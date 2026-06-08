@@ -13,11 +13,11 @@ use crate::hooks::constants::{
 };
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
-    GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
-    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
-    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
-    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEBUDDY_DIR, CODEBUDDY_HOOK_COMMAND,
+    CODEX_DIR, CURSOR_HOOK_COMMAND, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
+    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
+    HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
+    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -506,8 +506,8 @@ fn prompt_telemetry_consent() -> Result<()> {
     Ok(())
 }
 
-fn print_manual_instructions(hook_command: &str, include_opencode: bool) {
-    println!("\n  MANUAL STEP: Add this to ~/.claude/settings.json:");
+fn print_manual_instructions_at(settings_path: &str, hook_command: &str, restart_message: &str) {
+    println!("\n  MANUAL STEP: Add this to {}:", settings_path);
     println!("  {{");
     println!("    \"hooks\": {{ \"PreToolUse\": [{{");
     println!("      \"matcher\": \"Bash\",");
@@ -516,14 +516,10 @@ fn print_manual_instructions(hook_command: &str, include_opencode: bool) {
     println!("      }}]");
     println!("    }}]}}");
     println!("  }}");
-    if include_opencode {
-        println!("\n  Then restart Claude Code and OpenCode. Test with: git status\n");
-    } else {
-        println!("\n  Then restart Claude Code. Test with: git status\n");
-    }
+    println!("\n  {}\n", restart_message);
 }
 
-fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
+fn remove_hook_from_json(root: &mut serde_json::Value, hook_command: &str) -> bool {
     let hooks = match root
         .get_mut("hooks")
         .and_then(|h| h.get_mut(PRE_TOOL_USE_KEY))
@@ -542,8 +538,8 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
         if let Some(hooks_array) = entry.get("hooks").and_then(|h| h.as_array()) {
             for hook in hooks_array {
                 if let Some(command) = hook.get("command").and_then(|c| c.as_str()) {
-                    // Match both legacy script path and new binary command
-                    if command.contains(REWRITE_HOOK_FILE) || command == CLAUDE_HOOK_COMMAND {
+                    // Match both legacy script path and the selected native hook command.
+                    if command.contains(REWRITE_HOOK_FILE) || command == hook_command {
                         return false;
                     }
                 }
@@ -557,10 +553,13 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
 
 /// Remove RTK hook from settings.json file
 /// Backs up before modification, returns true if hook was found and removed
-fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
+fn remove_hook_from_settings_at(
+    settings_dir: &Path,
+    hook_command: &str,
+    ctx: InitContext,
+) -> Result<bool> {
     let InitContext { verbose, dry_run } = ctx;
-    let claude_dir = resolve_claude_dir()?;
-    let settings_path = claude_dir.join(SETTINGS_JSON);
+    let settings_path = settings_dir.join(SETTINGS_JSON);
 
     if !settings_path.exists() {
         if verbose > 0 {
@@ -579,7 +578,7 @@ fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
     let mut root: serde_json::Value = serde_json::from_str(&content)
         .with_context(|| format!("Failed to parse {} as JSON", settings_path.display()))?;
 
-    let removed = remove_hook_from_json(&mut root);
+    let removed = remove_hook_from_json(&mut root, hook_command);
 
     if removed {
         if dry_run {
@@ -613,13 +612,24 @@ fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
     Ok(removed)
 }
 
-/// Full uninstall for Claude, Gemini, Codex, Cursor, or Pi artifacts.
+fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
+    let claude_dir = resolve_claude_dir()?;
+    remove_hook_from_settings_at(&claude_dir, CLAUDE_HOOK_COMMAND, ctx)
+}
+
+fn remove_codebuddy_hook_from_settings(ctx: InitContext) -> Result<bool> {
+    let codebuddy_dir = resolve_codebuddy_dir()?;
+    remove_hook_from_settings_at(&codebuddy_dir, CODEBUDDY_HOOK_COMMAND, ctx)
+}
+
+/// Full uninstall for Claude, Gemini, Codex, Cursor, Pi, or CodeBuddy artifacts.
 pub fn uninstall(
     global: bool,
     gemini: bool,
     codex: bool,
     cursor: bool,
     pi: bool,
+    codebuddy: bool,
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
@@ -660,6 +670,34 @@ pub fn uninstall(
 
     if pi {
         uninstall_pi(global, ctx)?;
+        return Ok(());
+    }
+
+    if codebuddy {
+        if !global {
+            anyhow::bail!("CodeBuddy Code uninstall only works with --global flag");
+        }
+        let removed = remove_codebuddy_hook_from_settings(ctx)
+            .context("Failed to remove CodeBuddy Code hook")?;
+        if removed {
+            println!(
+                "{}",
+                if dry_run {
+                    "[dry-run] would uninstall RTK (CodeBuddy Code):"
+                } else {
+                    "RTK uninstalled (CodeBuddy Code):"
+                }
+            );
+            println!("  - settings.json: removed RTK hook entry");
+            if !dry_run {
+                println!("\nRestart CodeBuddy Code to apply changes.");
+            }
+        } else {
+            println!("RTK CodeBuddy Code support was not installed (nothing to remove)");
+        }
+        if dry_run {
+            print_dry_run_footer();
+        }
         return Ok(());
     }
 
@@ -933,9 +971,32 @@ fn patch_settings_json_command(
     include_opencode: bool,
     ctx: InitContext,
 ) -> Result<PatchResult> {
-    let InitContext { verbose, dry_run } = ctx;
     let claude_dir = resolve_claude_dir()?;
-    let settings_path = claude_dir.join(SETTINGS_JSON);
+    let restart_message = if include_opencode {
+        "Restart Claude Code and OpenCode. Test with: git status"
+    } else {
+        "Restart Claude Code. Test with: git status"
+    };
+    patch_settings_json_command_at(
+        &claude_dir,
+        hook_command,
+        mode,
+        "~/.claude/settings.json",
+        restart_message,
+        ctx,
+    )
+}
+
+fn patch_settings_json_command_at(
+    settings_dir: &Path,
+    hook_command: &str,
+    mode: PatchMode,
+    manual_settings_path: &str,
+    restart_message: &str,
+    ctx: InitContext,
+) -> Result<PatchResult> {
+    let InitContext { verbose, dry_run } = ctx;
+    let settings_path = settings_dir.join(SETTINGS_JSON);
 
     // Read or create settings.json
     let mut root = if settings_path.exists() {
@@ -963,7 +1024,7 @@ fn patch_settings_json_command(
     // Handle mode
     match mode {
         PatchMode::Skip => {
-            print_manual_instructions(hook_command, include_opencode);
+            print_manual_instructions_at(manual_settings_path, hook_command, restart_message);
             return Ok(PatchResult::Skipped);
         }
         PatchMode::Ask => {
@@ -974,7 +1035,7 @@ fn patch_settings_json_command(
                     settings_path.display()
                 );
             } else if !prompt_user_consent(&settings_path)? {
-                print_manual_instructions(hook_command, include_opencode);
+                print_manual_instructions_at(manual_settings_path, hook_command, restart_message);
                 return Ok(PatchResult::Declined);
             }
         }
@@ -999,6 +1060,9 @@ fn patch_settings_json_command(
         return Ok(PatchResult::WouldPatch);
     }
 
+    fs::create_dir_all(settings_dir)
+        .with_context(|| format!("Failed to create config dir: {}", settings_dir.display()))?;
+
     // Backup original
     if settings_path.exists() {
         let backup_path = settings_path.with_extension("json.bak");
@@ -1019,11 +1083,7 @@ fn patch_settings_json_command(
             settings_path.with_extension("json.bak").display()
         );
     }
-    if include_opencode {
-        println!("  Restart Claude Code and OpenCode. Test with: git status");
-    } else {
-        println!("  Restart Claude Code. Test with: git status");
-    }
+    println!("  {}", restart_message);
 
     Ok(PatchResult::Patched)
 }
@@ -1108,9 +1168,7 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .filter_map(|entry| entry.get("hooks")?.as_array())
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
-        .any(|cmd| {
-            cmd == hook_command || cmd == CLAUDE_HOOK_COMMAND || cmd.contains(REWRITE_HOOK_FILE)
-        })
+        .any(|cmd| cmd == hook_command || cmd.contains(REWRITE_HOOK_FILE))
 }
 
 /// Default mode: hook + slim RTK.md + @RTK.md reference
@@ -1199,6 +1257,49 @@ fn run_default_mode(
         println!(); // Final newline
     }
 
+    Ok(())
+}
+
+pub fn run_codebuddy_mode(global: bool, patch_mode: PatchMode, ctx: InitContext) -> Result<()> {
+    if !global {
+        anyhow::bail!("CodeBuddy Code hooks are global-only. Use: rtk init -g --agent codebuddy");
+    }
+    let codebuddy_dir = resolve_codebuddy_dir()?;
+    run_codebuddy_mode_at(&codebuddy_dir, patch_mode, ctx)
+}
+
+fn run_codebuddy_mode_at(
+    codebuddy_dir: &Path,
+    patch_mode: PatchMode,
+    ctx: InitContext,
+) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    if !dry_run {
+        println!("\nRTK hook registered for CodeBuddy Code (global).\n");
+        println!("  Command:   {}", CODEBUDDY_HOOK_COMMAND);
+    }
+    let patch_result = patch_settings_json_command_at(
+        codebuddy_dir,
+        CODEBUDDY_HOOK_COMMAND,
+        patch_mode,
+        "~/.codebuddy/settings.json",
+        "Restart CodeBuddy Code. Test with: git status",
+        ctx,
+    )?;
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        match patch_result {
+            PatchResult::Patched => {}
+            PatchResult::AlreadyPresent => {
+                println!("\n  settings.json: hook already present");
+                println!("  Restart CodeBuddy Code. Test with: git status");
+            }
+            PatchResult::Declined | PatchResult::Skipped => {}
+            PatchResult::WouldPatch => {}
+        }
+        println!();
+    }
     Ok(())
 }
 
@@ -2725,6 +2826,13 @@ fn resolve_claude_dir() -> Result<PathBuf> {
     resolve_home_subdir(CLAUDE_DIR)
 }
 
+fn resolve_codebuddy_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("RTK_CODEBUDDY_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
+    resolve_home_subdir(CODEBUDDY_DIR)
+}
+
 fn resolve_codex_dir() -> Result<PathBuf> {
     resolve_codex_dir_from(
         std::env::var_os("CODEX_HOME").map(PathBuf::from),
@@ -3497,6 +3605,26 @@ fn show_claude_config() -> Result<()> {
         println!("[--] Cursor: home dir not found");
     }
 
+    if let Ok(codebuddy_dir) = resolve_codebuddy_dir() {
+        let codebuddy_settings = codebuddy_dir.join(SETTINGS_JSON);
+        if codebuddy_settings.exists() {
+            let content = fs::read_to_string(&codebuddy_settings).unwrap_or_default();
+            if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
+                if hook_already_present(&root, CODEBUDDY_HOOK_COMMAND) {
+                    println!("[ok] CodeBuddy Code: hook configured");
+                } else {
+                    println!("[--] CodeBuddy Code: settings.json exists but rtk not configured");
+                }
+            } else {
+                println!("[warn] CodeBuddy Code: settings.json exists but invalid JSON");
+            }
+        } else {
+            println!("[--] CodeBuddy Code: settings.json not found");
+        }
+    } else {
+        println!("[--] CodeBuddy Code: home dir not found");
+    }
+
     println!("\nUsage:");
     println!("  rtk init              # Full injection into local CLAUDE.md");
     println!("  rtk init -g           # Hook + RTK.md + @RTK.md + settings.json (recommended)");
@@ -3509,6 +3637,7 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --codex         # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
     println!("  rtk init -g --opencode      # OpenCode plugin only");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
+    println!("  rtk init -g --agent codebuddy  # Install CodeBuddy Code hooks");
 
     Ok(())
 }
@@ -4462,6 +4591,133 @@ mod tests {
         assert!(added);
         let content = fs::read_to_string(&agents_md).unwrap();
         assert_eq!(content, "@RTK.md\n");
+    }
+
+    #[test]
+    fn test_codebuddy_settings_patch_creates_hook_entry() {
+        let temp = TempDir::new().unwrap();
+        let result = patch_settings_json_command_at(
+            temp.path(),
+            CODEBUDDY_HOOK_COMMAND,
+            PatchMode::Auto,
+            "~/.codebuddy/settings.json",
+            "Restart CodeBuddy Code. Test with: git status",
+            InitContext::default(),
+        )
+        .unwrap();
+
+        assert_eq!(result, PatchResult::Patched);
+        let content = fs::read_to_string(temp.path().join(SETTINGS_JSON)).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(hook_already_present(&root, CODEBUDDY_HOOK_COMMAND));
+        assert!(!hook_already_present(&root, CLAUDE_HOOK_COMMAND));
+    }
+
+    #[test]
+    fn test_codebuddy_settings_patch_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let first = patch_settings_json_command_at(
+            temp.path(),
+            CODEBUDDY_HOOK_COMMAND,
+            PatchMode::Auto,
+            "~/.codebuddy/settings.json",
+            "Restart CodeBuddy Code. Test with: git status",
+            InitContext::default(),
+        )
+        .unwrap();
+        let second = patch_settings_json_command_at(
+            temp.path(),
+            CODEBUDDY_HOOK_COMMAND,
+            PatchMode::Auto,
+            "~/.codebuddy/settings.json",
+            "Restart CodeBuddy Code. Test with: git status",
+            InitContext::default(),
+        )
+        .unwrap();
+
+        assert_eq!(first, PatchResult::Patched);
+        assert_eq!(second, PatchResult::AlreadyPresent);
+        let content = fs::read_to_string(temp.path().join(SETTINGS_JSON)).unwrap();
+        assert_eq!(content.matches(CODEBUDDY_HOOK_COMMAND).count(), 1);
+    }
+
+    #[test]
+    fn test_codebuddy_settings_patch_preserves_existing_hooks() {
+        let temp = TempDir::new().unwrap();
+        fs::write(
+            temp.path().join(SETTINGS_JSON),
+            r#"{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{ "type": "command", "command": "existing hook" }]
+    }]
+  }
+}"#,
+        )
+        .unwrap();
+
+        patch_settings_json_command_at(
+            temp.path(),
+            CODEBUDDY_HOOK_COMMAND,
+            PatchMode::Auto,
+            "~/.codebuddy/settings.json",
+            "Restart CodeBuddy Code. Test with: git status",
+            InitContext::default(),
+        )
+        .unwrap();
+
+        let content = fs::read_to_string(temp.path().join(SETTINGS_JSON)).unwrap();
+        assert!(content.contains("existing hook"));
+        assert!(content.contains(CODEBUDDY_HOOK_COMMAND));
+    }
+
+    #[test]
+    fn test_remove_codebuddy_hook_preserves_other_hooks() {
+        let temp = TempDir::new().unwrap();
+        fs::write(
+            temp.path().join(SETTINGS_JSON),
+            format!(
+                r#"{{
+  "hooks": {{
+    "PreToolUse": [
+      {{ "matcher": "Bash", "hooks": [{{ "type": "command", "command": "{}" }}] }},
+      {{ "matcher": "Bash", "hooks": [{{ "type": "command", "command": "existing hook" }}] }}
+    ]
+  }}
+}}"#,
+                CODEBUDDY_HOOK_COMMAND
+            ),
+        )
+        .unwrap();
+
+        let removed = remove_hook_from_settings_at(
+            temp.path(),
+            CODEBUDDY_HOOK_COMMAND,
+            InitContext::default(),
+        )
+        .unwrap();
+
+        assert!(removed);
+        let content = fs::read_to_string(temp.path().join(SETTINGS_JSON)).unwrap();
+        assert!(!content.contains(CODEBUDDY_HOOK_COMMAND));
+        assert!(content.contains("existing hook"));
+    }
+
+    #[test]
+    fn test_run_codebuddy_mode_dry_run_writes_nothing() {
+        let temp = TempDir::new().unwrap();
+        run_codebuddy_mode_at(
+            temp.path(),
+            PatchMode::Auto,
+            InitContext {
+                verbose: 0,
+                dry_run: true,
+            },
+        )
+        .unwrap();
+
+        assert!(!temp.path().join(SETTINGS_JSON).exists());
     }
 
     #[test]
@@ -5460,7 +5716,7 @@ mod tests {
             }
         });
 
-        let removed = remove_hook_from_json(&mut json_content);
+        let removed = remove_hook_from_json(&mut json_content, CLAUDE_HOOK_COMMAND);
         assert!(removed);
 
         // Should have only one hook left
@@ -5495,7 +5751,7 @@ mod tests {
             }
         });
 
-        let removed = remove_hook_from_json(&mut json_content);
+        let removed = remove_hook_from_json(&mut json_content, CLAUDE_HOOK_COMMAND);
         assert!(removed);
 
         let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
@@ -5520,7 +5776,7 @@ mod tests {
             }
         });
 
-        let removed = remove_hook_from_json(&mut json_content);
+        let removed = remove_hook_from_json(&mut json_content, CLAUDE_HOOK_COMMAND);
         assert!(!removed);
     }
 
@@ -5869,7 +6125,16 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
-            uninstall(true, false, false, false, false, InitContext::default()).unwrap();
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                InitContext::default(),
+            )
+            .unwrap();
 
             assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
             let settings_content =
@@ -5997,7 +6262,7 @@ mod tests {
                 dry_run: true,
                 ..Default::default()
             };
-            uninstall(true, false, false, false, false, dry).unwrap();
+            uninstall(true, false, false, false, false, false, dry).unwrap();
 
             // Files must still exist with identical content
             assert!(
@@ -6223,7 +6488,16 @@ mod tests {
             let plugin = pi_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
             assert!(plugin.exists());
 
-            uninstall(true, false, false, false, true, InitContext::default()).unwrap();
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                true,
+                false,
+                InitContext::default(),
+            )
+            .unwrap();
 
             assert!(!plugin.exists(), "plugin must be removed");
         });
@@ -6237,7 +6511,15 @@ mod tests {
         std::env::set_current_dir(tmp.path()).unwrap();
 
         run_pi_mode(false, InitContext::default()).unwrap();
-        let result = uninstall(false, false, false, false, true, InitContext::default());
+        let result = uninstall(
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            InitContext::default(),
+        );
         std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
@@ -6336,6 +6618,7 @@ mod tests {
                 false,
                 false,
                 true,
+                false,
                 InitContext {
                     verbose: 0,
                     dry_run: true,
@@ -6374,6 +6657,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             InitContext {
                 verbose: 0,
                 dry_run: true,

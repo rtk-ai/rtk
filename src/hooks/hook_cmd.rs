@@ -438,6 +438,108 @@ fn run_claude_inner(input: &str) -> Option<String> {
     }
 }
 
+// ── CodeBuddy Code native hook ─────────────────────────────────
+
+fn process_codebuddy_payload(v: &Value) -> PayloadAction {
+    let cmd = match v
+        .pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+    {
+        Some(c) => c,
+        None => return PayloadAction::Ignore,
+    };
+
+    let verdict = permissions::check_command(cmd);
+    if verdict == PermissionVerdict::Deny {
+        return PayloadAction::Skip {
+            reason: "skip:deny_rule",
+            cmd: cmd.to_string(),
+        };
+    }
+
+    let rewritten = match get_rewritten(cmd) {
+        Some(r) => r,
+        None => {
+            return PayloadAction::Skip {
+                reason: "skip:no_match",
+                cmd: cmd.to_string(),
+            }
+        }
+    };
+
+    let modified_input = {
+        let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+        if let Some(obj) = ti.as_object_mut() {
+            obj.insert("command".into(), Value::String(rewritten.clone()));
+        }
+        ti
+    };
+
+    let mut hook_output = json!({
+        "hookEventName": PRE_TOOL_USE_KEY,
+        "permissionDecisionReason": "RTK auto-rewrite",
+        "modifiedInput": modified_input
+    });
+
+    if verdict == PermissionVerdict::Allow {
+        hook_output
+            .as_object_mut()
+            .unwrap()
+            .insert("permissionDecision".into(), json!("allow"));
+    }
+
+    PayloadAction::Rewrite {
+        cmd: cmd.to_string(),
+        rewritten,
+        output: json!({ "hookSpecificOutput": hook_output }),
+    }
+}
+
+/// Run the CodeBuddy Code PreToolUse hook natively.
+pub fn run_codebuddy() -> Result<()> {
+    let input = read_stdin_limited()?;
+
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    match process_codebuddy_payload(&v) {
+        PayloadAction::Rewrite {
+            cmd,
+            rewritten,
+            output,
+        } => {
+            audit_log("rewrite", &cmd, &rewritten);
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        PayloadAction::Skip { reason, cmd } => {
+            audit_log(reason, &cmd, "");
+        }
+        PayloadAction::Ignore => {}
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_codebuddy_inner(input: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    match process_codebuddy_payload(&v) {
+        PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        _ => None,
+    }
+}
+
 // ── Cursor native hook ─────────────────────────────────────────
 
 /// Cursor on Windows ships hook payloads with one or more leading
@@ -1016,6 +1118,63 @@ mod tests {
     fn test_claude_no_tool_input_passthrough() {
         let input = json!({ "tool_name": "Bash" }).to_string();
         assert!(run_claude_inner(&input).is_none());
+    }
+
+    // --- CodeBuddy handler ---
+
+    #[test]
+    fn test_codebuddy_rewrite_git_status() {
+        let result = run_codebuddy_inner(&claude_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/modifiedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk git status");
+    }
+
+    #[test]
+    fn test_codebuddy_rewrite_preserves_tool_input_fields() {
+        let input = claude_input_with_fields("git status", 30000, "Check repo status");
+        let result = run_codebuddy_inner(&input).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let modified = &v["hookSpecificOutput"]["modifiedInput"];
+        assert_eq!(modified["command"], "rtk git status");
+        assert_eq!(modified["timeout"], 30000);
+        assert_eq!(modified["description"], "Check repo status");
+    }
+
+    #[test]
+    fn test_codebuddy_passthrough_no_output() {
+        assert!(run_codebuddy_inner(&claude_input("htop")).is_none());
+    }
+
+    #[test]
+    fn test_codebuddy_empty_command_passthrough() {
+        let input = json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "" }
+        })
+        .to_string();
+        assert!(run_codebuddy_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_codebuddy_malformed_json_passthrough() {
+        assert!(run_codebuddy_inner("not valid json {{{").is_none());
+    }
+
+    #[test]
+    fn test_codebuddy_json_output_structure() {
+        let result = run_codebuddy_inner(&claude_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
+        assert!(hook["modifiedInput"].is_object());
+        assert!(hook["modifiedInput"]["command"].is_string());
+        assert!(hook.get("updatedInput").is_none());
     }
 
     // --- Cursor handler ---
