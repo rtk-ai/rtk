@@ -3,7 +3,7 @@
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 
-use super::lexer::{split_on_operators, tokenize, TokenKind};
+use super::lexer::{shell_split, split_on_operators, tokenize, TokenKind};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
 /// Result of classifying a command.
@@ -837,6 +837,16 @@ fn rewrite_segment_inner(
         }
     }
 
+    // Conservative passthrough: if the native command carries a short flag whose
+    // clap interpretation under the target rtk subcommand differs from its native
+    // semantics, do NOT rewrite. Rewriting would silently change behavior — e.g.
+    // `grep -v` (invert-match) parsed as the global `--verbose` flag, returning
+    // *matching* lines instead of *non-matching* ones. Passing the command
+    // through to the native binary preserves the user's intent. (#flag-collision)
+    if has_colliding_short_flag(cmd_part, rule.rtk_cmd) {
+        return None;
+    }
+
     // Try each rewrite prefix (longest first) with word-boundary check
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(cmd_part, prefix) {
@@ -850,6 +860,55 @@ fn rewrite_segment_inner(
     }
 
     None
+}
+
+/// Short flags whose clap meaning under an rtk subcommand collides with a
+/// *different* native semantics. When present in the native command, the
+/// rewrite is skipped (passthrough) to avoid silently changing behavior.
+///
+/// `rtk grep`:
+///   - `-v` clap `--verbose` (global) vs native grep invert-match — **inverts results**
+///   - `-h` clap `--help` vs native grep no-filename
+///   - `-l` clap `--max-len` vs native grep files-with-matches
+///   - `-m` clap `--max` vs native grep max-count
+///   - `-V` clap `--version` vs native grep version
+///
+/// `rtk ls`:
+///   - `-h` clap `--help` vs native ls human-readable
+///   - `-V` clap `--version`
+///
+/// Long flags (`--invert-match`, `--max-count`, …) are unaffected: they fall
+/// through to `extra_args` and reach ripgrep / ls intact.
+fn colliding_short_flags(rtk_cmd: &str) -> &'static [char] {
+    match rtk_cmd {
+        "rtk grep" => &['v', 'h', 'l', 'm', 'V'],
+        "rtk ls" => &['h', 'V'],
+        _ => &[],
+    }
+}
+
+/// Returns `true` if `cmd_part` carries a short-flag cluster containing any flag
+/// that collides with the target rtk subcommand's clap options (see
+/// [`colliding_short_flags`]). Handles bundled clusters (`-rv` → `r`, `v`).
+///
+/// A token qualifies as a short-flag cluster when it is a single leading dash
+/// followed by one or more ASCII letters (e.g. `-v`, `-rv`). This excludes long
+/// flags (`--help`), option values (`3`), and negative numbers. A quoted pattern
+/// that merely looks like a flag (`grep -- -v file`) at worst yields a passthrough,
+/// which preserves native semantics anyway — the conservative direction.
+fn has_colliding_short_flag(cmd_part: &str, rtk_cmd: &str) -> bool {
+    let collisions = colliding_short_flags(rtk_cmd);
+    if collisions.is_empty() {
+        return false;
+    }
+    shell_split(cmd_part).iter().any(|token| {
+        let bytes = token.as_bytes();
+        bytes.len() >= 2
+            && bytes[0] == b'-'
+            && bytes[1] != b'-'
+            && token[1..].chars().all(|c| c.is_ascii_alphabetic())
+            && token[1..].chars().any(|c| collisions.contains(&c))
+    })
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -1419,6 +1478,87 @@ mod tests {
             rewrite_command_no_prefixes("rg \"fn main\"", &[]),
             Some("rtk grep \"fn main\"".into())
         );
+    }
+
+    // --- flag-collision passthrough (#flag-collision) ---
+    //
+    // Short flags whose clap meaning under `rtk grep`/`rtk ls` differs from the
+    // native semantics must NOT be rewritten; the command passes through to the
+    // native binary so behavior is preserved. The worst case is `grep -v`
+    // (invert-match) being parsed as the global `--verbose` flag.
+
+    #[test]
+    fn test_grep_invert_match_passthrough() {
+        // -v native = invert-match, clap = verbose → must passthrough.
+        assert_eq!(rewrite_command_no_prefixes("grep -v pattern file", &[]), None);
+    }
+
+    #[test]
+    fn test_grep_colliding_short_flags_passthrough() {
+        for cmd in [
+            "grep -h pattern file",  // no-filename vs --help
+            "grep -l pattern file",  // files-with-matches vs --max-len
+            "grep -m 1 pattern file", // max-count vs --max
+            "grep -V",               // version
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                None,
+                "expected passthrough for: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_grep_bundled_colliding_flag_passthrough() {
+        // Bundled cluster -rv contains v (invert-match) → passthrough.
+        assert_eq!(rewrite_command_no_prefixes("grep -rv pattern .", &[]), None);
+    }
+
+    #[test]
+    fn test_grep_safe_flags_still_rewrite() {
+        // Flags that pass through to ripgrep unchanged must still be rewritten.
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -i PATTERN file", &[]),
+            Some("rtk grep -i PATTERN file".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -rn pattern .", &[]),
+            Some("rtk grep -rn pattern .".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -A 3 pattern file", &[]),
+            Some("rtk grep -A 3 pattern file".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -c pattern file", &[]),
+            Some("rtk grep -c pattern file".into())
+        );
+    }
+
+    #[test]
+    fn test_grep_long_flags_still_rewrite() {
+        // Long forms reach ripgrep via extra_args; no clap collision.
+        assert_eq!(
+            rewrite_command_no_prefixes("grep --invert-match pattern file", &[]),
+            Some("rtk grep --invert-match pattern file".into())
+        );
+    }
+
+    #[test]
+    fn test_ls_human_readable_passthrough() {
+        // ls -h native = human-readable, clap = --help → passthrough.
+        assert_eq!(rewrite_command_no_prefixes("ls -h /tmp", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("ls -lh", &[]), None);
+    }
+
+    #[test]
+    fn test_ls_safe_flags_still_rewrite() {
+        assert_eq!(
+            rewrite_command_no_prefixes("ls -la", &[]),
+            Some("rtk ls -la".into())
+        );
+        assert_eq!(rewrite_command_no_prefixes("ls", &[]), Some("rtk ls".into()));
     }
 
     #[test]
