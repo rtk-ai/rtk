@@ -1729,6 +1729,9 @@ mod tests {
 
     #[test]
     fn test_classify_gh_search() {
+        // `gh search` routes through `rtk gh` but is currently a passthrough (no
+        // output filter), so it must report 0% savings rather than inheriting the
+        // rule's 82% — otherwise the discover projection overstates the gain.
         for command in [
             "gh search repos rtk",
             "gh search issues kubectl",
@@ -1736,13 +1739,19 @@ mod tests {
             "gh search code 'fn main'",
             "gh search commits initial",
         ] {
-            assert!(matches!(
-                classify_command(command),
-                Classification::Supported {
-                    rtk_equivalent: "rtk gh",
-                    ..
-                }
-            ));
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk gh",
+                        estimated_savings_pct,
+                        status: crate::discover::report::RtkStatus::Passthrough,
+                        ..
+                    } if estimated_savings_pct == 0.0
+                ),
+                "unexpected classification for {command:?}: {:?}",
+                classify_command(command)
+            );
         }
     }
 
