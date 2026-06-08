@@ -107,7 +107,7 @@ test_rewrite "grep -rn pattern src/" \
 
 test_rewrite "rg pattern src/" \
   "rg pattern src/" \
-  "rtk grep pattern src/"
+  "rtk rg pattern src/"
 
 test_rewrite "cargo test" \
   "cargo test" \

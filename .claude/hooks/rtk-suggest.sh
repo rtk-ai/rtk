@@ -74,8 +74,10 @@ elif echo "$FIRST_CMD" | grep -qE '^cargo\s+fmt(\s|$)'; then
 # --- File operations ---
 elif echo "$FIRST_CMD" | grep -qE '^cat\s+'; then
   SUGGESTION=$(echo "$CMD" | sed 's/^cat /rtk read /')
-elif echo "$FIRST_CMD" | grep -qE '^(rg|grep)\s+'; then
-  SUGGESTION=$(echo "$CMD" | sed -E 's/^(rg|grep) /rtk grep /')
+elif echo "$FIRST_CMD" | grep -qE '^rg\s+'; then
+  SUGGESTION=$(echo "$CMD" | sed -E 's/^rg /rtk rg /')
+elif echo "$FIRST_CMD" | grep -qE '^grep\s+'; then
+  SUGGESTION=$(echo "$CMD" | sed -E 's/^grep /rtk grep /')
 elif echo "$FIRST_CMD" | grep -qE '^ls(\s|$)'; then
   SUGGESTION=$(echo "$CMD" | sed 's/^ls/rtk ls/')
 elif echo "$FIRST_CMD" | grep -qE '^tree(\s|$)'; then

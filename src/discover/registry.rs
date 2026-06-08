@@ -1417,7 +1417,26 @@ mod tests {
     fn test_rewrite_rg_pattern() {
         assert_eq!(
             rewrite_command_no_prefixes("rg \"fn main\"", &[]),
-            Some("rtk grep \"fn main\"".into())
+            Some("rtk rg \"fn main\"".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_with_glob_uses_ripgrep_proxy() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "rg -n --glob '!node_modules/**' --glob '!dist/**' \"needle\" src",
+                &[]
+            ),
+            Some("rtk rg -n --glob '!node_modules/**' --glob '!dist/**' \"needle\" src".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_grep_pattern_uses_compact_grep_filter() {
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -rn pattern src/", &[]),
+            Some("rtk grep -rn pattern src/".into())
         );
     }
 

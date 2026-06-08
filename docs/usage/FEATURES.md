@@ -1255,7 +1255,8 @@ rtk verify
 | `gh pr/issue/run` | `rtk gh ...` |
 | `cargo test/build/clippy/check` | `rtk cargo ...` |
 | `cat/head/tail <fichier>` | `rtk read <fichier>` |
-| `rg/grep <pattern>` | `rtk grep <pattern>` |
+| `rg <pattern>` | `rtk rg <pattern>` |
+| `grep <pattern>` | `rtk grep <pattern>` |
 | `ls` | `rtk ls` |
 | `tree` | `rtk tree` |
 | `wc` | `rtk wc` |
