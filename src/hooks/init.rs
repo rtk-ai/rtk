@@ -14,7 +14,8 @@ use crate::hooks::constants::{
 
 use super::constants::{
     BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
-    GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
+    CODEX_HOOK_COMMAND, CODEX_HOOKS_JSON, GEMINI_HOOK_FILE, HERMES_DIR,
+    HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
     HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
     PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
     PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
@@ -515,10 +516,15 @@ fn print_manual_instructions(hook_command: &str, include_opencode: bool) {
     println!("    \"hooks\": {{ \"PreToolUse\": [{{");
     println!("      \"matcher\": \"Bash\",");
     println!("      \"hooks\": [{{ \"type\": \"command\",");
-    println!("        \"command\": \"{}\"", hook_command);
+    println!("        \"command\": \"{}\",", hook_command);
+    println!("        \"timeout\": 10");
     println!("      }}]");
     println!("    }}]}}");
     println!("  }}");
+    if cfg!(windows) {
+        println!("\n  Windows users: also add a \"Shell\" matcher entry for broader coverage:");
+        println!("  Add another PreToolUse entry with \"matcher\": \"Shell\"");
+    }
     if include_opencode {
         println!("\n  Then restart Claude Code and OpenCode. Test with: git status\n");
     } else {
@@ -1088,14 +1094,15 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result
         "matcher": "Bash",
         "hooks": [{
             "type": "command",
-            "command": hook_command
+            "command": hook_command,
+            "timeout": 10
         }]
     }));
     Ok(())
 }
 
 /// Check if RTK hook is already present in settings.json
-/// Matches on legacy rtk-rewrite.sh path OR new `rtk hook claude` command
+/// Matches on legacy rtk-rewrite.sh path OR new `rtk hook claude` command.
 fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
     let pre_tool_use_array = match root
         .get("hooks")
@@ -2256,6 +2263,71 @@ fn normalized_yaml_scalar(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+/// Patch Codex hooks.json to register `rtk hook codex` as a PreToolUse:Bash hook.
+///
+/// Analogous to `patch_settings_json_command` for Claude Code but for Codex's
+/// `hooks.json`. Codex uses the same JSON shape (snake_case keys) and the same
+/// PreToolUse protocol, so `rtk hook codex` delegates to the same payload
+/// processor as `rtk hook claude`.
+fn patch_codex_hooks_json(codex_hooks_path: &Path, hook_command: &str, ctx: InitContext) -> Result<bool> {
+    let InitContext { verbose, dry_run } = ctx;
+
+    let mut root: serde_json::Value = if codex_hooks_path.exists() {
+        let content = fs::read_to_string(codex_hooks_path)
+            .with_context(|| format!("Failed to read {}", codex_hooks_path.display()))?;
+        if content.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse {}", codex_hooks_path.display()))?
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    // Check if hook is already present
+    if codex_hook_already_present(&root, hook_command) {
+        if verbose > 0 {
+            eprintln!("Codex hooks.json: RTK hook already present");
+        }
+        return Ok(false);
+    }
+
+    // Insert PreToolUse:Bash hook entry
+    codex_insert_hook_entry(&mut root, hook_command)?;
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize Codex hooks.json")?;
+
+    if dry_run {
+        println!(
+            "[dry-run] would patch Codex hooks.json: {}",
+            codex_hooks_path.display()
+        );
+        if verbose > 0 {
+            println!("[dry-run] content:\n{}", serialized);
+        }
+        return Ok(true);
+    }
+
+    atomic_write(codex_hooks_path, &serialized)?;
+    if verbose > 0 {
+        eprintln!("Patched Codex hooks.json: {}", codex_hooks_path.display());
+    }
+    Ok(true)
+}
+
+/// Check if `rtk hook codex` is already registered in Codex hooks.json.
+fn codex_hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
+    // Delegate to the unified hook presence check (handles Bash + Shell matchers on Windows)
+    hook_already_present(root, hook_command)
+}
+
+fn codex_insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result<()> {
+    // Reuse the same structure as Claude Code's settings.json hook format
+    insert_hook_entry(root, hook_command)
+}
+
 fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
     let (agents_md_path, rtk_md_path) = if global {
         let codex_dir = resolve_codex_dir()?;
@@ -2301,6 +2373,21 @@ fn run_codex_mode_with_paths(
     write_if_changed(&rtk_md_path, RTK_SLIM_CODEX, RTK_MD, ctx)?;
     let added_ref = patch_agents_md(&agents_md_path, &rtk_md_ref, ctx)?;
 
+    // Install PreToolUse hook into Codex hooks.json (global only).
+    // Codex reads hooks.json from its global config directory; the hook
+    // auto-rewrites Bash commands to use `rtk` without relying on model
+    // instruction compliance.
+    let hooks_patched = if global {
+        if let Some(ref parent) = agents_md_path.parent() {
+            let hooks_json_path = parent.join(CODEX_HOOKS_JSON);
+            patch_codex_hooks_json(&hooks_json_path, CODEX_HOOK_COMMAND, ctx)?
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     if !dry_run {
         println!("\nRTK configured for Codex CLI.\n");
         println!("  RTK.md:    {}", rtk_md_path.display());
@@ -2314,11 +2401,17 @@ fn run_codex_mode_with_paths(
                 "\n  Codex global instructions path: {}",
                 agents_md_path.display()
             );
+            if hooks_patched {
+                println!("  hooks.json: PreToolUse hook installed — auto-rewrite active");
+            } else {
+                println!("  hooks.json: RTK hook already present");
+            }
         } else {
             println!(
                 "\n  Codex project instructions path: {}",
                 agents_md_path.display()
             );
+            println!("  (hooks.json is global-only; project-local Codex configs don't support hooks)");
         }
     }
 

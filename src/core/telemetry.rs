@@ -1,4 +1,5 @@
 //! Optional usage ping so we know which commands people run most.
+#![cfg_attr(not(feature = "telemetry"), allow(dead_code))]
 
 use super::constants::RTK_DATA_DIR;
 use crate::core::config;
@@ -19,6 +20,7 @@ const PING_INTERVAL_SECS: u64 = 23 * 3600; // 23 hours
 
 /// Send a telemetry ping if enabled and not already sent today.
 /// Fire-and-forget: errors are silently ignored.
+#[cfg_attr(not(feature = "telemetry"), allow(dead_code, unused_variables))]
 pub fn maybe_ping() {
     // No URL compiled in → telemetry disabled
     if TELEMETRY_URL.is_none() {
@@ -62,12 +64,15 @@ pub fn maybe_ping() {
     // Touch marker file immediately (before sending) to avoid double-ping
     touch_marker(&marker);
 
-    // Spawn thread so we never block the CLI
-    std::thread::spawn(|| {
-        let _ = send_ping();
-    });
+    #[cfg(feature = "telemetry")]
+    {
+        std::thread::spawn(|| {
+            let _ = send_ping();
+        });
+    }
 }
 
+#[cfg(feature = "telemetry")]
 fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
     let url = TELEMETRY_URL.ok_or("no telemetry URL")?;
     let device_hash = generate_device_hash();

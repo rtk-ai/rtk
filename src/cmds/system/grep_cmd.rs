@@ -355,9 +355,46 @@ pub fn run(
         })
         .context("grep/rg failed")?;
 
-    // Passthrough output flags that produce output that is already small.
+    // Format flags (--count, --files-with-matches, etc.) return structured
+    // output that is compact per line but can accumulate to 600KB+ across
+    // large repos. For --count specifically, summarize top matches by count
+    // instead of raw passthrough — RTK's job is compression, not truncation.
     if has_format_flag(&extra_args) {
-        print!("{}", result.stdout);
+        let has_count = extra_args.iter().any(|a| a == "-c" || a == "--count");
+        let lines: Vec<&str> = result.stdout.lines().collect();
+        let total_lines = lines.len();
+
+        if has_count && total_lines > 50 {
+            let mut entries: Vec<(&str, usize)> = Vec::new();
+            for line in &lines {
+                if let Some((file, count_str)) = line.rsplit_once(':') {
+                    if let Ok(cnt) = count_str.parse::<usize>() {
+                        entries.push((file, cnt));
+                    }
+                }
+            }
+            if entries.is_empty() {
+                print!("{}", result.stdout);
+            } else {
+                entries.sort_by(|a, b| b.1.cmp(&a.1));
+                let total_matches: usize = entries.iter().map(|e| e.1).sum();
+                let top_n = 20;
+                for (file, cnt) in entries.iter().take(top_n) {
+                    println!("{:>6}  {}", cnt, file);
+                }
+                if entries.len() > top_n {
+                    println!("  ...  ({} more files)", entries.len() - top_n);
+                }
+                println!("\n{} files, {} total matches", entries.len(), total_matches);
+            }
+        } else if total_lines > 200 {
+            let head: Vec<&str> = lines.iter().take(200).copied().collect();
+            println!("{}", head.join("\n"));
+            println!("... ({} lines truncated, {} total)", total_lines - 200, total_lines);
+        } else {
+            print!("{}", result.stdout);
+        }
+
         if !result.stderr.is_empty() {
             eprint!("{}", result.stderr.trim());
         }

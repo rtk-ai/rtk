@@ -2,31 +2,36 @@
 
 **Usage**: Token-optimized CLI proxy for shell commands.
 
-## Rule
+## Hook-Based Auto-Rewrite (Active)
 
-Always prefix shell commands with `rtk`.
+Bash commands are automatically rewritten by the Codex PreToolUse hook.
+Example: `git status` → `rtk git status` (transparent, no model awareness required).
 
-Examples:
+You don't need to manually prefix commands — the hook handles it silently.
+
+## Meta Commands (manually prefixed)
 
 ```bash
-rtk git status
-rtk cargo test
-rtk npm run build
-rtk pytest -q
+rtk gain              # Show token savings analytics
+rtk gain --history    # Show command usage history with savings
+rtk discover          # Analyze Codex history for missed opportunities
+rtk proxy <cmd>       # Execute raw command without filtering (for debugging)
 ```
 
-## Meta Commands
+## Windows PowerShell Commands
 
-```bash
-rtk gain            # Token savings analytics
-rtk gain --history  # Recent command savings history
-rtk proxy <cmd>     # Run raw command without filtering
+For PowerShell cmdlets and scripts, wrap the PowerShell process explicitly:
+
+```powershell
+rtk powershell -NoProfile -Command "Get-Content -LiteralPath 'C:\path\file.txt'"
+rtk powershell -NoProfile -File path\to\script.ps1
 ```
 
 ## Verification
 
 ```bash
-rtk --version
-rtk gain
-which rtk
+rtk --version         # Should show: rtk X.Y.Z
+rtk gain              # Should work (not "command not found")
 ```
+
+⚠️ **Name collision**: If `rtk gain` fails, you may have reachingforthejack/rtk (Rust Type Kit) installed instead.
