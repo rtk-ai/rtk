@@ -8,8 +8,9 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde_json::Value;
+use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
 use std::sync::OnceLock;
@@ -310,13 +311,19 @@ pub fn package_manager_exec(tool: &str) -> Command {
     }
 }
 
-/// Resolve a binary name to its full path, honoring PATHEXT on Windows.
+/// Resolve a binary name to its full path, searching project-local
+/// `node_modules/.bin` first, then the system PATH (PATHEXT-aware on Windows).
 ///
-/// On Windows, Node.js tools are installed as `.CMD`/`.BAT`/`.PS1` shims.
-/// Rust's `std::process::Command::new()` does NOT honor PATHEXT, so
-/// `Command::new("vitest")` fails even when `vitest.CMD` is on PATH.
+/// On Windows, Node.js tools are installed as `.CMD`/`.BAT`/`.PS1` shims, and
+/// project-local tools live in `./node_modules/.bin` — NOT on the system PATH.
+/// `npx`/`npm` add that directory to PATH at runtime; RTK strips the launcher
+/// during hook-rewrite (`npx eslint` → `rtk eslint`), so it must replicate the
+/// same resolution or every locally-installed tool fails with exit 127
+/// ("program not found"), even though `npx <tool>` would have run it fine.
 ///
-/// This function uses the `which` crate to perform proper PATH+PATHEXT resolution.
+/// Resolution order mirrors npx: nearest `node_modules/.bin` (cwd walking up to
+/// the filesystem root) first, then the inherited PATH. `which` honors PATHEXT,
+/// so the original bare-`Command::new` PATHEXT gap stays fixed too.
 ///
 /// # Arguments
 /// * `name` - Binary name (e.g., "vitest", "eslint", "tsc")
@@ -324,7 +331,37 @@ pub fn package_manager_exec(tool: &str) -> Command {
 /// # Returns
 /// Full path to the resolved binary, or error if not found.
 pub fn resolve_binary(name: &str) -> Result<PathBuf> {
-    which::which(name).context(format!("Binary '{}' not found on PATH", name))
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    resolve_binary_in(name, &cwd, std::env::var_os("PATH"))
+}
+
+/// Core of [`resolve_binary`], parameterized over the working directory and the
+/// `PATH` value so it is unit-testable without mutating global process state.
+fn resolve_binary_in(name: &str, cwd: &Path, path_var: Option<OsString>) -> Result<PathBuf> {
+    // Collect every `node_modules/.bin` from `cwd` up to the filesystem root
+    // (nearest first), so monorepo / nested-package layouts resolve like npx.
+    let mut search: Vec<PathBuf> = Vec::new();
+    let mut dir = Some(cwd);
+    while let Some(d) = dir {
+        let bin = d.join("node_modules").join(".bin");
+        if bin.is_dir() {
+            search.push(bin);
+        }
+        dir = d.parent();
+    }
+    // System PATH last — global installs and native tools (git, cargo) still
+    // resolve; local project tools take precedence (matches npx, and fixes a
+    // global tool shadowing the project-local one).
+    if let Some(path) = path_var {
+        search.extend(std::env::split_paths(&path));
+    }
+
+    let joined =
+        std::env::join_paths(&search).context("building node_modules/.bin + PATH search path")?;
+    which::which_in(name, Some(joined), cwd).context(format!(
+        "Binary '{}' not found in node_modules/.bin or on PATH",
+        name
+    ))
 }
 
 /// Create a `Command` with PATHEXT-aware binary resolution.
@@ -349,7 +386,7 @@ pub fn resolved_command(name: &str) -> Command {
             // On Unix, this is less common; only log in debug builds.
             if cfg!(any(target_os = "windows", debug_assertions)) {
                 eprintln!(
-                    "rtk: Failed to resolve '{}' via PATH, falling back to direct exec: {}",
+                    "rtk: Failed to resolve '{}' via node_modules/.bin or PATH, falling back to direct exec: {}",
                     name, e
                 );
             }
@@ -419,7 +456,9 @@ fn read_composer_bin_dir(composer_json: &str) -> Option<PathBuf> {
 ///
 /// Replaces manual `Command::new("which").arg(tool)` checks that fail on Windows.
 pub fn tool_exists(name: &str) -> bool {
-    which::which(name).is_ok()
+    // Same resolution as resolved_command (incl. project-local node_modules/.bin)
+    // so handlers that branch on tool_exists() detect locally-installed tools.
+    resolve_binary(name).is_ok()
 }
 
 /// Extract short name from AWS ARN.
@@ -733,6 +772,56 @@ mod tests {
     #[test]
     fn test_tool_exists_finds_git() {
         assert!(tool_exists("git"), "tool_exists('git') should return true");
+    }
+
+    // ===== node_modules/.bin resolution (npx-strip exit-127 regression) =====
+
+    #[test]
+    fn test_resolve_binary_in_prefers_local_node_modules_bin() {
+        // A tool present ONLY in ./node_modules/.bin (the npx scenario) must
+        // resolve even with an empty PATH. This is the exit-127 regression:
+        // the hook rewrites `npx eslint` → `rtk eslint`, dropping the launcher,
+        // so resolution has to replicate npx's local-bin lookup.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let bin = temp.path().join("node_modules").join(".bin");
+        std::fs::create_dir_all(&bin).expect("create node_modules/.bin");
+
+        #[cfg(windows)]
+        let tool = bin.join("rtk-local-only.cmd");
+        #[cfg(not(windows))]
+        let tool = bin.join("rtk-local-only");
+        std::fs::write(&tool, "#!/bin/sh\n").expect("write fake tool");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&tool).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&tool, perms).unwrap();
+        }
+
+        // Empty PATH → success is only possible via node_modules/.bin resolution.
+        let resolved =
+            resolve_binary_in("rtk-local-only", temp.path(), Some(std::ffi::OsString::new()));
+        assert!(
+            resolved.is_ok(),
+            "local node_modules/.bin tool must resolve with empty PATH, got: {:?}",
+            resolved.err()
+        );
+        let resolved = resolved.unwrap();
+        let stem = resolved.file_stem().unwrap().to_string_lossy();
+        assert_eq!(&*stem, "rtk-local-only");
+    }
+
+    #[test]
+    fn test_resolve_binary_in_absent_tool_errors() {
+        // No node_modules/.bin and empty PATH → clean Err, never a panic.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let resolved = resolve_binary_in(
+            "rtk-definitely-absent-xyz",
+            temp.path(),
+            Some(std::ffi::OsString::new()),
+        );
+        assert!(resolved.is_err(), "absent tool must return Err, not panic");
     }
 
     // ===== Windows-specific PATHEXT resolution tests (issue #212) =====
