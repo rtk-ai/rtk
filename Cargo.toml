@@ -23,7 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 colored = "2"
 dirs = "5"
-rusqlite = { version = "0.31", features = [] }
+rusqlite = { version = "0.31", features = ["bundled"] }
 toml = "0.8"
 chrono = "0.4"
 tempfile = "3"

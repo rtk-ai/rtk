@@ -141,7 +141,8 @@ fn run_forget() -> Result<()> {
     }
 
     // Send server-side erasure request
-    #[cfg(feature = "telemetry")] if let Some(hash) = _device_hash {
+    #[cfg(feature = "telemetry")]
+    if let Some(hash) = _device_hash {
         match send_erasure_request(&hash) {
             Ok(()) => {
                 println!("Erasure request sent to server.");

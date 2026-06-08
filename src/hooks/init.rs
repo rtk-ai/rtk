@@ -13,12 +13,11 @@ use crate::hooks::constants::{
 };
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
-    CODEX_HOOK_COMMAND, CODEX_HOOKS_JSON, GEMINI_HOOK_FILE, HERMES_DIR,
-    HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
-    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
-    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
-    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CODEX_HOOKS_JSON,
+    CODEX_HOOK_COMMAND, CURSOR_HOOK_COMMAND, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
+    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
+    HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
+    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -2277,7 +2276,11 @@ fn normalized_yaml_scalar(value: &str) -> Option<String> {
 /// `hooks.json`. Codex uses the same JSON shape (snake_case keys) and the same
 /// PreToolUse protocol, so `rtk hook codex` delegates to the same payload
 /// processor as `rtk hook claude`.
-fn patch_codex_hooks_json(codex_hooks_path: &Path, hook_command: &str, ctx: InitContext) -> Result<bool> {
+fn patch_codex_hooks_json(
+    codex_hooks_path: &Path,
+    hook_command: &str,
+    ctx: InitContext,
+) -> Result<bool> {
     let InitContext { verbose, dry_run } = ctx;
 
     let mut root: serde_json::Value = if codex_hooks_path.exists() {
@@ -2419,7 +2422,9 @@ fn run_codex_mode_with_paths(
                 "\n  Codex project instructions path: {}",
                 agents_md_path.display()
             );
-            println!("  (hooks.json is global-only; project-local Codex configs don't support hooks)");
+            println!(
+                "  (hooks.json is global-only; project-local Codex configs don't support hooks)"
+            );
         }
     }
 

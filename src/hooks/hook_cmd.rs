@@ -451,7 +451,10 @@ pub fn run_codex() -> Result<()> {
     let v: Value = match serde_json::from_str(input) {
         Ok(v) => v,
         Err(e) => {
-            let _ = writeln!(io::stderr(), "[rtk codex hook] Failed to parse JSON input: {e}");
+            let _ = writeln!(
+                io::stderr(),
+                "[rtk codex hook] Failed to parse JSON input: {e}"
+            );
             let preview: String = input.chars().take(120).collect();
             let _ = writeln!(io::stderr(), "[rtk codex hook] input preview: {preview}");
             diagnostics("codex", "parse_error", &preview);

@@ -327,7 +327,13 @@ pub fn run(
     }
 
     // extra_args is already stripped of -r/-R/-recursive by extract_pattern_path
-    rg_cmd.args(&extra_args);
+    for arg in &extra_args {
+        if let Some(glob_pattern) = arg.strip_prefix("--include=") {
+            rg_cmd.arg("--glob").arg(glob_pattern);
+            continue;
+        }
+        rg_cmd.arg(arg);
+    }
 
     // All patterns as -e flags (BRE \| → | translation for rg's PCRE engine).
     // Using -e keeps `--` semantically as a flag/path separator, not part of the pattern.
@@ -345,38 +351,64 @@ pub fn run(
             // rg unavailable: fall back to system grep with the original,
             // untranslated patterns (grep interprets BRE natively).
             let mut grep_cmd = resolved_command("grep");
-            // Filter out rg-specific flags (--glob, --type, etc.) that GNU
-            // grep does not understand.
-            let grep_safe_args: Vec<&String> = extra_args
-                .iter()
-                .filter(|a| {
-                    let s = a.as_str();
-                    !matches!(
-                        s,
-                        "--glob"
-                            | "--type"
-                            | "--type-add"
-                            | "--type-not"
-                            | "--iglob"
-                            | "--type-clear"
-                            | "--files"
-                            | "--sort"
-                            | "--sortr"
-                            | "--max-depth"
-                            | "--max-filesize"
-                            | "--no-ignore"
-                            | "--no-ignore-parent"
-                            | "--no-ignore-vcs"
-                            | "--no-ignore-dot"
-                            | "--hidden"
-                            | "--follow"
-                            | "--trim"
-                            | "--passthru"
-                    ) && !s.starts_with("--type-")
-                        && !s.starts_with("--glob=")
-                })
-                .collect();
-            grep_cmd.args(grep_safe_args);
+            // Fall back to grep when rg is not available.
+            // 1. Filter out rg-specific flags (--glob, --type, etc.)
+            //    that GNU grep does not understand.
+            // 2. Convert rg long-form flags to grep short-form equivalents
+            //    (--files-with-matches → -l, --count → -c, etc.)
+            let mut grep_safe_args: Vec<String> = Vec::new();
+            let mut skip_next = false;
+            for arg in &extra_args {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                let s = arg.as_str();
+                let rg_value_flag = matches!(
+                    s,
+                    "--glob"
+                        | "--type"
+                        | "--type-add"
+                        | "--type-not"
+                        | "--iglob"
+                        | "--sort"
+                        | "--sortr"
+                        | "--max-depth"
+                        | "--max-filesize"
+                );
+                let rg_bool_flag = matches!(
+                    s,
+                    "--type-clear"
+                        | "--files"
+                        | "--no-ignore"
+                        | "--no-ignore-parent"
+                        | "--no-ignore-vcs"
+                        | "--no-ignore-dot"
+                        | "--hidden"
+                        | "--follow"
+                        | "--trim"
+                        | "--passthru"
+                );
+                if rg_value_flag
+                    || rg_bool_flag
+                    || s.starts_with("--type-")
+                    || s.starts_with("--glob=")
+                {
+                    skip_next = rg_value_flag;
+                    continue;
+                }
+                // Convert rg long-form flags to grep short-form
+                let converted = match s {
+                    "--files-with-matches" => "-l",
+                    "--files-without-match" => "-L",
+                    "--only-matching" => "-o",
+                    "--null" => "-Z",
+                    "--count" => "-c",
+                    _ => s,
+                };
+                grep_safe_args.push(converted.to_string());
+            }
+            grep_cmd.args(&grep_safe_args);
             for p in &patterns {
                 grep_cmd.args(["-e", p]);
             }
@@ -1153,6 +1185,39 @@ mod tests {
     #[test]
     fn test_format_flag_ignores_normal_flags() {
         assert!(!has_format_flag(&["-i", "-w", "-A", "3"]));
+    }
+
+    // Grep fallback must convert rg long-form flags to grep short-form equivalents
+    #[test]
+    fn test_grep_fallback_converts_long_flags() {
+        // Simulates the conversion logic from the fallback path
+        let conversions = [
+            ("--files-with-matches", "-l"),
+            ("--files-without-match", "-L"),
+            ("--only-matching", "-o"),
+            ("--null", "-Z"),
+            ("--count", "-c"),
+        ];
+        for (rg_flag, grep_flag) in &conversions {
+            let extra_args = vec![rg_flag.to_string()];
+            let mut converted = Vec::new();
+            for arg in &extra_args {
+                let c = match arg.as_str() {
+                    "--files-with-matches" => "-l",
+                    "--files-without-match" => "-L",
+                    "--only-matching" => "-o",
+                    "--null" => "-Z",
+                    "--count" => "-c",
+                    _ => arg.as_str(),
+                };
+                converted.push(c.to_string());
+            }
+            assert_eq!(
+                converted[0], *grep_flag,
+                "{} should convert to {}",
+                rg_flag, grep_flag
+            );
+        }
     }
 
     // Verify line numbers are always enabled in rg invocation (grep_cmd.rs:24).

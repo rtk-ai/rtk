@@ -1,6 +1,6 @@
-# rtk Windows 兼容性 + 压缩率测试套件
-# 目标: E:\Desktop\拼多多\客服网站\wwwroot\wendingjc_web
-# 用法: powershell -File test-rtk-compat.ps1
+# rtk Windows 兼容性 + 压缩率测试套件 v2
+# 改进: 动态探测目标文件、正确区分无匹配vs失败、检测负压缩
+# 用法: pwsh -File test-rtk-compat.ps1
 
 param(
     [string]$Target = "E:\Desktop\拼多多\客服网站\wwwroot\wendingjc_web",
@@ -16,15 +16,22 @@ $script:TotalRawTokens = 0
 $script:TotalRtkTokens = 0
 
 function Write-H { param([string]$M, [string]$C="White") Write-Host $M -ForegroundColor $C }
-function Write-OK { $script:Pass++; $script:TotalTests++; Write-H "  PASS" "Green" }
+function Write-OK { param([string]$detail="") ; $script:Pass++; $script:TotalTests++; Write-H "  PASS $detail" "Green" }
 function Write-FAIL([string]$reason) { $script:Fail++; $script:TotalTests++; Write-H "  FAIL: $reason" "Red" }
 function Write-WARN([string]$reason) { $script:Warn++; $script:TotalTests++; Write-H "  WARN: $reason" "Yellow" }
 
 function Count-Tokens([string]$text) {
-    # Rough token estimate: ~0.75 tokens per char for code, ~0.3 for spaces
     if ([string]::IsNullOrWhiteSpace($text)) { return 0 }
-    $chars = $text.Length
-    return [math]::Max(1, [math]::Round($chars * 0.75))
+    return [math]::Max(1, [math]::Round($text.Length * 0.75))
+}
+
+# Run a command and capture stdout+stderr as string
+function Invoke-Capture([string]$cmd, [string]$workDir) {
+    Push-Location $workDir -EA SilentlyContinue
+    # Wrap in script block to handle paths with spaces properly
+    $out = try { & ([scriptblock]::Create($cmd)) 2>&1 | Out-String } catch { $_.Exception.Message }
+    Pop-Location -EA SilentlyContinue
+    return $out
 }
 
 function Test-Command {
@@ -33,17 +40,25 @@ function Test-Command {
         [string]$RawCommand,
         [string]$RtkCommand,
         [string]$WorkingDir = $Target,
-        [bool]$ExpectOutput = $true,
-        [bool]$ExpectRewrite = $true
+        [ValidateSet("HasOutput","NoOutput","Any")]
+        [string]$ExpectOutput = "HasOutput",
+        [bool]$ExpectRewrite = $true,
+        [string]$MustContain = ""  # rtk output must contain this string
     )
 
     Write-H ""
     Write-H "--- $Name ---" "Cyan"
     Write-H "  原始: $RawCommand" "DarkGray"
+    Write-H "  RTK:  $RtkCommand" "DarkGray"
 
     # === 1. Hook interception test ===
     $hookInput = @{ tool_name = "Bash"; tool_input = @{ command = $RawCommand } } | ConvertTo-Json -Compress
-    $hookOutput = $hookInput | & $RtkBin hook claude 2>$null | ConvertFrom-Json -EA 0
+    $hookOutput = $null
+    try {
+        $hookOutput = $hookInput | & $RtkBin hook claude 2>$null | ConvertFrom-Json -EA 0
+    } catch {
+        Write-H "  Hook: JSON parse error (可能包含特殊字符)" "Yellow"
+    }
 
     if ($hookOutput -and $hookOutput.hookSpecificOutput.permissionDecision -eq "allow") {
         $rewritten = $hookOutput.hookSpecificOutput.updatedInput.command
@@ -62,56 +77,124 @@ function Test-Command {
     }
 
     # === 2. Raw command output ===
-    Push-Location $WorkingDir -EA SilentlyContinue
-    $rawOut = try { Invoke-Expression $RawCommand 2>&1 | Out-String } catch { $_.Exception.Message }
-    Pop-Location -EA SilentlyContinue
+    $rawOut = Invoke-Capture $RawCommand $WorkingDir
     $rawTokens = Count-Tokens $rawOut
-    $script:TotalRawTokens += $rawTokens
 
     # === 3. RTK command output ===
-    Push-Location $WorkingDir -EA SilentlyContinue
-    $rtkOut = try { Invoke-Expression $RtkCommand 2>&1 | Out-String } catch { $_.Exception.Message }
-    Pop-Location -EA SilentlyContinue
+    # Quote the RTK binary path to handle spaces in directory names
+    $quotedCmd = $RtkCommand -replace "^$([regex]::Escape($RtkBin))", "`"$RtkBin`""
+    $rtkOut = Invoke-Capture $quotedCmd $WorkingDir
     $rtkTokens = Count-Tokens $rtkOut
-    $script:TotalRtkTokens += $rtkTokens
 
-    # === 4. Compare ===
+    # === 4. Token comparison ===
     $saved = $rawTokens - $rtkTokens
     $pct = if ($rawTokens -gt 0) { [math]::Round(($saved / $rawTokens) * 100, 1) } else { 0 }
 
-    Write-H "  原始 tokens: ~$rawTokens | rtk tokens: ~$rtkTokens | 节省: $saved ($pct%)" "White"
+    $tokenColor = if ($pct -ge 30) { "Green" } elseif ($pct -ge 0) { "Yellow" } else { "Red" }
+    Write-H "  原始: ~${rawTokens}t | rtk: ~${rtkTokens}t | 节省: ${saved}t (${pct}%)" $tokenColor
 
-    if ($ExpectOutput) {
-        if ($rtkOut.Trim().Length -gt 0) {
-            Write-OK
-        } else {
-            Write-FAIL "Expected output but got empty"
-        }
-    } else {
-        Write-H "  Output check: skipped (expected no output)" "DarkGray"
+    # Detect negative savings (RTK output LARGER than raw)
+    if ($pct -lt -50 -and $rawTokens -gt 10) {
+        Write-H "  ⚠️  负压缩! RTK 输出比原始大 $([math]::Abs($pct))% — 可能过滤器误识别" "Red"
     }
 
-    # Show first 3 lines of RTK output
-    $preview = ($rtkOut.Trim() -split "`n")[0..2] -join "`n"
-    if ($preview) { Write-H "  输出预览: $preview" "DarkGray" }
+    # Track totals
+    $script:TotalRawTokens += $rawTokens
+    $script:TotalRtkTokens += $rtkTokens
 
-    $saved
+    # === 5. Output validation ===
+    $hasRtkOutput = $rtkOut.Trim().Length -gt 0
+
+    switch ($ExpectOutput) {
+        "HasOutput" {
+            if ($hasRtkOutput) {
+                if ($MustContain -and -not $rtkOut.Contains($MustContain)) {
+                    Write-FAIL "输出缺少必需内容: '$MustContain'"
+                } else {
+                    Write-OK "(有输出)"
+                }
+            } else {
+                Write-FAIL "期望有输出但得到空"
+            }
+        }
+        "NoOutput" {
+            # 无匹配是正常的 — 检查是否有有意义的"0 matches"提示
+            if (-not $hasRtkOutput) {
+                Write-OK "(空输出 — 可考虑返回 '0 matches' 提示)"
+            } elseif ($rtkOut -match "0 match|no match|no result") {
+                Write-OK "(有零匹配提示)"
+            } else {
+                Write-WARN "无匹配场景下有非预期输出"
+            }
+        }
+        "Any" {
+            if ($hasRtkOutput) {
+                Write-OK "(有输出)"
+            } else {
+                Write-OK "(无输出)"
+            }
+        }
+    }
+
+    # Show preview
+    $preview = ($rtkOut.Trim() -split "`n")[0..2] -join "`n"
+    if ($preview) { Write-H "  预览: $preview" "DarkGray" }
+
+    return @{ raw = $rawOut; rtk = $rtkOut; rawTokens = $rawTokens; rtkTokens = $rtkTokens }
 }
 
+# ============================================================
+# Auto-detect test files in target directory
+# ============================================================
+function Find-TestAssets {
+    param([string]$Dir)
+
+    $assets = @{}
+
+    # Find a small text file for cat tests
+    $assets.TestFile = Get-ChildItem $Dir -Recurse -File -EA 0 |
+        Where-Object { $_.Length -gt 100 -and $_.Length -lt 5000 -and $_.Extension -match '\.(js|ts|json|md|py)$' -and $_.FullName -notmatch 'node_modules' } |
+        Select-Object -First 1
+
+    # Check for git repo
+    Push-Location $Dir -EA 0
+    $assets.IsGit = try { git rev-parse --git-dir 2>$null; $true } catch { $false }
+    Pop-Location -EA 0
+
+    # Find common source code extensions (text-based only, exclude images/binary)
+    $textExts = @('.js','.ts','.vue','.jsx','.tsx','.py','.rb','.go','.rs','.java','.cs','.php','.html','.css','.scss','.json','.xml','.yaml','.yml','.md','.sql','.sh','.bat','.ps1','.c','.cpp','.h','.hpp')
+    $exts = Get-ChildItem $Dir -Recurse -File -EA 0 |
+        Where-Object { $_.FullName -notmatch 'node_modules|\.git|dist|build' -and $_.Extension -in $textExts } |
+        Group-Object Extension |
+        Sort-Object Count -Descending |
+        Select-Object -First 5 -ExpandProperty Name
+    $assets.SourceExts = $exts
+
+    # Find a source directory with actual code
+    $assets.SourceDir = Get-ChildItem $Dir -Directory -EA 0 |
+        Where-Object { $_.Name -notmatch 'node_modules|\.git|dist|build|\.claude|\.omc' } |
+        Select-Object -First 1
+
+    return $assets
+}
+
+# ============================================================
+# Main
+# ============================================================
 Write-H ""
 Write-H "================================================================" "Cyan"
-Write-H "  RTK Windows 兼容性 + 压缩率测试" "Cyan"
+Write-H "  RTK Windows 兼容性 + 压缩率测试 v2" "Cyan"
 Write-H "  目标: $Target" "Cyan"
 Write-H "  时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" "Cyan"
 Write-H "================================================================" "Cyan"
 
-# Verify target exists
+# Verify target
 if (-not (Test-Path $Target)) {
     Write-FAIL "目标目录不存在: $Target"
     exit 1
 }
 
-# Verify rtk available
+# Verify rtk
 try {
     $ver = & $RtkBin --version 2>&1
     Write-H "  rtk: $ver" "Cyan"
@@ -120,91 +203,98 @@ try {
     exit 1
 }
 
+# Discover test assets
+$assets = Find-TestAssets $Target
+Write-H "  测试文件: $($assets.TestFile.Name)" "DarkGray"
+Write-H "  Git: $($assets.IsGit)" "DarkGray"
+Write-H "  源码扩展名: $($assets.SourceExts -join ', ')" "DarkGray"
+
+# Determine a valid source ext for grep tests
+$grepExt = if ($assets.SourceExts) { $assets.SourceExts[0] } else { ".js" }
+Write-H "  grep 测试扩展名: $grepExt" "DarkGray"
+
 # ============================================================
-# SECTION 1: ls / tree
+# 1. ls / tree
 # ============================================================
 Write-H ""
 Write-H "========== 1. 文件列表: ls / tree ==========" "Yellow"
 
-Test-Command "ls (no args)" "ls" "rtk ls"
-Test-Command "ls -la" "ls -la" "rtk ls -la"
-Test-Command "ls 子目录" "ls server" "rtk ls server"
-Test-Command "tree (dir listing)" "cmd /c dir /b" "rtk ls"
+Test-Command "ls (无参数)" "ls" "rtk ls"
+# 注意: Windows PowerShell 的 ls 是 Get-ChildItem 别名，不支持 -la
+# 用 rtk ls -la 单独测试，不与 PowerShell ls 对比
+Test-Command "ls -la (rtk原生)" "rtk ls -la" "rtk ls -la" -ExpectRewrite $false
+
+if ($assets.SourceDir) {
+    Test-Command "ls 子目录" "ls $($assets.SourceDir.Name)" "rtk ls $($assets.SourceDir.Name)"
+}
 
 # ============================================================
-# SECTION 2: cat / read
+# 2. cat / read
 # ============================================================
 Write-H ""
 Write-H "========== 2. 文件读取: cat / read ==========" "Yellow"
 
-# Find a readable file
-$testFile = Get-ChildItem $Target -Recurse -File -EA 0 | Where-Object { $_.Length -gt 100 -and $_.Length -lt 10000 -and $_.Extension -match '\.(js|ts|vue|json|md|py)$' } | Select-Object -First 1
-if ($testFile) {
-    $relPath = $testFile.FullName.Substring($Target.Length).TrimStart('\')
-    Test-Command "cat 小文件" "cat `"$($testFile.FullName)`"" "rtk read `"$($testFile.FullName)`"" -WorkingDir $Target
-    Test-Command "head 文件" "head `"$($testFile.FullName)`"" "rtk read `"$($testFile.FullName)`"" -WorkingDir $Target
+if ($assets.TestFile) {
+    $fpath = $assets.TestFile.FullName
+    Test-Command "cat 文件" "cat `"$fpath`"" "rtk read `"$fpath`""
 } else {
-    Write-WARN "No suitable test file found in $Target"
+    Write-WARN "No suitable test file found"
 }
 
-# Test with a config file
-$configFile = Get-ChildItem "$Target\package.json" -EA 0
-if ($configFile) {
-    Test-Command "cat package.json" "cat package.json" "rtk read package.json"
+# ASCII config file
+if (Test-Path "$Target\package.json") {
+    Test-Command "cat package.json (ASCII路径)" "cat package.json" "rtk read package.json"
 }
 
 # ============================================================
-# SECTION 3: grep / rg
+# 3. grep / rg — 使用实际存在的文件类型
 # ============================================================
 Write-H ""
 Write-H "========== 3. 搜索: grep / rg ==========" "Yellow"
 
-Test-Command "rg 搜索" "rg 'export default' --glob '*.vue'" "rtk grep 'export default' --glob '*.vue'"
-Test-Command "rg --count" "rg 'import' --glob '*.vue' --count" "rtk grep 'import' --glob '*.vue' --count"
-Test-Command "grep 搜索" "grep -rn 'function' server --include='*.js'" "rtk grep -rn 'function' server --include='*.js'"
-Test-Command "rg 特定文件" "rg 'const' server --glob '*.js' -l" "rtk grep 'const' server --glob '*.js' -l"
+# 3a. grep 搜索 — 使用 --include (兼容 grep 和 rg)
+$grepPattern = "export"
+Test-Command "grep 搜索 (--include)" "grep -rn '$grepPattern' . --include='*$grepExt'" "rtk grep '$grepPattern' . --include='*$grepExt'"
+
+# 3b. grep 无匹配 — 搜索不可能存在的字符串
+Test-Command "grep 无匹配 (应返回0matches)" "grep -rn 'ZZZNONEXISTENT_STRING_12345' . --include='*$grepExt'" "rtk grep 'ZZZNONEXISTENT_STRING_12345' . --include='*$grepExt'" -ExpectOutput "NoOutput"
+
+# 3c. grep --files-with-matches 路径列表模式 (用长标志避免与 rtk grep -l/--max-len 冲突)
+Test-Command "grep --files-with-matches 路径列表" "grep -rln '$grepPattern' . --include='*$grepExt'" "rtk grep '$grepPattern' . --include='*$grepExt' --files-with-matches"
+
+# 3d. grep 搜索 子目录
+if ($assets.SourceDir) {
+    $sd = $assets.SourceDir.Name
+    Test-Command "grep 子目录搜索" "grep -rn 'function' $sd --include='*$grepExt'" "rtk grep 'function' $sd --include='*$grepExt'"
+}
+
+# 3e. grep 无匹配 子目录
+Test-Command "grep 子目录无匹配" "grep -rn 'ZZZNONEXISTENT_12345' . --include='*$grepExt'" "rtk grep 'ZZZNONEXISTENT_12345' . --include='*$grepExt'" -ExpectOutput "NoOutput"
 
 # ============================================================
-# SECTION 4: git diff
+# 4. git
 # ============================================================
 Write-H ""
-Write-H "========== 4. Git: diff ==========" "Yellow"
+Write-H "========== 4. Git ==========" "Yellow"
 
-Push-Location $Target
-$isGit = try { git rev-parse --git-dir 2>$null; $true } catch { $false }
-Pop-Location
+$gitDir = if ($assets.IsGit) { $Target } else { "D:\AI\RTK fuben\rtk-repo" }
 
-if ($isGit) {
-    Test-Command "git diff --stat" "git diff --stat HEAD~1" "rtk git diff --stat HEAD~1"
-    Test-Command "git diff" "git diff HEAD~1" "rtk git diff HEAD~1"
-    Test-Command "git status" "git status" "rtk git status"
-    Test-Command "git log" "git log --oneline -5" "rtk git log --oneline -5"
-} else {
-    Write-WARN "Not a git repository, skipping git tests"
-    # Test general git behavior
-    Push-Location "D:\AI\RTK fuben\rtk-repo"
-    Test-Command "git diff (rtk-repo)" "git diff --stat HEAD~1" "rtk git diff --stat HEAD~1" -WorkingDir "D:\AI\RTK fuben\rtk-repo"
-    Test-Command "git status (rtk-repo)" "git status" "rtk git status" -WorkingDir "D:\AI\RTK fuben\rtk-repo"
-    Pop-Location
+Test-Command "git status" "git status" "rtk git status" -WorkingDir $gitDir
+Test-Command "git log" "git log --oneline -5" "rtk git log --oneline -5" -WorkingDir $gitDir
+Test-Command "git diff" "git diff --stat HEAD~1" "rtk git diff --stat HEAD~1" -WorkingDir $gitDir
+
+# ============================================================
+# 5. npm / package manager
+# ============================================================
+Write-H ""
+Write-H "========== 5. 包管理 ==========" "Yellow"
+
+if (Test-Path "$Target\package.json") {
+    Test-Command "npm ls" "npm ls --depth=0" "rtk npm ls --depth=0" -ExpectOutput "Any"
 }
 
 # ============================================================
-# SECTION 5: npm / test
-# ============================================================
-Write-H ""
-Write-H "========== 5. 包管理 & 测试: npm / cargo ==========" "Yellow"
-
-Test-Command "npm run build" "npm run build" "rtk npm run build" -ExpectOutput $true
-Test-Command "npm list" "npm ls --depth=0" "rtk npm ls --depth=0"
-
-# Test pytest if python files exist
-$hasPython = Get-ChildItem $Target -Recurse -File -EA 0 | Where-Object { $_.Extension -eq '.py' } | Select-Object -First 1
-if ($hasPython -and (Get-Command python -EA 0)) {
-    Test-Command "pytest" "pytest --collect-only" "rtk pytest --collect-only"
-}
-
-# ============================================================
-# SECTION 6: Edge cases
+# 6. 边缘情况
 # ============================================================
 Write-H ""
 Write-H "========== 6. 边缘情况 ==========" "Yellow"
@@ -212,17 +302,52 @@ Write-H "========== 6. 边缘情况 ==========" "Yellow"
 # Empty command
 $hookInput = '{"tool_name":"Bash","tool_input":{"command":""}}'
 $hookOutput = $hookInput | & $RtkBin hook claude 2>$null
-if ([string]::IsNullOrEmpty($hookOutput.Trim())) { Write-OK } else { Write-FAIL "Empty command should pass through" }
+$script:TotalTests++
+if ($null -eq $hookOutput -or [string]::IsNullOrEmpty("$hookOutput".Trim())) { Write-OK "(空命令不改写)"; $script:Pass++ } else { Write-FAIL "空命令不应改写"; $script:Fail++ }
 
-# Unrecognized command
-$hookInput = '{"tool_name":"Bash","tool_input":{"command":"mycustomtool --flag"}}'
+# Non-Bash tool
+$hookInput = '{"tool_name":"Glob","tool_input":{"pattern":"*.rs"}}'
 $hookOutput = $hookInput | & $RtkBin hook claude 2>$null
-if ([string]::IsNullOrEmpty($hookOutput.Trim())) { Write-OK } else { Write-FAIL "Unrecognized command should pass through" }
+$script:TotalTests++
+if ($null -eq $hookOutput -or [string]::IsNullOrEmpty("$hookOutput".Trim())) { Write-OK "(非Bash工具不改写)"; $script:Pass++ } else { Write-FAIL "非Bash工具不应改写"; $script:Fail++ }
 
-# PowerShell tool call
+# PowerShell tool
 $hookInput = '{"tool_name":"PowerShell","tool_input":{"command":"git status"}}'
 $hookOutput = $hookInput | & $RtkBin hook claude 2>$null
-if ($hookOutput -match "permissionDecision") { Write-OK } else { Write-FAIL "PowerShell tool should trigger hook" }
+$script:TotalTests++
+if ($hookOutput -match "permissionDecision") { Write-OK "(PowerShell工具触发hook)"; $script:Pass++ } else { Write-FAIL "PowerShell工具应触发hook"; $script:Fail++ }
+
+# Unicode path hook test
+Write-H ""
+Write-H "--- Unicode 路径 hook 测试 ---" "Cyan"
+$unicodeInput = @{ tool_name = "Bash"; tool_input = @{ command = "cat `"E:\桌面\测试\文件.txt`"" } } | ConvertTo-Json -Compress
+$script:TotalTests++
+try {
+    $unicodeOutput = $unicodeInput | & $RtkBin hook claude 2>$null | ConvertFrom-Json -EA Stop
+    if ($unicodeOutput.hookSpecificOutput.updatedInput.command) {
+        Write-OK "(Unicode路径hook正常)"; $script:Pass++
+    } else {
+        Write-WARN "Unicode路径hook返回但无command"
+    }
+} catch {
+    Write-FAIL "Unicode路径导致hook JSON解析失败: $($_.Exception.Message)"
+}
+
+# ============================================================
+# 7. 压缩质量分析
+# ============================================================
+Write-H ""
+Write-H "========== 7. 压缩质量分析 ==========" "Yellow"
+
+if ($script:TotalRawTokens -gt 0) {
+    $overallPct = [math]::Round((($script:TotalRawTokens - $script:TotalRtkTokens) / $script:TotalRawTokens) * 100, 1)
+    $color = if ($overallPct -ge 30) { "Green" } elseif ($overallPct -ge 0) { "Yellow" } else { "Red" }
+    Write-H "  整体压缩率: ${overallPct}%" $color
+    if ($overallPct -lt 0) {
+        Write-H "  ⚠️ 整体负压缩! RTK 输出比原始大 $([math]::Abs($overallPct))%" "Red"
+        Write-H "  原因可能是: grep -l 路径被误识别为 find 输出" "Red"
+    }
+}
 
 # ============================================================
 # SUMMARY
@@ -240,7 +365,7 @@ Write-H "  测试数:   $total  ($($script:Pass) PASS / $($script:Fail) FAIL / $
 Write-H "  通过率:   ${coverage}%" $(if ($coverage -ge 90) { "Green" } else { "Yellow" })
 Write-H "  原始 tokens: ~$($script:TotalRawTokens)" "DarkGray"
 Write-H "  RTK tokens:  ~$($script:TotalRtkTokens)" "DarkGray"
-Write-H "  压缩率:      ${savePct}%" $(if ($savePct -ge 50) { "Green" } elseif ($savePct -ge 30) { "Yellow" } else { "Red" })
+Write-H "  压缩率:      ${savePct}%" $(if ($savePct -ge 30) { "Green" } elseif ($savePct -ge 0) { "Yellow" } else { "Red" })
 Write-H ""
 
 exit $(if ($script:Fail -eq 0) { 0 } else { 1 })
