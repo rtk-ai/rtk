@@ -207,7 +207,7 @@ pub fn run_verify(verbose: u8) -> Result<()> {
     // If no legacy script exists, check for native binary command registration
     if !hook_path.exists() && !hash_file.exists() {
         // Check if the native binary command is registered in settings.json
-        let claude_dir = resolve_claude_dir()?;
+        let claude_dir = resolve_claude_dir().context("Cannot determine claude directory")?;
         let settings_path = claude_dir.join("settings.json");
         if settings_path.exists() {
             let content = fs::read_to_string(&settings_path).unwrap_or_default();

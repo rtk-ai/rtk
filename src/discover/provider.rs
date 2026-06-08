@@ -44,7 +44,7 @@ pub struct ClaudeProvider;
 impl ClaudeProvider {
     /// Get the base directory for Claude Code projects.
     fn projects_dir() -> Result<PathBuf> {
-        let claude_dir = resolve_claude_dir()?;
+        let claude_dir = resolve_claude_dir().context("could not determine claude directory")?;
         Ok(claude_dir.join("projects"))
     }
 
@@ -420,7 +420,10 @@ mod tests {
     #[test]
     fn test_discover_sessions_missing_projects_dir_returns_empty() {
         let temp_home = tempfile::tempdir().unwrap();
-        let missing_projects_dir = temp_home.path().join(".claude").join("projects");
+        let missing_projects_dir = temp_home
+            .path()
+            .join(crate::hooks::constants::CLAUDE_DIR)
+            .join("projects");
 
         let sessions = ClaudeProvider::discover_sessions_in_projects_dir(
             &missing_projects_dir,

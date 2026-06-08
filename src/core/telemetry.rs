@@ -353,8 +353,8 @@ fn detect_hook_type() -> String {
         None => return "unknown".to_string(),
     };
 
-    let claude_dir =
-        crate::hooks::init::resolve_claude_dir().unwrap_or_else(|_| home.join(".claude"));
+    let claude_dir = crate::hooks::init::resolve_claude_dir()
+        .unwrap_or_else(|_| home.join(crate::hooks::constants::CLAUDE_DIR));
 
     // Check in order of popularity
     let checks = [

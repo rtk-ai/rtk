@@ -499,8 +499,8 @@ fn prompt_telemetry_consent() -> Result<()> {
 
 fn print_manual_instructions(hook_command: &str, include_opencode: bool) {
     let settings_path = resolve_claude_dir()
-        .map(|dir| dir.join(SETTINGS_JSON))
-        .unwrap_or_else(|_| PathBuf::from("~/.claude/settings.json"));
+        .unwrap_or_else(|_| PathBuf::from(CLAUDE_DIR))
+        .join(SETTINGS_JSON);
     println!("\n  MANUAL STEP: Add this to {}:", settings_path.display());
     println!("  {{");
     println!("    \"hooks\": {{ \"PreToolUse\": [{{");
