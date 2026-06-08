@@ -345,7 +345,38 @@ pub fn run(
             // rg unavailable: fall back to system grep with the original,
             // untranslated patterns (grep interprets BRE natively).
             let mut grep_cmd = resolved_command("grep");
-            grep_cmd.args(&extra_args);
+            // Filter out rg-specific flags (--glob, --type, etc.) that GNU
+            // grep does not understand.
+            let grep_safe_args: Vec<&String> = extra_args
+                .iter()
+                .filter(|a| {
+                    let s = a.as_str();
+                    !matches!(
+                        s,
+                        "--glob"
+                            | "--type"
+                            | "--type-add"
+                            | "--type-not"
+                            | "--iglob"
+                            | "--type-clear"
+                            | "--files"
+                            | "--sort"
+                            | "--sortr"
+                            | "--max-depth"
+                            | "--max-filesize"
+                            | "--no-ignore"
+                            | "--no-ignore-parent"
+                            | "--no-ignore-vcs"
+                            | "--no-ignore-dot"
+                            | "--hidden"
+                            | "--follow"
+                            | "--trim"
+                            | "--passthru"
+                    ) && !s.starts_with("--type-")
+                        && !s.starts_with("--glob=")
+                })
+                .collect();
+            grep_cmd.args(grep_safe_args);
             for p in &patterns {
                 grep_cmd.args(["-e", p]);
             }
