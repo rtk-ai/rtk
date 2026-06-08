@@ -28,10 +28,16 @@ fn read_stdin_limited() -> Result<String> {
 // ── Copilot hook (VS Code + Copilot CLI) ──────────────────────
 
 /// Format detected from the preToolUse JSON input.
+///
+/// Payload format is determined by the event name in the hook config:
+///   "preToolUse" (camelCase)  → camelCase keys (toolName/toolArgs) — used by Copilot CLI
+///   "PreToolUse" (PascalCase) → snake_case keys (tool_name/tool_input) — always used by VS Code
 enum HookFormat {
-    /// VS Code Copilot Chat: "run_in_terminal". Uses updatedInput for transparent rewrite.
+    /// VS Code Copilot Chat: always snake_case, tool_name="run_in_terminal".
+    /// Uses hookSpecificOutput.updatedInput for transparent rewrite.
     VsCode,
-    /// Copilot CLI: "bash" (lowercase). Uses modifiedArgs for transparent rewrite.
+    /// Copilot CLI: camelCase format ("preToolUse" config), toolName="bash", toolArgs=JSON string.
+    /// Uses modifiedArgs for transparent rewrite.
     CopilotCli,
     /// Non-bash tool, already uses rtk, or unknown format — pass through silently.
     PassThrough,
@@ -106,6 +112,16 @@ fn process_vscode_payload(v: &Value) -> Option<Value> {
 }
 
 fn detect_format(v: &Value) -> HookFormat {
+    // Copilot CLI: camelCase keys, "preToolUse" config (version: 1)
+    // toolArgs is a JSON-encoded string
+    if let Some(tool_name) = v.get("toolName").and_then(|t| t.as_str()) {
+        if tool_name == "bash" && v.get("toolArgs").and_then(|a| a.as_str()).is_some() {
+            return HookFormat::CopilotCli;
+        }
+        return HookFormat::PassThrough;
+    }
+
+    // VS Code Copilot Chat: snake_case keys, "PreToolUse" config
     let Some(tool_name) = v.get("tool_name").and_then(|t| t.as_str()) else {
         return HookFormat::PassThrough;
     };
@@ -121,7 +137,6 @@ fn detect_format(v: &Value) -> HookFormat {
     }
 
     match tool_name {
-        "bash" => HookFormat::CopilotCli,
         "run_in_terminal" => HookFormat::VsCode,
         _ => HookFormat::PassThrough,
     }
@@ -171,28 +186,32 @@ fn decide_hook_action(cmd: &str, host: permissions::Host) -> HookDecision {
 }
 
 fn process_copilot_payload(v: &Value) -> Option<Value> {
-    let cmd = v
-        .pointer("/tool_input/command")
-        .and_then(|c| c.as_str())
-        .filter(|c| !c.is_empty())?;
+    // toolArgs is a JSON-encoded string in the camelCase (version: 1) format
+    let tool_args_str = v.get("toolArgs").and_then(|a| a.as_str())?;
+    let mut args: Value = serde_json::from_str(tool_args_str).ok()?;
 
-    let rewritten = match decide_hook_action(cmd, permissions::Host::Claude) {
+    let cmd = args
+        .get("command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())?
+        .to_string();
+
+    let rewritten = match decide_hook_action(&cmd, permissions::Host::Claude) {
         HookDecision::Deny => {
-            audit_log("deny", cmd, "");
+            audit_log("deny", &cmd, "");
             return None;
         }
         HookDecision::Defer => return None,
         HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r) => r,
     };
 
-    audit_log("rewrite", cmd, &rewritten);
+    audit_log("rewrite", &cmd, &rewritten);
 
-    let mut modified_args = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
-    if let Some(obj) = modified_args.as_object_mut() {
+    if let Some(obj) = args.as_object_mut() {
         obj.insert("command".into(), Value::String(rewritten));
     }
 
-    Some(json!({ "modifiedArgs": modified_args }))
+    Some(json!({ "permissionDecision": "allow", "modifiedArgs": args }))
 }
 
 // ── Gemini hook ───────────────────────────────────────────────
@@ -561,8 +580,8 @@ mod tests {
         // (confirmed for Cursor). run_copilot strips them before parsing;
         // verify both Copilot formats still parse after the same handling.
         for raw in [
-            format!("\u{feff}{}", vscode_input("bash", "git status")),
-            format!("\u{feff}\u{feff}{}", vscode_input("bash", "git status")),
+            format!("\u{feff}{}", copilot_cli_input("git status")),
+            format!("\u{feff}\u{feff}{}", copilot_cli_input("git status")),
         ] {
             let cleaned = strip_leading_bom(&raw).trim();
             let v: Value = serde_json::from_str(cleaned).expect("BOM-stripped JSON must parse");
@@ -1181,11 +1200,25 @@ mod tests {
         ));
     }
 
+    fn copilot_cli_input(cmd: &str) -> Value {
+        let args = serde_json::to_string(&json!({ "command": cmd, "description": "run a shell command" })).unwrap();
+        json!({ "toolName": "bash", "toolArgs": args })
+    }
+
     #[test]
-    fn test_detect_bash_lowercase_is_copilot_cli() {
+    fn test_detect_copilot_cli_camelcase() {
+        assert!(matches!(
+            detect_format(&copilot_cli_input("git status")),
+            HookFormat::CopilotCli
+        ));
+    }
+
+    #[test]
+    fn test_detect_bash_snake_case_is_passthrough() {
+        // snake_case "bash" (without toolArgs) is not Copilot CLI format
         assert!(matches!(
             detect_format(&vscode_input("bash", "git status")),
-            HookFormat::CopilotCli
+            HookFormat::PassThrough
         ));
     }
 
@@ -1252,25 +1285,17 @@ mod tests {
     }
 
     fn copilot_input(cmd: &str) -> String {
-        json!({
-            "hook_event_name": "PreToolUse",
-            "tool_name": "bash",
-            "tool_input": { "command": cmd, "description": "run a shell command" }
-        })
-        .to_string()
+        let args = serde_json::to_string(
+            &json!({ "command": cmd, "description": "run a shell command" })
+        ).unwrap();
+        json!({ "toolName": "bash", "toolArgs": args }).to_string()
     }
 
     fn copilot_input_with_extra(cmd: &str) -> String {
-        json!({
-            "hook_event_name": "PreToolUse",
-            "tool_name": "bash",
-            "tool_input": {
-                "command": cmd,
-                "description": "run git status",
-                "initial_wait": 30
-            }
-        })
-        .to_string()
+        let args = serde_json::to_string(
+            &json!({ "command": cmd, "description": "run git status", "initial_wait": 30 })
+        ).unwrap();
+        json!({ "toolName": "bash", "toolArgs": args }).to_string()
     }
 
     #[test]
@@ -1312,20 +1337,16 @@ mod tests {
 
     #[test]
     fn test_copilot_report_intent_passthrough() {
-        let input = json!({
-            "hook_event_name": "PreToolUse",
-            "tool_name": "report_intent",
-            "tool_input": { "intent": "Checking git status" }
-        })
-        .to_string();
+        let args = serde_json::to_string(&json!({"intent": "Checking git status"})).unwrap();
+        let input = json!({ "toolName": "report_intent", "toolArgs": args }).to_string();
         assert!(run_copilot_inner(&input).is_none());
     }
 
     #[test]
-    fn test_copilot_output_has_no_permission_decision() {
+    fn test_copilot_output_has_permission_decision_allow() {
         let result = run_copilot_inner(&copilot_input("git status")).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
-        assert!(v.get("permissionDecision").is_none());
+        assert_eq!(v["permissionDecision"], "allow");
         assert!(v.get("hookSpecificOutput").is_none());
     }
 }
