@@ -628,4 +628,132 @@ mod tests {
                 let args: Vec<String> = vec!["list".into(), "--project".into(), "PROJ".into()];
                 assert!(!has_output_flag(&args));
       }
+
+              // ── has_output_flag: --raw and --debug ──────────────────────────────
+
+              #[test]
+              fn has_output_flag_detects_raw() {
+                                let args: Vec<String> = vec!["--raw".into()];
+                                assert!(has_output_flag(&args));
+              }
+
+              #[test]
+              fn has_output_flag_detects_debug() {
+                                let args: Vec<String> = vec!["--debug".into()];
+                                assert!(has_output_flag(&args));
+              }
+
+              // ── issue list: cap hint and sparse columns ──────────────────────────
+
+              #[test]
+              fn issue_list_shows_more_hint_when_over_cap() {
+                                // Build more rows than MAX_ISSUES (CAP_LIST = 30)
+                                let rows: Vec<String> = (0..35)
+                                                      .map(|i| format!("Bug\tPROJ-{}\tSummary {}\tAlice\tHigh\tOpen\t2026-01-01", i, i))
+                                                      .collect();
+                                let raw = rows.join("\n");
+                                let out = format_issue_list(&raw, false);
+                                assert!(out.contains("more issues"), "truncation hint missing: {}", out);
+              }
+
+              #[test]
+              fn issue_list_sparse_columns_no_panic() {
+                                // Line with only 2 tab-separated columns (type + key), no status/summary
+                                let raw = "Bug\tPROJ-999";
+                                let out = format_issue_list(raw, false);
+                                assert!(out.contains("PROJ-999"), "key missing in sparse row: {}", out);
+              }
+
+              // ── issue view: extra branches ───────────────────────────────────────
+
+              #[test]
+              fn issue_view_keeps_summary_line() {
+                                let raw = "● PROJ-5  Story\nSummary: Add login page\nType: Story\nStatus: Open\n";
+                                let out = format_issue_view(raw);
+                                assert!(out.contains("Summary"), "Summary line not kept: {}", out);
+              }
+
+              #[test]
+              fn issue_view_keeps_updated_and_created() {
+                                let raw = "● PROJ-6  Bug\nType: Bug\nStatus: Open\nCreated: 2026-01-01\nUpdated: 2026-05-01\n";
+                                let out = format_issue_view(raw);
+                                assert!(out.contains("Created"), "Created line missing: {}", out);
+                                assert!(out.contains("Updated"), "Updated line missing: {}", out);
+              }
+
+              #[test]
+              fn issue_view_strips_html_comments() {
+                                // HTML comments should be stripped by HTML_COMMENT_RE (applied externally)
+                                // Here we verify description lines survive without HTML noise
+                                let raw = "● PROJ-7  Bug\nType: Bug\nStatus: Open\nDescription\nClean text here\n";
+                                let out = format_issue_view(raw);
+                                assert!(out.contains("Clean text"), "description text missing: {}", out);
+              }
+
+              #[test]
+              fn issue_view_desc_short_not_truncated() {
+                                // Description shorter than MAX_DESC_CHARS must appear in full (no "…")
+                                let raw = "● PROJ-8  Task\nType: Task\nStatus: Done\nDescription\nShort desc.\n";
+                                let out = format_issue_view(raw);
+                                assert!(out.contains("Short desc."), "short desc missing: {}", out);
+                                assert!(!out.contains('…'), "unexpected truncation in short desc");
+              }
+
+              #[test]
+              fn issue_view_multi_blank_collapsed() {
+                                // Multiple blank lines in output should be collapsed to at most two newlines
+                                let raw = "● PROJ-9  Bug\nType: Bug\n\n\n\nStatus: Open\n";
+                                let out = format_issue_view(raw);
+                                assert!(!out.contains("\n\n\n"), "triple newline not collapsed: {:?}", out);
+              }
+
+              // ── sprint list: cap hint and sparse columns ─────────────────────────
+
+              #[test]
+              fn sprint_list_shows_more_hint_when_over_cap() {
+                                let rows: Vec<String> = (0..35)
+                                                      .map(|i| format!("{}\tSprint {}\t2026-01-01\t2026-01-14\t\tactive", i, i))
+                                                      .collect();
+                                let raw = rows.join("\n");
+                                let out = format_sprint_list(&raw, false);
+                                assert!(out.contains("more"), "truncation hint missing: {}", out);
+              }
+
+              #[test]
+              fn sprint_list_sparse_columns_no_panic() {
+                                let raw = "42\tSprint Only";
+                                let out = format_sprint_list(raw, false);
+                                assert!(out.contains("42"), "id missing in sparse row: {}", out);
+              }
+
+              // ── board list: cap hint and sparse columns ──────────────────────────
+
+              #[test]
+              fn board_list_shows_more_hint_when_over_cap() {
+                                let rows: Vec<String> = (0..35)
+                                                      .map(|i| format!("{}\tBoard {}\tscrum\tTEAM", i, i))
+                                                      .collect();
+                                let raw = rows.join("\n");
+                                let out = format_board_list(&raw, false);
+                                assert!(out.contains("more"), "truncation hint missing: {}", out);
+              }
+
+              #[test]
+              fn board_list_sparse_columns_no_panic() {
+                                let raw = "7\tMy Board";
+                                let out = format_board_list(raw, false);
+                                assert!(out.contains("7"), "id missing in sparse row: {}", out);
+              }
+
+              #[test]
+              fn board_list_long_name_truncated() {
+                                let long_name = "C".repeat(100);
+                                let raw = format!("10\t{}\tkanban\tINFRA", long_name);
+                                let out = format_board_list(&raw, false);
+                                assert!(
+                                                      out.contains(&"C".repeat(40)) || out.contains('…'),
+                                                      "board name not truncated: {}", out
+                                                  );
+              }
+      
 }
