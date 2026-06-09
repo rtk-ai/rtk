@@ -958,12 +958,21 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
             println!("{}", compact);
         }
 
-        timer.track(
-            &format!("git add {}", args.join(" ")),
-            &format!("rtk git add {}", args.join(" ")),
-            &raw_output,
-            &compact,
-        );
+        // Only track when there's actual output — avoids inflated 100% savings
+        // when git add is a no-op (raw has warnings but compact is empty).
+        if compact.is_empty() {
+            timer.track_passthrough(
+                &format!("git add {}", args.join(" ")),
+                &format!("rtk git add {}", args.join(" ")),
+            );
+        } else {
+            timer.track(
+                &format!("git add {}", args.join(" ")),
+                &format!("rtk git add {}", args.join(" ")),
+                &raw_output,
+                &compact,
+            );
+        }
     } else {
         eprintln!("FAILED: git add");
         if !result.stderr.trim().is_empty() {
