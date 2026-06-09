@@ -1,5 +1,5 @@
 //! Command filter modules organized by language ecosystem.
-
+pub mod atlassian;
 pub mod cloud;
 pub mod dotnet;
 pub mod git;
