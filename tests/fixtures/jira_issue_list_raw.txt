@@ -1,0 +1,5 @@
+Bug	PROJ-1	Fix login crash on Safari	Alice Smith	High	Open	2026-05-01
+Story	PROJ-2	Add OAuth2 SSO support	Bob Jones	Medium	In Progress	2026-05-02
+Task	PROJ-3	Update dependencies to latest	Carol Wu	Low	Done	2026-05-03
+Bug	PROJ-4	Memory leak in background worker	Dave Lee	High	Open	2026-05-04
+Story	PROJ-5	Export CSV reports for billing	Eve Turner	Medium	Review	2026-05-05
