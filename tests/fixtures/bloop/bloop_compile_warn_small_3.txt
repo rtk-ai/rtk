@@ -1,0 +1,10 @@
+Compiling root (1 Scala source)
+[W]  [E1] src/main/scala/example/Defect1.scala:6:39
+[W]       match may not be exhaustive.
+[W]       
+[W]       It would fail on pattern case: None
+[W]       
+[W]       L6:   def label(o: Option[Int]): String = o match {
+[W]                                                 ^
+[W] src/main/scala/example/Defect1.scala: L6 [E1]
+Compiled root (1622ms)
