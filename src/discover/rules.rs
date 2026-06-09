@@ -43,6 +43,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[("mr", 87.0), ("ci", 82.0), ("issue", 80.0)],
         subcmd_status: &[],
     },
+        RtkRule {
+                    pattern: r"^jira\s+(issue|sprint|board)",
+                    rtk_cmd: "rtk jira",
+                    rewrite_prefixes: &["jira"],
+                    category: "Atlassian",
+                    savings_pct: 85.0,
+                    subcmd_savings: &[("issue", 88.0), ("sprint", 80.0), ("board", 80.0)],
+                    subcmd_status: &[],
+        },
     RtkRule {
         pattern: r"^cargo\s+(build|test|clippy|check|fmt|install)",
         rtk_cmd: "rtk cargo",
