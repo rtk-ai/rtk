@@ -2315,6 +2315,14 @@ fn run_cli() -> Result<i32> {
                 eprintln!("Proxy mode: {} {}", cmd_name, cmd_args.join(" "));
             }
 
+            // SECURITY (#2345 / CVE-2026-33068): gate the proxied command against
+            // Claude Code's permission rules before spawning. Without this, `rtk
+            // proxy` is an open hole around deny rules and the built-in .env
+            // protection (e.g. `rtk proxy grep -r PASSWORD .env`).
+            if let Some(reason) = hooks::permissions::proxy_block_reason(&cmd_name, &cmd_args) {
+                anyhow::bail!("{reason}");
+            }
+
             // ISSUE #897: Kill proxy child on SIGINT/SIGTERM to prevent orphan
             // processes. Drop-based ChildGuard doesn't run on signals with
             // panic=abort, so we register a signal handler that kills the child

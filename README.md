@@ -244,6 +244,8 @@ rtk summary <long command>      # Heuristic summary
 rtk proxy <command>             # Raw passthrough + tracking
 ```
 
+> **Security:** `rtk proxy` enforces your Claude Code deny rules and blocks reads of `.env` secret files (`.env.example` / `.env.sample` / `.env.template` excepted), including via inline interpreter scripts (`sh -c ...`). This is best-effort: recursive readers (`grep -r PASSWORD .`), launcher-wrapped commands (`env`/`timeout`), and shell obfuscation can still reach `.env`, and rtk's own `read`/`grep`/`log` subcommands are not yet covered ([#2345](https://github.com/rtk-ai/rtk/issues/2345)).
+
 ### Token Savings Analytics
 ```bash
 rtk gain                        # Summary stats

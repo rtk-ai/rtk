@@ -114,6 +114,167 @@ pub(crate) fn check_command_with_rules(
     }
 }
 
+// --- Proxy permission gate (issue #2345 / CVE-2026-33068) -------------------
+//
+// `rtk proxy <cmd>` executes an arbitrary command. Without a gate it bypasses
+// Claude Code's permission rules entirely, letting an agent read `.env` secrets
+// (e.g. `rtk proxy grep -r PASSWORD .env`) even when `.env` reads are denied.
+// `proxy_block_reason` is the gate the proxy handler calls before spawning.
+
+/// `.env.<suffix>` variants that conventionally hold placeholder values rather
+/// than real secrets, so they stay readable through proxy (matches Claude
+/// Code's allowance of `.env.example`). Matched case-sensitively.
+const SAFE_ENV_SUFFIXES: &[&str] = &["example", "sample", "template"];
+
+/// Command interpreters whose inline-eval payload rtk cannot inspect. Shells
+/// treat `-c` as an inline command; the interpreters use `-c`/`-e`/`-E`.
+const INLINE_EVAL_SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ash", "ksh", "fish", "busybox"];
+const INLINE_EVAL_INTERPRETERS: &[&str] = &[
+    "python", "python2", "python3", "ruby", "perl", "node", "nodejs", "php",
+];
+
+/// True if `base` (already a path basename) names a sensitive `.env` file.
+///
+/// Bare `.env` matches case-insensitively (case-insensitive filesystems such as
+/// default macOS map `.ENV` onto `.env`); the [`SAFE_ENV_SUFFIXES`] allowance
+/// stays case-sensitive by design (so `.env.EXAMPLE` is treated as a secret).
+fn env_basename_is_sensitive(base: &str) -> bool {
+    if base.eq_ignore_ascii_case(".env") {
+        return true;
+    }
+    match (base.get(..5), base.get(5..)) {
+        (Some(prefix), Some(suffix)) if prefix.eq_ignore_ascii_case(".env.") => {
+            !SAFE_ENV_SUFFIXES.contains(&suffix)
+        }
+        _ => false,
+    }
+}
+
+/// True if `token` (a command-line argument) references a `.env` secret file.
+///
+/// Inspects the token's path basename plus the value after `=` (`--env-file=.env`,
+/// `dd if=.env`), a leading `@` (`curl @.env`), and a glued short-flag value
+/// (`-f.env`). Matches `.env` and `.env.<suffix>` but not the placeholder variants
+/// in [`SAFE_ENV_SUFFIXES`], nor lookalikes like `foo.env` or `.environment`. A
+/// bare `.env` used as a non-file argument is conservatively flagged: blocking
+/// credential exfiltration is preferred over a rare false positive (see #2345).
+fn is_sensitive_env_path(token: &str) -> bool {
+    let after_eq = token.rsplit_once('=').map(|(_, v)| v);
+    let glued_flag = if token.starts_with('-') && !token.starts_with("--") {
+        token.get(2..)
+    } else {
+        None
+    };
+    [Some(token), after_eq, glued_flag]
+        .into_iter()
+        .flatten()
+        .flat_map(|c| [c, c.strip_prefix('@').unwrap_or(c)])
+        .map(|c| {
+            std::path::Path::new(c)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(c)
+        })
+        .any(env_basename_is_sensitive)
+}
+
+/// First argument that references a `.env` secret file, or `None`.
+fn first_sensitive_env_arg(args: &[String]) -> Option<&str> {
+    args.iter()
+        .map(String::as_str)
+        .find(|&arg| is_sensitive_env_path(arg))
+}
+
+/// Reason to refuse a proxied inline-interpreter eval (`sh -c ...`, `python -c
+/// ...`, `perl -e ...`), or `None`. rtk cannot enforce the `.env` guard or deny
+/// rules inside an interpreted payload, so such invocations are refused outright
+/// (a bare `sh script.sh` with no inline flag is left alone).
+fn interpreter_eval_block(cmd_name: &str, cmd_args: &[String]) -> Option<String> {
+    let prog = std::path::Path::new(cmd_name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(cmd_name)
+        .to_ascii_lowercase();
+    let has_short_flag = |wanted: &[char]| {
+        cmd_args.iter().any(|a| {
+            a.starts_with('-')
+                && !a.starts_with("--")
+                && a.chars().skip(1).any(|c| wanted.contains(&c))
+        })
+    };
+    let inline = if INLINE_EVAL_SHELLS.contains(&prog.as_str()) {
+        has_short_flag(&['c'])
+    } else if INLINE_EVAL_INTERPRETERS.contains(&prog.as_str()) {
+        has_short_flag(&['c', 'e', 'E'])
+    } else {
+        false
+    };
+    inline.then(|| {
+        format!(
+            "rtk proxy refuses to run an inline interpreter script ('{prog} -c/-e ...'): rtk \
+             cannot enforce .env protection or deny rules inside an interpreted payload, so it \
+             would be a credential-exfiltration bypass (issue #2345). Run the underlying \
+             command directly through rtk proxy instead."
+        )
+    })
+}
+
+/// Reason `rtk proxy` must refuse `cmd_name` + `cmd_args`, or `None` to allow.
+/// Loads the host's permission rules; see [`proxy_block_reason_with_rules`].
+pub fn proxy_block_reason(cmd_name: &str, cmd_args: &[String]) -> Option<String> {
+    let (deny, ask, allow) = load_permission_rules();
+    proxy_block_reason_with_rules(cmd_name, cmd_args, &deny, &ask, &allow)
+}
+
+/// Rule-injecting core of [`proxy_block_reason`] (no file I/O, for tests).
+///
+/// Refuses when (1) any argument references a `.env` secret file, (2) the command
+/// is an inline interpreter eval (`sh -c ...`), or (3) the reconstructed command
+/// hits a `Deny` verdict. `Ask`/`Default`/`Allow` pass through: the host already
+/// permitted the outer `rtk proxy` invocation, so proxy only enforces the hard
+/// deny boundary plus the `.env` guard.
+///
+/// Best-effort by design (the issue accepts documenting residual bypasses):
+/// process launchers (`env`/`timeout`/`nice <cmd>`), recursive readers that never
+/// name `.env` (`grep -r PASSWORD .`, `find -exec cat`), and shell obfuscation can
+/// still reach `.env`. rtk's own file-reading subcommands (`rtk read`/`grep`/`log`)
+/// are outside this proxy guard.
+pub(crate) fn proxy_block_reason_with_rules(
+    cmd_name: &str,
+    cmd_args: &[String],
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+) -> Option<String> {
+    if let Some(arg) = first_sensitive_env_arg(cmd_args) {
+        return Some(format!(
+            "rtk proxy refuses to access the secret file '{arg}'. .env files are blocked to \
+             prevent credential exfiltration (issue #2345 / CVE-2026-33068). Placeholder \
+             variants (.env.example, .env.sample, .env.template) are allowed."
+        ));
+    }
+
+    if let Some(reason) = interpreter_eval_block(cmd_name, cmd_args) {
+        return Some(reason);
+    }
+
+    let reconstructed = if cmd_args.is_empty() {
+        cmd_name.to_string()
+    } else {
+        format!("{cmd_name} {}", cmd_args.join(" "))
+    };
+    if check_command_with_rules(&reconstructed, deny_rules, ask_rules, allow_rules)
+        == PermissionVerdict::Deny
+    {
+        return Some(format!(
+            "rtk proxy refuses to run '{reconstructed}': blocked by a Claude Code deny rule. \
+             rtk proxy honors deny rules from .claude/settings.json so it cannot bypass your \
+             permission policy (issue #2345)."
+        ));
+    }
+    None
+}
+
 /// Load deny, ask, and allow Bash rules from all Claude Code settings files.
 ///
 /// Files read (in order, later files do not override earlier ones — all are merged):
@@ -975,6 +1136,227 @@ mod tests {
         let mut out = Vec::new();
         append_wrapped_rules(Some(&v), &["run_shell_command(", "ShellTool("], &mut out);
         assert_eq!(out, vec!["git", "npm test", "*"]);
+    }
+
+    // --- Proxy permission gate (#2345) ---
+
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_env_file_flagged() {
+        for t in [
+            ".env",
+            "./.env",
+            "config/.env",
+            "/srv/app/.env",
+            ".env.local",
+            ".env.production",
+            ".env.local.bak",
+            ".env.EXAMPLE", // safe-suffix match is case-sensitive
+        ] {
+            assert!(is_sensitive_env_path(t), "{t} should be flagged");
+        }
+    }
+
+    #[test]
+    fn test_env_safe_variants_not_flagged() {
+        for t in [
+            ".env.example",
+            ".env.sample",
+            ".env.template",
+            "dir/.env.example",
+        ] {
+            assert!(!is_sensitive_env_path(t), "{t} should be allowed");
+        }
+    }
+
+    #[test]
+    fn test_env_lookalikes_not_flagged() {
+        for t in [
+            "foo.env",
+            ".environment",
+            "env",
+            "environment",
+            "PASSWORD",
+            "-r",
+            "envfile",
+        ] {
+            assert!(!is_sensitive_env_path(t), "{t} should not be flagged");
+        }
+    }
+
+    #[test]
+    fn test_first_sensitive_env_arg() {
+        assert_eq!(
+            first_sensitive_env_arg(&args(&["-r", "PASSWORD", ".env"])),
+            Some(".env")
+        );
+        assert_eq!(
+            first_sensitive_env_arg(&args(&["-r", "PASSWORD", "src/"])),
+            None
+        );
+    }
+
+    // Reproduction from issue #2345: grep into .env must be refused even with no
+    // deny rules configured (the .env guard is unconditional).
+    #[test]
+    fn test_proxy_blocks_env_read_reproduction() {
+        let reason = proxy_block_reason_with_rules(
+            "grep",
+            &args(&["-r", "PASSWORD", ".env"]),
+            &[],
+            &[],
+            &[],
+        );
+        assert!(
+            reason.is_some(),
+            "grep -r PASSWORD .env must be refused by proxy"
+        );
+        assert!(reason.unwrap().contains(".env"));
+    }
+
+    #[test]
+    fn test_proxy_blocks_cat_env() {
+        assert!(
+            proxy_block_reason_with_rules("cat", &args(&[".env"]), &[], &[], &[]).is_some(),
+            "cat .env must be refused"
+        );
+    }
+
+    #[test]
+    fn test_proxy_allows_env_example() {
+        assert_eq!(
+            proxy_block_reason_with_rules("cat", &args(&[".env.example"]), &[], &[], &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_proxy_allows_normal_command() {
+        assert_eq!(
+            proxy_block_reason_with_rules("echo", &args(&["hi"]), &[], &[], &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_proxy_honors_bash_deny_rule() {
+        // A `Bash(rm -rf*)` deny must also block `rtk proxy rm -rf /tmp/x`.
+        let deny = vec!["rm -rf".to_string()];
+        let reason =
+            proxy_block_reason_with_rules("rm", &args(&["-rf", "/tmp/x"]), &deny, &[], &[]);
+        assert!(
+            reason.is_some(),
+            "deny rule must refuse the proxied command"
+        );
+    }
+
+    #[test]
+    fn test_proxy_deny_does_not_block_unrelated_command() {
+        let deny = vec!["rm -rf".to_string()];
+        assert_eq!(
+            proxy_block_reason_with_rules("git", &args(&["log", "--oneline"]), &deny, &[], &[]),
+            None
+        );
+    }
+
+    // Case-insensitive bare-name match: .ENV reads the same file as .env on a
+    // case-insensitive filesystem (default macOS), so it must be flagged too.
+    #[test]
+    fn test_env_case_insensitive_flagged() {
+        for t in [
+            ".ENV",
+            ".Env",
+            ".eNv",
+            "config/.ENV",
+            ".ENV.local",
+            ".Env.production",
+        ] {
+            assert!(is_sensitive_env_path(t), "{t} should be flagged");
+        }
+    }
+
+    #[test]
+    fn test_env_case_insensitive_safe_suffix_is_case_sensitive() {
+        assert!(!is_sensitive_env_path(".ENV.example")); // safe suffix lowercase
+        assert!(is_sensitive_env_path(".ENV.EXAMPLE")); // safe list is case-sensitive
+    }
+
+    // Attached-value / glued-flag forms that read .env without a bare token:
+    // dd if=.env, --env-file=.env, curl @.env, -f.env.
+    #[test]
+    fn test_env_attached_value_forms_flagged() {
+        for t in [
+            "--env-file=.env",
+            "if=.env",
+            "@.env",
+            "--data=@.env",
+            "-f.env",
+            "--file=config/.env.local",
+        ] {
+            assert!(is_sensitive_env_path(t), "{t} should be flagged");
+        }
+    }
+
+    #[test]
+    fn test_env_attached_value_safe_and_lookalikes() {
+        assert!(!is_sensitive_env_path("--file=.env.example"));
+        assert!(!is_sensitive_env_path("user.email=foo@bar"));
+        assert!(!is_sensitive_env_path("KEY=.environment"));
+    }
+
+    // Critical regression for the workflow's top finding: an interpreter running
+    // an inline -c/-e payload hides the .env token and must be refused outright.
+    #[test]
+    fn test_proxy_blocks_interpreter_inline_eval() {
+        let cases: [(&str, Vec<&str>); 8] = [
+            ("sh", vec!["-c", "cat .env"]),
+            ("bash", vec!["-lc", "cat .env"]),
+            ("zsh", vec!["-ic", "head .env"]),
+            ("dash", vec!["-c", "cat .e?v"]), // glob obfuscation also refused
+            ("/bin/bash", vec!["-c", "cat .env"]),
+            ("python3", vec!["-c", "open('.env').read()"]),
+            ("perl", vec!["-e", "print"]),
+            ("node", vec!["-e", "process"]),
+        ];
+        for (cmd, a) in cases {
+            assert!(
+                proxy_block_reason_with_rules(cmd, &args(&a), &[], &[], &[]).is_some(),
+                "{cmd} {a:?} must be refused"
+            );
+        }
+    }
+
+    // An interpreter with no inline-eval flag (running a named script) is allowed;
+    // the .env is never named, and refusing it would break legit `rtk proxy`.
+    #[test]
+    fn test_proxy_allows_interpreter_without_inline_eval() {
+        assert_eq!(
+            proxy_block_reason_with_rules("bash", &args(&["deploy.sh"]), &[], &[], &[]),
+            None
+        );
+        assert_eq!(
+            proxy_block_reason_with_rules("python3", &args(&["manage.py", "test"]), &[], &[], &[]),
+            None
+        );
+    }
+
+    // False-positive guard: an embedded ".env" inside a quoted argument (commit
+    // message) is one whitespace-containing token, so it must NOT be refused.
+    #[test]
+    fn test_proxy_allows_embedded_env_token() {
+        assert_eq!(
+            proxy_block_reason_with_rules(
+                "git",
+                &args(&["commit", "-m", "improve .env handling"]),
+                &[],
+                &[],
+                &[],
+            ),
+            None
+        );
     }
 
     #[test]
