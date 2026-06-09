@@ -8,6 +8,7 @@ mod parser;
 
 // Re-export command modules for routing
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use cmds::atlassian::jira_cmd;
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
@@ -183,6 +184,15 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+
+        /// Jira CLI (jira) commands with token-optimized output
+        Jira {
+                    /// Subcommand: issue, sprint, board
+                    subcommand: String,
+                    /// Additional arguments
+                    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+                    args: Vec<String>,
+        },
 
     /// AWS CLI with compact output (force JSON, compress)
     Aws {
@@ -1633,6 +1643,10 @@ fn run_cli() -> Result<i32> {
             }
             glab_cmd::run(&subcommand, &args, cli.verbose, cli.ultra_compact)?
         }
+
+                Commands::Jira { subcommand, args } => {
+                                jira_cmd::run(&subcommand, &args, cli.verbose, cli.ultra_compact)?
+                }
 
         Commands::Aws { subcommand, args } => aws_cmd::run(&subcommand, &args, cli.verbose)?,
 
