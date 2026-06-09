@@ -1,0 +1,39 @@
+Compiling root (6 Scala sources)
+[E] [E6] src/main/scala/example/Defect6.scala:5:21
+[E]      Found:    ("not an int" : String)
+[E]      Required: Int
+[E]      L5:   val broken: Int = "not an int"
+[E]                              ^^^^^^^^^^^^
+[E] [E5] src/main/scala/example/Defect5.scala:5:21
+[E]      Found:    ("not an int" : String)
+[E]      Required: Int
+[E]      L5:   val broken: Int = "not an int"
+[E]                              ^^^^^^^^^^^^
+[E] [E4] src/main/scala/example/Defect4.scala:5:21
+[E]      Found:    ("not an int" : String)
+[E]      Required: Int
+[E]      L5:   val broken: Int = "not an int"
+[E]                              ^^^^^^^^^^^^
+[E] [E3] src/main/scala/example/Defect3.scala:5:21
+[E]      Found:    ("not an int" : String)
+[E]      Required: Int
+[E]      L5:   val broken: Int = "not an int"
+[E]                              ^^^^^^^^^^^^
+[E] [E2] src/main/scala/example/Defect2.scala:5:21
+[E]      Found:    ("not an int" : String)
+[E]      Required: Int
+[E]      L5:   val broken: Int = "not an int"
+[E]                              ^^^^^^^^^^^^
+[E] [E1] src/main/scala/example/Defect1.scala:5:21
+[E]      Found:    ("not an int" : String)
+[E]      Required: Int
+[E]      L5:   val broken: Int = "not an int"
+[E]                              ^^^^^^^^^^^^
+[E] src/main/scala/example/Defect6.scala: L5 [E6]
+[E] src/main/scala/example/Defect4.scala: L5 [E4]
+[E] src/main/scala/example/Defect2.scala: L5 [E2]
+[E] src/main/scala/example/Defect5.scala: L5 [E5]
+[E] src/main/scala/example/Defect1.scala: L5 [E1]
+[E] src/main/scala/example/Defect3.scala: L5 [E3]
+Compiled root (2058ms)
+[E] Failed to compile 'root'

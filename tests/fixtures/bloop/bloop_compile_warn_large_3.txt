@@ -1,0 +1,50 @@
+Compiling root (6 Scala sources)
+[W]  [E6] src/main/scala/example/Defect6.scala:6:39
+[W]       match may not be exhaustive.
+[W]       
+[W]       It would fail on pattern case: None
+[W]       
+[W]       L6:   def label(o: Option[Int]): String = o match {
+[W]                                                 ^
+[W]  [E5] src/main/scala/example/Defect5.scala:6:39
+[W]       match may not be exhaustive.
+[W]       
+[W]       It would fail on pattern case: None
+[W]       
+[W]       L6:   def label(o: Option[Int]): String = o match {
+[W]                                                 ^
+[W]  [E4] src/main/scala/example/Defect4.scala:6:39
+[W]       match may not be exhaustive.
+[W]       
+[W]       It would fail on pattern case: None
+[W]       
+[W]       L6:   def label(o: Option[Int]): String = o match {
+[W]                                                 ^
+[W]  [E3] src/main/scala/example/Defect3.scala:6:39
+[W]       match may not be exhaustive.
+[W]       
+[W]       It would fail on pattern case: None
+[W]       
+[W]       L6:   def label(o: Option[Int]): String = o match {
+[W]                                                 ^
+[W]  [E2] src/main/scala/example/Defect2.scala:6:39
+[W]       match may not be exhaustive.
+[W]       
+[W]       It would fail on pattern case: None
+[W]       
+[W]       L6:   def label(o: Option[Int]): String = o match {
+[W]                                                 ^
+[W]  [E1] src/main/scala/example/Defect1.scala:6:39
+[W]       match may not be exhaustive.
+[W]       
+[W]       It would fail on pattern case: None
+[W]       
+[W]       L6:   def label(o: Option[Int]): String = o match {
+[W]                                                 ^
+[W] src/main/scala/example/Defect6.scala: L6 [E6]
+[W] src/main/scala/example/Defect4.scala: L6 [E4]
+[W] src/main/scala/example/Defect2.scala: L6 [E2]
+[W] src/main/scala/example/Defect5.scala: L6 [E5]
+[W] src/main/scala/example/Defect1.scala: L6 [E1]
+[W] src/main/scala/example/Defect3.scala: L6 [E3]
+Compiled root (1836ms)

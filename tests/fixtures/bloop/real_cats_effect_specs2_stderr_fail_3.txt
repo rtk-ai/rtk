@@ -1,0 +1,26 @@
+Compiling testsJVM (4 Scala sources)
+Compiled testsJVM (549ms)
+Compiling testsJVM-test (1 Scala source)
+Compiled testsJVM-test (361ms)
+ExitCodeSpec
+
+[E] x ExitCode.unapply is exhaustive
+[E]  0 is less than 100 (ExitCodeSpec.scala:23)
+
+
+
+Total for specification ExitCodeSpec
+Finished in 241 ms
+1 example, 3 expectations, 1 failure, 0 error
+
+Execution took 14ms
+1 tests, 1 failed
+
+====================================================================================================
+Total duration: 14ms
+1 failed
+
+Failed:
+- cats.effect.ExitCodeSpec:
+  * ExitCode.unapply is exhaustive - 0 is less than 100
+====================================================================================================

@@ -1,0 +1,325 @@
+Compiling root (1 Scala source)
+[W]  [E1] src/main/scala/example/Calculator.scala:12:39
+[W]       match may not be exhaustive.
+[W]       
+[W]       It would fail on pattern case: None
+[W]       
+[W]       L12:   def label(o: Option[Int]): String = o match {
+[W]                                                  ^
+[W] src/main/scala/example/Calculator.scala: L12 [E1]
+Compiled root (1645ms)
+Compiling root-test (6 Scala sources)
+Compiled root-test (977ms)
+Test run example.CalculatorSuite1 started
+==> X example.CalculatorSuite1.sub returns the difference 0.026s munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite1.scala:10
+9:   test("sub returns the difference") {
+10:    assertEquals(Calculator.sub(10, 4), 7)
+11:  }
+values are not the same
+=> Obtained
+6
+=> Diff (- expected, + obtained)
+-7
++6
+    at munit.FunSuite.assertEquals(FunSuite.scala:12)
+    at example.CalculatorSuite1.$init$$$anonfun$2(CalculatorSuite1.scala:10)
+==> X example.CalculatorSuite1.div returns the quotient 0.0s munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite1.scala:18
+17:  test("div returns the quotient") {
+18:    assertEquals(Calculator.div(20, 4), 4)
+19:  }
+values are not the same
+=> Obtained
+5
+=> Diff (- expected, + obtained)
+-4
++5
+    at munit.FunSuite.assertEquals(FunSuite.scala:12)
+    at example.CalculatorSuite1.$init$$$anonfun$4(CalculatorSuite1.scala:18)
+example.CalculatorSuite1: finished 0.073s
+Test run example.CalculatorSuite1 finished: 2 failed, 0 ignored, 4 total 0.089s
+Test run example.CalculatorSuite2 started
+==> X example.CalculatorSuite2.sub returns the difference 0.002s munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite2.scala:10
+9:   test("sub returns the difference") {
+10:    assertEquals(Calculator.sub(10, 4), 7)
+11:  }
+values are not the same
+Execution took 38ms
+=> Obtained
+6
+=> Diff (- expected, + obtained)
+-7
++6
+    at munit.FunSuite.assertEquals(FunSuite.scala:12)
+    at example.CalculatorSuite2.$init$$$anonfun$2(CalculatorSuite2.scala:10)
+==> X example.CalculatorSuite2.div returns the quotient 0.001s munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite2.scala:18
+17:  test("div returns the quotient") {
+18:    assertEquals(Calculator.div(20, 4), 4)
+19:  }
+values are not the same
+=> Obtained
+5
+=> Diff (- expected, + obtained)
+-4
++5
+    at munit.FunSuite.assertEquals(FunSuite.scala:12)
+    at example.CalculatorSuite2.$init$$$anonfun$4(CalculatorSuite2.scala:18)
+example.CalculatorSuite2: finished 0.005s
+Test run example.CalculatorSuite2 finished: 2 failed, 0 ignored, 4 total 0.005s
+4 tests, 2 passed, 2 failed
+
+Test run example.CalculatorSuite3 started
+==> X example.CalculatorSuite3.sub returns the difference 0.001s munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite3.scala:10
+9:   test("sub returns the difference") {
+10:    assertEquals(Calculator.sub(10, 4), 7)
+11:  }
+values are not the same
+=> Obtained
+6
+=> Diff (- expected, + obtained)
+-7
+Execution took 4ms
++6
+    at munit.FunSuite.assertEquals(FunSuite.scala:12)
+    at example.CalculatorSuite3.$init$$$anonfun$2(CalculatorSuite3.scala:10)
+==> X example.CalculatorSuite3.div returns the quotient 0.0s munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite3.scala:18
+4 tests, 2 passed, 2 failed
+17:  test("div returns the quotient") {
+18:    assertEquals(Calculator.div(20, 4), 4)
+19:  }
+values are not the same
+
+=> Obtained
+5
+=> Diff (- expected, + obtained)
+-4
++5
+    at munit.FunSuite.assertEquals(FunSuite.scala:12)
+    at example.CalculatorSuite3.$init$$$anonfun$4(CalculatorSuite3.scala:18)
+example.CalculatorSuite3: finished 0.003s
+Test run example.CalculatorSuite3 finished: 2 failed, 0 ignored, 4 total 0.003s
+Execution took 2ms
+4 tests, 2 passed, 2 failed
+
+Test run example.CalculatorSuite4 started
+==> X example.CalculatorSuite4.sub returns the difference 0.002s munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite4.scala:10
+9:   test("sub returns the difference") {
+10:    assertEquals(Calculator.sub(10, 4), 7)
+11:  }
+values are not the same
+=> Obtained
+6
+=> Diff (- expected, + obtained)
+-7
++6
+    at munit.FunSuite.assertEquals(FunSuite.scala:12)
+    at example.CalculatorSuite4.$init$$$anonfun$2(CalculatorSuite4.scala:10)
+==> X example.CalculatorSuite4.div returns the quotient 0.001s munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite4.scala:18
+17:  test("div returns the quotient") {
+18:    assertEquals(Calculator.div(20, 4), 4)
+19:  }
+values are not the same
+=> Obtained
+5
+=> Diff (- expected, + obtained)
+-4
++5
+    at munit.FunSuite.assertEquals(FunSuite.scala:12)
+    at example.CalculatorSuite4.$init$$$anonfun$4(CalculatorSuite4.scala:18)
+example.CalculatorSuite4: finished 0.003s
+Test run example.CalculatorSuite4 finished: 2 failed, 0 ignored, 4 total 0.003s
+Execution took 3ms
+4 tests, 2 passed, 2 failed
+
+Test run example.CalculatorSuite5 started
+==> X example.CalculatorSuite5.sub returns the difference 0.002s munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite5.scala:10
+9:   test("sub returns the difference") {
+10:    assertEquals(Calculator.sub(10, 4), 7)
+11:  }
+values are not the same
+=> Obtained
+6
+=> Diff (- expected, + obtained)
+-7
++6
+    at munit.FunSuite.assertEquals(FunSuite.scala:12)
+    at example.CalculatorSuite5.$init$$$anonfun$2(CalculatorSuite5.scala:10)
+==> X example.CalculatorSuite5.div returns the quotient 0.0s munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite5.scala:18
+17:  test("div returns the quotient") {
+18:    assertEquals(Calculator.div(20, 4), 4)
+19:  }
+values are not the same
+=> Obtained
+5
+=> Diff (- expected, + obtained)
+-4
++5
+    at munit.FunSuite.assertEquals(FunSuite.scala:12)
+    at example.CalculatorSuite5.$init$$$anonfun$4(CalculatorSuite5.scala:18)
+example.CalculatorSuite5: finished 0.004s
+Test run example.CalculatorSuite5 finished: 2 failed, 0 ignored, 4 total 0.004s
+Execution took 2ms
+4 tests, 2 passed, 2 failed
+
+Test run example.CalculatorSuite6 started
+==> X example.CalculatorSuite6.sub returns the difference 0.0s munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite6.scala:10
+9:   test("sub returns the difference") {
+10:    assertEquals(Calculator.sub(10, 4), 7)
+11:  }
+values are not the same
+=> Obtained
+6
+=> Diff (- expected, + obtained)
+-7
++6
+    at munit.FunSuite.assertEquals(FunSuite.scala:12)
+    at example.CalculatorSuite6.$init$$$anonfun$2(CalculatorSuite6.scala:10)
+==> X example.CalculatorSuite6.div returns the quotient 0.001s munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite6.scala:18
+17:  test("div returns the quotient") {
+18:    assertEquals(Calculator.div(20, 4), 4)
+19:  }
+values are not the same
+=> Obtained
+5
+=> Diff (- expected, + obtained)
+-4
++5
+    at munit.FunSuite.assertEquals(FunSuite.scala:12)
+    at example.CalculatorSuite6.$init$$$anonfun$4(CalculatorSuite6.scala:18)
+example.CalculatorSuite6: finished 0.003s
+Test run example.CalculatorSuite6 finished: 2 failed, 0 ignored, 4 total 0.003s
+Execution took 2ms
+4 tests, 2 passed, 2 failed
+
+The test execution was successfully closed.
+===========================================================================================================================================================================
+Total duration: 51ms
+6 failed
+
+Failed:
+- example.CalculatorSuite1:
+  * example.CalculatorSuite1.sub returns the difference - munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite1.scala:10
+9:   test("sub returns the difference") {
+10:    assertEquals(Calculator.sub(10, 4), 7)
+11:  }
+values are not the same
+=> Obtained
+6
+=> Diff (- expected, + obtained)
+-7
++6
+  * example.CalculatorSuite1.div returns the quotient - munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite1.scala:18
+17:  test("div returns the quotient") {
+18:    assertEquals(Calculator.div(20, 4), 4)
+19:  }
+values are not the same
+=> Obtained
+5
+=> Diff (- expected, + obtained)
+-4
++5
+- example.CalculatorSuite2:
+  * example.CalculatorSuite2.sub returns the difference - munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite2.scala:10
+9:   test("sub returns the difference") {
+10:    assertEquals(Calculator.sub(10, 4), 7)
+11:  }
+values are not the same
+=> Obtained
+6
+=> Diff (- expected, + obtained)
+-7
++6
+  * example.CalculatorSuite2.div returns the quotient - munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite2.scala:18
+17:  test("div returns the quotient") {
+18:    assertEquals(Calculator.div(20, 4), 4)
+19:  }
+values are not the same
+=> Obtained
+5
+=> Diff (- expected, + obtained)
+-4
++5
+- example.CalculatorSuite3:
+  * example.CalculatorSuite3.sub returns the difference - munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite3.scala:10
+9:   test("sub returns the difference") {
+10:    assertEquals(Calculator.sub(10, 4), 7)
+11:  }
+values are not the same
+=> Obtained
+6
+=> Diff (- expected, + obtained)
+-7
++6
+  * example.CalculatorSuite3.div returns the quotient - munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite3.scala:18
+17:  test("div returns the quotient") {
+18:    assertEquals(Calculator.div(20, 4), 4)
+19:  }
+values are not the same
+=> Obtained
+5
+=> Diff (- expected, + obtained)
+-4
++5
+- example.CalculatorSuite4:
+  * example.CalculatorSuite4.sub returns the difference - munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite4.scala:10
+9:   test("sub returns the difference") {
+10:    assertEquals(Calculator.sub(10, 4), 7)
+11:  }
+values are not the same
+=> Obtained
+6
+=> Diff (- expected, + obtained)
+-7
++6
+  * example.CalculatorSuite4.div returns the quotient - munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite4.scala:18
+17:  test("div returns the quotient") {
+18:    assertEquals(Calculator.div(20, 4), 4)
+19:  }
+values are not the same
+=> Obtained
+5
+=> Diff (- expected, + obtained)
+-4
++5
+- example.CalculatorSuite5:
+  * example.CalculatorSuite5.sub returns the difference - munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite5.scala:10
+9:   test("sub returns the difference") {
+10:    assertEquals(Calculator.sub(10, 4), 7)
+11:  }
+values are not the same
+=> Obtained
+6
+=> Diff (- expected, + obtained)
+-7
++6
+  * example.CalculatorSuite5.div returns the quotient - munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite5.scala:18
+17:  test("div returns the quotient") {
+18:    assertEquals(Calculator.div(20, 4), 4)
+19:  }
+values are not the same
+=> Obtained
+5
+=> Diff (- expected, + obtained)
+-4
++5
+- example.CalculatorSuite6:
+  * example.CalculatorSuite6.sub returns the difference - munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite6.scala:10
+9:   test("sub returns the difference") {
+10:    assertEquals(Calculator.sub(10, 4), 7)
+11:  }
+values are not the same
+=> Obtained
+6
+=> Diff (- expected, + obtained)
+-7
++6
+  * example.CalculatorSuite6.div returns the quotient - munit.ComparisonFailException: /tmp/workspace/munit-funsuite-warn-fail-large/src/test/scala/example/CalculatorSuite6.scala:18
+17:  test("div returns the quotient") {
+18:    assertEquals(Calculator.div(20, 4), 4)
+19:  }
+values are not the same
+=> Obtained
+5
+=> Diff (- expected, + obtained)
+-4
++5
+===========================================================================================================================================================================
