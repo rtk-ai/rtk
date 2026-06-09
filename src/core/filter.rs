@@ -237,28 +237,17 @@ impl FilterStrategy for MinimalFilter {
     }
 }
 
-/// Reduce indentation in deeply-indented JSON to save tokens.
-/// Only activates when average indent level >= 4 (deeply nested JSON).
-/// Each level of indentation is halved. Content is never removed.
-fn compactify_indent(content: String) -> String {
-    // Check if this content actually has deep indentation worth compacting
+/// Reduce indentation in data formats (JSON, YAML, XML) to save tokens.
+/// Normalizes each 2-space indent level to 1 space. Content is never removed.
+pub fn compactify_indent(content: String) -> String {
     let lines: Vec<&str> = content.lines().collect();
-    let indented_lines: Vec<usize> = lines
+    let indented_lines: usize = lines
         .iter()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.chars().take_while(|c| c.is_whitespace()).count())
-        .collect();
+        .filter(|l| !l.trim().is_empty() && l.chars().next().map_or(false, |c| c.is_whitespace()))
+        .count();
 
-    if indented_lines.is_empty() {
-        return content;
-    }
-
-    let avg_indent: f64 =
-        indented_lines.iter().sum::<usize>() as f64 / indented_lines.len() as f64;
-
-    // Only compactify if average indent >= 4 (deeply nested JSON)
-    // Shallow JSON (2-space) or TOML/YAML (2-space) pass through unchanged
-    if avg_indent < 4.0 {
+    // Only compactify if there are indented lines (structured data)
+    if indented_lines == 0 {
         return content;
     }
 
@@ -270,7 +259,7 @@ fn compactify_indent(content: String) -> String {
             continue;
         }
         let indent = line.chars().take_while(|c| c.is_whitespace()).count();
-        // Halve the indent level
+        // Each 2-space indent level → 1 space
         let new_indent = indent / 2;
         for _ in 0..new_indent {
             out.push(' ');
@@ -537,15 +526,21 @@ mod tests {
     }
 
     #[test]
-    fn test_json_shallow_indent_unchanged() {
-        // Shallow JSON (2-space indent) should pass through unchanged
+    fn test_json_shallow_indent_compactified() {
+        // Shallow JSON (2-space indent) should be compactified to 1-space
         let json = r#"{
   "name": "my-app",
   "version": "1.0.0"
 }"#;
         let filter = MinimalFilter;
         let result = filter.filter(json, &Language::Data);
-        assert_eq!(result, json.trim(), "shallow JSON should not be modified");
+        assert!(result.contains("my-app"), "content must be preserved");
+        assert!(
+            result.len() < json.len(),
+            "compactified ({}) should be shorter than original ({})",
+            result.len(),
+            json.len()
+        );
     }
 
     #[test]

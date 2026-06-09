@@ -39,6 +39,12 @@ pub fn run(
     let filter = filter::get_filter(level);
     let mut filtered = filter.filter(&content, &lang);
 
+    // Always compactify indentation for data formats (JSON, YAML, XML, TOML)
+    // regardless of filter level. This is lossless — only whitespace reduced.
+    if matches!(lang, Language::Data | Language::Unknown) {
+        filtered = filter::compactify_indent(filtered);
+    }
+
     // Safety: if filter emptied a non-empty file, fall back to raw content
     if filtered.trim().is_empty() && !content.trim().is_empty() {
         eprintln!(
