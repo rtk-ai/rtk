@@ -264,9 +264,6 @@ pub fn run(
     let InitContext { dry_run, .. } = ctx;
     // Validation: Codex mode conflicts
     if codex {
-        if install_opencode {
-            anyhow::bail!("--codex cannot be combined with --opencode");
-        }
         if claude_md {
             anyhow::bail!("--codex cannot be combined with --claude-md");
         }
@@ -280,6 +277,9 @@ pub fn run(
             anyhow::bail!("--codex cannot be combined with --no-patch");
         }
         run_codex_mode(global, ctx)?;
+        if install_opencode {
+            run_opencode_only_mode(ctx)?;
+        }
     } else {
         // Validation: Global-only features
         if install_opencode && !global {
