@@ -237,7 +237,13 @@ Each filter module follows the same pattern:
 5. Track token savings to SQLite
 6. Propagate exit code
 
-> **Details**: [`src/cmds/README.md`](../src/cmds/README.md) covers the common pattern, ecosystem organization, cross-command dependencies, and how to add new filters.
+**Generic pipeline**: commands routed through `core::runner` (captured and
+streamed) also pass through a generic, layered filter pipeline *before* their
+own filter — currently the `decorative` layer (ANSI / blank-run / box-drawing
+removal), user-tunable via `[levels]`. Commands that bypass `runner` (direct
+`exec_capture`) do not.
+
+> **Details**: [`src/cmds/README.md`](../src/cmds/README.md) covers the common pattern; [`src/core/pipeline/README.md`](../src/core/pipeline/README.md) covers the generic pipeline, layers, and level resolution.
 
 ### 3.5 Fallback Path
 
@@ -246,19 +252,24 @@ When Clap parsing fails (unknown command):
 1. Guard: check if the command is an RTK meta-command (`gain`, `init`, etc.) -- if so, show Clap error
 2. Look up TOML DSL filters via `toml_filter::find_matching_filter()`
 3. If TOML match: capture stdout, apply filter pipeline, track savings
-4. If no match: pure passthrough with `Stdio::inherit`, track as 0% savings
+4. If no match: the **global fallback pipeline** — excluded or terminal output
+   passes through raw; otherwise stream through the pipeline (decorative only)
 
 ```
 Command received
   -> Clap parse succeeds?
-     -> Yes: Route to Rust filter module
+     -> Yes: Route to Rust filter module (+ generic pipeline)
      -> No:  run_fallback()
               -> TOML filter match?
                  -> Yes: Capture stdout, apply filter, track savings
-                 -> No:  Passthrough (inherit stdio, track 0% savings)
+                 -> No:  excluded cmd or terminal? -> passthrough (raw)
+                         else (piped)              -> stream through pipeline
 ```
 
-> **Details**: [`src/core/README.md`](../src/core/README.md) covers the TOML filter engine, filter pipeline stages, and trust-gated project filters.
+The exclude list (`cat`, `head`, … built-in + `[levels].exclude`) keeps
+raw-output commands byte-exact.
+
+> **Details**: [`src/core/pipeline/README.md`](../src/core/pipeline/README.md) covers the generic pipeline and the global fallback; [`src/core/README.md`](../src/core/README.md) covers the TOML filter engine and trust-gated project filters.
 
 ### 3.6 Token Tracking
 

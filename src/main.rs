@@ -1174,16 +1174,14 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
 
     // TOML filter lookup — bypass with RTK_NO_TOML=1
     // Use basename of args[0] so absolute paths (/usr/bin/make) still match "^make\b".
-    let lookup_cmd = {
-        let base = std::path::Path::new(&args[0])
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| args[0].clone());
-        std::iter::once(base.as_str())
-            .chain(args[1..].iter().map(|s| s.as_str()))
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
+    let base = std::path::Path::new(&args[0])
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| args[0].clone());
+    let lookup_cmd = std::iter::once(base.as_str())
+        .chain(args[1..].iter().map(|s| s.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ");
     let toml_match = if std::env::var("RTK_NO_TOML").ok().as_deref() == Some("1") {
         None
     } else {
@@ -1252,8 +1250,10 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                 Ok(127)
             }
         }
-    } else {
-        // No TOML match: original passthrough behaviour (Stdio::inherit, streaming)
+    } else if core::pipeline::is_excluded(&base)
+        || std::io::IsTerminal::is_terminal(&std::io::stdout())
+    {
+        // Excluded (raw-output commands) or a terminal: passthrough untouched.
         let status = core::utils::resolved_command(&args[0])
             .args(&args[1..])
             .stdin(std::process::Stdio::inherit())
@@ -1264,14 +1264,41 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         match status {
             Ok(s) => {
                 timer.track_passthrough(&raw_command, &format!("rtk fallback: {}", raw_command));
-
                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
-
                 Ok(core::utils::exit_code_from_status(&s, &raw_command))
             }
             Err(e) => {
                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, false);
-                // Command not found or other OS error — single message, no duplicate Clap error
+                eprintln!("[rtk: {}]", e);
+                Ok(127)
+            }
+        }
+    } else {
+        // Piped: stream live through the global pipeline (no command filter).
+        let mut cmd = core::utils::resolved_command(&args[0]);
+        cmd.args(&args[1..]);
+        let opts = core::runner::RunOptions {
+            inherit_stdin: true,
+            tee_label: Some(raw_command.as_str()),
+            layers: core::pipeline::Layers {
+                decorative: true,
+                dedup: true,
+            },
+            ..Default::default()
+        };
+        match core::runner::run_streamed(
+            cmd,
+            &args[0],
+            &args[1..].join(" "),
+            Box::new(core::stream::Identity),
+            opts,
+        ) {
+            Ok(code) => {
+                core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+                Ok(code)
+            }
+            Err(e) => {
+                core::tracking::record_parse_failure_silent(&raw_command, &error_message, false);
                 eprintln!("[rtk: {}]", e);
                 Ok(127)
             }

@@ -1,12 +1,9 @@
 //! Filters pytest output to show only failures and the summary line.
 
 use crate::core::runner;
-use crate::core::truncate::CAP_WARNINGS;
+use crate::core::truncate::caps;
 use crate::core::utils::{resolved_command, tool_exists, truncate};
 use anyhow::Result;
-
-const MAX_XFAIL: usize = CAP_WARNINGS;
-const MAX_PYTEST_FAILURES: usize = CAP_WARNINGS;
 
 #[derive(Debug, PartialEq)]
 enum ParseState {
@@ -171,6 +168,8 @@ fn build_pytest_summary(
     failures: &[String],
     xfail_lines: &[String],
 ) -> String {
+    let max_xfail = caps().warnings;
+    let max_failures = caps().warnings;
     let counts = parse_summary_line(summary);
     let PytestCounts {
         passed,
@@ -207,13 +206,13 @@ fn build_pytest_summary(
     // signals that something expected-to-fail now passes.
     if !xfail_lines.is_empty() {
         result.push_str("\nExpected-failure outcomes:\n");
-        for line in xfail_lines.iter().take(MAX_XFAIL) {
+        for line in xfail_lines.iter().take(max_xfail) {
             result.push_str(&format!("  {}\n", truncate(line, 120)));
         }
-        if xfail_lines.len() > MAX_XFAIL {
-            result.push_str(&format!("  … +{} more\n", xfail_lines.len() - MAX_XFAIL));
+        if xfail_lines.len() > max_xfail {
+            result.push_str(&format!("  … +{} more\n", xfail_lines.len() - max_xfail));
             let all_xfail = xfail_lines.join("\n");
-            if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_xfail, "pytest-xfail", MAX_XFAIL + 1) {
+            if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_xfail, "pytest-xfail", max_xfail + 1) {
                 result.push_str(&format!("  {}\n", hint));
             }
         }
@@ -226,7 +225,7 @@ fn build_pytest_summary(
     // Show failures (limit to key information)
     result.push_str("\nFailures:\n");
 
-    for (i, failure) in failures.iter().take(MAX_PYTEST_FAILURES).enumerate() {
+    for (i, failure) in failures.iter().take(max_failures).enumerate() {
         // Extract test name and key error info
         let lines: Vec<&str> = failure.lines().collect();
 
@@ -271,10 +270,10 @@ fn build_pytest_summary(
         }
     }
 
-    if failures.len() > MAX_PYTEST_FAILURES {
+    if failures.len() > max_failures {
         result.push_str(&format!(
             "\n… +{} more failures\n",
-            failures.len() - MAX_PYTEST_FAILURES
+            failures.len() - max_failures
         ));
         let all_failures = failures.join("\n\n");
         if let Some(hint) = crate::core::tee::force_tee_hint(&all_failures, "pytest-failures") {
@@ -443,7 +442,7 @@ collected 0 items
             .count();
         assert!(
             listed <= 10,
-            "MAX_XFAIL cap not enforced: listed {listed}"
+            "max_xfail cap not enforced: listed {listed}"
         );
         assert!(result.contains("… +5 more"), "missing '+N more': {result}");
     }

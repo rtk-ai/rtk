@@ -2,7 +2,7 @@
 
 use crate::core::runner;
 use crate::core::truncate::CAP_WARNINGS;
-use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
+use crate::core::utils::{resolved_command, tool_exists, truncate};
 use anyhow::Result;
 use regex::Regex;
 
@@ -60,8 +60,7 @@ fn filter_next_build(output: &str) -> String {
     let mut errors = 0;
     let mut build_time = String::new();
 
-    // Strip ANSI codes
-    let clean_output = strip_ansi(output);
+    let clean_output = output;
 
     for line in clean_output.lines() {
         // Count route types by symbol

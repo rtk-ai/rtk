@@ -13,7 +13,7 @@
 use super::git;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
-use crate::core::utils::{ok_confirmation, resolved_command, strip_ansi, truncate};
+use crate::core::utils::{ok_confirmation, resolved_command, truncate};
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -783,11 +783,11 @@ fn ci_trace(args: &[String]) -> Result<i32> {
     )
 }
 
-/// Filter CI job trace output: strip ANSI codes, section markers, and runner
-/// boilerplate. Keep warnings, errors, and build output.
+/// Filter CI job trace output: strip section markers and runner boilerplate.
+/// Keep warnings, errors, and build output. (ANSI is stripped upstream by the
+/// decorative pipeline layer.)
 fn filter_ci_trace(raw: &str) -> String {
-    let cleaned = strip_ansi(raw);
-    let cleaned = BARE_ANSI_RE.replace_all(&cleaned, "");
+    let cleaned = BARE_ANSI_RE.replace_all(raw, "");
     let cleaned = SECTION_MARKER_RE.replace_all(&cleaned, "");
 
     let mut filtered = String::new();

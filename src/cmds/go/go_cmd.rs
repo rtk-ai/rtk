@@ -2,7 +2,7 @@
 
 use crate::core::runner;
 use crate::core::tracking;
-use crate::core::truncate::CAP_ERRORS;
+use crate::core::truncate::caps;
 use crate::core::utils::{exit_code_from_output, resolved_command, truncate};
 use crate::golangci_cmd;
 use anyhow::{Context, Result};
@@ -594,15 +594,15 @@ fn filter_go_build_with_exit(output: &str, exit_code: i32) -> String {
     let mut result = String::new();
     result.push_str(&format!("Go build: {} errors\n", errors.len()));
 
-    const MAX_GO_BUILD_ERRORS: usize = CAP_ERRORS;
-    for (i, error) in errors.iter().take(MAX_GO_BUILD_ERRORS).enumerate() {
+    let max_go_build_errors = caps().errors;
+    for (i, error) in errors.iter().take(max_go_build_errors).enumerate() {
         result.push_str(&format!("{}. {}\n", i + 1, truncate(error, 120)));
     }
 
-    if errors.len() > MAX_GO_BUILD_ERRORS {
-        result.push_str(&format!("\n… +{} more errors\n", errors.len() - MAX_GO_BUILD_ERRORS));
+    if errors.len() > max_go_build_errors {
+        result.push_str(&format!("\n… +{} more errors\n", errors.len() - max_go_build_errors));
         let all_errors = errors.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_errors, "go-build", MAX_GO_BUILD_ERRORS + 1) {
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_errors, "go-build", max_go_build_errors + 1) {
             result.push_str(&format!("  {}\n", hint));
         }
     }
@@ -626,15 +626,15 @@ fn format_go_build_failure(output: &str, exit_code: i32) -> String {
     result.push_str(&format!("Go build: failed (exit {})\n", exit_code));
     result.push_str("═══════════════════════════════════════\n");
 
-    const MAX_GO_BUILD_ERRORS: usize = CAP_ERRORS;
-    for (i, line) in lines.iter().take(MAX_GO_BUILD_ERRORS).enumerate() {
+    let max_go_build_errors = caps().errors;
+    for (i, line) in lines.iter().take(max_go_build_errors).enumerate() {
         result.push_str(&format!("{}. {}\n", i + 1, truncate(line, 120)));
     }
 
-    if lines.len() > MAX_GO_BUILD_ERRORS {
+    if lines.len() > max_go_build_errors {
         result.push_str(&format!(
             "\n… +{} more output lines\n",
-            lines.len() - MAX_GO_BUILD_ERRORS
+            lines.len() - max_go_build_errors
         ));
     }
 
@@ -717,15 +717,15 @@ fn filter_go_vet(output: &str) -> String {
     let mut result = String::new();
     result.push_str(&format!("Go vet: {} issues\n", issues.len()));
 
-    const MAX_GO_VET_ISSUES: usize = CAP_ERRORS;
-    for (i, issue) in issues.iter().take(MAX_GO_VET_ISSUES).enumerate() {
+    let max_go_vet_issues = caps().errors;
+    for (i, issue) in issues.iter().take(max_go_vet_issues).enumerate() {
         result.push_str(&format!("{}. {}\n", i + 1, truncate(issue, 120)));
     }
 
-    if issues.len() > MAX_GO_VET_ISSUES {
-        result.push_str(&format!("\n… +{} more issues\n", issues.len() - MAX_GO_VET_ISSUES));
+    if issues.len() > max_go_vet_issues {
+        result.push_str(&format!("\n… +{} more issues\n", issues.len() - max_go_vet_issues));
         let all_issues = issues.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_issues, "go-vet", MAX_GO_VET_ISSUES + 1) {
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_issues, "go-vet", max_go_vet_issues + 1) {
             result.push_str(&format!("  {}\n", hint));
         }
     }

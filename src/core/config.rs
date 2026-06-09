@@ -21,6 +21,8 @@ pub struct Config {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub levels: LevelsConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -148,6 +150,45 @@ impl Default for LimitsConfig {
 /// Get limits config. Falls back to defaults if config can't be loaded.
 pub fn limits() -> LimitsConfig {
     Config::load().map(|c| c.limits).unwrap_or_default()
+}
+
+fn default_decorative() -> String {
+    "reasonable".to_string()
+}
+
+fn default_dedup() -> String {
+    "exact".to_string()
+}
+
+fn default_truncate() -> String {
+    "reasonable".to_string()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LevelsConfig {
+    /// `none` | `light` | `reasonable` | `high`
+    #[serde(default = "default_decorative")]
+    pub decorative: String,
+    /// `none` | `exact` | `normalized`
+    #[serde(default = "default_dedup")]
+    pub dedup: String,
+    /// `none` | `light` | `reasonable` | `high` — scales the per-command item caps
+    #[serde(default = "default_truncate")]
+    pub truncate: String,
+    /// Extra commands excluded from the global fallback pipeline (raw passthrough).
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+impl Default for LevelsConfig {
+    fn default() -> Self {
+        Self {
+            decorative: default_decorative(),
+            dedup: default_dedup(),
+            truncate: default_truncate(),
+            exclude: Vec::new(),
+        }
+    }
 }
 
 impl Config {

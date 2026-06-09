@@ -14,6 +14,17 @@ pub trait StreamFilter {
     }
 }
 
+pub struct Identity;
+
+impl StreamFilter for Identity {
+    fn feed_line(&mut self, line: &str) -> Option<String> {
+        Some(format!("{}\n", line))
+    }
+    fn flush(&mut self) -> String {
+        String::new()
+    }
+}
+
 pub trait BlockHandler {
     fn should_skip(&mut self, line: &str) -> bool;
     fn is_block_start(&mut self, line: &str) -> bool;

@@ -2,7 +2,7 @@
 
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
-use crate::core::truncate::{CAP_INVENTORY, CAP_LIST};
+use crate::core::truncate::caps;
 use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -170,17 +170,17 @@ fn filter_pip_list(output: &str) -> String {
     // visible. The compression here is structural (drop the alignment padding,
     // group by initial); the per-group cap is just a safety bound for
     // pathological environments, not a normal-case truncation.
-    const MAX_PER_LETTER: usize = CAP_INVENTORY;
+    let max_per_letter = caps().inventory;
     for letter in letters {
         let pkgs = by_letter.get(letter).unwrap();
         result.push_str(&format!("\n[{}]\n", letter.to_uppercase()));
 
-        for pkg in pkgs.iter().take(MAX_PER_LETTER) {
+        for pkg in pkgs.iter().take(max_per_letter) {
             result.push_str(&format!("  {} ({})\n", pkg.name, pkg.version));
         }
 
-        if pkgs.len() > MAX_PER_LETTER {
-            result.push_str(&format!("  ... +{} more\n", pkgs.len() - MAX_PER_LETTER));
+        if pkgs.len() > max_per_letter {
+            result.push_str(&format!("  ... +{} more\n", pkgs.len() - max_per_letter));
         }
     }
 
@@ -203,8 +203,8 @@ fn filter_pip_outdated(output: &str) -> String {
     let mut result = String::new();
     result.push_str(&format!("pip outdated: {} packages\n", packages.len()));
 
-    const MAX_PIP_PACKAGES: usize = CAP_LIST;
-    for (i, pkg) in packages.iter().take(MAX_PIP_PACKAGES).enumerate() {
+    let max_pip_packages = caps().list;
+    for (i, pkg) in packages.iter().take(max_pip_packages).enumerate() {
         let latest = pkg.latest_version.as_deref().unwrap_or("unknown");
         result.push_str(&format!(
             "{}. {} ({} → {})\n",
@@ -215,10 +215,10 @@ fn filter_pip_outdated(output: &str) -> String {
         ));
     }
 
-    if packages.len() > MAX_PIP_PACKAGES {
+    if packages.len() > max_pip_packages {
         result.push_str(&format!(
             "\n... +{} more packages\n",
-            packages.len() - MAX_PIP_PACKAGES
+            packages.len() - max_pip_packages
         ));
     }
 

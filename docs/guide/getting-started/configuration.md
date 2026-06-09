@@ -49,6 +49,11 @@ enabled = true              # anonymous daily ping — see Telemetry & Privacy f
 
 [hooks]
 exclude_commands = []       # commands to never auto-rewrite
+
+[levels]
+decorative = "reasonable"   # chrome removal aggressivity: "light" | "reasonable" | "high"
+dedup = "exact"             # collapse repeated lines (fallback): "exact" | "normalized"
+exclude = []                # extra commands to leave unfiltered (raw passthrough)
 ```
 
 For full details on what is collected, opt-out options, and GDPR rights, see [Telemetry & Privacy](../resources/telemetry.md).
@@ -58,10 +63,64 @@ For full details on what is collected, opt-out options, and GDPR rights, see [Te
 | Variable | Description |
 |----------|-------------|
 | `RTK_DISABLED=1` | Disable RTK for a single command (`RTK_DISABLED=1 git status`) |
+| `RTK_DECORATIVE_LEVEL` | Decorative level for this invocation (`light`/`reasonable`/`high`) |
+| `RTK_DEDUP_LEVEL` | Dedup level for the fallback (`exact`/`normalized`) |
 | `RTK_TEE_DIR` | Override the tee directory |
 | `RTK_TELEMETRY_DISABLED=1` | Disable telemetry |
 | `RTK_HOOK_AUDIT=1` | Enable hook audit logging |
 | `SKIP_ENV_VALIDATION=1` | Skip env validation (useful with Next.js) |
+
+## Filter levels
+
+Before each command's own filter, RTK runs a generic pipeline of layers. Today
+that is the **decorative** layer — lossless chrome removal applied to every
+command routed through RTK (and to otherwise-unsupported commands via the global
+fallback).
+
+```toml
+[levels]
+decorative = "reasonable"
+exclude = ["mytool"]
+```
+
+| `decorative` | What it removes |
+|--------------|-----------------|
+| `light` | ANSI color codes only (fully lossless) |
+| `reasonable` (default) | ANSI + trailing whitespace + collapses blank-line runs |
+| `high` | + drops pure box-drawing / separator lines |
+
+Override for a single invocation:
+
+```bash
+RTK_DECORATIVE_LEVEL=high rtk <command>
+```
+
+### Dedup (unsupported commands)
+
+For commands RTK doesn't have a specific filter for, it also collapses consecutive
+repeated lines into `[×N] line` — useful for noisy logs, retries, and repeated warnings.
+
+| `dedup` | Behavior |
+|---------|----------|
+| `exact` (default) | collapse byte-identical consecutive lines |
+| `normalized` | mask volatile tokens (numbers, hex, timestamps) first, then collapse near-identical lines |
+
+```bash
+RTK_DEDUP_LEVEL=normalized rtk <command>
+```
+
+### Excluding commands from the pipeline
+
+Raw-output commands must stay byte-exact, so RTK never filters them: `cat`,
+`head`, `tail`, `base64`, `xxd`, `hexdump`, `od`, `strings`, `dd`. Add your own
+with `[levels].exclude`:
+
+```toml
+[levels]
+exclude = ["mytool", "dump-binary"]
+```
+
+Matching is by command name (basename), so `/usr/bin/cat` and `cat` both match.
 
 ## Tee system
 

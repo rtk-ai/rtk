@@ -6,7 +6,7 @@
 
 use crate::core::runner;
 use crate::core::truncate::CAP_WARNINGS;
-use crate::core::utils::{ruby_exec, strip_ansi};
+use crate::core::utils::ruby_exec;
 use anyhow::Result;
 
 const MAX_RAKE_FAILURES: usize = CAP_WARNINGS;
@@ -102,7 +102,7 @@ enum ParseState {
 /// 8 runs, 7 assertions, 1 failures, 1 errors, 0 skips
 /// ```
 fn filter_minitest_output(output: &str) -> String {
-    let clean = strip_ansi(output);
+    let clean = output;
     let mut state = ParseState::Header;
     let mut failures: Vec<String> = Vec::new();
     let mut current_failure: Vec<String> = Vec::new();
@@ -447,10 +447,10 @@ NoMethodError: undefined method `blah'
     }
 
     #[test]
-    fn test_filter_minitest_with_ansi() {
-        let output = "\x1b[32mRun options: --seed 12345\x1b[0m\n\n\
+    fn test_filter_minitest_basic() {
+        let output = "Run options: --seed 12345\n\n\
             # Running:\n\n\
-            \x1b[32m....\x1b[0m\n\n\
+            ....\n\n\
             Finished in 0.1s, 40.0 runs/s\n\n\
             4 runs, 4 assertions, 0 failures, 0 errors, 0 skips";
 
