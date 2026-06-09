@@ -78,7 +78,7 @@ pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<i32> {
                 total,
                 format_size(result.stdout.len() as u64)
             ));
-            rtk_output.push_str("--- first 10 lines ---\n");
+            rtk_output.push_str("first 10 lines:\n");
             for line in lines.iter().take(10) {
                 rtk_output.push_str(&format!("{}\n", truncate_line(line, 100)));
             }

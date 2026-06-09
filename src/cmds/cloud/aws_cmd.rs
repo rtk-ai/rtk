@@ -5,6 +5,7 @@
 
 use crate::core::tee::force_tee_hint;
 use crate::core::tracking;
+use crate::core::truncate::{CAP_INVENTORY, CAP_LIST};
 use crate::core::utils::{
     exit_code_from_output, exit_code_from_status, human_bytes, join_with_overflow,
     resolved_command, shorten_arn, truncate_iso_date,
@@ -15,7 +16,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use serde_json::Value;
 
-const MAX_ITEMS: usize = 20;
+const MAX_ITEMS: usize = CAP_LIST;
 const JSON_COMPRESS_DEPTH: usize = 4;
 
 /// Result of a filter function: filtered text + whether items were truncated.
@@ -214,7 +215,7 @@ fn is_structured_operation(args: &[String]) -> bool {
         || op == "receive-message"
 }
 
-/// Generic strategy: force --output json for structured ops, compress via json_cmd schema
+/// Generic strategy: force --output json for structured ops, compress via json_cmd compact (values preserved)
 fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -255,10 +256,10 @@ fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -
         return Ok(crate::core::utils::exit_code_from_output(&output, "aws"));
     }
 
-    let filtered = match json_cmd::filter_json_string(&raw, JSON_COMPRESS_DEPTH) {
-        Ok(schema) => {
-            println!("{}", schema);
-            schema
+    let filtered = match json_cmd::filter_json_compact(&raw, JSON_COMPRESS_DEPTH) {
+        Ok(compact) => {
+            println!("{}", compact);
+            compact
         }
         Err(_) => {
             // Fallback: print raw (maybe not JSON)
@@ -494,7 +495,7 @@ fn filter_s3_ls(output: &str) -> FilterResult {
 
     if total > limit {
         let text = format!(
-            "{}\n... +{} more items",
+            "{}\n… +{} more items",
             lines[..limit].join("\n"),
             total - limit
         );
@@ -553,7 +554,7 @@ fn filter_ec2_instances(json_str: &str) -> Option<FilterResult> {
     }
 
     if truncated {
-        result.push_str(&format!("  ... +{} more\n", total - MAX_ITEMS));
+        result.push_str(&format!("  … +{} more\n", total - MAX_ITEMS));
     }
 
     let text = result.trim_end().to_string();
@@ -700,7 +701,7 @@ fn filter_cfn_describe_stacks(json_str: &str) -> Option<FilterResult> {
 
 // --- P0 filters: CloudWatch Logs, CloudFormation Events, Lambda ---
 
-const MAX_LOG_EVENTS: usize = 50;
+const MAX_LOG_EVENTS: usize = CAP_INVENTORY;
 
 /// Convert days since Unix epoch to (year, month, day). Civil calendar, UTC.
 fn days_to_ymd(days: i64) -> (i64, i64, i64) {
@@ -759,7 +760,7 @@ fn filter_logs_events(json_str: &str) -> Option<FilterResult> {
     }
 
     if truncated {
-        lines.push(format!("... +{} more events", total - MAX_LOG_EVENTS));
+        lines.push(format!("… +{} more events", total - MAX_LOG_EVENTS));
     }
 
     let text = lines.join("\n");
@@ -1132,7 +1133,7 @@ fn filter_dynamodb_items(json_str: &str) -> Option<FilterResult> {
     }
 
     if truncated {
-        lines.push(format!("... +{} more items", total - MAX_ITEMS));
+        lines.push(format!("… +{} more items", total - MAX_ITEMS));
     }
 
     let text = lines.join("\n");
@@ -1426,7 +1427,7 @@ fn filter_logs_query_results(json_str: &str) -> Option<FilterResult> {
         }
 
         if truncated {
-            lines.push(format!("... +{} more rows", total - MAX_ITEMS));
+            lines.push(format!("… +{} more rows", total - MAX_ITEMS));
         }
 
         let text = lines.join("\n");
@@ -1616,7 +1617,7 @@ mod tests {
         }
         let input = lines.join("\n");
         let result = filter_s3_ls(&input);
-        assert!(result.text.contains("... +20 more items"));
+        assert!(result.text.contains("… +20 more items"));
         assert!(result.truncated);
     }
 
@@ -1852,7 +1853,7 @@ mod tests {
         }
         let json = format!(r#"{{"DBInstances": [{}]}}"#, dbs.join(","));
         let result = filter_rds_instances(&json).unwrap();
-        assert!(result.text.contains("... +5 more instances"));
+        assert!(result.text.contains("… +5 more instances"));
         assert!(result.truncated);
     }
 
@@ -1893,7 +1894,7 @@ mod tests {
         }
         let json = format!(r#"{{"events": [{}]}}"#, events.join(","));
         let result = filter_logs_events(&json).unwrap();
-        assert!(result.text.contains("... +10 more events"));
+        assert!(result.text.contains("… +10 more events"));
         assert!(result.truncated);
     }
 
@@ -2747,5 +2748,30 @@ upload: file10.txt to s3://bucket/file10.txt
         let result = filter_cfn_events(&json).unwrap();
         // Should report all 30 failures, not capped at MAX_ITEMS (20)
         assert!(result.text.contains("30 failed"));
+    }
+
+    // Regression: generic AWS path (unsupported subcommand returning JSON) must
+    // compress responses while preserving values, not collapse them to schema
+    // type names. Calls the primitive used at aws_cmd.rs run_generic line 259.
+    #[test]
+    fn test_aws_unsupported_subcommand_json_preserves_values() {
+        let fixture = include_str!(
+            "../../../tests/fixtures/aws_backup_describe_global_settings.json"
+        );
+        let output = json_cmd::filter_json_compact(fixture, JSON_COMPRESS_DEPTH)
+            .expect("filter_json_compact must not error on valid AWS JSON");
+
+        assert!(
+            output.contains("\"false\""),
+            "values must be preserved (expected literal \"false\"), got:\n{output}"
+        );
+        assert!(
+            !output.contains(": string"),
+            "schema-type leakage detected (\": string\" found), got:\n{output}"
+        );
+        assert!(
+            output.contains("isMpaEnabled"),
+            "object keys must be preserved, got:\n{output}"
+        );
     }
 }

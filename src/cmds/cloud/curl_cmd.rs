@@ -5,13 +5,18 @@
 //! The condensed-form-with-tee-hint path is reserved for non-JSON bodies on
 //! a real terminal where a human reads the output and the tee file gives the
 //! LLM a way to recover the raw response.
+//!
+//! Binary downloads (any non-UTF-8 byte sequence) are written through to
+//! stdout as raw bytes, bypassing the UTF-8 lossy conversion that would
+//! otherwise replace non-UTF-8 bytes with U+FFFD and corrupt the stream
+//! (`#1087`).
 
 use crate::core::tee::force_tee_hint;
 use crate::core::tracking;
-use crate::core::{stream::exec_capture, utils::resolved_command};
+use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
 use std::borrow::Cow;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 
 const MAX_RESPONSE_SIZE: usize = 500;
 
@@ -28,22 +33,46 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: curl -s {}", args.join(" "));
     }
 
-    let result = exec_capture(&mut cmd).context("Failed to run curl")?;
+    // Capture stdout as raw bytes (not UTF-8 String) so binary downloads
+    // survive intact. `String::from_utf8_lossy` would otherwise replace
+    // every non-UTF-8 byte with U+FFFD (3 bytes), corrupting e.g. gzip
+    // magic `1f 8b 08 00` into `1f ef bf bd 08 00` (#1087).
+    let output = cmd.output().context("Failed to run curl")?;
+    let exit_code = output.status.code().unwrap_or(1);
 
     // Skip filtering on failure: curl can return HTML error bodies that would
     // be misleading to summarize, and we want the real exit code surfaced.
-    if !result.success() {
-        let msg = if result.stderr.trim().is_empty() {
-            result.stdout.trim().to_string()
+    if !output.status.success() {
+        let stderr_str = String::from_utf8_lossy(&output.stderr);
+        let stdout_str = String::from_utf8_lossy(&output.stdout);
+        let msg = if stderr_str.trim().is_empty() {
+            stdout_str.trim().to_string()
         } else {
-            result.stderr.trim().to_string()
+            stderr_str.trim().to_string()
         };
         eprintln!("FAILED: curl {}", msg);
-        return Ok(result.exit_code);
+        return Ok(exit_code);
     }
 
-    let exit_code = result.exit_code;
-    let raw = result.stdout;
+    // Binary detection: if the body is not valid UTF-8, `from_utf8_lossy`
+    // would replace every invalid byte with U+FFFD and corrupt the stream
+    // (gzip, zip, png, pdf, elf, ... — any binary format). Write raw bytes
+    // through and skip filtering. Tracking is recorded as passthrough
+    // (0% savings) since token counts over binary content have no meaning.
+    if is_binary(&output.stdout) {
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        handle
+            .write_all(&output.stdout)
+            .context("Failed to write binary response to stdout")?;
+        timer.track_passthrough(
+            &format!("curl {}", args.join(" ")),
+            &format!("rtk curl {}", args.join(" ")),
+        );
+        return Ok(exit_code);
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout).into_owned();
     let is_tty = std::io::stdout().is_terminal();
     let filtered = filter_curl_output(&raw, is_tty);
 
@@ -60,6 +89,17 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     );
 
     Ok(exit_code)
+}
+
+/// Returns `true` if `bytes` is not valid UTF-8 — which is exactly the
+/// condition under which `from_utf8_lossy` would replace invalid bytes
+/// with U+FFFD and corrupt downstream consumers (`#1087`).
+///
+/// This is correct by construction: the only reason to passthrough raw
+/// bytes is to avoid the lossy conversion, and the only bytes that suffer
+/// from it are the non-UTF-8 ones.
+fn is_binary(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes).is_err()
 }
 
 fn filter_curl_output(raw: &str, is_tty: bool) -> FilterResult<'_> {
@@ -238,5 +278,36 @@ mod tests {
         let json_payload = format!(r#"[{}]"#, "1,".repeat(300));
         let json_result = filter_curl_output(&json_payload, true);
         assert!(matches!(json_result.content, Cow::Borrowed(_)));
+    }
+
+    // --- is_binary tests ----------------------------------------------------
+
+    #[test]
+    fn test_is_binary_gzip_magic_is_not_utf8() {
+        // gzip magic 1f 8b — 0x8b is an invalid UTF-8 continuation byte
+        let bytes = [0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03];
+        assert!(is_binary(&bytes));
+    }
+
+    #[test]
+    fn test_is_binary_valid_utf8_text_is_not_binary() {
+        assert!(!is_binary(br#"{"key": "value"}"#));
+        assert!(!is_binary(b"<!DOCTYPE html>\n<html><body>Hi</body></html>"));
+        assert!(!is_binary(b"Plain ASCII text"));
+        assert!(!is_binary("Héllo wörld — emojis 🚀 ✓".as_bytes()));
+    }
+
+    #[test]
+    fn test_is_binary_empty_is_not_binary() {
+        // Empty input is technically valid UTF-8 and trivially safe to filter.
+        assert!(!is_binary(&[]));
+    }
+
+    #[test]
+    fn test_is_binary_text_with_nul_is_not_binary() {
+        // NUL is valid UTF-8 (U+0000). Unusual in HTTP responses but the
+        // function honors UTF-8 strictly — caller can still filter such
+        // content safely. The bug we're fixing is only invalid UTF-8 bytes.
+        assert!(!is_binary(b"text with\0embedded nul"));
     }
 }

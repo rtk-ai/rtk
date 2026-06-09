@@ -440,6 +440,25 @@ fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
     (cmd_part, redir_part)
 }
 
+lazy_static! {
+    /// Matches a bash line-continuation: a backslash immediately followed by
+    /// `\n` or `\r\n`, *plus* any horizontal whitespace on the line before AND
+    /// after the break. This is what bash already collapses to a single space
+    /// before executing the command — rtk's hook matcher needs to do the same
+    /// so commands authored across multiple lines still hit the rewrite rules.
+    /// Consuming the trailing whitespace prevents double spaces in cases like
+    /// `git diff \<NL>HEAD~1`.
+    static ref LINE_CONTINUATION_RE: Regex =
+        Regex::new(r"(?m)[ \t\x0B\x0C]*\\\r?\n[ \t\x0B\x0C]*").unwrap();
+}
+
+/// Replace every bash line continuation with a single space, mirroring what
+/// bash does before dispatching the command. Returns a borrowed `&str` when the
+/// input contains no continuations, so the common fast path allocates nothing.
+fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> {
+    LINE_CONTINUATION_RE.replace_all(s, " ")
+}
+
 /// Returns `None` if the command is unsupported or ignored (hook should pass through).
 ///
 /// Handles compound commands (`&&`, `||`, `;`) by rewriting each segment independently.
@@ -464,7 +483,12 @@ pub fn rewrite_command(
     excluded: &[String],
     transparent_prefixes: &[String],
 ) -> Option<String> {
-    let trimmed = cmd.trim();
+    // Bash line continuations (`\<NL>`, `\<CRLF>`) and the leading whitespace that
+    // follows are syntactically equivalent to a single space, but `cmd.trim()` does
+    // not unwrap them so a leading backslash-newline used to defeat the whole matcher.
+    // Normalize first, then trim. See issue #1564.
+    let normalized = collapse_line_continuations(cmd);
+    let trimmed = normalized.trim();
     if trimmed.is_empty() {
         return None;
     }
@@ -3072,6 +3096,135 @@ mod tests {
         );
     }
 
+    // --- Maven ---
+
+    #[test]
+    fn test_classify_mvn_test() {
+        assert!(matches!(
+            classify_command("mvn test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_integration_test() {
+        assert!(matches!(
+            classify_command("mvn integration-test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_flags_before_goal() {
+        assert!(matches!(
+            classify_command("mvn -B -DskipTests=false clean install"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvnw_wrapper() {
+        assert!(matches!(
+            classify_command("./mvnw verify"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvnw_cmd_wrapper() {
+        assert!(matches!(
+            classify_command("mvnw.cmd package"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_clean_bypassed() {
+        // `clean` deliberately excluded from the alternation to avoid 0-overhead fork.
+        assert!(!matches!(
+            classify_command("mvn clean"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_site_bypassed() {
+        assert!(!matches!(
+            classify_command("mvn site"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_plugin_goal_bypassed() {
+        assert!(!matches!(
+            classify_command("mvn dependency:tree"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_bare_bypassed() {
+        assert!(!matches!(
+            classify_command("mvn"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_version_bypassed() {
+        assert!(!matches!(
+            classify_command("mvn --version"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_mvn_clean_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("mvn -B clean install", &[]),
+            Some("rtk mvn -B clean install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_mvnw_test() {
+        assert_eq!(
+            rewrite_command_no_prefixes("./mvnw test", &[]),
+            Some("rtk mvn test".into())
+        );
+    }
+
     // --- Compound operator edge cases ---
 
     #[test]
@@ -3882,6 +4035,70 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("git log | head | tail && git status", &[]),
             Some("rtk git log | head | tail && rtk git status".into())
+        );
+    }
+
+    // --- line-continuation handling (issue #1564) -------------------
+
+    #[test]
+    fn test_rewrite_leading_backslash_newline() {
+        // The exact reproduction from #1564: a leading `\<NL>` made
+        // the matcher see `\` as the command and bail out.
+        assert_eq!(
+            rewrite_command_no_prefixes("\\\ngit diff HEAD~1", &[]),
+            Some("rtk git diff HEAD~1".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_leading_backslash_crlf() {
+        // CRLF line ending — same shape, Windows shells / Git Bash.
+        assert_eq!(
+            rewrite_command_no_prefixes("\\\r\ngit diff HEAD~1", &[]),
+            Some("rtk git diff HEAD~1".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_internal_backslash_newline() {
+        // Embedded line continuation between subcommand and args:
+        // `git diff \<NL>HEAD~1` is exactly equivalent to
+        // `git diff HEAD~1` per bash semantics.
+        assert_eq!(
+            rewrite_command_no_prefixes("git diff \\\nHEAD~1", &[]),
+            Some("rtk git diff HEAD~1".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_backslash_newline_with_indent() {
+        // Continuation followed by indentation — also collapsed.
+        assert_eq!(
+            rewrite_command_no_prefixes("git \\\n    diff HEAD~1", &[]),
+            Some("rtk git diff HEAD~1".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_no_line_continuation_unchanged() {
+        // Sanity check: a command without any `\<NL>` should match
+        // unchanged. This pins that the normalization step does not
+        // regress the no-op fast path.
+        assert_eq!(
+            rewrite_command_no_prefixes("git diff HEAD~1", &[]),
+            Some("rtk git diff HEAD~1".into())
+        );
+    }
+
+    #[test]
+    fn test_collapse_line_continuations_no_op() {
+        // Helper-level: no continuations → returns Borrowed (no
+        // allocation). We can only spot-check the equality here, but
+        // the `Cow::Borrowed` variant is implied by `replace_all`
+        // when no replacement occurs.
+        assert_eq!(
+            collapse_line_continuations("git diff HEAD~1"),
+            std::borrow::Cow::<str>::Borrowed("git diff HEAD~1"),
         );
     }
 }

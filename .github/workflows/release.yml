@@ -291,7 +291,7 @@ jobs:
             desc "Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption"
             homepage "https://www.rtk-ai.app"
             version "VERSION_PLACEHOLDER"
-            license "MIT"
+            license "Apache 2.0"
 
             if OS.mac? && Hardware::CPU.arm?
               url "https://github.com/rtk-ai/rtk/releases/download/TAG_PLACEHOLDER/rtk-aarch64-apple-darwin.tar.gz"

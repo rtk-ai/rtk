@@ -1,0 +1,33 @@
+[INFO] Scanning for projects...
+[INFO]
+[INFO] ----------------------< commons-cli:commons-cli >-----------------------
+[INFO] Building Apache Commons CLI 1.11.1-SNAPSHOT
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO]
+[INFO] --- surefire:3.5.5:test (default-test) @ commons-cli ---
+[INFO]
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running org.apache.commons.cli.help.UtilTest
+[INFO] Tests run: 34, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 1.023 s -- in org.apache.commons.cli.help.UtilTest
+[INFO] Running org.apache.commons.cli.help.TextStyleTest
+[INFO] Tests run: 13, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.240 s -- in org.apache.commons.cli.help.TextStyleTest
+[INFO] Running org.apache.commons.cli.DefaultParserTest
+[WARNING] Tests run: 87, Failures: 0, Errors: 0, Skipped: 2, Time elapsed: 1.023 s -- in org.apache.commons.cli.DefaultParserTest
+[INFO] Running org.apache.commons.cli.ConverterTests
+[INFO] Tests run: 14, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.204 s -- in org.apache.commons.cli.ConverterTests
+[INFO] Running org.apache.commons.cli.AlreadySelectedExceptionTest
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.014 s -- in org.apache.commons.cli.AlreadySelectedExceptionTest
+[INFO]
+[INFO] Results:
+[INFO]
+[INFO] Tests run: 977, Failures: 0, Errors: 0, Skipped: 61
+[INFO]
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  01:14 min
+[INFO] Finished at: 2026-05-21T14:54:30Z
+[INFO] ------------------------------------------------------------------------

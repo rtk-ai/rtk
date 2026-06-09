@@ -30,11 +30,12 @@ Agent runs "cargo test"
 |-------|-----------------|---------------------------|
 | Claude Code | Shell hook (`PreToolUse`) | Yes |
 | VS Code Copilot Chat | Shell hook (`PreToolUse`) | Yes |
-| GitHub Copilot CLI | Shell hook (deny-with-suggestion) | No (agent retries) |
+| GitHub Copilot CLI | Shell hook (`preToolUse` `modifiedArgs`) | Yes |
 | Cursor | Shell hook (`preToolUse`) | Yes |
 | Gemini CLI | Rust binary (`BeforeTool`) | Yes |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | Yes |
 | OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
+| Pi | TypeScript extension (`tool_call` event) | Yes |
 | Hermes | Python plugin (`terminal` command mutation) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
@@ -60,16 +61,28 @@ rtk init --show    # shows hook status
 ### Cursor
 
 ```bash
-rtk init --global --cursor
+rtk init --global --agent cursor
 ```
 
 Restart Cursor. The hook uses `preToolUse` with Cursor's `updated_input` format.
 
-### VS Code Copilot Chat
+### GitHub Copilot (VS Code Chat + CLI)
 
 ```bash
-rtk init --global --copilot
+rtk init --copilot            # project-scoped (.github/hooks/)
+rtk init --global --copilot   # user-scoped (~/.copilot/hooks/, respects $COPILOT_HOME)
 ```
+
+Project-scoped writes `.github/hooks/rtk-rewrite.json` (both hosts get transparent rewrite — VS Code Chat via `updatedInput`, Copilot CLI via `modifiedArgs`) plus the RTK block in `.github/copilot-instructions.md`. User-scoped writes the same hook config to `~/.copilot/hooks/rtk-rewrite.json` and the RTK block to `~/.copilot/copilot-instructions.md` (both respect `$COPILOT_HOME` if set).
+
+Uninstall:
+
+```bash
+rtk init --uninstall --copilot
+rtk init --uninstall --global --copilot
+```
+
+Removes only RTK's hook file (and, for project, the RTK block in `copilot-instructions.md`). Other files in `.github/hooks/` or `~/.copilot/hooks/` and your own instruction content are untouched.
 
 ### Gemini CLI
 
@@ -84,6 +97,27 @@ rtk init --global --opencode
 ```
 
 Creates `~/.config/opencode/plugins/rtk.ts`. Uses the `tool.execute.before` hook.
+
+### Pi
+
+```bash
+# Project-local (default)
+rtk init --agent pi
+
+# Global — all projects
+rtk init --agent pi --global
+```
+
+Creates `.pi/extensions/rtk.ts` (local) or `~/.pi/agent/extensions/rtk.ts` (global). Pi auto-discovers extensions from both paths on startup.
+
+Uninstall:
+
+```bash
+rtk init --uninstall --agent pi
+rtk init --uninstall --agent pi --global
+```
+
+Removes only the installed Pi extension file.
 
 ### OpenClaw
 
@@ -106,7 +140,7 @@ The plugin fails open. If `rtk` is missing at load time, the hook is not registe
 ### Cline / Roo Code
 
 ```bash
-rtk init --cline    # creates .clinerules in current project
+rtk init --agent cline    # creates .clinerules in current project
 ```
 
 Cline reads `.clinerules` as custom instructions. RTK adds guidance telling Cline to prefer `rtk <cmd>` over raw commands.
@@ -114,13 +148,14 @@ Cline reads `.clinerules` as custom instructions. RTK adds guidance telling Clin
 ### Windsurf
 
 ```bash
-rtk init --windsurf    # creates .windsurfrules in current project
+rtk init --global --agent windsurf    # creates .windsurfrules in current project
 ```
 
 ### Codex CLI
 
 ```bash
-rtk init --codex    # creates AGENTS.md or patches existing one
+rtk init --codex           # project-scoped (AGENTS.md)
+rtk init --global --codex  # user-global (~/.codex/AGENTS.md)
 ```
 
 ### Kilo Code
@@ -151,7 +186,7 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it.
+Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
 
 ## Windows support
 

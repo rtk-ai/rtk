@@ -2,6 +2,7 @@
 
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
+use crate::core::truncate::CAP_LIST;
 use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -12,6 +13,8 @@ use crate::parser::{
     emit_degradation_warning, emit_passthrough_warning, truncate_passthrough, Dependency,
     DependencyState, FormatMode, OutputParser, ParseResult, TokenFormatter,
 };
+
+const MAX_LISTING: usize = CAP_LIST;
 
 /// pnpm list JSON output structure
 #[derive(Debug, Deserialize)]
@@ -125,20 +128,32 @@ fn collect_dependencies(
 fn extract_list_text(output: &str) -> Option<DependencyState> {
     let mut dependencies = Vec::new();
     let mut count = 0;
+    let mut is_dev = false;
 
     for line in output.lines() {
+        let trimmed = line.trim();
+
+        if trimmed == "devDependencies:" {
+            is_dev = true;
+            continue;
+        }
+        if trimmed == "dependencies:" {
+            is_dev = false;
+            continue;
+        }
+
         // Skip box-drawing and metadata
         if line.contains('│')
             || line.contains('├')
             || line.contains('└')
             || line.contains("Legend:")
-            || line.trim().is_empty()
+            || trimmed.is_empty()
         {
             continue;
         }
 
         // Parse lines like: "package@1.2.3"
-        let parts: Vec<&str> = line.split_whitespace().collect();
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
         if !parts.is_empty() {
             let pkg_str = parts[0];
             if let Some(at_pos) = pkg_str.rfind('@') {
@@ -150,7 +165,7 @@ fn extract_list_text(output: &str) -> Option<DependencyState> {
                         current_version: version.to_string(),
                         latest_version: None,
                         wanted_version: None,
-                        dev_dependency: false,
+                        dev_dependency: is_dev,
                     });
                     count += 1;
                 }
@@ -270,6 +285,67 @@ fn extract_outdated_text(output: &str) -> Option<DependencyState> {
     }
 }
 
+/// Format a dependency listing with grouped [prod]/[dev] sections.
+/// `cap = true` for plain `pnpm list` (both categories present, may truncate).
+/// `cap = false` for `pnpm list --prod` / `pnpm list --dev` (hint targets,
+/// must show every package so the LLM can find what was hidden by the cap).
+fn format_dependency_listing(state: &DependencyState, cap: bool) -> String {
+    let prod: Vec<_> = state.dependencies.iter().filter(|d| !d.dev_dependency).collect();
+    let dev: Vec<_> = state.dependencies.iter().filter(|d| d.dev_dependency).collect();
+    let total = state.total_packages.max(state.dependencies.len());
+
+    let mut lines = vec![format!(
+        "{} packages ({} prod / {} dev)",
+        total,
+        prod.len(),
+        dev.len()
+    )];
+
+    if !prod.is_empty() {
+        lines.push("[prod]".to_string());
+        let shown = if cap { prod.len().min(MAX_LISTING) } else { prod.len() };
+        for dep in prod.iter().take(shown) {
+            lines.push(format!("  {} {}", dep.name, dep.current_version));
+        }
+        if cap && prod.len() > MAX_LISTING {
+            lines.push(format!("  … +{} more", prod.len() - MAX_LISTING));
+            let all_prod = prod
+                .iter()
+                .map(|dep| format!("  {} {}", dep.name, dep.current_version))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(hint) =
+                crate::core::tee::force_tee_tail_hint(&all_prod, "pnpm-prod", MAX_LISTING + 1)
+            {
+                lines.push(format!("  {}", hint));
+            }
+        }
+    }
+
+    if !dev.is_empty() {
+        lines.push("[dev]".to_string());
+        let shown = if cap { dev.len().min(MAX_LISTING) } else { dev.len() };
+        for dep in dev.iter().take(shown) {
+            lines.push(format!("  {} {}", dep.name, dep.current_version));
+        }
+        if cap && dev.len() > MAX_LISTING {
+            lines.push(format!("  … +{} more", dev.len() - MAX_LISTING));
+            let all_dev = dev
+                .iter()
+                .map(|dep| format!("  {} {}", dep.name, dep.current_version))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(hint) =
+                crate::core::tee::force_tee_tail_hint(&all_dev, "pnpm-dev", MAX_LISTING + 1)
+            {
+                lines.push(format!("  {}", hint));
+            }
+        }
+    }
+
+    lines.join("\n")
+}
+
 #[derive(Debug, Clone)]
 pub enum PnpmCommand {
     List { depth: usize },
@@ -304,22 +380,24 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
         return Ok(result.exit_code);
     }
 
-    // Parse output using PnpmListParser
+    let is_filtered = args
+        .iter()
+        .any(|a| matches!(a.as_str(), "--prod" | "-P" | "--dev" | "-D"));
+
     let parse_result = PnpmListParser::parse(&result.stdout);
-    let mode = FormatMode::from_verbosity(verbose);
 
     let filtered = match parse_result {
         ParseResult::Full(data) => {
             if verbose > 0 {
                 eprintln!("pnpm list (Tier 1: Full JSON parse)");
             }
-            data.format(mode)
+            format_dependency_listing(&data, !is_filtered)
         }
         ParseResult::Degraded(data, warnings) => {
             if verbose > 0 {
                 emit_degradation_warning("pnpm list", &warnings.join(", "));
             }
-            data.format(mode)
+            format_dependency_listing(&data, !is_filtered)
         }
         ParseResult::Passthrough(raw) => {
             emit_passthrough_warning("pnpm list", "All parsing tiers failed");
@@ -512,5 +590,83 @@ mod tests {
         // Test that run_passthrough compiles and has correct signature
         let _args: Vec<OsString> = vec![OsString::from("help")];
         // Compile-time verification that the function exists with correct signature
+    }
+
+    fn make_state(prod: &[&str], dev: &[&str]) -> DependencyState {
+        let mut deps = Vec::new();
+        for name in prod {
+            deps.push(Dependency {
+                name: name.to_string(),
+                current_version: "1.0.0".to_string(),
+                latest_version: None,
+                wanted_version: None,
+                dev_dependency: false,
+            });
+        }
+        for name in dev {
+            deps.push(Dependency {
+                name: name.to_string(),
+                current_version: "1.0.0".to_string(),
+                latest_version: None,
+                wanted_version: None,
+                dev_dependency: true,
+            });
+        }
+        DependencyState {
+            total_packages: deps.len(),
+            outdated_count: 0,
+            dependencies: deps,
+        }
+    }
+
+    #[test]
+    fn test_format_listing_grouped_sections() {
+        let state = make_state(&["react", "typescript"], &["eslint", "vitest"]);
+        let out = format_dependency_listing(&state, true);
+        assert!(out.contains("[prod]"), "prod section missing");
+        assert!(out.contains("[dev]"), "dev section missing");
+        assert!(out.contains("react"), "prod package missing");
+        assert!(out.contains("eslint"), "dev package missing");
+        assert!(!out.contains("(dev)"), "per-line (dev) marker should be gone");
+    }
+
+    #[test]
+    fn test_format_listing_cap_shows_hint_with_offset() {
+        let prod: Vec<&str> = (0..60).map(|_| "pkg").collect();
+        let state = make_state(&prod, &["eslint"]);
+        let out = format_dependency_listing(&state, true);
+        let prod_count = 60usize;
+        assert!(
+            out.contains(&format!("… +{} more", prod_count - MAX_LISTING)),
+            "truncation count missing: got\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_format_listing_no_cap_when_prod_only() {
+        let prod: Vec<&str> = (0..60).map(|_| "pkg").collect();
+        let state = make_state(&prod, &[]);
+        let out = format_dependency_listing(&state, false);
+        assert!(!out.contains("… +"), "should not truncate when cap=false");
+        assert!(!out.contains("[dev]"), "no dev section for prod-only state");
+    }
+
+    #[test]
+    fn test_format_listing_no_cap_when_dev_only() {
+        let dev: Vec<&str> = (0..60).map(|_| "pkg").collect();
+        let state = make_state(&[], &dev);
+        let out = format_dependency_listing(&state, false);
+        assert!(!out.contains("… +"), "should not truncate when cap=false");
+        assert!(!out.contains("[prod]"), "no prod section for dev-only state");
+    }
+
+    #[test]
+    fn test_extract_list_text_tracks_dev_section() {
+        let input = "dependencies:\nreact@18.0.0\ndevDependencies:\neslint@8.0.0\n";
+        let state = extract_list_text(input).expect("should parse");
+        let react = state.dependencies.iter().find(|d| d.name == "react").unwrap();
+        let eslint = state.dependencies.iter().find(|d| d.name == "eslint").unwrap();
+        assert!(!react.dev_dependency, "react should be prod");
+        assert!(eslint.dev_dependency, "eslint should be dev");
     }
 }

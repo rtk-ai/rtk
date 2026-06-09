@@ -3,6 +3,7 @@
 use crate::binlog;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
+use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{resolved_command, truncate};
 use crate::dotnet_format_report;
 use crate::dotnet_trx;
@@ -367,9 +368,14 @@ fn format_dotnet_format_output(
     }
 
     let mut output = format!("Format: {} files need formatting", changed_count);
-    output.push_str("\n---------------------------------------");
 
-    for (index, file) in summary.files_with_changes.iter().take(20).enumerate() {
+    const MAX_FORMAT_FILES: usize = CAP_LIST;
+    for (index, file) in summary
+        .files_with_changes
+        .iter()
+        .take(MAX_FORMAT_FILES)
+        .enumerate()
+    {
         let first_change = &file.changes[0];
         let rule = if first_change.diagnostic_id.is_empty() {
             first_change.format_description.as_str()
@@ -386,8 +392,21 @@ fn format_dotnet_format_output(
         ));
     }
 
-    if changed_count > 20 {
-        output.push_str(&format!("\n... +{} more files", changed_count - 20));
+    if changed_count > MAX_FORMAT_FILES {
+        output.push_str(&format!("\n… +{} more files", changed_count - MAX_FORMAT_FILES));
+        let all_files = summary
+            .files_with_changes
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(
+            &all_files,
+            "dotnet-format-files",
+            MAX_FORMAT_FILES + 1,
+        ) {
+            output.push_str(&format!(" {}", hint));
+        }
     }
 
     output.push_str(&format!(
@@ -979,39 +998,62 @@ fn format_build_output(summary: &binlog::BuildSummary, _binlog_path: &Path) -> S
     let status_icon = if summary.succeeded { "ok" } else { "fail" };
     let duration = summary.duration_text.as_deref().unwrap_or("unknown");
 
+    const MAX_BUILD_ERRORS: usize = CAP_ERRORS;
+    const MAX_BUILD_WARNINGS: usize = CAP_WARNINGS;
+
     let mut errors = String::new();
     if !summary.errors.is_empty() {
         errors.push_str("Errors:\n");
-        for issue in summary.errors.iter().take(20) {
+        for issue in summary.errors.iter().take(MAX_BUILD_ERRORS) {
             errors.push_str(&format!("{}\n", format_issue(issue, "error")));
         }
-        if summary.errors.len() > 20 {
+        if summary.errors.len() > MAX_BUILD_ERRORS {
             errors.push_str(&format!(
-                "  ... +{} more errors\n",
-                summary.errors.len() - 20
+                "  … +{} more errors\n",
+                summary.errors.len() - MAX_BUILD_ERRORS
             ));
+            let all_errors = summary
+                .errors
+                .iter()
+                .map(|e| format_issue(e, "error"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(hint) = crate::core::tee::force_tee_tail_hint(
+                &all_errors,
+                "dotnet-build-errors",
+                MAX_BUILD_ERRORS + 1,
+            ) {
+                errors.push_str(&format!("  {}\n", hint));
+            }
         }
     }
 
     let mut warnings = String::new();
     if !summary.warnings.is_empty() {
         warnings.push_str("Warnings:\n");
-        for issue in summary.warnings.iter().take(10) {
+        for issue in summary.warnings.iter().take(MAX_BUILD_WARNINGS) {
             warnings.push_str(&format!("{}\n", format_issue(issue, "warning")));
         }
-        if summary.warnings.len() > 10 {
+        if summary.warnings.len() > MAX_BUILD_WARNINGS {
             warnings.push_str(&format!(
-                "  ... +{} more warnings\n",
-                summary.warnings.len() - 10
+                "  … +{} more warnings\n",
+                summary.warnings.len() - MAX_BUILD_WARNINGS
             ));
+            let all_warnings = summary
+                .warnings
+                .iter()
+                .map(|w| format_issue(w, "warning"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(hint) = crate::core::tee::force_tee_tail_hint(
+                &all_warnings,
+                "dotnet-build-warnings",
+                MAX_BUILD_WARNINGS + 1,
+            ) {
+                warnings.push_str(&format!("  {}\n", hint));
+            }
         }
     }
-
-    let sep = if !warnings.is_empty() || !errors.is_empty() {
-        "---------------------------------------"
-    } else {
-        ""
-    };
 
     let verdict = format!(
         "{} dotnet build: {} projects, {} errors, {} warnings ({})",
@@ -1027,7 +1069,7 @@ fn format_build_output(summary: &binlog::BuildSummary, _binlog_path: &Path) -> S
     // definitive verdict. Mirrors native `dotnet build`, which ends with
     // `Build succeeded.` / `Build FAILED.`. See issue #1574.
     // Warnings before errors: errors survive `| tail -N` immediately above the verdict.
-    [warnings, errors, sep.into(), verdict]
+    [warnings, errors, verdict]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
@@ -1077,64 +1119,101 @@ fn format_test_output(
         )
     };
 
+    const MAX_DOTNET_FAILURES: usize = CAP_WARNINGS;
     let mut failed_tests_section = String::new();
     if has_failures && !summary.failed_tests.is_empty() {
         failed_tests_section.push_str("Failed Tests:\n");
-        for failed in summary.failed_tests.iter().take(15) {
+        for failed in summary.failed_tests.iter().take(MAX_DOTNET_FAILURES) {
             failed_tests_section.push_str(&format!("  {}\n", failed.name));
             for detail in &failed.details {
                 failed_tests_section.push_str(&format!("    {}\n", truncate(detail, 320)));
             }
             failed_tests_section.push('\n');
         }
-        if summary.failed_tests.len() > 15 {
+        if summary.failed_tests.len() > MAX_DOTNET_FAILURES {
             failed_tests_section.push_str(&format!(
-                "... +{} more failed tests\n",
-                summary.failed_tests.len() - 15
+                "… +{} more failed tests\n",
+                summary.failed_tests.len() - MAX_DOTNET_FAILURES
             ));
+            let all_failed = summary
+                .failed_tests
+                .iter()
+                .skip(MAX_DOTNET_FAILURES)
+                .map(|t| {
+                    let mut s = t.name.clone();
+                    for detail in &t.details {
+                        s.push_str(&format!("\n  {}", truncate(detail, 320)));
+                    }
+                    s
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if let Some(hint) =
+                crate::core::tee::force_tee_hint(&all_failed, "dotnet-test-failures")
+            {
+                failed_tests_section.push_str(&format!("  {}\n", hint));
+            }
         }
     }
+
+    const MAX_TEST_ERRORS: usize = CAP_WARNINGS;
+    const MAX_TEST_WARNINGS: usize = CAP_WARNINGS;
 
     let mut errors_section = String::new();
     if !errors.is_empty() {
         errors_section.push_str("Errors:\n");
-        for issue in errors.iter().take(10) {
+        for issue in errors.iter().take(MAX_TEST_ERRORS) {
             errors_section.push_str(&format!("{}\n", format_issue(issue, "error")));
         }
-        if errors.len() > 10 {
-            errors_section.push_str(&format!("  ... +{} more errors\n", errors.len() - 10));
+        if errors.len() > MAX_TEST_ERRORS {
+            errors_section.push_str(&format!(
+                "  … +{} more errors\n",
+                errors.len() - MAX_TEST_ERRORS
+            ));
+            let all_errors = errors
+                .iter()
+                .map(|e| format_issue(e, "error"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(hint) = crate::core::tee::force_tee_tail_hint(
+                &all_errors,
+                "dotnet-test-errors",
+                MAX_TEST_ERRORS + 1,
+            ) {
+                errors_section.push_str(&format!("  {}\n", hint));
+            }
         }
     }
 
     let mut warnings_section = String::new();
     if !warnings.is_empty() {
         warnings_section.push_str("Warnings:\n");
-        for issue in warnings.iter().take(10) {
+        for issue in warnings.iter().take(MAX_TEST_WARNINGS) {
             warnings_section.push_str(&format!("{}\n", format_issue(issue, "warning")));
         }
-        if warnings.len() > 10 {
-            warnings_section.push_str(&format!("  ... +{} more warnings\n", warnings.len() - 10));
+        if warnings.len() > MAX_TEST_WARNINGS {
+            warnings_section.push_str(&format!(
+                "  … +{} more warnings\n",
+                warnings.len() - MAX_TEST_WARNINGS
+            ));
+            let all_warnings = warnings
+                .iter()
+                .map(|w| format_issue(w, "warning"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(hint) = crate::core::tee::force_tee_tail_hint(
+                &all_warnings,
+                "dotnet-test-warnings",
+                MAX_TEST_WARNINGS + 1,
+            ) {
+                warnings_section.push_str(&format!("  {}\n", hint));
+            }
         }
     }
 
-    let sep = if !failed_tests_section.is_empty()
-        || !warnings_section.is_empty()
-        || !errors_section.is_empty()
-    {
-        "---------------------------------------"
-    } else {
-        ""
-    };
-
     // Status line emitted last; see format_build_output (issue #1574).
     // Warnings before errors: errors survive `| tail -N` immediately above the verdict.
-    [
-        failed_tests_section,
-        warnings_section,
-        errors_section,
-        sep.into(),
-        header,
-    ]
+    [failed_tests_section, warnings_section, errors_section, header]
     .into_iter()
     .filter(|s| !s.is_empty())
     .collect::<Vec<_>>()
@@ -1155,33 +1234,60 @@ fn format_restore_output(
     let status_icon = if has_errors { "fail" } else { "ok" };
     let duration = summary.duration_text.as_deref().unwrap_or("unknown");
 
+    const MAX_FORMAT_ERRORS: usize = CAP_ERRORS;
+    const MAX_FORMAT_WARNINGS: usize = CAP_WARNINGS;
+
     let mut errors_section = String::new();
     if !errors.is_empty() {
         errors_section.push_str("Errors:\n");
-        for issue in errors.iter().take(20) {
+        for issue in errors.iter().take(MAX_FORMAT_ERRORS) {
             errors_section.push_str(&format!("{}\n", format_issue(issue, "error")));
         }
-        if errors.len() > 20 {
-            errors_section.push_str(&format!("  ... +{} more errors\n", errors.len() - 20));
+        if errors.len() > MAX_FORMAT_ERRORS {
+            errors_section.push_str(&format!(
+                "  … +{} more errors\n",
+                errors.len() - MAX_FORMAT_ERRORS
+            ));
+            let all_errors = errors
+                .iter()
+                .map(|e| format_issue(e, "error"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(hint) = crate::core::tee::force_tee_tail_hint(
+                &all_errors,
+                "dotnet-format-errors",
+                MAX_FORMAT_ERRORS + 1,
+            ) {
+                errors_section.push_str(&format!("  {}\n", hint));
+            }
         }
     }
 
     let mut warnings_section = String::new();
     if !warnings.is_empty() {
         warnings_section.push_str("Warnings:\n");
-        for issue in warnings.iter().take(10) {
+        for issue in warnings.iter().take(MAX_FORMAT_WARNINGS) {
             warnings_section.push_str(&format!("{}\n", format_issue(issue, "warning")));
         }
-        if warnings.len() > 10 {
-            warnings_section.push_str(&format!("  ... +{} more warnings\n", warnings.len() - 10));
+        if warnings.len() > MAX_FORMAT_WARNINGS {
+            warnings_section.push_str(&format!(
+                "  … +{} more warnings\n",
+                warnings.len() - MAX_FORMAT_WARNINGS
+            ));
+            let all_warnings = warnings
+                .iter()
+                .map(|w| format_issue(w, "warning"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(hint) = crate::core::tee::force_tee_tail_hint(
+                &all_warnings,
+                "dotnet-format-warnings",
+                MAX_FORMAT_WARNINGS + 1,
+            ) {
+                warnings_section.push_str(&format!("  {}\n", hint));
+            }
         }
     }
-
-    let sep = if !warnings_section.is_empty() || !errors_section.is_empty() {
-        "---------------------------------------"
-    } else {
-        ""
-    };
 
     let verdict = format!(
         "{} dotnet restore: {} projects, {} errors, {} warnings ({})",
@@ -1190,7 +1296,7 @@ fn format_restore_output(
 
     // Status line emitted last; see format_build_output (issue #1574).
     // Warnings before errors: errors survive `| tail -N` immediately above the verdict.
-    [warnings_section, errors_section, sep.into(), verdict]
+    [warnings_section, errors_section, verdict]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()

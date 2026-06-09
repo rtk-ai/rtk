@@ -50,7 +50,7 @@ Don't invent new output formats. Don't add RTK-specific headers or markers in th
 
 If a filter fails, fall back to raw output. RTK should never prevent a command from executing or producing output. Better to pass through unfiltered than to error out. Same for hooks: exit 0 on all error paths so the agent's command runs unmodified.
 
-Every filter needs a fallback path. Every hook must handle malformed input gracefully.
+Every filter needs a fallback path. Every hook must handle malformed input gracefully. Truncation follows the same rule: capping output at N items is only acceptable if accompanied by a hint that lets the agent recover the hidden data.
 
 ### Zero Overhead
 
@@ -262,6 +262,7 @@ cargo fmt --all --check && cargo clippy --all-targets && cargo test
 - [ ] Unit tests added/updated for changed code
 - [ ] Snapshot tests reviewed (`cargo insta review`)
 - [ ] Token savings >=60% verified
+- [ ] Any truncated list has a recovery hint (`force_tee_tail_hint` or `force_tee_hint`) and uses a `CAP_*` from `src/core/truncate.rs`
 - [ ] Edge cases covered
 - [ ] `cargo fmt --all --check && cargo clippy --all-targets && cargo test` passes
 - [ ] Manual test: run `rtk <cmd>` and inspect output

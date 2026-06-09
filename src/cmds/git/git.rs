@@ -1,7 +1,11 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
-use crate::core::stream::{exec_capture, CaptureResult};
+use crate::core::args_utils;
+use crate::core::stream::{
+    self, exec_capture, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode,
+};
 use crate::core::tracking;
+use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{exit_code_from_output, exit_code_from_status, resolved_command};
 use anyhow::{Context, Result};
 use std::ffi::OsString;
@@ -67,7 +71,7 @@ fn build_status_command(args: &[String], global_args: &[String]) -> Command {
     let mut cmd = git_cmd(global_args);
     cmd.arg("status");
     if uses_compact_status_path(args) {
-        cmd.args(["--porcelain", "-b", "-uall"]);
+        cmd.args(["--porcelain", "-b"]);
     } else {
         cmd.args(args);
     }
@@ -99,65 +103,6 @@ pub fn run(
     }
 }
 
-/// Re-insert `--` before the first path-like argument when clap has consumed it.
-///
-/// clap's `trailing_var_arg = true` silently drops `--` when it appears as the
-/// first positional argument (before any other positional).  This means:
-///   `rtk git diff -- file` → args = ["file"]   (clap ate `--`)
-///   `rtk git diff HEAD -- file` → args = ["HEAD", "--", "file"]  (preserved)
-///
-/// Without the `--` separator git may treat an unambiguous path as a revision and
-/// emit "fatal: ambiguous argument".  We re-insert `--` before the first path-like
-/// argument; see `normalize_diff_args_impl` for the detection rules.
-fn normalize_diff_args(args: &[String]) -> Vec<String> {
-    normalize_diff_args_impl(args, |p| std::path::Path::new(p).exists())
-}
-
-/// Testable core of `normalize_diff_args` — accepts an injectable filesystem existence checker.
-///
-/// The path-detection logic is:
-/// 1. Explicit path prefixes (`.`, `~`) → always a path, no filesystem check needed.
-/// 2. Contains path separator (`/`, `\`) → use `path_exists` to distinguish branch names
-///    (e.g. `feature/auth`) from real paths (e.g. `src/main.rs`).
-/// 3. Bare word with no separator → never a path (avoids injecting `--` when a file
-///    happens to share a name with a branch or ref, e.g. a file named `main`).
-fn normalize_diff_args_impl<F>(args: &[String], path_exists: F) -> Vec<String>
-where
-    F: Fn(&str) -> bool,
-{
-    // Already has `--` — nothing to do
-    if args.iter().any(|a| a == "--") {
-        return args.to_vec();
-    }
-    let path_start = args.iter().position(|arg| {
-        if arg.starts_with('-') {
-            return false;
-        }
-        // Explicit path prefixes — always treat as path regardless of existence
-        if arg.starts_with('.') || arg.starts_with('~') {
-            return true;
-        }
-        // Contains path separator — use filesystem check to distinguish
-        // branch names (feature/auth) from real paths (src/main.rs)
-        if arg.contains('/') || arg.contains('\\') {
-            return path_exists(arg);
-        }
-        // Bare word (no separator, no special prefix) — never inject `--`
-        // This avoids misidentifying a ref/branch as a path even if a same-named
-        // file happens to exist on disk.
-        false
-    });
-    match path_start {
-        Some(idx) => {
-            let mut out = args[..idx].to_vec();
-            out.push("--".to_string());
-            out.extend_from_slice(&args[idx..]);
-            out
-        }
-        None => args.to_vec(),
-    }
-}
-
 fn run_diff(
     args: &[String],
     max_lines: Option<usize>,
@@ -167,7 +112,7 @@ fn run_diff(
     let timer = tracking::TimedExecution::start();
 
     // Re-insert `--` when clap's trailing_var_arg consumed it (issue #1215)
-    let args = &normalize_diff_args(args);
+    let args = &args_utils::restore_double_dash(args);
 
     // Check if user wants stat output
     let wants_stat = args
@@ -248,10 +193,10 @@ fn run_diff(
 
     let mut final_output = result.stdout.clone();
     if !diff_result.stdout.is_empty() {
-        println!("\n--- Changes ---");
+        println!("\nChanges:");
         let compacted = compact_diff(&diff_result.stdout, max_lines.unwrap_or(500));
         println!("{}", compacted);
-        final_output.push_str("\n--- Changes ---\n");
+        final_output.push_str("\nChanges:\n");
         final_output.push_str(&compacted);
     }
 
@@ -360,7 +305,7 @@ fn run_show(
     let mut final_output = summary_result.stdout.clone();
     if !diff_text.is_empty() {
         if verbose > 0 {
-            println!("\n--- Changes ---");
+            println!("\nChanges:");
         }
         let compacted = compact_diff(diff_text, max_lines.unwrap_or(500));
         println!("{}", compacted);
@@ -520,8 +465,9 @@ fn run_log(
     // Only add --no-merges if user didn't explicitly request merge commits
     let wants_merges = args
         .iter()
-        .any(|arg| arg == "--merges" || arg == "--min-parents=2");
-    if !wants_merges {
+        .any(|arg| arg == "--merges" || arg == "--min-parents=2" || arg == "--no-merges");
+    // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
+    if !wants_merges && !has_limit_flag {
         cmd.arg("--no-merges");
     }
 
@@ -676,8 +622,15 @@ fn truncate_line(line: &str, width: usize) -> String {
     }
 }
 
-/// Preserve RTK's branch/clean framing while keeping porcelain file lines intact.
 pub(crate) fn format_status_output(porcelain: &str) -> String {
+    format_status_inner(porcelain, None)
+}
+
+pub(crate) fn format_status_output_detached(porcelain: &str, detached_ref: &str) -> String {
+    format_status_inner(porcelain, Some(detached_ref))
+}
+
+fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
     let lines: Vec<&str> = porcelain
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -692,7 +645,8 @@ pub(crate) fn format_status_output(porcelain: &str) -> String {
     if let Some(branch_line) = lines.first() {
         if branch_line.starts_with("##") {
             let branch = branch_line.trim_start_matches("## ");
-            output.push(format!("* {}", branch));
+            let display = detached.unwrap_or(branch);
+            output.push(format!("* {}", display));
         } else {
             output.push((*branch_line).to_string());
         }
@@ -807,6 +761,20 @@ fn extract_state_header(raw: &str) -> Option<String> {
     None
 }
 
+/// Extract the explicit "HEAD detached at/from <ref>" line from plain
+/// `git status` output.
+///
+/// Porcelain `-b` collapses a detached HEAD to the opaque `## HEAD (no branch)`,
+/// which an agent (or a distracted human) can misread as a branch literally
+/// named `HEAD`. The plain-status output keeps the explicit SHA/ref, so we
+/// surface that instead. Returns `None` when HEAD is on a branch.
+fn extract_detached_head(raw: &str) -> Option<String> {
+    raw.lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("HEAD detached "))
+        .map(str::to_string)
+}
+
 /// Minimal filtering for git status with user-provided args
 fn filter_status_with_args(output: &str) -> String {
     let mut result = Vec::new();
@@ -911,7 +879,10 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         return Ok(result.exit_code);
     }
 
-    let formatted = format_status_output(&result.stdout);
+    let formatted = match extract_detached_head(&raw_output) {
+        Some(detached_ref) => format_status_output_detached(&result.stdout, &detached_ref),
+        None => format_status_output(&result.stdout),
+    };
 
     // Surface in-progress state (rebase/merge/cherry-pick/bisect/am) from the
     // plain-status output we already captured for tracking. Porcelain omits it
@@ -968,8 +939,11 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
         stat_cmd.args(["diff", "--cached", "--stat", "--shortstat"]);
         let stat_result = exec_capture(&mut stat_cmd).context("Failed to check staged files")?;
 
+        // Mirror git's own behaviour: a no-op `git add` is silent. Emitting a
+        // generic "ok" here is misleading — an agent can't tell "staged N files"
+        // from "staged nothing" when both print "ok".
         let compact = if stat_result.stdout.trim().is_empty() {
-            "ok (nothing to add)".to_string()
+            String::new()
         } else {
             // Parse "1 file changed, 5 insertions(+)" format
             let short = stat_result.stdout.lines().last().unwrap_or("").trim();
@@ -980,7 +954,9 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
             }
         };
 
-        println!("{}", compact);
+        if !compact.is_empty() {
+            println!("{}", compact);
+        }
 
         timer.track(
             &format!("git add {}", args.join(" ")),
@@ -1011,6 +987,24 @@ fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
     cmd
 }
 
+/// Parse the first line of `git commit` success output and return a compact token.
+/// Handles: `[main abc1234def] message`, `[main (root-commit) abc1234def] msg`,
+/// localized variants, and multibyte branch names.
+fn parse_commit_output(line: &str) -> String {
+    if let Some(bracket_end) = line.find(']') {
+        let bracket_content = &line[1..bracket_end];
+        let hash = bracket_content.split_whitespace().next_back().unwrap_or("");
+        if !hash.is_empty() && hash.len() >= 7 {
+            let short_hash: String = hash.chars().take(7).collect();
+            format!("ok {}", short_hash)
+        } else {
+            "ok".to_string()
+        }
+    } else {
+        "ok".to_string()
+    }
+}
+
 fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -1032,17 +1026,10 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 
     if output.status.success() {
         // Extract commit hash from output like "[main abc1234] message"
+        // or "[main (root-commit) abc1234] message" (incl. localized variants)
+        // The hash is always the last whitespace-separated token before ']'.
         let compact = if let Some(line) = stdout.lines().next() {
-            if let Some(hash_start) = line.find(' ') {
-                let hash = line[1..hash_start].split(' ').next_back().unwrap_or("");
-                if !hash.is_empty() && hash.len() >= 7 {
-                    format!("ok {}", &hash[..7.min(hash.len())])
-                } else {
-                    "ok".to_string()
-                }
-            } else {
-                "ok".to_string()
-            }
+            parse_commit_output(line)
         } else {
             "ok".to_string()
         };
@@ -1072,6 +1059,62 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     Ok(0)
 }
 
+// Git push progress prefixes (stderr) — dropped from the stream.
+const GIT_PUSH_NOISE_PREFIXES: &[&str] = &[
+    "Enumerating objects:",
+    "Counting objects:",
+    "Compressing objects:",
+    "Writing objects:",
+    "Delta compression using",
+    "Total ",
+];
+
+#[derive(Default)]
+struct GitPushLineHandler {
+    up_to_date: bool,
+    pushed_ref: Option<String>,
+}
+
+impl LineHandler for GitPushLineHandler {
+    fn should_skip(&mut self, line: &str) -> bool {
+        if line.is_empty() {
+            return true;
+        }
+        let trimmed = line.trim_start();
+        GIT_PUSH_NOISE_PREFIXES
+            .iter()
+            .any(|p| trimmed.starts_with(p))
+    }
+
+    fn observe_line(&mut self, line: &str) {
+        if line.contains("Everything up-to-date") {
+            self.up_to_date = true;
+        }
+        if self.pushed_ref.is_none() {
+            if let Some(idx) = line.find(" -> ") {
+                let after = &line[idx + 4..];
+                if let Some(dest) = after.split_whitespace().next() {
+                    self.pushed_ref = Some(dest.to_string());
+                }
+            }
+        }
+    }
+
+    fn format_summary(&self, exit_code: i32, _raw: &str) -> Option<String> {
+        if exit_code != 0 {
+            return None;
+        }
+        let summary = if self.up_to_date {
+            "ok (up-to-date)".to_string()
+        } else if let Some(dest) = &self.pushed_ref {
+            format!("ok {}", dest)
+        } else {
+            "ok".to_string()
+        };
+        Some(format!("{}\n", summary))
+    }
+}
+
 fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -1085,56 +1128,23 @@ fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
         cmd.arg(arg);
     }
 
-    let output = cmd
-        .stdin(Stdio::inherit())
-        .output()
-        .context("Failed to run git push")?;
+    let cmd_label = format!("git push {}", args.join(" "));
+    let filter = LineStreamFilter::new(GitPushLineHandler::default());
+    let result = stream::run_streaming(
+        &mut cmd,
+        StdinMode::Inherit,
+        FilterMode::Streaming(Box::new(filter)),
+    )
+    .context("Failed to run git push")?;
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let raw = format!("{}{}", stdout, stderr);
+    timer.track(
+        &cmd_label,
+        &format!("rtk {}", cmd_label),
+        &result.raw,
+        &result.filtered,
+    );
 
-    if output.status.success() {
-        let compact = if stderr.contains("Everything up-to-date") {
-            "ok (up-to-date)".to_string()
-        } else {
-            let mut push_info = String::new();
-            for line in stderr.lines() {
-                if line.contains("->") {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 3 {
-                        push_info = format!("ok {}", parts[parts.len() - 1]);
-                        break;
-                    }
-                }
-            }
-            if !push_info.is_empty() {
-                push_info
-            } else {
-                "ok".to_string()
-            }
-        };
-
-        println!("{}", compact);
-
-        timer.track(
-            &format!("git push {}", args.join(" ")),
-            &format!("rtk git push {}", args.join(" ")),
-            &raw,
-            &compact,
-        );
-    } else {
-        eprintln!("FAILED: git push");
-        if !stderr.trim().is_empty() {
-            eprintln!("{}", stderr);
-        }
-        if !stdout.trim().is_empty() {
-            eprintln!("{}", stdout);
-        }
-        return Ok(exit_code_from_output(&output, "git push"));
-    }
-
-    Ok(0)
+    Ok(result.exit_code)
 }
 
 fn run_pull(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
@@ -1416,12 +1426,16 @@ fn filter_branch_output(output: &str) -> String {
             .filter(|r| *r != &current && !local.contains(r))
             .collect();
         if !remote_only.is_empty() {
+            const MAX_REMOTE_BRANCHES: usize = CAP_WARNINGS;
             result.push(format!("  remote-only ({}):", remote_only.len()));
-            for b in remote_only.iter().take(10) {
+            for b in remote_only.iter().take(MAX_REMOTE_BRANCHES) {
                 result.push(format!("    {}", b));
             }
-            if remote_only.len() > 10 {
-                result.push(format!("    ... +{} more", remote_only.len() - 10));
+            if remote_only.len() > MAX_REMOTE_BRANCHES {
+                result.push(format!(
+                    "    ... +{} more",
+                    remote_only.len() - MAX_REMOTE_BRANCHES
+                ));
             }
         }
     }
@@ -1478,9 +1492,12 @@ fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32
 fn format_stash_message(subcommand: Option<&str>, result: &CaptureResult) -> String {
     match subcommand {
         None | Some("push") | Some("save") => {
-            // Create operations check for "no local changes"
-            if result.stdout.contains("No local changes") {
-                "ok (nothing to stash)".to_string()
+            // A successful stash collapses to "ok stashed" (the WIP ref/sha git
+            // prints isn't needed to `git stash pop`). But a no-op must NOT look
+            // like success — pass git's "No local changes to save" through so the
+            // agent can tell nothing was stashed.
+            if result.combined().contains("No local changes") {
+                "No local changes to save".to_string()
             } else {
                 "ok stashed".to_string()
             }
@@ -1836,10 +1853,10 @@ mod tests {
     }
 
     #[test]
-    fn test_build_status_command_default_includes_uall() {
+    fn test_build_status_command_default_compact() {
         let cmd = build_status_command(&[], &[]);
         let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, vec!["status", "--porcelain", "-b", "-uall"]);
+        assert_eq!(args, vec!["status", "--porcelain", "-b"]);
     }
 
     #[test]
@@ -1847,8 +1864,14 @@ mod tests {
         assert!(uses_compact_status_path(&["-b".to_string()]));
         assert!(uses_compact_status_path(&["--branch".to_string()]));
         assert!(uses_compact_status_path(&["-sb".to_string()]));
-        assert!(uses_compact_status_path(&["-s".to_string(), "-b".to_string()]));
-        assert!(uses_compact_status_path(&["--short".to_string(), "--branch".to_string()]));
+        assert!(uses_compact_status_path(&[
+            "-s".to_string(),
+            "-b".to_string()
+        ]));
+        assert!(uses_compact_status_path(&[
+            "--short".to_string(),
+            "--branch".to_string()
+        ]));
         assert!(!uses_compact_status_path(&["-s".to_string()]));
         assert!(!uses_compact_status_path(&["--short".to_string()]));
         assert!(!uses_compact_status_path(&["--porcelain".to_string()]));
@@ -1860,7 +1883,7 @@ mod tests {
         let args = vec!["--short".to_string(), "--branch".to_string()];
         let cmd = build_status_command(&args, &[]);
         let cmd_args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(cmd_args, vec!["status", "--porcelain", "-b", "-uall"]);
+        assert_eq!(cmd_args, vec!["status", "--porcelain", "-b"]);
     }
 
     #[test]
@@ -1935,134 +1958,6 @@ mod tests {
         assert!(
             !result.contains("more changes truncated"),
             "5 files × 20 lines should not exceed max_lines=500"
-        );
-    }
-
-    // ----- normalize_diff_args (issue #1215 + branch-name fix #1431) -----
-    //
-    // Tests use normalize_diff_args_impl with a mock path-existence checker so
-    // they don't depend on the real filesystem.
-
-    fn exists_mock<'a>(existing: &'a [&'a str]) -> impl Fn(&str) -> bool + 'a {
-        move |p| existing.contains(&p)
-    }
-
-    /// Baseline: `--` already present → no-op, args unchanged.
-    #[test]
-    fn test_normalize_diff_args_noop_when_separator_present() {
-        let args = vec![
-            "HEAD".to_string(),
-            "--".to_string(),
-            "src/main.rs".to_string(),
-        ];
-        assert_eq!(normalize_diff_args_impl(&args, exists_mock(&[])), args);
-    }
-
-    /// Core regression (issue #1215): clap ate `--` before a real file path.
-    /// When the path exists on disk, `--` must be re-inserted.
-    #[test]
-    fn test_normalize_diff_args_reinserts_separator_before_existing_path() {
-        let args = vec!["apps/client/frontend/src/MyComponent.tsx".to_string()];
-        let normalized = normalize_diff_args_impl(
-            &args,
-            exists_mock(&["apps/client/frontend/src/MyComponent.tsx"]),
-        );
-        assert_eq!(
-            normalized,
-            vec![
-                "--".to_string(),
-                "apps/client/frontend/src/MyComponent.tsx".to_string()
-            ],
-            "-- must be injected before an existing path"
-        );
-    }
-
-    /// Ref before path: ["HEAD", "src/foo.rs"] where src/foo.rs exists → inject after HEAD.
-    #[test]
-    fn test_normalize_diff_args_reinserts_separator_after_ref() {
-        let args = vec!["HEAD".to_string(), "src/foo.rs".to_string()];
-        let normalized = normalize_diff_args_impl(&args, exists_mock(&["src/foo.rs"]));
-        assert_eq!(
-            normalized,
-            vec![
-                "HEAD".to_string(),
-                "--".to_string(),
-                "src/foo.rs".to_string()
-            ]
-        );
-    }
-
-    /// Flags before path: ["--cached", "src/foo.rs"] where src/foo.rs exists.
-    #[test]
-    fn test_normalize_diff_args_reinserts_separator_after_flag() {
-        let args = vec!["--cached".to_string(), "src/foo.rs".to_string()];
-        let normalized = normalize_diff_args_impl(&args, exists_mock(&["src/foo.rs"]));
-        assert_eq!(
-            normalized,
-            vec![
-                "--cached".to_string(),
-                "--".to_string(),
-                "src/foo.rs".to_string()
-            ]
-        );
-    }
-
-    /// Pure flags (no paths) → no injection.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_pure_flags() {
-        let args = vec!["--stat".to_string(), "--cached".to_string()];
-        assert_eq!(normalize_diff_args_impl(&args, exists_mock(&[])), args);
-    }
-
-    /// Dotfile that exists on disk → inject `--`.
-    #[test]
-    fn test_normalize_diff_args_dotfile_is_path() {
-        let args = vec![".gitignore".to_string()];
-        let normalized = normalize_diff_args_impl(&args, exists_mock(&[".gitignore"]));
-        assert_eq!(normalized, vec!["--".to_string(), ".gitignore".to_string()]);
-    }
-
-    /// A bare ref (HEAD) that doesn't exist as a file → no injection.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_bare_ref() {
-        let args = vec!["HEAD".to_string()];
-        assert_eq!(normalize_diff_args_impl(&args, exists_mock(&[])), args);
-    }
-
-    /// Branch name with `/` that does NOT exist as a file → no injection.
-    /// Regression for issue #1431: `rtk git diff feature/user-auth` must not inject `--`.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_branch_with_slash() {
-        let args = vec!["feature/user-auth".to_string()];
-        assert_eq!(
-            normalize_diff_args_impl(&args, exists_mock(&[])),
-            args,
-            "branch names containing '/' must not trigger -- injection"
-        );
-    }
-
-    /// Range syntax with `/` → no injection.
-    /// Regression: `rtk git diff main...feature/user-auth` produced no output.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_range_with_slash() {
-        let args = vec!["main...feature/user-auth".to_string()];
-        assert_eq!(
-            normalize_diff_args_impl(&args, exists_mock(&[])),
-            args,
-            "revision ranges like main...feature/user-auth must not trigger -- injection"
-        );
-    }
-
-    /// Bare word that happens to exist as a file on disk → still no injection.
-    /// A file named "main" must not cause `--` to be injected when the user
-    /// intends `rtk git diff main` as a branch comparison.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_bare_word_even_if_file_exists() {
-        let args = vec!["main".to_string()];
-        assert_eq!(
-            normalize_diff_args_impl(&args, exists_mock(&["main"])),
-            args,
-            "bare words must never trigger -- injection even when a same-named file exists"
         );
     }
 
@@ -2488,6 +2383,52 @@ no changes added to commit (use "git add" and/or "git commit -a")
         assert!(result.contains("* main"));
     }
 
+    // --- commit output parsing ---
+
+    #[test]
+    fn test_parse_commit_output_normal() {
+        let line = "[main abc1234def] add feature";
+        assert_eq!(parse_commit_output(line), "ok abc1234");
+    }
+
+    #[test]
+    fn test_parse_commit_output_root_commit() {
+        let line = "[main (root-commit) abc1234def] initial commit";
+        assert_eq!(parse_commit_output(line), "ok abc1234");
+    }
+
+    /// Regression test: multibyte branch name must not panic (was byte-slicing before fix)
+    #[test]
+    fn test_parse_commit_output_multibyte_branch() {
+        let line = "[分支名 abc1234def] 提交消息";
+        assert_eq!(parse_commit_output(line), "ok abc1234");
+    }
+
+    /// Regression test: Thai branch name (3 bytes per char)
+    #[test]
+    fn test_parse_commit_output_thai_branch() {
+        let line = "[สาขา abc1234def] commit message";
+        assert_eq!(parse_commit_output(line), "ok abc1234");
+    }
+
+    #[test]
+    fn test_parse_commit_output_no_bracket() {
+        let line = "some other output";
+        assert_eq!(parse_commit_output(line), "ok");
+    }
+
+    #[test]
+    fn test_parse_commit_output_short_hash() {
+        // Hash shorter than 7 chars — treat as "ok" (no hash shown)
+        let line = "[main abc12] message";
+        assert_eq!(parse_commit_output(line), "ok");
+    }
+
+    #[test]
+    fn test_parse_commit_output_empty() {
+        assert_eq!(parse_commit_output(""), "ok");
+    }
+
     /// Regression test: --oneline and other user format flags must preserve all commits.
     /// Before fix, filter_log_output split on ---END--- which doesn't exist when
     /// the user specifies their own format, resulting in only 2 commits surviving.
@@ -2738,6 +2679,35 @@ no changes added to commit (use "git add" and/or "git commit -a")
     }
 
     #[test]
+    fn test_extract_detached_head_returns_line() {
+        let raw = "HEAD detached at abc1234\nnothing to commit, working tree clean\n";
+        assert_eq!(
+            extract_detached_head(raw),
+            Some("HEAD detached at abc1234".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_detached_head_on_branch_is_none() {
+        let raw = "On branch main\nnothing to commit, working tree clean\n";
+        assert!(extract_detached_head(raw).is_none());
+    }
+
+    #[test]
+    fn test_format_status_output_detached_head() {
+        let porcelain = "## HEAD (no branch)\n M src/main.rs\n";
+        let result = format_status_output_detached(porcelain, "HEAD detached at abc1234");
+        assert!(
+            result.contains("HEAD detached at abc1234"),
+            "should use explicit detached ref, got: {result}"
+        );
+        assert!(
+            !result.contains("HEAD (no branch)"),
+            "should not show opaque porcelain string, got: {result}"
+        );
+    }
+
+    #[test]
     fn test_filter_log_output_body_omission_indicator() {
         // Commit with 6 meaningful body lines: only 3 shown, must signal "+3 lines omitted"
         let body_lines = (1..=6)
@@ -2753,6 +2723,125 @@ no changes added to commit (use "git add" and/or "git commit -a")
             result.contains("+3 lines omitted"),
             "Expected '+3 lines omitted' when 6 body lines truncated to 3, got:\n{}",
             result
+        );
+    }
+
+    fn run_push_filter(input: &str, exit_code: i32) -> String {
+        use crate::core::stream::StreamFilter;
+        let mut f = LineStreamFilter::new(GitPushLineHandler::default());
+        let mut out = String::new();
+        for line in input.lines() {
+            if let Some(s) = f.feed_line(line) {
+                out.push_str(&s);
+            }
+        }
+        out.push_str(&f.flush());
+        if let Some(s) = f.on_exit(exit_code, input) {
+            out.push_str(&s);
+        }
+        out
+    }
+
+    #[test]
+    fn test_push_filter_drops_progress_phases() {
+        let input = "\
+Enumerating objects: 5, done.
+Counting objects: 100% (5/5), done.
+Delta compression using up to 8 threads
+Compressing objects: 100% (3/3), done.
+Writing objects: 100% (3/3), 312 bytes | 312.00 KiB/s, done.
+Total 3 (delta 2), reused 0 (delta 0)
+To https://github.com/foo/bar.git
+   abc1234..def5678  master -> master
+";
+        let result = run_push_filter(input, 0);
+        for prefix in GIT_PUSH_NOISE_PREFIXES {
+            assert!(
+                !result.contains(prefix),
+                "noise prefix '{}' leaked through, got: {}",
+                prefix,
+                result
+            );
+        }
+        assert!(result.contains("To https://github.com/foo/bar.git"));
+        assert!(result.contains("master -> master"));
+        assert!(result.ends_with("ok master\n"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_push_filter_up_to_date_summary() {
+        let input = "Everything up-to-date\n";
+        let result = run_push_filter(input, 0);
+        assert!(result.contains("Everything up-to-date"));
+        assert!(result.ends_with("ok (up-to-date)\n"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_push_filter_passes_remote_messages_through() {
+        let input = "\
+remote: Resolving deltas: 100% (2/2), completed with 2 local objects.
+remote: GitHub found 1 vulnerability on foo/bar's default branch (1 moderate).
+To https://github.com/foo/bar.git
+   abc1234..def5678  feature -> feature
+";
+        let result = run_push_filter(input, 0);
+        assert!(result.contains("remote: Resolving deltas"));
+        assert!(result.contains("remote: GitHub found 1 vulnerability"));
+        assert!(result.ends_with("ok feature\n"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_push_filter_no_summary_on_failure() {
+        let input = "\
+To https://github.com/foo/bar.git
+ ! [rejected]        master -> master (non-fast-forward)
+error: failed to push some refs to 'https://github.com/foo/bar.git'
+";
+        let result = run_push_filter(input, 1);
+        assert!(result.contains("[rejected]"));
+        assert!(result.contains("error: failed to push"));
+        assert!(
+            !result.contains("ok "),
+            "summary leaked on failure, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_push_filter_first_ref_wins_for_summary() {
+        let input = "\
+To https://github.com/foo/bar.git
+   abc1234..def5678  feat/a -> feat/a
+   1111111..2222222  feat/b -> feat/b
+";
+        let result = run_push_filter(input, 0);
+        assert!(result.ends_with("ok feat/a\n"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_push_filter_token_savings_on_verbose_output() {
+        let input = "\
+Enumerating objects: 142, done.
+Counting objects: 100% (142/142), done.
+Delta compression using up to 8 threads
+Compressing objects: 100% (88/88), done.
+Writing objects: 100% (104/104), 28.50 KiB | 14.25 MiB/s, done.
+Total 104 (delta 64), reused 0 (delta 0), pack-reused 0
+remote: Resolving deltas: 100% (64/64), completed with 24 local objects.
+To https://github.com/foo/bar.git
+   abc1234..def5678  master -> master
+";
+        let result = run_push_filter(input, 0);
+        let count_tokens = |s: &str| s.split_whitespace().count();
+        let input_tokens = count_tokens(input);
+        let output_tokens = count_tokens(&result);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "expected >=60% savings, got {:.1}% (in={}, out={})",
+            savings,
+            input_tokens,
+            output_tokens
         );
     }
 }
