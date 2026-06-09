@@ -226,8 +226,59 @@ impl FilterStrategy for MinimalFilter {
 
         // Normalize multiple blank lines to max 2
         let result = MULTIPLE_BLANK_LINES.replace_all(&result, "\n\n");
-        result.trim().to_string()
+
+        // For data formats (JSON, YAML, XML), compactify leading whitespace.
+        // Each 2-space indent level becomes 1 space. Preserves all content.
+        if *lang == Language::Data || *lang == Language::Unknown {
+            compactify_indent(result.trim().to_string())
+        } else {
+            result.trim().to_string()
+        }
     }
+}
+
+/// Reduce indentation in deeply-indented JSON to save tokens.
+/// Only activates when average indent level >= 4 (deeply nested JSON).
+/// Each level of indentation is halved. Content is never removed.
+fn compactify_indent(content: String) -> String {
+    // Check if this content actually has deep indentation worth compacting
+    let lines: Vec<&str> = content.lines().collect();
+    let indented_lines: Vec<usize> = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.chars().take_while(|c| c.is_whitespace()).count())
+        .collect();
+
+    if indented_lines.is_empty() {
+        return content;
+    }
+
+    let avg_indent: f64 =
+        indented_lines.iter().sum::<usize>() as f64 / indented_lines.len() as f64;
+
+    // Only compactify if average indent >= 4 (deeply nested JSON)
+    // Shallow JSON (2-space) or TOML/YAML (2-space) pass through unchanged
+    if avg_indent < 4.0 {
+        return content;
+    }
+
+    let mut out = String::with_capacity(content.len());
+    for line in &lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            out.push('\n');
+            continue;
+        }
+        let indent = line.chars().take_while(|c| c.is_whitespace()).count();
+        // Halve the indent level
+        let new_indent = indent / 2;
+        for _ in 0..new_indent {
+            out.push(' ');
+        }
+        out.push_str(trimmed);
+        out.push('\n');
+    }
+    out.trim().to_string()
 }
 
 pub struct AggressiveFilter;
@@ -454,6 +505,47 @@ mod tests {
             result.contains("/* not a comment */"),
             "Aggressive filter must not strip comment-like patterns in JSON"
         );
+    }
+
+    #[test]
+    fn test_json_compactify_indent() {
+        // Deeply indented JSON (4-space nested) should be compactified
+        let json = r#"{
+    "name": "my-app",
+    "scripts": {
+        "build": "next build",
+        "dev": "next dev"
+    },
+    "dependencies": {
+        "react": "^18.0.0",
+        "react-dom": "^18.0.0"
+    }
+}"#;
+        let filter = MinimalFilter;
+        let result = filter.filter(json, &Language::Data);
+        // All content preserved
+        assert!(result.contains("my-app"), "content must be preserved");
+        assert!(result.contains("next build"), "content must be preserved");
+        assert!(result.contains("react-dom"), "content must be preserved");
+        // Indentation reduced (original had 4-space indent, compactified should be less)
+        assert!(
+            result.len() < json.len(),
+            "compactified ({}) should be shorter than original ({})",
+            result.len(),
+            json.len()
+        );
+    }
+
+    #[test]
+    fn test_json_shallow_indent_unchanged() {
+        // Shallow JSON (2-space indent) should pass through unchanged
+        let json = r#"{
+  "name": "my-app",
+  "version": "1.0.0"
+}"#;
+        let filter = MinimalFilter;
+        let result = filter.filter(json, &Language::Data);
+        assert_eq!(result, json.trim(), "shallow JSON should not be modified");
     }
 
     #[test]
