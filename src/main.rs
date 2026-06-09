@@ -20,8 +20,8 @@ use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
-    read, summary, tree, wc_cmd,
+    clang_format_cmd, deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd,
+    ls, pipe_cmd, read, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -520,6 +520,14 @@ enum Commands {
     /// Universal format checker (prettier, black, ruff format)
     Format {
         /// Formatter arguments (auto-detects formatter from project files)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// clang-format wrapper with changed-file summaries for -i mode
+    #[command(name = "clang-format")]
+    ClangFormat {
+        /// clang-format arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2036,6 +2044,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Format { args } => format_cmd::run(&args, cli.verbose)?,
 
+        Commands::ClangFormat { args } => clang_format_cmd::run(&args, cli.verbose)?,
+
         Commands::Playwright { args } => playwright_cmd::run(&args, cli.verbose)?,
 
         Commands::Cargo { command } => match command {
@@ -2526,6 +2536,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Next { .. }
             | Commands::Lint { .. }
             | Commands::Prettier { .. }
+            | Commands::ClangFormat { .. }
             | Commands::Playwright { .. }
             | Commands::Cargo { .. }
             | Commands::Npm { .. }
@@ -3280,6 +3291,35 @@ mod tests {
                 assert!(global);
             }
             _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_clang_format_trailing_args_parse() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "clang-format",
+            "-i",
+            "--style=file",
+            "--assume-filename",
+            "virtual.cpp",
+            "src/main.cpp",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::ClangFormat { args } => {
+                assert_eq!(
+                    args,
+                    vec![
+                        "-i",
+                        "--style=file",
+                        "--assume-filename",
+                        "virtual.cpp",
+                        "src/main.cpp",
+                    ]
+                );
+            }
+            _ => panic!("Expected ClangFormat command"),
         }
     }
 }

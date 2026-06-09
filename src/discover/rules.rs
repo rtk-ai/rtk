@@ -217,6 +217,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^clang-format(\s|$)",
+        rtk_cmd: "rtk clang-format",
+        rewrite_prefixes: &["clang-format"],
+        category: "Build",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?next\s+build",
         rtk_cmd: "rtk next",
         rewrite_prefixes: &[

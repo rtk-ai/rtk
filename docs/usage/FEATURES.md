@@ -714,6 +714,19 @@ Affiche uniquement les fichiers necessitant un formatage.
 
 ---
 
+### `rtk clang-format` -- Formatage C/C++
+
+**Economies :** ~70% pour `-i`
+
+```bash
+rtk clang-format -i src/main.cpp include/app.hpp
+```
+
+En mode `-i`, affiche uniquement les fichiers modifies ou `clang-format: no changes`.
+`--files=<list>` est developpe quand la liste est lisible. Les modes hors `-i`, stdin/stdout, `--dry-run`/`-n` et `--output-replacements-xml` restent en passthrough avec le code de sortie natif. Avec `-i`, `--Werror` conserve le resume RTK tout en preservant les diagnostics natifs et le code de sortie de `clang-format`.
+
+---
+
 ### `rtk format` -- Formateur universel
 
 ```bash
@@ -779,6 +792,17 @@ Sortie JSON compressee.
 rtk prettier --check .
 rtk prettier --write src/
 ```
+
+---
+
+### `rtk clang-format` -- clang-format
+
+```bash
+rtk clang-format -i file.cpp
+rtk clang-format --dry-run --Werror file.cpp
+```
+
+`-i` resume les fichiers reellement modifies. Les diagnostics et les modes qui produisent une sortie normale passent tels quels.
 
 ---
 

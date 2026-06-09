@@ -295,6 +295,7 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "lint",
     "prettier",
     "format",
+    "clang-format",
     "playwright",
     "cargo",
     "npm",

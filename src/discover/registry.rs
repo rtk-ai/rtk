@@ -1101,6 +1101,19 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_clang_format() {
+        assert_eq!(
+            classify_command("clang-format -i src/main.cpp"),
+            Classification::Supported {
+                rtk_equivalent: "rtk clang-format",
+                category: "Build",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
     fn test_registry_covers_all_cargo_subcommands() {
         // Verify that every CargoCommand variant (Build, Test, Clippy, Check, Fmt)
         // except Other has a matching pattern in the registry
@@ -1387,6 +1400,14 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("cat src/main.rs", &[]),
             Some("rtk read src/main.rs".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_clang_format_keeps_args() {
+        assert_eq!(
+            rewrite_command_no_prefixes("clang-format -i --style=file src/main.cpp", &[]),
+            Some("rtk clang-format -i --style=file src/main.cpp".into())
         );
     }
 
