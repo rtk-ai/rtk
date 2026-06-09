@@ -69,12 +69,13 @@ pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
         println!("PATH Variables:");
         for (k, v) in &path_vars {
             if k == "PATH" {
-                // Split PATH for readability
-                let paths: Vec<&str> = v.split(':').collect();
+                // Split PATH for readability. `split_paths` is platform-aware:
+                // `:` on Unix, `;` on Windows.
+                let paths: Vec<std::path::PathBuf> = env::split_paths(v).collect();
                 println!("  PATH ({} entries):", paths.len());
                 const MAX_PATH_ENTRIES: usize = CAP_WARNINGS;
                 for p in paths.iter().take(MAX_PATH_ENTRIES) {
-                    println!("    {}", p);
+                    println!("    {}", p.display());
                 }
                 if paths.len() > MAX_PATH_ENTRIES {
                     println!("    ... +{} more", paths.len() - MAX_PATH_ENTRIES);
@@ -215,6 +216,19 @@ fn is_interesting_var(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_path_split_uses_platform_separator() {
+        // Build a PATH-like value with the platform separator (`:` on Unix,
+        // `;` on Windows), then confirm split_paths recovers both entries.
+        let entries = [PathBuf::from("/a/b"), PathBuf::from("/c/d")];
+        let joined = env::join_paths(&entries).expect("join_paths");
+        let split: Vec<PathBuf> = env::split_paths(&joined).collect();
+        assert_eq!(split.len(), 2);
+        assert_eq!(split[0], entries[0]);
+        assert_eq!(split[1], entries[1]);
+    }
 
     #[test]
     fn test_mask_value_short() {

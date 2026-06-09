@@ -362,6 +362,24 @@ pub fn tool_exists(name: &str) -> bool {
     which::which(name).is_ok()
 }
 
+/// UNIX-style commands rtk's filters delegate to that are part of the base
+/// system on Linux/macOS. On Windows they are provided by Microsoft Coreutils
+/// (`winget install Microsoft.Coreutils`), which exposes each under its standard
+/// name (`ls.exe`, `grep.exe`, …) on PATH — resolved here via `which`.
+pub const COREUTILS_TOOLS: &[&str] = &["ls", "wc", "grep", "head", "tail", "sort", "uniq", "cat"];
+
+/// Returns the subset of [`COREUTILS_TOOLS`] not found on PATH.
+///
+/// Cross-platform so it can be unit-tested everywhere, but only meaningful on
+/// Windows (callers gate the resulting guidance behind `cfg!(windows)`).
+pub fn missing_coreutils() -> Vec<&'static str> {
+    COREUTILS_TOOLS
+        .iter()
+        .copied()
+        .filter(|t| !tool_exists(t))
+        .collect()
+}
+
 /// Extract short name from AWS ARN.
 /// Example: `arn:aws:ecs:region:acct:service/cluster/name` -> `name`
 /// For simple ARNs like `arn:aws:iam::123:user/alice`, returns `alice`.
@@ -405,6 +423,19 @@ mod tests {
     #[test]
     fn test_truncate_short_string() {
         assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_missing_coreutils_is_subset() {
+        // Whatever is missing must be drawn from the known list, with no dups.
+        let missing = missing_coreutils();
+        for tool in &missing {
+            assert!(
+                COREUTILS_TOOLS.contains(tool),
+                "{tool} not in COREUTILS_TOOLS"
+            );
+        }
+        assert!(missing.len() <= COREUTILS_TOOLS.len());
     }
 
     #[test]

@@ -658,9 +658,11 @@ pub(crate) mod tests {
         assert!(result.raw.is_empty());
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn test_run_streaming_exit_code_preserved() {
-        // nosemgrep: interpreter-execution
+        // Uses `sh`; exit codes 0/1 are covered cross-platform by the
+        // `true`/`false` tests above. nosemgrep: interpreter-execution
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "exit 42"]);
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough).unwrap();
@@ -723,9 +725,10 @@ pub(crate) mod tests {
         assert_eq!(result.exit_code, 0);
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn test_run_streaming_raw_cap_at_10mb() {
-        // nosemgrep: interpreter-execution
+        // Uses `sh` + `dd`/`/dev/zero` to generate ~11 MiB. nosemgrep: interpreter-execution
         let mut cmd = Command::new("sh");
         // ~11 MiB of 80-char lines (fast: fewer lines than `yes | head -6M`)
         cmd.args([
@@ -744,9 +747,10 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn test_run_streaming_stderr_cap_at_10mb() {
-        // nosemgrep: interpreter-execution
+        // Uses `sh` + `dd`/`/dev/zero` to generate ~11 MiB. nosemgrep: interpreter-execution
         let mut cmd = Command::new("sh");
         // ~11 MiB on stderr, nothing on stdout
         cmd.args([
@@ -811,18 +815,20 @@ pub(crate) mod tests {
         assert_eq!(result.exit_code, 1);
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn test_exec_capture_stderr() {
-        // nosemgrep: interpreter-execution
+        // Uses `sh` for stderr redirection. nosemgrep: interpreter-execution
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "echo err_msg >&2"]);
         let result = exec_capture(&mut cmd).unwrap();
         assert!(result.stderr.contains("err_msg"));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn test_exec_capture_combined() {
-        // nosemgrep: interpreter-execution
+        // Uses `sh` for stderr redirection. nosemgrep: interpreter-execution
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "echo out_msg; echo err_msg >&2"]);
         let result = exec_capture(&mut cmd).unwrap();

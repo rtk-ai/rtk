@@ -1195,11 +1195,31 @@ fn run_default_mode(
     // 6. Generate user-global filters template (~/.config/rtk/filters.toml)
     generate_global_filters_template(ctx)?;
 
+    // 7. On Windows, nudge toward Coreutils so ls/wc/grep/… filters work.
+    if !dry_run {
+        warn_missing_coreutils();
+    }
+
     if !dry_run {
         println!(); // Final newline
     }
 
     Ok(())
+}
+
+/// On Windows, print a one-line hint if the UNIX-style commands rtk's filters
+/// rely on are absent. They ship with Microsoft Coreutils. No-op on Unix, where
+/// these tools are part of the base system.
+fn warn_missing_coreutils() {
+    if cfg!(windows) {
+        let missing = crate::core::utils::missing_coreutils();
+        if !missing.is_empty() {
+            println!(
+                "\n  note: {} not found on PATH — filters for these fall back to raw output.\n        Install with: winget install Microsoft.Coreutils",
+                missing.join(", ")
+            );
+        }
+    }
 }
 
 /// Migrate old hook script to new binary command.

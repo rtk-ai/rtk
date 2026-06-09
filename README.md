@@ -88,7 +88,7 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 - Linux: `rtk-x86_64-unknown-linux-musl.tar.gz` / `rtk-aarch64-unknown-linux-gnu.tar.gz`
 - Windows: `rtk-x86_64-pc-windows-msvc.zip`
 
-> **Windows users**: Extract the zip and place `rtk.exe` somewhere in your PATH (e.g. `C:\Users\<you>\.local\bin`). Run RTK from **Command Prompt**, **PowerShell**, or **Windows Terminal** — do not double-click the `.exe` (it will flash and close). For the best experience, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) where the full hook system works natively. See [Windows setup](#windows) below for details.
+> **Windows users**: Extract the zip and place `rtk.exe` somewhere in your PATH (e.g. `C:\Users\<you>\.local\bin`). Run RTK from **Command Prompt**, **PowerShell**, or **Windows Terminal** — do not double-click the `.exe` (it will flash and close). RTK is fully supported on native Windows (no WSL required); for the best filter coverage also install [Coreutils for Windows](https://github.com/microsoft/coreutils) with `winget install Microsoft.Coreutils`. See [Windows setup](#windows) below for details.
 
 ### Verify Installation
 
@@ -316,40 +316,42 @@ After install, **restart Claude Code**.
 
 ## Windows
 
-RTK works on Windows with some limitations. The auto-rewrite hook (`rtk-rewrite.sh`) requires a Unix shell, so on native Windows RTK falls back to **CLAUDE.md injection mode** — your AI assistant receives RTK instructions but commands are not rewritten automatically.
+RTK runs **natively on Windows — no WSL required**. The auto-rewrite hook is the `rtk hook claude` binary command (pure Rust), so it installs and runs the same on Windows, Linux, and macOS. Binary resolution honors PATH and PATHEXT, and commands are spawned directly (bypassing PowerShell's `ls`/`cat` aliases).
 
-### Recommended: WSL (full support)
-
-For the best experience, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) (Windows Subsystem for Linux). Inside WSL, RTK works exactly like Linux — full hook support, auto-rewrite, everything:
-
-```bash
-# Inside WSL
-curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
-rtk init -g
-```
-
-### Native Windows (limited support)
-
-On native Windows (cmd.exe / PowerShell), RTK filters work but the hook does not auto-rewrite commands:
+### Native Windows setup
 
 ```powershell
-# 1. Download and extract rtk-x86_64-pc-windows-msvc.zip from releases
-# 2. Add rtk.exe to your PATH
-# 3. Initialize (falls back to CLAUDE.md injection)
-rtk init -g
-# 4. Use rtk explicitly
-rtk cargo test
+# 1. Install RTK (or download rtk-x86_64-pc-windows-msvc.zip from releases and add rtk.exe to PATH)
+winget install Microsoft.Coreutils   # 2. recommended — enables ls/grep/wc/head/... filters
+rtk init -g                          # 3. installs the Claude Code hook (auto-rewrite)
+rtk verify                           # 4. confirms hook integrity + reports coreutils status
+rtk cargo test                       # use it
 rtk git status
 ```
 
 **Important**: Do not double-click `rtk.exe` — it is a CLI tool that prints usage and exits immediately. Always run it from a terminal (Command Prompt, PowerShell, or Windows Terminal).
 
-| Feature | WSL | Native Windows |
-|---------|-----|----------------|
-| Filters (cargo, git, etc.) | Full | Full |
-| Auto-rewrite hook | Yes | No (CLAUDE.md fallback) |
-| `rtk init -g` | Hook mode | CLAUDE.md mode |
-| `rtk gain` / analytics | Full | Full |
+### Coreutils for Windows
+
+Some RTK filters wrap UNIX-style commands (`ls`, `grep`, `wc`, `head`, `tail`, `sort`, `uniq`, `cat`). On Linux/macOS these are part of the base system; on Windows, install [Coreutils for Windows](https://github.com/microsoft/coreutils):
+
+```powershell
+winget install Microsoft.Coreutils
+```
+
+It ships each utility under its standard name (`ls.exe`, `grep.exe`, …) on PATH, which RTK resolves via the `which` crate. Filters whose engine is pure Rust (`rtk find`, `rtk read`, `rtk json`, …) work with no extra install. If a wrapped tool is missing, the corresponding filter falls back to raw command output — `rtk verify` reports which tools are present.
+
+### WSL
+
+[WSL](https://learn.microsoft.com/en-us/windows/wsl/install) is still fully supported — inside WSL, RTK behaves exactly like Linux. It is now an option, not a requirement.
+
+| Feature | Native Windows | WSL | Linux/macOS |
+|---------|----------------|-----|-------------|
+| Filters (cargo, git, etc.) | Full | Full | Full |
+| Auto-rewrite hook (`rtk hook claude`) | Full | Full | Full |
+| `rtk init -g` | Hook mode | Hook mode | Hook mode |
+| UNIX-style filters (ls, grep, wc) | With Coreutils | Built-in | Built-in |
+| `rtk gain` / analytics | Full | Full | Full |
 
 ## Supported AI Tools
 

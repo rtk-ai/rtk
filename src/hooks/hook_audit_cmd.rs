@@ -1,19 +1,26 @@
 //! Audits hook activity logs to show what commands were rewritten and when.
 
+use crate::core::constants::RTK_DATA_DIR;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Default log file location (aligned with hook's $HOME/.local/share/rtk/).
+/// Default log file location.
+///
+/// `RTK_AUDIT_DIR` overrides everything. Otherwise the log lives under the
+/// platform data dir (`dirs::data_local_dir()`), matching `tracking.rs` and
+/// `tee.rs` — i.e. `~/.local/share/rtk/` on Linux, `%LOCALAPPDATA%\rtk\` on
+/// Windows. (The legacy bash hook used `$HOME/.local/share/rtk/`; the modern
+/// default install registers the `rtk hook claude` binary instead, so this
+/// `dirs`-based path is the cross-platform source of truth.)
 fn default_log_path() -> PathBuf {
     if let Ok(dir) = std::env::var("RTK_AUDIT_DIR") {
-        PathBuf::from(dir).join("hook-audit.log")
-    } else {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        PathBuf::from(home)
-            .join(".local/share/rtk")
-            .join("hook-audit.log")
+        return PathBuf::from(dir).join("hook-audit.log");
     }
+    dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(RTK_DATA_DIR)
+        .join("hook-audit.log")
 }
 
 /// A single parsed audit log entry.
@@ -199,6 +206,24 @@ mod tests {
     fn test_parse_line_invalid() {
         assert!(parse_line("garbage").is_none());
         assert!(parse_line("").is_none());
+    }
+
+    #[test]
+    fn test_default_log_path_is_cross_platform() {
+        // RTK_AUDIT_DIR override wins and is used verbatim.
+        let tmp = std::env::temp_dir().join("rtk-audit-test");
+        std::env::set_var("RTK_AUDIT_DIR", &tmp);
+        let overridden = default_log_path();
+        assert_eq!(overridden, tmp.join("hook-audit.log"));
+        std::env::remove_var("RTK_AUDIT_DIR");
+
+        // Default path lives under the platform data dir, never a hardcoded
+        // Unix path. It must end in `rtk/hook-audit.log` and not start with /tmp.
+        let default = default_log_path();
+        assert!(
+            default.ends_with("rtk/hook-audit.log") || default.ends_with("rtk\\hook-audit.log")
+        );
+        assert!(!default.starts_with("/tmp"));
     }
 
     #[test]

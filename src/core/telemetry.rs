@@ -207,7 +207,7 @@ fn random_salt() -> String {
 
 pub fn salt_file_path() -> PathBuf {
     dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .unwrap_or_else(std::env::temp_dir)
         .join("rtk")
         .join(".device_salt")
 }
@@ -436,7 +436,7 @@ fn install_method_from_path(path: &str) -> &'static str {
 
 pub fn telemetry_marker_path() -> PathBuf {
     let data_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .unwrap_or_else(std::env::temp_dir)
         .join(RTK_DATA_DIR);
     let _ = std::fs::create_dir_all(&data_dir);
     data_dir.join(".telemetry_last_ping")
