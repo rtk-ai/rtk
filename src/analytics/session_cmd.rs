@@ -80,11 +80,11 @@ pub fn run(_verbose: u8) -> Result<()> {
     let provider = ClaudeProvider;
     let sessions = provider
         .discover_sessions(None, Some(30))
-        .context("Failed to discover Claude Code sessions")?;
+        .context("Failed to discover Claude Code or Codex sessions")?;
 
     if sessions.is_empty() {
-        println!("No Claude Code sessions found in the last 30 days.");
-        println!("Make sure Claude Code has been used at least once.");
+        println!("No Claude Code or Codex sessions found in the last 30 days.");
+        println!("Make sure Claude Code or Codex has been used at least once.");
         return Ok(());
     }
 

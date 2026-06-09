@@ -118,65 +118,64 @@ impl ClaudeProvider {
         (text.len(), preview)
     }
 
-    fn discover_sessions_in_projects_dir(
-        projects_dir: &Path,
-        project_filter: Option<&str>,
-        since_days: Option<u64>,
-    ) -> Result<Vec<PathBuf>> {
-        if !projects_dir
-            .try_exists()
-            .with_context(|| format!("failed to access {}", projects_dir.display()))?
-        {
-            return Ok(Vec::new());
-        }
-
-        let cutoff = since_days.map(|days| {
+    fn cutoff_since_days(since_days: Option<u64>) -> Option<SystemTime> {
+        since_days.map(|days| {
             SystemTime::now()
                 .checked_sub(Duration::from_secs(days * 86400))
                 .unwrap_or(SystemTime::UNIX_EPOCH)
-        });
+        })
+    }
 
+    fn discover_sessions_from_roots(
+        projects_dir: &Path,
+        codex_roots: &[PathBuf],
+        project_filter: Option<&str>,
+        since_days: Option<u64>,
+    ) -> Result<Vec<PathBuf>> {
+        let cutoff = Self::cutoff_since_days(since_days);
         let mut sessions = Vec::new();
-        let mut found_any_root = true;
 
-        // List project directories
-        let entries = fs::read_dir(projects_dir)
-            .with_context(|| format!("failed to read {}", projects_dir.display()))?;
+        if projects_dir
+            .try_exists()
+            .with_context(|| format!("failed to access {}", projects_dir.display()))?
+        {
+            let entries = fs::read_dir(projects_dir)
+                .with_context(|| format!("failed to read {}", projects_dir.display()))?;
 
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-
-            if let Some(filter) = project_filter {
-                let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !dir_name.contains(filter) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
                     continue;
                 }
-            }
 
-            for walk_entry in WalkDir::new(&path)
-                .follow_links(false)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
-                let file_path = walk_entry.path();
-                if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                    continue;
+                if let Some(filter) = project_filter {
+                    let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if !dir_name.contains(filter) {
+                        continue;
+                    }
                 }
-                if !Self::matches_cutoff(file_path, cutoff) {
-                    continue;
+
+                for walk_entry in WalkDir::new(&path)
+                    .follow_links(false)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                {
+                    let file_path = walk_entry.path();
+                    if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                        continue;
+                    }
+                    if !Self::matches_cutoff(file_path, cutoff) {
+                        continue;
+                    }
+                    sessions.push(file_path.to_path_buf());
                 }
-                sessions.push(file_path.to_path_buf());
             }
         }
 
-        for root in Self::codex_session_roots()? {
+        for root in codex_roots {
             if !root.exists() {
                 continue;
             }
-            found_any_root = true;
 
             for walk_entry in WalkDir::new(&root)
                 .follow_links(false)
@@ -199,13 +198,20 @@ impl ClaudeProvider {
             }
         }
 
-        if !found_any_root {
-            anyhow::bail!(
-                "No supported session directories found under ~/.claude/projects or ~/.codex/sessions.\nMake sure Claude Code or Codex has been used at least once."
-            );
-        }
-
         Ok(sessions)
+    }
+
+    fn discover_sessions_in_projects_dir(
+        projects_dir: &Path,
+        project_filter: Option<&str>,
+        since_days: Option<u64>,
+    ) -> Result<Vec<PathBuf>> {
+        Self::discover_sessions_from_roots(
+            projects_dir,
+            &Self::codex_session_roots()?,
+            project_filter,
+            since_days,
+        )
     }
 
     /// Encode a filesystem path to Claude Code's directory name format.
@@ -582,14 +588,38 @@ mod tests {
         let temp_home = tempfile::tempdir().unwrap();
         let missing_projects_dir = temp_home.path().join(CLAUDE_DIR).join("projects");
 
-        let sessions = ClaudeProvider::discover_sessions_in_projects_dir(
+        let sessions = ClaudeProvider::discover_sessions_from_roots(
             &missing_projects_dir,
+            &[],
             None,
             Some(30),
         )
         .unwrap();
 
         assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn test_discover_sessions_scans_codex_when_claude_projects_missing() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let missing_projects_dir = temp_home.path().join(CLAUDE_DIR).join("projects");
+        let codex_root = temp_home.path().join(".codex/sessions/2026/06/09");
+        std::fs::create_dir_all(&codex_root).unwrap();
+        std::fs::write(
+            codex_root.join("rollout.jsonl"),
+            r#"{"type":"session_meta","payload":{"id":"abc","cwd":"/tmp/codex-only"}}"#,
+        )
+        .unwrap();
+
+        let sessions = ClaudeProvider::discover_sessions_from_roots(
+            &missing_projects_dir,
+            &[codex_root],
+            Some("codex-only"),
+            Some(30),
+        )
+        .unwrap();
+
+        assert_eq!(sessions.len(), 1);
     }
 
     #[test]
@@ -602,8 +632,9 @@ mod tests {
         std::fs::write(matching_project.join("matching.jsonl"), "").unwrap();
         std::fs::write(other_project.join("other.jsonl"), "").unwrap();
 
-        let sessions = ClaudeProvider::discover_sessions_in_projects_dir(
+        let sessions = ClaudeProvider::discover_sessions_from_roots(
             projects_dir.path(),
+            &[],
             Some("rtk"),
             None,
         )
@@ -621,7 +652,7 @@ mod tests {
         let projects_file = tempfile::NamedTempFile::new().unwrap();
 
         let err =
-            ClaudeProvider::discover_sessions_in_projects_dir(projects_file.path(), None, None)
+            ClaudeProvider::discover_sessions_from_roots(projects_file.path(), &[], None, None)
                 .unwrap_err();
 
         assert!(err.to_string().contains("failed to read"));
