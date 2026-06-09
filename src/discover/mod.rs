@@ -56,11 +56,10 @@ pub fn run(
     } else if let Some(p) = project {
         Some(p.to_string())
     } else {
-        // Default: current working directory
-        let cwd = std::env::current_dir()?;
-        let cwd_str = cwd.to_string_lossy().to_string();
-        let encoded = ClaudeProvider::encode_project_path(&cwd_str);
-        Some(encoded)
+        // Default: scan all projects. Encoding the CWD as a Claude slug
+        // can fail on path patterns with symlinks, case differences, or
+        // encoding mismatches — use None to match rtk session behavior.
+        None
     };
 
     let sessions = provider.discover_sessions(project_filter.as_deref(), Some(since_days))?;
