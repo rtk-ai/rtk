@@ -54,7 +54,7 @@ pub fn run(
         .or_else(|_| {
             let mut grep_cmd = resolved_command("grep");
             // When we fall back to grep, include all args, not just -rnHZ.
-            grep_cmd.args(["-rnHZ", pattern, path]).args(extra_args);
+            grep_cmd.args(["-rnHEZ", &rg_pattern, path]).args(extra_args);
             exec_capture(&mut grep_cmd)
         })
         .context("grep/rg failed")?;
