@@ -303,9 +303,10 @@ enum Commands {
     /// Compact grep - strips whitespace, truncates, groups by file
     Grep {
         /// Pattern to search
+        #[arg(allow_hyphen_values = true)]
         pattern: String,
         /// Path to search in
-        #[arg(default_value = ".")]
+        #[arg(default_value = ".", allow_hyphen_values = true)]
         path: String,
         /// Max line length
         #[arg(short = 'l', long, default_value = "80")]
@@ -3013,6 +3014,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_grep_clap_accepts_leading_search_flags() {
+        let result = Cli::try_parse_from(["rtk", "grep", "-n", "--fixed-strings", "needle", "src"]);
+        assert!(
+            result.is_ok(),
+            "grep should accept ripgrep flags before pattern/path"
+        );
+    }
+
+    #[test]
+    fn test_grep_clap_accepts_leading_search_flag_with_value() {
+        let result = Cli::try_parse_from(["rtk", "grep", "-A", "3", "needle", "src"]);
+        assert!(
+            result.is_ok(),
+            "grep should accept ripgrep flags with values before pattern/path"
+        );
     }
 
     #[test]

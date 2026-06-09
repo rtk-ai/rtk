@@ -20,13 +20,14 @@ pub fn run(
     verbose: u8,
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let args = normalize_leading_search_flags(pattern, path, extra_args);
 
     if verbose > 0 {
-        eprintln!("grep: '{}' in {}", pattern, path);
+        eprintln!("grep: '{}' in {}", args.pattern, args.path);
     }
 
     // Fix: convert BRE alternation \| → | for rg (which uses PCRE-style regex)
-    let rg_pattern = pattern.replace(r"\|", "|");
+    let rg_pattern = args.pattern.replace(r"\|", "|");
 
     let mut rg_cmd = resolved_command("rg");
     // --no-ignore-vcs: match grep -r behavior (don't skip .gitignore'd files).
@@ -36,40 +37,45 @@ pub fn run(
     // -H: always emit the filename.
     // -0: NUL-separate filename. Allows the parser to disambiguate filenames or
     // content containing `:digits:` patterns (issue #1436).
-    rg_cmd.args(["-nH0", "--no-heading", "--no-ignore-vcs", &rg_pattern, path]);
+    rg_cmd.args(["-nH0", "--no-heading", "--no-ignore-vcs"]);
 
     if let Some(ft) = file_type {
         rg_cmd.arg("--type").arg(ft);
     }
 
-    for arg in extra_args {
-        // Fix: skip grep-ism -r flag (rg is recursive by default; rg -r means --replace)
-        if arg == "-r" || arg == "--recursive" {
-            continue;
-        }
+    for arg in normalize_rg_extra_args(&args.extra_args) {
         rg_cmd.arg(arg);
     }
+    rg_cmd.args([&rg_pattern, &args.path]);
 
     let result = exec_capture(&mut rg_cmd)
         .or_else(|_| {
             let mut grep_cmd = resolved_command("grep");
             // When we fall back to grep, include all args, not just -rnHZ.
-            grep_cmd.args(["-rnHZ", pattern, path]).args(extra_args);
+            grep_cmd
+                .arg("-rnHZ")
+                .args(&args.extra_args)
+                .args([&args.pattern, &args.path]);
             exec_capture(&mut grep_cmd)
         })
         .context("grep/rg failed")?;
 
     // Passthrough output flags that produce output that is already small.
-    if has_format_flag(extra_args) {
+    if has_format_flag(&args.extra_args) {
         print!("{}", result.stdout);
         if !result.stderr.is_empty() {
             eprint!("{}", result.stderr.trim());
         }
 
-        let args_display = if extra_args.is_empty() {
-            format!("'{}' {}", pattern, path)
+        let args_display = if args.extra_args.is_empty() {
+            format!("'{}' {}", args.pattern, args.path)
         } else {
-            format!("{} '{}' {}", extra_args.join(" "), pattern, path)
+            format!(
+                "{} '{}' {}",
+                args.extra_args.join(" "),
+                args.pattern,
+                args.path
+            )
         };
 
         timer.track_passthrough(
@@ -87,10 +93,10 @@ pub fn run(
         if exit_code == 2 && !result.stderr.trim().is_empty() {
             eprintln!("{}", result.stderr.trim());
         }
-        let msg = format!("0 matches for '{}'", pattern);
+        let msg = format!("0 matches for '{}'", args.pattern);
         println!("{}", msg);
         timer.track(
-            &format!("grep -rn '{}' {}", pattern, path),
+            &format!("grep -rn '{}' {}", args.pattern, args.path),
             "rtk grep",
             &raw_output,
             &msg,
@@ -114,7 +120,7 @@ pub fn run(
         let Some((file, line_num, content)) = parse_match_line(line) else {
             continue;
         };
-        let cleaned = clean_line(content, max_line_len, context_re.as_ref(), pattern);
+        let cleaned = clean_line(content, max_line_len, context_re.as_ref(), &args.pattern);
         by_file.entry(file).or_default().push((line_num, cleaned));
     }
 
@@ -151,13 +157,137 @@ pub fn run(
 
     print!("{}", rtk_output);
     timer.track(
-        &format!("grep -rn '{}' {}", pattern, path),
+        &format!("grep -rn '{}' {}", args.pattern, args.path),
         "rtk grep",
         &raw_output,
         &rtk_output,
     );
 
     Ok(exit_code)
+}
+
+struct NormalizedGrepArgs {
+    pattern: String,
+    path: String,
+    extra_args: Vec<String>,
+}
+
+fn normalize_leading_search_flags(
+    pattern: &str,
+    path: &str,
+    extra_args: &[String],
+) -> NormalizedGrepArgs {
+    if !pattern.starts_with('-') {
+        return NormalizedGrepArgs {
+            pattern: pattern.to_string(),
+            path: path.to_string(),
+            extra_args: extra_args.to_vec(),
+        };
+    }
+
+    let mut tokens = Vec::with_capacity(extra_args.len() + 2);
+    tokens.push(pattern.to_string());
+    tokens.push(path.to_string());
+    tokens.extend(extra_args.iter().cloned());
+
+    let mut normalized_extra = Vec::new();
+    let mut positionals = Vec::new();
+    let mut i = 0;
+
+    while i < tokens.len() {
+        let token = &tokens[i];
+        if token == "--" {
+            positionals.extend(tokens[i + 1..].iter().cloned());
+            break;
+        }
+
+        if positionals.is_empty() && is_search_flag(token) {
+            normalized_extra.push(token.clone());
+            if search_flag_takes_value(token) && i + 1 < tokens.len() {
+                i += 1;
+                normalized_extra.push(tokens[i].clone());
+            }
+        } else {
+            positionals.push(token.clone());
+        }
+        i += 1;
+    }
+
+    let normalized_pattern = positionals.first().cloned().unwrap_or_default();
+    let normalized_path = positionals.get(1).cloned().unwrap_or_else(|| ".".to_string());
+    normalized_extra.extend(positionals.into_iter().skip(2));
+
+    NormalizedGrepArgs {
+        pattern: normalized_pattern,
+        path: normalized_path,
+        extra_args: normalized_extra,
+    }
+}
+
+fn is_search_flag(arg: &str) -> bool {
+    arg.starts_with('-') && arg != "-"
+}
+
+fn search_flag_takes_value(arg: &str) -> bool {
+    let flag = arg.split_once('=').map(|(flag, _)| flag).unwrap_or(arg);
+    !arg.contains('=')
+        && matches!(
+            flag,
+            "-A" | "--after-context"
+                | "-B"
+                | "--before-context"
+                | "-C"
+                | "--context"
+                | "-e"
+                | "--regexp"
+                | "-g"
+                | "--glob"
+                | "-t"
+                | "--type"
+                | "-T"
+                | "--type-not"
+        )
+}
+
+fn normalize_rg_extra_args(extra_args: &[String]) -> Vec<String> {
+    extra_args
+        .iter()
+        .filter_map(|arg| normalize_rg_extra_arg(arg))
+        .collect()
+}
+
+fn normalize_rg_extra_arg(arg: &str) -> Option<String> {
+    match arg {
+        "-r" | "--recursive" | "-n" | "--line-number" | "-E" | "--extended-regexp" => None,
+        _ => match normalize_short_grep_cluster(arg) {
+            Some(normalized) => normalized,
+            None => Some(arg.to_string()),
+        },
+    }
+}
+
+fn normalize_short_grep_cluster(arg: &str) -> Option<Option<String>> {
+    if !arg.starts_with('-') || arg.starts_with("--") || arg.len() <= 2 {
+        return None;
+    }
+
+    let mut kept = String::from("-");
+    let mut changed = false;
+
+    for flag in arg[1..].chars() {
+        match flag {
+            'r' | 'n' | 'E' => changed = true,
+            _ => kept.push(flag),
+        }
+    }
+
+    if !changed {
+        None
+    } else if kept == "-" {
+        Some(None)
+    } else {
+        Some(Some(kept))
+    }
 }
 
 /// Parses a single rg/grep match line of the form `file\0line_number:content`.
@@ -288,6 +418,51 @@ mod tests {
         // This is a compile-time test - if it compiles, the signature is correct
         let _extra: Vec<String> = vec!["-i".to_string(), "-A".to_string(), "3".to_string()];
         // No need to actually run - we're verifying the parameter exists
+    }
+
+    #[test]
+    fn test_normalize_leading_boolean_search_flag() {
+        let args = normalize_leading_search_flags(
+            "--fixed-strings",
+            "needle",
+            &["src".to_string()],
+        );
+        assert_eq!(args.pattern, "needle");
+        assert_eq!(args.path, "src");
+        assert_eq!(args.extra_args, vec!["--fixed-strings"]);
+    }
+
+    #[test]
+    fn test_normalize_leading_search_flag_with_value() {
+        let args = normalize_leading_search_flags("-A", "3", &["needle".into(), "src".into()]);
+        assert_eq!(args.pattern, "needle");
+        assert_eq!(args.path, "src");
+        assert_eq!(args.extra_args, vec!["-A", "3"]);
+    }
+
+    #[test]
+    fn test_normalize_keeps_trailing_search_flags() {
+        let args =
+            normalize_leading_search_flags("needle", "src", &["--fixed-strings".to_string()]);
+        assert_eq!(args.pattern, "needle");
+        assert_eq!(args.path, "src");
+        assert_eq!(args.extra_args, vec!["--fixed-strings"]);
+    }
+
+    #[test]
+    fn test_normalize_rg_extra_args_strips_grep_compat_flags() {
+        let args = normalize_rg_extra_args(&[
+            "-rn".to_string(),
+            "-rnE".to_string(),
+            "-rni".to_string(),
+            "--recursive".to_string(),
+            "--line-number".to_string(),
+            "--extended-regexp".to_string(),
+            "-A".to_string(),
+            "2".to_string(),
+        ]);
+
+        assert_eq!(args, vec!["-i", "-A", "2"]);
     }
 
     #[test]
