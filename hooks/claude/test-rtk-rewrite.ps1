@@ -237,10 +237,11 @@ Test-Rewrite "npx prisma migrate" "npx prisma migrate" "rtk prisma migrate"
 
 Write-Host ""
 
-# ---- SECTION 5: Already using rtk (pass through) ----
-Write-Host "--- Already using rtk (pass through) ---" -ForegroundColor Yellow
-Test-Rewrite "rtk git status (already using rtk)" "rtk git status" "rtk git status"
-Test-Rewrite "rtk cargo test (already using rtk)" "rtk cargo test" "rtk cargo test"
+# ---- SECTION 5: Already using rtk (ignored prefix — no rewrite) ----
+Write-Host "--- Already using rtk (ignored prefix) ---" -ForegroundColor Yellow
+# "rtk " is in IGNORED_PREFIXES, so the hook correctly returns no rewrite.
+Test-Rewrite "rtk git status (ignored prefix)" "rtk git status" ""
+Test-Rewrite "rtk cargo test (ignored prefix)" "rtk cargo test" ""
 
 Write-Host ""
 
@@ -387,7 +388,8 @@ Write-Host "--- npm/npx patterns ---" -ForegroundColor Yellow
 Test-Rewrite "npx jest" "npx jest" "rtk jest"
 Test-Rewrite "npx eslint" "npx eslint" "rtk lint"
 Test-Rewrite "npm run build" "npm run build" "rtk npm run build"
-Test-Rewrite "npm test" "npm test" "rtk npm test"
+# "npm test" is not in the rewrite rules (only npm run|exec|run-script are matched).
+Test-Rewrite "npm test (bare, no rewrite)" "npm test" ""
 
 Write-Host ""
 

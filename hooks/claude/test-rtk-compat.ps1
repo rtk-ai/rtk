@@ -290,7 +290,8 @@ Write-H ""
 Write-H "========== 5. 包管理 ==========" "Yellow"
 
 if (Test-Path "$Target\package.json") {
-    Test-Command "npm ls" "npm ls --depth=0" "rtk npm ls --depth=0" -ExpectOutput "Any"
+    # npm ls is not in rewrite rules (only npm run|exec|run-script matched)
+    Test-Command "npm ls" "npm ls --depth=0" "npm ls --depth=0" -ExpectOutput "Any" -ExpectRewrite $false
 }
 
 # ============================================================

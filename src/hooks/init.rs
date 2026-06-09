@@ -1089,22 +1089,42 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result
         .as_array_mut()
         .context("PreToolUse value is not an array")?;
 
-    pre_tool_use.push(serde_json::json!({
-        "matcher": "Bash",
-        "hooks": [{
-            "type": "command",
-            "command": hook_command,
-            "timeout": 10
-        }]
-    }));
-    pre_tool_use.push(serde_json::json!({
-        "matcher": "PowerShell",
-        "hooks": [{
-            "type": "command",
-            "command": hook_command,
-            "timeout": 10
-        }]
-    }));
+    // Collect existing matchers to avoid duplicates
+    let existing_matchers: Vec<String> = pre_tool_use
+        .iter()
+        .filter_map(|e| e.get("matcher").and_then(|m| m.as_str()).map(String::from))
+        .collect();
+
+    let entries: &[(&str, u64)] = &[("Bash", 10), ("PowerShell", 10)];
+
+    for &(matcher, timeout) in entries {
+        if existing_matchers.contains(&matcher.to_string()) {
+            // Update existing entry's command and timeout
+            for entry in pre_tool_use.iter_mut() {
+                if entry.get("matcher").and_then(|m| m.as_str()) == Some(matcher) {
+                    if let Some(hooks_arr) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                        for hook in hooks_arr.iter_mut() {
+                            if let Some(cmd) = hook.get_mut("command") {
+                                *cmd = serde_json::json!(hook_command);
+                            }
+                            if let Some(t) = hook.get_mut("timeout") {
+                                *t = serde_json::json!(timeout);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            pre_tool_use.push(serde_json::json!({
+                "matcher": matcher,
+                "hooks": [{
+                    "type": "command",
+                    "command": hook_command,
+                    "timeout": timeout
+                }]
+            }));
+        }
+    }
     Ok(())
 }
 
@@ -5449,10 +5469,18 @@ mod tests {
             .is_some());
 
         let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre_tool_use.len(), 1);
+        // insert_hook_entry adds both Bash and PowerShell matchers
+        assert_eq!(pre_tool_use.len(), 2);
 
-        let command = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
-        assert_eq!(command, hook_command);
+        // Verify Bash matcher
+        assert_eq!(pre_tool_use[0]["matcher"], "Bash");
+        let bash_cmd = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(bash_cmd, hook_command);
+
+        // Verify PowerShell matcher
+        assert_eq!(pre_tool_use[1]["matcher"], "PowerShell");
+        let ps_cmd = pre_tool_use[1]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(ps_cmd, hook_command);
     }
 
     #[test]
@@ -5473,15 +5501,18 @@ mod tests {
         insert_hook_entry(&mut json_content, hook_command).unwrap();
 
         let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre_tool_use.len(), 2); // Should have both hooks
+        // With dedup: existing Bash entry updated + new PowerShell = 2
+        assert_eq!(pre_tool_use.len(), 2);
 
-        // Check first hook is preserved
-        let first_command = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
-        assert_eq!(first_command, "/some/other/hook.sh");
+        // Existing Bash entry should have its command updated
+        assert_eq!(pre_tool_use[0]["matcher"], "Bash");
+        let bash_cmd = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(bash_cmd, hook_command);
 
-        // Check second hook is RTK
-        let second_command = pre_tool_use[1]["hooks"][0]["command"].as_str().unwrap();
-        assert_eq!(second_command, hook_command);
+        // PowerShell entry should be added
+        assert_eq!(pre_tool_use[1]["matcher"], "PowerShell");
+        let ps_cmd = pre_tool_use[1]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(ps_cmd, hook_command);
     }
 
     #[test]
@@ -6050,8 +6081,12 @@ mod tests {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
 
             let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
+            // With Bash + PowerShell matchers, the hook command appears twice
             let count = settings.matches(CLAUDE_HOOK_COMMAND).count();
-            assert_eq!(count, 1, "hook command must appear exactly once");
+            assert_eq!(
+                count, 2,
+                "hook command must appear once per matcher (Bash + PowerShell)"
+            );
         });
     }
 

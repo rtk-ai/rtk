@@ -346,77 +346,76 @@ pub fn run(
     rg_cmd.arg("--");
     rg_cmd.args(&paths);
 
-    let result = exec_capture(&mut rg_cmd)
-        .or_else(|_| {
-            // rg unavailable: fall back to system grep with the original,
-            // untranslated patterns (grep interprets BRE natively).
-            let mut grep_cmd = resolved_command("grep");
-            // Fall back to grep when rg is not available.
-            // 1. Filter out rg-specific flags (--glob, --type, etc.)
-            //    that GNU grep does not understand.
-            // 2. Convert rg long-form flags to grep short-form equivalents
-            //    (--files-with-matches → -l, --count → -c, etc.)
-            let mut grep_safe_args: Vec<String> = Vec::new();
-            let mut skip_next = false;
-            for arg in &extra_args {
-                if skip_next {
-                    skip_next = false;
-                    continue;
-                }
-                let s = arg.as_str();
-                let rg_value_flag = matches!(
-                    s,
-                    "--glob"
-                        | "--type"
-                        | "--type-add"
-                        | "--type-not"
-                        | "--iglob"
-                        | "--sort"
-                        | "--sortr"
-                        | "--max-depth"
-                        | "--max-filesize"
-                );
-                let rg_bool_flag = matches!(
-                    s,
-                    "--type-clear"
-                        | "--files"
-                        | "--no-ignore"
-                        | "--no-ignore-parent"
-                        | "--no-ignore-vcs"
-                        | "--no-ignore-dot"
-                        | "--hidden"
-                        | "--follow"
-                        | "--trim"
-                        | "--passthru"
-                );
-                if rg_value_flag
-                    || rg_bool_flag
-                    || s.starts_with("--type-")
-                    || s.starts_with("--glob=")
-                {
-                    skip_next = rg_value_flag;
-                    continue;
-                }
-                // Convert rg long-form flags to grep short-form
-                let converted = match s {
-                    "--files-with-matches" => "-l",
-                    "--files-without-match" => "-L",
-                    "--only-matching" => "-o",
-                    "--null" => "-Z",
-                    "--count" => "-c",
-                    _ => s,
-                };
-                grep_safe_args.push(converted.to_string());
+    let result = (|| -> Result<_> {
+        let rg_result = exec_capture(&mut rg_cmd).ok();
+        if let Some(r) = rg_result {
+            if r.exit_code == 0 {
+                return Ok(r);
             }
-            grep_cmd.args(&grep_safe_args);
-            for p in &patterns {
-                grep_cmd.args(["-e", p]);
+        }
+        // rg failed (not found or non-zero exit) — fall back to grep.
+        let mut grep_cmd = resolved_command("grep");
+        // Fall back to grep with the original, untranslated patterns. Filter
+        // out rg-specific flags and convert compatible long-form output flags.
+        let mut grep_safe_args: Vec<String> = Vec::new();
+        let mut skip_next = false;
+        for arg in &extra_args {
+            if skip_next {
+                skip_next = false;
+                continue;
             }
-            grep_cmd.args(["-rnHZ", "--"]);
-            grep_cmd.args(&paths);
-            exec_capture(&mut grep_cmd)
-        })
-        .context("grep/rg failed")?;
+            let s = arg.as_str();
+            let rg_value_flag = matches!(
+                s,
+                "--glob"
+                    | "--type"
+                    | "--type-add"
+                    | "--type-not"
+                    | "--iglob"
+                    | "--sort"
+                    | "--sortr"
+                    | "--max-depth"
+                    | "--max-filesize"
+            );
+            let rg_bool_flag = matches!(
+                s,
+                "--type-clear"
+                    | "--files"
+                    | "--no-ignore"
+                    | "--no-ignore-parent"
+                    | "--no-ignore-vcs"
+                    | "--no-ignore-dot"
+                    | "--hidden"
+                    | "--follow"
+                    | "--trim"
+                    | "--passthru"
+            );
+            if rg_value_flag
+                || rg_bool_flag
+                || s.starts_with("--type-")
+                || s.starts_with("--glob=")
+            {
+                skip_next = rg_value_flag;
+                continue;
+            }
+            let converted = match s {
+                "--files-with-matches" => "-l",
+                "--files-without-match" => "-L",
+                "--only-matching" => "-o",
+                "--null" => "-Z",
+                "--count" => "-c",
+                _ => s,
+            };
+            grep_safe_args.push(converted.to_string());
+        }
+        grep_cmd.args(&grep_safe_args);
+        for p in &patterns {
+            grep_cmd.args(["-e", p]);
+        }
+        grep_cmd.args(["-rnHZ", "--"]);
+        grep_cmd.args(&paths);
+        exec_capture(&mut grep_cmd).context("grep/rg failed")
+    })()?;
 
     // Format flags (--count, --files-with-matches, etc.) return structured
     // output that is compact per line but can accumulate to 600KB+ across

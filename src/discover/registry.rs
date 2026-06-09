@@ -810,8 +810,19 @@ fn rewrite_segment_inner(
         _ => return None,
     };
 
-    // Find the matching rule (rtk_cmd values are unique across all rules)
-    let rule = RULES.iter().find(|r| r.rtk_cmd == rtk_equivalent)?;
+    // Find the matching rule whose rewrite_prefixes match the command.
+    // Multiple rules may share the same rtk_cmd (e.g. "rtk read" for cat and Get-Content),
+    // so we prefer the one whose prefix actually matches. Fall back to first rtk_cmd match
+    // for rules with special handling (e.g. golangci-lint with flags before subcommand).
+    let rule = RULES
+        .iter()
+        .find(|r| {
+            r.rtk_cmd == rtk_equivalent
+                && r.rewrite_prefixes
+                    .iter()
+                    .any(|p| strip_word_prefix(cmd_part, p).is_some())
+        })
+        .or_else(|| RULES.iter().find(|r| r.rtk_cmd == rtk_equivalent))?;
 
     if let Some(parts) = parse_golangci_run_parts(cmd_part) {
         let rewritten = if parts.global_segment.is_empty() {
@@ -884,7 +895,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -897,7 +908,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -910,7 +921,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -931,7 +942,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -944,7 +955,7 @@ mod tests {
                 rtk_equivalent: "rtk cargo",
                 category: "Cargo",
                 estimated_savings_pct: 90.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -957,7 +968,7 @@ mod tests {
                 rtk_equivalent: "rtk tsc",
                 category: "Build",
                 estimated_savings_pct: 83.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -970,7 +981,7 @@ mod tests {
                 rtk_equivalent: "rtk read",
                 category: "Files",
                 estimated_savings_pct: 60.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -1030,7 +1041,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -1043,7 +1054,7 @@ mod tests {
                 rtk_equivalent: "rtk docker",
                 category: "Infra",
                 estimated_savings_pct: 85.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -1056,7 +1067,7 @@ mod tests {
                 rtk_equivalent: "rtk cargo",
                 category: "Cargo",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -1069,7 +1080,7 @@ mod tests {
                 rtk_equivalent: "rtk cargo",
                 category: "Cargo",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -1082,7 +1093,7 @@ mod tests {
                 rtk_equivalent: "rtk cargo",
                 category: "Cargo",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Passthrough,
+                status: RtkStatus::Passthrough
             }
         );
     }
@@ -1095,7 +1106,7 @@ mod tests {
                 rtk_equivalent: "rtk cargo",
                 category: "Cargo",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -1138,7 +1149,7 @@ mod tests {
                 rtk_equivalent: "rtk find",
                 category: "Files",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -1197,7 +1208,7 @@ mod tests {
                 rtk_equivalent: "rtk mypy",
                 category: "Build",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -1210,7 +1221,7 @@ mod tests {
                 rtk_equivalent: "rtk mypy",
                 category: "Build",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -1662,7 +1673,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -2093,7 +2104,7 @@ mod tests {
                 rtk_equivalent: "rtk swift",
                 category: "Build",
                 estimated_savings_pct: 90.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         ));
     }
@@ -3091,7 +3102,7 @@ mod tests {
                 rtk_equivalent: "rtk gradlew",
                 category: "Build",
                 estimated_savings_pct: 90.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -3527,7 +3538,7 @@ mod tests {
                 rtk_equivalent: "rtk grep",
                 category: "Files",
                 estimated_savings_pct: 75.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -3540,7 +3551,7 @@ mod tests {
                 rtk_equivalent: "rtk ls",
                 category: "Files",
                 estimated_savings_pct: 65.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -3553,7 +3564,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -3567,7 +3578,7 @@ mod tests {
                 rtk_equivalent: "rtk find",
                 category: "Files",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -3590,7 +3601,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -3603,7 +3614,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -3616,7 +3627,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -3682,7 +3693,7 @@ mod tests {
                 rtk_equivalent: "rtk wc",
                 category: "Files",
                 estimated_savings_pct: 60.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -3695,7 +3706,7 @@ mod tests {
                 rtk_equivalent: "rtk wc",
                 category: "Files",
                 estimated_savings_pct: 60.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -3724,7 +3735,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -4099,6 +4110,84 @@ mod tests {
         assert_eq!(
             collapse_line_continuations("git diff HEAD~1"),
             std::borrow::Cow::<str>::Borrowed("git diff HEAD~1"),
+        );
+    }
+
+    // --- PowerShell cmdlet rewrite tests ---
+
+    #[test]
+    fn test_classify_get_child_item() {
+        assert_eq!(
+            classify_command("Get-ChildItem"),
+            Classification::Supported {
+                rtk_equivalent: "rtk ls",
+                category: "Files",
+                estimated_savings_pct: 65.0,
+                status: RtkStatus::Existing
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_gci() {
+        assert_eq!(
+            classify_command("gci"),
+            Classification::Supported {
+                rtk_equivalent: "rtk ls",
+                category: "Files",
+                estimated_savings_pct: 65.0,
+                status: RtkStatus::Existing
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_get_content() {
+        assert_eq!(
+            classify_command("Get-Content file.txt"),
+            Classification::Supported {
+                rtk_equivalent: "rtk read",
+                category: "Files",
+                estimated_savings_pct: 60.0,
+                status: RtkStatus::Existing
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_select_string() {
+        assert_eq!(
+            classify_command("Select-String pattern"),
+            Classification::Supported {
+                rtk_equivalent: "rtk grep",
+                category: "Files",
+                estimated_savings_pct: 75.0,
+                status: RtkStatus::Existing
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_get_content() {
+        assert_eq!(
+            rewrite_command_no_prefixes("Get-Content file.txt", &[]),
+            Some("rtk read file.txt".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_select_string() {
+        assert_eq!(
+            rewrite_command_no_prefixes("Select-String pattern", &[]),
+            Some("rtk grep pattern".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_sls() {
+        assert_eq!(
+            rewrite_command_no_prefixes("sls pattern", &[]),
+            Some("rtk grep pattern".into())
         );
     }
 }
