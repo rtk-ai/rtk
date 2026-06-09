@@ -126,9 +126,11 @@ impl Language {
                 doc_block_start: None,
             },
             Language::Unknown => CommentPatterns {
-                line: Some("//"),
-                block_start: Some("/*"),
-                block_end: Some("*/"),
+                // Unknown file types are handled conservatively to avoid stripping
+                // semantically important comments in custom/uncommon formats.
+                line: None,
+                block_start: None,
+                block_end: None,
                 doc_line: None,
                 doc_block_start: None,
             },
@@ -158,6 +160,9 @@ pub struct MinimalFilter;
 lazy_static! {
     static ref MULTIPLE_BLANK_LINES: Regex = Regex::new(r"\n{3,}").unwrap();
     static ref TRAILING_WHITESPACE: Regex = Regex::new(r"[ \t]+$").unwrap();
+    static ref IMPORTANT_COMMENT_MARKERS: Regex =
+        Regex::new(r"(?i)\b(todo|fixme|note|warning|bug|hack|xxx|important|security|perf|why)\b")
+            .unwrap();
 }
 
 impl FilterStrategy for MinimalFilter {
@@ -200,15 +205,12 @@ impl FilterStrategy for MinimalFilter {
                 continue;
             }
 
-            // Skip single-line comments (but keep doc comments)
+            // Skip single-line comments unless they carry important context.
             if let Some(line_comment) = patterns.line {
                 if trimmed.starts_with(line_comment) {
-                    // Keep doc comments
-                    if let Some(doc) = patterns.doc_line {
-                        if trimmed.starts_with(doc) {
-                            result.push_str(line);
-                            result.push('\n');
-                        }
+                    if should_preserve_comment(trimmed, &patterns) {
+                        result.push_str(line);
+                        result.push('\n');
                     }
                     continue;
                 }
@@ -310,6 +312,23 @@ impl FilterStrategy for AggressiveFilter {
 
         result.trim().to_string()
     }
+}
+
+fn should_preserve_comment(trimmed: &str, patterns: &CommentPatterns) -> bool {
+    if trimmed.starts_with("#!") {
+        return true;
+    }
+    if let Some(doc) = patterns.doc_line {
+        if trimmed.starts_with(doc) {
+            return true;
+        }
+    }
+    if let Some(doc_block_start) = patterns.doc_block_start {
+        if trimmed.starts_with(doc_block_start) {
+            return true;
+        }
+    }
+    IMPORTANT_COMMENT_MARKERS.is_match(trimmed)
 }
 
 pub fn get_filter(level: FilterLevel) -> Box<dyn FilterStrategy> {
@@ -487,7 +506,6 @@ fn main() {
 
         let output = smart_truncate(&content, max_lines, &Language::Rust);
 
-        // Extract the overflow message
         let overflow_line = output
             .lines()
             .find(|l| l.contains("more lines"))
@@ -514,6 +532,41 @@ fn main() {
             reported_more,
             total_lines
         );
+    }
+
+    #[test]
+    fn test_minimal_filter_keeps_important_comments() {
+        let code = r#"
+// TODO: handle retry backoff
+fn main() {
+    println!("Hello");
+}
+"#;
+        let filter = MinimalFilter;
+        let result = filter.filter(code, &Language::Rust);
+        assert!(result.contains("TODO: handle retry backoff"));
+    }
+
+    #[test]
+    fn test_minimal_filter_keeps_shell_shebang() {
+        let code = r#"#!/usr/bin/env bash
+# setup
+echo "ok"
+"#;
+        let filter = MinimalFilter;
+        let result = filter.filter(code, &Language::Shell);
+        assert!(result.contains("#!/usr/bin/env bash"));
+        assert!(!result.contains("# setup"));
+    }
+
+    #[test]
+    fn test_unknown_language_is_conservative() {
+        let code = r#"// important context
+value = 1
+"#;
+        let filter = MinimalFilter;
+        let result = filter.filter(code, &Language::Unknown);
+        assert!(result.contains("// important context"));
     }
 
     #[test]

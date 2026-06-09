@@ -115,6 +115,10 @@ pub struct CommandRecord {
 pub struct GainSummary {
     /// Total number of commands recorded
     pub total_commands: usize,
+    /// Commands with token estimates (input/output not both zero)
+    pub token_tracked_commands: usize,
+    /// Commands recorded as passthrough/fallback timing-only entries
+    pub passthrough_commands: usize,
     /// Total input tokens across all commands
     pub total_input: usize,
     /// Total output tokens across all commands
@@ -572,6 +576,8 @@ impl Tracker {
     pub fn get_summary_filtered(&self, project_path: Option<&str>) -> Result<GainSummary> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut total_commands = 0usize;
+        let mut token_tracked_commands = 0usize;
+        let mut passthrough_commands = 0usize;
         let mut total_input = 0usize;
         let mut total_output = 0usize;
         let mut total_saved = 0usize;
@@ -596,6 +602,11 @@ impl Tracker {
         for row in rows {
             let (input, output, saved, time_ms) = row?;
             total_commands += 1;
+            if input == 0 && output == 0 {
+                passthrough_commands += 1;
+            } else {
+                token_tracked_commands += 1;
+            }
             total_input += input;
             total_output += output;
             total_saved += saved;
@@ -619,6 +630,8 @@ impl Tracker {
 
         Ok(GainSummary {
             total_commands,
+            token_tracked_commands,
+            passthrough_commands,
             total_input,
             total_output,
             total_saved,
@@ -1422,6 +1435,12 @@ pub fn args_display(args: &[OsString]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
@@ -1528,6 +1547,7 @@ mod tests {
     // 6. TimedExecution::track_passthrough records with 0 tokens
     #[test]
     fn test_timed_execution_passthrough() {
+        let _guard = env_lock().lock().unwrap();
         let timer = TimedExecution::start();
         timer.track_passthrough("git tag", "rtk git tag (passthrough)");
 
@@ -1544,15 +1564,47 @@ mod tests {
         assert_eq!(pt.saved_tokens, 0);
     }
 
+    #[test]
+    fn test_summary_separates_token_tracked_and_passthrough_counts() {
+        use std::env;
+        let _guard = env_lock().lock().unwrap();
+
+        let db_path = format!("/tmp/rtk_summary_counts_{}.db", std::process::id());
+        let _ = std::fs::remove_file(&db_path);
+        env::set_var("RTK_DB_PATH", &db_path);
+
+        let tracker = Tracker::new().expect("Failed to create tracker");
+        tracker
+            .record("git status", "rtk git status summary_test", 1000, 200, 10)
+            .expect("Failed to record token-tracked command");
+        tracker
+            .record(
+                "python3 script.py",
+                "rtk fallback: python3 script.py",
+                0,
+                0,
+                5,
+            )
+            .expect("Failed to record passthrough command");
+
+        let summary = tracker.get_summary().expect("Failed to get summary");
+        assert_eq!(summary.total_commands, 2);
+        assert_eq!(summary.token_tracked_commands, 1);
+        assert_eq!(summary.passthrough_commands, 1);
+        assert_eq!(summary.total_saved, 800);
+        assert_eq!(summary.avg_savings_pct, 80.0);
+
+        let _ = std::fs::remove_file(&db_path);
+        env::remove_var("RTK_DB_PATH");
+    }
+
     // 7. get_db_path respects environment variable RTK_DB_PATH
     // 8. get_db_path falls back to default when no custom config
     // Combined into one test to avoid env var race between parallel tests
     #[test]
     fn test_db_path_env_and_default() {
         use std::env;
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock().lock().unwrap();
 
         let custom_path = env::temp_dir().join("rtk_test_custom.db");
         env::set_var("RTK_DB_PATH", &custom_path);

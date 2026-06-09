@@ -99,15 +99,23 @@ pub fn run(
         println!();
 
         // added: KPI-style aligned output
-        print_kpi("Total commands", summary.total_commands.to_string());
-        print_kpi("Input tokens", format_tokens(summary.total_input));
-        print_kpi("Output tokens", format_tokens(summary.total_output));
+        print_kpi("Total records", summary.total_commands.to_string());
+        print_kpi(
+            "Token-tracked cmds",
+            summary.token_tracked_commands.to_string(),
+        );
+        print_kpi(
+            "Passthrough/fallback",
+            summary.passthrough_commands.to_string(),
+        );
+        print_kpi("Input tokens", format_token_metric(summary.total_input));
+        print_kpi("Output tokens", format_token_metric(summary.total_output));
         print_kpi(
             "Tokens saved",
             format!(
-                "{} ({:.1}%)",
-                format_tokens(summary.total_saved),
-                summary.avg_savings_pct
+                "{} ({})",
+                format_token_metric(summary.total_saved),
+                format_pct(summary.avg_savings_pct)
             ),
         );
         print_kpi(
@@ -119,6 +127,11 @@ pub fn run(
             ),
         );
         print_efficiency_meter(summary.avg_savings_pct);
+        if summary.passthrough_commands > 0 {
+            println!(
+                "Note: savings % is computed from token-tracked commands only; passthrough/fallback entries add history but usually save 0 tokens."
+            );
+        }
         println!();
 
         // Warn about hook issues that silently kill savings (stderr, not stdout)
@@ -336,6 +349,52 @@ fn print_kpi(label: &str, value: String) {
     println!("{:<18} {}", format!("{label}:"), value);
 }
 
+fn format_pct(pct: f64) -> String {
+    if !pct.is_finite() {
+        return "0.0%".to_string();
+    }
+    if pct > 99.0 && pct < 100.0 {
+        return format!("{pct:.3}%");
+    }
+    if pct >= 10.0 {
+        format!("{pct:.1}%")
+    } else if pct >= 1.0 {
+        format!("{pct:.2}%")
+    } else {
+        format!("{pct:.3}%")
+    }
+}
+
+fn meter_fill_units(pct: f64, width: usize) -> usize {
+    if width == 0 || !pct.is_finite() {
+        return 0;
+    }
+    if pct <= 0.0 {
+        return 0;
+    }
+    if pct >= 100.0 {
+        return width;
+    }
+    let filled = ((pct / 100.0) * width as f64).floor() as usize;
+    filled.clamp(1, width.saturating_sub(1))
+}
+
+fn format_int_with_commas(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
+fn format_token_metric(n: usize) -> String {
+    format!("{} ({})", format_tokens(n), format_int_with_commas(n))
+}
+
 /// Colorize percentage based on savings tier (TTY-aware). // added
 fn colorize_pct_cell(pct: f64, padded: &str) -> String {
     if !std::io::stdout().is_terminal() {
@@ -394,10 +453,10 @@ fn mini_bar(value: usize, max: usize, width: usize) -> String {
 /// Print an efficiency meter with colored progress bar (TTY-aware). // added
 fn print_efficiency_meter(pct: f64) {
     let width = 24usize;
-    let filled = (((pct / 100.0) * width as f64).round() as usize).min(width);
+    let filled = meter_fill_units(pct, width);
     let meter = format!("{}{}", "█".repeat(filled), "░".repeat(width - filled));
     if std::io::stdout().is_terminal() {
-        let pct_str = format!("{pct:.1}%");
+        let pct_str = format_pct(pct);
         let colored_pct = if pct >= 70.0 {
             pct_str.green().bold().to_string()
         } else if pct >= 40.0 {
@@ -407,7 +466,7 @@ fn print_efficiency_meter(pct: f64) {
         };
         println!("Efficiency meter: {} {}", meter.green(), colored_pct);
     } else {
-        println!("Efficiency meter: {} {:.1}%", meter, pct);
+        println!("Efficiency meter: {} {}", meter, format_pct(pct));
     }
 }
 
@@ -509,6 +568,8 @@ struct ExportData {
 #[derive(Serialize)]
 struct ExportSummary {
     total_commands: usize,
+    token_tracked_commands: usize,
+    passthrough_commands: usize,
     total_input: usize,
     total_output: usize,
     total_saved: usize,
@@ -532,6 +593,8 @@ fn export_json(
     let export = ExportData {
         summary: ExportSummary {
             total_commands: summary.total_commands,
+            token_tracked_commands: summary.token_tracked_commands,
+            passthrough_commands: summary.passthrough_commands,
             total_input: summary.total_input,
             total_output: summary.total_output,
             total_saved: summary.total_saved,
@@ -761,4 +824,38 @@ fn confirm_reset() -> Result<bool> {
         .context("Failed to read confirmation")?;
 
     Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_int_with_commas, format_pct, format_token_metric, meter_fill_units};
+
+    #[test]
+    fn test_format_pct_uses_adaptive_precision() {
+        assert_eq!(format_pct(42.0), "42.0%");
+        assert_eq!(format_pct(1.234), "1.23%");
+        assert_eq!(format_pct(0.4567), "0.457%");
+        assert_eq!(format_pct(99.958), "99.958%");
+    }
+
+    #[test]
+    fn test_meter_fill_units_never_shows_full_bar_below_100() {
+        assert_eq!(meter_fill_units(0.0, 24), 0);
+        assert_eq!(meter_fill_units(0.1, 24), 1);
+        assert_eq!(meter_fill_units(99.958, 24), 23);
+        assert_eq!(meter_fill_units(100.0, 24), 24);
+    }
+
+    #[test]
+    fn test_format_int_with_commas() {
+        assert_eq!(format_int_with_commas(0), "0");
+        assert_eq!(format_int_with_commas(1234), "1,234");
+        assert_eq!(format_int_with_commas(200_600_000), "200,600,000");
+    }
+
+    #[test]
+    fn test_format_token_metric_combines_compact_and_exact() {
+        assert_eq!(format_token_metric(999), "999 (999)");
+        assert_eq!(format_token_metric(2_034_567), "2.0M (2,034,567)");
+    }
 }

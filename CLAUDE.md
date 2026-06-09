@@ -169,3 +169,66 @@ When user provides a numbered plan (QW1-QW4, Phase 1-5, sprint tasks, etc.):
 3. **Never skip or reorder**: If a step is blocked, report it and ask before proceeding
 4. **Track progress**: Use task list (TaskCreate/TaskUpdate) for plans with 3+ steps
 5. **Validate assumptions**: Before starting, verify all referenced file paths exist and working directory is correct
+
+
+**Why**: Plan-driven execution produces better outcomes than ad-hoc implementation. Structured plans help maintain focus and prevent scope creep.
+
+
+## Filter Development Checklist
+
+When adding a new filter (e.g., `rtk newcmd`):
+
+### Implementation
+- [ ] Create filter module in `src/<cmd>_cmd.rs` (or extend existing)
+- [ ] Add `lazy_static!` regex patterns for parsing (compile once, reuse)
+- [ ] Implement fallback to raw command on error (graceful degradation)
+- [ ] Preserve exit codes (`std::process::exit(code)` if non-zero)
+
+### Testing
+- [ ] Write snapshot test with real command output fixture (`tests/fixtures/<cmd>_raw.txt`)
+- [ ] Verify token savings ≥60% with `count_tokens()` assertion
+- [ ] Test cross-platform shell escaping (macOS, Linux, Windows)
+- [ ] Write unit tests for edge cases (empty output, errors, unicode, ANSI codes)
+
+### Integration
+- [ ] Register filter in main.rs Commands enum
+- [ ] Update README.md with new command support and token savings %
+- [ ] Update CHANGELOG.md with feature description
+
+### Quality Gates
+- [ ] Run `cargo fmt --all && cargo clippy --all-targets && cargo test`
+- [ ] Benchmark startup time with `hyperfine` (verify <10ms)
+- [ ] Test manually: `rtk <cmd>` and inspect output for correctness
+- [ ] Verify fallback: Break filter intentionally, confirm raw command executes
+
+### Documentation
+- [ ] Add command to this CLAUDE.md Module Responsibilities table
+- [ ] Document token savings % (from tests)
+- [ ] Add usage examples to README.md
+
+**Example workflow** (adding `rtk newcmd`):
+
+```bash
+# 1. Create module
+touch src/newcmd_cmd.rs
+
+# 2. Write test first (TDD)
+echo 'raw command output fixture' > tests/fixtures/newcmd_raw.txt
+# Add test in src/newcmd_cmd.rs
+
+# 3. Implement filter
+# Add lazy_static regex, implement logic, add fallback
+
+# 4. Quality checks
+cargo fmt --all && cargo clippy --all-targets && cargo test
+
+# 5. Benchmark
+hyperfine 'rtk newcmd args'
+
+# 6. Manual test
+rtk newcmd args
+# Inspect output, verify condensed
+
+# 7. Document
+# Update README.md, CHANGELOG.md, this file
+```

@@ -244,7 +244,11 @@ pub fn split_command_chain(cmd: &str) -> Vec<&str> {
         return vec![trimmed];
     }
 
-    split_on_operators(trimmed, true)
+    trimmed
+        .lines()
+        .flat_map(|line| split_on_operators(line.trim(), true))
+        .filter(|part| !part.is_empty())
+        .collect()
 }
 
 /// Strip git global options before the subcommand (#163).
@@ -1173,6 +1177,14 @@ mod tests {
     #[test]
     fn test_split_single() {
         assert_eq!(split_command_chain("git status"), vec!["git status"]);
+    }
+
+    #[test]
+    fn test_split_newline_script() {
+        assert_eq!(
+            split_command_chain("tmp=$(mktemp)\ngit status\ntail -n 20 /tmp/log"),
+            vec!["tmp=$(mktemp)", "git status", "tail -n 20 /tmp/log"]
+        );
     }
 
     #[test]

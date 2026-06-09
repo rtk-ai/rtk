@@ -125,11 +125,11 @@ pub struct LimitsConfig {
     pub grep_max_results: usize,
     /// Max matches per file in grep output (default: 25)
     pub grep_max_per_file: usize,
-    /// Max staged/modified files shown in git status (default: 15)
+    /// Max staged/modified files shown in git status (default: 30)
     pub status_max_files: usize,
-    /// Max untracked files shown in git status (default: 10)
+    /// Max untracked files shown in git status (default: 20)
     pub status_max_untracked: usize,
-    /// Max chars for parser passthrough fallback (default: 2000)
+    /// Max chars for parser passthrough fallback (default: 6000)
     pub passthrough_max_chars: usize,
 }
 
@@ -138,9 +138,11 @@ impl Default for LimitsConfig {
         Self {
             grep_max_results: 200,
             grep_max_per_file: 25,
-            status_max_files: 15,
-            status_max_untracked: 10,
-            passthrough_max_chars: 2000,
+            // Keep more git context for AI/code-review flows.
+            status_max_files: 30,
+            status_max_untracked: 20,
+            // Preserve richer fallback context when parser degrades.
+            passthrough_max_chars: 6000,
         }
     }
 }

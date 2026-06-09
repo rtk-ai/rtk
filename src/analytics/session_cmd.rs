@@ -25,6 +25,26 @@ impl SessionSummary {
     }
 }
 
+fn display_session_id(cmds: &[ExtractedCommand], path: &std::path::Path) -> String {
+    let id = cmds
+        .iter()
+        .map(|c| c.session_id.trim())
+        .find(|id| !id.is_empty() && *id != "unknown")
+        .map(str::to_string)
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    if id.len() > 8 {
+        id[..8].to_string()
+    } else {
+        id
+    }
+}
+
 /// Count RTK-covered commands from extracted commands.
 /// A command is "covered" if it either:
 /// - starts with "rtk " (explicit rtk invocation), or
@@ -60,11 +80,11 @@ pub fn run(_verbose: u8) -> Result<()> {
     let provider = ClaudeProvider;
     let sessions = provider
         .discover_sessions(None, Some(30))
-        .context("Failed to discover Claude Code sessions")?;
+        .context("Failed to discover Claude Code or Codex sessions")?;
 
     if sessions.is_empty() {
-        println!("No Claude Code sessions found in the last 30 days.");
-        println!("Make sure Claude Code has been used at least once.");
+        println!("No Claude Code or Codex sessions found in the last 30 days.");
+        println!("Make sure Claude Code or Codex has been used at least once.");
         return Ok(());
     }
 
@@ -105,13 +125,6 @@ pub fn run(_verbose: u8) -> Result<()> {
 
         let (total_cmds, rtk_cmds, output_tokens) = count_rtk_commands(&cmds);
 
-        // Extract session ID from filename
-        let id = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
-        let short_id = if id.len() > 8 { &id[..8] } else { id };
-
         // Extract date from mtime
         let date = fs::metadata(path)
             .and_then(|m| m.modified())
@@ -131,7 +144,7 @@ pub fn run(_verbose: u8) -> Result<()> {
             .unwrap_or_else(|_| "?".to_string());
 
         summaries.push(SessionSummary {
-            id: short_id.to_string(),
+            id: display_session_id(&cmds, path),
             date,
             total_cmds,
             rtk_cmds,
@@ -319,6 +332,17 @@ mod tests {
         assert_eq!(rtk, 1);
     }
 
+    #[test]
+    fn test_count_multiline_script_split() {
+        let cmds = vec![make_cmd(
+            "tmp=$(mktemp /tmp/rtk.log)\ngit status\ntail -n 20 \"$tmp\"\nexit $rc",
+            Some(100),
+        )];
+        let (total, rtk, _) = count_rtk_commands(&cmds);
+        assert_eq!(total, 4, "multiline script should split into 4 commands");
+        assert_eq!(rtk, 2, "git status and tail are RTK-covered");
+    }
+
     // --- adoption_pct ---
 
     #[test]
@@ -343,6 +367,25 @@ mod tests {
             output_tokens: 0,
         };
         assert_eq!(s.adoption_pct(), 75.0);
+    }
+
+    #[test]
+    fn test_display_session_id_prefers_extracted_id() {
+        let path = std::path::Path::new(
+            "/tmp/rollout-2026-04-07T00-00-00-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl",
+        );
+        let cmds = vec![make_cmd("git status", Some(10))];
+        let mut cmds = cmds;
+        cmds[0].session_id = "019d46f3-ac1e-73b0-9594-a483c24d48ce".to_string();
+        assert_eq!(display_session_id(&cmds, path), "019d46f3");
+    }
+
+    #[test]
+    fn test_display_session_id_falls_back_to_filename() {
+        let path = std::path::Path::new("/tmp/session-abcdef123456.jsonl");
+        let mut cmds = vec![make_cmd("git status", Some(10))];
+        cmds[0].session_id = "unknown".to_string();
+        assert_eq!(display_session_id(&cmds, path), "session-");
     }
 
     // --- End-to-end: parse real JSONL and count ---
