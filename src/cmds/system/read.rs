@@ -1,6 +1,6 @@
 //! Reads source files with optional language-aware filtering to strip boilerplate.
 
-use crate::core::filter::{self, FilterLevel, Language};
+use crate::core::filter::{self, FilterLevel, FilterStrategy, Language};
 use crate::core::tracking;
 use anyhow::{Context, Result};
 use std::fs;
@@ -38,6 +38,20 @@ pub fn run(
     // Apply filter
     let filter = filter::get_filter(level);
     let mut filtered = filter.filter(&content, &lang);
+
+    // For code files with no explicit filter, apply comment stripping.
+    // Comments are not functional code — this is lossless compression.
+    // Only activates when user didn't specify a filter level (default "none").
+    if level == filter::FilterLevel::None
+        && !matches!(lang, Language::Data | Language::Unknown)
+    {
+        let minimal = filter::MinimalFilter;
+        let stripped = minimal.filter(&content, &lang);
+        // Only use stripped version if it's actually smaller (safeguard)
+        if stripped.len() < filtered.len() {
+            filtered = stripped;
+        }
+    }
 
     // Always compactify indentation for data formats (JSON, YAML, XML, TOML)
     // regardless of filter level. This is lossless — only whitespace reduced.
