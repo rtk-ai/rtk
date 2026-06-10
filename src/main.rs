@@ -319,6 +319,9 @@ enum Commands {
         /// Filter by file type (e.g., ts, py, rust)
         #[arg(short = 't', long)]
         file_type: Option<String>,
+        /// Use PCRE2 regex syntax (ripgrep compatibility)
+        #[arg(long)]
+        pcre2: bool,
         /// Show line numbers (always on, accepted for grep/rg compatibility)
         #[arg(short = 'n', long)]
         line_numbers: bool,
@@ -1806,6 +1809,7 @@ fn run_cli() -> Result<i32> {
             max,
             context_only,
             file_type,
+            pcre2,
             line_numbers: _, // no-op: line numbers always enabled in grep_cmd::run
             extra_args,
         } => grep_cmd::run(
@@ -1815,6 +1819,7 @@ fn run_cli() -> Result<i32> {
             max,
             context_only,
             file_type.as_deref(),
+            pcre2,
             &extra_args,
             cli.verbose,
         )?,
@@ -2816,6 +2821,29 @@ mod tests {
                 Commands::Gain { failures, .. } => assert!(failures),
                 _ => panic!("Expected Gain command"),
             }
+        }
+    }
+
+    #[test]
+    fn test_grep_pcre2_before_pattern_parses() {
+        let cli =
+            Cli::try_parse_from(["rtk", "grep", "-n", "--pcre2", "e2e-tests(?!-v2)"]).unwrap();
+        match cli.command {
+            Commands::Grep {
+                pattern,
+                path,
+                line_numbers,
+                pcre2,
+                extra_args,
+                ..
+            } => {
+                assert_eq!(pattern, "e2e-tests(?!-v2)");
+                assert_eq!(path, ".");
+                assert!(line_numbers);
+                assert!(pcre2);
+                assert!(extra_args.is_empty());
+            }
+            _ => panic!("Expected Grep command"),
         }
     }
 
