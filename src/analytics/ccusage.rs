@@ -77,6 +77,7 @@ struct MonthlyResponse {
 
 #[derive(Debug, Deserialize)]
 struct MonthlyEntry {
+    #[serde(alias = "period")]
     month: String,
     #[serde(flatten)]
     metrics: CcusageMetrics,
@@ -233,6 +234,32 @@ mod tests {
         assert_eq!(periods[0].key, "2026-01");
         assert_eq!(periods[0].metrics.input_tokens, 1000);
         assert_eq!(periods[0].metrics.total_cost, 12.34);
+    }
+
+    #[test]
+    fn test_parse_monthly_period_field() {
+        // ccusage 20.x changed the field name from "month" to "period" in the
+        // all-agents monthly response. Both must be accepted.
+        let json = r#"{
+            "monthly": [
+                {
+                    "period": "2026-02",
+                    "inputTokens": 2000,
+                    "outputTokens": 800,
+                    "cacheCreationTokens": 0,
+                    "cacheReadTokens": 0,
+                    "totalTokens": 2800,
+                    "totalCost": 9.99
+                }
+            ]
+        }"#;
+
+        let result = parse_json(json, Granularity::Monthly);
+        assert!(result.is_ok(), "should accept 'period' field: {:?}", result);
+        let periods = result.unwrap();
+        assert_eq!(periods.len(), 1);
+        assert_eq!(periods[0].key, "2026-02");
+        assert_eq!(periods[0].metrics.total_cost, 9.99);
     }
 
     #[test]
