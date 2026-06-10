@@ -43,11 +43,16 @@ pub fn run(
     }
 
     for arg in extra_args {
-        // Fix: skip grep-ism -r flag (rg is recursive by default; rg -r means --replace)
-        if arg == "-r" || arg == "--recursive" {
-            continue;
+        // Strip grep flags whose letter ripgrep reuses for a DIFFERENT, value-taking
+        // flag — otherwise rg silently consumes the next token (often the pattern):
+        //   grep -r/-R (recursive) -> rg -r is --replace  (e.g. `grep -rn def` became
+        //                                                   `--replace=n`, rewriting matches)
+        //   grep -E    (ERE)       -> rg -E is --encoding  (eats the pattern)
+        // rg recurses and is ERE by default, so dropping them is safe. Handles combined
+        // short bundles (-rn -> -n, -nE -> -n) while preserving value-flags' values.
+        if let Some(sanitized) = strip_grep_only_flags(arg) {
+            rg_cmd.arg(sanitized);
         }
-        rg_cmd.arg(arg);
     }
 
     let result = exec_capture(&mut rg_cmd)
@@ -180,6 +185,41 @@ fn parse_match_line(line: &str) -> Option<(String, usize, &str)> {
         let line_num: usize = line_num.parse().ok()?;
         Some((file.to_string(), line_num, content))
     })
+}
+
+/// Short grep flags that take a value, so the rest of a combined bundle is that
+/// value (e.g. `-A3`, `-tpy`) — stop dropping characters once one is seen.
+const SHORT_VALUE_CHARS: &[char] = &['A', 'B', 'C', 'm', 'e', 'f', 'g', 't', 'T'];
+
+/// Remove grep flags that must NOT reach ripgrep verbatim because rg reuses the
+/// letter for a value-taking flag that would silently swallow the pattern:
+/// `-r`/`-R` (grep recursive) is rg `--replace`, `-E` (grep ERE) is rg `--encoding`.
+/// rg recurses and is ERE by default, so dropping them is safe. Returns the rewritten
+/// flag, or `None` if nothing survives (e.g. bare `-r`). Handles combined short bundles
+/// (`-rn` -> `-n`, `-nE` -> `-n`) while preserving value-flags and their values.
+fn strip_grep_only_flags(tok: &str) -> Option<String> {
+    if let Some(long) = tok.strip_prefix("--") {
+        return match long {
+            "recursive" | "dereference-recursive" | "extended-regexp" => None,
+            _ => Some(tok.to_string()),
+        };
+    }
+    if let Some(rest) = tok.strip_prefix('-') {
+        let mut out = String::from("-");
+        let mut chars = rest.chars();
+        while let Some(c) = chars.next() {
+            if matches!(c, 'r' | 'R' | 'E') {
+                continue;
+            }
+            out.push(c);
+            if SHORT_VALUE_CHARS.contains(&c) {
+                out.extend(chars);
+                break;
+            }
+        }
+        return if out == "-" { None } else { Some(out) };
+    }
+    Some(tok.to_string())
 }
 
 fn has_format_flag(extra_args: &[String]) -> bool {
@@ -317,13 +357,32 @@ mod tests {
     // Fix: -r flag (grep recursive) is stripped from extra_args (rg is recursive by default)
     #[test]
     fn test_recursive_flag_stripped() {
-        let extra_args: Vec<String> = vec!["-r".to_string(), "-i".to_string()];
-        let filtered: Vec<&String> = extra_args
-            .iter()
-            .filter(|a| *a != "-r" && *a != "--recursive")
-            .collect();
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0], "-i");
+        assert_eq!(strip_grep_only_flags("-r"), None);
+        assert_eq!(strip_grep_only_flags("--recursive"), None);
+        // A non-recursive flag is preserved unchanged.
+        assert_eq!(strip_grep_only_flags("-i").as_deref(), Some("-i"));
+    }
+
+    // Regression: grep's -r/-R/-E collide with rg's value-taking --replace/--encoding.
+    // A muscle-memory `grep -rn PATTERN` must not become `rg --replace=n` (which rewrote
+    // every match to "n"); `grep -nE PATTERN` must not feed PATTERN to `--encoding`.
+    #[test]
+    fn test_strip_grep_only_flags_bundles() {
+        // -r in a bundle: drop just the r, keep the rest (prevents --replace mangling).
+        assert_eq!(strip_grep_only_flags("-rn").as_deref(), Some("-n"));
+        assert_eq!(strip_grep_only_flags("-rln").as_deref(), Some("-ln"));
+        assert_eq!(strip_grep_only_flags("-Rn").as_deref(), Some("-n"));
+        // -E (ERE) likewise; rg is ERE by default.
+        assert_eq!(strip_grep_only_flags("-nE").as_deref(), Some("-n"));
+        assert_eq!(strip_grep_only_flags("-E"), None);
+        assert_eq!(strip_grep_only_flags("--extended-regexp"), None);
+        // Value-taking flags keep their value even if it contains r/R/E.
+        assert_eq!(strip_grep_only_flags("-tpy").as_deref(), Some("-tpy"));
+        assert_eq!(strip_grep_only_flags("-A3").as_deref(), Some("-A3"));
+        assert_eq!(strip_grep_only_flags("-erare").as_deref(), Some("-erare"));
+        // Untouched flags pass through.
+        assert_eq!(strip_grep_only_flags("-i").as_deref(), Some("-i"));
+        assert_eq!(strip_grep_only_flags("--glob").as_deref(), Some("--glob"));
     }
 
     // --- truncation accuracy ---
