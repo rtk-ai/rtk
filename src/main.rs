@@ -322,6 +322,12 @@ enum Commands {
         /// Show line numbers (always on, accepted for grep/rg compatibility)
         #[arg(short = 'n', long)]
         line_numbers: bool,
+        /// Invert match — show non-matching lines (ripgrep --invert-match).
+        /// Long-only: the `-v` short form collides with the global `--verbose`
+        /// flag, so `rtk grep -v` is mapped to this via an argv rewrite before
+        /// parsing (see `rewrite_grep_invert`).
+        #[arg(long = "invert-match")]
+        invert_match: bool,
         /// Extra ripgrep arguments (e.g., -i, -A 3, -w, --glob)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
@@ -1407,11 +1413,70 @@ where
     }
 }
 
+/// `rtk grep -v` must mean ripgrep's `--invert-match`, not the global
+/// `--verbose` flag. `verbose` is declared as a global `-v` (main.rs), so clap
+/// consumes the flag before it can reach grep's trailing args — making
+/// `rtk grep -v foo file` return matching lines instead of inverting (#1477).
+///
+/// Rewrite a standalone `-v` token that follows the `grep` subcommand into
+/// `--invert-match` so it is forwarded to rg. A `-v` that *precedes* `grep`
+/// (e.g. `rtk -v grep ...`) is left untouched — there it genuinely means
+/// verbose. Users wanting a verbose grep can still pass `--verbose`.
+///
+/// A `--` end-of-options separator after `grep` stops the rewrite: everything
+/// past it is a literal pattern/path (e.g. `rtk grep -- -v` searches for the
+/// literal string "-v"), matching GNU grep / getopt convention.
+///
+/// Limitation: this is a token rewrite, not an arity-aware parser. A bare `-v`
+/// used as the *value* of another forwarded flag (e.g. `rtk grep foo . -e -v`)
+/// would also be rewritten. In practice rtk grep takes its pattern positionally
+/// and does not accept `-e`, so this affects only a degenerate hand-built rg
+/// passthrough; the common `-v` / `--invert-match` paths are correct.
+fn rewrite_grep_invert(args: Vec<OsString>) -> Vec<OsString> {
+    // Locate the `grep` subcommand: the first non-flag token after argv[0].
+    let mut grep_idx = None;
+    for (i, a) in args.iter().enumerate().skip(1) {
+        match a.to_str() {
+            Some("grep") => {
+                grep_idx = Some(i);
+                break;
+            }
+            // A different subcommand appeared first — nothing to rewrite.
+            Some(s) if !s.starts_with('-') => break,
+            // A leading global flag (e.g. `-v`, `--no-track`) — keep scanning.
+            Some(_) => continue,
+            // Non-UTF-8 token before the subcommand — bail out conservatively.
+            None => break,
+        }
+    }
+    let Some(gi) = grep_idx else { return args };
+
+    let mut past_separator = false;
+    args.into_iter()
+        .enumerate()
+        .map(|(i, a)| {
+            if i <= gi || past_separator {
+                return a;
+            }
+            if a.as_os_str() == "--" {
+                past_separator = true;
+                return a;
+            }
+            if a.as_os_str() == "-v" {
+                OsString::from("--invert-match")
+            } else {
+                a
+            }
+        })
+        .collect()
+}
+
 fn run_cli() -> Result<i32> {
     // Fire-and-forget telemetry ping (1/day, non-blocking)
     core::telemetry::maybe_ping();
 
-    let cli = match Cli::try_parse() {
+    let argv = rewrite_grep_invert(std::env::args_os().collect());
+    let cli = match Cli::try_parse_from(&argv) {
         Ok(cli) => cli,
         Err(e) => {
             if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
@@ -1807,17 +1872,26 @@ fn run_cli() -> Result<i32> {
             context_only,
             file_type,
             line_numbers: _, // no-op: line numbers always enabled in grep_cmd::run
-            extra_args,
-        } => grep_cmd::run(
-            &pattern,
-            &path,
-            max_len,
-            max,
-            context_only,
-            file_type.as_deref(),
-            &extra_args,
-            cli.verbose,
-        )?,
+            invert_match,
+            mut extra_args,
+        } => {
+            // Forward `--invert-match` to ripgrep. The flag is parsed natively
+            // (so position, `--`, and arity are handled by clap); we append it
+            // to extra_args, which grep_cmd::run passes through to rg.
+            if invert_match {
+                extra_args.push("--invert-match".to_string());
+            }
+            grep_cmd::run(
+                &pattern,
+                &path,
+                max_len,
+                max,
+                context_only,
+                file_type.as_deref(),
+                &extra_args,
+                cli.verbose,
+            )?
+        }
 
         Commands::Init {
             global,
@@ -2680,6 +2754,128 @@ mod tests {
     fn test_try_parse_valid_git_status() {
         let result = Cli::try_parse_from(["rtk", "git", "status"]);
         assert!(result.is_ok(), "git status should parse successfully");
+    }
+
+    // --- #1477: `rtk grep -v` means --invert-match, not --verbose ---
+
+    fn rw(args: &[&str]) -> Vec<String> {
+        rewrite_grep_invert(args.iter().map(OsString::from).collect())
+            .into_iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn test_grep_invert_rewrites_leading_v() {
+        assert_eq!(
+            rw(&["rtk", "grep", "-v", "foo", "file"]),
+            ["rtk", "grep", "--invert-match", "foo", "file"]
+        );
+    }
+
+    #[test]
+    fn test_grep_invert_rewrites_trailing_v() {
+        // Position-independent: grep appends extra args to rg either way.
+        assert_eq!(
+            rw(&["rtk", "grep", "foo", "file", "-v"]),
+            ["rtk", "grep", "foo", "file", "--invert-match"]
+        );
+    }
+
+    #[test]
+    fn test_grep_invert_preserves_verbose_before_grep() {
+        // A `-v` before the subcommand is the real global verbose flag.
+        assert_eq!(
+            rw(&["rtk", "-v", "grep", "foo", "file"]),
+            ["rtk", "-v", "grep", "foo", "file"]
+        );
+    }
+
+    #[test]
+    fn test_grep_invert_leaves_other_commands_untouched() {
+        assert_eq!(
+            rw(&["rtk", "read", "-v", "file"]),
+            ["rtk", "read", "-v", "file"]
+        );
+    }
+
+    #[test]
+    fn test_grep_invert_stops_at_separator() {
+        // `--` ends option processing: a following `-v` is a literal pattern,
+        // not invert-match (matches GNU grep: `grep -- -v` searches for "-v").
+        assert_eq!(
+            rw(&["rtk", "grep", "--", "-v", "file"]),
+            ["rtk", "grep", "--", "-v", "file"]
+        );
+        // A `-v` before `--` still inverts; only post-separator tokens are literal.
+        assert_eq!(
+            rw(&["rtk", "grep", "-v", "foo", "--", "-v"]),
+            ["rtk", "grep", "--invert-match", "foo", "--", "-v"]
+        );
+    }
+
+    #[test]
+    fn test_grep_invert_only_exact_v_token() {
+        // Combined/long flags are not a standalone `-v`; leave them alone.
+        assert_eq!(
+            rw(&["rtk", "grep", "-iv", "foo"]),
+            ["rtk", "grep", "-iv", "foo"]
+        );
+        assert_eq!(
+            rw(&["rtk", "grep", "--verbose", "foo"]),
+            ["rtk", "grep", "--verbose", "foo"]
+        );
+    }
+
+    #[test]
+    fn test_grep_invert_parses_into_invert_match_flag() {
+        // End-to-end: after the rewrite, clap parses `-v` (now `--invert-match`)
+        // into the native invert_match flag — not the global verbose counter.
+        let argv = rewrite_grep_invert(
+            ["rtk", "grep", "-v", "foo", "file"]
+                .iter()
+                .map(OsString::from)
+                .collect(),
+        );
+        let cli = Cli::try_parse_from(&argv).unwrap();
+        match cli.command {
+            Commands::Grep {
+                pattern,
+                path,
+                invert_match,
+                ..
+            } => {
+                assert_eq!(pattern, "foo");
+                assert_eq!(path, "file");
+                assert!(invert_match, "`-v` must set the invert_match flag");
+            }
+            _ => panic!("expected grep subcommand"),
+        }
+        assert_eq!(
+            cli.verbose, 0,
+            "`-v` must not bump the global verbose count"
+        );
+    }
+
+    #[test]
+    fn test_grep_invert_native_long_flag_leading() {
+        // The native `--invert-match` flag must parse *before* the positionals.
+        // Without the dedicated field it is an UnknownArgument here (extra_args
+        // is trailing_var_arg), which forced a fallback to raw grep.
+        let cli = Cli::try_parse_from(["rtk", "grep", "--invert-match", "foo", "file"]).unwrap();
+        match cli.command {
+            Commands::Grep {
+                pattern,
+                path,
+                invert_match,
+                ..
+            } => {
+                assert_eq!(pattern, "foo");
+                assert_eq!(path, "file");
+                assert!(invert_match);
+            }
+            _ => panic!("expected grep subcommand"),
+        }
     }
 
     #[test]
