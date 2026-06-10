@@ -10,7 +10,7 @@
   <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://github.com/rtk-ai/rtk/workflows/Security%20Check/badge.svg" alt="CI"></a>
   <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk" alt="Release"></a>
   <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
-  <a href="https://discord.gg/RySmvNF5kF"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord" alt="Discord"></a>
+  <a href="https://discord.gg/RySmvNF5kF"<img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord" alt="Discord"></a>
   <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk" alt="Homebrew"></a>
 </p>
 
@@ -170,6 +170,14 @@ rtk gh pr list                  # Compact PR listing
 rtk gh pr view 42               # PR details + checks
 rtk gh issue list               # Compact issue listing
 rtk gh run list                 # Workflow run status
+```
+
+### Jira
+```bash
+rtk jira issue list             # Compact issue listing (-88%)
+rtk jira issue view PROJ-123    # Issue details (-80%)
+rtk jira sprint list            # Active sprint issues (-80%)
+rtk jira board list             # Board overview (-80%)
 ```
 
 ### Test Runners
