@@ -1,13 +1,17 @@
 //! Filters grep output by grouping matches by file.
 
 use crate::core::config;
-use crate::core::stream::exec_capture;
+use crate::core::stream::{exec_capture, CaptureResult};
 use crate::core::tracking;
 use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
 
+/// `rtk grep` — runs **system grep** so grep's own semantics are respected (BRE
+/// by default, grep flags). Ripgrep is handled separately by [`run_rg`]; the two
+/// are never crossed, because grep and rg share short flags with conflicting
+/// meanings (e.g. `-r` is recursive in grep but `--replace` in rg).
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     pattern: &str,
@@ -25,40 +29,111 @@ pub fn run(
         eprintln!("grep: '{}' in {}", pattern, path);
     }
 
-    // Fix: convert BRE alternation \| → | for rg (which uses PCRE-style regex)
-    let rg_pattern = pattern.replace(r"\|", "|");
+    // -r: recurse like the common `grep -r`; -n: line numbers; -H: always print
+    // the filename so output is the parseable `file:line:content`. `-e` marks the
+    // pattern explicitly so patterns starting with `-` aren't read as flags.
+    let mut grep_cmd = resolved_command("grep");
+    grep_cmd.arg("-rnH");
+    if let Some(ft) = file_type {
+        grep_cmd.arg(format!("--include={}", grep_type_glob(ft)));
+    }
+    grep_cmd.arg("-e").arg(pattern).arg(path).args(extra_args);
+
+    let result = exec_capture(&mut grep_cmd).context("grep failed")?;
+
+    emit_filtered(
+        result,
+        extra_args,
+        pattern,
+        path,
+        max_line_len,
+        max_results,
+        context_only,
+        parse_grep_line,
+        timer,
+    )
+}
+
+/// `rtk rg` — faithful ripgrep passthrough with RTK filtering. All args are
+/// forwarded to ripgrep verbatim (no grep-ism translation), so ripgrep-only flags
+/// like `--glob`/`-g`/`-P`/`--files` work in any order. Routing these through the
+/// `grep` subcommand / system grep is what broke in #2167, #2060, #1651.
+pub fn run_rg(args: &[String], verbose: u8) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    if verbose > 0 {
+        eprintln!("rg {}", args.join(" "));
+    }
+
+    // Info/list flags produce output that is not `file:line:content` (or is
+    // already compact): run rg verbatim and stream it through untouched.
+    if args.iter().any(|a| is_raw_passthrough_flag(a)) {
+        let mut rg_cmd = resolved_command("rg");
+        rg_cmd.args(args);
+        let status = rg_cmd.status().context("failed to execute rg")?;
+        let raw_command = format!("rg {}", args.join(" "));
+        timer.track_passthrough(
+            &raw_command,
+            &format!("rtk rg {} (passthrough)", args.join(" ")),
+        );
+        return Ok(crate::core::utils::exit_code_from_status(
+            &status,
+            &raw_command,
+        ));
+    }
 
     let mut rg_cmd = resolved_command("rg");
-    // --no-ignore-vcs: match grep -r behavior (don't skip .gitignore'd files).
-    // Without this, rg returns 0 matches for files in .gitignore, causing
-    // false negatives that make AI agents draw wrong conclusions.
-    // Using --no-ignore-vcs (not --no-ignore) so .ignore/.rgignore are still respected.
-    // -H: always emit the filename.
-    // -0: NUL-separate filename. Allows the parser to disambiguate filenames or
-    // content containing `:digits:` patterns (issue #1436).
-    rg_cmd.args(["-nH0", "--no-heading", "--no-ignore-vcs", &rg_pattern, path]);
+    // -0 NUL-separates the filename so the parser is unambiguous (#1436);
+    // --no-ignore-vcs matches grep -r (don't skip .gitignore'd files).
+    rg_cmd.args(["-nH0", "--no-heading", "--no-ignore-vcs"]);
+    rg_cmd.args(args);
+    let result = exec_capture(&mut rg_cmd).context("rg failed")?;
 
-    if let Some(ft) = file_type {
-        rg_cmd.arg("--type").arg(ft);
-    }
+    // Pattern is only used for context-aware truncation centring; the positional
+    // pattern isn't separated out here, so head-truncate instead.
+    emit_filtered(result, args, "", ".", 80, 200, false, parse_match_line, timer)
+}
 
-    for arg in extra_args {
-        // Fix: skip grep-ism -r flag (rg is recursive by default; rg -r means --replace)
-        if arg == "-r" || arg == "--recursive" {
-            continue;
-        }
-        rg_cmd.arg(arg);
-    }
+/// Map an rg-style `--file-type` name to a system-grep `--include` glob. Most rg
+/// type names are the file extension; a few common ones differ.
+fn grep_type_glob(file_type: &str) -> String {
+    let ext = match file_type {
+        "rust" => "rs",
+        "python" => "py",
+        "ruby" => "rb",
+        "javascript" => "js",
+        "typescript" => "ts",
+        "markdown" => "md",
+        other => other,
+    };
+    format!("*.{}", ext)
+}
 
-    let result = exec_capture(&mut rg_cmd)
-        .or_else(|_| {
-            let mut grep_cmd = resolved_command("grep");
-            // When we fall back to grep, include all args, not just -rnHZ.
-            grep_cmd.args(["-rnHZ", pattern, path]).args(extra_args);
-            exec_capture(&mut grep_cmd)
-        })
-        .context("grep/rg failed")?;
+/// rg flags whose output should be streamed through unfiltered (file listings,
+/// count/format modes). Superset of [`has_format_flag`].
+fn is_raw_passthrough_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--files" | "--type-list" | "--json" | "--vimgrep" | "--count-matches"
+    ) || has_format_flag(std::slice::from_ref(&arg.to_string()))
+}
 
+/// Shared post-execution filtering: passthrough for format flags, an empty-result
+/// message, or the by-file grouped/truncated output used by both `run` and
+/// `run_rg`. `parse_line` adapts the backend's match-line format (rg's NUL form
+/// vs grep's `file:line:content`).
+#[allow(clippy::too_many_arguments)]
+fn emit_filtered(
+    result: CaptureResult,
+    extra_args: &[String],
+    pattern: &str,
+    path: &str,
+    max_line_len: usize,
+    max_results: usize,
+    context_only: bool,
+    parse_line: fn(&str) -> Option<(String, usize, &str)>,
+    timer: tracking::TimedExecution,
+) -> Result<i32> {
     // Passthrough output flags that produce output that is already small.
     if has_format_flag(extra_args) {
         print!("{}", result.stdout);
@@ -87,7 +162,13 @@ pub fn run(
         if exit_code == 2 && !result.stderr.trim().is_empty() {
             eprintln!("{}", result.stderr.trim());
         }
-        let msg = format!("0 matches for '{}'", pattern);
+        // In raw mode the positional pattern isn't separated out, so omit it
+        // rather than printing a misleading empty `0 matches for ''`.
+        let msg = if pattern.is_empty() {
+            "0 matches".to_string()
+        } else {
+            format!("0 matches for '{}'", pattern)
+        };
         println!("{}", msg);
         timer.track(
             &format!("grep -rn '{}' {}", pattern, path),
@@ -111,7 +192,7 @@ pub fn run(
 
     let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
     for line in result.stdout.lines() {
-        let Some((file, line_num, content)) = parse_match_line(line) else {
+        let Some((file, line_num, content)) = parse_line(line) else {
             continue;
         };
         let cleaned = clean_line(content, max_line_len, context_re.as_ref(), pattern);
@@ -180,6 +261,17 @@ fn parse_match_line(line: &str) -> Option<(String, usize, &str)> {
         let line_num: usize = line_num.parse().ok()?;
         Some((file.to_string(), line_num, content))
     })
+}
+
+/// Parse a system-grep match line of the form `file:line:content` (from
+/// `grep -nH`). Unlike rg's NUL form there is no separator to disambiguate, so a
+/// filename containing `:` can't be told apart and such lines are skipped — this
+/// mirrors grep's own inherent ambiguity. Colons inside the content are kept.
+fn parse_grep_line(line: &str) -> Option<(String, usize, &str)> {
+    let (file, rest) = line.split_once(':')?;
+    let (line_num, content) = rest.split_once(':')?;
+    let line_num: usize = line_num.parse().ok()?;
+    Some((file.to_string(), line_num, content))
 }
 
 fn has_format_flag(extra_args: &[String]) -> bool {
@@ -288,6 +380,46 @@ mod tests {
         // This is a compile-time test - if it compiles, the signature is correct
         let _extra: Vec<String> = vec!["-i".to_string(), "-A".to_string(), "3".to_string()];
         // No need to actually run - we're verifying the parameter exists
+    }
+
+    #[test]
+    fn test_is_raw_passthrough_flag() {
+        // Info/list flags stream through unfiltered.
+        for flag in ["--files", "--type-list", "--json", "--count-matches"] {
+            assert!(is_raw_passthrough_flag(flag), "{flag} should pass through");
+        }
+        // Format flags from has_format_flag are also passthrough.
+        assert!(is_raw_passthrough_flag("-c"));
+        assert!(is_raw_passthrough_flag("--files-with-matches"));
+        // Ordinary search flags are filtered, not passed through.
+        for flag in ["-i", "--glob", "-g", "-A", "-w", "alpha"] {
+            assert!(!is_raw_passthrough_flag(flag), "{flag} should be filtered");
+        }
+    }
+
+    #[test]
+    fn test_parse_grep_line() {
+        // Standard grep -nH line.
+        assert_eq!(
+            parse_grep_line("src/main.rs:42:fn main() {"),
+            Some(("src/main.rs".to_string(), 42, "fn main() {"))
+        );
+        // Colons inside the content are preserved.
+        assert_eq!(
+            parse_grep_line("a.rs:7:Registry::init(x):y"),
+            Some(("a.rs".to_string(), 7, "Registry::init(x):y"))
+        );
+        // Non-match lines (e.g. grep -A/-B context with `-` separator) are skipped.
+        assert_eq!(parse_grep_line("src/main.rs-43-    let x = 1;"), None);
+        assert_eq!(parse_grep_line("no colons here"), None);
+    }
+
+    #[test]
+    fn test_grep_type_glob() {
+        assert_eq!(grep_type_glob("py"), "*.py");
+        assert_eq!(grep_type_glob("rust"), "*.rs");
+        assert_eq!(grep_type_glob("ts"), "*.ts");
+        assert_eq!(grep_type_glob("markdown"), "*.md");
     }
 
     #[test]

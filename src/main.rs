@@ -327,6 +327,16 @@ enum Commands {
         extra_args: Vec<String>,
     },
 
+    /// Ripgrep with token-optimized output (compact, grouped by file)
+    ///
+    /// Faithful ripgrep passthrough: all args are forwarded to `rg` verbatim, so
+    /// ripgrep-only flags (`--glob`, `-g`, `-P`, `--files`, ...) work in any order.
+    Rg {
+        /// Arguments passed to ripgrep (pattern, paths, and any rg flags)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Initialize rtk instructions for assistant CLI usage
     Init {
         /// Add to global assistant config directory instead of local project file
@@ -1819,6 +1829,8 @@ fn run_cli() -> Result<i32> {
             cli.verbose,
         )?,
 
+        Commands::Rg { args } => grep_cmd::run_rg(&args, cli.verbose)?,
+
         Commands::Init {
             global,
             opencode,
@@ -2519,6 +2531,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Kubectl { .. }
             | Commands::Summary { .. }
             | Commands::Grep { .. }
+            | Commands::Rg { .. }
             | Commands::Wget { .. }
             | Commands::Vitest { .. }
             | Commands::Prisma { .. }

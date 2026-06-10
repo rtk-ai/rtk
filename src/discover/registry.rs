@@ -1415,9 +1415,15 @@ mod tests {
 
     #[test]
     fn test_rewrite_rg_pattern() {
+        // rg keeps its own identity (-> rtk rg), grep keeps its own (-> rtk grep),
+        // so each runs its own backend without flag-semantic crossover.
         assert_eq!(
             rewrite_command_no_prefixes("rg \"fn main\"", &[]),
-            Some("rtk grep \"fn main\"".into())
+            Some("rtk rg \"fn main\"".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("grep \"fn main\" .", &[]),
+            Some("rtk grep \"fn main\" .".into())
         );
     }
 
