@@ -1,0 +1,4 @@
+# Fixtures are byte-exact filter inputs; eol conversion must never touch them.
+# Without this, Windows runners (core.autocrlf=true) check fixtures out with
+# CRLF, and tests that synthesize CRLF input from them produce \r\r\n.
+tests/fixtures/** -text

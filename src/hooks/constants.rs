@@ -21,6 +21,19 @@ pub const OPENCODE_PLUGIN_FILE: &str = "rtk.ts";
 pub const CURSOR_DIR: &str = ".cursor";
 pub const CODEX_DIR: &str = ".codex";
 pub const GEMINI_DIR: &str = ".gemini";
+
+pub const GITHUB_DIR: &str = ".github";
+pub const COPILOT_HOOK_FILE: &str = "rtk-rewrite.json";
+pub const COPILOT_INSTRUCTIONS_FILE: &str = "copilot-instructions.md";
+pub const COPILOT_USER_DIR: &str = ".copilot";
+pub const COPILOT_HOME_ENV: &str = "COPILOT_HOME";
+
+pub const PI_DIR: &str = ".pi/agent";
+pub const PI_LOCAL_DIR: &str = ".pi";
+pub const PI_EXTENSIONS_SUBDIR: &str = "extensions";
+pub const PI_PLUGIN_FILE: &str = "rtk.ts";
+pub const PI_CODING_AGENT_DIR_ENV: &str = "PI_CODING_AGENT_DIR";
+
 pub const HERMES_DIR: &str = ".hermes";
 pub const HERMES_PLUGINS_SUBDIR: &str = "plugins";
 pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";

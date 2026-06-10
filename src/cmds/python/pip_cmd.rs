@@ -153,7 +153,6 @@ fn filter_pip_list(output: &str) -> String {
 
     let mut result = String::new();
     result.push_str(&format!("pip list: {} packages\n", packages.len()));
-    result.push_str("═══════════════════════════════════════\n");
 
     // Group by first letter for easier scanning
     let mut by_letter: std::collections::HashMap<char, Vec<&Package>> =
@@ -203,7 +202,6 @@ fn filter_pip_outdated(output: &str) -> String {
 
     let mut result = String::new();
     result.push_str(&format!("pip outdated: {} packages\n", packages.len()));
-    result.push_str("═══════════════════════════════════════\n");
 
     const MAX_PIP_PACKAGES: usize = CAP_LIST;
     for (i, pkg) in packages.iter().take(MAX_PIP_PACKAGES).enumerate() {

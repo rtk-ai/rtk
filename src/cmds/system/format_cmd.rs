@@ -235,7 +235,6 @@ fn filter_black_output(output: &str) -> String {
             "Format (black): {} files need formatting\n",
             count
         ));
-        result.push_str("═══════════════════════════════════════\n");
 
         if !files_to_format.is_empty() {
             const MAX_FORMAT_FILES: usize = CAP_WARNINGS;

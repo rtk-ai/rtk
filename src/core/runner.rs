@@ -62,10 +62,77 @@ impl<'a> RunOptions<'a> {
     }
 }
 
+pub type CaptureFilter<'a> = Box<dyn Fn(&str) -> String + 'a>;
+pub type ExitAwareCaptureFilter<'a> = Box<dyn Fn(&str, i32) -> String + 'a>;
+
 pub enum RunMode<'a> {
-    Filtered(Box<dyn Fn(&str) -> String + 'a>),
+    Filtered(CaptureFilter<'a>),
+    FilteredWithExit(ExitAwareCaptureFilter<'a>),
     Streamed(Box<dyn StreamFilter + 'a>),
     Passthrough,
+}
+
+fn run_captured_filter<F>(
+    mut cmd: Command,
+    tool_name: &str,
+    cmd_label: &str,
+    filter_fn: F,
+    opts: RunOptions<'_>,
+    timer: tracking::TimedExecution,
+) -> Result<i32>
+where
+    F: Fn(&str, i32) -> String,
+{
+    let stdin_mode = if opts.inherit_stdin {
+        StdinMode::Inherit
+    } else {
+        StdinMode::Null
+    };
+    let result = stream::run_streaming(&mut cmd, stdin_mode, FilterMode::CaptureOnly)
+        .with_context(|| format!("Failed to run {}", tool_name))?;
+
+    let exit_code = result.exit_code;
+    let raw = &result.raw;
+    let raw_stdout = &result.raw_stdout;
+
+    if opts.skip_filter_on_failure && exit_code != 0 {
+        if !result.raw_stdout.trim().is_empty() {
+            print!("{}", result.raw_stdout);
+        }
+        if !result.raw_stderr.trim().is_empty() {
+            eprint!("{}", result.raw_stderr);
+        }
+        timer.track(cmd_label, &format!("rtk {}", cmd_label), raw, raw);
+        return Ok(exit_code);
+    }
+
+    let text_to_filter = if opts.filter_stdout_only {
+        raw_stdout
+    } else {
+        raw
+    };
+    let filtered = filter_fn(text_to_filter, exit_code);
+
+    if let Some(label) = opts.tee_label {
+        print_with_hint(&filtered, raw, label, exit_code);
+    } else if opts.no_trailing_newline {
+        print!("{}", filtered);
+    } else {
+        println!("{}", filtered);
+    }
+
+    let raw_for_tracking = if opts.filter_stdout_only {
+        raw_stdout
+    } else {
+        raw
+    };
+    timer.track(
+        cmd_label,
+        &format!("rtk {}", cmd_label),
+        raw_for_tracking,
+        &filtered,
+    );
+    Ok(exit_code)
 }
 
 pub fn run(
@@ -79,58 +146,22 @@ pub fn run(
     let cmd_label = format!("{} {}", tool_name, args_display);
 
     match mode {
-        RunMode::Filtered(filter_fn) => {
-            let stdin_mode = if opts.inherit_stdin {
-                StdinMode::Inherit
-            } else {
-                StdinMode::Null
-            };
-            let result = stream::run_streaming(&mut cmd, stdin_mode, FilterMode::CaptureOnly)
-                .with_context(|| format!("Failed to run {}", tool_name))?;
-
-            let exit_code = result.exit_code;
-            let raw = &result.raw;
-            let raw_stdout = &result.raw_stdout;
-
-            if opts.skip_filter_on_failure && exit_code != 0 {
-                if !result.raw_stdout.trim().is_empty() {
-                    print!("{}", result.raw_stdout);
-                }
-                if !result.raw_stderr.trim().is_empty() {
-                    eprint!("{}", result.raw_stderr);
-                }
-                timer.track(&cmd_label, &format!("rtk {}", cmd_label), raw, raw);
-                return Ok(exit_code);
-            }
-
-            let text_to_filter = if opts.filter_stdout_only {
-                raw_stdout
-            } else {
-                raw
-            };
-            let filtered = filter_fn(text_to_filter);
-
-            if let Some(label) = opts.tee_label {
-                print_with_hint(&filtered, raw, label, exit_code);
-            } else if opts.no_trailing_newline {
-                print!("{}", filtered);
-            } else {
-                println!("{}", filtered);
-            }
-
-            let raw_for_tracking = if opts.filter_stdout_only {
-                raw_stdout
-            } else {
-                raw
-            };
-            timer.track(
-                &cmd_label,
-                &format!("rtk {}", cmd_label),
-                raw_for_tracking,
-                &filtered,
-            );
-            Ok(exit_code)
-        }
+        RunMode::Filtered(filter_fn) => run_captured_filter(
+            cmd,
+            tool_name,
+            &cmd_label,
+            move |text, _| filter_fn(text),
+            opts,
+            timer,
+        ),
+        RunMode::FilteredWithExit(filter_fn) => run_captured_filter(
+            cmd,
+            tool_name,
+            &cmd_label,
+            move |text, exit_code| filter_fn(text, exit_code),
+            opts,
+            timer,
+        ),
         RunMode::Streamed(filter) => {
             let result =
                 stream::run_streaming(&mut cmd, StdinMode::Null, FilterMode::Streaming(filter))
@@ -178,6 +209,25 @@ where
         tool_name,
         args_display,
         RunMode::Filtered(Box::new(filter_fn)),
+        opts,
+    )
+}
+
+pub fn run_filtered_with_exit<F>(
+    cmd: Command,
+    tool_name: &str,
+    args_display: &str,
+    filter_fn: F,
+    opts: RunOptions<'_>,
+) -> Result<i32>
+where
+    F: Fn(&str, i32) -> String,
+{
+    run(
+        cmd,
+        tool_name,
+        args_display,
+        RunMode::FilteredWithExit(Box::new(filter_fn)),
         opts,
     )
 }

@@ -212,6 +212,16 @@ fn extract_identifier_and_extra_args(args: &[String]) -> Option<(String, Vec<Str
     identifier.map(|id| (id, extra))
 }
 
+/// Like `extract_identifier_and_extra_args` but yields `(None, args.to_vec())` when no
+/// positional identifier is present, so callers can defer the "id required" decision
+/// to `glab` itself (e.g. `glab mr view` defaults to the current branch's MR).
+fn parse_optional_identifier(args: &[String]) -> (Option<String>, Vec<String>) {
+    match extract_identifier_and_extra_args(args) {
+        Some((id, extra)) => (Some(id), extra),
+        None => (None, args.to_vec()),
+    }
+}
+
 /// Check if user explicitly requested JSON/custom output format.
 /// When present, passthrough to avoid double JSON injection.
 fn has_output_flag(args: &[String]) -> bool {
@@ -409,24 +419,32 @@ fn format_mr_view(json: &Value, ultra_compact: bool) -> String {
 }
 
 fn mr_view(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
-    let (mr_number, extra_args) = match extract_identifier_and_extra_args(args) {
-        Some(pair) => pair,
-        None => return Err(anyhow::anyhow!("MR number required")),
-    };
+    // `glab mr view` without an identifier defaults to the MR for the current branch.
+    let (mr_number_opt, extra_args) = parse_optional_identifier(args);
 
     // Passthrough for --web, --comments, or explicit output format
     if should_passthrough_view(&extra_args) {
-        return run_passthrough_with_extra("glab", &["mr", "view", &mr_number], &extra_args);
+        let mut base: Vec<&str> = vec!["mr", "view"];
+        if let Some(id) = mr_number_opt.as_deref() {
+            base.push(id);
+        }
+        return run_passthrough_with_extra("glab", &base, &extra_args);
     }
 
     let mut cmd = resolved_command("glab");
-    cmd.args(["mr", "view", &mr_number, "-F", "json"]);
+    cmd.args(["mr", "view"]);
+    if let Some(id) = mr_number_opt.as_deref() {
+        cmd.arg(id);
+    }
+    cmd.args(["-F", "json"]);
     for arg in &extra_args {
         cmd.arg(arg);
     }
-    run_glab_json(cmd, &format!("mr view {}", mr_number), |json| {
-        format_mr_view(json, ultra_compact)
-    })
+    let label = match mr_number_opt.as_deref() {
+        Some(id) => format!("mr view {}", id),
+        None => "mr view".to_string(),
+    };
+    run_glab_json(cmd, &label, |json| format_mr_view(json, ultra_compact))
 }
 
 fn mr_create(args: &[String], _verbose: u8) -> Result<i32> {
@@ -603,25 +621,31 @@ fn format_issue_view(json: &Value) -> String {
 }
 
 fn issue_view(args: &[String], _verbose: u8) -> Result<i32> {
-    let (issue_number, extra_args) = match extract_identifier_and_extra_args(args) {
-        Some(pair) => pair,
-        None => return Err(anyhow::anyhow!("Issue number required")),
-    };
+    // Let glab emit its own error message when the identifier is missing rather than pre-rejecting.
+    let (issue_number_opt, extra_args) = parse_optional_identifier(args);
 
     if should_passthrough_view(&extra_args) {
-        return run_passthrough_with_extra("glab", &["issue", "view", &issue_number], &extra_args);
+        let mut base: Vec<&str> = vec!["issue", "view"];
+        if let Some(id) = issue_number_opt.as_deref() {
+            base.push(id);
+        }
+        return run_passthrough_with_extra("glab", &base, &extra_args);
     }
 
     let mut cmd = resolved_command("glab");
-    cmd.args(["issue", "view", &issue_number, "-F", "json"]);
+    cmd.args(["issue", "view"]);
+    if let Some(id) = issue_number_opt.as_deref() {
+        cmd.arg(id);
+    }
+    cmd.args(["-F", "json"]);
     for arg in &extra_args {
         cmd.arg(arg);
     }
-    run_glab_json(
-        cmd,
-        &format!("issue view {}", issue_number),
-        format_issue_view,
-    )
+    let label = match issue_number_opt.as_deref() {
+        Some(id) => format!("issue view {}", id),
+        None => "issue view".to_string(),
+    };
+    run_glab_json(cmd, &label, format_issue_view)
 }
 
 // ── CI/Pipeline subcommands ─────────────────────────────────────────────
@@ -1233,6 +1257,35 @@ mod tests {
     fn test_extract_identifier_only_flags() {
         let args: Vec<String> = vec!["-R".into(), "group/project".into()];
         assert!(extract_identifier_and_extra_args(&args).is_none());
+    }
+
+    // ── parse_optional_identifier tests ─────────────────────────────────
+
+    #[test]
+    fn test_parse_optional_identifier_empty_yields_no_id() {
+        // `glab mr view` (no args) must surface as (None, []) so the caller
+        // hands the request to glab, which resolves the current branch's MR.
+        let (id, extra) = parse_optional_identifier(&[]);
+        assert!(id.is_none());
+        assert!(extra.is_empty());
+    }
+
+    #[test]
+    fn test_parse_optional_identifier_only_flags_preserves_flags() {
+        // Regression: `glab mr view -R group/project` previously triggered
+        // "MR number required". Now flags must round-trip into `extra`.
+        let args: Vec<String> = vec!["-R".into(), "group/project".into()];
+        let (id, extra) = parse_optional_identifier(&args);
+        assert!(id.is_none());
+        assert_eq!(extra, vec!["-R", "group/project"]);
+    }
+
+    #[test]
+    fn test_parse_optional_identifier_with_id_matches_extract() {
+        let args: Vec<String> = vec!["-R".into(), "group/project".into(), "42".into()];
+        let (id, extra) = parse_optional_identifier(&args);
+        assert_eq!(id.as_deref(), Some("42"));
+        assert_eq!(extra, vec!["-R", "group/project"]);
     }
 
     // ── has_output_flag tests ───────────────────────────────────────────

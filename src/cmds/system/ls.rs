@@ -24,6 +24,19 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .iter()
         .any(|a| (a.starts_with('-') && !a.starts_with("--") && a.contains('a')) || a == "--all");
 
+    // Per `man ls`, the long listing is triggered by `-l` and also implied by
+    // `-g`, `-n`, `-o`, `--full-time` or GNU `--format=long` and `--format=verbose`.
+    // In any of those cases we preserve permission info as octal.
+    let show_long = args.iter().any(|a| {
+        if a == "--full-time" || a == "--format=long" || a == "--format=verbose" {
+            return true;
+        }
+        if a.starts_with('-') && !a.starts_with("--") {
+            return a.chars().any(|c| matches!(c, 'l' | 'g' | 'n' | 'o'));
+        }
+        false
+    });
+
     let flags: Vec<&str> = args
         .iter()
         .filter(|a| a.starts_with('-'))
@@ -74,7 +87,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "ls",
         &format!("-la {}", target_display),
         |raw| {
-            let (entries, summary, parsed_count) = compact_ls(raw, show_all);
+            let (entries, summary, parsed_count) = compact_ls(raw, show_all, show_long);
 
             // If no lines were parsed (e.g., unrecognized locale), fall back to raw output.
             // This is safer than returning "(empty)" for a non-empty directory.
@@ -124,14 +137,17 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-/// Parse a single `ls -la` line, returning `(file_type_char, size, name)`.
+/// Parse a single `ls -la` line, returning `(file_type_char, perms, size, name)`.
+///
+/// `perms` is the raw 10-char string from ls (e.g. `-rw-r--r--`); use
+/// [`perms_to_octal`] to render it.
 ///
 /// Uses the date field as a stable anchor — the date format in `ls -la` is
 /// always three tokens (`Mon DD HH:MM` or `Mon DD  YYYY`), so we locate it
 /// with a regex, then extract size (rightmost number before the date) and
 /// filename (everything after the date). This handles owner/group names that
 /// contain spaces, which break the old fixed-column approach.
-fn parse_ls_line(line: &str) -> Option<(char, u64, String)> {
+fn parse_ls_line(line: &str) -> Option<(char, String, u64, String)> {
     // Skip . and .. entries before date parsing (works for non-English locales too)
     if is_dotdir(line) {
         return None;
@@ -146,7 +162,7 @@ fn parse_ls_line(line: &str) -> Option<(char, u64, String)> {
         return None;
     }
 
-    let perms = before_parts[0];
+    let perms = before_parts[0].to_string();
     let file_type = perms.chars().next()?;
 
     // Size is the rightmost parseable number before the date.
@@ -160,7 +176,7 @@ fn parse_ls_line(line: &str) -> Option<(char, u64, String)> {
         }
     }
 
-    Some((file_type, size, name))
+    Some((file_type, perms, size, name))
 }
 
 /// Returns true if the line represents a . or .. directory entry.
@@ -173,17 +189,60 @@ fn is_dotdir(line: &str) -> bool {
     line.trim().ends_with('.') || line.trim().ends_with("..")
 }
 
-/// Parse ls -la output into compact format:
-///   name/  (dirs)
-///   name  size  (files)
+/// Convert an `ls`-style permission string (e.g. `-rw-r--r--`, `drwxr-xr-x`,
+/// `-rwsr-xr-t`) into octal notation (e.g. `644`, `755`, `4755`).
+///
+/// Returns `None` if the input does not look like a permission field.
+/// Special bits (setuid/setgid/sticky) are encoded as a leading 4th digit when
+/// any are set; otherwise we emit a 3-digit value to stay compact.
+fn perms_to_octal(perms: &str) -> Option<String> {
+    if perms.len() < 10 || !perms.is_ascii() {
+        return None;
+    }
+    let b = perms.as_bytes();
+
+    fn perm_value(read: bool, write: bool, exec: bool) -> u32 {
+        ((read as u32) << 2) | ((write as u32) << 1) | (exec as u32)
+    }
+
+    let owner_x = matches!(b[3], b'x' | b's');
+    let group_x = matches!(b[6], b'x' | b's');
+    let other_x = matches!(b[9], b'x' | b't');
+
+    let owner = perm_value(b[1] == b'r', b[2] == b'w', owner_x);
+    let group = perm_value(b[4] == b'r', b[5] == b'w', group_x);
+    let other = perm_value(b[7] == b'r', b[8] == b'w', other_x);
+
+    let setuid = matches!(b[3], b's' | b'S');
+    let setgid = matches!(b[6], b's' | b'S');
+    let sticky = matches!(b[9], b't' | b'T');
+    let special = perm_value(setuid, setgid, sticky);
+
+    if special > 0 {
+        Some(format!("{}{}{}{}", special, owner, group, other))
+    } else {
+        Some(format!("{}{}{}", owner, group, other))
+    }
+}
+
+/// Parse ls -la output into compact format.
+///
+/// Without `show_long`:
+///   name/        (dirs)
+///   name  size   (files)
+///
+/// With `show_long` (user passed `-l`):
+///   755  name/        (dirs)
+///   644  name  size   (files)
+///
 /// Returns (entries, summary, parsed_count) so caller can suppress summary when piped.
 /// parsed_count tracks how many non-header lines were successfully parsed.
 /// If parsed_count == 0 but raw had content, caller should fall back to raw output.
-fn compact_ls(raw: &str, show_all: bool) -> (String, String, usize) {
+fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, usize) {
     use std::collections::HashMap;
 
-    let mut dirs: Vec<String> = Vec::new();
-    let mut files: Vec<(String, String)> = Vec::new(); // (name, size)
+    let mut dirs: Vec<(String, Option<String>)> = Vec::new(); // (name, octal_perms)
+    let mut files: Vec<(String, String, Option<String>)> = Vec::new(); // (name, size, octal_perms)
     let mut by_ext: HashMap<String, usize> = HashMap::new();
     let mut lines_seen: usize = 0;
     let mut parsed_count: usize = 0;
@@ -195,7 +254,7 @@ fn compact_ls(raw: &str, show_all: bool) -> (String, String, usize) {
         }
         lines_seen += 1;
 
-        let Some((file_type, size, name)) = parse_ls_line(line) else {
+        let Some((file_type, perms, size, name)) = parse_ls_line(line) else {
             if is_dotdir(line) {
                 dotdirs += 1;
             }
@@ -208,8 +267,16 @@ fn compact_ls(raw: &str, show_all: bool) -> (String, String, usize) {
             continue;
         }
 
+        // Only parse perms when the user actually wants the long listing —
+        // skip the work otherwise.
+        let octal = if show_long {
+            perms_to_octal(&perms)
+        } else {
+            None
+        };
+
         if file_type == 'd' {
-            dirs.push(name);
+            dirs.push((name, octal));
         } else {
             // Regular files, symlinks, character/block devices, pipes, sockets
             let ext = if let Some(pos) = name.rfind('.') {
@@ -218,7 +285,7 @@ fn compact_ls(raw: &str, show_all: bool) -> (String, String, usize) {
                 "no ext".to_string()
             };
             *by_ext.entry(ext).or_insert(0) += 1;
-            files.push((name, human_size(size)));
+            files.push((name, human_size(size), octal));
         }
     }
 
@@ -237,13 +304,21 @@ fn compact_ls(raw: &str, show_all: bool) -> (String, String, usize) {
     let mut entries = String::new();
 
     // Dirs first, compact
-    for d in &dirs {
-        entries.push_str(d);
+    for (name, octal) in &dirs {
+        if let Some(octal) = octal {
+            entries.push_str(octal);
+            entries.push_str("  ");
+        }
+        entries.push_str(name);
         entries.push_str("/\n");
     }
 
     // Files with size
-    for (name, size) in &files {
+    for (name, size, octal) in &files {
+        if let Some(octal) = octal {
+            entries.push_str(octal);
+            entries.push_str("  ");
+        }
         entries.push_str(name);
         entries.push_str("  ");
         entries.push_str(size);
@@ -286,7 +361,7 @@ mod tests {
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n\
                      -rw-r--r--  1 user  staff  5678 Jan  1 12:00 README.md\n";
-        let (entries, _summary, _) = compact_ls(input, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false);
         assert!(entries.contains("src/"));
         assert!(entries.contains("Cargo.toml"));
         assert!(entries.contains("README.md"));
@@ -307,7 +382,7 @@ mod tests {
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 target\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  100 Jan  1 12:00 main.rs\n";
-        let (entries, _summary, _) = compact_ls(input, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false);
         assert!(!entries.contains("node_modules"));
         assert!(!entries.contains(".git"));
         assert!(!entries.contains("target"));
@@ -320,7 +395,7 @@ mod tests {
         let input = "total 8\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .git\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n";
-        let (entries, _summary, _) = compact_ls(input, true);
+        let (entries, _summary, _parsed) = compact_ls(input, true, false);
         assert!(entries.contains(".git/"));
         assert!(entries.contains("src/"));
     }
@@ -328,7 +403,7 @@ mod tests {
     #[test]
     fn test_compact_empty() {
         let input = "total 0\n";
-        let (entries, summary, _) = compact_ls(input, false);
+        let (entries, summary, _parsed) = compact_ls(input, false, false);
         assert_eq!(entries, "(empty)\n");
         assert!(summary.is_empty());
     }
@@ -338,7 +413,7 @@ mod tests {
         let input = "total 8\n\
                      drwxr-xr-x  2 user user  4096  1月  1 12:00 .\n\
                      drwxr-xr-x 16 user user 20480  1月  1 12:00 ..\n";
-        let (entries, summary, parsed_count) = compact_ls(input, false);
+        let (entries, summary, parsed_count) = compact_ls(input, false, false);
         assert_eq!(parsed_count, 0);
         assert_eq!(entries, "(empty)\n");
         assert!(summary.is_empty());
@@ -349,7 +424,7 @@ mod tests {
         let input = "total 0\n\
                      drwxr-xr-x  2 lumin  wheel  64 Apr 23 00:37 .\n\
                      drwxr-xr-x 16 root  wheel 164576 Apr 23 00:37 ..\n";
-        let (entries, summary, parsed_count) = compact_ls(input, false);
+        let (entries, summary, parsed_count) = compact_ls(input, false, false);
         assert_eq!(parsed_count, 0);
         assert_eq!(entries, "(empty)\n");
         assert!(summary.is_empty());
@@ -362,7 +437,7 @@ mod tests {
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n\
                      -rw-r--r--  1 user  staff  5678 Jan  1 12:00 lib.rs\n\
                      -rw-r--r--  1 user  staff   100 Jan  1 12:00 Cargo.toml\n";
-        let (_entries, summary, _) = compact_ls(input, false);
+        let (_entries, summary, _parsed) = compact_ls(input, false, false);
         assert!(summary.contains("Summary: 3 files, 1 dirs"));
         assert!(summary.contains(".rs"));
         assert!(summary.contains(".toml"));
@@ -382,7 +457,7 @@ mod tests {
     fn test_compact_handles_filenames_with_spaces() {
         let input = "total 8\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 my file.txt\n";
-        let (entries, _summary, _) = compact_ls(input, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false);
         assert!(entries.contains("my file.txt"));
     }
 
@@ -390,7 +465,7 @@ mod tests {
     fn test_compact_symlinks() {
         let input = "total 8\n\
                      lrwxr-xr-x  1 user  staff  10 Jan  1 12:00 link -> target\n";
-        let (entries, _summary, _) = compact_ls(input, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false);
         assert!(entries.contains("link -> target"));
     }
 
@@ -400,7 +475,7 @@ mod tests {
         let input = "total 48\n\
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n";
-        let (entries, summary, _) = compact_ls(input, false);
+        let (entries, summary, _parsed) = compact_ls(input, false, false);
         assert!(
             !entries.contains("Summary:"),
             "entries must not contain summary"
@@ -419,7 +494,7 @@ mod tests {
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n\
                      -rw-r--r--  1 user  staff  5678 Jan  1 12:00 lib.rs\n";
-        let (entries, _summary, _) = compact_ls(input, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false);
         let line_count = entries.lines().count();
         assert_eq!(
             line_count, 3,
@@ -434,7 +509,7 @@ mod tests {
         let input = "total 8\n\
                      -rw-r--r--  1 fjeanne utilisa. du domaine    0 Mar 31 16:18 empty.txt\n\
                      -rw-r--r--  1 fjeanne utilisa. du domaine 1234 Mar 31 16:18 data.json\n";
-        let (entries, _summary, _) = compact_ls(input, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false);
         assert!(
             entries.contains("empty.txt"),
             "should contain 'empty.txt', got: {entries}"
@@ -462,7 +537,7 @@ mod tests {
         // Some systems show year instead of time for old files
         let input = "total 8\n\
                      -rw-r--r--  1 user staff  5678 Dec 25  2024 archive.tar\n";
-        let (entries, _summary, _) = compact_ls(input, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false);
         assert!(
             entries.contains("archive.tar"),
             "should contain filename, got: {entries}"
@@ -472,38 +547,42 @@ mod tests {
 
     #[test]
     fn test_parse_ls_line_basic() {
-        let (ft, size, name) =
+        let (ft, perms, size, name) =
             parse_ls_line("-rw-r--r--  1 user staff 1234 Jan  1 12:00 file.txt").unwrap();
         assert_eq!(ft, '-');
+        assert_eq!(perms, "-rw-r--r--");
         assert_eq!(size, 1234);
         assert_eq!(name, "file.txt");
     }
 
     #[test]
     fn test_parse_ls_line_multiline_group() {
-        let (ft, size, name) =
+        let (ft, perms, size, name) =
             parse_ls_line("-rw-r--r--  1 fjeanne utilisa. du domaine 0 Mar 31 16:18 empty.txt")
                 .unwrap();
         assert_eq!(ft, '-');
+        assert_eq!(perms, "-rw-r--r--");
         assert_eq!(size, 0);
         assert_eq!(name, "empty.txt");
     }
 
     #[test]
     fn test_parse_ls_line_dir_with_space_in_group() {
-        let (ft, size, name) =
+        let (ft, perms, size, name) =
             parse_ls_line("drwxr-xr-x  2 fjeanne utilisa. du domaine 64 Mar 31 16:18 my dir")
                 .unwrap();
         assert_eq!(ft, 'd');
+        assert_eq!(perms, "drwxr-xr-x");
         assert_eq!(size, 64);
         assert_eq!(name, "my dir");
     }
 
     #[test]
     fn test_parse_ls_line_symlink() {
-        let (ft, size, name) =
+        let (ft, perms, size, name) =
             parse_ls_line("lrwxr-xr-x  1 user staff 10 Jan  1 12:00 link -> target").unwrap();
         assert_eq!(ft, 'l');
+        assert_eq!(perms, "lrwxr-xr-x");
         assert_eq!(size, 10);
         assert_eq!(name, "link -> target");
     }
@@ -513,7 +592,7 @@ mod tests {
         // Regression test for #844: `rtk ls /dev/ttyACM*` returned "(empty)"
         // because character devices (type 'c') were not handled by compact_ls.
         let input = "crw-rw----  1 root  dialout  166, 0 Apr 22 09:46 /dev/ttyACM0\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false);
         assert!(
             entries.contains("/dev/ttyACM0"),
             "should contain device file, got: {entries}"
@@ -525,7 +604,7 @@ mod tests {
     fn test_compact_device_files_macos_hex_size() {
         // macOS shows device major/minor as hex (e.g. 0x2000000)
         let input = "crw-rw-rw-  1 root  wheel  0x2000000 Mar 31 19:25 /dev/tty\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false);
         assert!(
             entries.contains("/dev/tty"),
             "should contain device file, got: {entries}"
@@ -535,7 +614,7 @@ mod tests {
     #[test]
     fn test_compact_block_device() {
         let input = "brw-rw----  1 root  disk  8, 0 Apr 22 09:46 /dev/sda\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false);
         assert!(
             entries.contains("/dev/sda"),
             "should contain block device, got: {entries}"
@@ -549,11 +628,78 @@ mod tests {
 
     #[test]
     fn test_parse_ls_line_year_format() {
-        let (ft, size, name) =
+        let (ft, perms, size, name) =
             parse_ls_line("-rw-r--r--  1 user staff 5678 Dec 25  2024 old.tar.gz").unwrap();
         assert_eq!(ft, '-');
+        assert_eq!(perms, "-rw-r--r--");
         assert_eq!(size, 5678);
         assert_eq!(name, "old.tar.gz");
+    }
+
+    #[test]
+    fn test_perms_to_octal_common() {
+        assert_eq!(perms_to_octal("-rw-r--r--").as_deref(), Some("644"));
+        assert_eq!(perms_to_octal("-rwxr-xr-x").as_deref(), Some("755"));
+        assert_eq!(perms_to_octal("drwxr-xr-x").as_deref(), Some("755"));
+        assert_eq!(perms_to_octal("-rw-------").as_deref(), Some("600"));
+        assert_eq!(perms_to_octal("-rwxrwxrwx").as_deref(), Some("777"));
+        assert_eq!(perms_to_octal("----------").as_deref(), Some("000"));
+        assert_eq!(perms_to_octal("lrwxr-xr-x").as_deref(), Some("755"));
+    }
+
+    #[test]
+    fn test_perms_to_octal_special_bits() {
+        // setuid + 755 -> 4755
+        assert_eq!(perms_to_octal("-rwsr-xr-x").as_deref(), Some("4755"));
+        // setuid without execute -> 4644
+        assert_eq!(perms_to_octal("-rwSr--r--").as_deref(), Some("4644"));
+        // setgid + 755 -> 2755
+        assert_eq!(perms_to_octal("-rwxr-sr-x").as_deref(), Some("2755"));
+        // sticky bit on /tmp-style dir -> 1777
+        assert_eq!(perms_to_octal("drwxrwxrwt").as_deref(), Some("1777"));
+        // setuid + setgid + sticky
+        assert_eq!(perms_to_octal("-rwsrwsrwt").as_deref(), Some("7777"));
+    }
+
+    #[test]
+    fn test_perms_to_octal_garbage() {
+        assert_eq!(perms_to_octal(""), None);
+        assert_eq!(perms_to_octal("short"), None);
+    }
+
+    #[test]
+    fn test_compact_long_format_includes_octal() {
+        let input = "total 48\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
+                     -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n\
+                     -rwxr-xr-x  1 user  staff   500 Jan  1 12:00 build.sh\n";
+        let (entries, _summary, _parsed) = compact_ls(input, false, true);
+        assert!(
+            entries.contains("755  src/"),
+            "dir should be prefixed with octal perms, got: {entries}"
+        );
+        assert!(
+            entries.contains("644  Cargo.toml  1.2K"),
+            "file should be prefixed with octal perms, got: {entries}"
+        );
+        assert!(
+            entries.contains("755  build.sh  500B"),
+            "executable should show 755, got: {entries}"
+        );
+    }
+
+    #[test]
+    fn test_compact_short_format_omits_octal() {
+        // Without -l, no octal prefix even though we still parse `ls -la`
+        // under the hood.
+        let input = "total 48\n\
+                     -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n";
+        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        assert!(
+            !entries.contains("644"),
+            "short format must not include octal perms, got: {entries}"
+        );
+        assert!(entries.contains("Cargo.toml"));
     }
 
     #[test]
@@ -561,7 +707,7 @@ mod tests {
         let input = "total 8\n\
                       drwxr-xr-x  2 user staff  64  1月  1 12:00 src\n\
                       -rw-r--r--  1 user staff 1234  1月  1 12:00 main.rs\n";
-        let (entries, summary, parsed_count) = compact_ls(input, false);
+        let (entries, summary, parsed_count) = compact_ls(input, false, false);
         assert_eq!(parsed_count, 0);
         assert!(entries.is_empty());
         assert!(summary.is_empty());

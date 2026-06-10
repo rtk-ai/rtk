@@ -215,7 +215,7 @@ fn is_structured_operation(args: &[String]) -> bool {
         || op == "receive-message"
 }
 
-/// Generic strategy: force --output json for structured ops, compress via json_cmd schema
+/// Generic strategy: force --output json for structured ops, compress via json_cmd compact (values preserved)
 fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -256,10 +256,10 @@ fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -
         return Ok(crate::core::utils::exit_code_from_output(&output, "aws"));
     }
 
-    let filtered = match json_cmd::filter_json_string(&raw, JSON_COMPRESS_DEPTH) {
-        Ok(schema) => {
-            println!("{}", schema);
-            schema
+    let filtered = match json_cmd::filter_json_compact(&raw, JSON_COMPRESS_DEPTH) {
+        Ok(compact) => {
+            println!("{}", compact);
+            compact
         }
         Err(_) => {
             // Fallback: print raw (maybe not JSON)
@@ -2748,5 +2748,30 @@ upload: file10.txt to s3://bucket/file10.txt
         let result = filter_cfn_events(&json).unwrap();
         // Should report all 30 failures, not capped at MAX_ITEMS (20)
         assert!(result.text.contains("30 failed"));
+    }
+
+    // Regression: generic AWS path (unsupported subcommand returning JSON) must
+    // compress responses while preserving values, not collapse them to schema
+    // type names. Calls the primitive used at aws_cmd.rs run_generic line 259.
+    #[test]
+    fn test_aws_unsupported_subcommand_json_preserves_values() {
+        let fixture = include_str!(
+            "../../../tests/fixtures/aws_backup_describe_global_settings.json"
+        );
+        let output = json_cmd::filter_json_compact(fixture, JSON_COMPRESS_DEPTH)
+            .expect("filter_json_compact must not error on valid AWS JSON");
+
+        assert!(
+            output.contains("\"false\""),
+            "values must be preserved (expected literal \"false\"), got:\n{output}"
+        );
+        assert!(
+            !output.contains(": string"),
+            "schema-type leakage detected (\": string\" found), got:\n{output}"
+        );
+        assert!(
+            output.contains("isMpaEnabled"),
+            "object keys must be preserved, got:\n{output}"
+        );
     }
 }

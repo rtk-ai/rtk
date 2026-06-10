@@ -202,7 +202,6 @@ fn build_pytest_summary(
         result.push_str(&format!(", {} xpassed", xpassed));
     }
     result.push('\n');
-    result.push_str("═══════════════════════════════════════\n");
 
     // Surface xfail/xpass entries (with their reasons) — XPASS in particular
     // signals that something expected-to-fail now passes.

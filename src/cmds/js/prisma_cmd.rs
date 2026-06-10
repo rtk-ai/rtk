@@ -277,7 +277,6 @@ fn filter_migrate_dev(output: &str) -> String {
 
     if !migration_name.is_empty() {
         result.push_str(&format!("Migration: {}\n", migration_name));
-        result.push_str("═══════════════════════════════════════\n");
     }
 
     result.push_str("Changes:\n");

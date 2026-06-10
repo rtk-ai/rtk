@@ -162,6 +162,16 @@ fn extract_identifier_and_extra_args(args: &[String]) -> Option<(String, Vec<Str
     identifier.map(|id| (id, extra))
 }
 
+/// Like `extract_identifier_and_extra_args` but yields `(None, args.to_vec())` when no
+/// positional identifier is present, so callers can defer the "id required" decision
+/// to `gh` itself (e.g. `gh pr view` defaults to the current branch's PR).
+fn parse_optional_identifier(args: &[String]) -> (Option<String>, Vec<String>) {
+    match extract_identifier_and_extra_args(args) {
+        Some((id, extra)) => (Some(id), extra),
+        None => (None, args.to_vec()),
+    }
+}
+
 fn run_gh_json<F>(cmd: Command, label: &str, filter_fn: F) -> Result<i32>
 where
     F: Fn(&Value) -> String,
@@ -319,27 +329,32 @@ fn pr_status_json_fields() -> &'static str {
 }
 
 fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
-    let (pr_number, extra_args) = match extract_identifier_and_extra_args(args) {
-        Some(result) => result,
-        None => return Err(anyhow::anyhow!("PR number required")),
-    };
+    // `gh pr view` without an identifier defaults to the PR for the current branch.
+    let (pr_number_opt, extra_args) = parse_optional_identifier(args);
     if should_passthrough_pr_view(&extra_args) {
-        return run_passthrough_with_extra("gh", &["pr", "view", &pr_number], &extra_args);
+        let mut base: Vec<&str> = vec!["pr", "view"];
+        if let Some(id) = pr_number_opt.as_deref() {
+            base.push(id);
+        }
+        return run_passthrough_with_extra("gh", &base, &extra_args);
     }
     let mut cmd = resolved_command("gh");
+    cmd.args(["pr", "view"]);
+    if let Some(id) = pr_number_opt.as_deref() {
+        cmd.arg(id);
+    }
     cmd.args([
-        "pr",
-        "view",
-        &pr_number,
         "--json",
         "number,title,state,author,body,url,mergeable,reviews,statusCheckRollup",
     ]);
     for arg in &extra_args {
         cmd.arg(arg);
     }
-    run_gh_json(cmd, &format!("pr view {}", pr_number), |json| {
-        format_pr_view(json, ultra_compact)
-    })
+    let label = match pr_number_opt.as_deref() {
+        Some(id) => format!("pr view {}", id),
+        None => "pr view".to_string(),
+    };
+    run_gh_json(cmd, &label, |json| format_pr_view(json, ultra_compact))
 }
 
 fn format_pr_view(json: &Value, ultra_compact: bool) -> String {
@@ -419,6 +434,8 @@ fn format_pr_view(json: &Value, ultra_compact: bool) -> String {
                 for line in body_filtered.lines() {
                     out.push_str(&format!("  {}\n", line));
                 }
+            } else {
+                out.push_str("\n  (body contained only badges/images/comments)\n");
             }
         }
     }
@@ -427,19 +444,24 @@ fn format_pr_view(json: &Value, ultra_compact: bool) -> String {
 }
 
 fn pr_checks(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32> {
-    let (pr_number, extra_args) = match extract_identifier_and_extra_args(args) {
-        Some(result) => result,
-        None => return Err(anyhow::anyhow!("PR number required")),
-    };
+    // `gh pr checks` without an identifier defaults to the PR for the current branch.
+    let (pr_number_opt, extra_args) = parse_optional_identifier(args);
     let mut cmd = resolved_command("gh");
-    cmd.args(["pr", "checks", &pr_number]);
+    cmd.args(["pr", "checks"]);
+    if let Some(id) = pr_number_opt.as_deref() {
+        cmd.arg(id);
+    }
     for arg in &extra_args {
         cmd.arg(arg);
     }
+    let label = match pr_number_opt.as_deref() {
+        Some(id) => format!("pr checks {}", id),
+        None => "pr checks".to_string(),
+    };
     runner::run_filtered(
         cmd,
         "gh",
-        &format!("pr checks {}", pr_number),
+        &label,
         format_pr_checks,
         RunOptions::stdout_only()
             .early_exit_on_failure()
@@ -623,27 +645,29 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
 }
 
 fn view_issue(args: &[String], _verbose: u8) -> Result<i32> {
-    let (issue_number, extra_args) = match extract_identifier_and_extra_args(args) {
-        Some(result) => result,
-        None => return Err(anyhow::anyhow!("Issue number required")),
-    };
+    // Let gh emit its own error message when the identifier is missing rather than pre-rejecting.
+    let (issue_number_opt, extra_args) = parse_optional_identifier(args);
     if should_passthrough_issue_view(&extra_args) {
-        return run_passthrough_with_extra("gh", &["issue", "view", &issue_number], &extra_args);
+        let mut base: Vec<&str> = vec!["issue", "view"];
+        if let Some(id) = issue_number_opt.as_deref() {
+            base.push(id);
+        }
+        return run_passthrough_with_extra("gh", &base, &extra_args);
     }
     let mut cmd = resolved_command("gh");
-    cmd.args([
-        "issue",
-        "view",
-        &issue_number,
-        "--json",
-        "number,title,state,author,body,url",
-    ]);
+    cmd.args(["issue", "view"]);
+    if let Some(id) = issue_number_opt.as_deref() {
+        cmd.arg(id);
+    }
+    cmd.args(["--json", "number,title,state,author,body,url"]);
     for arg in &extra_args {
         cmd.arg(arg);
     }
-    run_gh_json(cmd, &format!("issue view {}", issue_number), |json| {
-        format_issue_view(json)
-    })
+    let label = match issue_number_opt.as_deref() {
+        Some(id) => format!("issue view {}", id),
+        None => "issue view".to_string(),
+    };
+    run_gh_json(cmd, &label, format_issue_view)
 }
 
 fn format_issue_view(json: &Value) -> String {
@@ -672,6 +696,8 @@ fn format_issue_view(json: &Value) -> String {
                 for line in body_filtered.lines() {
                     out.push_str(&format!("    {}\n", line));
                 }
+            } else {
+                out.push_str("\n  Description: (body contained only badges/images/comments)\n");
             }
         }
     }
@@ -753,23 +779,32 @@ fn should_passthrough_run_view(extra_args: &[String]) -> bool {
 }
 
 fn view_run(args: &[String], _verbose: u8) -> Result<i32> {
-    let (run_id, extra_args) = match extract_identifier_and_extra_args(args) {
-        Some(result) => result,
-        None => return Err(anyhow::anyhow!("Run ID required")),
-    };
+    // `gh run view` without an identifier opens an interactive picker — defer to gh.
+    let (run_id_opt, extra_args) = parse_optional_identifier(args);
     if should_passthrough_run_view(&extra_args) {
-        return run_passthrough_with_extra("gh", &["run", "view", &run_id], &extra_args);
+        let mut base: Vec<&str> = vec!["run", "view"];
+        if let Some(id) = run_id_opt.as_deref() {
+            base.push(id);
+        }
+        return run_passthrough_with_extra("gh", &base, &extra_args);
     }
     let mut cmd = resolved_command("gh");
-    cmd.args(["run", "view", &run_id]);
+    cmd.args(["run", "view"]);
+    if let Some(id) = run_id_opt.as_deref() {
+        cmd.arg(id);
+    }
     for arg in &extra_args {
         cmd.arg(arg);
     }
-    let run_id_owned = run_id.clone();
+    let label = match run_id_opt.as_deref() {
+        Some(id) => format!("run view {}", id),
+        None => "run view".to_string(),
+    };
+    let run_id_owned = run_id_opt.unwrap_or_default();
     runner::run_filtered(
         cmd,
         "gh",
-        &format!("run view {}", run_id),
+        &label,
         move |stdout| format_run_view(stdout, &run_id_owned),
         RunOptions::stdout_only()
             .early_exit_on_failure()
@@ -781,7 +816,11 @@ fn format_run_view(stdout: &str, run_id: &str) -> String {
     let mut out = String::new();
     let mut in_jobs = false;
 
-    out.push_str(&format!("Workflow Run #{}\n", run_id));
+    if run_id.is_empty() {
+        out.push_str("Workflow Run\n");
+    } else {
+        out.push_str(&format!("Workflow Run #{}\n", run_id));
+    }
     for line in stdout.lines() {
         if line.contains("JOBS") {
             in_jobs = true;
@@ -1077,6 +1116,35 @@ mod tests {
         assert!(extract_identifier_and_extra_args(&args).is_none());
     }
 
+    // --- parse_optional_identifier tests ---
+
+    #[test]
+    fn test_parse_optional_identifier_empty_yields_no_id() {
+        // `gh pr view` (no args) must surface as (None, []) so the caller
+        // hands the request to gh, which resolves the current branch's PR.
+        let (id, extra) = parse_optional_identifier(&[]);
+        assert!(id.is_none());
+        assert!(extra.is_empty());
+    }
+
+    #[test]
+    fn test_parse_optional_identifier_only_flags_preserves_flags() {
+        // Regression: `gh pr view -R rtk-ai/rtk` previously triggered
+        // "PR number required". Now flags must round-trip into `extra`.
+        let args: Vec<String> = vec!["-R".into(), "rtk-ai/rtk".into()];
+        let (id, extra) = parse_optional_identifier(&args);
+        assert!(id.is_none());
+        assert_eq!(extra, vec!["-R", "rtk-ai/rtk"]);
+    }
+
+    #[test]
+    fn test_parse_optional_identifier_with_id_matches_extract() {
+        let args: Vec<String> = vec!["-R".into(), "rtk-ai/rtk".into(), "42".into()];
+        let (id, extra) = parse_optional_identifier(&args);
+        assert_eq!(id.as_deref(), Some("42"));
+        assert_eq!(extra, vec!["-R", "rtk-ai/rtk"]);
+    }
+
     #[test]
     fn test_extract_identifier_with_web_flag() {
         let args: Vec<String> = vec!["123".into(), "--web".into()];
@@ -1106,6 +1174,21 @@ mod tests {
     #[test]
     fn test_run_view_no_passthrough_empty() {
         assert!(!should_passthrough_run_view(&[]));
+    }
+
+    #[test]
+    fn test_format_run_view_with_id() {
+        let output = format_run_view("", "12345");
+        assert!(output.starts_with("Workflow Run #12345\n"));
+    }
+
+    #[test]
+    fn test_format_run_view_without_id() {
+        // `gh run view` with no arg opens an interactive picker — the captured run id
+        // is empty, so the header must not render an empty `#`.
+        let output = format_run_view("", "");
+        assert!(output.starts_with("Workflow Run\n"));
+        assert!(!output.contains("#\n"));
     }
 
     #[test]
@@ -1467,5 +1550,88 @@ ___
         assert!(result.contains("## Changes"));
         assert!(result.contains("## Test Plan"));
         assert!(result.contains("Filter HTML comments"));
+    }
+
+    #[test]
+    fn test_format_pr_view_body_badges_only_shows_fallback_note() {
+        // PR body that filter_markdown_body would strip entirely:
+        // HTML comments, badge links, image-only lines, horizontal rules.
+        let body = "<!-- Auto-generated by bot -->\n\
+                    [![CI](https://shields.io/badge.svg)](https://ci.example.com)\n\
+                    ![screenshot](https://example.com/img.png)\n\
+                    ---\n";
+        let json = serde_json::json!({
+            "number": 42,
+            "title": "Test PR",
+            "state": "OPEN",
+            "author": { "login": "octocat" },
+            "url": "https://github.com/foo/bar/pull/42",
+            "mergeable": "MERGEABLE",
+            "body": body,
+        });
+        let out = format_pr_view(&json, false);
+        assert!(
+            out.contains("(body contained only badges/images/comments)"),
+            "expected fallback note when body filters to empty, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_format_pr_view_body_with_content_no_fallback_note() {
+        // Sanity check: real content should NOT trigger the fallback note.
+        let json = serde_json::json!({
+            "number": 42,
+            "title": "Test PR",
+            "state": "OPEN",
+            "author": { "login": "octocat" },
+            "url": "https://github.com/foo/bar/pull/42",
+            "mergeable": "MERGEABLE",
+            "body": "## Summary\nFix the thing.\n",
+        });
+        let out = format_pr_view(&json, false);
+        assert!(
+            !out.contains("(body contained only badges/images/comments)"),
+            "fallback note should not fire when body has real content, got:\n{}",
+            out
+        );
+        assert!(out.contains("## Summary"));
+        assert!(out.contains("Fix the thing."));
+    }
+
+    #[test]
+    fn test_format_pr_view_empty_body_no_fallback_note() {
+        // Empty body should not trigger the note either (nothing to flag).
+        let json = serde_json::json!({
+            "number": 42,
+            "title": "Test PR",
+            "state": "OPEN",
+            "author": { "login": "octocat" },
+            "url": "https://github.com/foo/bar/pull/42",
+            "mergeable": "MERGEABLE",
+            "body": "",
+        });
+        let out = format_pr_view(&json, false);
+        assert!(!out.contains("(body contained only badges/images/comments)"));
+    }
+
+    #[test]
+    fn test_format_issue_view_body_badges_only_shows_fallback_note() {
+        let body = "<!-- Auto-generated -->\n\
+                    [![status](https://shields.io/s.svg)](https://example.com)\n";
+        let json = serde_json::json!({
+            "number": 99,
+            "title": "Test Issue",
+            "state": "OPEN",
+            "author": { "login": "octocat" },
+            "url": "https://github.com/foo/bar/issues/99",
+            "body": body,
+        });
+        let out = format_issue_view(&json);
+        assert!(
+            out.contains("(body contained only badges/images/comments)"),
+            "expected fallback note when issue body filters to empty, got:\n{}",
+            out
+        );
     }
 }

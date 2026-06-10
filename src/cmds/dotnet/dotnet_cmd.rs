@@ -368,7 +368,6 @@ fn format_dotnet_format_output(
     }
 
     let mut output = format!("Format: {} files need formatting", changed_count);
-    output.push_str("\n---------------------------------------");
 
     const MAX_FORMAT_FILES: usize = CAP_LIST;
     for (index, file) in summary
@@ -1056,12 +1055,6 @@ fn format_build_output(summary: &binlog::BuildSummary, _binlog_path: &Path) -> S
         }
     }
 
-    let sep = if !warnings.is_empty() || !errors.is_empty() {
-        "---------------------------------------"
-    } else {
-        ""
-    };
-
     let verdict = format!(
         "{} dotnet build: {} projects, {} errors, {} warnings ({})",
         status_icon,
@@ -1076,7 +1069,7 @@ fn format_build_output(summary: &binlog::BuildSummary, _binlog_path: &Path) -> S
     // definitive verdict. Mirrors native `dotnet build`, which ends with
     // `Build succeeded.` / `Build FAILED.`. See issue #1574.
     // Warnings before errors: errors survive `| tail -N` immediately above the verdict.
-    [warnings, errors, sep.into(), verdict]
+    [warnings, errors, verdict]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
@@ -1218,24 +1211,9 @@ fn format_test_output(
         }
     }
 
-    let sep = if !failed_tests_section.is_empty()
-        || !warnings_section.is_empty()
-        || !errors_section.is_empty()
-    {
-        "---------------------------------------"
-    } else {
-        ""
-    };
-
     // Status line emitted last; see format_build_output (issue #1574).
     // Warnings before errors: errors survive `| tail -N` immediately above the verdict.
-    [
-        failed_tests_section,
-        warnings_section,
-        errors_section,
-        sep.into(),
-        header,
-    ]
+    [failed_tests_section, warnings_section, errors_section, header]
     .into_iter()
     .filter(|s| !s.is_empty())
     .collect::<Vec<_>>()
@@ -1311,12 +1289,6 @@ fn format_restore_output(
         }
     }
 
-    let sep = if !warnings_section.is_empty() || !errors_section.is_empty() {
-        "---------------------------------------"
-    } else {
-        ""
-    };
-
     let verdict = format!(
         "{} dotnet restore: {} projects, {} errors, {} warnings ({})",
         status_icon, summary.restored_projects, summary.errors, summary.warnings, duration
@@ -1324,7 +1296,7 @@ fn format_restore_output(
 
     // Status line emitted last; see format_build_output (issue #1574).
     // Warnings before errors: errors survive `| tail -N` immediately above the verdict.
-    [warnings_section, errors_section, sep.into(), verdict]
+    [warnings_section, errors_section, verdict]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
