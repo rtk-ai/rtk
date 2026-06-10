@@ -39,3 +39,9 @@ pub const HERMES_PLUGINS_SUBDIR: &str = "plugins";
 pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";
 pub const HERMES_PLUGIN_INIT_FILE: &str = "__init__.py";
 pub const HERMES_PLUGIN_MANIFEST_FILE: &str = "plugin.yaml";
+
+pub const CODEBUDDY_DIR: &str = ".codebuddy";
+/// Native Rust hook command for CodeBuddy.
+pub const CODEBUDDY_HOOK_COMMAND: &str = "rtk hook codebuddy";
+/// CodeBuddy matcher: catches both CLI mode (Bash) and IDE mode (execute_command).
+pub const CODEBUDDY_MATCHER: &str = "Bash|execute_command";

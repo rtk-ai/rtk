@@ -13,11 +13,12 @@ use crate::hooks::constants::{
 };
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
-    GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
-    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
-    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
-    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEBUDDY_DIR, CODEBUDDY_HOOK_COMMAND,
+    CODEBUDDY_MATCHER, CODEX_DIR, CURSOR_HOOK_COMMAND, GEMINI_HOOK_FILE, HERMES_DIR,
+    HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE,
+    HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR,
+    PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
+    SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -2783,6 +2784,231 @@ fn codex_rtk_md_ref(codex_dir: &Path) -> String {
 
 fn resolve_opencode_dir() -> Result<PathBuf> {
     resolve_home_subdir(CONFIG_DIR).map(|p| p.join(OPENCODE_SUBDIR))
+}
+
+// ─── CodeBuddy support ─────────────────────────────────────────────
+
+/// Resolve CodeBuddy config directory (global: ~/.codebuddy).
+fn resolve_codebuddy_dir() -> Result<PathBuf> {
+    resolve_home_subdir(CODEBUDDY_DIR)
+}
+
+/// Run `rtk init --agent codebuddy`: patch `~/.codebuddy/settings.json`
+/// with the RTK PreToolUse hook entry.
+pub fn run_codebuddy_mode(ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let codebuddy_dir = resolve_codebuddy_dir()?;
+
+    if !dry_run {
+        fs::create_dir_all(&codebuddy_dir).with_context(|| {
+            format!(
+                "Failed to create CodeBuddy config directory: {}",
+                codebuddy_dir.display()
+            )
+        })?;
+    }
+
+    let settings_path = codebuddy_dir.join(SETTINGS_JSON);
+    let patched = patch_codebuddy_settings_json(&settings_path, ctx)?;
+
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        println!("\nRTK configured for CodeBuddy.\n");
+        println!("  Command:    {}", CODEBUDDY_HOOK_COMMAND);
+        println!("  Settings:   {}", settings_path.display());
+        if patched {
+            println!("  Settings:   RTK PreToolUse hook added");
+        } else {
+            println!("  Settings:   RTK PreToolUse hook already present");
+        }
+        println!(
+            "  Matcher:    {} (CLI + IDE modes)",
+            CODEBUDDY_MATCHER
+        );
+        println!("  Restart CodeBuddy. Test with: git status\n");
+    }
+
+    Ok(())
+}
+
+/// Patch `~/.codebuddy/settings.json` to add the RTK PreToolUse hook.
+/// Returns `true` if the file was modified.
+fn patch_codebuddy_settings_json(path: &Path, ctx: InitContext) -> Result<bool> {
+    let InitContext { verbose, dry_run } = ctx;
+
+    let mut root = if path.exists() {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        if content.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse {} as JSON", path.display()))?
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    // Check idempotency: skip if RTK hook is already present
+    if codebuddy_hook_already_present(&root) {
+        if verbose > 0 {
+            eprintln!("CodeBuddy settings.json: RTK hook already present");
+        }
+        return Ok(false);
+    }
+
+    insert_codebuddy_hook_entry(&mut root)?;
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
+
+    if dry_run {
+        println!(
+            "[dry-run] would patch CodeBuddy settings.json: {}",
+            path.display()
+        );
+        if verbose > 0 {
+            println!("[dry-run] content:\n{}", serialized);
+        }
+        return Ok(true);
+    }
+
+    // Backup if exists
+    if path.exists() {
+        let backup_path = path.with_extension("json.bak");
+        fs::copy(path, &backup_path)
+            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+        if verbose > 0 {
+            eprintln!("Backup: {}", backup_path.display());
+        }
+    }
+
+    atomic_write(path, &serialized)?;
+    Ok(true)
+}
+
+/// Insert the RTK PreToolUse hook entry into CodeBuddy's settings.json.
+fn insert_codebuddy_hook_entry(root: &mut serde_json::Value) -> Result<()> {
+    let root_obj = match root.as_object_mut() {
+        Some(obj) => obj,
+        None => {
+            *root = serde_json::json!({});
+            root.as_object_mut().expect("just-created json object")
+        }
+    };
+
+    let hooks = root_obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("hooks value is not an object")?;
+
+    let pre_tool_use = hooks
+        .entry(PRE_TOOL_USE_KEY)
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .context("PreToolUse value is not an array")?;
+
+    pre_tool_use.push(serde_json::json!({
+        "matcher": CODEBUDDY_MATCHER,
+        "hooks": [{
+            "type": "command",
+            "command": CODEBUDDY_HOOK_COMMAND
+        }]
+    }));
+    Ok(())
+}
+
+/// Check if the RTK CodeBuddy hook is already present in settings.json.
+fn codebuddy_hook_already_present(root: &serde_json::Value) -> bool {
+    let pre_tool_use_array = match root
+        .get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    pre_tool_use_array
+        .iter()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .filter_map(|hook| hook.get("command")?.as_str())
+        .any(|cmd| cmd == CODEBUDDY_HOOK_COMMAND)
+}
+
+/// Uninstall RTK hook from CodeBuddy settings.json.
+pub fn uninstall_codebuddy(ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, verbose } = ctx;
+    let codebuddy_dir = resolve_codebuddy_dir()?;
+    let settings_path = codebuddy_dir.join(SETTINGS_JSON);
+
+    if !settings_path.exists() {
+        println!("CodeBuddy settings.json not found (nothing to remove)");
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&settings_path)
+        .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+    let mut root: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {}", settings_path.display()))?;
+
+    if !remove_codebuddy_hook_entries(&mut root) {
+        println!("RTK hook not found in CodeBuddy settings.json (nothing to remove)");
+        return Ok(());
+    }
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
+
+    if dry_run {
+        println!(
+            "[dry-run] would remove RTK hook from CodeBuddy settings.json: {}",
+            settings_path.display()
+        );
+        if verbose > 0 {
+            println!("[dry-run] content:\n{}", serialized);
+        }
+        print_dry_run_footer();
+    } else {
+        // Backup
+        let backup_path = settings_path.with_extension("json.bak");
+        let _ = fs::copy(&settings_path, &backup_path);
+        atomic_write(&settings_path, &serialized)?;
+        println!("RTK hook removed from CodeBuddy settings.json");
+        println!("  Settings: {}", settings_path.display());
+    }
+
+    Ok(())
+}
+
+/// Remove RTK hook entries from CodeBuddy settings.json in-memory.
+/// Returns true if any entries were removed.
+fn remove_codebuddy_hook_entries(root: &mut serde_json::Value) -> bool {
+    let pre_tool_use = match root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array_mut())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    let before_len = pre_tool_use.len();
+    pre_tool_use.retain(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .map(|hooks| {
+                !hooks
+                    .iter()
+                    .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(CODEBUDDY_HOOK_COMMAND))
+            })
+            .unwrap_or(true)
+    });
+    pre_tool_use.len() != before_len
 }
 
 // ─── Pi coding agent support ──────────────────────────────────────────
