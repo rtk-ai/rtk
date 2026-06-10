@@ -37,6 +37,10 @@ pub fn run(
     // -0: NUL-separate filename. Allows the parser to disambiguate filenames or
     // content containing `:digits:` patterns (issue #1436).
     rg_cmd.args(["-nH0", "--no-heading", "--no-ignore-vcs", &rg_pattern, path]);
+    // Skip Claude Code worktrees — these are session-local snapshots
+    // that are out of scope for an agentic session and often contain
+    // stale or duplicated data (see issue #2147).
+    rg_cmd.args(["--glob", "!.claude/worktrees/**"]);
 
     if let Some(ft) = file_type {
         rg_cmd.arg("--type").arg(ft);
@@ -54,7 +58,9 @@ pub fn run(
         .or_else(|_| {
             let mut grep_cmd = resolved_command("grep");
             // When we fall back to grep, include all args, not just -rnHZ.
-            grep_cmd.args(["-rnHZ", pattern, path]).args(extra_args);
+            grep_cmd.args(["-rnHZ", pattern, path]);
+            grep_cmd.args(["--exclude-dir", ".claude/worktrees"]);
+            grep_cmd.args(extra_args);
             exec_capture(&mut grep_cmd)
         })
         .context("grep/rg failed")?;
