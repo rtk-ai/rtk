@@ -8,6 +8,65 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
 
+/// Flags that ripgrep supports but system grep does not.
+/// Each entry: (prefix match string, takes_value_arg, keep_as_grep_flag)
+const RG_ONLY_FLAGS: &[(&str, bool, &str)] = &[
+    ("--glob", true, ""),
+    ("--iglob", true, ""),
+    ("--type-not", true, ""),
+    ("--sort", true, ""),
+    ("--field-match-separator", true, ""),
+    ("--path-separator", true, ""),
+    ("--no-ignore", false, ""),
+    ("--hidden", false, ""),
+    ("--pcre2", false, ""),
+    ("--json", false, ""),
+    ("--stats", false, ""),
+    ("--mmap", false, ""),
+    ("--one-file-system", false, ""),
+    ("--trim", false, ""),
+];
+
+/// Returns true if the arg is a ripgrep-only flag (not supported by grep).
+fn is_rg_only_flag(arg: &str) -> bool {
+    RG_ONLY_FLAGS.iter().any(|(prefix, _, _)| {
+        arg.starts_with(prefix) || arg == "-g" || arg.starts_with("-g=") || arg == "-T"
+    })
+}
+
+/// Returns true if the flag takes a separate value argument (next token to skip).
+fn flag_takes_value(arg: &str) -> bool {
+    // Value embedded with = means the next token is not its value.
+    if arg.contains('=') {
+        return false;
+    }
+    RG_ONLY_FLAGS
+        .iter()
+        .any(|(prefix, takes_val, _)| takes_val && arg == *prefix)
+        || arg == "-g"
+        || arg == "-T"
+}
+
+/// Filter out ripgrep-specific flags from a list of args, handling value-taking flags.
+fn filter_rg_flags(args: &[String]) -> Vec<&str> {
+    let mut skip_next = false;
+    let mut result = Vec::new();
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if is_rg_only_flag(arg) {
+            if flag_takes_value(arg) {
+                skip_next = true;
+            }
+            continue;
+        }
+        result.push(arg.as_str());
+    }
+    result
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     pattern: &str,
@@ -53,8 +112,9 @@ pub fn run(
     let result = exec_capture(&mut rg_cmd)
         .or_else(|_| {
             let mut grep_cmd = resolved_command("grep");
-            // When we fall back to grep, include all args, not just -rnHZ.
-            grep_cmd.args(["-rnHZ", pattern, path]).args(extra_args);
+            // Strip ripgrep-only flags before passing to system grep.
+            let grep_extra_args = filter_rg_flags(extra_args);
+            grep_cmd.args(["-rnHZ", pattern, path]).args(&grep_extra_args);
             exec_capture(&mut grep_cmd)
         })
         .context("grep/rg failed")?;
