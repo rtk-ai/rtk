@@ -81,6 +81,35 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 cargo install --git https://github.com/rtk-ai/rtk
 ```
 
+### Build from Source (Linux/macOS)
+
+For forks or local changes — including the **telemetry-disabled build** — compile
+from source. The prebuilt binaries from `install.sh` and releases do **not**
+contain local modifications, so building is the only way to ship your own changes.
+
+```bash
+# From a checkout of the repo:
+./install-from-source.sh
+
+# Standalone (clones the repo first):
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/<branch>/install-from-source.sh | bash
+```
+
+The script provisions the required toolchain per platform — `build-essential`,
+`pkg-config` and Rust via `rustup` on **Debian/Ubuntu** (apt), or the Xcode
+Command Line Tools on **macOS** — then runs `cargo build --release` and installs
+to `~/.local/bin`. A C compiler is required because `rusqlite` is built with the
+`bundled` feature (compiles SQLite from C).
+
+Options:
+
+```bash
+./install-from-source.sh --dir /usr/local/bin   # custom install directory
+./install-from-source.sh --init                 # also wire up Claude Code hooks
+./install-from-source.sh --no-deps              # skip toolchain install (already present)
+./install-from-source.sh --help                 # full usage
+```
+
 ### Pre-built Binaries
 
 Download from [releases](https://github.com/rtk-ai/rtk/releases):
