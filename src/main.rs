@@ -1322,6 +1322,29 @@ fn shell_split(input: &str) -> Vec<String> {
     discover::lexer::shell_split(input)
 }
 
+/// Detects shell compound syntax in a command that would not work with
+/// direct exec invocation (proxy does not invoke a shell).
+/// Returns the first shell metacharacter or control operator found.
+fn detect_shell_snippet(cmd: &str, args: &[String]) -> Option<&'static str> {
+    // Check the command name and all args for shell syntax.
+    for token in std::iter::once(cmd).chain(args.iter().map(|s| s.as_str())) {
+        // Standalone shell control operators (can never be legitimate args).
+        match token {
+            "&&" => return Some("&&"),
+            "||" => return Some("||"),
+            ";" => return Some(";"),
+            "|" => return Some("|"),
+            "&" => return Some("&"),
+            _ => {}
+        }
+        // Command substitution embedded in any token.
+        if token.contains("$(") || token.contains("${") || token.contains('`') {
+            return Some("$()");
+        }
+    }
+    None
+}
+
 /// Merge pnpm global filters args with other ones for standard String-based commands
 fn merge_pnpm_args(filters: &[String], args: &[String]) -> Vec<String> {
     filters
@@ -2310,6 +2333,23 @@ fn run_cli() -> Result<i32> {
                         .collect(),
                 )
             };
+
+            // Validate that the command is not a compound shell snippet.
+            // proxy does not invoke a shell — it spawns the command directly
+            // via exec. Shell metacharacters like &&, |, ;, $() will not be
+            // interpreted and would instead be passed as literal arguments,
+            // causing confusion or incorrect behavior (#2163).
+            if let Some(detected) = detect_shell_snippet(&cmd_name, &cmd_args) {
+                anyhow::bail!(
+                    "proxy rejected command containing shell syntax element `{}`.\n\
+                     rtk proxy does not invoke a shell — it runs the command directly. \
+                     Use `sh -c '...'` or `bash -c '...'` for compound shell snippets.\n\
+                     Command: {} {}",
+                    detected,
+                    cmd_name,
+                    cmd_args.join(" "),
+                );
+            }
 
             if cli.verbose > 0 {
                 eprintln!("Proxy mode: {} {}", cmd_name, cmd_args.join(" "));
