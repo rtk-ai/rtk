@@ -1152,6 +1152,21 @@ const RTK_META_COMMANDS: &[&str] = &[
     "rewrite",
 ];
 
+/// Run a filter closure, failing open to `raw` if it panics.
+///
+/// Mirrors the `catch_unwind` fail-open guards in `core::stream` and
+/// `cmds::system::pipe_cmd`: a filter bug should degrade to raw passthrough,
+/// never take down rtk. The default panic hook still prints the panic location
+/// to stderr before we recover, which is useful for diagnosing the filter bug.
+/// Requires `panic = "unwind"` in the release profile to be effective (see
+/// Cargo.toml / tests/release_profile_panic.rs).
+fn filter_or_passthrough<F: FnOnce() -> String>(raw: &str, filter_fn: F) -> String {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(filter_fn)).unwrap_or_else(|_| {
+        eprintln!("[rtk] warning: filter panicked — passing through raw output");
+        raw.to_string()
+    })
+}
+
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -1229,7 +1244,9 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                     None
                 };
 
-                let filtered = core::toml_filter::apply_filter(filter, &combined_raw);
+                let filtered = filter_or_passthrough(&combined_raw, || {
+                    core::toml_filter::apply_filter(filter, &combined_raw)
+                });
                 println!("{}", filtered);
                 if let Some(hint) = tee_hint {
                     println!("{}", hint);
@@ -2548,6 +2565,19 @@ mod tests {
     use super::*;
     use clap::Parser;
     use std::cell::Cell;
+
+    #[test]
+    fn test_filter_or_passthrough_recovers_from_panic() {
+        // A panicking filter must not take down rtk — it falls back to raw output.
+        let out = filter_or_passthrough("raw output", || panic!("filter bug"));
+        assert_eq!(out, "raw output");
+    }
+
+    #[test]
+    fn test_filter_or_passthrough_returns_filtered_value() {
+        let out = filter_or_passthrough("raw", || "filtered".to_string());
+        assert_eq!(out, "filtered");
+    }
 
     #[test]
     fn test_git_commit_single_message() {
