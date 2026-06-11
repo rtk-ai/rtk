@@ -878,6 +878,24 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
+    RtkRule {
+        pattern: r"^flutter\s+(analyze|pub\s+get|test)(\s|$)",
+        rtk_cmd: "rtk flutter",
+        rewrite_prefixes: &["flutter"],
+        category: "Flutter",
+        savings_pct: 75.0,
+        subcmd_savings: &[("analyze", 70.0), ("pub get", 85.0), ("test", 80.0)],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^dart\s+analyze(\s|$)",
+        rtk_cmd: "rtk dart",
+        rewrite_prefixes: &["dart"],
+        category: "Dart",
+        savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
 ];
 
 pub const IGNORED_PREFIXES: &[&str] = &[

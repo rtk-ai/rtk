@@ -8,7 +8,9 @@ mod parser;
 
 // Re-export command modules for routing
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use cmds::dart::dart_cmd;
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
+use cmds::flutter::flutter_cmd;
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
@@ -467,6 +469,18 @@ enum Commands {
         /// Create default config file
         #[arg(long)]
         create: bool,
+    },
+
+    /// Flutter commands with compact output
+    Flutter {
+        #[command(subcommand)]
+        command: FlutterCommands,
+    },
+
+    /// Dart commands with compact output
+    Dart {
+        #[command(subcommand)]
+        command: DartCommands,
     },
 
     /// Jest commands with compact output
@@ -1127,6 +1141,56 @@ enum GoCommands {
         args: Vec<String>,
     },
     /// Passthrough: runs any unsupported go subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Debug, Subcommand)]
+enum FlutterCommands {
+    /// Analyze Flutter project output
+    Analyze {
+        /// Additional flutter analyze arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Test Flutter project output
+    Test {
+        /// Additional flutter test arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Flutter pub commands
+    Pub {
+        #[command(subcommand)]
+        command: FlutterPubCommands,
+    },
+    /// Passthrough: runs any unsupported flutter subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Debug, Subcommand)]
+enum FlutterPubCommands {
+    /// flutter pub get with compact output
+    Get {
+        /// Additional flutter pub get arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported flutter pub subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Debug, Subcommand)]
+enum DartCommands {
+    /// Analyze Dart project output
+    Analyze {
+        /// Additional dart analyze arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported dart subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
 }
@@ -1990,6 +2054,25 @@ fn run_cli() -> Result<i32> {
             0
         }
 
+        Commands::Flutter { command } => match command {
+            FlutterCommands::Analyze { args } => flutter_cmd::run_analyze(&args, cli.verbose)?,
+            FlutterCommands::Test { args } => flutter_cmd::run_test(&args, cli.verbose)?,
+            FlutterCommands::Pub { command } => match command {
+                FlutterPubCommands::Get { args } => {
+                    flutter_cmd::run_pub_get(&args, cli.verbose)?
+                }
+                FlutterPubCommands::Other(args) => {
+                    flutter_cmd::run_pub_other(&args, cli.verbose)?
+                }
+            },
+            FlutterCommands::Other(args) => flutter_cmd::run_other(&args, cli.verbose)?,
+        },
+
+        Commands::Dart { command } => match command {
+            DartCommands::Analyze { args } => dart_cmd::run_analyze(&args, cli.verbose)?,
+            DartCommands::Other(args) => dart_cmd::run_other(&args, cli.verbose)?,
+        },
+
         Commands::Jest { ref args } | Commands::Vitest { ref args } => {
             vitest_cmd::run_test(&cli.command, args, cli.verbose)?
         }
@@ -2520,6 +2603,8 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Summary { .. }
             | Commands::Grep { .. }
             | Commands::Wget { .. }
+            | Commands::Flutter { .. }
+            | Commands::Dart { .. }
             | Commands::Vitest { .. }
             | Commands::Prisma { .. }
             | Commands::Tsc { .. }
