@@ -25,8 +25,8 @@
 <p align="center">
   <a href="README.md">English</a> &bull;
   <a href="README_fr.md">Francais</a> &bull;
-  <a href="README_zh.md">简体中文</a> &bull;
-  <a href="README_zh-TW.md">繁體中文</a> &bull;
+  <a href="README_zh-Hans.md">简体中文</a> &bull;
+  <a href="README_zh-Hant.md">繁體中文</a> &bull;
   <a href="README_ja.md">日本語</a> &bull;
   <a href="README_ko.md">한국어</a> &bull;
   <a href="README_es.md">Espanol</a> &bull;
@@ -35,7 +35,7 @@
 
 ---
 
-rtk 會在指令輸出進入 LLM 脈絡前進行過濾與壓縮。單一 Rust 二進位檔，零依賴，<10ms 額外開銷。
+rtk 會在指令輸出進入 LLM 上下文前進行過濾與壓縮。單一 Rust 二進位檔，零依賴，<10ms 額外開銷。
 
 ## Token 節省（30 分鐘 Claude Code 工作階段）
 
@@ -101,7 +101,7 @@ git status  # 自動改寫為 rtk git status
 
 1. **智慧過濾** - 移除雜訊（註解、空白、樣板程式碼）
 2. **分組** - 彙整相似項目（依目錄分組檔案，依類型分組錯誤）
-3. **截斷** - 保留相關脈絡，移除冗餘
+3. **截斷** - 保留相關上下文，移除冗餘
 4. **去除重複** - 合併重複日誌行並計數
 
 ## 指令
