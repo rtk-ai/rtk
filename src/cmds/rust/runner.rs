@@ -114,32 +114,48 @@ fn build_shell_command(command: &str) -> Command {
     }
 }
 
-/// Run a command and filter output to show only errors/warnings
-pub fn run_err(command: &str, verbose: u8) -> Result<i32> {
-    if verbose > 0 {
-        eprintln!("Running: {}", command);
+// A single token is treated as a shell line so things like `make && make test`
+// still work. Anything already split into argv is run as-is, otherwise joining
+// it back and handing it to `sh -c` would re-split quoted args and swallow the
+// real exit code (same approach as proxy mode).
+fn build_command(argv: &[String]) -> Command {
+    if argv.len() == 1 {
+        build_shell_command(&argv[0])
+    } else {
+        let mut c = Command::new(&argv[0]);
+        c.args(&argv[1..]);
+        c
     }
-    let cmd = build_shell_command(command);
+}
+
+/// Run a command and filter output to show only errors/warnings
+pub fn run_err(command: &[String], verbose: u8) -> Result<i32> {
+    let display = command.join(" ");
+    if verbose > 0 {
+        eprintln!("Running: {}", display);
+    }
+    let cmd = build_command(command);
     crate::core::runner::run_streamed(
         cmd,
         "err",
-        command,
+        &display,
         Box::new(ErrorStreamFilter::new()),
         crate::core::runner::RunOptions::with_tee("err"),
     )
 }
 
 /// Run tests and show only failures
-pub fn run_test(command: &str, verbose: u8) -> Result<i32> {
+pub fn run_test(command: &[String], verbose: u8) -> Result<i32> {
+    let display = command.join(" ");
     if verbose > 0 {
-        eprintln!("Running tests: {}", command);
+        eprintln!("Running tests: {}", display);
     }
-    let cmd = build_shell_command(command);
-    let command_owned = command.to_string();
+    let cmd = build_command(command);
+    let command_owned = display.clone();
     crate::core::runner::run_filtered(
         cmd,
         "test",
-        command,
+        &display,
         move |raw| extract_test_summary(raw, &command_owned),
         crate::core::runner::RunOptions::with_tee("test"),
     )
@@ -289,5 +305,44 @@ mod tests {
         let filtered = filter_errors(output);
         assert!(filtered.contains("error"));
         assert!(!filtered.contains("info"));
+    }
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn collect_args(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn test_build_command_keeps_quoted_args() {
+        // `sh -c 'exit 7'` should reach sh as two args, not get re-split.
+        let cmd = build_command(&argv(&["sh", "-c", "exit 7"]));
+        assert_eq!(cmd.get_program().to_string_lossy(), "sh");
+        assert_eq!(collect_args(&cmd), vec!["-c", "exit 7"]);
+    }
+
+    #[test]
+    fn test_build_command_arg_with_spaces() {
+        let cmd = build_command(&argv(&["echo", "a b"]));
+        assert_eq!(cmd.get_program().to_string_lossy(), "echo");
+        assert_eq!(collect_args(&cmd), vec!["a b"]);
+    }
+
+    #[test]
+    fn test_build_command_single_token_uses_shell() {
+        let cmd = build_command(&argv(&["echo hi | grep hi"]));
+        let program = cmd.get_program().to_string_lossy().into_owned();
+        let args = collect_args(&cmd);
+        if cfg!(target_os = "windows") {
+            assert_eq!(program, "cmd");
+            assert_eq!(args, vec!["/C", "echo hi | grep hi"]);
+        } else {
+            assert_eq!(program, "sh");
+            assert_eq!(args, vec!["-c", "echo hi | grep hi"]);
+        }
     }
 }

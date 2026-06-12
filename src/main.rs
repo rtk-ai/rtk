@@ -1668,13 +1668,21 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Err { command } => {
-            let cmd = command.join(" ");
-            runner::run_err(&cmd, cli.verbose)?
+            if command.is_empty() {
+                anyhow::bail!(
+                    "err requires a command to execute\nUsage: rtk err <command> [args...]"
+                );
+            }
+            runner::run_err(&command, cli.verbose)?
         }
 
         Commands::Test { command } => {
-            let cmd = command.join(" ");
-            runner::run_test(&cmd, cli.verbose)?
+            if command.is_empty() {
+                anyhow::bail!(
+                    "test requires a command to execute\nUsage: rtk test <command> [args...]"
+                );
+            }
+            runner::run_test(&command, cli.verbose)?
         }
 
         Commands::Json {
