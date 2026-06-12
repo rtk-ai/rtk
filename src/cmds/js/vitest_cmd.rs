@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
-use crate::core::utils::{package_manager_exec, strip_ansi};
+use crate::core::utils::{package_manager_exec, resolved_command, strip_ansi};
 use crate::parser::{
     emit_degradation_warning, emit_passthrough_warning, extract_json_object, truncate_passthrough,
     FormatMode, OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
@@ -204,7 +204,100 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
     failures
 }
 
+fn should_passthrough_args(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--help" | "-h" | "--version" | "-v" | "help" | "version"
+        )
+    })
+}
+
+fn should_synthesize_version(framework: &str, args: &[String]) -> bool {
+    framework == "vitest"
+        && args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "--version" | "-v" | "version"))
+}
+
+fn run_synthetic_version(framework: &str, args: &[String], verbose: u8) -> Result<Option<i32>> {
+    if !should_synthesize_version(framework, args) {
+        return Ok(None);
+    }
+
+    let timer = tracking::TimedExecution::start();
+    let mut cmd = resolved_command("node");
+    cmd.arg("-e").arg(
+        r#"const { version } = require("vitest/package.json");
+console.log(`vitest/${version} ${process.platform}-${process.arch} node-${process.version}`);"#,
+    );
+
+    let result = match exec_capture(&mut cmd) {
+        Ok(result) if result.success() => result,
+        Ok(_) | Err(_) => {
+            if verbose > 0 {
+                eprintln!("{} version fallback: using CLI passthrough", framework);
+            }
+            return Ok(None);
+        }
+    };
+
+    let combined = result.combined();
+    print!("{}", combined);
+
+    timer.track(
+        format!("{} version", framework).as_str(),
+        format!("rtk {} {}", framework, args.join(" ")).trim(),
+        &combined,
+        &combined,
+    );
+
+    Ok(Some(0))
+}
+
+fn run_passthrough(framework: &str, args: &[String], verbose: u8) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+    let mut cmd = package_manager_exec(framework);
+
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let result = exec_capture(&mut cmd).context(format!("Failed to run {}", framework))?;
+    let combined = result.combined();
+
+    if verbose > 0 {
+        eprintln!("{} passthrough: {}", framework, args.join(" "));
+    }
+
+    print!("{}", combined);
+
+    timer.track(
+        format!("{} passthrough", framework).as_str(),
+        format!("rtk {} {}", framework, args.join(" ")).trim(),
+        &combined,
+        &combined,
+    );
+
+    if !result.success() {
+        return Ok(result.exit_code);
+    }
+    Ok(0)
+}
+
 pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32> {
+    if should_passthrough_args(args) {
+        let framework = match command {
+            Commands::Vitest { .. } => "vitest",
+            Commands::Jest { .. } => "jest",
+            _ => unreachable!(),
+        };
+        if let Some(exit_code) = run_synthetic_version(framework, args, verbose)? {
+            return Ok(exit_code);
+        }
+        return run_passthrough(framework, args, verbose);
+    }
+
     let timer = tracking::TimedExecution::start();
 
     let (framework, mut cmd) = match command {
@@ -396,5 +489,20 @@ Scope: all 6 workspace projects
         let data = result.unwrap();
         assert_eq!(data.total, 2);
         assert_eq!(data.passed, 2);
+    }
+
+    #[test]
+    fn test_should_passthrough_info_args() {
+        assert!(should_passthrough_args(&["--version".to_string()]));
+        assert!(should_passthrough_args(&["--help".to_string()]));
+        assert!(!should_passthrough_args(&["run".to_string(), "--reporter=json".to_string()]));
+    }
+
+    #[test]
+    fn test_should_synthesize_vitest_version() {
+        assert!(should_synthesize_version("vitest", &["--version".to_string()]));
+        assert!(should_synthesize_version("vitest", &["-v".to_string()]));
+        assert!(!should_synthesize_version("vitest", &["--help".to_string()]));
+        assert!(!should_synthesize_version("jest", &["--version".to_string()]));
     }
 }
