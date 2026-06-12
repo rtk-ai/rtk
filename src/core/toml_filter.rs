@@ -191,13 +191,14 @@ impl TomlFilterRegistry {
         // Priority 1: project-local .rtk/filters.toml (trust-gated)
         let project_filter_path = std::path::Path::new(".rtk/filters.toml");
         if project_filter_path.exists() {
-            let trust_status = crate::hooks::trust::check_trust(project_filter_path)
-                .unwrap_or(crate::hooks::trust::TrustStatus::Untrusted);
+            let (trust_status, verified_content) =
+                crate::hooks::trust::check_trust_with_content(project_filter_path)
+                    .unwrap_or((crate::hooks::trust::TrustStatus::Untrusted, None));
 
             match trust_status {
                 crate::hooks::trust::TrustStatus::Trusted
                 | crate::hooks::trust::TrustStatus::EnvOverride => {
-                    if let Ok(content) = std::fs::read_to_string(project_filter_path) {
+                    if let Some(content) = verified_content {
                         match Self::parse_and_compile(&content, "project") {
                             Ok(f) => filters.extend(f),
                             Err(e) => eprintln!("[rtk] warning: .rtk/filters.toml: {}", e),
@@ -559,12 +560,13 @@ pub fn run_filter_tests(filter_name_opt: Option<&str>) -> VerifyResults {
     // Trust-gated: only verify project-local filters if trusted (SA-2025-RTK-002)
     let project_path = std::path::Path::new(".rtk/filters.toml");
     if project_path.exists() {
-        let trust_status = crate::hooks::trust::check_trust(project_path)
-            .unwrap_or(crate::hooks::trust::TrustStatus::Untrusted);
+        let (trust_status, verified_content) =
+            crate::hooks::trust::check_trust_with_content(project_path)
+                .unwrap_or((crate::hooks::trust::TrustStatus::Untrusted, None));
         match trust_status {
             crate::hooks::trust::TrustStatus::Trusted
             | crate::hooks::trust::TrustStatus::EnvOverride => {
-                if let Ok(content) = std::fs::read_to_string(project_path) {
+                if let Some(content) = verified_content {
                     collect_test_outcomes(
                         &content,
                         filter_name_opt,
