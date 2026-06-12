@@ -120,6 +120,8 @@ git status  # Automatically rewritten to rtk git status
 
 Hook-based agents rewrite Bash commands (e.g., `git status` -> `rtk git status`) before execution. Plugin-based agents, including Hermes, use their plugin API to rewrite commands before execution. The agent receives compact output without needing to call `rtk` explicitly.
 
+Common shell file-discovery commands rewrite too: `find . -name "*.rs"` maps to `rtk find "*.rs" .`, and plain `rg --files` / `rg --files <path>` map to `rtk find "*" .` / `rtk find "*" <path>`.
+
 **Important:** the hook only runs on Bash tool calls. Claude Code built-in tools like `Read`, `Grep`, and `Glob` do not pass through the Bash hook, so they are not auto-rewritten. To get RTK's compact output for those workflows, use shell commands (`cat`/`head`/`tail`, `rg`/`grep`, `find`) or call `rtk read`, `rtk grep`, or `rtk find` directly.
 
 ## How It Works

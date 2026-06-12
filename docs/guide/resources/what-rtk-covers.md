@@ -111,6 +111,7 @@ Typical savings: 60-99%.
 |---------|---------|--------------|
 | `ls` | 80% | Tree format with file counts |
 | `find` | 75% | Tree format |
+| `rg --files [path]` | 70% | Rewritten to `rtk find "*" .` or `rtk find "*" <path>` for plain file listings |
 | `grep` | 70% | Truncated lines, grouped by file |
 | `diff` | 65% | Context reduced |
 | `wc` | 60% | Compact counts |
