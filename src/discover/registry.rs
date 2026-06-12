@@ -116,8 +116,12 @@ pub fn classify_command(cmd: &str) -> Classification {
         return Classification::Ignored;
     }
 
-    if starts_with_rg_files_token(cmd_clean) {
-        if parse_rg_files(cmd_clean).is_some() {
+    // Normalize absolute binary paths before the rg --files special case so
+    // `/usr/bin/rg --files` follows the same rewrite path as plain `rg`.
+    let cmd_normalized = strip_absolute_path(cmd_clean);
+
+    if starts_with_rg_files_token(&cmd_normalized) {
+        if parse_rg_files(&cmd_normalized).is_some() {
             return Classification::Supported {
                 rtk_equivalent: "rtk find",
                 category: "Files",
@@ -130,8 +134,6 @@ pub fn classify_command(cmd: &str) -> Classification {
         };
     }
 
-    // Normalize absolute binary paths: /usr/bin/grep → grep (#485)
-    let cmd_normalized = strip_absolute_path(cmd_clean);
     // Strip git global options: git -C /tmp status → git status (#163)
     let cmd_normalized = strip_git_global_opts(&cmd_normalized);
     // Strip golangci-lint global options before `run` so classify/rewrite stays
@@ -833,8 +835,9 @@ fn rewrite_segment_inner(
         return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
     }
 
-    if starts_with_rg_files_token(cmd_part) {
-        return parse_rg_files(cmd_part)
+    let cmd_part_normalized = strip_absolute_path(cmd_part);
+    if starts_with_rg_files_token(&cmd_part_normalized) {
+        return parse_rg_files(&cmd_part_normalized)
             .map(|path| format!("rtk find '*' {}{}", path, redirect_suffix));
     }
 
@@ -1502,6 +1505,14 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_rg_files_absolute_path() {
+        assert_eq!(
+            rewrite_command_no_prefixes("/usr/bin/rg --files src", &[]),
+            Some("rtk find '*' src".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_pwd_and_rg_files() {
         assert_eq!(
             rewrite_command_no_prefixes("pwd && rg --files", &[]),
@@ -1513,6 +1524,7 @@ mod tests {
     fn test_rewrite_rg_files_unsupported_forms_skipped() {
         for command in [
             "rg --files --hidden",
+            "/usr/bin/rg --files --hidden",
             "rg --files -g '*.rs'",
             "rg --files src tests",
         ] {
