@@ -145,8 +145,12 @@ Four strategies applied per command type:
 ### Files
 ```bash
 rtk ls .                        # Token-optimized directory tree
-rtk read file.rs                # Smart file reading
+rtk read file.rs                # Compact read (minimal filter, auto-window large files)
+rtk read file.rs -l none        # Exact raw file content
 rtk read file.rs -l aggressive  # Signatures only (strips bodies)
+rtk read --symbol run file.rs   # Requested symbol with nearby context
+rtk read --changed file.rs      # Suppress unchanged repeat reads
+rtk read --total-max-lines 300 a.rs b.rs  # Shared multi-file budget
 rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
 rtk grep "pattern" .            # Grouped search results

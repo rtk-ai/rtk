@@ -189,6 +189,9 @@ rtk prisma              # Prisma without ASCII art (88%)
 ```bash
 rtk ls <path>           # Tree format, compact (65%)
 rtk read <file>         # Code reading with filtering (60%)
+rtk read --symbol <name> <file> # Focused symbol context
+rtk read --changed <file>       # Suppress unchanged repeat reads
+rtk read -l none <file>         # Exact content for editing
 rtk grep <pattern>      # Search grouped by file (75%). Format flags (-c, -l, -L, -o, -Z) run raw.
 rtk find <pattern>      # Find grouped by directory (70%)
 ```
@@ -3911,6 +3914,9 @@ cargo test                 rtk cargo test
 docker ps                  rtk docker ps
 kubectl get pods           rtk kubectl pods
 ```
+
+For file exploration, prefer `rtk read <file>`. Use `--symbol <name>` for focused
+context, `--changed` for repeat checks, and `-l none` only for exact editing content.
 
 ## Meta commands (use directly)
 

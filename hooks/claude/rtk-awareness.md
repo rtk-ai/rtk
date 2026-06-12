@@ -26,4 +26,8 @@ which rtk             # Verify correct binary
 All other commands are automatically rewritten by the Claude Code hook.
 Example: `git status` → `rtk git status` (transparent, 0 tokens overhead)
 
+For file exploration and analysis, prefer `rtk read <file>` over the built-in Read tool.
+Use `rtk read --symbol <name> <file>` for focused code context, `rtk read --changed <file>`
+for repeat checks, and the built-in Read tool or `rtk read -l none` when exact content is required for editing.
+
 Refer to CLAUDE.md for full command reference.

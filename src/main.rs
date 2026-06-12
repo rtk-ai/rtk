@@ -96,8 +96,8 @@ enum Commands {
         /// Files to read (supports multiple, like cat)
         #[arg(required = true, num_args = 1..)]
         files: Vec<PathBuf>,
-        /// Filter: none (default, full content), minimal, aggressive
-        #[arg(short, long, default_value = "none")]
+        /// Filter: minimal (default, strips comments/blank lines), none, aggressive
+        #[arg(short, long, default_value = "minimal")]
         level: core::filter::FilterLevel,
         /// Max lines
         #[arg(short, long, conflicts_with = "tail_lines")]
@@ -108,6 +108,15 @@ enum Commands {
         /// Show line numbers
         #[arg(short = 'n', long)]
         line_numbers: bool,
+        /// Show only matches for a symbol with nearby context
+        #[arg(long)]
+        symbol: Option<String>,
+        /// Suppress unchanged files using a persistent content hash
+        #[arg(long)]
+        changed: bool,
+        /// Shared maximum lines across all files
+        #[arg(long, conflicts_with_all = ["max_lines", "tail_lines"])]
+        total_max_lines: Option<usize>,
     },
 
     /// Generate 2-line technical summary (heuristic-based)
@@ -1446,9 +1455,16 @@ fn run_cli() -> Result<i32> {
             max_lines,
             tail_lines,
             line_numbers,
+            symbol,
+            changed,
+            total_max_lines,
         } => {
             let mut had_error = false;
             let mut stdin_seen = false;
+            let shared_max_lines = total_max_lines.map(|total| {
+                let file_count = files.len().max(1);
+                (total / file_count).max(1)
+            });
             for file in &files {
                 let result = if file == Path::new("-") {
                     if stdin_seen {
@@ -1456,14 +1472,28 @@ fn run_cli() -> Result<i32> {
                         continue;
                     }
                     stdin_seen = true;
-                    read::run_stdin(level, max_lines, tail_lines, line_numbers, cli.verbose)
+                    read::run_stdin(
+                        read::ReadOptions {
+                            level,
+                            max_lines: max_lines.or(shared_max_lines),
+                            tail_lines,
+                            line_numbers,
+                            symbol: symbol.as_deref(),
+                            changed,
+                        },
+                        cli.verbose,
+                    )
                 } else {
                     read::run(
                         file,
-                        level,
-                        max_lines,
-                        tail_lines,
-                        line_numbers,
+                        read::ReadOptions {
+                            level,
+                            max_lines: max_lines.or(shared_max_lines),
+                            tail_lines,
+                            line_numbers,
+                            symbol: symbol.as_deref(),
+                            changed,
+                        },
                         cli.verbose,
                     )
                 };
@@ -2548,6 +2578,46 @@ mod tests {
     use super::*;
     use clap::Parser;
     use std::cell::Cell;
+
+    #[test]
+    fn test_read_defaults_to_minimal_filter() {
+        let cli = Cli::try_parse_from(["rtk", "read", "src/main.rs"]).unwrap();
+        match cli.command {
+            Commands::Read { level, .. } => {
+                assert_eq!(level, core::filter::FilterLevel::Minimal);
+            }
+            _ => panic!("Expected Read command"),
+        }
+    }
+
+    #[test]
+    fn test_read_supports_shared_budget_symbol_and_changed_mode() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "read",
+            "--total-max-lines",
+            "100",
+            "--symbol",
+            "wanted",
+            "--changed",
+            "a.rs",
+            "b.rs",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Read {
+                total_max_lines,
+                symbol,
+                changed,
+                ..
+            } => {
+                assert_eq!(total_max_lines, Some(100));
+                assert_eq!(symbol.as_deref(), Some("wanted"));
+                assert!(changed);
+            }
+            _ => panic!("Expected Read command"),
+        }
+    }
 
     #[test]
     fn test_git_commit_single_message() {

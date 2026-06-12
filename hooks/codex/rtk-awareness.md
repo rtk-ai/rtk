@@ -6,6 +6,10 @@
 
 Always prefix shell commands with `rtk`.
 
+For file exploration and analysis, prefer `rtk read <file>` over native file-read tools.
+Use `rtk read --symbol <name> <file>` for focused code context, `rtk read --changed <file>`
+for repeat checks, and `rtk read -l none <file>` only when exact content is required for editing.
+
 Examples:
 
 ```bash

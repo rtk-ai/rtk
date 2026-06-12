@@ -6,6 +6,9 @@
 
 Always prefix shell commands with `rtk` to minimize token consumption.
 
+Prefer `rtk read <file>` for file exploration. Use `--symbol <name>` for focused context,
+`--changed` for repeat checks, and `-l none` only when exact content is required.
+
 Examples:
 
 ```bash

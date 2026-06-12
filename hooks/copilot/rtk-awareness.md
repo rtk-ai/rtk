@@ -7,6 +7,10 @@
 The `.github/copilot-instructions.md` file is loaded at session start by both Copilot CLI and VS Code Copilot Chat.
 It instructs Copilot to prefix commands with `rtk` automatically.
 
+For file exploration and analysis, prefer `rtk read <file>` over native file-read tools.
+Use `rtk read --symbol <name> <file>` for focused context, `rtk read --changed <file>`
+for repeat checks, and `rtk read -l none <file>` only when exact content is required.
+
 The `.github/hooks/rtk-rewrite.json` hook adds a `PreToolUse` safety net via `rtk hook` —
 a cross-platform Rust binary that intercepts raw bash tool calls and rewrites them.
 No shell scripts, no `jq` dependency, works on Windows natively.
