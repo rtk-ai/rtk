@@ -170,10 +170,13 @@ impl FilterStrategy for MinimalFilter {
         for line in content.lines() {
             let trimmed = line.trim();
 
-            // Handle block comments
+            // Handle block comments. Only treat a line as opening a block
+            // comment when it actually starts with the marker — using `contains`
+            // here would also match `/*` inside a string literal or a trailing
+            // comment and wrongly swallow the surrounding code.
             if let (Some(start), Some(end)) = (patterns.block_start, patterns.block_end) {
                 if !in_docstring
-                    && trimmed.contains(start)
+                    && trimmed.starts_with(start)
                     && !trimmed.starts_with(patterns.doc_block_start.unwrap_or("###"))
                 {
                     in_block_comment = true;
@@ -467,6 +470,38 @@ fn main() {
         let filter = MinimalFilter;
         let result = filter.filter(code, &Language::Rust);
         assert!(!result.contains("// This is a comment"));
+        assert!(result.contains("fn main()"));
+    }
+
+    #[test]
+    fn test_minimal_filter_keeps_code_with_block_comment_markers() {
+        // A `/*` inside a string or a trailing block comment must not make the
+        // filter drop the line (or everything after it). See #2385.
+        let code = r#"
+let pattern = "/* not a comment */";
+let re = "start /*";
+let x = 5; /* inline note */
+fn keep_me() {}
+"#;
+        let result = MinimalFilter.filter(code, &Language::Rust);
+        assert!(result.contains("let pattern"));
+        assert!(result.contains("let re"));
+        assert!(result.contains("let x = 5;"));
+        assert!(result.contains("fn keep_me()"));
+    }
+
+    #[test]
+    fn test_minimal_filter_still_strips_block_comments() {
+        let code = r#"
+/* a standalone comment */
+/*
+ * multi-line comment
+ */
+fn main() {}
+"#;
+        let result = MinimalFilter.filter(code, &Language::Rust);
+        assert!(!result.contains("standalone comment"));
+        assert!(!result.contains("multi-line comment"));
         assert!(result.contains("fn main()"));
     }
 
