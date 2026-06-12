@@ -5,6 +5,23 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.4](https://github.com/rtk-ai/rtk/compare/v0.42.3...v0.42.4) (2026-06-12)
+
+
+### Bug Fixes
+
+* **aws:** preserve values in JSON output for unsupported subcommands ([9574007](https://github.com/rtk-ai/rtk/commit/9574007f77fa7051e93d10c512809e60ed61ac57))
+* **ci:** pin fixture line endings, harden CRLF tests ([be28a51](https://github.com/rtk-ai/rtk/commit/be28a511797fb5214ff0784f57f491d2b7dd0e71))
+* **curl:** passthrough binary downloads to prevent UTF-8 corruption ([#1087](https://github.com/rtk-ai/rtk/issues/1087)) ([35273c2](https://github.com/rtk-ai/rtk/commit/35273c2dc1c94dd93ba97555e72b4e46928574b6))
+* **filters:** remove max_lines cap from helm filter that truncates template output ([63a76de](https://github.com/rtk-ai/rtk/commit/63a76dedff245173a8e9240e09c741552f318de3))
+* **init:** respect CLAUDE_CONFIG_DIR for global paths ([05de9d3](https://github.com/rtk-ai/rtk/commit/05de9d366aff627f044e0a40daf5fcbcf277ea30)), closes [#633](https://github.com/rtk-ai/rtk/issues/633)
+* minor print_manual_instructions regression ([6785a6c](https://github.com/rtk-ai/rtk/commit/6785a6c7695d7273e722214a295249a84819b6f0))
+* **mvn:** re-arm failure trail on per-test sublines ([1050cfe](https://github.com/rtk-ai/rtk/commit/1050cfeadcc3fd2b34df3401c6ec3aa09f0cd199))
+* **mvn:** strip post-failure help boilerplate in non-quiet mode ([df76528](https://github.com/rtk-ai/rtk/commit/df76528dd36dba4a58163a4827d34fbb9e7c17ca))
+* **security:** harden installer checksum, filter-trust, meta-command ([769b6ce](https://github.com/rtk-ai/rtk/commit/769b6ce5a44ec696bf40d845a7fea35cdb5f7699))
+* **security:** harden installer checksum, filter-trust, meta-command fallthrough ([9cc4937](https://github.com/rtk-ai/rtk/commit/9cc4937dac3ba9aa27147699afe66a2842e7bffc))
+* **security:** harden meta command list check ([069a089](https://github.com/rtk-ai/rtk/commit/069a089c409193115b83fd27438d1bd73bf876b0))
+
 ## [0.42.3](https://github.com/rtk-ai/rtk/compare/v0.42.2...v0.42.3) (2026-06-05)
 
 
