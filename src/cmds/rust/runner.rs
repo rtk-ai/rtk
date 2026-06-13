@@ -267,11 +267,35 @@ fn extract_test_summary(output: &str, command: &str) -> String {
             output.push_str(&format!("  {}\n", r));
         }
     } else {
-        output.push_str("OUTPUT (last 5 lines):\n");
-        let start = lines.len().saturating_sub(5);
-        for line in &lines[start..] {
-            if !line.trim().is_empty() {
+        let is_generic = !is_cargo && !is_pytest && !is_jest && !is_go;
+        let error_lines: Vec<&str> = if is_generic {
+            lines
+                .iter()
+                .copied()
+                .filter(|line| ERROR_PATTERNS.iter().any(|p| p.is_match(line)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        if !error_lines.is_empty() {
+            output.push_str("[FAIL] ERRORS:\n");
+            for line in error_lines.iter().take(MAX_RUNNER_LINES) {
                 output.push_str(&format!("  {}\n", line));
+            }
+            if error_lines.len() > MAX_RUNNER_LINES {
+                output.push_str(&format!(
+                    "  ... +{} more\n",
+                    error_lines.len() - MAX_RUNNER_LINES
+                ));
+            }
+        } else {
+            output.push_str("OUTPUT (last 5 lines):\n");
+            let start = lines.len().saturating_sub(5);
+            for line in &lines[start..] {
+                if !line.trim().is_empty() {
+                    output.push_str(&format!("  {}\n", line));
+                }
             }
         }
     }
@@ -289,5 +313,42 @@ mod tests {
         let filtered = filter_errors(output);
         assert!(filtered.contains("error"));
         assert!(!filtered.contains("info"));
+    }
+
+    #[test]
+    fn test_extract_generic_runner_shows_error_lines_before_tail() {
+        let output = "\
+error: setup failed before tests ran
+line 1
+line 2
+line 3
+line 4
+line 5
+line 6";
+
+        let summary = extract_test_summary(output, "custom-test-runner");
+
+        assert!(summary.contains("[FAIL] ERRORS:"));
+        assert!(summary.contains("error: setup failed before tests ran"));
+        assert!(!summary.contains("OUTPUT (last 5 lines):"));
+        assert!(!summary.contains("line 6"));
+    }
+
+    #[test]
+    fn test_extract_generic_runner_without_errors_keeps_last_five_lines() {
+        let output = "\
+line 1
+line 2
+line 3
+line 4
+line 5
+line 6";
+
+        let summary = extract_test_summary(output, "custom-test-runner");
+
+        assert!(summary.contains("OUTPUT (last 5 lines):"));
+        assert!(!summary.contains("line 1"));
+        assert!(summary.contains("line 2"));
+        assert!(summary.contains("line 6"));
     }
 }
