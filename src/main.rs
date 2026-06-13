@@ -1447,6 +1447,13 @@ fn run_cli() -> Result<i32> {
             tail_lines,
             line_numbers,
         } => {
+            // SECURITY (#2428): rtk read must not exfiltrate .env secrets, mirroring
+            // the proxy guard (#2345).
+            if let Some(reason) =
+                hooks::permissions::first_env_read_refusal(files.iter().filter_map(|f| f.to_str()))
+            {
+                anyhow::bail!("{reason}");
+            }
             let mut had_error = false;
             let mut stdin_seen = false;
             for file in &files {
@@ -1484,6 +1491,10 @@ fn run_cli() -> Result<i32> {
             model,
             force_download,
         } => {
+            // SECURITY (#2428): refuse summarizing a .env secret file.
+            if let Some(reason) = file.to_str().and_then(hooks::permissions::env_read_refusal) {
+                anyhow::bail!("{reason}");
+            }
             local_llm::run(&file, &model, force_download, cli.verbose)?;
             0
         }
@@ -1706,6 +1717,14 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Diff { file1, file2 } => {
+            // SECURITY (#2428): refuse diffing a .env secret file.
+            if let Some(reason) = hooks::permissions::first_env_read_refusal(
+                std::iter::once(file1.as_path())
+                    .chain(file2.as_deref())
+                    .filter_map(Path::to_str),
+            ) {
+                anyhow::bail!("{reason}");
+            }
             if let Some(f2) = file2 {
                 diff_cmd::run(&file1, &f2, cli.verbose)?;
             } else {
@@ -1715,6 +1734,14 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Log { file } => {
+            // SECURITY (#2428): refuse filtering a .env secret file as a log.
+            if let Some(reason) = file
+                .as_deref()
+                .and_then(Path::to_str)
+                .and_then(hooks::permissions::env_read_refusal)
+            {
+                anyhow::bail!("{reason}");
+            }
             if let Some(f) = file {
                 log_cmd::run_file(&f, cli.verbose)?;
             } else {
@@ -1808,16 +1835,25 @@ fn run_cli() -> Result<i32> {
             file_type,
             line_numbers: _, // no-op: line numbers always enabled in grep_cmd::run
             extra_args,
-        } => grep_cmd::run(
-            &pattern,
-            &path,
-            max_len,
-            max,
-            context_only,
-            file_type.as_deref(),
-            &extra_args,
-            cli.verbose,
-        )?,
+        } => {
+            // SECURITY (#2428): refuse grepping a .env secret file. The search
+            // pattern is intentionally not inspected (only the path + file args).
+            if let Some(reason) = hooks::permissions::first_env_read_refusal(
+                std::iter::once(path.as_str()).chain(extra_args.iter().map(String::as_str)),
+            ) {
+                anyhow::bail!("{reason}");
+            }
+            grep_cmd::run(
+                &pattern,
+                &path,
+                max_len,
+                max,
+                context_only,
+                file_type.as_deref(),
+                &extra_args,
+                cli.verbose,
+            )?
+        }
 
         Commands::Init {
             global,

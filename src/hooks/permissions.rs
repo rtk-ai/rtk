@@ -185,6 +185,31 @@ fn first_sensitive_env_arg(args: &[String]) -> Option<&str> {
         .find(|&arg| is_sensitive_env_path(arg))
 }
 
+// --- Native-command .env guard (issue #2428) --------------------------------
+//
+// rtk's own content-reading subcommands (read/grep/diff/log/smart) open file
+// paths directly. Like `rtk proxy`, they must refuse `.env` secret files so a
+// permission deny on `.env` cannot be bypassed via rtk itself.
+
+/// Refusal reason if `path` names a `.env` secret file, else `None`.
+pub(crate) fn env_read_refusal(path: &str) -> Option<String> {
+    is_sensitive_env_path(path).then(|| {
+        format!(
+            "rtk refuses to read the secret file '{path}'. .env files are blocked to prevent \
+             credential exfiltration (issue #2428). Placeholder variants (.env.example, \
+             .env.sample, .env.template) are allowed."
+        )
+    })
+}
+
+/// First refusal among `paths` (for commands that take several file args), else
+/// `None`.
+pub(crate) fn first_env_read_refusal<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    paths.into_iter().find_map(env_read_refusal)
+}
+
 /// Reason to refuse a proxied inline-interpreter eval (`sh -c ...`, `python -c
 /// ...`, `perl -e ...`), or `None`. rtk cannot enforce the `.env` guard or deny
 /// rules inside an interpreted payload, so such invocations are refused outright
@@ -1357,6 +1382,25 @@ mod tests {
             ),
             None
         );
+    }
+
+    // --- Native-command .env guard (#2428) ---
+
+    #[test]
+    fn test_env_read_refusal() {
+        assert!(env_read_refusal(".env").is_some());
+        assert!(env_read_refusal("config/.env.local").is_some());
+        assert!(env_read_refusal(".ENV").is_some()); // case-insensitive bare name
+        assert_eq!(env_read_refusal(".env.example"), None);
+        assert_eq!(env_read_refusal("src/main.rs"), None);
+    }
+
+    #[test]
+    fn test_first_env_read_refusal() {
+        assert!(first_env_read_refusal(["README.md", ".env"]).is_some());
+        assert_eq!(first_env_read_refusal(["a.txt", "b.txt"]), None);
+        // Caller passes only file paths (not e.g. a grep pattern); a .env path hits.
+        assert!(first_env_read_refusal([".env", "Makefile"]).is_some());
     }
 
     #[test]
