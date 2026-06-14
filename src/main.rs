@@ -49,6 +49,8 @@ pub enum AgentTarget {
     Pi,
     /// Hermes CLI
     Hermes,
+    /// MiMoCode (Xiaomi opencode fork)
+    Mimocode,
 }
 
 #[derive(Parser)]
@@ -336,6 +338,10 @@ enum Commands {
         /// Install OpenCode plugin (in addition to Claude Code)
         #[arg(long)]
         opencode: bool,
+
+        /// Install MiMoCode plugin (Xiaomi opencode fork)
+        #[arg(long)]
+        mimocode: bool,
 
         /// Initialize for Gemini CLI instead of Claude Code
         #[arg(long)]
@@ -1385,21 +1391,26 @@ fn main() {
     std::process::exit(code);
 }
 
-fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
+#[allow(clippy::too_many_arguments)]
+fn uninstall_init_dispatch<UninstallHermes, UninstallMimocode, UninstallStandard>(
     agent: Option<AgentTarget>,
     global: bool,
     gemini: bool,
     codex: bool,
     ctx: hooks::init::InitContext,
     uninstall_hermes: UninstallHermes,
+    uninstall_mimocode: UninstallMimocode,
     uninstall_standard: UninstallStandard,
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
+    UninstallMimocode: FnOnce(bool, hooks::init::InitContext) -> Result<()>,
     UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
+    } else if agent == Some(AgentTarget::Mimocode) {
+        uninstall_mimocode(global, ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -1822,6 +1833,7 @@ fn run_cli() -> Result<i32> {
         Commands::Init {
             global,
             opencode,
+            mimocode,
             gemini,
             agent,
             show,
@@ -1854,6 +1866,7 @@ fn run_cli() -> Result<i32> {
                     codex,
                     ctx,
                     hooks::init::uninstall_hermes,
+                    hooks::init::uninstall_mimocode,
                     hooks::init::uninstall,
                 )?;
             } else if gemini {
@@ -1887,6 +1900,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_antigravity_mode(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
+            } else if mimocode || agent == Some(AgentTarget::Mimocode) {
+                hooks::init::run_mimocode_mode(global, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2722,6 +2737,7 @@ mod tests {
     #[test]
     fn test_init_uninstall_dispatch_routes_hermes_to_hermes_cleanup() {
         let hermes_called = Cell::new(false);
+        let mimocode_called = Cell::new(false);
         let standard_called = Cell::new(false);
         let ctx = hooks::init::InitContext {
             verbose: 2,
@@ -2740,6 +2756,10 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
+            |_, _| {
+                mimocode_called.set(true);
+                Ok(())
+            },
             |_, _, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
@@ -2748,6 +2768,67 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(hermes_called.get());
+        assert!(!mimocode_called.get());
+        assert!(!standard_called.get());
+    }
+
+    #[test]
+    fn test_try_parse_init_agent_mimocode() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "mimocode"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Mimocode));
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_init_mimocode_flag() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--mimocode"]).unwrap();
+        match cli.command {
+            Commands::Init { mimocode, .. } => {
+                assert!(mimocode);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_init_uninstall_dispatch_routes_mimocode() {
+        let hermes_called = Cell::new(false);
+        let mimocode_called = Cell::new(false);
+        let standard_called = Cell::new(false);
+        let ctx = hooks::init::InitContext {
+            verbose: 1,
+            dry_run: false,
+        };
+
+        let result = uninstall_init_dispatch(
+            Some(AgentTarget::Mimocode),
+            true,
+            false,
+            false,
+            ctx,
+            |_| {
+                hermes_called.set(true);
+                Ok(())
+            },
+            |global, ctx| {
+                mimocode_called.set(true);
+                assert!(global);
+                assert_eq!(ctx.verbose, 1);
+                Ok(())
+            },
+            |_, _, _, _, _, _| {
+                standard_called.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(!hermes_called.get());
+        assert!(mimocode_called.get());
         assert!(!standard_called.get());
     }
 

@@ -9,7 +9,8 @@ use tempfile::NamedTempFile;
 
 use crate::hooks::constants::{
     CONFIG_DIR, COPILOT_HOME_ENV, COPILOT_HOOK_FILE, COPILOT_INSTRUCTIONS_FILE, COPILOT_USER_DIR,
-    CURSOR_DIR, GEMINI_DIR, GITHUB_DIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+    CURSOR_DIR, GEMINI_DIR, GITHUB_DIR, MIMOCODE_HOME_ENV, MIMOCODE_PLUGIN_FILE, MIMOCODE_SUBDIR,
+    OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
 };
 
 use super::constants::{
@@ -23,6 +24,9 @@ use super::integrity;
 
 // Embedded OpenCode plugin (auto-rewrite)
 const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
+
+// Embedded MiMoCode plugin (auto-rewrite, opencode fork by Xiaomi)
+const MIMOCODE_PLUGIN: &str = include_str!("../../hooks/mimocode/rtk.ts");
 
 // Embedded Pi extension (auto-rewrite)
 const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
@@ -2974,6 +2978,135 @@ fn remove_opencode_plugin(ctx: InitContext) -> Result<Vec<PathBuf>> {
     }
 
     Ok(removed)
+}
+
+// ─── MiMoCode support (Xiaomi opencode fork) ──────────────────────────
+
+/// Resolve MiMoCode config directory, honouring `MIMOCODE_HOME` override.
+/// Default: `~/.config/mimocode/`
+fn resolve_mimocode_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var(MIMOCODE_HOME_ENV) {
+        if !dir.is_empty() {
+            return Ok(PathBuf::from(dir));
+        }
+    }
+    resolve_home_subdir(CONFIG_DIR).map(|p| p.join(MIMOCODE_SUBDIR))
+}
+
+/// Return MiMoCode plugin path: ~/.config/mimocode/plugins/rtk.ts
+fn mimocode_plugin_path(mimocode_dir: &Path) -> PathBuf {
+    mimocode_dir.join(PLUGIN_SUBDIR).join(MIMOCODE_PLUGIN_FILE)
+}
+
+/// Write MiMoCode plugin file if missing or outdated
+fn ensure_mimocode_plugin_installed(path: &Path, ctx: InitContext) -> Result<bool> {
+    let InitContext { dry_run, .. } = ctx;
+    if !dry_run {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create MiMoCode plugin directory: {}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+    write_if_changed(path, MIMOCODE_PLUGIN, "MiMoCode plugin", ctx)
+}
+
+/// Remove MiMoCode plugin file
+fn remove_mimocode_plugin(ctx: InitContext) -> Result<Vec<PathBuf>> {
+    let InitContext { verbose, dry_run } = ctx;
+    let mimocode_dir = resolve_mimocode_dir()?;
+    let path = mimocode_plugin_path(&mimocode_dir);
+    let mut removed = Vec::new();
+
+    if path.exists() {
+        if dry_run {
+            println!("[dry-run] would remove MiMoCode plugin: {}", path.display());
+        } else {
+            fs::remove_file(&path)
+                .with_context(|| format!("Failed to remove MiMoCode plugin: {}", path.display()))?;
+            if verbose > 0 {
+                eprintln!("Removed MiMoCode plugin: {}", path.display());
+            }
+        }
+        removed.push(path);
+    }
+
+    Ok(removed)
+}
+
+/// Uninstall MiMoCode extension for the given scope.
+pub fn uninstall_mimocode(_global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext {
+        verbose: _,
+        dry_run,
+    } = ctx;
+    let removed = remove_mimocode_plugin(ctx)?;
+
+    if dry_run {
+        print_dry_run_footer();
+    } else if !removed.is_empty() {
+        println!("RTK uninstalled (MiMoCode):");
+        for item in &removed {
+            println!("  - {}", item.display());
+        }
+        println!("\nRestart MiMoCode to apply changes.");
+    } else {
+        println!("RTK MiMoCode plugin was not installed (nothing to remove)");
+    }
+    Ok(())
+}
+
+/// Install the MiMoCode plugin (hook-only; no AGENTS.md injection).
+///
+/// global=true  → `$MIMOCODE_HOME/plugins/rtk.ts` or `~/.config/mimocode/plugins/rtk.ts`
+/// global=false → `~/.config/mimocode/plugins/rtk.ts` (MiMoCode is global-only)
+pub fn run_mimocode_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext {
+        verbose: _,
+        dry_run,
+    } = ctx;
+
+    let mimocode_dir = resolve_mimocode_dir()?;
+    let plugin_path = mimocode_plugin_path(&mimocode_dir);
+
+    if !dry_run {
+        if let Some(parent) = plugin_path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create MiMoCode plugin directory: {}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+
+    let installed = ensure_mimocode_plugin_installed(&plugin_path, ctx)?;
+
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        let status = if installed {
+            "installed"
+        } else {
+            "already up to date"
+        };
+        println!("RTK MiMoCode plugin {}:", status);
+        println!("  Plugin: {}", plugin_path.display());
+        println!();
+        println!("Restart MiMoCode to activate. Test with: git status");
+        if !global {
+            println!();
+            println!(
+                "Note: MiMoCode plugin is installed globally at {}",
+                plugin_path.display()
+            );
+        }
+    }
+
+    Ok(())
 }
 
 // ─── Cursor Agent support ─────────────────────────────────────────────
