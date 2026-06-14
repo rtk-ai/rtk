@@ -25,8 +25,15 @@ pub fn run(
         eprintln!("grep: '{}' in {}", pattern, path);
     }
 
-    // Fix: convert BRE alternation \| → | for rg (which uses PCRE-style regex)
-    let rg_pattern = pattern.replace(r"\|", "|");
+    let is_fixed_strings = extra_args.iter().any(|a| a == "--fixed-strings" || a == "-F");
+
+    // Convert BRE alternation \| → | for rg (which uses PCRE-style regex),
+    // but skip when --fixed-strings is active (pattern is literal).
+    let rg_pattern = if is_fixed_strings {
+        pattern.to_string()
+    } else {
+        pattern.replace(r"\|", "|")
+    };
 
     let mut rg_cmd = resolved_command("rg");
     // --no-ignore-vcs: match grep -r behavior (don't skip .gitignore'd files).
@@ -50,11 +57,34 @@ pub fn run(
         rg_cmd.arg(arg);
     }
 
+    let has_rg_only_flags = extra_args.iter().any(|a| {
+        a == "--pcre2" || a == "--glob" || a == "-g" || a.starts_with("--glob=")
+    });
+
     let result = exec_capture(&mut rg_cmd)
-        .or_else(|_| {
+        .or_else(|e| {
+            if has_rg_only_flags {
+                return Err(e);
+            }
+            eprintln!("rtk: rg not found, falling back to grep (install ripgrep for best results)");
             let mut grep_cmd = resolved_command("grep");
-            // When we fall back to grep, include all args, not just -rnHZ.
-            grep_cmd.args(["-rnHZ", pattern, path]).args(extra_args);
+            grep_cmd.args(["-rnHZ", pattern, path]);
+            for arg in extra_args {
+                match arg.as_str() {
+                    "--fixed-strings" => {
+                        grep_cmd.arg("-F");
+                    }
+                    "--word-regexp" => {
+                        grep_cmd.arg("-w");
+                    }
+                    "--ignore-case" => {
+                        grep_cmd.arg("-i");
+                    }
+                    _ => {
+                        grep_cmd.arg(arg);
+                    }
+                }
+            }
             exec_capture(&mut grep_cmd)
         })
         .context("grep/rg failed")?;
@@ -314,6 +344,32 @@ mod tests {
         assert_eq!(rg_pattern, "fn foo|pub.*bar");
     }
 
+    #[test]
+    fn test_bre_translation_skipped_for_fixed_strings() {
+        let pattern = r"foo\|bar";
+        let extra_args = vec!["--fixed-strings".to_string()];
+        let is_fixed = extra_args.iter().any(|a| a == "--fixed-strings" || a == "-F");
+        let rg_pattern = if is_fixed {
+            pattern.to_string()
+        } else {
+            pattern.replace(r"\|", "|")
+        };
+        assert_eq!(rg_pattern, r"foo\|bar", "fixed-strings must preserve literal pattern");
+    }
+
+    #[test]
+    fn test_bre_translation_skipped_for_fixed_strings_short() {
+        let pattern = r"foo\|bar";
+        let extra_args = vec!["-F".to_string()];
+        let is_fixed = extra_args.iter().any(|a| a == "--fixed-strings" || a == "-F");
+        let rg_pattern = if is_fixed {
+            pattern.to_string()
+        } else {
+            pattern.replace(r"\|", "|")
+        };
+        assert_eq!(rg_pattern, r"foo\|bar", "-F must preserve literal pattern");
+    }
+
     // Fix: -r flag (grep recursive) is stripped from extra_args (rg is recursive by default)
     #[test]
     fn test_recursive_flag_stripped() {
@@ -506,5 +562,57 @@ mod tests {
             );
         }
         // If rg is not installed, skip gracefully (test still passes)
+    }
+
+    // --- grep fallback flag translation ---
+
+    fn has_rg_only_flags(extra_args: &[String]) -> bool {
+        extra_args
+            .iter()
+            .any(|a| a == "--pcre2" || a == "--glob" || a == "-g" || a.starts_with("--glob="))
+    }
+
+    fn translate_args_for_grep(extra_args: &[String]) -> Vec<String> {
+        let mut grep_args: Vec<String> = Vec::new();
+        for arg in extra_args {
+            match arg.as_str() {
+                "--fixed-strings" => grep_args.push("-F".into()),
+                "--word-regexp" => grep_args.push("-w".into()),
+                "--ignore-case" => grep_args.push("-i".into()),
+                _ => grep_args.push(arg.clone()),
+            }
+        }
+        grep_args
+    }
+
+    #[test]
+    fn test_grep_fallback_blocked_by_pcre2() {
+        assert!(has_rg_only_flags(&["--pcre2".into(), "-w".into()]));
+    }
+
+    #[test]
+    fn test_grep_fallback_blocked_by_glob() {
+        assert!(has_rg_only_flags(&["--glob".into(), "*.rs".into()]));
+        assert!(has_rg_only_flags(&["-g".into(), "*.rs".into()]));
+        assert!(has_rg_only_flags(&["--glob=*.rs".into()]));
+    }
+
+    #[test]
+    fn test_grep_fallback_allowed_for_compatible_flags() {
+        assert!(!has_rg_only_flags(&["-w".into(), "-i".into()]));
+        assert!(!has_rg_only_flags(&["--fixed-strings".into()]));
+        assert!(!has_rg_only_flags(&["-A".into(), "3".into()]));
+    }
+
+    #[test]
+    fn test_grep_fallback_translates_long_flags() {
+        let args: Vec<String> = vec!["--fixed-strings".into(), "--word-regexp".into(), "--ignore-case".into()];
+        assert_eq!(translate_args_for_grep(&args), vec!["-F", "-w", "-i"]);
+    }
+
+    #[test]
+    fn test_grep_fallback_passes_short_flags_through() {
+        let args: Vec<String> = vec!["-w".into(), "-i".into(), "-F".into()];
+        assert_eq!(translate_args_for_grep(&args), vec!["-w", "-i", "-F"]);
     }
 }
