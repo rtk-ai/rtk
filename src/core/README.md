@@ -115,6 +115,15 @@ Core provides infrastructure that `cmds/` and other components consume. These co
 
 Consumers must call `timer.track()` on **all** code paths — success, failure, and fallback. Calling `std::process::exit()` before `track()` loses metrics. The raw string passed to `track()` should include both stdout and stderr to produce accurate savings percentages.
 
+### Output fallback (`runner`)
+
+In captured/buffered mode (`run_filtered`, `run_filtered_with_exit`), the runner
+compares the filtered output against the raw input it consumed and emits whichever
+has fewer estimated tokens — ties prefer the raw output. This guarantees rtk never
+prints (or records) more than the underlying command would, even when a filter adds
+boilerplate to an already-small output. Streaming mode (`run_streamed`) is exempt:
+its lines are flushed in real time and cannot be retroactively swapped.
+
 ### Tee (`tee_and_hint`)
 
 Consumers that parse structured output (JSON, NDJSON, state machines) should call `tee::tee_and_hint()` to save raw output for LLM recovery on failure. Tee must be called before `std::process::exit()`.

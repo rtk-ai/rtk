@@ -6,6 +6,17 @@ use std::process::Command;
 use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
 use crate::core::tracking;
 
+/// Returns `original` when filtering failed to reduce the estimated token
+/// count, so rtk never emits more than the underlying command would. Ties
+/// prefer the original (no benefit in a reformatted, non-shorter output).
+fn choose_output<'a>(filtered: &'a str, original: &'a str) -> &'a str {
+    if tracking::estimate_tokens(filtered) >= tracking::estimate_tokens(original) {
+        original
+    } else {
+        filtered
+    }
+}
+
 pub fn print_with_hint(filtered: &str, raw: &str, tee_label: &str, exit_code: i32) {
     if let Some(hint) = crate::core::tee::tee_and_hint(raw, tee_label, exit_code) {
         println!("{}\n{}", filtered, hint);
@@ -112,25 +123,21 @@ where
         raw
     };
     let filtered = filter_fn(text_to_filter, exit_code);
+    let output = choose_output(&filtered, text_to_filter);
 
     if let Some(label) = opts.tee_label {
-        print_with_hint(&filtered, raw, label, exit_code);
+        print_with_hint(output, raw, label, exit_code);
     } else if opts.no_trailing_newline {
-        print!("{}", filtered);
+        print!("{}", output);
     } else {
-        println!("{}", filtered);
+        println!("{}", output);
     }
 
-    let raw_for_tracking = if opts.filter_stdout_only {
-        raw_stdout
-    } else {
-        raw
-    };
     timer.track(
         cmd_label,
         &format!("rtk {}", cmd_label),
-        raw_for_tracking,
-        &filtered,
+        text_to_filter,
+        output,
     );
     Ok(exit_code)
 }
@@ -262,4 +269,38 @@ pub fn run_streamed(
         RunMode::Streamed(filter),
         opts,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn choose_output_keeps_filtered_when_smaller() {
+        let filtered = "short";
+        let original = "this is a much longer original output that filtering reduced";
+        assert_eq!(choose_output(filtered, original), filtered);
+    }
+
+    #[test]
+    fn choose_output_falls_back_when_filtered_larger() {
+        let original = "ok\n";
+        let filtered = "ok\n[rtk] summary: 1 entry, 0 hidden, see footer for details";
+        assert_eq!(choose_output(filtered, original), original);
+    }
+
+    #[test]
+    fn choose_output_prefers_original_on_tie() {
+        // Same byte length => same estimated tokens => prefer original.
+        let original = "abcd";
+        let filtered = "wxyz";
+        assert_eq!(choose_output(filtered, original), original);
+    }
+
+    #[test]
+    fn choose_output_handles_empty() {
+        assert_eq!(choose_output("", ""), "");
+        assert_eq!(choose_output("anything", ""), "");
+        assert_eq!(choose_output("", "raw output"), "");
+    }
 }
