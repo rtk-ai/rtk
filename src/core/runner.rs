@@ -6,14 +6,24 @@ use std::process::Command;
 use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
 use crate::core::tracking;
 
-/// Returns `original` when filtering failed to reduce the estimated token
-/// count, so rtk never emits more than the underlying command would. Ties
-/// prefer the original (no benefit in a reformatted, non-shorter output).
-fn choose_output<'a>(filtered: &'a str, original: &'a str) -> &'a str {
-    if tracking::estimate_tokens(filtered) >= tracking::estimate_tokens(original) {
-        original
+/// Picks the output to emit, along with its estimated token count: the
+/// filtered text when it has fewer estimated tokens than the original,
+/// otherwise the original. Ties prefer the original (no benefit in a
+/// reformatted, non-shorter output), so rtk never emits more than the
+/// underlying command would.
+///
+/// Token counts are passed in (not computed here) so the central path
+/// estimates each string only once and reuses the result for tracking.
+fn choose_output<'a>(
+    filtered: &'a str,
+    filtered_tokens: usize,
+    original: &'a str,
+    original_tokens: usize,
+) -> (&'a str, usize) {
+    if filtered_tokens >= original_tokens {
+        (original, original_tokens)
     } else {
-        filtered
+        (filtered, filtered_tokens)
     }
 }
 
@@ -123,7 +133,10 @@ where
         raw
     };
     let filtered = filter_fn(text_to_filter, exit_code);
-    let output = choose_output(&filtered, text_to_filter);
+    let input_tokens = tracking::estimate_tokens(text_to_filter);
+    let filtered_tokens = tracking::estimate_tokens(&filtered);
+    let (output, output_tokens) =
+        choose_output(&filtered, filtered_tokens, text_to_filter, input_tokens);
 
     if let Some(label) = opts.tee_label {
         print_with_hint(output, raw, label, exit_code);
@@ -133,11 +146,11 @@ where
         println!("{}", output);
     }
 
-    timer.track(
+    timer.track_with_tokens(
         cmd_label,
         &format!("rtk {}", cmd_label),
-        text_to_filter,
-        output,
+        input_tokens,
+        output_tokens,
     );
     Ok(exit_code)
 }
@@ -276,31 +289,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn choose_output_keeps_filtered_when_smaller() {
-        let filtered = "short";
-        let original = "this is a much longer original output that filtering reduced";
-        assert_eq!(choose_output(filtered, original), filtered);
+    fn choose_output_keeps_filtered_when_fewer_tokens() {
+        let (output, tokens) = choose_output("short", 2, "much longer original", 10);
+        assert_eq!(output, "short");
+        assert_eq!(tokens, 2);
     }
 
     #[test]
-    fn choose_output_falls_back_when_filtered_larger() {
-        let original = "ok\n";
-        let filtered = "ok\n[rtk] summary: 1 entry, 0 hidden, see footer for details";
-        assert_eq!(choose_output(filtered, original), original);
+    fn choose_output_falls_back_when_filtered_not_smaller() {
+        let (output, tokens) = choose_output("filtered + boilerplate", 15, "ok", 1);
+        assert_eq!(output, "ok");
+        assert_eq!(tokens, 1);
     }
 
     #[test]
     fn choose_output_prefers_original_on_tie() {
-        // Same byte length => same estimated tokens => prefer original.
-        let original = "abcd";
-        let filtered = "wxyz";
-        assert_eq!(choose_output(filtered, original), original);
+        // Equal token counts must select the original reference, not the
+        // filtered one. Use identical-content strings so only pointer
+        // identity (not value equality) can distinguish the choice.
+        let original = String::from("same");
+        let filtered = String::from("same");
+        let (output, tokens) = choose_output(&filtered, 1, &original, 1);
+        assert!(std::ptr::eq(output, original.as_str()));
+        assert_eq!(tokens, 1);
     }
 
     #[test]
-    fn choose_output_handles_empty() {
-        assert_eq!(choose_output("", ""), "");
-        assert_eq!(choose_output("anything", ""), "");
-        assert_eq!(choose_output("", "raw output"), "");
+    fn choose_output_keeps_empty_filtered() {
+        let (output, tokens) = choose_output("", 0, "raw output", 3);
+        assert_eq!(output, "");
+        assert_eq!(tokens, 0);
     }
 }
