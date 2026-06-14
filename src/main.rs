@@ -322,7 +322,22 @@ enum Commands {
         /// Show line numbers (always on, accepted for grep/rg compatibility)
         #[arg(short = 'n', long)]
         line_numbers: bool,
-        /// Extra ripgrep arguments (e.g., -i, -A 3, -w, --glob)
+        /// Whole-word match (passed to ripgrep)
+        #[arg(short = 'w', long = "word-regexp")]
+        word_regexp: bool,
+        /// Case-insensitive search (passed to ripgrep)
+        #[arg(short = 'i', long = "ignore-case")]
+        ignore_case: bool,
+        /// Fixed-string match (passed to ripgrep)
+        #[arg(short = 'F', long = "fixed-strings")]
+        fixed_strings: bool,
+        /// Enable PCRE2 regex engine
+        #[arg(long)]
+        pcre2: bool,
+        /// Filter by glob pattern (passed to ripgrep)
+        #[arg(short = 'g', long = "glob")]
+        glob: Vec<String>,
+        /// Extra ripgrep arguments (e.g., -A 3, --glob)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
     },
@@ -1807,17 +1822,42 @@ fn run_cli() -> Result<i32> {
             context_only,
             file_type,
             line_numbers: _, // no-op: line numbers always enabled in grep_cmd::run
+            word_regexp,
+            ignore_case,
+            fixed_strings,
+            pcre2,
+            glob,
             extra_args,
-        } => grep_cmd::run(
-            &pattern,
-            &path,
-            max_len,
-            max,
-            context_only,
-            file_type.as_deref(),
-            &extra_args,
-            cli.verbose,
-        )?,
+        } => {
+            let mut all_extra: Vec<String> = Vec::new();
+            if word_regexp {
+                all_extra.push("-w".to_string());
+            }
+            if ignore_case {
+                all_extra.push("-i".to_string());
+            }
+            if fixed_strings {
+                all_extra.push("--fixed-strings".to_string());
+            }
+            if pcre2 {
+                all_extra.push("--pcre2".to_string());
+            }
+            for g in &glob {
+                all_extra.push("--glob".to_string());
+                all_extra.push(g.clone());
+            }
+            all_extra.extend(extra_args);
+            grep_cmd::run(
+                &pattern,
+                &path,
+                max_len,
+                max,
+                context_only,
+                file_type.as_deref(),
+                &all_extra,
+                cli.verbose,
+            )?
+        }
 
         Commands::Init {
             global,
@@ -3280,6 +3320,173 @@ mod tests {
                 assert!(global);
             }
             _ => panic!("Expected Init command"),
+        }
+    }
+
+    // --- #2120: grep flags before pattern must not trigger fallback ---
+
+    #[test]
+    fn test_grep_word_flag_before_pattern() {
+        let cli = Cli::try_parse_from(["rtk", "grep", "-w", "class", "./src"]).unwrap();
+        match cli.command {
+            Commands::Grep {
+                pattern,
+                path,
+                word_regexp,
+                ..
+            } => {
+                assert_eq!(pattern, "class");
+                assert_eq!(path, "./src");
+                assert!(word_regexp);
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    #[test]
+    fn test_grep_ignore_case_before_pattern() {
+        let cli = Cli::try_parse_from(["rtk", "grep", "-i", "pattern", "."]).unwrap();
+        match cli.command {
+            Commands::Grep {
+                pattern,
+                ignore_case,
+                ..
+            } => {
+                assert_eq!(pattern, "pattern");
+                assert!(ignore_case);
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    #[test]
+    fn test_grep_pcre2_before_pattern() {
+        let cli =
+            Cli::try_parse_from(["rtk", "grep", "--pcre2", "(?<=fn )\\w+", "."]).unwrap();
+        match cli.command {
+            Commands::Grep {
+                pattern, pcre2, ..
+            } => {
+                assert_eq!(pattern, "(?<=fn )\\w+");
+                assert!(pcre2);
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    #[test]
+    fn test_grep_fixed_strings_before_pattern() {
+        let cli =
+            Cli::try_parse_from(["rtk", "grep", "--fixed-strings", "fn run(", "."]).unwrap();
+        match cli.command {
+            Commands::Grep {
+                pattern,
+                fixed_strings,
+                ..
+            } => {
+                assert_eq!(pattern, "fn run(");
+                assert!(fixed_strings);
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    #[test]
+    fn test_grep_glob_before_pattern() {
+        let cli =
+            Cli::try_parse_from(["rtk", "grep", "-g", "*.rs", "fn main", "."]).unwrap();
+        match cli.command {
+            Commands::Grep {
+                pattern,
+                path,
+                glob,
+                ..
+            } => {
+                assert_eq!(pattern, "fn main");
+                assert_eq!(path, ".");
+                assert_eq!(glob, vec!["*.rs"]);
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    #[test]
+    fn test_grep_multiple_flags_before_pattern() {
+        let cli =
+            Cli::try_parse_from(["rtk", "grep", "-w", "-i", "class", "./src"]).unwrap();
+        match cli.command {
+            Commands::Grep {
+                pattern,
+                path,
+                word_regexp,
+                ignore_case,
+                ..
+            } => {
+                assert_eq!(pattern, "class");
+                assert_eq!(path, "./src");
+                assert!(word_regexp);
+                assert!(ignore_case);
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    #[test]
+    fn test_grep_flags_after_pattern_still_works() {
+        let cli =
+            Cli::try_parse_from(["rtk", "grep", "class", "./src", "-w", "--pcre2"]).unwrap();
+        match cli.command {
+            Commands::Grep {
+                pattern,
+                path,
+                word_regexp,
+                pcre2,
+                ..
+            } => {
+                assert_eq!(pattern, "class");
+                assert_eq!(path, "./src");
+                assert!(word_regexp);
+                assert!(pcre2);
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    #[test]
+    fn test_grep_combined_short_flags() {
+        let cli = Cli::try_parse_from(["rtk", "grep", "-wi", "class", "./src"]).unwrap();
+        match cli.command {
+            Commands::Grep {
+                pattern,
+                path,
+                word_regexp,
+                ignore_case,
+                ..
+            } => {
+                assert_eq!(pattern, "class");
+                assert_eq!(path, "./src");
+                assert!(word_regexp);
+                assert!(ignore_case);
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    #[test]
+    fn test_grep_flags_with_default_path() {
+        let cli = Cli::try_parse_from(["rtk", "grep", "-w", "class"]).unwrap();
+        match cli.command {
+            Commands::Grep {
+                pattern,
+                path,
+                word_regexp,
+                ..
+            } => {
+                assert_eq!(pattern, "class");
+                assert_eq!(path, ".");
+                assert!(word_regexp);
+            }
+            _ => panic!("Expected Grep command"),
         }
     }
 }
