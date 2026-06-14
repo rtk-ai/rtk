@@ -281,7 +281,7 @@ cp ~/.claude/settings.json.bak ~/.claude/settings.json
 ```bash
 rtk ls .              # Compact tree view
 rtk read file.rs      # Optimized reading
-rtk grep "pattern" .  # Grouped search results
+rtk grep "pattern" .  # Filtered search results (file:line:content, --no-ignore-vcs)
 ```
 
 ### Git

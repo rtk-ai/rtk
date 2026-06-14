@@ -108,7 +108,7 @@ git status  # 自動的に rtk git status に書き換え
 rtk ls .                        # 最適化されたディレクトリツリー
 rtk read file.rs                # スマートファイル読み取り
 rtk find "*.rs" .               # コンパクトな検索結果
-rtk grep "pattern" .            # ファイル別グループ化検索
+rtk grep "pattern" .            # フィルタリング検索 (file:line:content, --no-ignore-vcs)
 ```
 
 ### Git

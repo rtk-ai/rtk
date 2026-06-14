@@ -202,7 +202,7 @@ Supporte a la fois la syntaxe RTK et la syntaxe native `find` (`-name`, `-type`,
 
 ### `rtk grep` -- Recherche dans le contenu
 
-**Objectif :** Remplace `grep` et `rg` avec une sortie groupee par fichier, tronquee.
+**Objectif :** Remplace `grep` et `rg`. Sortie toujours filtree au format `file:line:content` (troncature des lignes longues, plafonds par fichier et global). Utilise `--no-ignore-vcs` pour inclure les fichiers ignores par `.gitignore`, tout en respectant `.ignore`/`.rgignore`.
 
 **Syntaxe :**
 ```bash

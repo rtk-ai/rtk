@@ -284,7 +284,7 @@ Savings %       = (Saved / Input) × 100
 | `rtk vitest` | 94-99% | Show failures only |
 | `rtk find` | 75% | Tree format |
 | `rtk pnpm list` | 70-90% | Compact dependencies |
-| `rtk grep` | 70% | Truncate + group |
+| `rtk grep` | 50-90% | Filtered file:line:content, --no-ignore-vcs |
 
 ## Database Management
 

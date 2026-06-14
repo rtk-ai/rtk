@@ -119,7 +119,7 @@ rtk ls .                        # Arbre de repertoires optimise
 rtk read file.rs                # Lecture intelligente
 rtk read file.rs -l aggressive  # Signatures uniquement
 rtk find "*.rs" .               # Resultats compacts
-rtk grep "pattern" .            # Resultats groupes par fichier
+rtk grep "pattern" .            # Resultats filtres (file:line:content, --no-ignore-vcs)
 rtk diff file1 file2            # Diff condense
 ```
 
