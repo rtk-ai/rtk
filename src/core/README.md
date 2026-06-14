@@ -119,10 +119,12 @@ Consumers must call `timer.track()` on **all** code paths — success, failure, 
 
 In captured/buffered mode (`run_filtered`, `run_filtered_with_exit`), the runner
 compares the filtered output against the raw input it consumed and emits whichever
-has fewer estimated tokens — ties prefer the raw output. This guarantees rtk never
-prints (or records) more than the underlying command would, even when a filter adds
-boilerplate to an already-small output. Streaming mode (`run_streamed`) is exempt:
-its lines are flushed in real time and cannot be retroactively swapped.
+has fewer estimated tokens — ties prefer the raw output. This guarantees the
+emitted command-output body is never larger than the underlying command's, even
+when a filter adds boilerplate to an already-small output. (The optional tee/hint
+line appended by `print_with_hint` is recovery metadata and sits outside this
+comparison.) Streaming mode (`run_streamed`) is exempt: its lines are flushed in
+real time and cannot be retroactively swapped.
 
 ### Tee (`tee_and_hint`)
 

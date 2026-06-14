@@ -1365,7 +1365,12 @@ impl TimedExecution {
     /// Like [`track`], but accepts precomputed token counts so callers that
     /// already estimated the input/output (e.g. the runner's output-fallback
     /// decision) don't pay for re-estimation.
-    pub fn track_with_tokens(
+    ///
+    /// Contract: the counts **must** come from [`estimate_tokens`] over the
+    /// same strings that would otherwise be passed to [`track`], so metrics
+    /// stay consistent with the rest of the database. Kept `pub(crate)` to
+    /// keep this internal-only invariant enforceable.
+    pub(crate) fn track_with_tokens(
         &self,
         original_cmd: &str,
         rtk_cmd: &str,
