@@ -1368,8 +1368,10 @@ impl TimedExecution {
     ///
     /// Contract: the counts **must** come from [`estimate_tokens`] over the
     /// same strings that would otherwise be passed to [`track`], so metrics
-    /// stay consistent with the rest of the database. Kept `pub(crate)` to
-    /// keep this internal-only invariant enforceable.
+    /// stay consistent with the rest of the database. This is `pub(crate)`
+    /// because it is internal-only; note that `pub(crate)` scopes visibility
+    /// but does not itself enforce the count-consistency contract above —
+    /// that remains a caller convention.
     pub(crate) fn track_with_tokens(
         &self,
         original_cmd: &str,

@@ -10,11 +10,14 @@ use crate::core::tracking;
 /// filtered text when it has fewer estimated tokens than the original,
 /// otherwise the original. Ties prefer the original (no benefit in a
 /// reformatted, non-shorter output), so the emitted command-output body is
-/// never larger than the underlying command's. Any optional tee/hint line
-/// appended by `print_with_hint` is recovery metadata outside this comparison.
+/// never larger than the underlying command's *by `estimate_tokens`*. Any
+/// optional tee/hint line appended by `print_with_hint` is recovery metadata
+/// outside this comparison.
 ///
 /// Token counts are passed in (not computed here) so the central path
-/// estimates each string only once and reuses the result for tracking.
+/// estimates each string only once and reuses the result for tracking. The
+/// guarantee above therefore assumes both counts come from `estimate_tokens`;
+/// the sole caller (`run_captured_filter`) derives both from it.
 fn choose_output<'a>(
     filtered: &'a str,
     filtered_tokens: usize,
