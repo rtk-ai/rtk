@@ -31,11 +31,11 @@ fn choose_output<'a>(
     }
 }
 
-pub fn print_with_hint(filtered: &str, raw: &str, tee_label: &str, exit_code: i32) {
+pub fn print_with_hint(output: &str, raw: &str, tee_label: &str, exit_code: i32) {
     if let Some(hint) = crate::core::tee::tee_and_hint(raw, tee_label, exit_code) {
-        println!("{}\n{}", filtered, hint);
+        println!("{}\n{}", output, hint);
     } else {
-        println!("{}", filtered);
+        println!("{}", output);
     }
 }
 
