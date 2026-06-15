@@ -438,6 +438,83 @@ fn run_claude_inner(input: &str) -> Option<String> {
     }
 }
 
+// ── Codex CLI native hook ──────────────────────────────────────
+//
+// Codex's PreToolUse protocol (per developers.openai.com/codex/hooks):
+//   stdin  : {"hook_event_name":"PreToolUse","tool_name":"Bash",
+//             "tool_input":{"command":"..."}, session_id, turn_id, cwd, ...}
+//   stdout : {"hookSpecificOutput":{"hookEventName":"PreToolUse",
+//             "permissionDecision":"allow|deny", "updatedInput":{"command":"..."}}}
+//
+// The response schema is byte-identical to Claude's, so we reuse
+// `process_claude_payload`. Codex-specific differences live entirely in
+// `run_codex`: it emits `{}` (Codex's neutral no-opinion) on every
+// non-rewrite path (empty stdin, malformed JSON, non-Bash tool, skip,
+// ignore) rather than going silent. Codex semantics permit multiple
+// matching hooks to run concurrently — unlike Claude #1515, there is
+// no manifest fallthrough to engineer here.
+
+/// Run the Codex CLI PreToolUse hook natively.
+pub fn run_codex() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let input = input.trim();
+    if input.is_empty() {
+        let _ = writeln!(io::stdout(), "{{}}");
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(_) => {
+            // Fail-open: emit neutral no-opinion, no stderr noise.
+            let _ = writeln!(io::stdout(), "{{}}");
+            return Ok(());
+        }
+    };
+
+    // Codex currently fires PreToolUse only for the Bash tool; defend
+    // against future event/tool expansion by emitting `{}` for anything
+    // else rather than misinterpreting the payload.
+    let tool_name = v.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
+    if tool_name != "Bash" {
+        let _ = writeln!(io::stdout(), "{{}}");
+        return Ok(());
+    }
+
+    match process_claude_payload(&v) {
+        PayloadAction::Rewrite {
+            cmd,
+            rewritten,
+            output,
+        } => {
+            audit_log("rewrite", &cmd, &rewritten);
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        PayloadAction::Skip { reason, cmd } => {
+            audit_log(reason, &cmd, "");
+            let _ = writeln!(io::stdout(), "{{}}");
+        }
+        PayloadAction::Ignore => {
+            let _ = writeln!(io::stdout(), "{{}}");
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_codex_inner(input: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    let tool_name = v.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
+    if tool_name != "Bash" {
+        return None;
+    }
+    match process_claude_payload(&v) {
+        PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        _ => None,
+    }
+}
+
 // ── Cursor native hook ─────────────────────────────────────────
 
 /// Cursor on Windows ships hook payloads with one or more leading
@@ -1016,6 +1093,160 @@ mod tests {
     fn test_claude_no_tool_input_passthrough() {
         let input = json!({ "tool_name": "Bash" }).to_string();
         assert!(run_claude_inner(&input).is_none());
+    }
+
+    // --- Codex handler ---
+
+    fn codex_input(cmd: &str) -> String {
+        // Codex PreToolUse stdin includes session/turn metadata that RTK
+        // ignores, plus the canonical Bash payload. Tests use the full
+        // shape to catch regressions where extra fields confuse parsing.
+        json!({
+            "session_id": "s-1234",
+            "tool_use_id": "tu-5678",
+            "turn_id": "t-9012",
+            "cwd": "/repo",
+            "permission_mode": "default",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": { "command": cmd }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_codex_rewrite_git_status() {
+        let result = run_codex_inner(&codex_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk git status");
+    }
+
+    #[test]
+    fn test_codex_output_matches_claude_schema_byte_for_byte() {
+        // RTK reuses process_claude_payload because the OpenAI Codex
+        // PreToolUse response schema is identical to Claude's. This test
+        // pins that invariant so a future Claude-only tweak that drifts
+        // the schema gets caught.
+        let codex = run_codex_inner(&codex_input("git status")).unwrap();
+        let claude = run_claude_inner(&claude_input("git status")).unwrap();
+        assert_eq!(codex, claude);
+    }
+
+    #[test]
+    fn test_codex_hookspecificoutput_structure() {
+        let result = run_codex_inner(&codex_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+        assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
+        assert!(hook["updatedInput"].is_object());
+        assert!(hook["updatedInput"]["command"].is_string());
+    }
+
+    #[test]
+    fn test_codex_non_bash_tool_returns_none() {
+        // Codex PreToolUse currently only fires for Bash, but defensive:
+        // if a future Codex sends shell_view or fs_read here, RTK must
+        // refuse rather than misinterpret.
+        let input = json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "shell_view",
+            "tool_input": { "command": "git status" }
+        })
+        .to_string();
+        assert!(run_codex_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_codex_passthrough_no_output() {
+        // htop has no RTK rewrite — payload returns None (-> "{}" in I/O wrapper).
+        assert!(run_codex_inner(&codex_input("htop")).is_none());
+    }
+
+    #[test]
+    fn test_codex_already_rtk_passthrough() {
+        assert!(run_codex_inner(&codex_input("rtk git status")).is_none());
+    }
+
+    #[test]
+    fn test_codex_compound_command_rewrites_both_segments() {
+        let result = run_codex_inner(&codex_input("git add . && cargo test")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk git add . && rtk cargo test");
+    }
+
+    #[test]
+    fn test_codex_env_prefix_preserved() {
+        let result = run_codex_inner(&codex_input("GIT_PAGER=cat git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "GIT_PAGER=cat rtk git status");
+    }
+
+    #[test]
+    fn test_codex_substitution_not_rewritten() {
+        // CVE-class: command substitution payloads must skip so Codex
+        // applies its own permission policy instead of auto-allowing.
+        assert!(run_codex_inner(&codex_input("git status `rm -rf /tmp/x`")).is_none());
+        assert!(run_codex_inner(&codex_input("git status $(rm -rf /tmp/x)")).is_none());
+    }
+
+    #[test]
+    fn test_codex_file_redirect_not_rewritten() {
+        assert!(run_codex_inner(&codex_input("git log > /tmp/out.txt")).is_none());
+    }
+
+    #[test]
+    fn test_codex_empty_command_returns_none() {
+        let input = json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": { "command": "" }
+        })
+        .to_string();
+        assert!(run_codex_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_codex_malformed_json_returns_none() {
+        assert!(run_codex_inner("not valid json {{{").is_none());
+    }
+
+    #[test]
+    fn test_codex_no_tool_input_returns_none() {
+        let input = json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash"
+        })
+        .to_string();
+        assert!(run_codex_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_codex_extra_session_fields_ignored() {
+        // session_id / turn_id / cwd / permission_mode must not affect
+        // the rewrite. codex_input() already adds them — this verifies
+        // a smaller payload with NONE of them rewrites identically.
+        let minimal = json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "git status" }
+        })
+        .to_string();
+        let full = codex_input("git status");
+        let minimal_out = run_codex_inner(&minimal).unwrap();
+        let full_out = run_codex_inner(&full).unwrap();
+        assert_eq!(minimal_out, full_out);
     }
 
     // --- Cursor handler ---
