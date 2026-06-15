@@ -837,6 +837,15 @@ fn rewrite_segment_inner(
         }
     }
 
+    // `rtk find` does not implement GNU find's compound predicates/actions
+    // (-not, -o, -a, -and, -or, -exec, -execdir, -ok, -okdir, -prune, `!`).
+    // Rewriting `find … -not …` → `rtk find … -not …` makes rtk error and the
+    // caller (often an agent) retry in a loop. Skip rewrite so the original
+    // bare `find` runs and the predicate works.
+    if rule.rtk_cmd == "rtk find" && has_find_compound_predicate(cmd_part) {
+        return None;
+    }
+
     // Try each rewrite prefix (longest first) with word-boundary check
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(cmd_part, prefix) {
@@ -850,6 +859,23 @@ fn rewrite_segment_inner(
     }
 
     None
+}
+
+/// GNU find predicates/actions that `rtk find` does not implement. When any of
+/// these appear as a whitespace-delimited token, the `find` command must NOT be
+/// rewritten to `rtk find` (which would error). `!` is included because it is
+/// find's negation operator.
+const FIND_COMPOUND_TOKENS: &[&str] = &[
+    "-not", "-o", "-a", "-and", "-or", "-exec", "-execdir", "-ok", "-okdir",
+    "-prune", "!",
+];
+
+/// Returns true if a `find …` command string uses a compound predicate/action
+/// that `rtk find` cannot handle. Matches only whole tokens (space-delimited),
+/// so a path like `./-not-a-flag` or `-name '*-o*'` does not trip it.
+fn has_find_compound_predicate(cmd: &str) -> bool {
+    cmd.split_whitespace()
+        .any(|tok| FIND_COMPOUND_TOKENS.contains(&tok))
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -1513,6 +1539,56 @@ mod tests {
             rewrite_command_no_prefixes("find . -name '*.rs'", &[]),
             Some("rtk find . -name '*.rs'".into())
         );
+    }
+
+    #[test]
+    fn test_rewrite_find_compound_not_skipped() {
+        // `rtk find` does not support -not; pass the bare find through unchanged.
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -not -path './node_modules/*'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_find_compound_exec_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -name '*.rs' -exec grep -l foo {} ;", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_find_compound_or_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -type f -o -type l", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_find_compound_bang_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find . ! -name '*.tmp'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_find_simple_predicate_still_rewritten() {
+        // -name/-type alone are NOT compound — these must still rewrite.
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -name '*.rs' -type f", &[]),
+            Some("rtk find . -name '*.rs' -type f".into())
+        );
+    }
+
+    #[test]
+    fn test_has_find_compound_predicate_token_boundary() {
+        // a path substring containing "-o" must NOT trip the guard
+        assert!(!has_find_compound_predicate("find . -name '*-o-file*'"));
+        assert!(has_find_compound_predicate("find . -type f -o -type d"));
+        assert!(!has_find_compound_predicate("find . -name foo"));
     }
 
     #[test]
