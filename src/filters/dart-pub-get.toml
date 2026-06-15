@@ -1,6 +1,6 @@
 [filters.dart-pub-get]
 description = "Compact dart pub get — strip download noise; keep summary, warnings, and hints"
-match_command = "^dart\\s+pub\\s+(get|add|outdated|upgrade|downgrade)\\b"
+match_command = "^dart\\s+pub\\s+(get|add|upgrade|downgrade|outdated)\\b"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

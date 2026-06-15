@@ -453,7 +453,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^dart\s+pub\s+(get|add|outdated|upgrade|downgrade)\b",
+        pattern: r"^dart\s+pub\s+(get|add|upgrade|downgrade|outdated)\b",
         rtk_cmd: "rtk dart pub",
         rewrite_prefixes: &["dart pub"],
         category: "PackageManager",
