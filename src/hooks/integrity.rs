@@ -12,7 +12,8 @@
 //!
 //! Reference: SA-2025-RTK-001 (Finding F-01)
 
-use super::constants::{CLAUDE_DIR, HOOKS_SUBDIR, REWRITE_HOOK_FILE};
+use super::constants::{HOOKS_SUBDIR, REWRITE_HOOK_FILE};
+use super::init::resolve_claude_dir;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -188,13 +189,7 @@ fn read_stored_hash(path: &Path) -> Result<String> {
 
 /// Resolve the default hook path (~/.claude/hooks/rtk-rewrite.sh)
 pub fn resolve_hook_path() -> Result<PathBuf> {
-    dirs::home_dir()
-        .map(|h| {
-            h.join(CLAUDE_DIR)
-                .join(HOOKS_SUBDIR)
-                .join(REWRITE_HOOK_FILE)
-        })
-        .context("Cannot determine home directory. Is $HOME set?")
+    resolve_claude_dir().map(|dir| dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE))
 }
 
 /// Run integrity check and print results (for `rtk verify` subcommand)
@@ -210,8 +205,8 @@ pub fn run_verify(verbose: u8) -> Result<()> {
     // If no legacy script exists, check for native binary command registration
     if !hook_path.exists() && !hash_file.exists() {
         // Check if the native binary command is registered in settings.json
-        let home = dirs::home_dir().context("Cannot determine home directory")?;
-        let settings_path = home.join(CLAUDE_DIR).join("settings.json");
+        let claude_dir = resolve_claude_dir().context("Cannot determine claude directory")?;
+        let settings_path = claude_dir.join("settings.json");
         if settings_path.exists() {
             let content = fs::read_to_string(&settings_path).unwrap_or_default();
             if content.contains("rtk hook claude") {

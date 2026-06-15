@@ -3,6 +3,8 @@
 use super::constants::RTK_DATA_DIR;
 use crate::core::config;
 use crate::core::tracking;
+use crate::hooks::constants::CLAUDE_DIR;
+use crate::hooks::init::resolve_claude_dir;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as FmtWrite;
 use std::io::Write as IoWrite;
@@ -353,10 +355,12 @@ fn detect_hook_type() -> String {
         None => return "unknown".to_string(),
     };
 
+    let claude_dir = resolve_claude_dir().unwrap_or_else(|_| home.join(CLAUDE_DIR));
+
     // Check in order of popularity
     let checks = [
-        (home.join(".claude/hooks/rtk-rewrite.sh"), "claude"),
-        (home.join(".claude/hooks/rtk-rewrite.json"), "claude"),
+        (claude_dir.join("hooks/rtk-rewrite.sh"), "claude"),
+        (claude_dir.join("hooks/rtk-rewrite.json"), "claude"),
         (home.join(".gemini/hooks/rtk-hook.sh"), "gemini"),
         (home.join(".codex/AGENTS.md"), "codex"),
         (home.join(".cursor/hooks/rtk-rewrite.json"), "cursor"),
