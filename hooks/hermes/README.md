@@ -24,6 +24,14 @@ Hermes loads plugins from Python, so the plugin entrypoint is Python. The Python
 
 All rewrite rules stay in Rust inside `rtk rewrite`. When RTK adds or changes command rewrite behavior, the Hermes plugin picks up that behavior by delegating to the RTK binary.
 
+## The Conductor twist
+
+Set `RTK_HERMES_CONDUCTOR=1` to brand Hermes plugin warnings as `The Conductor` while keeping the same fail-open behavior:
+
+```bash
+RTK_HERMES_CONDUCTOR=1 hermes
+```
+
 ## Fail-open behavior
 
 The plugin does not block command execution. If anything goes wrong, Hermes runs the original command unchanged.
