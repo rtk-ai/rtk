@@ -14,8 +14,20 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
         eprintln!("Comparing: {} vs {}", file1.display(), file2.display());
     }
 
-    let content1 = fs::read_to_string(file1)?;
-    let content2 = fs::read_to_string(file2)?;
+    let content1 = match fs::read_to_string(file1) {
+        Ok(content) => content,
+        Err(err) => {
+            eprintln!("rtk diff: failed to read {}: {}", file1.display(), err);
+            return Ok(2);
+        }
+    };
+    let content2 = match fs::read_to_string(file2) {
+        Ok(content) => content,
+        Err(err) => {
+            eprintln!("rtk diff: failed to read {}: {}", file2.display(), err);
+            return Ok(2);
+        }
+    };
     let raw = format!("{}\n---\n{}", content1, content2);
 
     let (rtk, exit_code) = render_file_diff(file1, file2, &content1, &content2);
@@ -509,5 +521,43 @@ diff --git a/b.rs b/b.rs
                 assert_eq!(old.len(), 500, "Line was truncated!");
             }
         }
+    }
+
+    #[test]
+    fn test_run_returns_zero_for_identical_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file1 = dir.path().join("a.txt");
+        let file2 = dir.path().join("b.txt");
+        fs::write(&file1, "same\n").expect("write file1");
+        fs::write(&file2, "same\n").expect("write file2");
+
+        let code = run(&file1, &file2, 0).expect("diff should run");
+
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn test_run_returns_one_for_different_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file1 = dir.path().join("a.txt");
+        let file2 = dir.path().join("b.txt");
+        fs::write(&file1, "a\n").expect("write file1");
+        fs::write(&file2, "b\n").expect("write file2");
+
+        let code = run(&file1, &file2, 0).expect("diff should run");
+
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn test_run_returns_two_when_file_is_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("missing.txt");
+        let file2 = dir.path().join("b.txt");
+        fs::write(&file2, "b\n").expect("write file2");
+
+        let code = run(&missing, &file2, 0).expect("diff should return an exit code");
+
+        assert_eq!(code, 2);
     }
 }
