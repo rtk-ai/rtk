@@ -1,0 +1,62 @@
+[filters.dart-test]
+description = "Compact dart test output — strip loading and blank lines, keep all test results"
+match_command = "^dart\\s+test\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\d\\d:\\d\\d\\s+\\+\\d+\\s*:\\s*loading",
+]
+match_output = [
+  { pattern = "All tests passed!", message = "ok dart test: all passed" },
+]
+max_lines = 80
+
+[[tests.dart-test]]
+name = "all passing — short-circuits"
+input = """
+00:00 +0: loading test/example_test.dart
+00:00 +0: test1
+00:00 +1: test2
+00:00 +2: test3
+00:00 +3: All tests passed!
+"""
+expected = "ok dart test: all passed"
+
+[[tests.dart-test]]
+name = "keep all test results, strip only loading and blanks"
+input = """
+00:00 +0: loading test/example_test.dart
+00:00 +0: test/example_test.dart: passing test
+00:00 +1: test/all_pass_test.dart: passes 1
+00:00 +2 -1: test/example_test.dart: failing test [E]
+  Expected: <3>
+    Actual: <2>
+  
+  package:matcher             expect
+  test/example_test.dart 8:5  main.<fn>
+  
+00:00 +2 -1: test/example_test.dart: second passing
+00:00 +3 -1: test/all_pass_test.dart: passes 2
+00:00 +4 -1: Some tests failed.
+Failing tests:
+  test/example_test.dart: failing test
+Consider enabling the flag chain-stack-traces to receive more detailed exceptions.
+"""
+expected = """00:00 +0: test/example_test.dart: passing test
+00:00 +1: test/all_pass_test.dart: passes 1
+00:00 +2 -1: test/example_test.dart: failing test [E]
+  Expected: <3>
+    Actual: <2>
+  package:matcher             expect
+  test/example_test.dart 8:5  main.<fn>
+00:00 +2 -1: test/example_test.dart: second passing
+00:00 +3 -1: test/all_pass_test.dart: passes 2
+00:00 +4 -1: Some tests failed.
+Failing tests:
+  test/example_test.dart: failing test
+Consider enabling the flag chain-stack-traces to receive more detailed exceptions."""
+
+[[tests.dart-test]]
+name = "empty input"
+input = ""
+expected = ""

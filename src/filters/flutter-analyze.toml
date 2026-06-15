@@ -1,0 +1,46 @@
+[filters.flutter-analyze]
+description = "Compact flutter analyze — strip headers, info-level issues; keep error/warning lines and summary"
+match_command = "^flutter\\s+analyze\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Analyzing ",
+  "^info ",
+]
+match_output = [
+  { pattern = "No issues found", message = "flutter analyze: No issues found" },
+]
+max_lines = 80
+
+[[tests.flutter-analyze]]
+name = "strips header and info, keeps warnings and summary"
+input = """
+Analyzing test_issues.dart...
+
+warning • Unused import: 'dart:math'. Try removing the import directive • test_issues.dart:1:8 • unused_import
+warning • Unused import: 'dart:async'. Try removing the import directive • test_issues.dart:2:8 • unused_import
+info • Unnecessary use of multiple underscores • test_issues.dart:113:11 • unnecessary_underscores
+warning • Dead code. Try removing the code • test_issues.dart:14:14 • dead_code
+
+7 issues found. (ran in 0.1s)
+"""
+expected = "warning • Unused import: 'dart:math'. Try removing the import directive • test_issues.dart:1:8 • unused_import\nwarning • Unused import: 'dart:async'. Try removing the import directive • test_issues.dart:2:8 • unused_import\nwarning • Dead code. Try removing the code • test_issues.dart:14:14 • dead_code\n7 issues found. (ran in 0.1s)"
+
+[[tests.flutter-analyze]]
+name = "no issues — returns match_output"
+input = """
+Analyzing speakscore...
+No issues found! (ran in 3.5s)
+"""
+expected = "flutter analyze: No issues found"
+
+[[tests.flutter-analyze]]
+name = "only errors kept"
+input = """
+Analyzing broken.dart...
+
+error • The method 'foo' isn't defined for the class 'Bar' • broken.dart:24:5 • undefined_method
+
+1 issue found. (ran in 0.1s)
+"""
+expected = "error • The method 'foo' isn't defined for the class 'Bar' • broken.dart:24:5 • undefined_method\n1 issue found. (ran in 0.1s)"

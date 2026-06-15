@@ -1,0 +1,35 @@
+[filters.dart-analyze]
+description = "Compact dart analyze — strip headers, info-level issues; keep error/warning lines and summary"
+match_command = "^dart\\s+analyze\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Analyzing ",
+  "^info -",
+]
+match_output = [
+  { pattern = "No issues found", message = "dart analyze: No issues found" },
+]
+max_lines = 80
+
+[[tests.dart-analyze]]
+name = "strips header and info, keeps warnings and summary"
+input = """
+Analyzing test_issues.dart...
+
+warning - test_issues.dart:1:8 - Unused import: 'dart:math'. Try removing the import directive. - unused_import
+warning - test_issues.dart:2:8 - Unused import: 'dart:async'. Try removing the import directive. - unused_import
+info - test_issues.dart:7:7 - The value of the local variable 'y' isn't used. - unused_local_variable
+warning - test_issues.dart:14:14 - Dead code. Try removing the code. - dead_code
+
+7 issues found.
+"""
+expected = "warning - test_issues.dart:1:8 - Unused import: 'dart:math'. Try removing the import directive. - unused_import\nwarning - test_issues.dart:2:8 - Unused import: 'dart:async'. Try removing the import directive. - unused_import\nwarning - test_issues.dart:14:14 - Dead code. Try removing the code. - dead_code\n7 issues found."
+
+[[tests.dart-analyze]]
+name = "no issues — returns match_output"
+input = """
+Analyzing lib...
+No issues found!
+"""
+expected = "dart analyze: No issues found"
