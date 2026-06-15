@@ -349,7 +349,9 @@ pub fn run(
             for p in &patterns {
                 grep_cmd.args(["-e", p]);
             }
-            grep_cmd.args(["-rnHZ", "--"]);
+            // --null (not -Z): on BSD/macOS grep -Z means --decompress, not the
+            // NUL filename separator parse_match_line() needs (issue #2310).
+            grep_cmd.args(["-rnH", "--null", "--"]);
             grep_cmd.args(&paths);
             exec_capture(&mut grep_cmd)
         })
@@ -465,8 +467,9 @@ pub fn run(
 
 /// Parses a single rg/grep match line of the form `file\0line_number:content`.
 ///
-/// Requires the underlying command to be invoked with `-0` (rg) or `-Z` (grep)
-/// so the filename is NUL-separated from `line:content`. NUL cannot appear in
+/// Requires the underlying command to be invoked with `-0` (rg) or `--null`
+/// (grep) so the filename is NUL-separated from `line:content`. NUL cannot
+/// appear in
 /// file paths, so the parser is unambiguous regardless of:
 ///   - content with `:` or `::` (e.g. `ClassRegistry::init(...)`, issue #1436);
 ///   - paths with embedded `:` (Windows drive letters, weird filenames like
