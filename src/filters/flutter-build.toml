@@ -1,0 +1,78 @@
+[filters.flutter-build]
+description = "Compact flutter build — strip pub preamble, plugin warnings, tree-shaking, spinners; keep errors, wasm findings, build result"
+match_command = "^flutter\\s+build\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Resolving dependencies",
+  "^Downloading packages",
+  "^  [a-zA-Z_][a-zA-Z0-9_-]* \\d",
+  "^Got dependencies!",
+  "^\\d+ packages have newer",
+  "^Try `flutter pub outdated`",
+  "^The following plugins do not support",
+  "^  - ",
+  "^This will become an error",
+  "^Font asset",
+  "^Compiling ",
+  "^Running",
+  "^\\[\\+\\d+ ms\\] ",
+]
+max_lines = 60
+
+[[tests.flutter-build]]
+name = "web build — strips noise, keeps wasm findings and result"
+input = """
+Resolving dependencies...
+Downloading packages...
+  _fe_analyzer_shared 96.0.0 (103.0.0 available)
+  meta 1.18.0 (1.18.3 available)
+Got dependencies!
+59 packages have newer versions incompatible with dependency constraints.
+Try `flutter pub outdated` for more information.
+The following plugins do not support Swift Package Manager for ios:
+  - patrol
+  - flutter_secure_storage
+This will become an error in a future version of Flutter.
+The following plugins do not support Swift Package Manager for macos:
+  - patrol
+  - flutter_secure_storage_macos
+This will become an error in a future version of Flutter.
+Compiling lib/main.dart for the Web...                          
+Wasm dry run findings:
+Found incompatibilities with WebAssembly.
+
+package:flutter_secure_storage_web/flutter_secure_storage_web.dart 5:1 - dart:html unsupported (0)
+package:flutter_secure_storage_web/flutter_secure_storage_web.dart 6:1 - dart:js_util unsupported (15)
+
+Consider addressing these issues to enable wasm builds. See docs for more info: https://docs.flutter.dev/platform-integration/web/wasm
+
+Use --no-wasm-dry-run to disable these warnings.
+Font asset "CupertinoIcons.ttf" was tree-shaken, reducing it from 257628 to 1472 bytes (99.4% reduction).
+Font asset "MaterialIcons-Regular.otf" was tree-shaken, reducing it from 1645184 to 17660 bytes (98.9% reduction).
+Compiling lib/main.dart for the Web...                             48.3s
+✓ Built build/web
+"""
+expected = """Wasm dry run findings:
+Found incompatibilities with WebAssembly.
+package:flutter_secure_storage_web/flutter_secure_storage_web.dart 5:1 - dart:html unsupported (0)
+package:flutter_secure_storage_web/flutter_secure_storage_web.dart 6:1 - dart:js_util unsupported (15)
+Consider addressing these issues to enable wasm builds. See docs for more info: https://docs.flutter.dev/platform-integration/web/wasm
+Use --no-wasm-dry-run to disable these warnings.
+✓ Built build/web"""
+
+[[tests.flutter-build]]
+name = "build fails — keeps error"
+input = """
+Resolving dependencies...
+Downloading packages...
+  meta 1.18.0 (1.18.3 available)
+Got dependencies!
+Compiling lib/main.dart for the Web...                          
+lib/main.dart:10:5: Error: The method 'foo' isn't defined for class 'Bar'.
+    foo();
+    ^^^
+"""
+expected = """lib/main.dart:10:5: Error: The method 'foo' isn't defined for class 'Bar'.
+    foo();
+    ^^^"""

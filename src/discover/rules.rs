@@ -965,6 +965,24 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
+    RtkRule {
+        pattern: r"^dart\s+run\s+build_runner\b",
+        rtk_cmd: "rtk dart build_runner",
+        rewrite_prefixes: &["dart run build_runner"],
+        category: "Build",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^flutter\s+build\b",
+        rtk_cmd: "rtk flutter build",
+        rewrite_prefixes: &["flutter build"],
+        category: "Build",
+        savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
 ];
 
 pub const IGNORED_PREFIXES: &[&str] = &[

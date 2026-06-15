@@ -217,6 +217,8 @@ rtk dart test                   # Dart tests, failures only (-75%)
 rtk flutter analyze             # Flutter analyzer (-75%)
 rtk flutter pub get             # Flutter dependencies (-70%)
 rtk flutter test                # Flutter tests, failures only (-75%)
+rtk dart build_runner           # Dart codegen (-70%)
+rtk flutter build               # Flutter build (-75%)
 ```
 
 ### AWS
