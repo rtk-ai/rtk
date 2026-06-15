@@ -20,6 +20,7 @@ pub const OPENCODE_PLUGIN_FILE: &str = "rtk.ts";
 
 pub const CURSOR_DIR: &str = ".cursor";
 pub const CODEX_DIR: &str = ".codex";
+pub const REASONIX_DIR: &str = "reasonix";
 pub const GEMINI_DIR: &str = ".gemini";
 
 pub const GITHUB_DIR: &str = ".github";

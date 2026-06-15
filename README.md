@@ -106,6 +106,7 @@ rtk gain        # Should show token savings stats
 rtk init -g                     # Claude Code / Copilot (default)
 rtk init -g --gemini            # Gemini CLI
 rtk init -g --codex             # Codex (OpenAI)
+rtk init -g --reasonix          # Reasonix
 rtk init -g --agent cursor      # Cursor
 rtk init -g --agent windsurf    # Windsurf
 rtk init --agent cline          # Cline / Roo Code
@@ -363,6 +364,7 @@ RTK supports 14 AI coding tools. Each integration rewrites shell commands to `rt
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
 | **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook |
 | **Codex** | `rtk init -g --codex` | AGENTS.md + RTK.md instructions |
+| **Reasonix** | `rtk init -g --reasonix` | AGENTS.md + RTK.md instructions |
 | **Windsurf** | `rtk init -g --agent windsurf` | .windsurfrules (project-scoped) |
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |

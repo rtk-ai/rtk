@@ -373,6 +373,10 @@ enum Commands {
         #[arg(long)]
         codex: bool,
 
+        /// Target Reasonix (uses AGENTS.md + RTK.md, no Claude hook patching)
+        #[arg(long)]
+        reasonix: bool,
+
         /// Install GitHub Copilot integration (VS Code + CLI)
         #[arg(long)]
         copilot: bool,
@@ -1385,25 +1389,28 @@ fn main() {
     std::process::exit(code);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
     agent: Option<AgentTarget>,
     global: bool,
     gemini: bool,
     codex: bool,
+    reasonix: bool,
     ctx: hooks::init::InitContext,
     uninstall_hermes: UninstallHermes,
     uninstall_standard: UninstallStandard,
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
-    UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
+    UninstallStandard:
+        FnOnce(bool, bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
-        uninstall_standard(global, gemini, codex, cursor, pi, ctx)
+        uninstall_standard(global, gemini, codex, reasonix, cursor, pi, ctx)
     }
 }
 
@@ -1831,6 +1838,7 @@ fn run_cli() -> Result<i32> {
             no_patch,
             uninstall,
             codex,
+            reasonix,
             copilot,
             dry_run,
         } => {
@@ -1839,19 +1847,22 @@ fn run_cli() -> Result<i32> {
                 dry_run,
             };
             if show {
-                hooks::init::show_config(codex)?;
+                hooks::init::show_config(codex, reasonix)?;
             } else if uninstall && copilot {
                 if global {
                     hooks::init::uninstall_copilot_global(ctx)?;
                 } else {
                     hooks::init::uninstall_copilot(ctx)?;
                 }
+            } else if uninstall && reasonix {
+                hooks::init::uninstall_reasonix(global, ctx)?;
             } else if uninstall {
                 uninstall_init_dispatch(
                     agent,
                     global,
                     gemini,
                     codex,
+                    reasonix,
                     ctx,
                     hooks::init::uninstall_hermes,
                     hooks::init::uninstall,
@@ -1911,6 +1922,7 @@ fn run_cli() -> Result<i32> {
                     claude_md,
                     hook_only,
                     codex,
+                    reasonix,
                     patch_mode,
                     ctx,
                 )?;
@@ -2733,6 +2745,7 @@ mod tests {
             true,
             false,
             false,
+            false,
             ctx,
             |ctx| {
                 hermes_called.set(true);
@@ -2740,7 +2753,7 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
-            |_, _, _, _, _, _| {
+            |_, _, _, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
             },
