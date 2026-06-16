@@ -1,6 +1,8 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
 use crate::core::args_utils;
+use crate::core::config;
+use crate::core::config::LimitsConfig;
 use crate::core::stream::{
     self, exec_capture, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode,
 };
@@ -623,14 +625,19 @@ fn truncate_line(line: &str, width: usize) -> String {
 }
 
 pub(crate) fn format_status_output(porcelain: &str) -> String {
-    format_status_inner(porcelain, None)
+    format_status_inner(porcelain, None, None)
 }
 
+#[allow(dead_code)]
 pub(crate) fn format_status_output_detached(porcelain: &str, detached_ref: &str) -> String {
-    format_status_inner(porcelain, Some(detached_ref))
+    format_status_inner(porcelain, Some(detached_ref), None)
 }
 
-fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
+fn format_status_inner(
+    porcelain: &str,
+    detached: Option<&str>,
+    limits: Option<&LimitsConfig>,
+) -> String {
     let lines: Vec<&str> = porcelain
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -652,8 +659,48 @@ fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
         }
     }
 
-    for line in lines.iter().skip(1) {
-        output.push((*line).to_string());
+    // When limits are provided, cap tracked (staged/modified) and untracked files
+    // separately so the user's status_max_files and status_max_untracked knobs work.
+    if let Some(limits) = limits {
+        let mut tracked_count = 0usize;
+        let mut untracked_count = 0usize;
+        let mut tracked_hidden = 0usize;
+        let mut untracked_hidden = 0usize;
+
+        for line in lines.iter().skip(1) {
+            let is_untracked = line.starts_with("??");
+            if is_untracked {
+                if untracked_count < limits.status_max_untracked {
+                    output.push((*line).to_string());
+                    untracked_count += 1;
+                } else {
+                    untracked_hidden += 1;
+                }
+            } else {
+                if tracked_count < limits.status_max_files {
+                    output.push((*line).to_string());
+                    tracked_count += 1;
+                } else {
+                    tracked_hidden += 1;
+                }
+            }
+        }
+
+        let mut hints = Vec::new();
+        if tracked_hidden > 0 {
+            hints.push(format!("... +{} more changed file(s)", tracked_hidden));
+        }
+        if untracked_hidden > 0 {
+            hints.push(format!("... +{} more untracked file(s)", untracked_hidden));
+        }
+        for hint in hints {
+            output.push(hint);
+        }
+    } else {
+        // No limits: preserve existing unbounded behaviour for backward compat.
+        for line in lines.iter().skip(1) {
+            output.push((*line).to_string());
+        }
     }
 
     if lines.len() == 1 && lines[0].starts_with("##") {
@@ -879,9 +926,12 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         return Ok(result.exit_code);
     }
 
+    let limits = config::limits();
     let formatted = match extract_detached_head(&raw_output) {
-        Some(detached_ref) => format_status_output_detached(&result.stdout, &detached_ref),
-        None => format_status_output(&result.stdout),
+        Some(detached_ref) => {
+            format_status_inner(&result.stdout, Some(&detached_ref), Some(&limits))
+        }
+        None => format_status_inner(&result.stdout, None, Some(&limits)),
     };
 
     // Surface in-progress state (rebase/merge/cherry-pick/bisect/am) from the
