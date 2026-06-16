@@ -39,7 +39,7 @@ Agent runs "cargo test"
 | Hermes | Python plugin (`terminal` command mutation) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
-| Codex CLI | AGENTS.md instructions | N/A |
+| Codex CLI | Rust binary (`rtk hook codex`) + AGENTS.md / RTK.md | Yes (`updatedInput`) |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
 | Mistral Vibe | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Pending upstream |
@@ -158,6 +158,11 @@ rtk init --codex           # project-scoped (AGENTS.md)
 rtk init --global --codex  # user-global (~/.codex/AGENTS.md)
 ```
 
+Codex uses a native `PreToolUse` hook when configured with `rtk init --global --codex`.
+The hook command is `rtk hook codex`, and RTK installs Bash, Shell, and PowerShell
+matchers while preserving existing Codex hooks. `AGENTS.md` / `RTK.md` remain as
+operator guidance, but they are not the only rewrite mechanism.
+
 ### Kilo Code
 
 ```bash
@@ -186,17 +191,20 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Kilo Code, Antigravity) rely on the model following instructions.
+Full hook integrations (Claude Code, Codex CLI, Cursor, Gemini) rewrite commands through the host hook API when that host/runtime version invokes the hook.
+Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
 
 ## Windows support
 
-The shell hook (`rtk-rewrite.sh`) requires a Unix shell. On native Windows:
+Native Windows supports binary hooks for Claude Code and Codex:
 
-- `rtk init -g` automatically falls back to **CLAUDE.md injection mode** (prompt-level instructions)
+- `rtk init -g` configures Claude Code with `rtk hook claude`
+- `rtk init -g --codex` configures Codex with `rtk hook codex`
+- Bash, Shell, and PowerShell matcher payloads are supported
 - Filters work normally (`rtk cargo test`, `rtk git status`)
-- Auto-rewrite does not work — the AI assistant is instructed to use RTK but commands are not intercepted
 
-For full hook support on Windows, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). Inside WSL, all agents with shell hook integration (Claude Code, Cursor, Gemini) work identically to Linux.
+WSL remains supported. Inside WSL, shell hook integrations work like Linux.
 
 ## Graceful degradation
 

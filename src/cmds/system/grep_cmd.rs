@@ -128,6 +128,39 @@ fn strip_recursive(arg: &str) -> Option<String> {
     }
 }
 
+fn is_known_boolean_long_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--count"
+            | "--count-matches"
+            | "--files"
+            | "--files-with-matches"
+            | "--files-without-match"
+            | "--fixed-strings"
+            | "--follow"
+            | "--hidden"
+            | "--ignore-case"
+            | "--json"
+            | "--line-number"
+            | "--no-heading"
+            | "--no-ignore"
+            | "--no-ignore-dot"
+            | "--no-ignore-parent"
+            | "--no-ignore-vcs"
+            | "--no-messages"
+            | "--null"
+            | "--only-matching"
+            | "--passthru"
+            | "--perl-regexp"
+            | "--smart-case"
+            | "--text"
+            | "--trim"
+            | "--type-list"
+            | "--with-filename"
+            | "--word-regexp"
+    )
+}
+
 /// Extracts `(patterns, paths, flags)` from the raw trailing args.
 ///
 /// - `patterns`: positional pattern + all `-e`/`--regexp` values. Empty → error.
@@ -182,9 +215,19 @@ fn extract_pattern_path<T: AsRef<str>>(args: &[T]) -> (Vec<String>, Vec<String>,
                 }
                 continue;
             }
-            // Drop --recursive; pass everything else through.
+            // Drop --recursive; pass known flags through. If the first token is
+            // an unknown --dash string, treat it as a grep pattern instead of
+            // letting rg reject it as an unknown flag.
             if let Some(cleaned) = strip_recursive(arg) {
-                flags.push(cleaned);
+                if is_known_boolean_long_flag(arg)
+                    || arg.contains('=')
+                    || !positionals.is_empty()
+                    || !e_patterns.is_empty()
+                {
+                    flags.push(cleaned);
+                } else {
+                    positionals.push(cleaned);
+                }
             }
             i += 1;
             continue;
@@ -272,7 +315,6 @@ pub fn run(
         rg_cmd.args(args);
         let result = exec_capture(&mut rg_cmd)
             .or_else(|_| {
-                // rg unavailable: fall back to system grep.
                 let mut grep_cmd = resolved_command("grep");
                 grep_cmd.args(args);
                 exec_capture(&mut grep_cmd)
@@ -285,9 +327,8 @@ pub fn run(
         return Ok(result.exit_code);
     }
 
-    // Re-insert `--` when clap's trailing_var_arg consumed it
+    // Re-insert `--` when clap's trailing_var_arg consumed it.
     let args = args_utils::restore_double_dash(args);
-
     let (patterns, paths, extra_args) = extract_pattern_path(&args);
 
     if patterns.is_empty() {
@@ -300,7 +341,6 @@ pub fn run(
     } else {
         patterns.join("|")
     };
-
     let paths = if paths.is_empty() {
         vec![".".to_string()]
     } else {
@@ -313,20 +353,15 @@ pub fn run(
     }
 
     let mut rg_cmd = resolved_command("rg");
-    // --no-ignore-vcs: match grep -r behavior (don't skip .gitignore'd files).
-    // Without this, rg returns 0 matches for files in .gitignore, causing
-    // false negatives that make AI agents draw wrong conclusions.
-    // Using --no-ignore-vcs (not --no-ignore) so .ignore/.rgignore are still respected.
+    // --no-ignore-vcs: match grep -r behavior (do not skip .gitignore'd files).
     // -H: always emit the filename.
-    // -0: NUL-separate filename. Allows the parser to disambiguate filenames or
-    // content containing `:digits:` patterns (issue #1436).
+    // -0: NUL-separate filename so paths containing ':' parse correctly.
     rg_cmd.args(["-nH0", "--no-heading", "--no-ignore-vcs"]);
 
     if let Some(ft) = file_type {
         rg_cmd.arg("--type").arg(ft);
     }
 
-    // extra_args is already stripped of -r/-R/-recursive by extract_pattern_path
     for arg in &extra_args {
         if let Some(glob_pattern) = arg.strip_prefix("--include=") {
             rg_cmd.arg("--glob").arg(glob_pattern);
@@ -335,92 +370,33 @@ pub fn run(
         rg_cmd.arg(arg);
     }
 
-    // All patterns as -e flags (BRE \| → | translation for rg's PCRE engine).
-    // Using -e keeps `--` semantically as a flag/path separator, not part of the pattern.
     for p in &patterns {
         rg_cmd.args(["-e", &p.replace(r"\|", "|")]);
     }
-
-    // `--` after all flags: prevents rg from interpreting path args starting
-    // with `-` as its own flags.
     rg_cmd.arg("--");
     rg_cmd.args(&paths);
 
     let result = (|| -> Result<_> {
-        let rg_result = exec_capture(&mut rg_cmd).ok();
-        if let Some(r) = rg_result {
-            if r.exit_code == 0 {
-                return Ok(r);
+        match exec_capture(&mut rg_cmd) {
+            Ok(result) => Ok(result),
+            Err(_) => {
+                let mut grep_cmd = resolved_command("grep");
+                let grep_safe_args = grep_fallback_args(&extra_args);
+                grep_cmd.args(["-rnHZ"]);
+                grep_cmd.args(&grep_safe_args);
+                for p in &patterns {
+                    grep_cmd.args(["-e", p]);
+                }
+                grep_cmd.arg("--");
+                grep_cmd.args(&paths);
+                exec_capture(&mut grep_cmd).context("grep/rg failed")
             }
         }
-        // rg failed (not found or non-zero exit) — fall back to grep.
-        let mut grep_cmd = resolved_command("grep");
-        // Fall back to grep with the original, untranslated patterns. Filter
-        // out rg-specific flags and convert compatible long-form output flags.
-        let mut grep_safe_args: Vec<String> = Vec::new();
-        let mut skip_next = false;
-        for arg in &extra_args {
-            if skip_next {
-                skip_next = false;
-                continue;
-            }
-            let s = arg.as_str();
-            let rg_value_flag = matches!(
-                s,
-                "--glob"
-                    | "--type"
-                    | "--type-add"
-                    | "--type-not"
-                    | "--iglob"
-                    | "--sort"
-                    | "--sortr"
-                    | "--max-depth"
-                    | "--max-filesize"
-            );
-            let rg_bool_flag = matches!(
-                s,
-                "--type-clear"
-                    | "--files"
-                    | "--no-ignore"
-                    | "--no-ignore-parent"
-                    | "--no-ignore-vcs"
-                    | "--no-ignore-dot"
-                    | "--hidden"
-                    | "--follow"
-                    | "--trim"
-                    | "--passthru"
-            );
-            if rg_value_flag
-                || rg_bool_flag
-                || s.starts_with("--type-")
-                || s.starts_with("--glob=")
-            {
-                skip_next = rg_value_flag;
-                continue;
-            }
-            let converted = match s {
-                "--files-with-matches" => "-l",
-                "--files-without-match" => "-L",
-                "--only-matching" => "-o",
-                "--null" => "-Z",
-                "--count" => "-c",
-                _ => s,
-            };
-            grep_safe_args.push(converted.to_string());
-        }
-        grep_cmd.args(&grep_safe_args);
-        for p in &patterns {
-            grep_cmd.args(["-e", p]);
-        }
-        grep_cmd.args(["-rnHZ", "--"]);
-        grep_cmd.args(&paths);
-        exec_capture(&mut grep_cmd).context("grep/rg failed")
     })()?;
 
     // Format flags (--count, --files-with-matches, etc.) return structured
     // output that is compact per line but can accumulate to 600KB+ across
-    // large repos. For --count specifically, summarize top matches by count
-    // instead of raw passthrough — RTK's job is compression, not truncation.
+    // large repos. For --count specifically, summarize top matches by count.
     if has_format_flag(&extra_args) {
         let has_count = extra_args.iter().any(|a| a == "-c" || a == "--count");
         let lines: Vec<&str> = result.stdout.lines().collect();
@@ -452,7 +428,11 @@ pub fn run(
         } else if total_lines > 200 {
             let head: Vec<&str> = lines.iter().take(200).copied().collect();
             println!("{}", head.join("\n"));
-            println!("... ({} lines truncated, {} total)", total_lines - 200, total_lines);
+            println!(
+                "... ({} lines truncated, {} total)",
+                total_lines - 200,
+                total_lines
+            );
         } else {
             print!("{}", result.stdout);
         }
@@ -480,12 +460,16 @@ pub fn run(
     }
 
     let exit_code = result.exit_code;
-    let raw_output = result.stdout.clone();
+    let raw_output = result.combined();
 
     if result.stdout.trim().is_empty() {
-        // Show stderr for errors (bad regex, missing file, etc.)
-        if exit_code == 2 && !result.stderr.trim().is_empty() {
-            eprintln!("{}", result.stderr.trim());
+        if exit_code != 1 && !result.stderr.trim().is_empty() {
+            eprint!("{}", result.stderr);
+            timer.track_passthrough(
+                &format!("grep -rn '{}' {}", pattern_display, path_display),
+                "rtk grep (error passthrough)",
+            );
+            return Ok(exit_code);
         }
         let msg = format!("0 matches for '{}'", pattern_display);
         println!("{}", msg);
@@ -517,9 +501,7 @@ pub fn run(
         by_file.entry(file).or_default().push((line_num, cleaned));
     }
 
-    // Derive total from parsed results so the header matches what we show.
     let total_matches: usize = by_file.values().map(|v| v.len()).sum();
-
     let mut rtk_output = String::new();
     rtk_output.push_str(&format!(
         "{} matches in {} files:\n\n",
@@ -550,13 +532,18 @@ pub fn run(
     if total_matches > shown {
         rtk_output.push_str(&format!("[+{} more]\n", total_matches - shown));
     }
+    let mut tracked_output = rtk_output.clone();
+    if exit_code != 0 && !result.stderr.trim().is_empty() {
+        eprint!("{}", result.stderr);
+        tracked_output.push_str(&result.stderr);
+    }
 
     print!("{}", rtk_output);
     timer.track(
         &format!("grep -rn '{}' {}", pattern_display, path_display),
         "rtk grep",
         &raw_output,
-        &rtk_output,
+        &tracked_output,
     );
 
     Ok(exit_code)
@@ -1219,6 +1206,69 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_grep_fallback_drops_rg_glob_short_flag_and_value() {
+        let args = vec![
+            "-g".to_string(),
+            "*.ts".to_string(),
+            "--hidden".to_string(),
+            "-i".to_string(),
+        ];
+        assert_eq!(grep_fallback_args(&args), vec!["-i".to_string()]);
+    }
+
+    #[test]
+    fn test_grep_fallback_drops_rg_files_and_glob_equals() {
+        let args = vec![
+            "--files".to_string(),
+            "--glob=*.rs".to_string(),
+            "--files-with-matches".to_string(),
+        ];
+        assert_eq!(grep_fallback_args(&args), vec!["-l".to_string()]);
+    }
+
+    #[test]
+    fn test_grep_fallback_drops_rg_smart_case() {
+        let args = vec![
+            "-S".to_string(),
+            "--smart-case".to_string(),
+            "-i".to_string(),
+        ];
+        assert_eq!(grep_fallback_args(&args), vec!["-i".to_string()]);
+    }
+
+    #[test]
+    fn test_grep_dash_prefixed_pattern_is_not_treated_as_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sample.txt");
+        std::fs::write(&file, "--reason: pending\nother\n").unwrap();
+
+        let path = dir.path().to_string_lossy().to_string();
+        let args = vec!["--reason".to_string(), path];
+        let status = run(80, 10, false, None, &args, 0).unwrap();
+        assert_eq!(status, 0);
+    }
+
+    #[test]
+    fn test_grep_multiple_paths_are_passed_after_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("a.txt"), "Codex native hook\n").unwrap();
+        std::fs::write(second.join("b.txt"), "Prompt-level other agent\n").unwrap();
+
+        let args = vec![
+            "-n".to_string(),
+            "Codex|Prompt-level".to_string(),
+            first.to_string_lossy().to_string(),
+            second.to_string_lossy().to_string(),
+        ];
+        let status = run(80, 10, false, None, &args, 0).unwrap();
+        assert_eq!(status, 0);
+    }
+
     // Verify line numbers are always enabled in rg invocation (grep_cmd.rs:24).
     // The -n/--line-numbers clap flag in main.rs is a no-op accepted for compat.
     #[test]
@@ -1337,4 +1387,61 @@ mod tests {
         }
         // If rg is not installed, skip gracefully (test still passes)
     }
+}
+
+fn grep_fallback_args(extra_args: &[String]) -> Vec<String> {
+    let mut grep_safe_args: Vec<String> = Vec::new();
+    let mut skip_next = false;
+    for arg in extra_args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let s = arg.as_str();
+        if matches!(
+            s,
+            "-g" | "--glob"
+                | "--type"
+                | "--type-add"
+                | "--type-not"
+                | "--iglob"
+                | "--type-clear"
+                | "--sort"
+                | "--sortr"
+                | "--max-depth"
+                | "--max-filesize"
+        ) {
+            skip_next = true;
+            continue;
+        }
+        if matches!(
+            s,
+            "--files"
+                | "--no-ignore"
+                | "--no-ignore-parent"
+                | "--no-ignore-vcs"
+                | "--no-ignore-dot"
+                | "--hidden"
+                | "--follow"
+                | "--trim"
+                | "--passthru"
+                | "-S"
+                | "--smart-case"
+        ) || s.starts_with("--type-")
+            || s.starts_with("--glob=")
+            || s.starts_with("-g")
+        {
+            continue;
+        }
+        let converted = match s {
+            "--files-with-matches" => "-l",
+            "--files-without-match" => "-L",
+            "--only-matching" => "-o",
+            "--null" => "-Z",
+            "--count" => "-c",
+            _ => s,
+        };
+        grep_safe_args.push(converted.to_string());
+    }
+    grep_safe_args
 }

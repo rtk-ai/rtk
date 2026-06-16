@@ -396,7 +396,10 @@ pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> Stri
 
     // Single end-of-output marker: not code syntax, unambiguous to AI agents.
     // Invariant: kept_lines + N == lines.len() (N = lines not shown)
-    result.push(format!("[{} more lines]", lines.len() - kept_lines));
+    result.push(format!(
+        "[rtk: {} more lines omitted; use --max-lines/--tail-lines or rtk grep for more context]",
+        lines.len() - kept_lines
+    ));
 
     result.join("\n")
 }
@@ -563,7 +566,7 @@ fn main() {
     fn test_smart_truncate_overflow_count_exact() {
         // 200 plain-text lines (no function signatures/imports) with max_lines=20.
         // Smart selection keeps up to max_lines/2=10 non-important lines then stops.
-        // The overflow message "[N more lines]" must satisfy:
+        // The overflow message must satisfy:
         //   kept_count + N == total_lines
         let total_lines = 200usize;
         let max_lines = 20usize;
@@ -580,10 +583,10 @@ fn main() {
             .find(|l| l.contains("more lines"))
             .unwrap_or_else(|| panic!("No overflow message found in:\n{}", output));
 
-        // Parse "[N more lines]"
+        // Parse "[rtk: N more lines omitted; ...]"
         let reported_more: usize = overflow_line
             .trim()
-            .strip_prefix('[')
+            .strip_prefix("[rtk: ")
             .and_then(|s| s.split_whitespace().next())
             .and_then(|n| n.parse().ok())
             .unwrap_or_else(|| panic!("Could not parse overflow count from: {}", overflow_line));
@@ -615,7 +618,8 @@ fn main() {
             "smart_truncate must not insert synthetic comment annotations"
         );
         // Must contain clean end-of-output marker (1 kept + 9 omitted = 10 total)
-        assert!(output.contains("[9 more lines]"));
+        assert!(output.contains("[rtk: 9 more lines omitted;"));
+        assert!(output.contains("rtk grep for more context"));
         // Only the first line is kept (plain-text, no important signatures)
         assert!(output.starts_with("line1\n"));
     }

@@ -68,11 +68,16 @@ lazy_static! {
     // to the native `head`/`tail` binary — which already handles multi-file with
     // `==> name <==` banners that `rtk read --max-lines` cannot reproduce.
     static ref HEAD_N: Regex = Regex::new(r"^head\s+-(\d+)\s+(\S+)$").unwrap();
+    static ref HEAD_N_SPACE: Regex = Regex::new(r"^head\s+-n\s+(\d+)\s+(\S+)$").unwrap();
     static ref HEAD_LINES: Regex = Regex::new(r"^head\s+--lines=(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_N: Regex = Regex::new(r"^tail\s+-(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_N_SPACE: Regex = Regex::new(r"^tail\s+-n\s+(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_LINES_EQ: Regex = Regex::new(r"^tail\s+--lines=(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_LINES_SPACE: Regex = Regex::new(r"^tail\s+--lines\s+(\d+)\s+(\S+)$").unwrap();
+    static ref TAIL_PLAIN: Regex = Regex::new(r"^tail\s+(\S+)$").unwrap();
+    static ref RTK_DISABLED_ASSIGNMENT: Regex = Regex::new(
+        r"(?i)(^|[;&|]{1,2}\s*)(?:\$env:RTK_DISABLED\s*=|set\s+RTK_DISABLED\s*=|(?:[A-Z_][A-Z0-9_]*=\S+\s+)*RTK_DISABLED=)"
+    ).unwrap();
 }
 
 const GOLANGCI_GLOBAL_OPT_WITH_VALUE: &[&str] = &[
@@ -143,6 +148,14 @@ pub fn classify_command(cmd: &str) -> Classification {
                     .to_string(),
             };
         }
+    }
+
+    // `rg --files` lists candidate files. It is not a grep/search operation,
+    // and rewriting it to `rtk grep --files` breaks common discovery pipelines.
+    if is_ripgrep_file_listing(cmd_clean) {
+        return Classification::Unsupported {
+            base_command: "rg".to_string(),
+        };
     }
 
     // Fast check with RegexSet — take the last (most specific) match
@@ -359,6 +372,25 @@ fn split_token_spans(cmd: &str) -> Vec<(&str, usize, usize)> {
     tokens
 }
 
+fn is_ripgrep_file_listing(cmd: &str) -> bool {
+    let tokens = split_token_spans(cmd);
+    tokens.first().is_some_and(|(token, _, _)| *token == "rg")
+        && tokens
+            .iter()
+            .skip(1)
+            .any(|(token, _, _)| *token == "--files")
+}
+
+fn has_powershell_expression_arg(args: &[(&str, usize, usize)]) -> bool {
+    args.iter().skip(1).any(|(token, _, _)| {
+        token.starts_with('$')
+            || token.starts_with('(')
+            || token.contains("$(")
+            || token.contains("::")
+            || token.contains('|')
+    })
+}
+
 /// Normalize absolute binary paths: `/usr/bin/grep -rn foo` → `grep -rn foo` (#485)
 /// Only strips if the first word contains a `/` (Unix path).
 fn strip_absolute_path(cmd: &str) -> String {
@@ -493,6 +525,14 @@ pub fn rewrite_command(
         return None;
     }
 
+    if has_rtk_disabled_assignment(trimmed) {
+        eprintln!(
+            "[rtk] RTK_DISABLED=1 detected — skipping filter for this command. \
+             Remove RTK_DISABLED=1 to restore token savings."
+        );
+        return None;
+    }
+
     if has_heredoc(trimmed) || trimmed.contains("$((") {
         return None;
     }
@@ -560,7 +600,8 @@ fn rewrite_compound(
                 let is_pipe_incompatible = seg.starts_with("find ")
                     || seg == "find"
                     || seg.starts_with("fd ")
-                    || seg == "fd";
+                    || seg == "fd"
+                    || is_powershell_cmdlet(seg);
                 let rewritten = if is_pipe_incompatible {
                     seg.to_string()
                 } else {
@@ -625,7 +666,7 @@ fn rewrite_compound(
 }
 
 fn rewrite_line_range(cmd: &str) -> Option<String> {
-    for re in [&*HEAD_N, &*HEAD_LINES] {
+    for re in [&*HEAD_N, &*HEAD_N_SPACE, &*HEAD_LINES] {
         if let Some(caps) = re.captures(cmd) {
             let n = caps.get(1)?.as_str();
             let file = caps.get(2)?.as_str();
@@ -647,7 +688,65 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
             return Some(format!("rtk read {} --tail-lines {}", file, n));
         }
     }
+    if let Some(caps) = TAIL_PLAIN.captures(cmd) {
+        let file = caps.get(1)?.as_str();
+        if !file.starts_with('-') {
+            return Some(format!("rtk read {} --tail-lines 10", file));
+        }
+    }
     None
+}
+
+fn has_rtk_disabled_assignment(cmd: &str) -> bool {
+    RTK_DISABLED_ASSIGNMENT.is_match(cmd)
+}
+
+fn cat_reads_agent_instruction_file(cmd_part: &str) -> bool {
+    let Some(rest) = cmd_part.strip_prefix("cat ") else {
+        return false;
+    };
+    split_arg_token_spans(rest)
+        .iter()
+        .any(|(token, _, _)| !token.starts_with('-') && is_agent_instruction_file_token(token))
+}
+
+fn is_agent_instruction_file_token(token: &str) -> bool {
+    let trimmed = token.trim_matches(|c| c == '"' || c == '\'');
+    let name = trimmed
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or(trimmed)
+        .to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "skill.md" | "agents.md" | "claude.md" | "rtk.md" | "instructions.md"
+    )
+}
+
+fn is_database_client_command(cmd_part: &str) -> bool {
+    let tokens = split_arg_token_spans(cmd_part);
+    let Some((first, _, _)) = tokens.first() else {
+        return false;
+    };
+    let unquoted = first.trim_matches(|c| c == '"' || c == '\'');
+    let basename = unquoted
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or(unquoted)
+        .to_ascii_lowercase();
+    let command = basename.strip_suffix(".exe").unwrap_or(&basename);
+    matches!(
+        command,
+        "mysql"
+            | "mysqldump"
+            | "mariadb"
+            | "psql"
+            | "sqlcmd"
+            | "sqlite3"
+            | "mongosh"
+            | "mongo"
+            | "redis-cli"
+    )
 }
 
 /// Shell prefix builtins that modify how the shell runs a command
@@ -787,6 +886,14 @@ fn rewrite_segment_inner(
         return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
     }
 
+    if cat_reads_agent_instruction_file(cmd_part) {
+        return None;
+    }
+
+    if is_database_client_command(cmd_part) {
+        return None;
+    }
+
     // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
     // semantics than rtk read or no equivalent at all. Only `-n` (line numbers)
     // maps correctly to `rtk read -n`. Skip rewrite for any other flag.
@@ -795,6 +902,10 @@ fn rewrite_segment_inner(
         if args.starts_with('-') && !args.starts_with("-n ") && !args.starts_with("-n\t") {
             return None;
         }
+    }
+
+    if let Some(rewritten) = rewrite_cmd_builtin(cmd_part, redirect_suffix) {
+        return Some(rewritten);
     }
 
     // Use classify_command for correct ignore/prefix handling
@@ -836,6 +947,10 @@ fn rewrite_segment_inner(
         return Some(rewritten);
     }
 
+    if is_powershell_cmdlet(cmd_part) {
+        return rewrite_powershell_cmdlet(cmd_part, redirect_suffix);
+    }
+
     // #196: gh with --json/--jq/--template produces structured output that
     // rtk gh would corrupt — skip rewrite so the caller gets raw JSON.
     if rule.rtk_cmd == "rtk gh" {
@@ -861,6 +976,279 @@ fn rewrite_segment_inner(
     }
 
     None
+}
+
+fn rewrite_cmd_builtin(cmd_part: &str, redirect_suffix: &str) -> Option<String> {
+    let args = split_arg_token_spans(cmd_part);
+    let (cmd, _, _) = args.first().copied()?;
+    match cmd.to_ascii_lowercase().as_str() {
+        "dir" => rewrite_cmd_dir(&args, redirect_suffix),
+        "type" => rewrite_cmd_type(&args, redirect_suffix),
+        "findstr" => rewrite_cmd_findstr(&args, redirect_suffix),
+        _ => None,
+    }
+}
+
+fn rewrite_cmd_dir(args: &[(&str, usize, usize)], redirect_suffix: &str) -> Option<String> {
+    let mut output_args: Vec<&str> = Vec::new();
+    for (token, _, _) in args.iter().skip(1).copied() {
+        if token.eq_ignore_ascii_case("/b") {
+            continue;
+        } else if token.eq_ignore_ascii_case("/s") {
+            output_args.push("-R");
+        } else if token.to_ascii_lowercase().starts_with("/a") {
+            output_args.push("-a");
+        } else if token.starts_with('/') {
+            return None;
+        } else {
+            output_args.push(token);
+        }
+    }
+
+    if output_args.is_empty() {
+        Some(format!("rtk ls{}", redirect_suffix))
+    } else {
+        Some(format!(
+            "rtk ls {}{}",
+            output_args.join(" "),
+            redirect_suffix
+        ))
+    }
+}
+
+fn rewrite_cmd_type(args: &[(&str, usize, usize)], redirect_suffix: &str) -> Option<String> {
+    if args.len() != 2 {
+        return None;
+    }
+    let path = args[1].0;
+    if is_agent_instruction_file_token(path) {
+        return None;
+    }
+    if path.starts_with('/') || !looks_like_file_path(path) {
+        return None;
+    }
+    Some(format!("rtk read {}{}", path, redirect_suffix))
+}
+
+fn rewrite_cmd_findstr(args: &[(&str, usize, usize)], redirect_suffix: &str) -> Option<String> {
+    let mut output_args: Vec<&str> = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        let token = args[i].0;
+        if token.eq_ignore_ascii_case("/i") {
+            output_args.push("-i");
+        } else if token.eq_ignore_ascii_case("/n") {
+            output_args.push("-n");
+        } else if token.starts_with('/') {
+            return None;
+        } else {
+            output_args.push(token);
+        }
+        i += 1;
+    }
+
+    if output_args.len() < 2 {
+        return None;
+    }
+    Some(format!(
+        "rtk grep {}{}",
+        output_args.join(" "),
+        redirect_suffix
+    ))
+}
+
+fn looks_like_file_path(token: &str) -> bool {
+    let unquoted = token.trim_matches('"').trim_matches('\'');
+    unquoted.contains('.')
+        || unquoted.contains('\\')
+        || unquoted.contains('/')
+        || unquoted.starts_with('.')
+}
+
+fn rewrite_powershell_cmdlet(cmd_part: &str, redirect_suffix: &str) -> Option<String> {
+    let args = split_arg_token_spans(cmd_part);
+    if has_powershell_expression_arg(&args) {
+        return None;
+    }
+    let (cmdlet, _, _) = args.first().copied()?;
+    if cmdlet.eq_ignore_ascii_case("Get-Content") || cmdlet.eq_ignore_ascii_case("gc") {
+        return rewrite_powershell_get_content(&args, redirect_suffix);
+    }
+    if cmdlet.eq_ignore_ascii_case("Select-String") || cmdlet.eq_ignore_ascii_case("sls") {
+        return rewrite_powershell_select_string(&args, redirect_suffix);
+    }
+    if cmdlet.eq_ignore_ascii_case("Get-ChildItem") || cmdlet.eq_ignore_ascii_case("gci") {
+        return rewrite_powershell_get_child_item(&args, redirect_suffix);
+    }
+    None
+}
+
+fn is_powershell_cmdlet(cmd_part: &str) -> bool {
+    let args = split_arg_token_spans(cmd_part);
+    let Some((cmdlet, _, _)) = args.first().copied() else {
+        return false;
+    };
+    matches!(
+        cmdlet.to_ascii_lowercase().as_str(),
+        "get-content" | "gc" | "select-string" | "sls" | "get-childitem" | "gci"
+    )
+}
+
+fn rewrite_powershell_get_content(
+    args: &[(&str, usize, usize)],
+    redirect_suffix: &str,
+) -> Option<String> {
+    let mut output_args: Vec<&str> = Vec::new();
+    let mut paths: Vec<&str> = Vec::new();
+    let mut i = 1;
+
+    while i < args.len() {
+        let token = args[i].0;
+        if is_ps_flag(token, &["Path", "LiteralPath"]) {
+            i += 1;
+            paths.push(args.get(i)?.0);
+        } else if is_ps_flag(token, &["Raw"]) {
+            // Raw changes PowerShell object shape, not the terminal text we optimize.
+        } else if is_ps_flag(token, &["TotalCount", "First", "Head"]) {
+            i += 1;
+            output_args.push("--max-lines");
+            output_args.push(args.get(i)?.0);
+        } else if is_ps_flag(token, &["Tail", "Last"]) {
+            i += 1;
+            output_args.push("--tail-lines");
+            output_args.push(args.get(i)?.0);
+        } else if token.starts_with('-') {
+            return None;
+        } else {
+            paths.push(token);
+        }
+        i += 1;
+    }
+
+    if paths.is_empty() {
+        return None;
+    }
+
+    if paths
+        .iter()
+        .any(|path| is_agent_instruction_file_token(path))
+    {
+        return None;
+    }
+
+    output_args.extend(paths);
+    Some(format!(
+        "rtk read {}{}",
+        output_args.join(" "),
+        redirect_suffix
+    ))
+}
+
+fn rewrite_powershell_select_string(
+    args: &[(&str, usize, usize)],
+    redirect_suffix: &str,
+) -> Option<String> {
+    let mut pattern: Option<&str> = None;
+    let mut paths: Vec<&str> = Vec::new();
+    let mut extra: Vec<&str> = Vec::new();
+    let mut positionals: Vec<&str> = Vec::new();
+    let mut i = 1;
+
+    while i < args.len() {
+        let token = args[i].0;
+        if is_ps_flag(token, &["Pattern"]) {
+            i += 1;
+            pattern = Some(args.get(i)?.0);
+        } else if is_ps_flag(token, &["Path", "LiteralPath"]) {
+            i += 1;
+            paths.push(args.get(i)?.0);
+        } else if is_ps_flag(token, &["CaseSensitive"]) {
+            extra.push("--case-sensitive");
+        } else if is_ps_flag(token, &["SimpleMatch"]) {
+            extra.push("--fixed-strings");
+        } else if token.starts_with('-') {
+            return None;
+        } else {
+            positionals.push(token);
+        }
+        i += 1;
+    }
+
+    if pattern.is_none() {
+        pattern = positionals.first().copied();
+        if positionals.len() > 1 {
+            paths.extend(positionals.iter().skip(1).copied());
+        }
+    } else {
+        paths.extend(positionals);
+    }
+
+    let pattern = pattern?;
+    let mut output_args = vec![pattern];
+    if let Some(path) = paths.first().copied() {
+        output_args.push(path);
+    }
+    output_args.extend(extra);
+    Some(format!(
+        "rtk grep {}{}",
+        output_args.join(" "),
+        redirect_suffix
+    ))
+}
+
+fn rewrite_powershell_get_child_item(
+    args: &[(&str, usize, usize)],
+    redirect_suffix: &str,
+) -> Option<String> {
+    let mut output_args: Vec<&str> = Vec::new();
+    let mut paths: Vec<&str> = Vec::new();
+    let mut i = 1;
+
+    while i < args.len() {
+        let token = args[i].0;
+        if is_ps_flag(token, &["Path", "LiteralPath"]) {
+            i += 1;
+            paths.push(args.get(i)?.0);
+        } else if is_ps_flag(token, &["Recurse"]) {
+            output_args.push("-R");
+        } else if is_ps_flag(token, &["Force"]) {
+            output_args.push("-a");
+        } else if token.starts_with('-') {
+            return None;
+        } else {
+            paths.push(token);
+        }
+        i += 1;
+    }
+
+    output_args.extend(paths);
+    let args = output_args.join(" ");
+    if args.is_empty() {
+        Some(format!("rtk ls{}", redirect_suffix))
+    } else {
+        Some(format!("rtk ls {}{}", args, redirect_suffix))
+    }
+}
+
+fn is_ps_flag(token: &str, names: &[&str]) -> bool {
+    let Some(name) = token.strip_prefix('-') else {
+        return false;
+    };
+    names
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+}
+
+fn split_arg_token_spans(cmd: &str) -> Vec<(&str, usize, usize)> {
+    tokenize(cmd)
+        .into_iter()
+        .filter(|token| token.kind == TokenKind::Arg)
+        .filter_map(|token| {
+            let start = token.offset;
+            let end = start.checked_add(token.value.len())?;
+            cmd.get(start..end).map(|raw| (raw, start, end))
+        })
+        .collect()
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -1155,6 +1543,16 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_rg_files_is_not_search() {
+        assert_eq!(
+            classify_command("rg --files docs scratch scripts ."),
+            Classification::Unsupported {
+                base_command: "rg".to_string()
+            }
+        );
+    }
+
+    #[test]
     fn test_fi_still_ignored_exact() {
         // Bare "fi" (shell keyword) should still be ignored
         assert_eq!(classify_command("fi"), Classification::Ignored);
@@ -1295,6 +1693,38 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_rg_files_passthrough() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files docs scratch scripts .", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_files_pipeline_passthrough() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files docs scratch scripts . | rg summary", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_files_pipeline_filter_passthrough() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files | rg 'read|cat|file'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_glob_search_still_rewrites() {
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"rg -n "DB_HOST" server/src -g "*.ts""#, &[]),
+            Some(r#"rtk grep -n "DB_HOST" server/src -g "*.ts""#.into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_compound_and() {
         assert_eq!(
             rewrite_command_no_prefixes("git add . && cargo test", &[]),
@@ -1399,6 +1829,74 @@ mod tests {
             rewrite_command_no_prefixes("cat src/main.rs", &[]),
             Some("rtk read src/main.rs".into())
         );
+    }
+
+    #[test]
+    fn test_windows_claude_codex_baseline_command_matrix() {
+        let cases = [
+            ("git status", "rtk git status"),
+            ("git diff", "rtk git diff"),
+            ("git log -5", "rtk git log -5"),
+            ("git show HEAD", "rtk git show HEAD"),
+            ("git add .", "rtk git add ."),
+            (
+                r#"git commit -m "fix hooks""#,
+                r#"rtk git commit -m "fix hooks""#,
+            ),
+            ("git push origin main", "rtk git push origin main"),
+            ("git pull --rebase", "rtk git pull --rebase"),
+            ("cat package.json", "rtk read package.json"),
+            (
+                "head -20 src/main.rs",
+                "rtk read src/main.rs --max-lines 20",
+            ),
+            (
+                "tail -20 logs/app.log",
+                "rtk read logs/app.log --tail-lines 20",
+            ),
+            ("tail logs/app.log", "rtk read logs/app.log --tail-lines 10"),
+            (
+                r#"grep -rn "fn main" src/"#,
+                r#"rtk grep -rn "fn main" src/"#,
+            ),
+            (r#"rg "fn main" src/"#, r#"rtk grep "fn main" src/"#),
+            ("cargo test", "rtk cargo test"),
+            ("pytest", "rtk pytest"),
+            ("npm test", "rtk npm test"),
+            ("npm run build", "rtk npm run build"),
+            ("pnpm install", "rtk pnpm install"),
+            ("Get-Content file.txt", "rtk read file.txt"),
+            ("gc file.txt", "rtk read file.txt"),
+            ("Get-ChildItem", "rtk ls"),
+            ("gci src", "rtk ls src"),
+            ("Select-String pattern", "rtk grep pattern"),
+            ("sls pattern", "rtk grep pattern"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                Some(expected.into()),
+                "failed for {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_powershell_expression_paths_passthrough() {
+        let cases = [
+            r#"Get-Content -LiteralPath (Join-Path $env:USERPROFILE '.codex\RTK.md')"#,
+            r#"Get-ChildItem -LiteralPath $env:USERPROFILE"#,
+            r#"Select-String -Path ($files | ForEach-Object FullName) -Pattern rtk"#,
+        ];
+
+        for input in cases {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                None,
+                "PowerShell expression should pass through unchanged: {input}"
+            );
+        }
     }
 
     #[test]
@@ -1576,6 +2074,22 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_rtk_disabled_powershell_assignment_chain() {
+        assert_eq!(
+            rewrite_command_no_prefixes("$env:RTK_DISABLED='1'; Get-ChildItem -Force", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rtk_disabled_cmd_assignment_chain() {
+        assert_eq!(
+            rewrite_command_no_prefixes("set RTK_DISABLED=1&& git status", &[]),
+            None
+        );
+    }
+
+    #[test]
     fn test_rewrite_rtk_disabled_warns_on_stderr() {
         assert_eq!(
             rewrite_command_no_prefixes("RTK_DISABLED=1 git status", &[]),
@@ -1627,6 +2141,84 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("SOME_VAR=1 git status", &[]),
             Some("SOME_VAR=1 rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_cat_agent_instruction_files_passthrough() {
+        for name in [
+            "AGENTS.md",
+            "SKILL.md",
+            "CLAUDE.md",
+            "RTK.md",
+            "instructions.md",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("cat {name}"), &[]),
+                None,
+                "cat must not rewrite instruction file {name}"
+            );
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"cat "C:\Users\Administrator\.codex\skills\team\SKILL.md""#,
+                &[]
+            ),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("cat src/main.rs", &[]),
+            Some("rtk read src/main.rs".into())
+        );
+    }
+
+    #[test]
+    fn test_windows_instruction_file_reads_passthrough() {
+        for name in [
+            "AGENTS.md",
+            "SKILL.md",
+            "CLAUDE.md",
+            "RTK.md",
+            "instructions.md",
+        ] {
+            for input in [
+                format!("type {name}"),
+                format!("Get-Content {name}"),
+                format!("gc {name}"),
+            ] {
+                assert_eq!(
+                    rewrite_command_no_prefixes(&input, &[]),
+                    None,
+                    "instruction/control file reads must stay native: {input}"
+                );
+            }
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"type "C:\Users\Administrator\.codex\RTK.md""#, &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"Get-Content -LiteralPath "C:\Users\Administrator\.codex\skills\team\SKILL.md""#,
+                &[]
+            ),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"Get-Content -TotalCount 20 C:\Users\Administrator\.codex\RTK.md"#,
+                &[]
+            ),
+            None
+        );
+
+        assert_eq!(
+            rewrite_command_no_prefixes("type src\\main.rs", &[]),
+            Some("rtk read src\\main.rs".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("Get-Content src\\main.rs", &[]),
+            Some("rtk read src\\main.rs".into())
         );
     }
 
@@ -1771,6 +2363,14 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_head_n_space_flag() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head -n 20 src/main.rs", &[]),
+            Some("rtk read src/main.rs --max-lines 20".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_head_lines_long_flag() {
         assert_eq!(
             rewrite_command_no_prefixes("head --lines=50 src/lib.rs", &[]),
@@ -1837,8 +2437,19 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_tail_plain_file_skipped() {
-        assert_eq!(rewrite_command_no_prefixes("tail src/main.rs", &[]), None);
+    fn test_rewrite_tail_plain_single_file() {
+        assert_eq!(
+            rewrite_command_no_prefixes("tail src/main.rs", &[]),
+            Some("rtk read src/main.rs --tail-lines 10".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tail_plain_multi_file_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("tail src/main.rs src/lib.rs", &[]),
+            None
+        );
     }
 
     // --- Issue #1362: head/tail with multiple files falls back to native command ---
@@ -2233,8 +2844,29 @@ mod tests {
     fn test_rewrite_psql() {
         assert_eq!(
             rewrite_command_no_prefixes("psql -U postgres -d mydb", &[]),
-            Some("rtk psql -U postgres -d mydb".into())
+            None
         );
+    }
+
+    #[test]
+    fn test_rewrite_database_clients_skip_auto_hook_rewrite() {
+        for cmd in [
+            "mysql -e 'select 1'",
+            "mysqldump mydb",
+            "mariadb -e 'select 1'",
+            "psql -c 'select 1'",
+            "sqlcmd -Q 'select 1'",
+            "sqlite3 test.db '.tables'",
+            "mongosh --eval 'db.stats()'",
+            "redis-cli ping",
+            r#""C:\Program Files\MySQL\bin\mysql.exe" -e "select 1""#,
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                None,
+                "database client should not be auto-rewritten: {cmd}"
+            );
+        }
     }
 
     // --- Python tooling ---
@@ -4176,6 +4808,34 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_get_content_path_option() {
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"Get-Content -Path "file with spaces.txt""#, &[]),
+            Some(r#"rtk read "file with spaces.txt""#.into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_get_content_total_count_and_tail() {
+        assert_eq!(
+            rewrite_command_no_prefixes("Get-Content -TotalCount 20 src\\main.rs", &[]),
+            Some("rtk read --max-lines 20 src\\main.rs".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("gc -Tail 15 src\\main.rs", &[]),
+            Some("rtk read --tail-lines 15 src\\main.rs".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_get_content_unsupported_option_skips() {
+        assert_eq!(
+            rewrite_command_no_prefixes("Get-Content -Encoding utf8 src\\main.rs", &[]),
+            None
+        );
+    }
+
+    #[test]
     fn test_rewrite_select_string() {
         assert_eq!(
             rewrite_command_no_prefixes("Select-String pattern", &[]),
@@ -4184,10 +4844,104 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_select_string_named_pattern_and_path() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"Select-String -Pattern "fn main" -Path src\main.rs"#,
+                &[]
+            ),
+            Some(r#"rtk grep "fn main" src\main.rs"#.into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"Select-String -Path src\main.rs -Pattern "fn main""#,
+                &[]
+            ),
+            Some(r#"rtk grep "fn main" src\main.rs"#.into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_select_string_unsupported_option_skips() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"Select-String -Pattern "fn main" -Context 2 src\main.rs"#,
+                &[]
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn test_rewrite_sls() {
         assert_eq!(
             rewrite_command_no_prefixes("sls pattern", &[]),
             Some("rtk grep pattern".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_get_child_item_path_and_flags() {
+        assert_eq!(
+            rewrite_command_no_prefixes("Get-ChildItem -Path src", &[]),
+            Some("rtk ls src".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("gci -Recurse -Force src", &[]),
+            Some("rtk ls -R -a src".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_cmd_builtins_safe_shapes() {
+        assert_eq!(
+            rewrite_command_no_prefixes("dir", &[]),
+            Some("rtk ls".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("dir /b src", &[]),
+            Some("rtk ls src".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("dir /s /a src", &[]),
+            Some("rtk ls -R -a src".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("type Cargo.toml", &[]),
+            Some("rtk read Cargo.toml".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("findstr /i RTK Cargo.toml", &[]),
+            Some("rtk grep -i RTK Cargo.toml".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_cmd_builtins_skip_ambiguous_shapes() {
+        assert_eq!(rewrite_command_no_prefixes("type python", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("type a.txt b.txt", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("findstr /r RTK Cargo.toml", &[]),
+            None
+        );
+        assert_eq!(rewrite_command_no_prefixes("dir /q src", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_powershell_object_pipeline_skips() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"Get-ChildItem -LiteralPath "D:\AI\RTK" -Force | ForEach-Object { $_.FullName }"#,
+                &[]
+            ),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"Get-Content -Raw -LiteralPath package.json | ConvertFrom-Json"#,
+                &[]
+            ),
+            None
         );
     }
 }

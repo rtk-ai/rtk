@@ -8,6 +8,7 @@ use super::permissions::{self, PermissionVerdict};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::{self, Read, Write};
+use std::path::PathBuf;
 
 use crate::discover::registry::{has_heredoc, rewrite_command};
 
@@ -299,10 +300,9 @@ fn sanitize_log_field(s: &str) -> String {
 }
 
 fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> {
-    let home = dirs::home_dir()?;
-    let dir = home.join(".local").join("share").join("rtk");
+    let path = hook_audit_log_path()?;
+    let dir = path.parent()?;
     std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join("hook-audit.log");
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -318,6 +318,37 @@ fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> 
         sanitize_log_field(rewritten)
     )
     .ok()
+}
+
+fn env_path(name: &str) -> Option<PathBuf> {
+    let value = std::env::var_os(name)?;
+    let path = PathBuf::from(value);
+    if path.as_os_str().is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
+fn audit_home_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        env_path("USERPROFILE").or_else(dirs::home_dir)
+    } else {
+        dirs::home_dir().or_else(|| env_path("HOME"))
+    }
+}
+
+pub(crate) fn hook_audit_log_path() -> Option<PathBuf> {
+    if let Some(dir) = env_path("RTK_AUDIT_DIR") {
+        return Some(dir.join("hook-audit.log"));
+    }
+    let home = audit_home_dir()?;
+    Some(
+        home.join(".local")
+            .join("share")
+            .join("rtk")
+            .join("hook-audit.log"),
+    )
 }
 
 // ── Claude Code native hook ────────────────────────────────────
@@ -371,17 +402,45 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         ti
     };
 
-    let hook_output = json!({
+    let mut hook_output = json!({
         "hookEventName": PRE_TOOL_USE_KEY,
-        "permissionDecision": "allow",
         "permissionDecisionReason": "RTK auto-rewrite",
         "updatedInput": updated_input
     });
+    if verdict == PermissionVerdict::Allow {
+        hook_output["permissionDecision"] = json!("allow");
+    }
 
     PayloadAction::Rewrite {
         cmd: cmd.to_string(),
         rewritten,
         output: json!({ "hookSpecificOutput": hook_output }),
+    }
+}
+
+fn process_codex_payload(v: &Value) -> PayloadAction {
+    match process_claude_payload(v) {
+        PayloadAction::Rewrite {
+            cmd,
+            rewritten,
+            mut output,
+        } => {
+            if let Some(hook_output) = output
+                .get_mut("hookSpecificOutput")
+                .and_then(|value| value.as_object_mut())
+            {
+                // Codex only applies updatedInput when PreToolUse explicitly
+                // returns permissionDecision=allow. Claude accepts the same
+                // updatedInput without allow, so keep this Codex-specific.
+                hook_output.insert("permissionDecision".into(), json!("allow"));
+            }
+            PayloadAction::Rewrite {
+                cmd,
+                rewritten,
+                output,
+            }
+        }
+        other => other,
     }
 }
 
@@ -462,9 +521,9 @@ pub fn run_codex() -> Result<()> {
         }
     };
 
-    // Codex PreToolUse matches on Bash and uses the same payload shape
-    // as Claude Code (snake_case: tool_name, tool_input.command).
-    match process_claude_payload(&v) {
+    // Codex uses the same input shape as Claude Code, but requires
+    // permissionDecision=allow before it applies updatedInput.
+    match process_codex_payload(&v) {
         PayloadAction::Rewrite {
             cmd,
             rewritten,
@@ -877,8 +936,12 @@ mod tests {
     // --- Claude handler ---
 
     fn claude_input(cmd: &str) -> String {
+        agent_input("Bash", cmd)
+    }
+
+    fn agent_input(tool: &str, cmd: &str) -> String {
         json!({
-            "tool_name": "Bash",
+            "tool_name": tool,
             "tool_input": { "command": cmd }
         })
         .to_string()
@@ -905,6 +968,97 @@ mod tests {
             .and_then(|c| c.as_str())
             .unwrap();
         assert_eq!(cmd, "rtk git status");
+    }
+
+    #[test]
+    fn test_claude_rewrites_powershell_named_args() {
+        let result = run_claude_inner(&agent_input(
+            "PowerShell",
+            r#"Select-String -Pattern "fn main" -Path src\main.rs"#,
+        ))
+        .unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, r#"rtk grep "fn main" src\main.rs"#);
+    }
+
+    #[test]
+    fn test_claude_hook_rewrites_all_windows_matchers() {
+        let cases = [
+            ("Bash", "git show HEAD", "rtk git show HEAD"),
+            ("Shell", "npm run build", "rtk npm run build"),
+            ("PowerShell", "Get-ChildItem -Path src", "rtk ls src"),
+        ];
+
+        for (tool, input, expected) in cases {
+            let result = run_claude_inner(&agent_input(tool, input)).unwrap();
+            let v: Value = serde_json::from_str(&result).unwrap();
+            let cmd = v
+                .pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(|c| c.as_str())
+                .unwrap();
+            assert_eq!(cmd, expected, "failed for {tool}: {input}");
+        }
+    }
+
+    #[test]
+    fn test_codex_shared_payload_rewrites_powershell_named_args() {
+        let input: Value = serde_json::from_str(&agent_input(
+            "PowerShell",
+            r#"Get-Content -Path "file with spaces.txt""#,
+        ))
+        .unwrap();
+        let PayloadAction::Rewrite { output, .. } = process_codex_payload(&input) else {
+            panic!("expected rewrite");
+        };
+        let cmd = output
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, r#"rtk read "file with spaces.txt""#);
+    }
+
+    #[test]
+    fn test_codex_rewrite_includes_allow_for_updated_input() {
+        let input: Value =
+            serde_json::from_str(&agent_input("Bash", "git status --short")).unwrap();
+        let PayloadAction::Rewrite { output, .. } = process_codex_payload(&input) else {
+            panic!("expected rewrite");
+        };
+        let hook = &output["hookSpecificOutput"];
+        assert_eq!(hook["permissionDecision"], "allow");
+        assert_eq!(
+            hook["updatedInput"]["command"], "rtk git status --short",
+            "Codex ignores updatedInput unless permissionDecision=allow is present"
+        );
+    }
+
+    #[test]
+    fn test_codex_shared_payload_rewrites_old_guide_matrix_samples() {
+        let cases = [
+            ("Bash", "git add .", "rtk git add ."),
+            ("Shell", "pnpm install", "rtk pnpm install"),
+            (
+                "PowerShell",
+                "gc -Tail 15 src\\main.rs",
+                "rtk read --tail-lines 15 src\\main.rs",
+            ),
+        ];
+
+        for (tool, input, expected) in cases {
+            let input: Value = serde_json::from_str(&agent_input(tool, input)).unwrap();
+            let PayloadAction::Rewrite { output, .. } = process_codex_payload(&input) else {
+                panic!("expected rewrite for {tool}: {input}");
+            };
+            let cmd = output
+                .pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(|c| c.as_str())
+                .unwrap();
+            assert_eq!(cmd, expected, "failed for {tool}: {input}");
+        }
     }
 
     #[test]
@@ -979,6 +1133,7 @@ mod tests {
         assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
         // permissionDecision is only set when an explicit allow rule matches;
         // with default-to-ask semantics (no rules configured), it is absent.
+        assert!(hook.get("permissionDecision").is_none());
         assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
         assert!(hook["updatedInput"].is_object());
         assert!(hook["updatedInput"]["command"].is_string());
@@ -1138,6 +1293,35 @@ mod tests {
         assert_eq!(parts[2], "git status");
         assert_eq!(parts[3], "rtk git status");
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_audit_log_uses_explicit_audit_dir() {
+        let tmp = std::env::temp_dir().join(format!("rtk-test-audit-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let log_path = tmp.join("hook-audit.log");
+
+        let old_audit = std::env::var_os("RTK_HOOK_AUDIT");
+        let old_dir = std::env::var_os("RTK_AUDIT_DIR");
+        std::env::set_var("RTK_HOOK_AUDIT", "1");
+        std::env::set_var("RTK_AUDIT_DIR", &tmp);
+        audit_log("rewrite", "git status", "rtk git status");
+
+        if let Some(value) = old_audit {
+            std::env::set_var("RTK_HOOK_AUDIT", value);
+        } else {
+            std::env::remove_var("RTK_HOOK_AUDIT");
+        }
+        if let Some(value) = old_dir {
+            std::env::set_var("RTK_AUDIT_DIR", value);
+        } else {
+            std::env::remove_var("RTK_AUDIT_DIR");
+        }
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("rewrite | git status | rtk git status"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

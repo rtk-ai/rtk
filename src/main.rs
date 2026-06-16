@@ -432,8 +432,11 @@ enum Commands {
         #[arg(long)]
         reset: bool,
         /// Skip confirmation prompt when resetting
-        #[arg(long, requires = "reset")]
+        #[arg(long)]
         yes: bool,
+        /// Compatibility alias: `rtk gain reset`
+        #[arg(value_name = "ACTION", value_parser = ["reset"], hide = true)]
+        action: Option<String>,
     },
 
     /// Claude Code economics: spending (ccusage) vs savings (rtk) analysis
@@ -1940,7 +1943,9 @@ fn run_cli() -> Result<i32> {
             failures,
             reset,
             yes,
+            action,
         } => {
+            let reset = reset || action.as_deref() == Some("reset");
             analytics::gain::run(
                 project, // added: pass project flag
                 graph,
@@ -2815,6 +2820,21 @@ mod tests {
     }
 
     #[test]
+    fn test_gain_reset_subcommand_alias_parses() {
+        let result = Cli::try_parse_from(["rtk", "gain", "reset", "--yes"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Gain { action, yes, .. } => {
+                    assert_eq!(action.as_deref(), Some("reset"));
+                    assert!(yes);
+                }
+                _ => panic!("Expected Gain command"),
+            }
+        }
+    }
+
+    #[test]
     fn test_meta_commands_reject_bad_flags() {
         // RTK meta-commands should produce parse errors (not fall through to raw execution).
         // Skip "proxy" because it uses trailing_var_arg (accepts any args by design).
@@ -3023,6 +3043,134 @@ mod tests {
                 }
                 _ => panic!("expected Rewrite command"),
             }
+        }
+    }
+
+    #[test]
+    fn test_grep_cli_accepts_leading_grep_flags() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "grep",
+            "-a",
+            "-n",
+            "NamedPipeRequest|NamedPipeResponse",
+            r"D:\bazhuayuRPA\Studio",
+            "-g",
+            "*.dll",
+            "-g",
+            "*.exe",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Grep { extra_args, .. } => {
+                assert_eq!(
+                    extra_args,
+                    vec![
+                        "-a",
+                        "-n",
+                        "NamedPipeRequest|NamedPipeResponse",
+                        r"D:\bazhuayuRPA\Studio",
+                        "-g",
+                        "*.dll",
+                        "-g",
+                        "*.exe"
+                    ]
+                );
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    #[test]
+    fn test_grep_cli_accepts_rg_smart_case() {
+        let cli = Cli::try_parse_from(["rtk", "grep", "-S", "RTK_DISABLED", "src"]).unwrap();
+        match cli.command {
+            Commands::Grep { extra_args, .. } => {
+                assert_eq!(extra_args, vec!["-S", "RTK_DISABLED", "src"]);
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    #[test]
+    fn test_grep_cli_treats_unknown_dash_token_as_pattern() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "grep",
+            "-n",
+            "--reason|FAST_QUOTE_RETRY_REASON|pending",
+            r".\server\scripts\fast-quote-benchmark-retry-samples.cjs",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Grep { extra_args, .. } => {
+                assert_eq!(
+                    extra_args,
+                    vec![
+                        "-n",
+                        "--reason|FAST_QUOTE_RETRY_REASON|pending",
+                        r".\server\scripts\fast-quote-benchmark-retry-samples.cjs"
+                    ]
+                );
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    #[test]
+    fn test_grep_cli_parses_rtk_limits_without_stealing_grep_flags() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "grep",
+            "--max",
+            "2",
+            "--max-len=40",
+            "fn",
+            "src",
+            "-i",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Grep {
+                max,
+                max_len,
+                extra_args,
+                ..
+            } => {
+                assert_eq!(max, 2);
+                assert_eq!(max_len, 40);
+                assert_eq!(extra_args, vec!["fn", "src", "-i"]);
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    #[test]
+    fn test_grep_cli_accepts_dashdash_and_multiple_paths() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "grep",
+            "-n",
+            "--",
+            "Codex|Prompt-level",
+            "hooks",
+            "docs/contributing/TECHNICAL.md",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Grep { extra_args, .. } => {
+                assert_eq!(
+                    extra_args,
+                    vec![
+                        "-n",
+                        "--",
+                        "Codex|Prompt-level",
+                        "hooks",
+                        "docs/contributing/TECHNICAL.md"
+                    ]
+                );
+            }
+            _ => panic!("Expected Grep command"),
         }
     }
 

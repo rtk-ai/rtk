@@ -6,6 +6,28 @@ use std::process::Command;
 use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
 use crate::core::tracking;
 
+struct PanicHookGuard {
+    original: Option<Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>>,
+}
+
+impl PanicHookGuard {
+    fn silence() -> Self {
+        let original = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        Self {
+            original: Some(original),
+        }
+    }
+}
+
+impl Drop for PanicHookGuard {
+    fn drop(&mut self) {
+        if let Some(original) = self.original.take() {
+            std::panic::set_hook(original);
+        }
+    }
+}
+
 pub fn print_with_hint(filtered: &str, raw: &str, tee_label: &str, exit_code: i32) {
     if let Some(hint) = crate::core::tee::tee_and_hint(raw, tee_label, exit_code) {
         println!("{}\n{}", filtered, hint);
@@ -72,6 +94,27 @@ pub enum RunMode<'a> {
     Passthrough,
 }
 
+fn apply_capture_filter<F>(
+    filter_fn: &F,
+    text_to_filter: &str,
+    exit_code: i32,
+    fallback_raw: &str,
+) -> (String, bool)
+where
+    F: Fn(&str, i32) -> String,
+{
+    let _panic_hook = PanicHookGuard::silence();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        filter_fn(text_to_filter, exit_code)
+    })) {
+        Ok(filtered) => (filtered, false),
+        Err(_) => {
+            eprintln!("[rtk] warning: filter panicked — passing through raw output");
+            (fallback_raw.to_string(), true)
+        }
+    }
+}
+
 fn run_captured_filter<F>(
     mut cmd: Command,
     tool_name: &str,
@@ -111,7 +154,24 @@ where
     } else {
         raw
     };
-    let filtered = filter_fn(text_to_filter, exit_code);
+    let (filtered, filter_failed) =
+        apply_capture_filter(&filter_fn, text_to_filter, exit_code, raw);
+
+    if filter_failed {
+        if !result.raw_stdout.is_empty() {
+            print!("{}", result.raw_stdout);
+        }
+        if !result.raw_stderr.is_empty() {
+            eprint!("{}", result.raw_stderr);
+        }
+        timer.track(
+            cmd_label,
+            &format!("rtk {} (filter-passthrough)", cmd_label),
+            raw,
+            raw,
+        );
+        return Ok(exit_code);
+    }
 
     if let Some(label) = opts.tee_label {
         print_with_hint(&filtered, raw, label, exit_code);
@@ -262,4 +322,31 @@ pub fn run_streamed(
         RunMode::Streamed(filter),
         opts,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_apply_capture_filter_returns_filtered_output() {
+        let (filtered, failed) =
+            apply_capture_filter(&|text, _| text.to_uppercase(), "ok", 0, "ok");
+
+        assert_eq!(filtered, "OK");
+        assert!(!failed);
+    }
+
+    #[test]
+    fn test_apply_capture_filter_panic_returns_raw_output() {
+        let (filtered, failed) = apply_capture_filter(
+            &|_, _| panic!("synthetic filter failure"),
+            "filtered input",
+            0,
+            "raw stdout\nraw stderr\n",
+        );
+
+        assert_eq!(filtered, "raw stdout\nraw stderr\n");
+        assert!(failed);
+    }
 }

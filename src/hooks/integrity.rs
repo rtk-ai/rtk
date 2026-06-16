@@ -12,7 +12,10 @@
 //!
 //! Reference: SA-2025-RTK-001 (Finding F-01)
 
-use super::constants::{HOOKS_SUBDIR, REWRITE_HOOK_FILE};
+use super::constants::{
+    CLAUDE_DIR, CLAUDE_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
+    SETTINGS_JSON, SETTINGS_LOCAL_JSON,
+};
 use super::init::resolve_claude_dir;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -192,6 +195,49 @@ pub fn resolve_hook_path() -> Result<PathBuf> {
     resolve_claude_dir().map(|dir| dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE))
 }
 
+fn native_binary_hook_paths(home: &Path) -> Vec<PathBuf> {
+    let claude_dir = home.join(CLAUDE_DIR);
+    [SETTINGS_JSON, SETTINGS_LOCAL_JSON]
+        .iter()
+        .map(|file_name| claude_dir.join(file_name))
+        .filter(|path| native_binary_hook_registered(path))
+        .collect()
+}
+
+fn native_binary_hook_registered(path: &Path) -> bool {
+    let content = match fs::read_to_string(path) {
+        Ok(c) if !c.trim().is_empty() => c,
+        _ => return false,
+    };
+    let root: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let Some(pre_tool_use) = root
+        .get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+    else {
+        return false;
+    };
+
+    ["Bash", "Shell", "PowerShell"].iter().all(|matcher| {
+        pre_tool_use.iter().any(|entry| {
+            entry
+                .get("matcher")
+                .and_then(|m| m.as_str())
+                .is_some_and(|m| m.eq_ignore_ascii_case(matcher))
+                && entry
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|hook| hook.get("command")?.as_str())
+                    .any(|cmd| cmd == CLAUDE_HOOK_COMMAND)
+        })
+    })
+}
+
 /// Run integrity check and print results (for `rtk verify` subcommand)
 pub fn run_verify(verbose: u8) -> Result<()> {
     let hook_path = resolve_hook_path()?;
@@ -204,17 +250,26 @@ pub fn run_verify(verbose: u8) -> Result<()> {
 
     // If no legacy script exists, check for native binary command registration
     if !hook_path.exists() && !hash_file.exists() {
-        // Check if the native binary command is registered in settings.json
-        let claude_dir = resolve_claude_dir().context("Cannot determine claude directory")?;
-        let settings_path = claude_dir.join("settings.json");
-        if settings_path.exists() {
-            let content = fs::read_to_string(&settings_path).unwrap_or_default();
-            if content.contains("rtk hook claude") {
-                println!("PASS  native binary hook registered in settings.json");
-                println!("      command: rtk hook claude");
-                println!("      (no script file — integrity check not applicable)");
-                return Ok(());
+        // Check if the native binary command is registered in Claude settings.
+        let home = dirs::home_dir().context("Cannot determine home directory")?;
+        let native_paths = native_binary_hook_paths(&home);
+        if native_paths.len() == 2 {
+            println!("PASS  native binary hook registered in Claude settings");
+            println!("      command: {}", CLAUDE_HOOK_COMMAND);
+            println!("      matchers: Bash, Shell, PowerShell");
+            for path in native_paths {
+                println!("      {}", path.display());
             }
+            println!("      (no script file — integrity check not applicable)");
+            return Ok(());
+        }
+        if !native_paths.is_empty() {
+            println!("WARN  native binary hook partially registered");
+            for path in native_paths {
+                println!("      found: {}", path.display());
+            }
+            println!("      Run `rtk init -g --auto-patch` to cover settings.json and settings.local.json.");
+            return Ok(());
         }
         println!("SKIP  RTK hook not installed");
         println!("      Run `rtk init -g` to install.");
@@ -419,6 +474,57 @@ mod tests {
 
         let status = verify_hook_at(&hook).unwrap();
         assert_eq!(status, IntegrityStatus::OrphanedHash);
+    }
+
+    #[test]
+    fn test_native_binary_hook_paths_require_both_settings_files_for_complete_coverage() {
+        let temp = TempDir::new().unwrap();
+        let claude_dir = temp.path().join(CLAUDE_DIR);
+        fs::create_dir_all(&claude_dir).unwrap();
+        let settings_json = claude_dir.join(SETTINGS_JSON);
+        let settings_local = claude_dir.join(SETTINGS_LOCAL_JSON);
+        let content = r#"{
+	              "hooks": {
+	                "PreToolUse": [
+	                  {"matcher": "Bash", "hooks": [{"type": "command", "command": "rtk hook claude"}]},
+                  {"matcher": "Shell", "hooks": [{"type": "command", "command": "rtk hook claude"}]},
+	                  {"matcher": "PowerShell", "hooks": [{"type": "command", "command": "rtk hook claude"}]}
+	                ]
+	              }
+	            }"#;
+        fs::write(&settings_local, content).unwrap();
+
+        assert_eq!(
+            native_binary_hook_paths(temp.path()),
+            vec![settings_local.clone()]
+        );
+
+        fs::write(&settings_json, content).unwrap();
+
+        assert_eq!(
+            native_binary_hook_paths(temp.path()),
+            vec![settings_json, settings_local]
+        );
+    }
+
+    #[test]
+    fn test_native_binary_hook_path_rejects_missing_matchers() {
+        let temp = TempDir::new().unwrap();
+        let claude_dir = temp.path().join(CLAUDE_DIR);
+        fs::create_dir_all(&claude_dir).unwrap();
+        fs::write(
+            claude_dir.join(SETTINGS_LOCAL_JSON),
+            r#"{
+              "hooks": {
+                "PreToolUse": [
+                  {"matcher": "Bash", "hooks": [{"type": "command", "command": "rtk hook claude"}]}
+                ]
+              }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(native_binary_hook_paths(temp.path()).is_empty());
     }
 
     #[test]

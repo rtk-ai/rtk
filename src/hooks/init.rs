@@ -17,7 +17,7 @@ use super::constants::{
     CODEX_HOOK_COMMAND, CURSOR_HOOK_COMMAND, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
     HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
     HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
-    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, SETTINGS_LOCAL_JSON,
 };
 use super::integrity;
 
@@ -71,7 +71,7 @@ const GEMINI_MD: &str = "GEMINI.md";
 const RTK_BLOCK_START: &str = "<!-- rtk-instructions";
 const RTK_BLOCK_END: &str = "<!-- /rtk-instructions -->";
 
-/// Control flow for settings.json patching
+/// Control flow for Claude settings patching
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PatchMode {
     Ask,  // Default: prompt user [y/N]
@@ -79,11 +79,11 @@ pub enum PatchMode {
     Skip, // --no-patch: manual instructions
 }
 
-/// Result of settings.json patching operation
+/// Result of Claude settings patching operation
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PatchResult {
     Patched,        // Hook was added successfully
-    AlreadyPresent, // Hook was already in settings.json
+    AlreadyPresent, // Hook was already in Claude settings
     Declined,       // User declined when prompted
     Skipped,        // --no-patch flag used
     WouldPatch,     // Dry-run: hook would have been added
@@ -270,9 +270,6 @@ pub fn run(
         if hook_only {
             anyhow::bail!("--codex cannot be combined with --hook-only");
         }
-        if matches!(patch_mode, PatchMode::Auto) {
-            anyhow::bail!("--codex cannot be combined with --auto-patch");
-        }
         if matches!(patch_mode, PatchMode::Skip) {
             anyhow::bail!("--codex cannot be combined with --no-patch");
         }
@@ -421,7 +418,7 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-/// Prompt user for consent to patch settings.json
+/// Prompt user for consent to patch a settings file
 /// Prints to stderr (stdout may be piped), reads from stdin
 /// Default is No (capital N)
 fn prompt_user_consent(settings_path: &Path) -> Result<bool> {
@@ -507,23 +504,21 @@ fn prompt_telemetry_consent() -> Result<()> {
 }
 
 fn print_manual_instructions(hook_command: &str, include_opencode: bool) {
-    let settings_path = resolve_claude_dir()
-        .unwrap_or_else(|_| PathBuf::from(format!("~/{}", CLAUDE_DIR)))
-        .join(SETTINGS_JSON);
-    println!("\n  MANUAL STEP: Add this to {}:", settings_path.display());
+    println!("\n  MANUAL STEP: Add this to ~/.claude/settings.local.json:");
     println!("  {{");
-    println!("    \"hooks\": {{ \"PreToolUse\": [{{");
-    println!("      \"matcher\": \"Bash\",");
-    println!("      \"hooks\": [{{ \"type\": \"command\",");
-    println!("        \"command\": \"{}\",", hook_command);
-    println!("        \"timeout\": 10");
-    println!("      }}]");
-    println!("    }}]}}");
-    println!("  }}");
-    if cfg!(windows) {
-        println!("\n  Windows users: also add a \"Shell\" matcher entry for broader coverage:");
-        println!("  Add another PreToolUse entry with \"matcher\": \"Shell\"");
+    println!("    \"hooks\": {{ \"PreToolUse\": [");
+    for (idx, matcher) in ["Bash", "Shell", "PowerShell"].iter().enumerate() {
+        let suffix = if idx == 2 { "" } else { "," };
+        println!("      {{");
+        println!("        \"matcher\": \"{}\",", matcher);
+        println!("        \"hooks\": [{{ \"type\": \"command\",");
+        println!("          \"command\": \"{}\",", hook_command);
+        println!("          \"timeout\": 10");
+        println!("        }}]");
+        println!("      }}{}", suffix);
     }
+    println!("    ]}}");
+    println!("  }}");
     if include_opencode {
         println!("\n  Then restart Claude Code and OpenCode. Test with: git status\n");
     } else {
@@ -563,17 +558,27 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
     pre_tool_use_array.len() < original_len
 }
 
-/// Remove RTK hook from settings.json file
+/// Remove RTK hook from Claude settings files
 /// Backs up before modification, returns true if hook was found and removed
 fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext { verbose, .. } = ctx;
     let claude_dir = resolve_claude_dir()?;
-    let settings_path = claude_dir.join(SETTINGS_JSON);
+    let mut removed_any = false;
 
+    for file_name in [SETTINGS_JSON, SETTINGS_LOCAL_JSON] {
+        removed_any |= remove_hook_from_settings_file(&claude_dir.join(file_name), ctx)?;
+    }
+
+    if !removed_any && verbose > 0 {
+        eprintln!("Claude settings hook not found, nothing to remove");
+    }
+
+    Ok(removed_any)
+}
+
+fn remove_hook_from_settings_file(settings_path: &Path, ctx: InitContext) -> Result<bool> {
+    let InitContext { verbose, dry_run } = ctx;
     if !settings_path.exists() {
-        if verbose > 0 {
-            eprintln!("settings.json not found, nothing to remove");
-        }
         return Ok(false);
     }
 
@@ -597,7 +602,7 @@ fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
             );
             if verbose > 0 {
                 let serialized = serde_json::to_string_pretty(&root)
-                    .context("Failed to serialize settings.json")?;
+                    .context("Failed to serialize Claude settings")?;
                 println!("[dry-run] content:\n{}", serialized);
             }
             return Ok(true);
@@ -610,11 +615,11 @@ fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
 
         // Atomic write
         let serialized =
-            serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
+            serde_json::to_string_pretty(&root).context("Failed to serialize Claude settings")?;
         atomic_write(&settings_path, &serialized)?;
 
         if verbose > 0 {
-            eprintln!("Removed RTK hook from settings.json");
+            eprintln!("Removed RTK hook from {}", settings_path.display());
         }
     }
 
@@ -807,9 +812,9 @@ pub fn uninstall(
         }
     }
 
-    // 4. Remove hook entry from settings.json
+    // 4. Remove hook entry from Claude settings
     if remove_hook_from_settings(ctx)? {
-        removed.push("settings.json: removed RTK hook entry".to_string());
+        removed.push("Claude settings: removed RTK hook entry".to_string());
     }
 
     // 5. Remove OpenCode plugin
@@ -930,10 +935,30 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
         removed.push("AGENTS.md: removed @RTK.md reference".to_string());
     }
 
+    let hooks_json_path = codex_dir.join(HOOKS_JSON);
+    if hooks_json_path.exists() {
+        let content = fs::read_to_string(&hooks_json_path)
+            .with_context(|| format!("Failed to read hooks.json: {}", hooks_json_path.display()))?;
+        if let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&content) {
+            if remove_hook_command_entry(&mut root, CODEX_HOOK_COMMAND) {
+                if dry_run {
+                    println!(
+                        "[dry-run] would remove RTK hook from Codex hooks.json: {}",
+                        hooks_json_path.display()
+                    );
+                } else {
+                    let serialized = serde_json::to_string_pretty(&root)?;
+                    atomic_write(&hooks_json_path, &serialized)?;
+                }
+                removed.push("hooks.json: removed RTK PreToolUse hook".to_string());
+            }
+        }
+    }
+
     Ok(removed)
 }
 
-/// Orchestrator: patch settings.json with RTK hook (binary command variant)
+/// Orchestrator: patch Claude settings with RTK hook (binary command variant)
 /// Handles reading, checking, prompting, merging, backing up, and atomic writing
 fn patch_settings_json_command(
     hook_command: &str,
@@ -943,27 +968,42 @@ fn patch_settings_json_command(
 ) -> Result<PatchResult> {
     let InitContext { verbose, dry_run } = ctx;
     let claude_dir = resolve_claude_dir()?;
-    let settings_path = claude_dir.join(SETTINGS_JSON);
+    fs::create_dir_all(&claude_dir)
+        .with_context(|| format!("Failed to create {}", claude_dir.display()))?;
+    let settings_paths = [
+        claude_dir.join(SETTINGS_JSON),
+        claude_dir.join(SETTINGS_LOCAL_JSON),
+    ];
+    let mut settings_roots = Vec::with_capacity(settings_paths.len());
 
-    // Read or create settings.json
-    let mut root = if settings_path.exists() {
-        let content = fs::read_to_string(&settings_path)
-            .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+    for path in &settings_paths {
+        let root = if path.exists() {
+            let content = fs::read_to_string(path)
+                .with_context(|| format!("Failed to read {}", path.display()))?;
 
-        if content.trim().is_empty() {
-            serde_json::json!({})
+            if content.trim().is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(&content)
+                    .with_context(|| format!("Failed to parse {} as JSON", path.display()))?
+            }
         } else {
-            serde_json::from_str(&content)
-                .with_context(|| format!("Failed to parse {} as JSON", settings_path.display()))?
-        }
-    } else {
-        serde_json::json!({})
-    };
+            serde_json::json!({})
+        };
+        settings_roots.push((path.clone(), root));
+    }
 
-    // Check idempotency
-    if hook_already_present(&root, hook_command) {
+    // Check idempotency across both files. Claude print/SDK paths may ignore the
+    // durable fallback, while interactive paths can rewrite settings.json. Keep
+    // both configured so neither host mode silently loses PreToolUse coverage.
+    if settings_roots
+        .iter()
+        .all(|(_, root)| hook_already_present(root, hook_command))
+    {
         if verbose > 0 {
-            eprintln!("settings.json: hook already present");
+            eprintln!(
+                "Claude settings: hook already present in settings.json and settings.local.json"
+            );
         }
         return Ok(PatchResult::AlreadyPresent);
     }
@@ -978,10 +1018,10 @@ fn patch_settings_json_command(
             // Skip the interactive prompt in dry-run: we must not mutate state or block on stdin.
             if dry_run {
                 println!(
-                    "[dry-run] would prompt before patching {}",
-                    settings_path.display()
+                    "[dry-run] would prompt before patching Claude settings in {}",
+                    claude_dir.display()
                 );
-            } else if !prompt_user_consent(&settings_path)? {
+            } else if !prompt_user_consent(&settings_paths[0])? {
                 print_manual_instructions(hook_command, include_opencode);
                 return Ok(PatchResult::Declined);
             }
@@ -991,41 +1031,56 @@ fn patch_settings_json_command(
         }
     }
 
-    insert_hook_entry(&mut root, hook_command)?;
-
-    let serialized =
-        serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
-
     if dry_run {
-        println!(
-            "[dry-run] would patch settings.json: {}",
-            settings_path.display()
-        );
-        if verbose > 0 {
-            println!("[dry-run] content:\n{}", serialized);
+        for (path, root) in settings_roots.iter_mut() {
+            if hook_already_present(root, hook_command) {
+                continue;
+            }
+            insert_hook_entry(root, hook_command)?;
+            println!("[dry-run] would patch Claude settings: {}", path.display());
+            if verbose > 0 {
+                let serialized =
+                    serde_json::to_string_pretty(root).context("Failed to serialize settings")?;
+                println!("[dry-run] content:\n{}", serialized);
+            }
         }
         return Ok(PatchResult::WouldPatch);
     }
 
-    // Backup original
-    if settings_path.exists() {
-        let backup_path = settings_path.with_extension("json.bak");
-        fs::copy(&settings_path, &backup_path)
-            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
-        if verbose > 0 {
-            eprintln!("Backup: {}", backup_path.display());
+    let mut patched_paths = Vec::new();
+    for (path, mut root) in settings_roots {
+        if hook_already_present(&root, hook_command) {
+            continue;
         }
+        insert_hook_entry(&mut root, hook_command)?;
+        let serialized =
+            serde_json::to_string_pretty(&root).context("Failed to serialize Claude settings")?;
+
+        // Backup original
+        if path.exists() {
+            let backup_path = path.with_extension("json.bak");
+            fs::copy(&path, &backup_path)
+                .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+            if verbose > 0 {
+                eprintln!("Backup: {}", backup_path.display());
+            }
+        }
+
+        // Atomic write
+        atomic_write(&path, &serialized)?;
+        patched_paths.push(path);
     }
 
-    // Atomic write
-    atomic_write(&settings_path, &serialized)?;
-
-    println!("\n  settings.json: hook added");
-    if settings_path.with_extension("json.bak").exists() {
-        println!(
-            "  Backup: {}",
-            settings_path.with_extension("json.bak").display()
-        );
+    println!("\n  Claude settings hook added/verified");
+    for path in &patched_paths {
+        println!("  Patched: {}", path.display());
+        let backup = path.with_extension("json.bak");
+        if backup.exists() {
+            println!("  Backup: {}", backup.display());
+        }
+    }
+    if patched_paths.is_empty() {
+        return Ok(PatchResult::AlreadyPresent);
     }
     if include_opencode {
         println!("  Restart Claude Code and OpenCode. Test with: git status");
@@ -1066,7 +1121,7 @@ fn clean_double_blanks(content: &str) -> String {
     result.join("\n")
 }
 
-/// Deep-merge RTK hook entry into settings.json
+/// Deep-merge RTK hook entry into Claude settings
 /// Creates hooks.PreToolUse structure if missing, preserves existing hooks
 fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result<()> {
     let root_obj = match root.as_object_mut() {
@@ -1089,38 +1144,57 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result
         .as_array_mut()
         .context("PreToolUse value is not an array")?;
 
-    // Collect existing matchers to avoid duplicates
-    let existing_matchers: Vec<String> = pre_tool_use
-        .iter()
-        .filter_map(|e| e.get("matcher").and_then(|m| m.as_str()).map(String::from))
-        .collect();
+    for matcher in ["Bash", "Shell", "PowerShell"] {
+        let mut found_matcher = false;
+        for entry in pre_tool_use.iter_mut() {
+            let matches = entry
+                .get("matcher")
+                .and_then(|m| m.as_str())
+                .is_some_and(|m| m.eq_ignore_ascii_case(matcher));
+            if !matches {
+                continue;
+            }
 
-    let entries: &[(&str, u64)] = &[("Bash", 10), ("PowerShell", 10)];
+            found_matcher = true;
+            let hooks_arr = entry
+                .as_object_mut()
+                .context("PreToolUse entry is not an object")?
+                .entry("hooks")
+                .or_insert_with(|| serde_json::json!([]))
+                .as_array_mut()
+                .context("hooks value is not an array")?;
 
-    for &(matcher, timeout) in entries {
-        if existing_matchers.contains(&matcher.to_string()) {
-            // Update existing entry's command and timeout
-            for entry in pre_tool_use.iter_mut() {
-                if entry.get("matcher").and_then(|m| m.as_str()) == Some(matcher) {
-                    if let Some(hooks_arr) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
-                        for hook in hooks_arr.iter_mut() {
-                            if let Some(cmd) = hook.get_mut("command") {
-                                *cmd = serde_json::json!(hook_command);
-                            }
-                            if let Some(t) = hook.get_mut("timeout") {
-                                *t = serde_json::json!(timeout);
-                            }
-                        }
+            let mut found_command = false;
+            for hook in hooks_arr.iter_mut() {
+                let is_rtk = hook
+                    .get("command")
+                    .and_then(|cmd| cmd.as_str())
+                    .is_some_and(|cmd| cmd == hook_command);
+                if is_rtk {
+                    found_command = true;
+                    if let Some(obj) = hook.as_object_mut() {
+                        obj.insert("type".to_string(), serde_json::json!("command"));
+                        obj.insert("timeout".to_string(), serde_json::json!(10));
                     }
                 }
             }
-        } else {
+
+            if !found_command {
+                hooks_arr.push(serde_json::json!({
+                    "type": "command",
+                    "command": hook_command,
+                    "timeout": 10
+                }));
+            }
+        }
+
+        if !found_matcher {
             pre_tool_use.push(serde_json::json!({
                 "matcher": matcher,
                 "hooks": [{
                     "type": "command",
                     "command": hook_command,
-                    "timeout": timeout
+                    "timeout": 10
                 }]
             }));
         }
@@ -1128,8 +1202,90 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result
     Ok(())
 }
 
-/// Check if RTK hook is already present in settings.json
-/// Matches on legacy rtk-rewrite.sh path OR new `rtk hook claude` command.
+fn hook_matchers_present(root: &serde_json::Value, hook_command: &str) -> bool {
+    missing_hook_matchers(root, hook_command).is_empty()
+}
+
+fn missing_hook_matchers(root: &serde_json::Value, hook_command: &str) -> Vec<&'static str> {
+    ["Bash", "Shell", "PowerShell"]
+        .into_iter()
+        .filter(|matcher| !hook_matcher_present(root, hook_command, matcher))
+        .collect()
+}
+
+fn hook_command_program(hook_command: &str) -> Option<&str> {
+    hook_command
+        .split_whitespace()
+        .next()
+        .filter(|program| !program.is_empty())
+}
+
+fn resolve_hook_command_program(hook_command: &str) -> Result<PathBuf, String> {
+    let program = hook_command_program(hook_command).ok_or_else(|| {
+        format!("hook command `{hook_command}` does not include an executable program")
+    })?;
+    which::which(program)
+        .map_err(|err| format!("hook command program `{program}` is not on PATH ({err})"))
+}
+
+fn hook_matcher_present(root: &serde_json::Value, hook_command: &str, matcher: &str) -> bool {
+    root.get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+        .into_iter()
+        .flatten()
+        .any(|entry| {
+            entry
+                .get("matcher")
+                .and_then(|m| m.as_str())
+                .is_some_and(|m| m.eq_ignore_ascii_case(matcher))
+                && entry
+                    .get("hooks")
+                    .and_then(|hooks| hooks.as_array())
+                    .into_iter()
+                    .flatten()
+                    .any(|hook| {
+                        hook.get("command")
+                            .and_then(|c| c.as_str())
+                            .is_some_and(|cmd| cmd == hook_command)
+                    })
+        })
+}
+
+fn remove_hook_command_entry(root: &mut serde_json::Value, hook_command: &str) -> bool {
+    let Some(pre_tool_use) = root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array_mut())
+    else {
+        return false;
+    };
+
+    let mut removed = false;
+    for entry in pre_tool_use.iter_mut() {
+        if let Some(hooks) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+            let before_hooks = hooks.len();
+            hooks.retain(|hook| {
+                hook.get("command")
+                    .and_then(|c| c.as_str())
+                    .is_none_or(|cmd| cmd != hook_command)
+            });
+            removed |= hooks.len() != before_hooks;
+        }
+    }
+    pre_tool_use.retain(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .is_none_or(|hooks| !hooks.is_empty())
+    });
+
+    removed
+}
+
+/// Check if RTK hook is already present in Claude/Codex settings.
+/// Native binary hooks require Bash, Shell, and PowerShell matcher coverage.
+/// Legacy rtk-rewrite.sh paths are accepted for migration detection.
 fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
     let pre_tool_use_array = match root
         .get("hooks")
@@ -1140,6 +1296,10 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         None => return false,
     };
 
+    if hook_command == CLAUDE_HOOK_COMMAND || hook_command == CODEX_HOOK_COMMAND {
+        return hook_matchers_present(root, hook_command);
+    }
+
     pre_tool_use_array
         .iter()
         .filter_map(|entry| entry.get("hooks")?.as_array())
@@ -1148,6 +1308,16 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .any(|cmd| {
             cmd == hook_command || cmd == CLAUDE_HOOK_COMMAND || cmd.contains(REWRITE_HOOK_FILE)
         })
+}
+
+fn settings_file_has_hook(path: &Path, hook_command: &str) -> bool {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => return false,
+    };
+    serde_json::from_str::<serde_json::Value>(&content)
+        .map(|root| hook_already_present(&root, hook_command))
+        .unwrap_or(false)
 }
 
 /// Default mode: hook + slim RTK.md + @RTK.md reference
@@ -1202,7 +1372,7 @@ fn run_default_mode(
         }
     }
 
-    // 5. Patch settings.json with binary command
+    // 5. Patch Claude settings with binary command
     let patch_result =
         patch_settings_json_command(CLAUDE_HOOK_COMMAND, patch_mode, install_opencode, ctx)?;
 
@@ -1213,7 +1383,7 @@ fn run_default_mode(
                 // Already printed by patch_settings_json_command
             }
             PatchResult::AlreadyPresent => {
-                println!("\n  settings.json: hook already present");
+                println!("\n  settings.json/settings.local.json: hook already present");
                 if install_opencode {
                     println!("  Restart Claude Code and OpenCode. Test with: git status");
                 } else {
@@ -1485,7 +1655,7 @@ fn run_hook_only_mode(
         );
     }
 
-    // Patch settings.json with binary command
+    // Patch Claude settings with binary command
     let patch_result =
         patch_settings_json_command(CLAUDE_HOOK_COMMAND, patch_mode, install_opencode, ctx)?;
 
@@ -1496,7 +1666,7 @@ fn run_hook_only_mode(
                 // Already printed by patch_settings_json_command
             }
             PatchResult::AlreadyPresent => {
-                println!("\n  settings.json: hook already present");
+                println!("\n  settings.local.json: hook already present");
                 if install_opencode {
                     println!("  Restart Claude Code and OpenCode. Test with: git status");
                 } else {
@@ -2433,10 +2603,11 @@ fn run_codex_mode_with_paths(
                 agents_md_path.display()
             );
             if hooks_patched {
-                println!("  hooks.json: PreToolUse hook installed — auto-rewrite active");
+                println!("  hooks.json: PreToolUse hook installed for Codex CLI");
             } else {
                 println!("  hooks.json: RTK hook already present");
             }
+            println!("  Note: Codex App internal tool calls may not route through CLI hooks.json.");
         } else {
             println!(
                 "\n  Codex project instructions path: {}",
@@ -2751,7 +2922,11 @@ fn has_rtk_reference(content: &str, refs: &[&str]) -> bool {
     content
         .lines()
         .map(str::trim)
-        .any(|line| refs.contains(&line))
+        .any(|line| line_has_rtk_reference(line, refs))
+}
+
+fn line_has_rtk_reference(line: &str, refs: &[&str]) -> bool {
+    refs.iter().any(|reference| line.contains(reference))
 }
 
 fn remove_rtk_reference_from_agents(path: &Path, refs: &[&str], ctx: InitContext) -> Result<bool> {
@@ -2768,10 +2943,7 @@ fn remove_rtk_reference_from_agents(path: &Path, refs: &[&str], ctx: InitContext
 
     let new_content = content
         .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            !refs.contains(&trimmed)
-        })
+        .filter(|line| !line_has_rtk_reference(line.trim(), refs))
         .collect::<Vec<_>>()
         .join("\n");
     let cleaned = clean_double_blanks(&new_content);
@@ -3434,19 +3606,22 @@ fn show_claude_config() -> Result<()> {
 
     // Check hook: prefer binary command detection, fall back to script file
     let settings_path = claude_dir.join(SETTINGS_JSON);
-    let binary_hook_registered = if settings_path.exists() {
-        let content = fs::read_to_string(&settings_path).unwrap_or_default();
-        if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
-            hook_already_present(&root, CLAUDE_HOOK_COMMAND)
-        } else {
-            false
-        }
-    } else {
-        false
-    };
+    let settings_local_path = claude_dir.join(SETTINGS_LOCAL_JSON);
+    let settings_json_configured = settings_file_has_hook(&settings_path, CLAUDE_HOOK_COMMAND);
+    let settings_local_configured =
+        settings_file_has_hook(&settings_local_path, CLAUDE_HOOK_COMMAND);
+    let binary_hook_registered = settings_json_configured && settings_local_configured;
 
     if binary_hook_registered {
-        println!("[ok] Hook: {} (native binary command)", CLAUDE_HOOK_COMMAND);
+        println!(
+            "[ok] Hook: {} (native binary command in settings.json and settings.local.json)",
+            CLAUDE_HOOK_COMMAND
+        );
+    } else if settings_json_configured || settings_local_configured {
+        println!(
+            "[warn] Hook: {} partially configured; run `rtk init -g --auto-patch`",
+            CLAUDE_HOOK_COMMAND
+        );
     } else if hook_path.exists() {
         #[cfg(unix)]
         {
@@ -3553,25 +3728,49 @@ fn show_claude_config() -> Result<()> {
         println!("[--] Local (./CLAUDE.md): not found");
     }
 
-    // Check settings.json (detailed status)
-    if settings_path.exists() {
-        let content = fs::read_to_string(&settings_path)?;
-        if !content.trim().is_empty() {
-            if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
-                if hook_already_present(&root, CLAUDE_HOOK_COMMAND) {
-                    println!("[ok] settings.json: RTK hook configured");
-                } else {
-                    println!("[warn] settings.json: exists but RTK hook not configured");
-                    println!("    Run: rtk init -g --auto-patch");
-                }
+    // Check Claude settings files (detailed status)
+    for (label, path, configured) in [
+        (
+            "settings.json",
+            settings_path.as_path(),
+            settings_json_configured,
+        ),
+        (
+            "settings.local.json",
+            settings_local_path.as_path(),
+            settings_local_configured,
+        ),
+    ] {
+        if path.exists() {
+            let content = fs::read_to_string(path)?;
+            if content.trim().is_empty() {
+                println!("[--] {}: empty", label);
+            } else if serde_json::from_str::<serde_json::Value>(&content).is_err() {
+                println!("[warn] {}: exists but invalid JSON", label);
+            } else if configured {
+                println!("[ok] {}: RTK hook configured", label);
+            } else if label == "settings.json" && settings_local_configured {
+                println!(
+                    "[warn] {}: no RTK hook; Claude print/SDK paths can ignore settings.local.json",
+                    label
+                );
+                println!("    Run: rtk init -g --auto-patch");
             } else {
-                println!("[warn] settings.json: exists but invalid JSON");
+                println!(
+                    "[warn] {}: exists but RTK hook not configured or missing matchers",
+                    label
+                );
+                println!("    Run: rtk init -g --auto-patch");
             }
+        } else if label == "settings.json" && settings_local_configured {
+            println!(
+                "[warn] {}: not found; Claude print/SDK paths can ignore settings.local.json",
+                label
+            );
+            println!("    Run: rtk init -g --auto-patch");
         } else {
-            println!("[--] settings.json: empty");
+            println!("[--] {}: not found", label);
         }
-    } else {
-        println!("[--] settings.json: not found");
     }
 
     // Check OpenCode plugin
@@ -3647,7 +3846,7 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --claude-md     # Legacy: full injection into ~/.claude/CLAUDE.md");
     println!("  rtk init -g --hook-only     # Hook only, no RTK.md");
     println!("  rtk init --codex            # Configure local AGENTS.md + RTK.md");
-    println!("  rtk init -g --codex         # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
+    println!("  rtk init -g --codex         # Configure $CODEX_HOME/hooks.json + AGENTS.md + RTK.md (or ~/.codex/)");
     println!("  rtk init -g --opencode      # OpenCode plugin only");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
 
@@ -3683,6 +3882,40 @@ fn show_codex_config() -> Result<()> {
         println!("[--] Global AGENTS.md: not found");
     }
 
+    let global_hooks_json = codex_dir.join(CODEX_HOOKS_JSON);
+    if global_hooks_json.exists() {
+        let content = fs::read_to_string(&global_hooks_json)?;
+        match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(root) => {
+                let missing = missing_hook_matchers(&root, CODEX_HOOK_COMMAND);
+                if missing.is_empty() {
+                    match resolve_hook_command_program(CODEX_HOOK_COMMAND) {
+                        Ok(path) => println!(
+                            "[ok] Global hooks.json: RTK PreToolUse hook configured for Codex CLI (Bash, Shell, PowerShell); command resolves to {}",
+                            path.display()
+                        ),
+                        Err(err) => println!(
+                            "[!!] Global hooks.json: RTK PreToolUse hook configured (Bash, Shell, PowerShell), but {err}"
+                        ),
+                    }
+                    println!(
+                        "     Note: Codex App internal tool calls may not route through CLI hooks.json."
+                    );
+                } else {
+                    println!(
+                        "[!!] Global hooks.json: RTK hook missing matchers: {}",
+                        missing.join(", ")
+                    );
+                }
+            }
+            Err(err) => {
+                println!("[!!] Global hooks.json: invalid JSON ({err})");
+            }
+        }
+    } else {
+        println!("[--] Global hooks.json: not found");
+    }
+
     if local_rtk_md.exists() {
         println!("[ok] Local RTK.md: {}", local_rtk_md.display());
     } else {
@@ -3704,7 +3937,7 @@ fn show_codex_config() -> Result<()> {
 
     println!("\nUsage:");
     println!("  rtk init --codex              # Configure local AGENTS.md + RTK.md");
-    println!("  rtk init -g --codex           # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
+    println!("  rtk init -g --codex           # Configure $CODEX_HOME/hooks.json + AGENTS.md + RTK.md (or ~/.codex/)");
     println!("  rtk init -g --codex --uninstall  # Remove global Codex RTK artifacts");
 
     Ok(())
@@ -4500,25 +4733,102 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_mode_rejects_auto_patch() {
-        let err = run(
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            true,
-            PatchMode::Auto,
+    fn test_has_rtk_reference_accepts_prefixed_codex_line() {
+        let content = "existing instructions\n\n必读：@C:\\Users\\Administrator\\.codex\\RTK.md\n";
+
+        assert!(has_rtk_reference(
+            content,
+            &["@C:\\Users\\Administrator\\.codex\\RTK.md"]
+        ));
+    }
+
+    #[test]
+    fn test_remove_rtk_reference_removes_prefixed_codex_line() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        fs::write(
+            &agents_md,
+            "existing instructions\n\n必读：@C:\\Users\\Administrator\\.codex\\RTK.md\n",
+        )
+        .unwrap();
+
+        let removed = remove_rtk_reference_from_agents(
+            &agents_md,
+            &["@C:\\Users\\Administrator\\.codex\\RTK.md"],
             InitContext::default(),
         )
-        .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "--codex cannot be combined with --auto-patch"
+        .unwrap();
+
+        assert!(removed);
+        let content = fs::read_to_string(&agents_md).unwrap();
+        assert!(!content.contains("RTK.md"));
+        assert!(content.contains("existing instructions"));
+    }
+
+    #[test]
+    fn test_codex_mode_allows_auto_patch() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        let rtk_md = temp.path().join("RTK.md");
+
+        run_codex_mode_with_paths(agents_md, rtk_md, true, InitContext::default()).unwrap();
+
+        let hooks_json = fs::read_to_string(temp.path().join(HOOKS_JSON)).unwrap();
+        assert_eq!(hooks_json.matches(CODEX_HOOK_COMMAND).count(), 3);
+        assert!(hooks_json.contains("\"matcher\": \"Bash\""));
+        assert!(hooks_json.contains("\"matcher\": \"Shell\""));
+        assert!(hooks_json.contains("\"matcher\": \"PowerShell\""));
+    }
+
+    #[test]
+    fn test_codex_hooks_json_preserves_existing_omx_shim() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        let rtk_md = temp.path().join("RTK.md");
+        let hooks_path = temp.path().join(HOOKS_JSON);
+        let existing = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "omx shim pretooluse"
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+        fs::write(
+            &hooks_path,
+            serde_json::to_string_pretty(&existing).unwrap(),
+        )
+        .unwrap();
+
+        run_codex_mode_with_paths(
+            agents_md.clone(),
+            rtk_md.clone(),
+            true,
+            InitContext::default(),
+        )
+        .unwrap();
+        run_codex_mode_with_paths(agents_md, rtk_md, true, InitContext::default()).unwrap();
+
+        let hooks_json = fs::read_to_string(hooks_path).unwrap();
+        assert!(
+            hooks_json.contains("omx shim pretooluse"),
+            "existing OMX shim hook must be preserved"
         );
+        assert_eq!(
+            hooks_json.matches(CODEX_HOOK_COMMAND).count(),
+            3,
+            "RTK hook must be added once for Bash, Shell, and PowerShell"
+        );
+        assert!(hooks_json.contains("\"matcher\": \"Bash\""));
+        assert!(hooks_json.contains("\"matcher\": \"Shell\""));
+        assert!(hooks_json.contains("\"matcher\": \"PowerShell\""));
     }
 
     #[test]
@@ -5418,7 +5728,77 @@ mod tests {
     }
 
     #[test]
+    fn test_missing_hook_matchers_reports_partial_codex_install() {
+        let json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": CODEX_HOOK_COMMAND
+                        }]
+                    },
+                    {
+                        "matcher": "PowerShell",
+                        "hooks": [{
+                            "type": "command",
+                            "command": CODEX_HOOK_COMMAND
+                        }]
+                    }
+                ]
+            }
+        });
+
+        assert_eq!(
+            missing_hook_matchers(&json_content, CODEX_HOOK_COMMAND),
+            vec!["Shell"]
+        );
+        assert!(!hook_already_present(&json_content, CODEX_HOOK_COMMAND));
+    }
+
+    #[test]
+    fn test_hook_command_program_extracts_rtk() {
+        assert_eq!(hook_command_program(CODEX_HOOK_COMMAND), Some("rtk"));
+        assert_eq!(hook_command_program("  rtk hook claude"), Some("rtk"));
+        assert_eq!(hook_command_program(""), None);
+    }
+
+    #[test]
     fn test_hook_already_present_new_command() {
+        let json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": CLAUDE_HOOK_COMMAND
+                        }]
+                    },
+                    {
+                        "matcher": "Shell",
+                        "hooks": [{
+                            "type": "command",
+                            "command": CLAUDE_HOOK_COMMAND
+                        }]
+                    },
+                    {
+                        "matcher": "PowerShell",
+                        "hooks": [{
+                            "type": "command",
+                            "command": CLAUDE_HOOK_COMMAND
+                        }]
+                    }
+                ]
+            }
+        });
+
+        assert!(hook_already_present(&json_content, CLAUDE_HOOK_COMMAND));
+    }
+
+    #[test]
+    fn test_hook_not_present_when_new_command_missing_matchers() {
         let json_content = serde_json::json!({
             "hooks": {
                 "PreToolUse": [{
@@ -5431,7 +5811,7 @@ mod tests {
             }
         });
 
-        assert!(hook_already_present(&json_content, CLAUDE_HOOK_COMMAND));
+        assert!(!hook_already_present(&json_content, CLAUDE_HOOK_COMMAND));
     }
 
     #[test]
@@ -5469,17 +5849,22 @@ mod tests {
             .is_some());
 
         let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
-        // insert_hook_entry adds both Bash and PowerShell matchers
-        assert_eq!(pre_tool_use.len(), 2);
+        // insert_hook_entry adds Bash, Shell, and PowerShell matchers
+        assert_eq!(pre_tool_use.len(), 3);
 
         // Verify Bash matcher
         assert_eq!(pre_tool_use[0]["matcher"], "Bash");
         let bash_cmd = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(bash_cmd, hook_command);
 
+        // Verify Shell matcher
+        assert_eq!(pre_tool_use[1]["matcher"], "Shell");
+        let shell_cmd = pre_tool_use[1]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(shell_cmd, hook_command);
+
         // Verify PowerShell matcher
-        assert_eq!(pre_tool_use[1]["matcher"], "PowerShell");
-        let ps_cmd = pre_tool_use[1]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(pre_tool_use[2]["matcher"], "PowerShell");
+        let ps_cmd = pre_tool_use[2]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(ps_cmd, hook_command);
     }
 
@@ -5501,17 +5886,23 @@ mod tests {
         insert_hook_entry(&mut json_content, hook_command).unwrap();
 
         let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
-        // With dedup: existing Bash entry updated + new PowerShell = 2
-        assert_eq!(pre_tool_use.len(), 2);
+        // Existing Bash hook should be preserved and RTK added alongside Shell + PowerShell.
+        assert_eq!(pre_tool_use.len(), 3);
 
-        // Existing Bash entry should have its command updated
+        // Existing Bash entry should keep the pre-existing hook and add RTK.
         assert_eq!(pre_tool_use[0]["matcher"], "Bash");
-        let bash_cmd = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
-        assert_eq!(bash_cmd, hook_command);
+        let bash_hooks = pre_tool_use[0]["hooks"].as_array().unwrap();
+        assert!(bash_hooks
+            .iter()
+            .any(|hook| hook["command"].as_str() == Some("/some/other/hook.sh")));
+        assert!(bash_hooks
+            .iter()
+            .any(|hook| hook["command"].as_str() == Some(hook_command)));
 
-        // PowerShell entry should be added
-        assert_eq!(pre_tool_use[1]["matcher"], "PowerShell");
-        let ps_cmd = pre_tool_use[1]["hooks"][0]["command"].as_str().unwrap();
+        // Shell and PowerShell entries should be added.
+        assert_eq!(pre_tool_use[1]["matcher"], "Shell");
+        assert_eq!(pre_tool_use[2]["matcher"], "PowerShell");
+        let ps_cmd = pre_tool_use[2]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(ps_cmd, hook_command);
     }
 
@@ -6046,12 +6437,98 @@ mod tests {
                 "CLAUDE.md must be created"
             );
 
-            let settings = claude_dir.join(SETTINGS_JSON);
-            assert!(settings.exists(), "settings.json must be created");
+            let settings = claude_dir.join(SETTINGS_LOCAL_JSON);
+            assert!(
+                settings.exists(),
+                "settings.local.json must be created for durable Claude hooks"
+            );
             let content = fs::read_to_string(&settings).unwrap();
             assert!(
                 content.contains(CLAUDE_HOOK_COMMAND),
-                "settings.json must contain hook command"
+                "settings.local.json must contain hook command"
+            );
+            assert!(
+                !claude_dir
+                    .join(CLAUDE_DIR)
+                    .join(SETTINGS_LOCAL_JSON)
+                    .exists(),
+                "installer must not write a nested .claude/.claude/settings.local.json"
+            );
+        });
+    }
+
+    #[test]
+    fn test_global_default_mode_patches_settings_json_and_settings_local_json() {
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let settings_json = claude_dir.join(SETTINGS_JSON);
+            let settings_local_json = claude_dir.join(SETTINGS_LOCAL_JSON);
+            fs::write(
+                &settings_json,
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "theme": "dark",
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "Bash",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": "omc hook claude"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                &settings_local_json,
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "permissions": {
+                        "allow": ["Bash(git status)"]
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+
+            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+
+            let global_content = fs::read_to_string(&settings_json).unwrap();
+            let local_content = fs::read_to_string(&settings_local_json).unwrap();
+
+            for (name, content) in [
+                (SETTINGS_JSON, global_content.as_str()),
+                (SETTINGS_LOCAL_JSON, local_content.as_str()),
+            ] {
+                assert_eq!(
+                    content.matches(CLAUDE_HOOK_COMMAND).count(),
+                    3,
+                    "{name} must contain one RTK hook for Bash, Shell, and PowerShell"
+                );
+                assert!(
+                    content.contains("\"matcher\": \"Bash\"")
+                        && content.contains("\"matcher\": \"Shell\"")
+                        && content.contains("\"matcher\": \"PowerShell\""),
+                    "{name} must contain all Claude tool matchers"
+                );
+            }
+
+            assert!(
+                global_content.contains("omc hook claude"),
+                "existing Claude hook must be preserved"
+            );
+            assert!(
+                global_content.contains("\"theme\": \"dark\""),
+                "settings.json unrelated keys must be preserved"
+            );
+            assert!(
+                local_content.contains("Bash(git status)"),
+                "settings.local.json unrelated permissions must be preserved"
             );
         });
     }
@@ -6065,10 +6542,10 @@ mod tests {
 
             assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
             let settings_content =
-                fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap_or_default();
+                fs::read_to_string(claude_dir.join(SETTINGS_LOCAL_JSON)).unwrap_or_default();
             assert!(
                 !settings_content.contains(CLAUDE_HOOK_COMMAND),
-                "hook entry must be removed from settings.json"
+                "hook entry must be removed from settings.local.json"
             );
         });
     }
@@ -6080,13 +6557,10 @@ mod tests {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
 
-            let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
-            // With Bash + PowerShell matchers, the hook command appears twice
+            let settings = fs::read_to_string(claude_dir.join(SETTINGS_LOCAL_JSON)).unwrap();
+            // With Bash + Shell + PowerShell matchers, the hook command appears three times.
             let count = settings.matches(CLAUDE_HOOK_COMMAND).count();
-            assert_eq!(
-                count, 2,
-                "hook command must appear once per matcher (Bash + PowerShell)"
-            );
+            assert_eq!(count, 3, "hook command must appear once per matcher");
         });
     }
 
@@ -6104,10 +6578,10 @@ mod tests {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
 
             assert!(claude_dir.join(RTK_MD).exists(), "RTK.md must be created");
-            let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
+            let settings = fs::read_to_string(claude_dir.join(SETTINGS_LOCAL_JSON)).unwrap();
             assert!(
                 settings.contains(CLAUDE_HOOK_COMMAND),
-                "hook must be in settings.json after upgrade"
+                "hook must be in settings.local.json after upgrade"
             );
         });
     }
@@ -6143,10 +6617,10 @@ mod tests {
                 !claude_dir.join(RTK_MD).exists(),
                 "RTK.md must NOT be created in hook-only mode"
             );
-            let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
+            let settings = fs::read_to_string(claude_dir.join(SETTINGS_LOCAL_JSON)).unwrap();
             assert!(
                 settings.contains(CLAUDE_HOOK_COMMAND),
-                "settings.json must contain hook command"
+                "settings.local.json must contain hook command"
             );
         });
     }
@@ -6170,8 +6644,8 @@ mod tests {
                 "dry-run must not create CLAUDE.md"
             );
             assert!(
-                !claude_dir.join(SETTINGS_JSON).exists(),
-                "dry-run must not create settings.json"
+                !claude_dir.join(SETTINGS_LOCAL_JSON).exists(),
+                "dry-run must not create settings.local.json"
             );
         });
     }
@@ -6183,9 +6657,9 @@ mod tests {
             // Stage a real install first
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
             assert!(claude_dir.join(RTK_MD).exists());
-            assert!(claude_dir.join(SETTINGS_JSON).exists());
+            assert!(claude_dir.join(SETTINGS_LOCAL_JSON).exists());
 
-            let settings_before = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
+            let settings_before = fs::read_to_string(claude_dir.join(SETTINGS_LOCAL_JSON)).unwrap();
             let rtk_md_before = fs::read_to_string(claude_dir.join(RTK_MD)).unwrap();
 
             // Dry-run uninstall
@@ -6201,8 +6675,8 @@ mod tests {
                 "dry-run uninstall must not remove RTK.md"
             );
             assert!(
-                claude_dir.join(SETTINGS_JSON).exists(),
-                "dry-run uninstall must not remove settings.json"
+                claude_dir.join(SETTINGS_LOCAL_JSON).exists(),
+                "dry-run uninstall must not remove settings.local.json"
             );
             assert_eq!(
                 fs::read_to_string(claude_dir.join(RTK_MD)).unwrap(),
@@ -6210,9 +6684,9 @@ mod tests {
                 "dry-run uninstall must not modify RTK.md"
             );
             assert_eq!(
-                fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap(),
+                fs::read_to_string(claude_dir.join(SETTINGS_LOCAL_JSON)).unwrap(),
                 settings_before,
-                "dry-run uninstall must not modify settings.json"
+                "dry-run uninstall must not modify settings.local.json"
             );
         });
     }
