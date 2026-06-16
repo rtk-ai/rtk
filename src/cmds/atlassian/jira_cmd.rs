@@ -581,7 +581,7 @@ mod tests {
                 let raw = format!("1\t{}\t2026-01-01\t2026-01-14\t\tactive", long_name);
                 let out = format_sprint_list(&raw, false);
                 // Name capped at 40 chars
-          assert!(out.contains("B".repeat(40).as_str()) || out.contains("…"), "not truncated: {}", out);
+          assert!(out.contains("...") && !out.contains("B".repeat(100).as_str()), "not truncated: {}", out);
       }
 
     // ── board list ──────────────────────────────────────────────────────────
@@ -750,7 +750,7 @@ mod tests {
                                 let raw = format!("10\t{}\tkanban\tINFRA", long_name);
                                 let out = format_board_list(&raw, false);
                                 assert!(
-                                                      out.contains(&"C".repeat(40)) || out.contains('…'),
+                                                      out.contains("...") && !out.contains("C".repeat(100).as_str()),
                                                       "board name not truncated: {}", out
                                                   );
               }
