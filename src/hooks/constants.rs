@@ -39,3 +39,8 @@ pub const HERMES_PLUGINS_SUBDIR: &str = "plugins";
 pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";
 pub const HERMES_PLUGIN_INIT_FILE: &str = "__init__.py";
 pub const HERMES_PLUGIN_MANIFEST_FILE: &str = "plugin.yaml";
+
+pub const VIBE_DIR: &str = ".vibe";
+pub const VIBE_HOOKS_SUBDIR: &str = "hooks";
+pub const VIBE_HOOK_FILE: &str = "rtk-hook-vibe.sh";
+pub const VIBE_HOOKS_TOML: &str = "hooks.toml";

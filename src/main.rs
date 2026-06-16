@@ -49,6 +49,8 @@ pub enum AgentTarget {
     Pi,
     /// Hermes CLI
     Hermes,
+    /// Mistral Vibe
+    Vibe,
 }
 
 #[derive(Parser)]
@@ -1377,25 +1379,33 @@ fn main() {
     std::process::exit(code);
 }
 
-fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
-    agent: Option<AgentTarget>,
+struct InitUninstallFlags {
     global: bool,
     gemini: bool,
     codex: bool,
+}
+
+fn uninstall_init_dispatch<UninstallHermes, UninstallStandard, UninstallVibe>(
+    agent: Option<AgentTarget>,
+    flags: InitUninstallFlags,
     ctx: hooks::init::InitContext,
     uninstall_hermes: UninstallHermes,
+    uninstall_vibe: UninstallVibe,
     uninstall_standard: UninstallStandard,
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
+    UninstallVibe: FnOnce(hooks::init::InitContext) -> Result<()>,
     UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
+    } else if agent == Some(AgentTarget::Vibe) {
+        uninstall_vibe(ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
-        uninstall_standard(global, gemini, codex, cursor, pi, ctx)
+        uninstall_standard(flags.global, flags.gemini, flags.codex, cursor, pi, ctx)
     }
 }
 
@@ -1836,11 +1846,14 @@ fn run_cli() -> Result<i32> {
             } else if uninstall {
                 uninstall_init_dispatch(
                     agent,
-                    global,
-                    gemini,
-                    codex,
+                    InitUninstallFlags {
+                        global,
+                        gemini,
+                        codex,
+                    },
                     ctx,
                     hooks::init::uninstall_hermes,
+                    hooks::init::uninstall_vibe,
                     hooks::init::uninstall,
                 )?;
             } else if gemini {
@@ -1874,6 +1887,13 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_antigravity_mode(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Vibe) {
+                if !global {
+                    anyhow::bail!(
+                        "Mistral Vibe hooks are global-only. Use: rtk init -g --agent vibe"
+                    );
+                }
+                hooks::init::run_vibe_mode(ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2717,9 +2737,11 @@ mod tests {
 
         let result = uninstall_init_dispatch(
             Some(AgentTarget::Hermes),
-            true,
-            false,
-            false,
+            InitUninstallFlags {
+                global: true,
+                gemini: false,
+                codex: false,
+            },
             ctx,
             |ctx| {
                 hermes_called.set(true);
@@ -2727,6 +2749,7 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
+            |_| Ok(()),
             |_, _, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
