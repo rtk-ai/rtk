@@ -18,7 +18,6 @@ use crate::core::utils::{ok_confirmation, resolved_command, truncate};
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
-use serde_json::Value;
 
 lazy_static! {
       static ref MULTI_BLANK_RE: Regex = Regex::new(r"\n{3,}").unwrap();
@@ -253,11 +252,11 @@ fn issue_create(args: &[String], _verbose: u8) -> Result<i32> {
                                                             // URL line like "https://org.atlassian.net/browse/PROJ-123"
                                           let key = line.trim().rsplit('/').next().unwrap_or("").trim();
                                                             if !key.is_empty() {
-                                                                                      return ok_confirmation(&format!("created {}", key));
+                                                                                      return ok_confirmation("created", key);
                                                             }
                                       }
                     }
-                              ok_confirmation("created")
+                              ok_confirmation("created", "")
                 },
                 RunOptions::stdout_only(),
             )
