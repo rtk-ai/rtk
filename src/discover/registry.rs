@@ -116,8 +116,24 @@ pub fn classify_command(cmd: &str) -> Classification {
         return Classification::Ignored;
     }
 
-    // Normalize absolute binary paths: /usr/bin/grep → grep (#485)
+    // Normalize absolute binary paths before the rg --files special case so
+    // `/usr/bin/rg --files` follows the same rewrite path as plain `rg`.
     let cmd_normalized = strip_absolute_path(cmd_clean);
+
+    if starts_with_rg_files_token(&cmd_normalized) {
+        if parse_rg_files(&cmd_normalized).is_some() {
+            return Classification::Supported {
+                rtk_equivalent: "rtk find",
+                category: "Files",
+                estimated_savings_pct: 70.0,
+                status: super::report::RtkStatus::Existing,
+            };
+        }
+        return Classification::Unsupported {
+            base_command: "rg".to_string(),
+        };
+    }
+
     // Strip git global options: git -C /tmp status → git status (#163)
     let cmd_normalized = strip_git_global_opts(&cmd_normalized);
     // Strip golangci-lint global options before `run` so classify/rewrite stays
@@ -650,6 +666,38 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
     None
 }
 
+fn parse_rg_files(cmd: &str) -> Option<String> {
+    let tokens = tokenize(cmd);
+    if !(tokens.len() == 2 || tokens.len() == 3) || tokens.iter().any(|t| t.kind != TokenKind::Arg)
+    {
+        return None;
+    }
+
+    if tokens[0].value != "rg" || tokens[1].value != "--files" {
+        return None;
+    }
+
+    if tokens.len() == 2 {
+        return Some(".".to_string());
+    }
+
+    let path = tokens[2].value.as_str();
+    if path.starts_with('-') {
+        None
+    } else {
+        Some(path.to_string())
+    }
+}
+
+fn starts_with_rg_files_token(cmd: &str) -> bool {
+    let tokens = tokenize(cmd);
+    tokens.len() >= 2
+        && tokens[0].kind == TokenKind::Arg
+        && tokens[0].value == "rg"
+        && tokens[1].kind == TokenKind::Arg
+        && tokens[1].value == "--files"
+}
+
 /// Shell prefix builtins that modify how the shell runs a command
 /// but don't change which command runs. Strip before routing, re-prepend after.
 const SHELL_PREFIX_BUILTINS: &[&str] = &["noglob", "command", "builtin", "exec", "nocorrect"];
@@ -785,6 +833,12 @@ fn rewrite_segment_inner(
 
     if cmd_part.starts_with("head -") || cmd_part.starts_with("tail ") {
         return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
+    }
+
+    let cmd_part_normalized = strip_absolute_path(cmd_part);
+    if starts_with_rg_files_token(&cmd_part_normalized) {
+        return parse_rg_files(&cmd_part_normalized)
+            .map(|path| format!("rtk find '*' {}{}", path, redirect_suffix));
     }
 
     // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
@@ -1418,6 +1472,75 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("rg \"fn main\"", &[]),
             Some("rtk grep \"fn main\"".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_rg_files() {
+        assert_eq!(
+            classify_command("rg --files"),
+            Classification::Supported {
+                rtk_equivalent: "rtk find",
+                category: "Files",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_files() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files", &[]),
+            Some("rtk find '*' .".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_files_with_path() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files src", &[]),
+            Some("rtk find '*' src".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_files_absolute_path() {
+        assert_eq!(
+            rewrite_command_no_prefixes("/usr/bin/rg --files src", &[]),
+            Some("rtk find '*' src".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pwd_and_rg_files() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pwd && rg --files", &[]),
+            Some("pwd && rtk find '*' .".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_files_unsupported_forms_skipped() {
+        for command in [
+            "rg --files --hidden",
+            "/usr/bin/rg --files --hidden",
+            "rg --files -g '*.rs'",
+            "rg --files src tests",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(command, &[]), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn test_rewrite_rg_files_with_matches_still_uses_grep() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files-with-matches TODO src", &[]),
+            Some("rtk grep --files-with-matches TODO src".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files-without-match TODO src", &[]),
+            Some("rtk grep --files-without-match TODO src".into())
         );
     }
 
