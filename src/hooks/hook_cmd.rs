@@ -339,6 +339,12 @@ enum PayloadAction {
     Ignore,
 }
 
+#[derive(Clone, Copy)]
+enum AskRewriteHandling {
+    EmitWithoutAllow,
+    Skip(&'static str),
+}
+
 fn process_claude_payload(v: &Value) -> PayloadAction {
     let cmd = match v
         .pointer("/tool_input/command")
@@ -349,7 +355,22 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         None => return PayloadAction::Ignore,
     };
 
-    let (rewritten, allow) = match decide_hook_action(cmd, permissions::Host::Claude) {
+    let decision = decide_hook_action(cmd, permissions::Host::Claude);
+    process_pre_tool_use_payload_with_decision(
+        v,
+        cmd,
+        decision,
+        AskRewriteHandling::EmitWithoutAllow,
+    )
+}
+
+fn process_pre_tool_use_payload_with_decision(
+    v: &Value,
+    cmd: &str,
+    decision: HookDecision,
+    ask_rewrite_handling: AskRewriteHandling,
+) -> PayloadAction {
+    let (rewritten, allow) = match decision {
         HookDecision::Deny => {
             return PayloadAction::Skip {
                 reason: "skip:deny_rule",
@@ -363,7 +384,15 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
             }
         }
         HookDecision::AllowRewrite(r) => (r, true),
-        HookDecision::AskRewrite(r) => (r, false),
+        HookDecision::AskRewrite(r) => match ask_rewrite_handling {
+            AskRewriteHandling::EmitWithoutAllow => (r, false),
+            AskRewriteHandling::Skip(reason) => {
+                return PayloadAction::Skip {
+                    reason,
+                    cmd: cmd.to_string(),
+                }
+            }
+        },
     };
 
     let updated_input = {
@@ -392,6 +421,33 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         rewritten,
         output: json!({ "hookSpecificOutput": hook_output }),
     }
+}
+
+fn process_codex_payload(v: &Value) -> PayloadAction {
+    let cmd = match v
+        .pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+    {
+        Some(c) => c,
+        None => return PayloadAction::Ignore,
+    };
+
+    let decision = decide_hook_action(cmd, permissions::Host::Claude);
+    process_codex_payload_with_decision(v, cmd, decision)
+}
+
+fn process_codex_payload_with_decision(
+    v: &Value,
+    cmd: &str,
+    decision: HookDecision,
+) -> PayloadAction {
+    process_pre_tool_use_payload_with_decision(
+        v,
+        cmd,
+        decision,
+        AskRewriteHandling::Skip("skip:codex_requires_allow_for_updated_input"),
+    )
 }
 
 /// Run the Claude Code PreToolUse hook natively.
@@ -446,13 +502,13 @@ fn run_claude_inner(input: &str) -> Option<String> {
 //   stdout : {"hookSpecificOutput":{"hookEventName":"PreToolUse",
 //             "permissionDecision":"allow|deny", "updatedInput":{"command":"..."}}}
 //
-// The response schema is byte-identical to Claude's, so we reuse
-// `process_claude_payload`. Codex-specific differences live entirely in
-// `run_codex`: it emits `{}` (Codex's neutral no-opinion) on every
-// non-rewrite path (empty stdin, malformed JSON, non-Bash tool, skip,
-// ignore) rather than going silent. Codex semantics permit multiple
-// matching hooks to run concurrently — unlike Claude #1515, there is
-// no manifest fallthrough to engineer here.
+// Codex rejects `updatedInput` unless the same hook output also carries
+// `permissionDecision: "allow"`. Claude can rewrite and still let its
+// native prompt run by omitting `permissionDecision`; Codex cannot, so
+// `run_codex` only emits rewrites that RTK can explicitly allow and
+// emits `{}` (Codex's neutral no-opinion) for default/ask decisions.
+// Codex semantics permit multiple matching hooks to run concurrently —
+// unlike Claude #1515, there is no manifest fallthrough to engineer here.
 
 /// Run the Codex CLI PreToolUse hook natively.
 pub fn run_codex() -> Result<()> {
@@ -481,7 +537,7 @@ pub fn run_codex() -> Result<()> {
         return Ok(());
     }
 
-    match process_claude_payload(&v) {
+    match process_codex_payload(&v) {
         PayloadAction::Rewrite {
             cmd,
             rewritten,
@@ -509,7 +565,31 @@ fn run_codex_inner(input: &str) -> Option<String> {
     if tool_name != "Bash" {
         return None;
     }
-    match process_claude_payload(&v) {
+    match process_codex_payload(&v) {
+        PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn run_codex_inner_with_rules(
+    input: &str,
+    deny: &[String],
+    ask: &[String],
+    allow: &[String],
+) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    let tool_name = v.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
+    if tool_name != "Bash" {
+        return None;
+    }
+    let cmd = v
+        .pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())?;
+    let verdict = permissions::check_command_with_rules(cmd, deny, ask, allow);
+    let decision = decide_from_verdict(cmd, verdict);
+    match process_codex_payload_with_decision(&v, cmd, decision) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
         _ => None,
     }
@@ -1114,9 +1194,13 @@ mod tests {
         .to_string()
     }
 
+    fn run_codex_allowed(input: &str) -> Option<String> {
+        run_codex_inner_with_rules(input, &[], &[], &["*".to_string()])
+    }
+
     #[test]
     fn test_codex_rewrite_git_status() {
-        let result = run_codex_inner(&codex_input("git status")).unwrap();
+        let result = run_codex_allowed(&codex_input("git status")).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
         let cmd = v
             .pointer("/hookSpecificOutput/updatedInput/command")
@@ -1126,22 +1210,28 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_output_matches_claude_schema_byte_for_byte() {
-        // RTK reuses process_claude_payload because the OpenAI Codex
-        // PreToolUse response schema is identical to Claude's. This test
-        // pins that invariant so a future Claude-only tweak that drifts
-        // the schema gets caught.
-        let codex = run_codex_inner(&codex_input("git status")).unwrap();
-        let claude = run_claude_inner(&claude_input("git status")).unwrap();
-        assert_eq!(codex, claude);
+    fn test_codex_default_rewrite_returns_none_to_avoid_invalid_schema() {
+        assert!(run_codex_inner_with_rules(&codex_input("git status"), &[], &[], &[]).is_none());
+    }
+
+    #[test]
+    fn test_codex_ask_rewrite_returns_none_to_avoid_invalid_schema() {
+        assert!(run_codex_inner_with_rules(
+            &codex_input("git status"),
+            &[],
+            &["git *".to_string()],
+            &["git *".to_string()],
+        )
+        .is_none());
     }
 
     #[test]
     fn test_codex_hookspecificoutput_structure() {
-        let result = run_codex_inner(&codex_input("git status")).unwrap();
+        let result = run_codex_allowed(&codex_input("git status")).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
         let hook = &v["hookSpecificOutput"];
         assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(hook["permissionDecision"], "allow");
         assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
         assert!(hook["updatedInput"].is_object());
         assert!(hook["updatedInput"]["command"].is_string());
@@ -1158,23 +1248,23 @@ mod tests {
             "tool_input": { "command": "git status" }
         })
         .to_string();
-        assert!(run_codex_inner(&input).is_none());
+        assert!(run_codex_allowed(&input).is_none());
     }
 
     #[test]
     fn test_codex_passthrough_no_output() {
         // htop has no RTK rewrite — payload returns None (-> "{}" in I/O wrapper).
-        assert!(run_codex_inner(&codex_input("htop")).is_none());
+        assert!(run_codex_allowed(&codex_input("htop")).is_none());
     }
 
     #[test]
     fn test_codex_already_rtk_passthrough() {
-        assert!(run_codex_inner(&codex_input("rtk git status")).is_none());
+        assert!(run_codex_allowed(&codex_input("rtk git status")).is_none());
     }
 
     #[test]
     fn test_codex_compound_command_rewrites_both_segments() {
-        let result = run_codex_inner(&codex_input("git add . && cargo test")).unwrap();
+        let result = run_codex_allowed(&codex_input("git add . && cargo test")).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
         let cmd = v
             .pointer("/hookSpecificOutput/updatedInput/command")
@@ -1185,7 +1275,7 @@ mod tests {
 
     #[test]
     fn test_codex_env_prefix_preserved() {
-        let result = run_codex_inner(&codex_input("GIT_PAGER=cat git status")).unwrap();
+        let result = run_codex_allowed(&codex_input("GIT_PAGER=cat git status")).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
         let cmd = v
             .pointer("/hookSpecificOutput/updatedInput/command")
@@ -1198,13 +1288,13 @@ mod tests {
     fn test_codex_substitution_not_rewritten() {
         // CVE-class: command substitution payloads must skip so Codex
         // applies its own permission policy instead of auto-allowing.
-        assert!(run_codex_inner(&codex_input("git status `rm -rf /tmp/x`")).is_none());
-        assert!(run_codex_inner(&codex_input("git status $(rm -rf /tmp/x)")).is_none());
+        assert!(run_codex_allowed(&codex_input("git status `rm -rf /tmp/x`")).is_none());
+        assert!(run_codex_allowed(&codex_input("git status $(rm -rf /tmp/x)")).is_none());
     }
 
     #[test]
     fn test_codex_file_redirect_not_rewritten() {
-        assert!(run_codex_inner(&codex_input("git log > /tmp/out.txt")).is_none());
+        assert!(run_codex_allowed(&codex_input("git log > /tmp/out.txt")).is_none());
     }
 
     #[test]
@@ -1215,7 +1305,7 @@ mod tests {
             "tool_input": { "command": "" }
         })
         .to_string();
-        assert!(run_codex_inner(&input).is_none());
+        assert!(run_codex_allowed(&input).is_none());
     }
 
     #[test]
@@ -1244,8 +1334,8 @@ mod tests {
         })
         .to_string();
         let full = codex_input("git status");
-        let minimal_out = run_codex_inner(&minimal).unwrap();
-        let full_out = run_codex_inner(&full).unwrap();
+        let minimal_out = run_codex_allowed(&minimal).unwrap();
+        let full_out = run_codex_allowed(&full).unwrap();
         assert_eq!(minimal_out, full_out);
     }
 
