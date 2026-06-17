@@ -382,7 +382,9 @@ pub fn run(
             Err(_) => {
                 let mut grep_cmd = resolved_command("grep");
                 let grep_safe_args = grep_fallback_args(&extra_args);
-                grep_cmd.args(["-rnHZ"]);
+                // --null (not -Z): on BSD/macOS grep -Z means --decompress, not the
+                // NUL filename separator parse_match_line() needs (issue #2310).
+                grep_cmd.args(["-rnH", "--null"]);
                 grep_cmd.args(&grep_safe_args);
                 for p in &patterns {
                     grep_cmd.args(["-e", p]);
@@ -551,8 +553,9 @@ pub fn run(
 
 /// Parses a single rg/grep match line of the form `file\0line_number:content`.
 ///
-/// Requires the underlying command to be invoked with `-0` (rg) or `-Z` (grep)
-/// so the filename is NUL-separated from `line:content`. NUL cannot appear in
+/// Requires the underlying command to be invoked with `-0` (rg) or `--null`
+/// (grep) so the filename is NUL-separated from `line:content`. NUL cannot
+/// appear in
 /// file paths, so the parser is unambiguous regardless of:
 ///   - content with `:` or `::` (e.g. `ClassRegistry::init(...)`, issue #1436);
 ///   - paths with embedded `:` (Windows drive letters, weird filenames like
@@ -1173,31 +1176,20 @@ mod tests {
         assert!(!has_format_flag(&["-i", "-w", "-A", "3"]));
     }
 
-    // Grep fallback must convert rg long-form flags to grep short-form equivalents
+    // Grep fallback must convert rg long-form flags to grep equivalents.
     #[test]
     fn test_grep_fallback_converts_long_flags() {
-        // Simulates the conversion logic from the fallback path
         let conversions = [
             ("--files-with-matches", "-l"),
             ("--files-without-match", "-L"),
             ("--only-matching", "-o"),
-            ("--null", "-Z"),
+            ("--null", "--null"),
+            ("-Z", "--null"),
             ("--count", "-c"),
         ];
         for (rg_flag, grep_flag) in &conversions {
             let extra_args = vec![rg_flag.to_string()];
-            let mut converted = Vec::new();
-            for arg in &extra_args {
-                let c = match arg.as_str() {
-                    "--files-with-matches" => "-l",
-                    "--files-without-match" => "-L",
-                    "--only-matching" => "-o",
-                    "--null" => "-Z",
-                    "--count" => "-c",
-                    _ => arg.as_str(),
-                };
-                converted.push(c.to_string());
-            }
+            let converted = grep_fallback_args(&extra_args);
             assert_eq!(
                 converted[0], *grep_flag,
                 "{} should convert to {}",
@@ -1437,7 +1429,7 @@ fn grep_fallback_args(extra_args: &[String]) -> Vec<String> {
             "--files-with-matches" => "-l",
             "--files-without-match" => "-L",
             "--only-matching" => "-o",
-            "--null" => "-Z",
+            "-Z" | "--null" => "--null",
             "--count" => "-c",
             _ => s,
         };
