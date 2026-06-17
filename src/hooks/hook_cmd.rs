@@ -332,6 +332,10 @@ enum PayloadAction {
         rewritten: String,
         output: Value,
     },
+    Deny {
+        cmd: String,
+        reason: String,
+    },
     Skip {
         reason: &'static str,
         cmd: String,
@@ -344,6 +348,14 @@ enum AskRewriteHandling {
     EmitWithoutAllow,
     Skip(&'static str),
 }
+
+#[derive(Clone, Copy)]
+enum DenyHandling {
+    Skip(&'static str),
+    Emit(&'static str),
+}
+
+const RTK_PERMISSION_DENY_REASON: &str = "Blocked by RTK permission rule";
 
 fn process_claude_payload(v: &Value) -> PayloadAction {
     let cmd = match v
@@ -360,6 +372,7 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         v,
         cmd,
         decision,
+        DenyHandling::Skip("skip:deny_rule"),
         AskRewriteHandling::EmitWithoutAllow,
     )
 }
@@ -368,15 +381,24 @@ fn process_pre_tool_use_payload_with_decision(
     v: &Value,
     cmd: &str,
     decision: HookDecision,
+    deny_handling: DenyHandling,
     ask_rewrite_handling: AskRewriteHandling,
 ) -> PayloadAction {
     let (rewritten, allow) = match decision {
-        HookDecision::Deny => {
-            return PayloadAction::Skip {
-                reason: "skip:deny_rule",
-                cmd: cmd.to_string(),
+        HookDecision::Deny => match deny_handling {
+            DenyHandling::Skip(reason) => {
+                return PayloadAction::Skip {
+                    reason,
+                    cmd: cmd.to_string(),
+                }
             }
-        }
+            DenyHandling::Emit(reason) => {
+                return PayloadAction::Deny {
+                    cmd: cmd.to_string(),
+                    reason: reason.to_string(),
+                }
+            }
+        },
         HookDecision::Defer => {
             return PayloadAction::Skip {
                 reason: "skip:defer",
@@ -446,8 +468,19 @@ fn process_codex_payload_with_decision(
         v,
         cmd,
         decision,
+        DenyHandling::Emit(RTK_PERMISSION_DENY_REASON),
         AskRewriteHandling::Skip("skip:codex_requires_allow_for_updated_input"),
     )
+}
+
+fn pre_tool_use_deny_output(reason: &str) -> Value {
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": PRE_TOOL_USE_KEY,
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason
+        }
+    })
 }
 
 /// Run the Claude Code PreToolUse hook natively.
@@ -478,6 +511,9 @@ pub fn run_claude() -> Result<()> {
         }
         PayloadAction::Skip { reason, cmd } => {
             audit_log(reason, &cmd, "");
+        }
+        PayloadAction::Deny { reason, cmd, .. } => {
+            audit_log("deny", &cmd, &reason);
         }
         PayloadAction::Ignore => {}
     }
@@ -550,6 +586,11 @@ pub fn run_codex() -> Result<()> {
             audit_log(reason, &cmd, "");
             let _ = writeln!(io::stdout(), "{{}}");
         }
+        PayloadAction::Deny { cmd, reason } => {
+            audit_log("deny", &cmd, &reason);
+            let output = pre_tool_use_deny_output(&reason);
+            let _ = writeln!(io::stdout(), "{output}");
+        }
         PayloadAction::Ignore => {
             let _ = writeln!(io::stdout(), "{{}}");
         }
@@ -567,6 +608,7 @@ fn run_codex_inner(input: &str) -> Option<String> {
     }
     match process_codex_payload(&v) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        PayloadAction::Deny { reason, .. } => Some(pre_tool_use_deny_output(&reason).to_string()),
         _ => None,
     }
 }
@@ -591,6 +633,7 @@ fn run_codex_inner_with_rules(
     let decision = decide_from_verdict(cmd, verdict);
     match process_codex_payload_with_decision(&v, cmd, decision) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        PayloadAction::Deny { reason, .. } => Some(pre_tool_use_deny_output(&reason).to_string()),
         _ => None,
     }
 }
@@ -1223,6 +1266,26 @@ mod tests {
             &["git *".to_string()],
         )
         .is_none());
+    }
+
+    #[test]
+    fn test_codex_deny_emits_block_without_updated_input() {
+        let result = run_codex_inner_with_rules(
+            &codex_input("git status"),
+            &["git status".to_string()],
+            &[],
+            &["*".to_string()],
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+        assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(hook["permissionDecision"], "deny");
+        assert_eq!(
+            hook["permissionDecisionReason"],
+            "Blocked by RTK permission rule"
+        );
+        assert!(hook.get("updatedInput").is_none());
     }
 
     #[test]
