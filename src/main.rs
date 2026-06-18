@@ -626,6 +626,10 @@ enum Commands {
         #[arg(short, long)]
         filter: Option<String>,
 
+        /// Original command that produced stdin; used only to choose a filter
+        #[arg(long)]
+        command: Option<String>,
+
         /// Pass stdin through without filtering
         #[arg(long)]
         passthrough: bool,
@@ -1312,6 +1316,203 @@ enum GtCommands {
 /// e.g. `git log --format="%H %s"` → ["git", "log", "--format=%H %s"]
 fn shell_split(input: &str) -> Vec<String> {
     discover::lexer::shell_split(input)
+}
+
+fn pipe_filter_for_command(command: &str) -> Option<pipe_cmd::PipeFilter> {
+    pipe_filter_name_for_command(command).and_then(pipe_cmd::resolve_filter)
+}
+
+fn pipe_filter_name_for_command(command: &str) -> Option<&'static str> {
+    let (excluded, transparent_prefixes) = core::config::Config::load()
+        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
+        .unwrap_or_default();
+    pipe_filter_name_for_command_with_config(command, &excluded, &transparent_prefixes)
+}
+
+fn pipe_filter_name_for_command_with_config(
+    command: &str,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+) -> Option<&'static str> {
+    use discover::registry::rewrite_command;
+
+    let unwrapped = unwrap_pipe_producer_command(command);
+    let rewritten = rewrite_command(&unwrapped, excluded, transparent_prefixes)
+        .unwrap_or_else(|| unwrapped.clone());
+
+    let mut matches: Vec<&'static str> = Vec::new();
+    for segment in discover::lexer::split_on_operators(&rewritten, false) {
+        if let Some(name) = pipe_filter_name_for_rtk_segment(segment) {
+            if !matches.contains(&name) {
+                matches.push(name);
+            }
+        }
+    }
+
+    match matches.as_slice() {
+        [name] => Some(*name),
+        _ => None,
+    }
+}
+
+fn unwrap_pipe_producer_command(command: &str) -> String {
+    let mut current = command.trim().to_string();
+
+    for _ in 0..8 {
+        let Some(next) = unwrap_pipe_producer_command_once(&current) else {
+            break;
+        };
+        current = next;
+    }
+
+    current
+}
+
+fn unwrap_pipe_producer_command_once(command: &str) -> Option<String> {
+    let tokens = shell_split(command);
+    let first = tokens.first().map(|t| command_basename(t))?;
+
+    match first {
+        "sh" | "bash" | "zsh" | "dash" => shell_c_command(&tokens),
+        "rtk" => rtk_raw_wrapper_command(&tokens),
+        _ => None,
+    }
+}
+
+fn shell_c_command(tokens: &[String]) -> Option<String> {
+    for (idx, token) in tokens.iter().enumerate().skip(1) {
+        if token == "-c" || (token.starts_with('-') && token.contains('c')) {
+            return tokens.get(idx + 1).cloned();
+        }
+    }
+    None
+}
+
+fn rtk_raw_wrapper_command(tokens: &[String]) -> Option<String> {
+    match tokens.get(1).map(String::as_str) {
+        Some("proxy") => raw_wrapper_args_command(&tokens[2..]),
+        Some("run") => {
+            if let Some(idx) = tokens.iter().position(|t| t == "-c" || t == "--command") {
+                tokens.get(idx + 1).cloned()
+            } else {
+                raw_wrapper_args_command(&tokens[2..])
+            }
+        }
+        _ => None,
+    }
+    .filter(|s| !s.trim().is_empty())
+}
+
+fn raw_wrapper_args_command(tokens: &[String]) -> Option<String> {
+    match tokens.first().map(|token| command_basename(token)) {
+        Some("sh" | "bash" | "zsh" | "dash") => shell_c_command(tokens),
+        Some(_) => Some(tokens.join(" ")),
+        None => None,
+    }
+}
+
+fn pipe_filter_name_for_rtk_segment(segment: &str) -> Option<&'static str> {
+    let tokens = shell_split(segment);
+    let rtk_idx = tokens
+        .iter()
+        .position(|token| command_basename(token) == "rtk")?;
+
+    let mut args = vec!["rtk".to_string()];
+    args.extend(
+        tokens[rtk_idx + 1..]
+            .iter()
+            .filter(|token| !is_redirect_token(token))
+            .cloned(),
+    );
+
+    let cli = Cli::try_parse_from(args).ok()?;
+    pipe_filter_name_for_cli_command(&cli.command)
+}
+
+fn pipe_filter_name_for_cli_command(command: &Commands) -> Option<&'static str> {
+    match command {
+        Commands::Cargo {
+            command: CargoCommands::Test { .. },
+        } => Some("cargo-test"),
+        Commands::Pytest { .. } => Some("pytest"),
+        Commands::Mypy { .. } => Some("mypy"),
+        Commands::Go {
+            command: GoCommands::Test { args },
+        } if args.iter().any(|arg| arg == "-json" || arg == "--json") => Some("go-test"),
+        Commands::Go {
+            command: GoCommands::Build { .. },
+        } => Some("go-build"),
+        Commands::Git {
+            command: GitCommands::Status { .. },
+            ..
+        } => Some("git-status"),
+        Commands::Git {
+            command: GitCommands::Log { .. },
+            ..
+        } => Some("git-log"),
+        Commands::Git {
+            command: GitCommands::Diff { .. },
+            ..
+        } => Some("git-diff"),
+        Commands::Grep { extra_args, .. } => Some(if grep_outputs_filenames(extra_args) {
+            "find"
+        } else {
+            "grep"
+        }),
+        Commands::Find { .. } => Some("find"),
+        Commands::Tsc { .. } => Some("tsc"),
+        Commands::Vitest { .. } => Some("vitest"),
+        Commands::Ruff { args } => ruff_pipe_filter_name(args),
+        Commands::Prettier { .. } => Some("prettier"),
+        Commands::Npx { args } => package_tool_pipe_filter_name(args),
+        _ => None,
+    }
+}
+
+fn ruff_pipe_filter_name(args: &[String]) -> Option<&'static str> {
+    if args.iter().any(|arg| arg == "format") {
+        Some("ruff-format")
+    } else if args.is_empty()
+        || args[0] == "check"
+        || (!args[0].starts_with('-') && args[0] != "version")
+    {
+        Some("ruff-check")
+    } else {
+        None
+    }
+}
+
+fn package_tool_pipe_filter_name(args: &[String]) -> Option<&'static str> {
+    match args.first().map(|arg| command_basename(arg)) {
+        Some("tsc" | "typescript") => Some("tsc"),
+        Some("vitest") => Some("vitest"),
+        Some("prettier") => Some("prettier"),
+        _ => None,
+    }
+}
+
+fn grep_outputs_filenames(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "-l" | "--files-with-matches" | "-L" | "--files-without-match"
+        )
+    })
+}
+
+fn is_redirect_token(token: &str) -> bool {
+    matches!(token, "<" | ">" | ">>" | "2>" | "2>>" | "2>&1" | "1>&2")
+        || token.starts_with(">")
+        || token.starts_with("2>")
+        || token.starts_with("&>")
+}
+
+fn command_basename(token: &str) -> &str {
+    token
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(token)
 }
 
 /// Merge pnpm global filters args with other ones for standard String-based commands
@@ -2236,9 +2437,15 @@ fn run_cli() -> Result<i32> {
 
         Commands::Pipe {
             filter,
+            command,
             passthrough,
         } => {
-            pipe_cmd::run(filter.as_deref(), passthrough)?;
+            let command_filter = if filter.is_none() {
+                command.as_deref().and_then(pipe_filter_for_command)
+            } else {
+                None
+            };
+            pipe_cmd::run(filter.as_deref(), command_filter, passthrough)?;
             0
         }
 
@@ -2845,6 +3052,71 @@ mod tests {
             }
             _ => panic!("Expected Run command"),
         }
+    }
+
+    #[test]
+    fn test_pipe_command_metadata_parses() {
+        let cli = Cli::try_parse_from(["rtk", "pipe", "--command", "cargo test"]).unwrap();
+        match cli.command {
+            Commands::Pipe {
+                filter,
+                command,
+                passthrough,
+            } => {
+                assert!(filter.is_none());
+                assert_eq!(command, Some("cargo test".to_string()));
+                assert!(!passthrough);
+            }
+            _ => panic!("Expected Pipe command"),
+        }
+    }
+
+    #[test]
+    fn test_pipe_command_filter_reuses_rewrite_and_cli_parse() {
+        let excluded = Vec::new();
+        let transparent_prefixes = Vec::new();
+        let resolve = |command: &str| {
+            pipe_filter_name_for_command_with_config(command, &excluded, &transparent_prefixes)
+        };
+
+        assert_eq!(resolve("cargo test -- --nocapture"), Some("cargo-test"));
+        assert_eq!(resolve("python -m pytest tests -q"), Some("pytest"));
+        assert_eq!(
+            resolve("git -C /tmp --no-pager diff -- src/lib.rs"),
+            Some("git-diff")
+        );
+        assert_eq!(resolve("npx tsc --noEmit"), Some("tsc"));
+        assert_eq!(resolve("find . -name foo"), Some("find"));
+        assert_eq!(
+            resolve("ruff check --output-format=json"),
+            Some("ruff-check")
+        );
+        assert_eq!(resolve("ruff format --check"), Some("ruff-format"));
+    }
+
+    #[test]
+    fn test_pipe_command_filter_handles_compound_and_wrappers() {
+        let excluded = Vec::new();
+        let transparent_prefixes = Vec::new();
+        let resolve = |command: &str| {
+            pipe_filter_name_for_command_with_config(command, &excluded, &transparent_prefixes)
+        };
+
+        assert_eq!(resolve("cargo test 2>&1 | tail -20"), Some("cargo-test"));
+        assert_eq!(resolve("rg main src | head -20"), Some("grep"));
+        assert_eq!(resolve("cargo test && git status"), None);
+        assert_eq!(resolve("go test ./..."), None);
+        assert_eq!(resolve("go test -json ./..."), Some("go-test"));
+        assert_eq!(
+            resolve("FOO=bar sudo env BAR=baz pytest -q"),
+            Some("pytest")
+        );
+        assert_eq!(
+            resolve("sh -c 'cargo test -- --nocapture'"),
+            Some("cargo-test")
+        );
+        assert_eq!(resolve("rtk proxy cargo test"), Some("cargo-test"));
+        assert_eq!(resolve("rtk proxy sh -c 'rg main src'"), Some("grep"));
     }
 
     #[test]

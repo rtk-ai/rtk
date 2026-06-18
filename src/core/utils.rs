@@ -34,6 +34,15 @@ pub fn truncate(s: &str, max_len: usize) -> String {
     }
 }
 
+/// Returns the closest UTF-8 character boundary at or before `end`.
+pub fn floor_char_boundary(s: &str, mut end: usize) -> usize {
+    end = end.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
 /// Strip ANSI escape codes (colors, styles) from a string.
 ///
 /// # Arguments
