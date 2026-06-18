@@ -136,11 +136,11 @@ pub fn run_test(command: &str, verbose: u8) -> Result<i32> {
     }
     let cmd = build_shell_command(command);
     let command_owned = command.to_string();
-    crate::core::runner::run_filtered(
+    crate::core::runner::run_filtered_with_exit(
         cmd,
         "test",
         command,
-        move |raw| extract_test_summary(raw, &command_owned),
+        move |raw, exit_code| extract_test_summary(raw, &command_owned, exit_code),
         crate::core::runner::RunOptions::with_tee("test"),
     )
 }
@@ -178,7 +178,7 @@ fn filter_errors(output: &str) -> String {
     result.join("\n")
 }
 
-fn extract_test_summary(output: &str, command: &str) -> String {
+fn extract_test_summary(output: &str, command: &str, exit_code: i32) -> String {
     let mut result = Vec::new();
     let lines: Vec<&str> = output.lines().collect();
 
@@ -268,7 +268,7 @@ fn extract_test_summary(output: &str, command: &str) -> String {
         }
     } else {
         let is_generic = !is_cargo && !is_pytest && !is_jest && !is_go;
-        let error_lines: Vec<&str> = if is_generic {
+        let error_lines: Vec<&str> = if is_generic && exit_code != 0 {
             lines
                 .iter()
                 .copied()
@@ -326,7 +326,7 @@ line 4
 line 5
 line 6";
 
-        let summary = extract_test_summary(output, "custom-test-runner");
+        let summary = extract_test_summary(output, "custom-test-runner", 1);
 
         assert!(summary.contains("[FAIL] ERRORS:"));
         assert!(summary.contains("error: setup failed before tests ran"));
@@ -344,11 +344,24 @@ line 4
 line 5
 line 6";
 
-        let summary = extract_test_summary(output, "custom-test-runner");
+        let summary = extract_test_summary(output, "custom-test-runner", 0);
 
         assert!(summary.contains("OUTPUT (last 5 lines):"));
         assert!(!summary.contains("line 1"));
         assert!(summary.contains("line 2"));
         assert!(summary.contains("line 6"));
+    }
+
+    #[test]
+    fn test_extract_generic_runner_passing_with_failed_keyword_shows_tail() {
+        let output = "\
+setup complete
+Summary: 0 failed, 10 passed";
+
+        let summary = extract_test_summary(output, "custom-test-runner", 0);
+
+        assert!(summary.contains("OUTPUT (last 5 lines):"));
+        assert!(!summary.contains("[FAIL] ERRORS:"));
+        assert!(summary.contains("Summary: 0 failed, 10 passed"));
     }
 }
