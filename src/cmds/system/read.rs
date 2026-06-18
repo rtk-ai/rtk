@@ -7,11 +7,36 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 
+enum LineRange {
+    Full,
+    Empty,
+    Head(usize),           // n > 0
+    Tail(usize),           // n > 0
+    From(usize),           // start >= 0
+    Slice((usize, usize)), // start >= 0, limit > 0
+}
+
+impl LineRange {
+    fn from_args(offset: Option<usize>, limit: Option<usize>, tail_lines: Option<usize>) -> Self {
+        match (offset, limit, tail_lines) {
+            (_, Some(0), _) | (_, _, Some(0)) => Self::Empty,
+            (Some(offset), Some(limit), _) => Self::Slice((offset.saturating_sub(1), limit)),
+            (Some(offset), None, _) => Self::From(offset.saturating_sub(1)),
+            (None, Some(limit), _) => Self::Head(limit),
+            (None, None, Some(tail)) => Self::Tail(tail),
+            _ => Self::Full,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     file: &Path,
     level: FilterLevel,
     max_lines: Option<usize>,
     tail_lines: Option<usize>,
+    offset: Option<usize>,
+    limit: Option<usize>,
     line_numbers: bool,
     verbose: u8,
 ) -> Result<()> {
@@ -64,15 +89,16 @@ pub fn run(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
+    let range = LineRange::from_args(offset, limit, tail_lines);
+    let (line_start, filtered) = apply_line_window(&filtered, max_lines, &range, &lang);
 
     let (raw, rtk_output) = if line_numbers {
         (
-            format_with_line_numbers(&content),
-            format_with_line_numbers(&filtered),
+            format_with_line_numbers(&content, 1),
+            format_with_line_numbers(&filtered, line_start),
         )
     } else {
-        (content.clone(), filtered.clone())
+        (content, filtered)
     };
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
@@ -89,6 +115,8 @@ pub fn run_stdin(
     level: FilterLevel,
     max_lines: Option<usize>,
     tail_lines: Option<usize>,
+    offset: Option<usize>,
+    limit: Option<usize>,
     line_numbers: bool,
     verbose: u8,
 ) -> Result<()> {
@@ -116,7 +144,7 @@ pub fn run_stdin(
 
     // Apply filter
     let filter = filter::get_filter(level);
-    let mut filtered = filter.filter(&content, &lang);
+    let filtered = filter.filter(&content, &lang);
 
     if verbose > 0 {
         let original_lines = content.lines().count();
@@ -132,15 +160,16 @@ pub fn run_stdin(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
+    let range = LineRange::from_args(offset, limit, tail_lines);
+    let (line_start, filtered) = apply_line_window(&filtered, max_lines, &range, &lang);
 
     let (raw, rtk_output) = if line_numbers {
         (
-            format_with_line_numbers(&content),
-            format_with_line_numbers(&filtered),
+            format_with_line_numbers(&content, 1),
+            format_with_line_numbers(&filtered, line_start),
         )
     } else {
-        (content.clone(), filtered.clone())
+        (content, filtered)
     };
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
@@ -149,12 +178,19 @@ pub fn run_stdin(
     Ok(())
 }
 
-fn format_with_line_numbers(content: &str) -> String {
+fn format_with_line_numbers(content: &str, display_start: usize) -> String {
     let lines: Vec<&str> = content.lines().collect();
-    let width = lines.len().to_string().len();
+    let width = (display_start + lines.len().saturating_sub(1))
+        .to_string()
+        .len();
     let mut out = String::new();
     for (i, line) in lines.iter().enumerate() {
-        out.push_str(&format!("{:>width$} │ {}\n", i + 1, line, width = width));
+        out.push_str(&format!(
+            "{:>width$} │ {}\n",
+            display_start + i,
+            line,
+            width = width
+        ));
     }
     out
 }
@@ -162,27 +198,62 @@ fn format_with_line_numbers(content: &str) -> String {
 fn apply_line_window(
     content: &str,
     max_lines: Option<usize>,
-    tail_lines: Option<usize>,
+    range: &LineRange,
     lang: &Language,
-) -> String {
-    if let Some(tail) = tail_lines {
-        if tail == 0 {
-            return String::new();
+) -> (usize, String) {
+    let start_ptr = content.as_ptr() as usize;
+
+    let (line_start, windowed) = match range {
+        LineRange::Empty => return (1, String::new()),
+        LineRange::Tail(n) => {
+            // we do a double pass instead of a Vec<&str> collection to save memory
+            let total = content.lines().count();
+            let start = total.saturating_sub(*n);
+            let byte_start = content
+                .lines()
+                .nth(start)
+                .map(|line| line.as_ptr() as usize - start_ptr)
+                .unwrap_or(0);
+            return (start + 1, content[byte_start..].to_string());
         }
-        let lines: Vec<&str> = content.lines().collect();
-        let start = lines.len().saturating_sub(tail);
-        let mut result = lines[start..].join("\n");
-        if content.ends_with('\n') {
-            result.push('\n');
+        LineRange::Head(n) => {
+            if let Some(line) = content.lines().nth(*n) {
+                let byte_stop = line.as_ptr() as usize - start_ptr;
+                (1, &content[..byte_stop])
+            } else {
+                (1, content)
+            }
         }
-        return result;
-    }
+        LineRange::From(n) => {
+            if let Some(line) = content.lines().nth(*n) {
+                let byte_start = line.as_ptr() as usize - start_ptr;
+                (*n + 1, &content[byte_start..])
+            } else {
+                (*n + 1, &content[0..0])
+            }
+        }
+        LineRange::Slice((start, limit)) => {
+            let mut lines = content.lines();
+            if let Some(line) = lines.nth(*start) {
+                let byte_start = line.as_ptr() as usize - start_ptr;
+                if let Some(line) = lines.nth(*limit - 1) {
+                    let byte_stop = line.as_ptr() as usize - start_ptr;
+                    (*start + 1, &content[byte_start..byte_stop])
+                } else {
+                    (*start + 1, &content[byte_start..])
+                }
+            } else {
+                (*start + 1, &content[0..0])
+            }
+        }
+        LineRange::Full => (1, content),
+    };
 
     if let Some(max) = max_lines {
-        return filter::smart_truncate(content, max, lang);
+        (line_start, filter::smart_truncate(windowed, max, lang))
+    } else {
+        (line_start, windowed.to_string())
     }
-
-    content.to_string()
 }
 
 #[cfg(test)]
@@ -203,7 +274,16 @@ fn main() {{
         )?;
 
         // Just verify it doesn't panic
-        run(file.path(), FilterLevel::Minimal, None, None, false, 0)?;
+        run(
+            file.path(),
+            FilterLevel::Minimal,
+            None,
+            None,
+            None,
+            None,
+            false,
+            0,
+        )?;
         Ok(())
     }
 
@@ -214,26 +294,126 @@ fn main() {{
         // Compile-time verification that the function exists with correct signature
     }
 
+    fn window(offset: Option<usize>, limit: Option<usize>, tail: Option<usize>) -> LineRange {
+        LineRange::from_args(offset, limit, tail)
+    }
+
+    fn gen_lines(lines: usize, newline: bool) -> String {
+        let mut buffer = (1..=lines)
+            .map(|n| format!("line {}\n", n))
+            .collect::<String>();
+        if !newline {
+            buffer.pop();
+        }
+        buffer
+    }
+
+    fn get_range(input: &str, range: &LineRange) -> (usize, String) {
+        apply_line_window(input, None, range, &Language::Unknown)
+    }
+
     #[test]
     fn test_apply_line_window_tail_lines() {
-        let input = "a\nb\nc\nd\n";
-        let output = apply_line_window(input, None, Some(2), &Language::Unknown);
-        assert_eq!(output, "c\nd\n");
+        let (start, output) = get_range(&gen_lines(4, true), &window(None, None, Some(2)));
+        assert_eq!(start, 3);
+        assert_eq!(output, "line 3\nline 4\n");
     }
 
     #[test]
     fn test_apply_line_window_tail_lines_no_trailing_newline() {
-        let input = "a\nb\nc\nd";
-        let output = apply_line_window(input, None, Some(2), &Language::Unknown);
-        assert_eq!(output, "c\nd");
+        let (start, output) = get_range(&gen_lines(4, false), &window(None, None, Some(2)));
+        assert_eq!(start, 3);
+        assert_eq!(output, "line 3\nline 4");
     }
 
     #[test]
-    fn test_apply_line_window_max_lines_still_works() {
-        let input = "a\nb\nc\nd\n";
-        let output = apply_line_window(input, Some(2), None, &Language::Unknown);
-        assert!(output.starts_with("a\n"));
-        assert!(output.contains("more lines"));
+    fn test_apply_line_window_max_lines() {
+        let (start, output) = apply_line_window(
+            &gen_lines(4, true),
+            Some(2),
+            &window(None, None, None),
+            &Language::Unknown,
+        );
+        assert_eq!(start, 1);
+        assert!(output.starts_with("line 1\n"));
+        assert!(output.contains("3 more lines"));
+    }
+
+    #[test]
+    fn test_apply_line_window_offset_only() {
+        let (start, output) = get_range(&gen_lines(4, true), &window(Some(2), None, None));
+        assert_eq!(start, 2);
+        assert_eq!(output, "line 2\nline 3\nline 4\n");
+    }
+
+    #[test]
+    fn test_apply_line_window_offset_and_max_lines() {
+        let (start, output) = apply_line_window(
+            &gen_lines(4, true),
+            Some(2),
+            &window(Some(2), None, None),
+            &Language::Unknown,
+        );
+        assert_eq!(start, 2);
+        assert!(output.starts_with("line 2\n"));
+        assert!(output.contains("2 more lines"));
+    }
+
+    #[test]
+    fn test_apply_line_window_offset_beyond_end() {
+        let (start, output) = get_range(&gen_lines(2, true), &window(Some(3), None, None));
+        assert_eq!(start, 3);
+        assert_eq!(output, "");
+    }
+
+    #[test]
+    fn test_apply_line_window_empty_range() {
+        let (_, output) = get_range(&gen_lines(2, true), &window(Some(2), Some(0), None));
+        assert_eq!(output, "");
+    }
+
+    #[test]
+    fn test_apply_line_window_head() {
+        let (start, output) = get_range(&gen_lines(5, true), &window(None, Some(3), None));
+        assert_eq!(start, 1);
+        assert_eq!(output, "line 1\nline 2\nline 3\n");
+    }
+
+    #[test]
+    fn test_apply_line_window_head_beyond_end() {
+        let (start, output) = get_range(&gen_lines(2, true), &window(None, Some(3), None));
+        assert_eq!(start, 1);
+        assert_eq!(output, "line 1\nline 2\n");
+    }
+
+    #[test]
+    fn test_apply_line_window_slice() {
+        let (start, output) = get_range(&gen_lines(5, true), &window(Some(3), Some(2), None));
+        assert_eq!(start, 3);
+        assert_eq!(output, "line 3\nline 4\n");
+    }
+
+    #[test]
+    fn test_apply_line_window_slice_beyond_end() {
+        let (start, output) = get_range(&gen_lines(5, true), &window(Some(3), Some(10), None));
+        assert_eq!(start, 3);
+        assert_eq!(output, "line 3\nline 4\nline 5\n");
+    }
+
+    #[test]
+    fn test_apply_line_window_slice_start_beyond_end() {
+        let (start, output) = get_range(&gen_lines(5, true), &window(Some(6), Some(1), None));
+        assert_eq!(start, 6);
+        assert_eq!(output, "");
+    }
+
+    #[test]
+    fn test_read_slice_with_line_numbers() {
+        let (start, output) = get_range(&gen_lines(5, true), &window(Some(3), Some(2), None));
+        assert_eq!(start, 3);
+        let output = format_with_line_numbers(&output, start);
+        assert!(output.contains("3 │ line 3\n"), "line 3 wrong: {output:?}");
+        assert!(output.contains("4 │ line 4\n"), "line 4 wrong: {output:?}");
     }
 
     fn rtk_bin() -> std::path::PathBuf {
@@ -255,7 +435,11 @@ fn main() {{
         writeln!(f2, "charlie\ndelta").unwrap();
 
         let output = std::process::Command::new(&bin)
-            .args(["read", &f1.path().to_string_lossy(), &f2.path().to_string_lossy()])
+            .args([
+                "read",
+                &f1.path().to_string_lossy(),
+                &f2.path().to_string_lossy(),
+            ])
             .output()
             .expect("failed to run rtk read");
 
@@ -275,15 +459,28 @@ fn main() {{
         writeln!(f1, "valid content").unwrap();
 
         let output = std::process::Command::new(&bin)
-            .args(["read", &f1.path().to_string_lossy(), "/tmp/rtk_nonexistent_file.txt"])
+            .args([
+                "read",
+                &f1.path().to_string_lossy(),
+                "/tmp/rtk_nonexistent_file.txt",
+            ])
             .output()
             .expect("failed to run rtk read");
 
-        assert!(!output.status.success(), "should exit non-zero on missing file");
+        assert!(
+            !output.status.success(),
+            "should exit non-zero on missing file"
+        );
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stdout.contains("valid content"), "valid file should still be printed");
-        assert!(stderr.contains("rtk_nonexistent_file"), "should report missing file on stderr");
+        assert!(
+            stdout.contains("valid content"),
+            "valid file should still be printed"
+        );
+        assert!(
+            stderr.contains("rtk_nonexistent_file"),
+            "should report missing file on stderr"
+        );
     }
 
     #[test]
