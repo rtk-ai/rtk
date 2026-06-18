@@ -47,6 +47,14 @@ cargo uninstall rtk
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
 ```
 
+### Quick Install (Windows)
+
+```powershell
+irm https://raw.githubusercontent.com/rtk-ai/rtk/master/install.ps1 | iex
+```
+
+Installs `rtk.exe` to `%USERPROFILE%\.local\bin`. Open a new terminal, then run `rtk init -g` to register the native `rtk hook claude` auto-rewrite hook (works on native Windows, no WSL required).
+
 After installation, **verify you have the correct rtk**:
 ```bash
 rtk gain  # Must show token savings stats (not "command not found")

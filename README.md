@@ -75,6 +75,14 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 > echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc  # or ~/.zshrc
 > ```
 
+### Quick Install (Windows)
+
+```powershell
+irm https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.ps1 | iex
+```
+
+> Installs `rtk.exe` to `%USERPROFILE%\.local\bin`. Open a new terminal so PATH refreshes, then run `rtk init -g` to register the native Claude Code auto-rewrite hook. See [Windows setup](#windows) for details.
+
 ### Cargo
 
 ```bash
@@ -88,7 +96,7 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 - Linux: `rtk-x86_64-unknown-linux-musl.tar.gz` / `rtk-aarch64-unknown-linux-gnu.tar.gz`
 - Windows: `rtk-x86_64-pc-windows-msvc.zip`
 
-> **Windows users**: Extract the zip and place `rtk.exe` somewhere in your PATH (e.g. `C:\Users\<you>\.local\bin`). Run RTK from **Command Prompt**, **PowerShell**, or **Windows Terminal** — do not double-click the `.exe` (it will flash and close). For the best experience, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) where the full hook system works natively. See [Windows setup](#windows) below for details.
+> **Windows users**: Run `irm https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.ps1 | iex`, or extract the zip and place `rtk.exe` somewhere in your PATH (e.g. `C:\Users\<you>\.local\bin`). Run RTK from **Command Prompt**, **PowerShell**, or **Windows Terminal** — do not double-click the `.exe` (it will flash and close). Native Windows now gets the same auto-rewrite hook as macOS/Linux via `rtk init -g`; WSL is optional. See [Windows setup](#windows) below for details.
 
 ### Verify Installation
 
@@ -316,11 +324,30 @@ After install, **restart Claude Code**.
 
 ## Windows
 
-RTK works on Windows with some limitations. The auto-rewrite hook (`rtk-rewrite.sh`) requires a Unix shell, so on native Windows RTK falls back to **CLAUDE.md injection mode** — your AI assistant receives RTK instructions but commands are not rewritten automatically.
+**Native Windows now has full auto-rewrite support — same as macOS/Linux, no WSL required.**
 
-### Recommended: WSL (full support)
+Modern RTK no longer relies on the `rtk-rewrite.sh` shell script. The Claude Code hook is a native Rust subcommand, `rtk hook claude`, that reads the PreToolUse JSON from stdin and writes the rewritten command to stdout. It runs identically on every platform, so `rtk init -g` registers the real auto-rewrite hook on native Windows too (cmd.exe, PowerShell, Windows Terminal).
 
-For the best experience, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) (Windows Subsystem for Linux). Inside WSL, RTK works exactly like Linux — full hook support, auto-rewrite, everything:
+### Native Windows (full support)
+
+```powershell
+# 1. Install (downloads rtk.exe to %USERPROFILE%\.local\bin)
+irm https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.ps1 | iex
+
+# 2. Open a NEW terminal so PATH refreshes, then register the hook
+rtk init -g
+
+# 3. Restart Claude Code, then test — this is rewritten automatically
+git status
+```
+
+Prefer to install manually? Download and extract `rtk-x86_64-pc-windows-msvc.zip` from [releases](https://github.com/rtk-ai/rtk/releases), put `rtk.exe` somewhere on your PATH (e.g. `C:\Users\<you>\.local\bin`), then run `rtk init -g`.
+
+**Important**: Do not double-click `rtk.exe` — it is a CLI tool that prints usage and exits immediately. Always run it from a terminal (Command Prompt, PowerShell, or Windows Terminal).
+
+### WSL
+
+[WSL](https://learn.microsoft.com/en-us/windows/wsl/install) remains fully supported and behaves exactly like Linux. Use it if your workflow already lives inside WSL — it is no longer *required* for auto-rewrite:
 
 ```bash
 # Inside WSL
@@ -328,28 +355,14 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 rtk init -g
 ```
 
-### Native Windows (limited support)
-
-On native Windows (cmd.exe / PowerShell), RTK filters work but the hook does not auto-rewrite commands:
-
-```powershell
-# 1. Download and extract rtk-x86_64-pc-windows-msvc.zip from releases
-# 2. Add rtk.exe to your PATH
-# 3. Initialize (falls back to CLAUDE.md injection)
-rtk init -g
-# 4. Use rtk explicitly
-rtk cargo test
-rtk git status
-```
-
-**Important**: Do not double-click `rtk.exe` — it is a CLI tool that prints usage and exits immediately. Always run it from a terminal (Command Prompt, PowerShell, or Windows Terminal).
-
-| Feature | WSL | Native Windows |
-|---------|-----|----------------|
+| Feature | Native Windows | WSL |
+|---------|----------------|-----|
 | Filters (cargo, git, etc.) | Full | Full |
-| Auto-rewrite hook | Yes | No (CLAUDE.md fallback) |
-| `rtk init -g` | Hook mode | CLAUDE.md mode |
+| Auto-rewrite hook (`rtk hook claude`) | Yes | Yes |
+| `rtk init -g` | Hook mode | Hook mode |
 | `rtk gain` / analytics | Full | Full |
+
+> Note: the native `rtk hook claude` hook covers **Claude Code**. A few other agents still ship Unix-shell wrappers (e.g. the Gemini CLI hook); those specific integrations may still need WSL on Windows until they migrate to the native subcommand.
 
 ## Supported AI Tools
 
