@@ -1,0 +1,33 @@
+version: "3.9"
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: myapp:latest
+    ports:
+      - "8080:80"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgres://db:5432/app
+    depends_on:
+      - db
+      - cache
+    restart: unless-stopped
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: app
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+  cache:
+    image: redis:7
+    ports:
+      - "6379:6379"
+volumes:
+  pgdata:
+    driver: local
