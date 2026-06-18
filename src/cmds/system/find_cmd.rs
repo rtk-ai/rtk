@@ -575,7 +575,13 @@ mod tests {
     }
 
     // --- #2469: unsupported predicates fall back to native find (Never Block) ---
+    // These two execute the resolved `find` and assert GNU/BSD find semantics
+    // (a valid -not/-exec query exits 0). On Windows, `find.exe` is an unrelated
+    // text-search tool that rejects these args (exit 2), so the assertions only
+    // hold on unix. The passthrough routing itself is covered cross-platform by
+    // `has_unsupported_find_flags_detects_and_ignores` below.
 
+    #[cfg(unix)]
     #[test]
     fn run_from_args_unsupported_predicate_passes_through() {
         // `-not` can't be compacted; instead of bailing, rtk runs native find.
@@ -585,6 +591,7 @@ mod tests {
         assert_eq!(result.unwrap(), 0, "native find exit code is propagated");
     }
 
+    #[cfg(unix)]
     #[test]
     fn run_from_args_exec_passes_through() {
         // `-exec` is an action rtk can't model; native find handles it.
