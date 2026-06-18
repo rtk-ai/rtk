@@ -21,7 +21,7 @@ use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
     deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
-    read, summary, tree, wc_cmd,
+    read, summary, tree, wc_cmd, yaml_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -228,6 +228,18 @@ enum Commands {
     /// Show JSON (compact values by default, or keys-only with --keys-only)
     Json {
         /// JSON file
+        file: PathBuf,
+        /// Max depth
+        #[arg(short, long, default_value = "5")]
+        depth: usize,
+        /// Show keys only (strip all values, show structure)
+        #[arg(long)]
+        keys_only: bool,
+    },
+
+    /// Linearize YAML to dotted-path lines (path: value), or keys-only with --keys-only
+    Yaml {
+        /// YAML file (use - for stdin)
         file: PathBuf,
         /// Max depth
         #[arg(short, long, default_value = "5")]
@@ -1682,6 +1694,19 @@ fn run_cli() -> Result<i32> {
             0
         }
 
+        Commands::Yaml {
+            file,
+            depth,
+            keys_only,
+        } => {
+            if file == Path::new("-") {
+                yaml_cmd::run_stdin(depth, keys_only, cli.verbose)?;
+            } else {
+                yaml_cmd::run(&file, depth, keys_only, cli.verbose)?;
+            }
+            0
+        }
+
         Commands::Deps { path } => {
             deps::run(&path, cli.verbose)?;
             0
@@ -2496,6 +2521,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Err { .. }
             | Commands::Test { .. }
             | Commands::Json { .. }
+            | Commands::Yaml { .. }
             | Commands::Deps { .. }
             | Commands::Env { .. }
             | Commands::Find { .. }

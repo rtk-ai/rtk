@@ -1,12 +1,18 @@
 //! Filters grep output by grouping matches by file.
 
+use super::yaml_cmd::filter_yaml_linear;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
-use crate::core::utils::resolved_command;
+use crate::core::utils::{resolved_command, truncate};
 use crate::core::{args_utils, config};
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
+use std::path::Path;
+
+/// Depth used when linearizing YAML for grep. High enough that real-world
+/// configs never hit the `...` truncation that would hide matchable leaves.
+const YAML_GREP_DEPTH: usize = 64;
 
 /// Short single-char flags that consume one following token (or inline remainder)
 /// as their value. `-e` is handled separately — its value goes to `patterns`.
@@ -301,6 +307,29 @@ pub fn run(
         patterns.join("|")
     };
 
+    // YAML-aware fast path: when every explicit path is a .yaml/.yml file and no
+    // match-altering flags are present, grep the linearized (dotted-path) form so
+    // each hit carries its full parent context (e.g. `databases.base.enabled: true`
+    // instead of a bare `enabled: true`). Anything unusual falls through to the
+    // raw rg/grep path below, so behavior is unchanged for every other case.
+    if !paths.is_empty()
+        && paths.iter().all(|p| is_yaml_file(p))
+        && yaml_mode_supported(&extra_args)
+    {
+        if let Some(res) =
+            try_grep_yaml(&patterns, &paths, &extra_args, max_results, max_line_len)
+        {
+            print!("{}", res.output);
+            timer.track(
+                &format!("grep -rn '{}' {}", pattern_display, paths.join(" ")),
+                "rtk grep (yaml)",
+                &res.raw_input,
+                &res.output,
+            );
+            return Ok(res.exit_code);
+        }
+    }
+
     let paths = if paths.is_empty() {
         vec![".".to_string()]
     } else {
@@ -571,6 +600,132 @@ fn compact_path(path: &str) -> String {
         parts[parts.len() - 2],
         parts[parts.len() - 1]
     )
+}
+
+/// Outcome of the YAML-aware grep fast path.
+struct YamlGrepResult {
+    /// Formatted, ready-to-print grep output.
+    output: String,
+    /// Grep exit code (0 = matches found, 1 = none).
+    exit_code: i32,
+    /// Concatenated raw file contents, used only for token-savings tracking.
+    raw_input: String,
+}
+
+/// Returns true when `path` is an existing regular file with a YAML extension.
+fn is_yaml_file(path: &str) -> bool {
+    let p = Path::new(path);
+    let ext_is_yaml = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("yaml") || e.eq_ignore_ascii_case("yml"));
+    ext_is_yaml && p.is_file()
+}
+
+/// Returns true when the passthrough args are safe for YAML mode.
+///
+/// Only an empty arg list or a lone case-insensitive flag is supported, because
+/// the linearized form cannot honor context (`-A`/`-B`/`-C`), inversion (`-v`),
+/// globbing, or output-format flags. Anything else falls back to raw grep.
+fn yaml_mode_supported(extra_args: &[String]) -> bool {
+    extra_args
+        .iter()
+        .all(|a| a == "-i" || a == "--ignore-case")
+}
+
+/// Greps the linearized form of one or more YAML files.
+///
+/// Returns `None` to signal "couldn't handle this, fall back to raw grep" when a
+/// file can't be read, a document doesn't parse, or a pattern isn't valid regex.
+fn try_grep_yaml(
+    patterns: &[String],
+    paths: &[String],
+    extra_args: &[String],
+    max_results: usize,
+    max_line_len: usize,
+) -> Option<YamlGrepResult> {
+    let case_insensitive = extra_args
+        .iter()
+        .any(|a| a == "-i" || a == "--ignore-case");
+
+    // Compile every pattern up front; any failure means we can't faithfully
+    // reproduce grep semantics, so bail to the raw path.
+    let mut regexes: Vec<Regex> = Vec::with_capacity(patterns.len());
+    for p in patterns {
+        // Mirror the raw path's BRE `\|` -> `|` alternation translation.
+        let pat = p.replace(r"\|", "|");
+        let pat = if case_insensitive {
+            format!("(?i){pat}")
+        } else {
+            pat
+        };
+        regexes.push(Regex::new(&pat).ok()?);
+    }
+
+    let mut raw_input = String::new();
+    // Preserve the caller's path order so output is deterministic.
+    let mut by_file: Vec<(String, Vec<String>)> = Vec::new();
+    let mut total_matches = 0usize;
+
+    for path in paths {
+        let content = std::fs::read_to_string(path).ok()?;
+        raw_input.push_str(&content);
+        let linear = filter_yaml_linear(&content, YAML_GREP_DEPTH, false).ok()?;
+
+        let mut hits = Vec::new();
+        for line in linear.lines() {
+            if regexes.iter().any(|re| re.is_match(line)) {
+                hits.push(truncate(line, max_line_len));
+            }
+        }
+        if !hits.is_empty() {
+            total_matches += hits.len();
+            by_file.push((path.clone(), hits));
+        }
+    }
+
+    let exit_code = if total_matches == 0 { 1 } else { 0 };
+
+    let pattern_display = if patterns.len() == 1 {
+        patterns[0].clone()
+    } else {
+        patterns.join("|")
+    };
+
+    if total_matches == 0 {
+        return Some(YamlGrepResult {
+            output: format!("0 matches for '{}'\n", pattern_display),
+            exit_code,
+            raw_input,
+        });
+    }
+
+    let mut output = format!("{} matches in {} files:\n\n", total_matches, by_file.len());
+    let per_file = config::limits().grep_max_per_file;
+    let mut shown = 0;
+    for (file, hits) in &by_file {
+        if shown >= max_results {
+            break;
+        }
+        let file_display = compact_path(file);
+        for content in hits.iter().take(per_file) {
+            if shown >= max_results {
+                break;
+            }
+            // No source line number: the dotted path is the locator.
+            output.push_str(&format!("{}:{}\n", file_display, content));
+            shown += 1;
+        }
+    }
+    if total_matches > shown {
+        output.push_str(&format!("[+{} more]\n", total_matches - shown));
+    }
+
+    Some(YamlGrepResult {
+        output,
+        exit_code,
+        raw_input,
+    })
 }
 
 #[cfg(test)]
@@ -1207,5 +1362,104 @@ mod tests {
             );
         }
         // If rg is not installed, skip gracefully (test still passes)
+    }
+
+    // --- YAML-aware grep ---
+
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn write_yaml(content: &str) -> NamedTempFile {
+        let mut f = NamedTempFile::with_suffix(".yaml").unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    #[test]
+    fn test_is_yaml_file_by_extension() {
+        let yaml = write_yaml("a: 1\n");
+        let yml = NamedTempFile::with_suffix(".yml").unwrap();
+        let txt = NamedTempFile::with_suffix(".txt").unwrap();
+
+        assert!(is_yaml_file(yaml.path().to_str().unwrap()));
+        assert!(is_yaml_file(yml.path().to_str().unwrap()));
+        assert!(!is_yaml_file(txt.path().to_str().unwrap()));
+        assert!(!is_yaml_file("does/not/exist.yaml"));
+    }
+
+    #[test]
+    fn test_yaml_mode_supported_gating() {
+        assert!(yaml_mode_supported(&[]));
+        assert!(yaml_mode_supported(&["-i".to_string()]));
+        assert!(yaml_mode_supported(&["--ignore-case".to_string()]));
+        // Context, inversion, and glob flags must fall back to raw grep.
+        assert!(!yaml_mode_supported(&["-v".to_string()]));
+        assert!(!yaml_mode_supported(&["-A".to_string(), "1".to_string()]));
+        assert!(!yaml_mode_supported(&["--glob".to_string()]));
+    }
+
+    #[test]
+    fn test_grep_yaml_resolves_full_path() {
+        // The motivating case: a bare `enabled` match carries its parent context.
+        let f = write_yaml("databases:\n  base:\n    enabled: true\n  cache:\n    enabled: false\n");
+        let path = f.path().to_str().unwrap().to_string();
+        let res = try_grep_yaml(&["enabled".to_string()], &[path], &[], 200, 80).unwrap();
+
+        assert_eq!(res.exit_code, 0);
+        assert!(
+            res.output.contains("databases.base.enabled: true"),
+            "got: {}",
+            res.output
+        );
+        assert!(res.output.contains("databases.cache.enabled: false"));
+        assert!(res.output.starts_with("2 matches in 1 files:"));
+    }
+
+    #[test]
+    fn test_grep_yaml_no_match_exit_code() {
+        let f = write_yaml("a: 1\n");
+        let path = f.path().to_str().unwrap().to_string();
+        let res = try_grep_yaml(&["zzz_nope".to_string()], &[path], &[], 200, 80).unwrap();
+
+        assert_eq!(res.exit_code, 1);
+        assert!(res.output.contains("0 matches"));
+    }
+
+    #[test]
+    fn test_grep_yaml_case_insensitive() {
+        let f = write_yaml("Service:\n  Enabled: true\n");
+        let path = f.path().to_str().unwrap().to_string();
+        let res =
+            try_grep_yaml(&["enabled".to_string()], &[path], &["-i".to_string()], 200, 80).unwrap();
+
+        assert_eq!(res.exit_code, 0);
+        assert!(res.output.contains("Service.Enabled: true"), "got: {}", res.output);
+    }
+
+    #[test]
+    fn test_grep_yaml_honors_max_results() {
+        let f = write_yaml("a:\n  x: 1\n  y: 2\n  z: 3\n");
+        let path = f.path().to_str().unwrap().to_string();
+        // Match all three leaves but cap output at one.
+        let res = try_grep_yaml(&[r"\d".to_string()], &[path], &[], 1, 80).unwrap();
+
+        assert!(res.output.contains("[+2 more]"), "got: {}", res.output);
+    }
+
+    #[test]
+    fn test_grep_yaml_invalid_regex_falls_back() {
+        let f = write_yaml("a: 1\n");
+        let path = f.path().to_str().unwrap().to_string();
+        // Unbalanced bracket: can't compile, so yaml mode declines (None).
+        assert!(try_grep_yaml(&["[unclosed".to_string()], &[path], &[], 200, 80).is_none());
+    }
+
+    #[test]
+    fn test_grep_yaml_malformed_falls_back() {
+        let f = write_yaml("key: : : invalid\n  - nope\n");
+        let path = f.path().to_str().unwrap().to_string();
+        // Unparseable YAML: decline so the user still gets raw grep output.
+        assert!(try_grep_yaml(&["key".to_string()], &[path], &[], 200, 80).is_none());
     }
 }
