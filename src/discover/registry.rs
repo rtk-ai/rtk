@@ -2234,6 +2234,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_classify_sqlite3() {
+        assert!(matches!(
+            classify_command("sqlite3 mydb.db \".tables\""),
+            Classification::Supported {
+                rtk_equivalent: "rtk sqlite",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_sqlite3_query() {
+        assert!(matches!(
+            classify_command("sqlite3 /path/to/db.db \"SELECT * FROM users;\""),
+            Classification::Supported {
+                rtk_equivalent: "rtk sqlite",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_sqlite3() {
+        assert_eq!(
+            rewrite_command_no_prefixes("sqlite3 mydb.db \".tables\"", &[]),
+            Some("rtk sqlite mydb.db \".tables\"".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_sqlite3_query() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "sqlite3 /path/to/db.db \"SELECT name FROM sqlite_master WHERE type='table';\"",
+                &[]
+            ),
+            Some(
+                "rtk sqlite /path/to/db.db \"SELECT name FROM sqlite_master WHERE type='table';\""
+                    .into()
+            )
+        );
+    }
+
     // --- Python tooling ---
 
     #[test]

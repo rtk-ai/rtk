@@ -7,7 +7,7 @@ mod learn;
 mod parser;
 
 // Re-export command modules for routing
-use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, sqlite_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
@@ -197,6 +197,14 @@ enum Commands {
     #[command(disable_help_flag = true)]
     Psql {
         /// psql arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// SQLite3 CLI with compact output (strip separators, tab-separated data)
+    #[command(disable_help_flag = true)]
+    Sqlite {
+        /// sqlite3 arguments (database file, SQL query, or dot-commands)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1630,6 +1638,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Psql { args } => psql_cmd::run(&args, cli.verbose)?,
 
+        Commands::Sqlite { args } => sqlite_cmd::run(&args, cli.verbose)?,
+
         Commands::Pnpm { filter, command } => {
             // Warns user if filters are used with unsupported subcommands like typecheck
             if let Some(warning) = validate_pnpm_filters(&filter, &command) {
@@ -2504,6 +2514,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Dotnet { .. }
             | Commands::Docker { .. }
             | Commands::Kubectl { .. }
+            | Commands::Sqlite { .. }
             | Commands::Summary { .. }
             | Commands::Grep { .. }
             | Commands::Wget { .. }
