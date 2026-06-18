@@ -11,6 +11,22 @@ use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+/// Truncate a command string for the fixed-width "Recent Commands" column.
+///
+/// Must be UTF-8 char-boundary safe: slicing by byte index (e.g. `&s[..22]`)
+/// panics when the cut lands inside a multibyte character such as CJK, which
+/// is common in non-English command strings. Truncate by `char` instead.
+fn truncate_cmd_display(cmd: &str) -> String {
+    const MAX_CHARS: usize = 25;
+    const KEEP_CHARS: usize = 22;
+    if cmd.chars().count() > MAX_CHARS {
+        let truncated: String = cmd.chars().take(KEEP_CHARS).collect();
+        format!("{truncated}...")
+    } else {
+        cmd.to_string()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     project: bool, // added: per-project scope flag
@@ -246,11 +262,7 @@ pub fn run(
                 println!("──────────────────────────────────────────────────────────");
                 for rec in recent {
                     let time = rec.timestamp.with_timezone(&Local).format("%m-%d %H:%M");
-                    let cmd_short = if rec.rtk_cmd.len() > 25 {
-                        format!("{}...", &rec.rtk_cmd[..22])
-                    } else {
-                        rec.rtk_cmd.clone()
-                    };
+                    let cmd_short = truncate_cmd_display(&rec.rtk_cmd);
                     // added: tier indicators by savings level
                     let sign = if rec.savings_pct >= 70.0 {
                         "▲"
@@ -761,4 +773,34 @@ fn confirm_reset() -> Result<bool> {
         .context("Failed to read confirmation")?;
 
     Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_cmd_display_does_not_panic_on_multibyte() {
+        // Regression for `rtk gain --history` panicking at a non-char-boundary
+        // byte slice when a recent command contains CJK characters, e.g. `原`.
+        let cmd = "rtk git log 原命令原命令原命令原命令原命令原命令";
+        let out = truncate_cmd_display(cmd);
+        assert!(out.ends_with("..."));
+        // 22 kept chars + the "..." marker.
+        assert_eq!(out.chars().count(), 22 + 3);
+    }
+
+    #[test]
+    fn truncate_cmd_display_keeps_short_commands_unchanged() {
+        let cmd = "rtk git status";
+        assert_eq!(truncate_cmd_display(cmd), cmd);
+    }
+
+    #[test]
+    fn truncate_cmd_display_truncates_long_ascii() {
+        let cmd = "rtk git log --all --oneline --decorate --graph";
+        let out = truncate_cmd_display(cmd);
+        assert!(out.ends_with("..."));
+        assert_eq!(out.chars().count(), 22 + 3);
+    }
 }
