@@ -21,6 +21,10 @@
 
             cargoLock.lockFile = ./Cargo.lock;
 
+            # Tests hit the filesystem and search PATH — incompatible with Nix sandbox.
+            # The upstream CI already runs the full test suite.
+            doCheck = false;
+
             nativeBuildInputs = with pkgs; [ pkg-config ];
 
             buildInputs = pkgs.lib.optionals pkgs.stdenv.isDarwin (with pkgs.darwin.apple_sdk.frameworks; [
