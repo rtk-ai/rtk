@@ -979,4 +979,54 @@ api-1  | Connected to database";
             );
         }
     }
+
+    #[test]
+    fn test_kubectl_get_target_pods_aliases() {
+        for resource in ["po", "pod", "pods"] {
+            let args = vec![resource.to_string(), "-n".to_string(), "default".to_string()];
+
+            assert_eq!(
+                kubectl_get_target(&args),
+                Some(("pods", &args[1..])),
+                "failed for {resource}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_kubectl_get_target_services_aliases() {
+        for resource in ["svc", "service", "services"] {
+            let args = vec![resource.to_string(), "-A".to_string()];
+
+            assert_eq!(
+                kubectl_get_target(&args),
+                Some(("services", &args[1..])),
+                "failed for {resource}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_kubectl_get_target_unsupported_resource() {
+        let args = vec!["deployments".to_string()];
+
+        assert_eq!(kubectl_get_target(&args), None);
+    }
+
+    #[test]
+    fn test_kubectl_get_target_respects_output_flags() {
+        for output_flag in ["-o", "-owide", "--output", "--output=json"] {
+            let args = vec![
+                "pods".to_string(),
+                output_flag.to_string(),
+                "wide".to_string(),
+            ];
+
+            assert_eq!(
+                kubectl_get_target(&args),
+                None,
+                "should pass through {output_flag}"
+            );
+        }
+    }
 }
