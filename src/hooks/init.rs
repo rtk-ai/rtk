@@ -1220,6 +1220,60 @@ fn hook_command_program(hook_command: &str) -> Option<&str> {
         .filter(|program| !program.is_empty())
 }
 
+fn split_hook_command(command: &str) -> Option<(&str, &str)> {
+    let command = command.trim();
+    if command.is_empty() {
+        return None;
+    }
+
+    let bytes = command.as_bytes();
+    if matches!(bytes.first(), Some(b'"' | b'\'')) {
+        let quote = bytes[0];
+        let end = bytes
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find_map(|(idx, byte)| (*byte == quote).then_some(idx))?;
+        let program = &command[1..end];
+        let rest = command[end + 1..].trim();
+        return Some((program, rest));
+    }
+
+    let split_at = command.find(char::is_whitespace).unwrap_or(command.len());
+    let program = &command[..split_at];
+    let rest = command[split_at..].trim();
+    Some((program, rest))
+}
+
+fn hook_program_is_rtk(program: &str) -> bool {
+    let file_name = program
+        .trim_matches(|c| c == '"' || c == '\'')
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+
+    matches!(file_name.as_str(), "rtk" | "rtk.exe")
+}
+
+fn hook_command_equivalent(actual: &str, expected: &str) -> bool {
+    if actual == expected {
+        return true;
+    }
+
+    let Some((expected_program, expected_args)) = split_hook_command(expected) else {
+        return false;
+    };
+    if !hook_program_is_rtk(expected_program) {
+        return false;
+    }
+
+    let Some((actual_program, actual_args)) = split_hook_command(actual) else {
+        return false;
+    };
+    hook_program_is_rtk(actual_program) && actual_args.eq_ignore_ascii_case(expected_args)
+}
+
 fn resolve_hook_command_program(hook_command: &str) -> Result<PathBuf, String> {
     let program = hook_command_program(hook_command).ok_or_else(|| {
         format!("hook command `{hook_command}` does not include an executable program")
@@ -1247,7 +1301,7 @@ fn hook_matcher_present(root: &serde_json::Value, hook_command: &str, matcher: &
                     .any(|hook| {
                         hook.get("command")
                             .and_then(|c| c.as_str())
-                            .is_some_and(|cmd| cmd == hook_command)
+                            .is_some_and(|cmd| hook_command_equivalent(cmd, hook_command))
                     })
         })
 }
@@ -1268,7 +1322,7 @@ fn remove_hook_command_entry(root: &mut serde_json::Value, hook_command: &str) -
             hooks.retain(|hook| {
                 hook.get("command")
                     .and_then(|c| c.as_str())
-                    .is_none_or(|cmd| cmd != hook_command)
+                    .is_none_or(|cmd| !hook_command_equivalent(cmd, hook_command))
             });
             removed |= hooks.len() != before_hooks;
         }
@@ -1306,7 +1360,9 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
         .any(|cmd| {
-            cmd == hook_command || cmd == CLAUDE_HOOK_COMMAND || cmd.contains(REWRITE_HOOK_FILE)
+            hook_command_equivalent(cmd, hook_command)
+                || hook_command_equivalent(cmd, CLAUDE_HOOK_COMMAND)
+                || cmd.contains(REWRITE_HOOK_FILE)
         })
 }
 
@@ -5758,10 +5814,61 @@ mod tests {
     }
 
     #[test]
+    fn test_missing_hook_matchers_accepts_absolute_rtk_exe_codex_command() {
+        let absolute_command = r"C:\Users\Administrator\.local\bin\rtk.exe hook codex";
+        let json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": absolute_command
+                        }]
+                    },
+                    {
+                        "matcher": "Shell",
+                        "hooks": [{
+                            "type": "command",
+                            "command": absolute_command
+                        }]
+                    },
+                    {
+                        "matcher": "PowerShell",
+                        "hooks": [{
+                            "type": "command",
+                            "command": absolute_command
+                        }]
+                    }
+                ]
+            }
+        });
+
+        assert!(missing_hook_matchers(&json_content, CODEX_HOOK_COMMAND).is_empty());
+        assert!(hook_already_present(&json_content, CODEX_HOOK_COMMAND));
+    }
+
+    #[test]
     fn test_hook_command_program_extracts_rtk() {
         assert_eq!(hook_command_program(CODEX_HOOK_COMMAND), Some("rtk"));
         assert_eq!(hook_command_program("  rtk hook claude"), Some("rtk"));
         assert_eq!(hook_command_program(""), None);
+    }
+
+    #[test]
+    fn test_hook_command_equivalent_accepts_quoted_absolute_rtk_exe() {
+        assert!(hook_command_equivalent(
+            r#""C:\Program Files\rtk\rtk.exe" hook codex"#,
+            CODEX_HOOK_COMMAND
+        ));
+        assert!(hook_command_equivalent(
+            "/usr/local/bin/rtk hook claude",
+            CLAUDE_HOOK_COMMAND
+        ));
+        assert!(!hook_command_equivalent(
+            r"C:\Users\Administrator\.codex\hooks\omx-native-hook-windows-shim.ps1",
+            CODEX_HOOK_COMMAND
+        ));
     }
 
     #[test]
@@ -5924,6 +6031,46 @@ mod tests {
 
         // And add hooks
         assert!(json_content.get("hooks").is_some());
+    }
+
+    #[test]
+    fn test_remove_hook_command_entry_removes_absolute_rtk_exe_codex_command() {
+        let absolute_command = r"C:\Users\Administrator\.local\bin\rtk.exe hook codex";
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {"type": "command", "command": absolute_command},
+                            {"type": "command", "command": "powershell.exe -File guard.ps1"}
+                        ]
+                    },
+                    {
+                        "matcher": "Shell",
+                        "hooks": [{"type": "command", "command": absolute_command}]
+                    },
+                    {
+                        "matcher": "PowerShell",
+                        "hooks": [{"type": "command", "command": absolute_command}]
+                    }
+                ]
+            }
+        });
+
+        assert!(remove_hook_command_entry(
+            &mut json_content,
+            CODEX_HOOK_COMMAND
+        ));
+
+        let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool_use.len(), 1);
+        let bash_hooks = pre_tool_use[0]["hooks"].as_array().unwrap();
+        assert_eq!(bash_hooks.len(), 1);
+        assert_eq!(
+            bash_hooks[0]["command"].as_str(),
+            Some("powershell.exe -File guard.ps1")
+        );
     }
 
     // Tests for atomic_write()
