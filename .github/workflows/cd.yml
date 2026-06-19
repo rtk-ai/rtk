@@ -4,6 +4,10 @@ on:
   workflow_dispatch:
   push:
     branches: [develop, master]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
 
 concurrency:
   group: cd-${{ github.ref }}
