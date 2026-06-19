@@ -390,6 +390,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^oc\s+(get|logs|describe|apply|status|adm)",
+        rtk_cmd: "rtk oc",
+        rewrite_prefixes: &["oc"],
+        category: "Infra",
+        savings_pct: 85.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^tree(\s|$)",
         rtk_cmd: "rtk tree",
         rewrite_prefixes: &["tree"],

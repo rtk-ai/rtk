@@ -27,24 +27,24 @@ pub fn run(cmd: ContainerCmd, args: &[String], verbose: u8) -> Result<i32> {
         ContainerCmd::DockerPsAll => docker_ps_all(verbose),
         ContainerCmd::DockerImages => docker_images(verbose),
         ContainerCmd::DockerLogs => docker_logs(args, verbose),
-        ContainerCmd::KubectlPods => kubectl_pods(args, verbose),
-        ContainerCmd::KubectlServices => kubectl_services(args, verbose),
-        ContainerCmd::KubectlLogs => kubectl_logs(args, verbose),
+        ContainerCmd::KubectlPods => k8s_pods("kubectl", args, verbose),
+        ContainerCmd::KubectlServices => k8s_services("kubectl", args, verbose),
+        ContainerCmd::KubectlLogs => k8s_logs("kubectl", args, verbose),
     }
 }
 
-fn run_kubectl_json<F>(cmd: Command, label: &str, filter_fn: F) -> Result<i32>
+fn run_k8s_json<F>(cmd: Command, tool: &str, label: &str, filter_fn: F) -> Result<i32>
 where
     F: Fn(&Value) -> String,
 {
     runner::run_filtered(
         cmd,
-        "kubectl",
+        tool,
         label,
         |stdout| match serde_json::from_str::<Value>(stdout) {
             Ok(json) => filter_fn(&json),
             Err(e) => {
-                eprintln!("[rtk] kubectl: JSON parse failed: {}", e);
+                eprintln!("[rtk] {}: JSON parse failed: {}", tool, e);
                 stdout.to_string()
             }
         },
@@ -330,13 +330,13 @@ fn docker_logs(args: &[String], _verbose: u8) -> Result<i32> {
     )
 }
 
-fn kubectl_pods(args: &[String], _verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("kubectl");
+pub fn k8s_pods(tool: &str, args: &[String], _verbose: u8) -> Result<i32> {
+    let mut cmd = resolved_command(tool);
     cmd.args(["get", "pods", "-o", "json"]);
     for arg in args {
         cmd.arg(arg);
     }
-    run_kubectl_json(cmd, "get pods", format_kubectl_pods)
+    run_k8s_json(cmd, tool, "get pods", format_kubectl_pods)
 }
 
 fn format_kubectl_pods(json: &Value) -> String {
@@ -416,13 +416,13 @@ fn format_kubectl_pods(json: &Value) -> String {
     out
 }
 
-fn kubectl_services(args: &[String], _verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("kubectl");
+pub fn k8s_services(tool: &str, args: &[String], _verbose: u8) -> Result<i32> {
+    let mut cmd = resolved_command(tool);
     cmd.args(["get", "services", "-o", "json"]);
     for arg in args {
         cmd.arg(arg);
     }
-    run_kubectl_json(cmd, "get services", format_kubectl_services)
+    run_k8s_json(cmd, tool, "get services", format_kubectl_services)
 }
 
 fn format_kubectl_services(json: &Value) -> String {
@@ -477,14 +477,14 @@ fn format_kubectl_services(json: &Value) -> String {
     out
 }
 
-fn kubectl_logs(args: &[String], _verbose: u8) -> Result<i32> {
+pub fn k8s_logs(tool: &str, args: &[String], _verbose: u8) -> Result<i32> {
     let pod = args.first().map(|s| s.as_str()).unwrap_or("");
     if pod.is_empty() {
-        println!("Usage: rtk kubectl logs <pod>");
+        println!("Usage: rtk {} logs <pod>", tool);
         return Ok(0);
     }
 
-    let mut cmd = resolved_command("kubectl");
+    let mut cmd = resolved_command(tool);
     cmd.args(["logs", "--tail", "100", pod]);
     for arg in args.iter().skip(1) {
         cmd.arg(arg);
@@ -493,7 +493,7 @@ fn kubectl_logs(args: &[String], _verbose: u8) -> Result<i32> {
     let label = format!("logs {}", pod);
     runner::run_filtered(
         cmd,
-        "kubectl",
+        tool,
         &label,
         |stdout| {
             format!(
@@ -751,17 +751,26 @@ pub fn run_compose_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
 }
 
 pub fn run_kubectl_get(args: &[String], verbose: u8) -> Result<i32> {
-    match kubectl_get_target(args) {
-        Some(("pods", rest)) => run(ContainerCmd::KubectlPods, rest, verbose),
-        Some(("services", rest)) => run(ContainerCmd::KubectlServices, rest, verbose),
-        _ => run_kubectl_get_passthrough(args, verbose),
+    run_k8s_get("kubectl", args, verbose)
+}
+
+fn run_k8s_get(tool: &str, args: &[String], verbose: u8) -> Result<i32> {
+    match k8s_get_target(args) {
+        Some(("pods", rest)) => k8s_pods(tool, rest, verbose),
+        Some(("services", rest)) => k8s_services(tool, rest, verbose),
+        _ => {
+            let passthrough_args: Vec<OsString> = std::iter::once(OsString::from("get"))
+                .chain(args.iter().map(|arg| OsString::from(arg.as_str())))
+                .collect();
+            crate::core::runner::run_passthrough(tool, &passthrough_args, verbose)
+        }
     }
 }
 
-fn kubectl_get_target(args: &[String]) -> Option<(&'static str, &[String])> {
+fn k8s_get_target(args: &[String]) -> Option<(&'static str, &[String])> {
     let resource = args.first()?.as_str();
     let rest = &args[1..];
-    if kubectl_get_requests_raw_output(rest) {
+    if k8s_get_requests_raw_output(rest) {
         return None;
     }
 
@@ -772,7 +781,7 @@ fn kubectl_get_target(args: &[String]) -> Option<(&'static str, &[String])> {
     }
 }
 
-fn kubectl_get_requests_raw_output(args: &[String]) -> bool {
+fn k8s_get_requests_raw_output(args: &[String]) -> bool {
     args.iter().any(|arg| {
         matches!(
             arg.as_str(),
@@ -782,15 +791,16 @@ fn kubectl_get_requests_raw_output(args: &[String]) -> bool {
     })
 }
 
-fn run_kubectl_get_passthrough(args: &[String], verbose: u8) -> Result<i32> {
-    let passthrough_args: Vec<OsString> = std::iter::once(OsString::from("get"))
-        .chain(args.iter().map(|arg| OsString::from(arg.as_str())))
-        .collect();
-    run_kubectl_passthrough(&passthrough_args, verbose)
-}
-
 pub fn run_kubectl_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
     crate::core::runner::run_passthrough("kubectl", args, verbose)
+}
+
+pub fn run_oc_get(args: &[String], verbose: u8) -> Result<i32> {
+    run_k8s_get("oc", args, verbose)
+}
+
+pub fn run_oc_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
+    crate::core::runner::run_passthrough("oc", args, verbose)
 }
 
 #[cfg(test)]
@@ -931,12 +941,12 @@ api-1  | Connected to database";
     }
 
     #[test]
-    fn test_kubectl_get_target_pods_aliases() {
+    fn test_k8s_get_target_pods_aliases() {
         for resource in ["po", "pod", "pods"] {
             let args = vec![resource.to_string(), "-n".to_string(), "default".to_string()];
 
             assert_eq!(
-                kubectl_get_target(&args),
+                k8s_get_target(&args),
                 Some(("pods", &args[1..])),
                 "failed for {resource}"
             );
@@ -944,12 +954,12 @@ api-1  | Connected to database";
     }
 
     #[test]
-    fn test_kubectl_get_target_services_aliases() {
+    fn test_k8s_get_target_services_aliases() {
         for resource in ["svc", "service", "services"] {
             let args = vec![resource.to_string(), "-A".to_string()];
 
             assert_eq!(
-                kubectl_get_target(&args),
+                k8s_get_target(&args),
                 Some(("services", &args[1..])),
                 "failed for {resource}"
             );
@@ -957,14 +967,14 @@ api-1  | Connected to database";
     }
 
     #[test]
-    fn test_kubectl_get_target_unsupported_resource() {
+    fn test_k8s_get_target_unsupported_resource() {
         let args = vec!["deployments".to_string()];
 
-        assert_eq!(kubectl_get_target(&args), None);
+        assert_eq!(k8s_get_target(&args), None);
     }
 
     #[test]
-    fn test_kubectl_get_target_respects_output_flags() {
+    fn test_k8s_get_target_respects_output_flags() {
         for output_flag in ["-o", "-owide", "--output", "--output=json"] {
             let args = vec![
                 "pods".to_string(),
@@ -973,10 +983,27 @@ api-1  | Connected to database";
             ];
 
             assert_eq!(
-                kubectl_get_target(&args),
+                k8s_get_target(&args),
                 None,
                 "should pass through {output_flag}"
             );
         }
+    }
+
+    // ── oc support ────────────────────────────────────────
+
+    #[test]
+    fn test_oc_pods_savings() {
+        let input_str = include_str!("../../../tests/fixtures/oc_pods.json");
+        let input: Value = serde_json::from_str(input_str).expect("fixture should parse");
+        let output = format_kubectl_pods(&input);
+        let input_tokens = input_str.split_whitespace().count();
+        let output_tokens = output.split_whitespace().count();
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "Expected >=60% savings, got {:.1}%",
+            savings
+        );
     }
 }
