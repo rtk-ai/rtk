@@ -88,10 +88,24 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
+    // `rg` and `grep` both rewrite to `rtk grep`, but an rg pattern is written
+    // in rg's native regex dialect, not grep's BRE default. The rg rule injects
+    // --engine=auto so the pattern reaches rg's engine unchanged instead of being
+    // BRE-translated (#1436 follow-up); a later grep dialect flag in the command
+    // routes to native grep instead (grep applies the dialect itself).
     RtkRule {
-        pattern: r"^(rg|grep)\s+",
+        pattern: r"^rg\s+",
+        rtk_cmd: "rtk grep --engine=auto",
+        rewrite_prefixes: &["rg"],
+        category: "Files",
+        savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^grep\s+",
         rtk_cmd: "rtk grep",
-        rewrite_prefixes: &["rg", "grep"],
+        rewrite_prefixes: &["grep"],
         category: "Files",
         savings_pct: 75.0,
         subcmd_savings: &[],

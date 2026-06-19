@@ -1,6 +1,6 @@
 //! Filters grep output by grouping matches by file.
 
-use crate::core::stream::exec_capture;
+use crate::core::stream::{CaptureResult, exec_capture};
 use crate::core::tracking;
 use crate::core::utils::resolved_command;
 use crate::core::{args_utils, config};
@@ -11,8 +11,9 @@ use std::collections::HashMap;
 /// Short single-char flags that consume one following token (or inline remainder)
 /// as their value. `-e` is handled separately — its value goes to `patterns`.
 /// Includes all rg short flags that take a value argument except `-e` and `-r`
-/// (stripped) and `-E` (dialect, left to #2138). Failure mode for a missing
-/// entry: the value becomes a positional (visible wrong result, not silent).
+/// (stripped) and `-E` (a dialect flag handled by `detect_syntax`/routing, not
+/// consumed here). Failure mode for a missing entry: the value becomes a
+/// positional (visible wrong result, not silent).
 const VALUE_FLAGS_SHORT: &[u8] = b"ABCMTdfgjmt";
 
 /// Long flags that consume the NEXT token as their value (space-separated form).
@@ -85,7 +86,7 @@ fn parse_cluster(rest: &str) -> ClusterResult {
         let ch = bytes[j];
         let is_e = ch == b'e';
         if is_e || VALUE_FLAGS_SHORT.contains(&ch) {
-            let prefix = strip_r(&raw_prefix);
+            let prefix = strip_short_args(&raw_prefix);
             // Inline value = bytes after this char; returned verbatim (no stripping).
             let inline = std::str::from_utf8(&bytes[j + 1..])
                 .unwrap_or("")
@@ -99,16 +100,16 @@ fn parse_cluster(rest: &str) -> ClusterResult {
         raw_prefix.push(ch as char);
         j += 1;
     }
-    ClusterResult::Boolean(strip_r(&raw_prefix))
+    ClusterResult::Boolean(strip_short_args(&raw_prefix))
 }
 
 /// Strip `r`/`R` from a string of flag letters.
 /// Returns `None` when nothing remains after stripping.
 ///
 /// Only called on accumulated flag letters (never on inline values).
-/// `strip_r("carrot")` → `Some("caot")` — this shows exactly why it must not
-/// touch value bytes; that corruption was the original `-ecarrot` bug.
-fn strip_r(flag_letters: &str) -> Option<String> {
+/// `strip_short_args("carrot")` → `Some("caot")` — this shows exactly why it
+/// must not touch value bytes; that corruption was the original `-ecarrot` bug.
+fn strip_short_args(flag_letters: &str) -> Option<String> {
     let s: String = flag_letters
         .chars()
         .filter(|&c| c != 'r' && c != 'R')
@@ -121,7 +122,7 @@ fn strip_r(flag_letters: &str) -> Option<String> {
 }
 
 /// Drop `--recursive` (grep-ism); pass all other long flags through unchanged.
-fn strip_recursive(arg: &str) -> Option<String> {
+fn strip_long_args(arg: &str) -> Option<String> {
     match arg {
         "--recursive" => None,
         _ => Some(arg.to_string()),
@@ -183,7 +184,7 @@ fn extract_pattern_path<T: AsRef<str>>(args: &[T]) -> (Vec<String>, Vec<String>,
                 continue;
             }
             // Drop --recursive; pass everything else through.
-            if let Some(cleaned) = strip_recursive(arg) {
+            if let Some(cleaned) = strip_long_args(arg) {
                 flags.push(cleaned);
             }
             i += 1;
@@ -251,6 +252,156 @@ fn extract_pattern_path<T: AsRef<str>>(args: &[T]) -> (Vec<String>, Vec<String>,
     (patterns, paths, flags)
 }
 
+/// Regex dialect selected by a grep dialect flag. [`detect_syntax`] returns
+/// `None` for grep's POSIX default (BRE), so the default needs no variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegexSyntax {
+    /// Extended Regular Expression (`-E`/`--extended-regexp`).
+    Ere,
+    /// Explicit Basic Regular Expression (`-G`/`--basic-regexp`).
+    Basic,
+    /// Perl-Compatible Regular Expression (`-P`/`--perl-regexp`).
+    Pcre,
+    /// Fixed string, no regex (`-F`/`--fixed-strings`).
+    Fixed,
+}
+
+/// Returns the regex dialect requested via a grep dialect flag, or `None` for
+/// the POSIX default (BRE — what plain `grep` uses with no dialect flag).
+///
+/// Matches GNU grep semantics: the LAST dialect flag wins (`-E -F` → Fixed), and
+/// a dialect char bundled in a short cluster counts too (`-iE` → Ere). Scanning
+/// stops at `--` (everything after is an operand) and at `=` within a token (so
+/// a `--color=…` value can't false-trigger).
+fn detect_syntax(extra_args: &[String]) -> Option<RegexSyntax> {
+    let mut syntax = None;
+    for arg in extra_args {
+        if arg == "--" {
+            break;
+        }
+        match arg.as_str() {
+            "-E" | "--extended-regexp" => syntax = Some(RegexSyntax::Ere),
+            "-G" | "--basic-regexp" => syntax = Some(RegexSyntax::Basic),
+            "-P" | "--perl-regexp" => syntax = Some(RegexSyntax::Pcre),
+            "-F" | "--fixed-strings" => syntax = Some(RegexSyntax::Fixed),
+            other => {
+                // Short flag or bundled cluster (`-iE`): a single leading dash,
+                // scan its chars until `=`. Last dialect char wins.
+                if let Some(rest) = other.strip_prefix('-') {
+                    if rest.starts_with('-') {
+                        continue;
+                    }
+                    for ch in rest.chars() {
+                        match ch {
+                            '=' => break,
+                            'E' => syntax = Some(RegexSyntax::Ere),
+                            'G' => syntax = Some(RegexSyntax::Basic),
+                            'P' => syntax = Some(RegexSyntax::Pcre),
+                            'F' => syntax = Some(RegexSyntax::Fixed),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+    syntax
+}
+
+/// True if the caller passed an rg engine-selection flag (`--engine[=...]` or
+/// `--auto-hybrid-regex`). These pick rg's own regex engine, so the pattern is
+/// rg-native: it must run on rg (never grep, which can't accept the flag) and
+/// must NOT be BRE-translated. This is also the marker the rg-origin hook
+/// rewrite uses (`--engine=auto`) to keep `rg` patterns off grep's BRE path.
+fn has_rg_engine_flag<T: AsRef<str>>(extra_args: &[T]) -> bool {
+    extra_args.iter().any(|a| {
+        let a = a.as_ref();
+        a == "--engine" || a.starts_with("--engine=") || a == "--auto-hybrid-regex"
+    })
+}
+
+/// Translates a POSIX BRE pattern (grep's default) into an equivalent regex for
+/// ripgrep.
+///
+/// In BRE the metacharacters are the *escaped* forms (`\(`, `\)`, `\+`, `\?`,
+/// `\{`, `\}`, `\|`) and the bare characters are literals; rg uses the inverse
+/// convention. A leading bare `*` is also a literal in BRE. `.` and a non-leading
+/// `*` keep their meaning, so `\.`/`\*` and `.`/`*` pass through unchanged.
+///
+/// This fixes issue #1436: `delete()` is a literal match in BRE, but feeding it
+/// straight to rg treats `()` as an empty group and matches every `delete`.
+fn bre_to_pcre(bre: &str) -> String {
+    let mut out = String::with_capacity(bre.len() + 8);
+    let mut chars = bre.chars();
+    let mut at_start = true;
+    // Inside a `[...]` bracket expression every metacharacter is already literal
+    // in both dialects, so the contents pass through untranslated. (The rare
+    // POSIX `[]...]`/`[^]...]` form, where a leading `]` is literal, is not
+    // special-cased — such a pattern passes through exactly as written.)
+    let mut in_bracket = false;
+    while let Some(ch) = chars.next() {
+        if in_bracket {
+            out.push(ch);
+            if ch == ']' {
+                in_bracket = false;
+            }
+            at_start = false;
+            continue;
+        }
+        match ch {
+            // Opening a bracket expression: copy verbatim until it closes.
+            '[' => {
+                in_bracket = true;
+                out.push('[');
+            }
+            '\\' => match chars.next() {
+                // Escaped BRE metacharacter -> unescape so rg treats it as one.
+                Some(c @ ('+' | '?' | '|' | '(' | ')' | '{' | '}')) => out.push(c),
+                // Escaped backslash -> a literal backslash in both dialects.
+                Some('\\') => out.push_str(r"\\"),
+                // Any other escape (`\.`, `\*`, `\d`) -> keep verbatim.
+                Some(c) => {
+                    out.push('\\');
+                    out.push(c);
+                }
+                // Trailing lone backslash -> keep as-is.
+                None => out.push('\\'),
+            },
+            // A leading `*` has nothing to quantify in BRE, so it is literal.
+            '*' if at_start => out.push_str(r"\*"),
+            // Bare BRE metacharacters are literals -> escape them for rg.
+            '+' | '?' | '|' | '(' | ')' | '{' | '}' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+        at_start = false;
+    }
+    out
+}
+
+/// Runs native grep with the original (untranslated) patterns and grep-compatible
+/// flags, which grep interprets in its own dialect. Used when the caller named
+/// any grep dialect (`-E`/`-G`/`-P`/`-F`), and as the fallback when rg is
+/// unavailable.
+fn native_grep(
+    patterns: &[String],
+    paths: &[String],
+    extra_args: &[String],
+) -> Result<CaptureResult> {
+    let mut grep_cmd = resolved_command("grep");
+    grep_cmd.args(extra_args);
+    for p in patterns {
+        grep_cmd.args(["-e", p]);
+    }
+    // --null (not -Z): on BSD/macOS grep -Z means --decompress, not the NUL
+    // filename separator parse_match_line() needs (issue #2310).
+    grep_cmd.args(["-rnH", "--null", "--"]);
+    grep_cmd.args(paths);
+    exec_capture(&mut grep_cmd)
+}
+
 pub fn run(
     max_line_len: usize,
     max_results: usize,
@@ -312,50 +463,57 @@ pub fn run(
         eprintln!("grep: '{}' in {}", pattern_display, path_display);
     }
 
-    let mut rg_cmd = resolved_command("rg");
-    // --no-ignore-vcs: match grep -r behavior (don't skip .gitignore'd files).
-    // Without this, rg returns 0 matches for files in .gitignore, causing
-    // false negatives that make AI agents draw wrong conclusions.
-    // Using --no-ignore-vcs (not --no-ignore) so .ignore/.rgignore are still respected.
-    // -H: always emit the filename.
-    // -0: NUL-separate filename. Allows the parser to disambiguate filenames or
-    // content containing `:digits:` patterns (issue #1436).
-    rg_cmd.args(["-nH0", "--no-heading", "--no-ignore-vcs"]);
+    // Routing (per regex dialect):
+    // - An explicit grep dialect flag (-E/-G/-P/-F) names a grep engine → run
+    //   native grep directly; it applies the dialect from extra_args. No rg, no
+    //   translation.
+    // - An rg engine flag (--engine/--auto-hybrid-regex, incl. the rg-origin
+    //   hook marker --engine=auto) forces rg even alongside a dialect flag, since
+    //   grep can't accept it; that pattern is rg-native, so it is not translated.
+    // - The plain default (no dialect) goes through rg with BRE→rg translation
+    //   (issue #1436).
+    let syntax = detect_syntax(&extra_args);
+    let rg_engine = has_rg_engine_flag(&extra_args);
 
-    if let Some(ft) = file_type {
-        rg_cmd.arg("--type").arg(ft);
-    }
+    let result = if syntax.is_some() && !rg_engine {
+        native_grep(&patterns, &paths, &extra_args).context("grep failed")?
+    } else {
+        let mut rg_cmd = resolved_command("rg");
+        // --no-ignore-vcs: match grep -r behavior (don't skip .gitignore'd files)
+        // so AI agents don't draw wrong conclusions from missing matches.
+        // -H: always emit the filename. -0: NUL-separate the filename so the
+        // parser can disambiguate `:digits:` in paths/content (issue #1436).
+        rg_cmd.args(["-nH0", "--no-heading", "--no-ignore-vcs"]);
 
-    // extra_args is already stripped of -r/-R/-recursive by extract_pattern_path
-    rg_cmd.args(&extra_args);
+        if let Some(ft) = file_type {
+            rg_cmd.arg("--type").arg(ft);
+        }
 
-    // All patterns as -e flags (BRE \| → | translation for rg's PCRE engine).
-    // Using -e keeps `--` semantically as a flag/path separator, not part of the pattern.
-    for p in &patterns {
-        rg_cmd.args(["-e", &p.replace(r"\|", "|")]);
-    }
+        // extract_pattern_path already dropped -r/--recursive during the split,
+        // and no grep dialect flag reaches here (those route to native grep
+        // above), so the caller's remaining flags forward to rg unchanged.
+        rg_cmd.args(&extra_args);
 
-    // `--` after all flags: prevents rg from interpreting path args starting
-    // with `-` as its own flags.
-    rg_cmd.arg("--");
-    rg_cmd.args(&paths);
+        // Translate only the plain BRE default. An rg engine flag means the
+        // pattern is already rg-native, so pass it through verbatim.
+        let translate = !rg_engine;
+        for p in &patterns {
+            let pattern = if translate { bre_to_pcre(p) } else { p.clone() };
+            rg_cmd.args(["-e", &pattern]);
+        }
 
-    let result = exec_capture(&mut rg_cmd)
-        .or_else(|_| {
-            // rg unavailable: fall back to system grep with the original,
-            // untranslated patterns (grep interprets BRE natively).
-            let mut grep_cmd = resolved_command("grep");
-            grep_cmd.args(&extra_args);
-            for p in &patterns {
-                grep_cmd.args(["-e", p]);
-            }
-            // --null (not -Z): on BSD/macOS grep -Z means --decompress, not the
-            // NUL filename separator parse_match_line() needs (issue #2310).
-            grep_cmd.args(["-rnH", "--null", "--"]);
-            grep_cmd.args(&paths);
-            exec_capture(&mut grep_cmd)
-        })
-        .context("grep/rg failed")?;
+        // `--` after all flags: stop rg reading path args as its own flags.
+        rg_cmd.arg("--");
+        rg_cmd.args(&paths);
+
+        exec_capture(&mut rg_cmd)
+            .or_else(|_| {
+                // rg unavailable: fall back to native grep with the original,
+                // untranslated patterns (grep interprets each dialect natively).
+                native_grep(&patterns, &paths, &extra_args)
+            })
+            .context("grep/rg failed")?
+    };
 
     // Passthrough output flags that produce output that is already small.
     if has_format_flag(&extra_args) {
@@ -637,12 +795,137 @@ mod tests {
         assert!(!cleaned.is_empty());
     }
 
-    // Fix: BRE \| alternation is translated to PCRE | for rg
+    fn s(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    // --- bre_to_pcre (issue #1436) ---
+
     #[test]
-    fn test_bre_alternation_translated() {
-        let pattern = r"fn foo\|pub.*bar";
-        let rg_pattern = pattern.replace(r"\|", "|");
-        assert_eq!(rg_pattern, "fn foo|pub.*bar");
+    fn test_bre_to_pcre_literal_metachars_escaped() {
+        // Literal in BRE, special in PCRE -> must be escaped for rg.
+        assert_eq!(bre_to_pcre("delete()"), r"delete\(\)");
+        assert_eq!(bre_to_pcre("a+b"), r"a\+b");
+        assert_eq!(bre_to_pcre("a?b"), r"a\?b");
+        assert_eq!(bre_to_pcre("foo|bar"), r"foo\|bar");
+        assert_eq!(bre_to_pcre("a{2}"), r"a\{2\}");
+        assert_eq!(bre_to_pcre("a{2,3}"), r"a\{2,3\}");
+    }
+
+    #[test]
+    fn test_bre_to_pcre_escaped_metachars_unescaped() {
+        // BRE escape that means "special" -> unescape for PCRE.
+        assert_eq!(bre_to_pcre(r"\(group\)"), "(group)");
+        assert_eq!(bre_to_pcre(r"a\{2\}"), "a{2}");
+        assert_eq!(bre_to_pcre(r"foo\|bar"), "foo|bar");
+        assert_eq!(bre_to_pcre(r"a\+"), "a+");
+        assert_eq!(bre_to_pcre(r"a\?"), "a?");
+    }
+
+    #[test]
+    fn test_bre_to_pcre_passthrough() {
+        // Same meaning in BRE and PCRE -> unchanged.
+        assert_eq!(bre_to_pcre(".*"), ".*");
+        assert_eq!(bre_to_pcre("^foo$"), "^foo$");
+        assert_eq!(bre_to_pcre("[a-z]"), "[a-z]");
+        assert_eq!(bre_to_pcre(r"\."), r"\.");
+        assert_eq!(bre_to_pcre(r"foo\nbar"), r"foo\nbar");
+    }
+
+    #[test]
+    fn test_bre_to_pcre_composed() {
+        assert_eq!(bre_to_pcre("fn delete(.*)"), r"fn delete\(.*\)");
+        // The original #1436 alternation case.
+        assert_eq!(bre_to_pcre(r"fn foo\|pub.*bar"), "fn foo|pub.*bar");
+        // Leading bare `*` is literal in BRE.
+        assert_eq!(bre_to_pcre("*.rs"), r"\*.rs");
+    }
+
+    #[test]
+    fn test_bre_to_pcre_bracket_expressions() {
+        // Metacharacter-lookalikes are literal inside [...] -> pass through.
+        assert_eq!(bre_to_pcre("[a(b]"), "[a(b]");
+        assert_eq!(bre_to_pcre("[+?{}]"), "[+?{}]");
+        assert_eq!(bre_to_pcre("pre[(]post"), "pre[(]post");
+        // A metacharacter OUTSIDE the bracket is still escaped.
+        assert_eq!(bre_to_pcre("[a-z]+"), r"[a-z]\+");
+    }
+
+    // --- detect_syntax ---
+    // Note: the POSIX default (BRE) is represented as `None`; any `Some(dialect)`
+    // (`-E`/`-G`/`-P`/`-F` and long forms) routes the call site to native grep,
+    // while `None` is the rg+translate default. Each dialect maps to its variant.
+
+    #[test]
+    fn test_detect_syntax_default_and_long_forms() {
+        assert_eq!(detect_syntax(&[]), None);
+        assert_eq!(detect_syntax(&s(&["-i", "-n"])), None);
+        assert_eq!(
+            detect_syntax(&s(&["--extended-regexp"])),
+            Some(RegexSyntax::Ere)
+        );
+        assert_eq!(
+            detect_syntax(&s(&["--basic-regexp"])),
+            Some(RegexSyntax::Basic)
+        );
+        assert_eq!(
+            detect_syntax(&s(&["--perl-regexp"])),
+            Some(RegexSyntax::Pcre)
+        );
+        assert_eq!(
+            detect_syntax(&s(&["--fixed-strings"])),
+            Some(RegexSyntax::Fixed)
+        );
+    }
+
+    #[test]
+    fn test_detect_syntax_short_forms() {
+        assert_eq!(detect_syntax(&s(&["-E"])), Some(RegexSyntax::Ere));
+        assert_eq!(detect_syntax(&s(&["-G"])), Some(RegexSyntax::Basic));
+        assert_eq!(detect_syntax(&s(&["-P"])), Some(RegexSyntax::Pcre));
+        assert_eq!(detect_syntax(&s(&["-F"])), Some(RegexSyntax::Fixed));
+    }
+
+    #[test]
+    fn test_detect_syntax_last_wins() {
+        assert_eq!(detect_syntax(&s(&["-E", "-G"])), Some(RegexSyntax::Basic));
+        assert_eq!(detect_syntax(&s(&["-G", "-E"])), Some(RegexSyntax::Ere));
+        assert_eq!(detect_syntax(&s(&["-E", "-P"])), Some(RegexSyntax::Pcre));
+        assert_eq!(detect_syntax(&s(&["-P", "-F"])), Some(RegexSyntax::Fixed));
+    }
+
+    #[test]
+    fn test_detect_syntax_stops_at_dashdash() {
+        assert_eq!(
+            detect_syntax(&s(&["-E", "--", "-G"])),
+            Some(RegexSyntax::Ere)
+        );
+    }
+
+    #[test]
+    fn test_detect_syntax_short_clusters() {
+        assert_eq!(detect_syntax(&s(&["-nE"])), Some(RegexSyntax::Ere));
+        assert_eq!(detect_syntax(&s(&["-inP"])), Some(RegexSyntax::Pcre));
+    }
+
+    #[test]
+    fn test_detect_syntax_interleaved() {
+        assert_eq!(
+            detect_syntax(&s(&["-i", "--glob", "*.rs", "-E", "-A", "2"])),
+            Some(RegexSyntax::Ere)
+        );
+    }
+
+    // --- has_rg_engine_flag ---
+
+    #[test]
+    fn test_has_rg_engine_flag() {
+        assert!(has_rg_engine_flag(&["--engine", "auto"]));
+        assert!(has_rg_engine_flag(&["--engine=pcre2"]));
+        assert!(has_rg_engine_flag(&["--auto-hybrid-regex"]));
+        assert!(!has_rg_engine_flag(&["-i", "-n"]));
+        // Must not false-positive on the similarly-named --encoding flag.
+        assert!(!has_rg_engine_flag(&["--encoding", "utf8"]));
     }
 
     // --- parse_cluster ---
@@ -747,28 +1030,28 @@ mod tests {
         assert_eq!(parse_cluster("M120"), vt(None, 'M', "120"));
     }
 
-    // --- strip_r ---
+    // --- strip_short_args ---
 
     #[test]
-    fn test_strip_r() {
-        assert_eq!(strip_r("r"), None);
-        assert_eq!(strip_r("R"), None);
-        assert_eq!(strip_r("rR"), None);
-        assert_eq!(strip_r(""), None);
-        assert_eq!(strip_r("rn"), Some("n".to_string()));
-        assert_eq!(strip_r("Rni"), Some("ni".to_string()));
-        assert_eq!(strip_r("i"), Some("i".to_string()));
+    fn test_strip_short_args() {
+        assert_eq!(strip_short_args("r"), None);
+        assert_eq!(strip_short_args("R"), None);
+        assert_eq!(strip_short_args("rR"), None);
+        assert_eq!(strip_short_args(""), None);
+        assert_eq!(strip_short_args("rn"), Some("n".to_string()));
+        assert_eq!(strip_short_args("Rni"), Some("ni".to_string()));
+        assert_eq!(strip_short_args("i"), Some("i".to_string()));
         // Shows why it must only be called on flag letters, not value bytes:
-        assert_eq!(strip_r("carrot"), Some("caot".to_string()));
+        assert_eq!(strip_short_args("carrot"), Some("caot".to_string()));
     }
 
-    // --- strip_recursive ---
+    // --- strip_long_args ---
 
     #[test]
-    fn test_strip_recursive() {
-        assert_eq!(strip_recursive("--recursive"), None);
-        assert_eq!(strip_recursive("--glob"), Some("--glob".to_string()));
-        assert_eq!(strip_recursive("--type"), Some("--type".to_string()));
+    fn test_strip_long_args() {
+        assert_eq!(strip_long_args("--recursive"), None);
+        assert_eq!(strip_long_args("--glob"), Some("--glob".to_string()));
+        assert_eq!(strip_long_args("--type"), Some("--type".to_string()));
     }
 
     // --- extract_pattern_path ---

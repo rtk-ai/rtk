@@ -1423,9 +1423,42 @@ mod tests {
 
     #[test]
     fn test_rewrite_rg_pattern() {
+        // rg-origin rewrites carry --engine=auto (from the rg rule's rtk_cmd) so
+        // the pattern goes to rg's native engine, not rtk's BRE translation.
         assert_eq!(
             rewrite_command_no_prefixes("rg \"fn main\"", &[]),
-            Some("rtk grep \"fn main\"".into())
+            Some("rtk grep --engine=auto \"fn main\"".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_vs_grep_dialect() {
+        // #1436 follow-up: `rg` carries rg-regex semantics, so an rg rewrite
+        // skips rtk's BRE translation via the --engine=auto marker (a grep dialect
+        // flag like -E would route to native grep instead); `grep` keeps the BRE
+        // default.
+        assert_eq!(
+            rewrite_command_no_prefixes("rg 'foo(bar)+'", &[]),
+            Some("rtk grep --engine=auto 'foo(bar)+'".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("grep 'foo(bar)+'", &[]),
+            Some("rtk grep 'foo(bar)+'".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_with_flag_keeps_dialect_override() {
+        // Flagged rg also gets the rule's --engine=auto marker (a grep dialect
+        // flag like -E would route to native grep instead); the rest of the
+        // command's flags follow unchanged.
+        assert_eq!(
+            rewrite_command_no_prefixes("rg -i 'foo'", &[]),
+            Some("rtk grep --engine=auto -i 'foo'".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("rg -F 'a+b'", &[]),
+            Some("rtk grep --engine=auto -F 'a+b'".into())
         );
     }
 
