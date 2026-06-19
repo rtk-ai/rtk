@@ -109,6 +109,56 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
     Ok(result.exit_code)
 }
 
+/// Decide what to print for a dotnet subcommand from the structured `filtered`
+/// output and the raw process streams.
+///
+/// On failure RTK normally prepends the raw stdout (or stderr) so nothing the
+/// filter might have missed is lost. For `test`, the `Failed Tests:` section
+/// already reconstructs every failure (name + message/stack) from the TRX or
+/// console parse, so prepending the raw stdout there duplicates every failure
+/// and inflates the output (issue #2501). The raw fallback is kept only when
+/// the structured section is *not* a complete substitute:
+///
+/// - build / restore — failures come from a single source, no duplication;
+/// - test with empty `failed_tests` — build failure, crash with no TRX, or
+///   counts-unavailable run, so the raw stream is the only failure detail;
+/// - test where any failure has empty `details` — the section shows only a
+///   name, so the raw message must be preserved.
+///
+/// Behavior is byte-for-byte identical to the previous inline logic in every
+/// case except the de-duplicated one (test failures that carry full detail).
+fn compose_dotnet_output(
+    subcommand: &str,
+    command_success: bool,
+    stdout: &str,
+    stderr: &str,
+    filtered: &str,
+    test_failures_have_detail: bool,
+) -> String {
+    if command_success {
+        return filtered.to_string();
+    }
+
+    let needs_raw_fallback = match subcommand {
+        "test" => !test_failures_have_detail,
+        _ => true,
+    };
+
+    if !needs_raw_fallback {
+        return filtered.to_string();
+    }
+
+    let stdout_trimmed = stdout.trim();
+    let stderr_trimmed = stderr.trim();
+    if !stdout_trimmed.is_empty() {
+        format!("{}\n\n{}", stdout_trimmed, filtered)
+    } else if !stderr_trimmed.is_empty() {
+        format!("{}\n\n{}", stderr_trimmed, filtered)
+    } else {
+        filtered.to_string()
+    }
+}
+
 fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
     let binlog_path = build_binlog_path(subcommand);
@@ -137,6 +187,12 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);
     let command_success = result.success();
+
+    // Whether the filtered `test` output already reconstructs every failure
+    // (name + message/stack) in its `Failed Tests:` section. When it does,
+    // prepending the raw stdout below would print every failure twice and
+    // inflate the output — see issue #2501. Stays false for build/restore.
+    let mut test_failures_have_detail = false;
 
     let filtered = match subcommand {
         "build" => {
@@ -170,6 +226,12 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
             );
 
             let summary = normalize_test_summary(summary, command_success);
+            // Every failure must carry detail for the section to be a complete
+            // substitute for the raw stdout. `.all()` (not `.any()`) keeps the
+            // raw fallback when even one failure has empty `details`, so a
+            // name-only entry never silently drops its message (#2501).
+            test_failures_have_detail = !summary.failed_tests.is_empty()
+                && summary.failed_tests.iter().all(|t| !t.details.is_empty());
             let binlog_diagnostics = if should_expect_binlog && binlog_path.exists() {
                 normalize_build_summary(
                     binlog::parse_build(&binlog_path).unwrap_or_default(),
@@ -208,19 +270,14 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
         _ => raw.clone(),
     };
 
-    let output_to_print = if !command_success {
-        let stdout_trimmed = result.stdout.trim();
-        let stderr_trimmed = result.stderr.trim();
-        if !stdout_trimmed.is_empty() {
-            format!("{}\n\n{}", stdout_trimmed, filtered)
-        } else if !stderr_trimmed.is_empty() {
-            format!("{}\n\n{}", stderr_trimmed, filtered)
-        } else {
-            filtered
-        }
-    } else {
-        filtered
-    };
+    let output_to_print = compose_dotnet_output(
+        subcommand,
+        command_success,
+        &result.stdout,
+        &result.stderr,
+        &filtered,
+        test_failures_have_detail,
+    );
 
     println!("{}", output_to_print);
 
@@ -2553,5 +2610,159 @@ mod tests {
         cleanup_temp_file(&missing_file);
 
         assert!(!missing_file.exists());
+    }
+
+    // --- compose_dotnet_output: failing-run de-duplication (issue #2501) ---
+
+    fn failures_have_detail(summary: &binlog::TestSummary) -> bool {
+        !summary.failed_tests.is_empty()
+            && summary.failed_tests.iter().all(|t| !t.details.is_empty())
+    }
+
+    #[test]
+    fn test_failing_test_output_not_duplicated_issue_2501() {
+        // The raw stdout already prints each failure inline (MTP / xUnit v3),
+        // and format_test_output rebuilds the same failure in `Failed Tests:`.
+        // The old orchestration prepended the full raw stdout unconditionally,
+        // printing every failure twice (+65% tokens on the reported benchmark).
+        // With structured detail present the prepend must be dropped, so the
+        // failure's assertion string appears exactly once.
+        let assertion = "Assert.Equal() Failure: Values differ";
+        let raw_stdout = format!(
+            "  Failed MyTests.Widget_total [12 ms]\n  Error Message:\n   {assertion}\n  Stack Trace:\n     at MyTests.Widget()"
+        );
+        let summary = binlog::TestSummary {
+            passed: 717,
+            failed: 1,
+            skipped: 0,
+            total: 718,
+            project_count: 1,
+            failed_tests: vec![binlog::FailedTest {
+                name: "MyTests.Widget_total".to_string(),
+                details: vec![assertion.to_string()],
+            }],
+            duration_text: Some("00:00:03.10".to_string()),
+        };
+        let filtered = format_test_output(&summary, &[], &[], Path::new("/tmp/test.binlog"));
+        // Precondition: the structured section carries the failure detail.
+        assert!(filtered.contains(assertion));
+        assert!(failures_have_detail(&summary));
+
+        let output =
+            compose_dotnet_output("test", false, &raw_stdout, "", &filtered, true);
+
+        assert_eq!(
+            output.matches(assertion).count(),
+            1,
+            "failure detail must appear exactly once, got:\n{output}"
+        );
+        // Raw stdout must not be prepended when the section already has detail.
+        assert_eq!(output, filtered);
+    }
+
+    #[test]
+    fn test_failing_test_keeps_raw_when_failure_lacks_detail() {
+        // A failure parsed without detail (self-closing UnitTestResult, no
+        // ErrorInfo) yields a name-only section. The raw stdout carries the only
+        // message, so it must still be prepended — row 2 of the #2501 analysis.
+        let raw_stdout = "Failed Foo.Bar\n  message only present in raw stdout";
+        let summary = binlog::TestSummary {
+            failed: 1,
+            total: 1,
+            failed_tests: vec![binlog::FailedTest {
+                name: "Foo.Bar".to_string(),
+                details: vec![],
+            }],
+            ..Default::default()
+        };
+        assert!(!failures_have_detail(&summary));
+        let filtered = format_test_output(&summary, &[], &[], Path::new("/tmp/test.binlog"));
+
+        let output = compose_dotnet_output(
+            "test",
+            false,
+            raw_stdout,
+            "",
+            &filtered,
+            failures_have_detail(&summary),
+        );
+
+        assert!(output.contains("message only present in raw stdout"));
+        assert!(output.starts_with(raw_stdout));
+    }
+
+    #[test]
+    fn test_failing_test_mixed_detail_keeps_raw_fallback() {
+        // One failure has detail, another does not. `.all()` (not `.any()`)
+        // means the section is not a complete substitute, so the raw fallback
+        // is kept and the detail-less failure's message survives.
+        let summary = binlog::TestSummary {
+            failed: 2,
+            total: 2,
+            failed_tests: vec![
+                binlog::FailedTest {
+                    name: "A".to_string(),
+                    details: vec!["msg A".to_string()],
+                },
+                binlog::FailedTest {
+                    name: "B".to_string(),
+                    details: vec![],
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(!failures_have_detail(&summary));
+        let filtered = format_test_output(&summary, &[], &[], Path::new("/tmp/test.binlog"));
+
+        let output = compose_dotnet_output(
+            "test",
+            false,
+            "raw B failure message",
+            "",
+            &filtered,
+            failures_have_detail(&summary),
+        );
+
+        assert!(output.starts_with("raw B failure message"));
+    }
+
+    #[test]
+    fn test_compose_output_build_failure_keeps_raw_prepend() {
+        // `build` has a single failure source — never affected by #2501.
+        let out =
+            compose_dotnet_output("build", false, "raw build errors", "", "filtered build", false);
+        assert_eq!(out, "raw build errors\n\nfiltered build");
+    }
+
+    #[test]
+    fn test_compose_output_restore_failure_keeps_raw_prepend() {
+        let out =
+            compose_dotnet_output("restore", false, "raw restore", "", "filtered restore", false);
+        assert_eq!(out, "raw restore\n\nfiltered restore");
+    }
+
+    #[test]
+    fn test_compose_output_success_returns_filtered_only() {
+        // Success never prepends, regardless of subcommand or detail flag.
+        assert_eq!(
+            compose_dotnet_output("test", true, "raw stuff", "err", "filtered", false),
+            "filtered"
+        );
+        assert_eq!(
+            compose_dotnet_output("build", true, "raw stuff", "err", "filtered", false),
+            "filtered"
+        );
+    }
+
+    #[test]
+    fn test_compose_output_falls_back_to_stderr_when_stdout_empty() {
+        let out = compose_dotnet_output("test", false, "   ", "stderr diag", "filtered", false);
+        assert_eq!(out, "stderr diag\n\nfiltered");
+    }
+
+    #[test]
+    fn test_compose_output_filtered_only_when_both_streams_empty() {
+        let out = compose_dotnet_output("test", false, "  ", "  ", "filtered", false);
+        assert_eq!(out, "filtered");
     }
 }
