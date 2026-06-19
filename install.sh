@@ -1,11 +1,11 @@
 #!/usr/bin/env sh
-# rtk installer - https://github.com/rtk-ai/rtk
-# Usage: curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+# rtkx installer - https://github.com/sammyjdev/rtkx
+# Usage: curl -fsSL https://raw.githubusercontent.com/sammyjdev/rtkx/refs/heads/develop/install.sh | sh
 
 set -e
 
-REPO="rtk-ai/rtk"
-BINARY_NAME="rtk"
+REPO="sammyjdev/rtkx"
+BINARY_NAME="rtkx"
 INSTALL_DIR="${RTK_INSTALL_DIR:-$HOME/.local/bin}"
 
 # Colors

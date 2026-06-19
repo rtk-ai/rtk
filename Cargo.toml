@@ -1,13 +1,13 @@
 [package]
-name = "rtk"
+name = "rtkx"
 version = "0.42.2"
 edition = "2021"
 rust-version = "1.91"
-authors = ["Patrick Szymkowiak"]
-description = "Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption"
+authors = ["Patrick Szymkowiak", "sammyjdev"]
+description = "rtkx - context compression CLI for the AXON stack, a fork of rtk (Rust Token Killer)"
 license = "Apache 2.0"
-homepage = "https://www.rtk-ai.app"
-repository = "https://github.com/rtk-ai/rtk"
+homepage = "https://github.com/sammyjdev/rtkx"
+repository = "https://github.com/sammyjdev/rtkx"
 readme = "README.md"
 keywords = ["cli", "llm", "token", "filter", "productivity"]
 categories = ["command-line-utilities", "development-tools"]
@@ -59,12 +59,12 @@ extended-description = "rtk filters and compresses command outputs before they r
 section = "utility"
 priority = "optional"
 assets = [
-    ["target/release/rtk", "usr/bin/", "755"],
+    ["target/release/rtkx", "usr/bin/", "755"],
 ]
 # cargo-generate-rpm configuration
 [package.metadata.generate-rpm]
 assets = [
-    { source = "target/release/rtk", dest = "/usr/bin/rtk", mode = "755" },
+    { source = "target/release/rtkx", dest = "/usr/bin/rtkx", mode = "755" },
 ]
 
 [lints.rust]
