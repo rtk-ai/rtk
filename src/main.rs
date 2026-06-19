@@ -2044,9 +2044,8 @@ fn run_cli() -> Result<i32> {
             0
         }
 
-        Commands::Jest { ref args } | Commands::Vitest { ref args } => {
-            vitest_cmd::run_test(&cli.command, args, cli.verbose)?
-        }
+        Commands::Vitest { ref args } => vitest_cmd::run_vitest(args, cli.verbose)?,
+        Commands::Jest { ref args } => vitest_cmd::run_jest(args, cli.verbose)?,
 
         Commands::Prisma { command } => match command {
             PrismaCommands::Generate { args } => {

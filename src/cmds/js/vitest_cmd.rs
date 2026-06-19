@@ -11,7 +11,7 @@ use crate::parser::{
     emit_degradation_warning, emit_passthrough_warning, extract_json_object, truncate_passthrough,
     FormatMode, OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
 };
-use crate::Commands;
+use std::process::Command;
 
 /// Vitest JSON output structures (tool-specific format)
 #[derive(Debug, Deserialize)]
@@ -204,32 +204,28 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
     failures
 }
 
-pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
+pub fn run_vitest(args: &[String], verbose: u8) -> Result<i32> {
+    let mut cmd = package_manager_exec("vitest");
+    cmd
+        // Force non-watch mode
+        .arg("run")
+        // Enable JSON structured output
+        .arg("--reporter=json");
+    run_framework_test("vitest", cmd, args, verbose)
+}
 
-    let (framework, mut cmd) = match command {
-        Commands::Vitest { .. } => {
-            let framework = "vitest";
-            let mut cmd = package_manager_exec(framework);
-            cmd
-                // Force non-watch mode
-                .arg("run")
-                // Enable JSON structured output
-                .arg("--reporter=json");
-            (framework, cmd)
-        }
-        Commands::Jest { .. } => {
-            let framework = "jest";
-            let mut cmd = package_manager_exec(framework);
-            cmd
-                // Force non-watch mode
-                .arg("--no-watch")
-                // Enable JSON structured output
-                .arg("--json");
-            (framework, cmd)
-        }
-        _ => unreachable!(),
-    };
+pub fn run_jest(args: &[String], verbose: u8) -> Result<i32> {
+    let mut cmd = package_manager_exec("jest");
+    cmd
+        // Force non-watch mode
+        .arg("--no-watch")
+        // Enable JSON structured output
+        .arg("--json");
+    run_framework_test("jest", cmd, args, verbose)
+}
+
+fn run_framework_test(framework: &str, mut cmd: Command, args: &[String], verbose: u8) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
 
     for arg in args {
         if arg == "run"
