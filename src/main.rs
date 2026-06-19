@@ -51,6 +51,21 @@ pub enum AgentTarget {
     Hermes,
 }
 
+/// Subcommands for the reversible compression store (CCR).
+#[derive(Debug, Subcommand)]
+enum CcrCommands {
+    /// Store a file's contents and print its restore handle
+    Store {
+        /// File whose contents to store (use "-" for stdin)
+        file: PathBuf,
+    },
+    /// Print the original contents previously stored under a handle
+    Restore {
+        /// Handle returned by `rtkx ccr store`
+        handle: String,
+    },
+}
+
 #[derive(Parser)]
 #[command(
     name = "rtkx",
@@ -235,6 +250,12 @@ enum Commands {
         /// Show keys only (strip all values, show structure)
         #[arg(long)]
         keys_only: bool,
+    },
+
+    /// Reversible compression store (CCR): keep originals retrievable by handle
+    Ccr {
+        #[command(subcommand)]
+        command: CcrCommands,
     },
 
     /// Summarize project dependencies
@@ -1370,7 +1391,7 @@ fn main() {
     let code = match run_cli() {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("rtk: {:#}", e);
+            eprintln!("rtkx: {:#}", e);
             1
         }
     };
@@ -1681,6 +1702,24 @@ fn run_cli() -> Result<i32> {
             }
             0
         }
+
+        Commands::Ccr { command } => match command {
+            CcrCommands::Store { file } => {
+                let content = if file == Path::new("-") {
+                    std::io::read_to_string(std::io::stdin())?
+                } else {
+                    std::fs::read_to_string(&file)?
+                };
+                let handle = core::ccr::store(&content)?;
+                println!("{handle}");
+                0
+            }
+            CcrCommands::Restore { handle } => {
+                let content = core::ccr::restore(&handle)?;
+                print!("{content}");
+                0
+            }
+        },
 
         Commands::Deps { path } => {
             deps::run(&path, cli.verbose)?;
