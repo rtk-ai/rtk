@@ -8,8 +8,8 @@ use regex::Regex;
 use serde::Deserialize;
 
 use crate::parser::{
-    emit_degradation_warning, emit_passthrough_warning, truncate_passthrough, FormatMode,
-    OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
+    build_json_envelope, emit_degradation_warning, emit_passthrough_warning, truncate_passthrough,
+    FormatMode, OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
 };
 
 /// Matches real Playwright JSON reporter output (suites → specs → tests → results)
@@ -241,7 +241,7 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
     failures
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+pub fn run(args: &[String], verbose: u8, json: bool) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     // Skip `which playwright` — it can find pyenv shims or other non-Node
@@ -293,6 +293,24 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     // Parse output using PlaywrightParser
     let parse_result = PlaywrightParser::parse(&result.stdout);
+
+    // R7: --json bypasses formatter, suppresses tier-warning stderr, emits stable envelope
+    if json {
+        let envelope = build_json_envelope("playwright", parse_result, result.exit_code);
+        let serialized = serde_json::to_string(&envelope)
+            .context("Failed to serialize JSON envelope")?;
+        println!("{}", serialized);
+
+        timer.track(
+            &format!("playwright {}", args.join(" ")),
+            &format!("rtk playwright {} --json", args.join(" ")),
+            &raw,
+            &serialized,
+        );
+
+        return Ok(result.exit_code);
+    }
+
     let mode = FormatMode::from_verbosity(verbose);
 
     let filtered = match parse_result {
@@ -479,5 +497,78 @@ mod tests {
         let result = PlaywrightParser::parse(invalid);
         assert_eq!(result.tier(), 3); // Passthrough
         assert!(!result.is_ok());
+    }
+
+    // --- JSON envelope tests (--json global flag) ---
+
+    use crate::parser::{build_json_envelope, JsonEnvelope};
+
+    /// T1 (playwright): full-tier envelope round-trips with all fields populated.
+    #[test]
+    fn test_playwright_json_envelope_full_tier() {
+        let json = r#"{
+            "stats": {"expected": 4, "unexpected": 0, "skipped": 0, "duration": 1500.0},
+            "suites": [],
+            "errors": []
+        }"#;
+
+        let parse_result = PlaywrightParser::parse(json);
+        let envelope = build_json_envelope("playwright", parse_result, 0);
+        let serialized = serde_json::to_string(&envelope).unwrap();
+
+        let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(value["tool"], "playwright");
+        assert_eq!(value["tier"], "full");
+        assert_eq!(value["exit"], 0);
+        assert_eq!(value["data"]["passed"], 4);
+        assert!(value.get("warnings").is_none());
+        assert!(value.get("raw").is_none());
+    }
+
+    /// T2 (playwright): JSON path preserves all failures across nested suites.
+    #[test]
+    fn test_playwright_json_envelope_includes_all_failures() {
+        let mut specs = String::new();
+        for i in 0..11 {
+            if i > 0 {
+                specs.push(',');
+            }
+            specs.push_str(&format!(
+                r#"{{"title": "spec {i}", "ok": false, "tests": [{{"status": "unexpected", "results": [{{"status": "failed", "errors": [{{"message": "boom {i}"}}]}}]}}]}}"#,
+                i = i
+            ));
+        }
+        let json = format!(
+            r#"{{
+                "stats": {{"expected": 0, "unexpected": 11, "skipped": 0, "duration": 100.0}},
+                "suites": [{{"title": "all.spec.ts", "file": "all.spec.ts", "specs": [{}], "suites": []}}],
+                "errors": []
+            }}"#,
+            specs
+        );
+
+        let parse_result = PlaywrightParser::parse(&json);
+        let envelope = build_json_envelope("playwright", parse_result, 1);
+        let serialized = serde_json::to_string(&envelope).unwrap();
+
+        let parsed: JsonEnvelope<TestResult> =
+            serde_json::from_str(&serialized).expect("envelope deserialize");
+        let data = parsed.data.expect("data present on full tier");
+        assert_eq!(data.failed, 11);
+        assert_eq!(data.failures.len(), 11, "all 11 failures must survive --json");
+    }
+
+    /// T3 (playwright): malformed input yields passthrough envelope with raw field.
+    #[test]
+    fn test_playwright_json_envelope_passthrough() {
+        let parse_result = PlaywrightParser::parse("totally not playwright json");
+        let envelope = build_json_envelope("playwright", parse_result, 2);
+        let serialized = serde_json::to_string(&envelope).unwrap();
+
+        let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(value["tier"], "passthrough");
+        assert_eq!(value["exit"], 2);
+        assert!(!value["raw"].as_str().unwrap_or("").is_empty());
+        assert!(value.get("data").is_none());
     }
 }

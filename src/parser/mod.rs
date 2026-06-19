@@ -8,9 +8,11 @@
 //! The three-tier system ensures RTK never returns false data silently.
 
 pub mod formatter;
+pub mod json_envelope;
 pub mod types;
 
 pub use formatter::{FormatMode, TokenFormatter};
+pub use json_envelope::{build_json_envelope, JsonEnvelope, JsonTier};
 pub use types::*;
 
 /// Parse result with degradation tier
