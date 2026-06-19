@@ -848,10 +848,22 @@ fn rewrite_segment_inner(
     // Try each rewrite prefix (longest first) with word-boundary check
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(cmd_part, prefix) {
-            let rewritten = if rest.is_empty() {
-                format!("{}{}", rule.rtk_cmd, redirect_suffix)
+            // `rg` and `grep` share the `rtk grep` rule, but `rtk grep` is a
+            // POSIX-grep passthrough: it is NOT recursive and rejects ripgrep-only
+            // flags (--hidden/--glob/--type/-g). Downgrading `rg`→`rtk grep` breaks
+            // ripgrep's semantics — flags bomb out and the bare form reads stdin
+            // instead of recursing (an agent then mis-reads it as "rg isn't
+            // installed"; it is). rtk ships a faithful `rtk rg` (real ripgrep), so
+            // route an `rg` invocation there, preserving every flag + recursion.
+            let effective_rtk_cmd = if rule.rtk_cmd == "rtk grep" && prefix == "rg" {
+                "rtk rg"
             } else {
-                format!("{} {}{}", rule.rtk_cmd, rest, redirect_suffix)
+                rule.rtk_cmd
+            };
+            let rewritten = if rest.is_empty() {
+                format!("{}{}", effective_rtk_cmd, redirect_suffix)
+            } else {
+                format!("{} {}{}", effective_rtk_cmd, rest, redirect_suffix)
             };
             return Some(rewritten);
         }
@@ -1423,9 +1435,29 @@ mod tests {
 
     #[test]
     fn test_rewrite_rg_pattern() {
+        // `rg` routes to `rtk rg` (faithful ripgrep), NOT `rtk grep` (POSIX
+        // passthrough): preserves recursion + ripgrep-only flags.
         assert_eq!(
             rewrite_command_no_prefixes("rg \"fn main\"", &[]),
-            Some("rtk grep \"fn main\"".into())
+            Some("rtk rg \"fn main\"".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_preserves_ripgrep_flags() {
+        // ripgrep-only flags must survive (they bomb on `rtk grep`'s POSIX passthrough).
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --hidden -g '*.rs' foo", &[]),
+            Some("rtk rg --hidden -g '*.rs' foo".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_grep_still_maps_to_rtk_grep() {
+        // A real `grep` is unaffected — only `rg` is rerouted to `rtk rg`.
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -rn foo .", &[]),
+            Some("rtk grep -rn foo .".into())
         );
     }
 
