@@ -4754,8 +4754,7 @@ mod tests {
 
     #[test]
     fn test_codex_mode_accepts_auto_patch() {
-        // v3 change (was: --codex --auto-patch rejected, before Codex shipped
-        // PreToolUse Bash interception). Now: --auto-patch ALSO writes
+        // Native Codex hook mode allows --auto-patch so install can write
         // ~/.codex/hooks.json. Use dry_run to avoid touching the real $HOME.
         let r = run(
             false,
@@ -4773,14 +4772,13 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(r.is_ok(), "--codex --auto-patch must succeed (v3): {r:?}");
+        assert!(r.is_ok(), "--codex --auto-patch must succeed: {r:?}");
     }
 
     #[test]
     fn test_codex_mode_accepts_no_patch() {
-        // v3 change: --codex --no-patch now means file-only mode
-        // (RTK.md + AGENTS.md, no hooks.json) — same as bare --codex.
-        // Use dry_run to avoid touching the real $HOME.
+        // --codex --no-patch is file-only mode: RTK.md + AGENTS.md,
+        // no hooks.json. Use dry_run to avoid touching the real $HOME.
         let r = run(
             false,
             false,
@@ -4797,7 +4795,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(r.is_ok(), "--codex --no-patch must succeed (v3): {r:?}");
+        assert!(r.is_ok(), "--codex --no-patch must succeed: {r:?}");
     }
 
     #[test]
@@ -5609,18 +5607,29 @@ mod tests {
 
     // --- Codex hooks.json install / upsert / uninstall ---
 
+    fn parse_codex_hooks_json(output: &str) -> serde_json::Value {
+        serde_json::from_str(output).unwrap()
+    }
+
+    fn codex_pre_tool_use_entries(root: &serde_json::Value) -> &[serde_json::Value] {
+        root.pointer("/hooks/PreToolUse")
+            .and_then(|a| a.as_array())
+            .unwrap()
+    }
+
+    fn codex_hook_command(entries: &[serde_json::Value], index: usize) -> &str {
+        entries[index]["hooks"][0]["command"].as_str().unwrap()
+    }
+
     #[test]
     fn test_codex_upsert_adds_to_empty_file() {
         let (out, action) = upsert_codex_hook_json(None, CODEX_HOOK_COMMAND).unwrap();
         assert_eq!(action, CodexHookUpsert::Added);
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        let entries = v
-            .pointer("/hooks/PreToolUse")
-            .and_then(|a| a.as_array())
-            .unwrap();
+        let v = parse_codex_hooks_json(&out);
+        let entries = codex_pre_tool_use_entries(&v);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["matcher"], "^Bash$");
-        assert_eq!(entries[0]["hooks"][0]["command"], CODEX_HOOK_COMMAND);
+        assert_eq!(codex_hook_command(entries, 0), CODEX_HOOK_COMMAND);
         assert_eq!(entries[0]["hooks"][0][CODEX_HOOK_RTK_MARKER], true);
         assert_eq!(entries[0]["hooks"][0]["timeout"], 30);
     }
@@ -5654,11 +5663,8 @@ mod tests {
         .to_string();
         let (out, action) = upsert_codex_hook_json(Some(&existing), CODEX_HOOK_COMMAND).unwrap();
         assert_eq!(action, CodexHookUpsert::Added);
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        let entries = v
-            .pointer("/hooks/PreToolUse")
-            .and_then(|a| a.as_array())
-            .unwrap();
+        let v = parse_codex_hooks_json(&out);
+        let entries = codex_pre_tool_use_entries(&v);
         assert_eq!(
             entries.len(),
             2,
@@ -5666,10 +5672,10 @@ mod tests {
         );
         // Foreign first, rtk appended.
         assert_eq!(
-            entries[0]["hooks"][0]["command"],
+            codex_hook_command(entries, 0),
             "/usr/local/bin/my-audit-logger"
         );
-        assert_eq!(entries[1]["hooks"][0]["command"], CODEX_HOOK_COMMAND);
+        assert_eq!(codex_hook_command(entries, 1), CODEX_HOOK_COMMAND);
     }
 
     #[test]
@@ -5692,13 +5698,10 @@ mod tests {
         .to_string();
         let (out, action) = upsert_codex_hook_json(Some(&existing), CODEX_HOOK_COMMAND).unwrap();
         assert_eq!(action, CodexHookUpsert::Updated);
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        let entries = v
-            .pointer("/hooks/PreToolUse")
-            .and_then(|a| a.as_array())
-            .unwrap();
+        let v = parse_codex_hooks_json(&out);
+        let entries = codex_pre_tool_use_entries(&v);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0]["hooks"][0]["command"], CODEX_HOOK_COMMAND);
+        assert_eq!(codex_hook_command(entries, 0), CODEX_HOOK_COMMAND);
     }
 
     #[test]
@@ -5721,13 +5724,10 @@ mod tests {
         .to_string();
         let (out, action) = upsert_codex_hook_json(Some(&existing), CODEX_HOOK_COMMAND).unwrap();
         assert_eq!(action, CodexHookUpsert::Updated);
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        let entries = v
-            .pointer("/hooks/PreToolUse")
-            .and_then(|a| a.as_array())
-            .unwrap();
+        let v = parse_codex_hooks_json(&out);
+        let entries = codex_pre_tool_use_entries(&v);
         assert_eq!(entries.len(), 1, "must not duplicate the rtk entry");
-        assert_eq!(entries[0]["hooks"][0]["command"], CODEX_HOOK_COMMAND);
+        assert_eq!(codex_hook_command(entries, 0), CODEX_HOOK_COMMAND);
         assert_eq!(entries[0]["hooks"][0][CODEX_HOOK_RTK_MARKER], true);
     }
 
@@ -5788,14 +5788,11 @@ mod tests {
         let result = remove_codex_hook_from_json(&mixed, CODEX_HOOK_COMMAND)
             .unwrap()
             .expect("rtk entry should have been removed");
-        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
-        let entries = v
-            .pointer("/hooks/PreToolUse")
-            .and_then(|a| a.as_array())
-            .unwrap();
+        let v = parse_codex_hooks_json(&result);
+        let entries = codex_pre_tool_use_entries(&v);
         assert_eq!(entries.len(), 1);
         assert_eq!(
-            entries[0]["hooks"][0]["command"],
+            codex_hook_command(entries, 0),
             "/usr/local/bin/my-audit-logger"
         );
     }
@@ -5875,15 +5872,11 @@ mod tests {
             "uninstall report must mention hooks.json, got: {removed:?}"
         );
 
-        let after: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&hooks_json).unwrap()).unwrap();
-        let entries = after
-            .pointer("/hooks/PreToolUse")
-            .and_then(|a| a.as_array())
-            .unwrap();
+        let after = parse_codex_hooks_json(&fs::read_to_string(&hooks_json).unwrap());
+        let entries = codex_pre_tool_use_entries(&after);
         assert_eq!(entries.len(), 1);
         assert_eq!(
-            entries[0]["hooks"][0]["command"],
+            codex_hook_command(entries, 0),
             "/usr/local/bin/my-audit-logger"
         );
     }

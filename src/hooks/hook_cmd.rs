@@ -1241,31 +1241,61 @@ mod tests {
         run_codex_inner_with_rules(input, &[], &[], &["*".to_string()])
     }
 
-    #[test]
-    fn test_codex_rewrite_git_status() {
-        let result = run_codex_allowed(&codex_input("git status")).unwrap();
-        let v: Value = serde_json::from_str(&result).unwrap();
-        let cmd = v
-            .pointer("/hookSpecificOutput/updatedInput/command")
-            .and_then(|c| c.as_str())
-            .unwrap();
-        assert_eq!(cmd, "rtk git status");
+    fn run_codex_allowed_json(input: &str) -> Option<Value> {
+        run_codex_allowed(input).map(|result| serde_json::from_str(&result).unwrap())
     }
 
     #[test]
-    fn test_codex_default_rewrite_returns_none_to_avoid_invalid_schema() {
-        assert!(run_codex_inner_with_rules(&codex_input("git status"), &[], &[], &[]).is_none());
+    fn test_codex_allowed_rewrites_emit_allow_with_updated_input() {
+        let cases = [
+            ("simple command", "git status", "rtk git status"),
+            (
+                "compound command",
+                "git add . && cargo test",
+                "rtk git add . && rtk cargo test",
+            ),
+            (
+                "environment prefix",
+                "GIT_PAGER=cat git status",
+                "GIT_PAGER=cat rtk git status",
+            ),
+        ];
+
+        for (name, input_command, expected_command) in cases {
+            let v = run_codex_allowed_json(&codex_input(input_command)).unwrap();
+            let hook = &v["hookSpecificOutput"];
+            assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY, "{name}");
+            assert_eq!(hook["permissionDecision"], "allow", "{name}");
+            assert_eq!(
+                hook["permissionDecisionReason"], "RTK auto-rewrite",
+                "{name}"
+            );
+            assert_eq!(hook["updatedInput"]["command"], expected_command, "{name}");
+        }
     }
 
     #[test]
-    fn test_codex_ask_rewrite_returns_none_to_avoid_invalid_schema() {
-        assert!(run_codex_inner_with_rules(
-            &codex_input("git status"),
-            &[],
-            &["git *".to_string()],
-            &["git *".to_string()],
-        )
-        .is_none());
+    fn test_codex_non_allow_rewrites_return_none_to_avoid_invalid_schema() {
+        // Codex rejects `updatedInput` unless permissionDecision is `allow`;
+        // default/ask rewrites therefore emit no output and let Codex handle
+        // the original command through its native permission flow.
+        let cases = [
+            ("default", vec![], vec![], vec![]),
+            (
+                "ask",
+                vec![],
+                vec!["git *".to_string()],
+                vec!["git *".to_string()],
+            ),
+        ];
+
+        for (name, deny, ask, allow) in cases {
+            assert!(
+                run_codex_inner_with_rules(&codex_input("git status"), &deny, &ask, &allow)
+                    .is_none(),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -1289,18 +1319,6 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_hookspecificoutput_structure() {
-        let result = run_codex_allowed(&codex_input("git status")).unwrap();
-        let v: Value = serde_json::from_str(&result).unwrap();
-        let hook = &v["hookSpecificOutput"];
-        assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
-        assert_eq!(hook["permissionDecision"], "allow");
-        assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
-        assert!(hook["updatedInput"].is_object());
-        assert!(hook["updatedInput"]["command"].is_string());
-    }
-
-    #[test]
     fn test_codex_non_bash_tool_returns_none() {
         // Codex PreToolUse currently only fires for Bash, but defensive:
         // if a future Codex sends shell_view or fs_read here, RTK must
@@ -1315,36 +1333,15 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_passthrough_no_output() {
-        // htop has no RTK rewrite — payload returns None (-> "{}" in I/O wrapper).
-        assert!(run_codex_allowed(&codex_input("htop")).is_none());
-    }
-
-    #[test]
-    fn test_codex_already_rtk_passthrough() {
-        assert!(run_codex_allowed(&codex_input("rtk git status")).is_none());
-    }
-
-    #[test]
-    fn test_codex_compound_command_rewrites_both_segments() {
-        let result = run_codex_allowed(&codex_input("git add . && cargo test")).unwrap();
-        let v: Value = serde_json::from_str(&result).unwrap();
-        let cmd = v
-            .pointer("/hookSpecificOutput/updatedInput/command")
-            .and_then(|c| c.as_str())
-            .unwrap();
-        assert_eq!(cmd, "rtk git add . && rtk cargo test");
-    }
-
-    #[test]
-    fn test_codex_env_prefix_preserved() {
-        let result = run_codex_allowed(&codex_input("GIT_PAGER=cat git status")).unwrap();
-        let v: Value = serde_json::from_str(&result).unwrap();
-        let cmd = v
-            .pointer("/hookSpecificOutput/updatedInput/command")
-            .and_then(|c| c.as_str())
-            .unwrap();
-        assert_eq!(cmd, "GIT_PAGER=cat rtk git status");
+    fn test_codex_skip_cases_return_none() {
+        // htop has no RTK rewrite; already-prefixed and redirected commands
+        // must also skip so Codex sees no hook output (-> "{}" in I/O wrapper).
+        for command in ["htop", "rtk git status", "git log > /tmp/out.txt"] {
+            assert!(
+                run_codex_allowed(&codex_input(command)).is_none(),
+                "{command}"
+            );
+        }
     }
 
     #[test]
@@ -1356,34 +1353,31 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_file_redirect_not_rewritten() {
-        assert!(run_codex_allowed(&codex_input("git log > /tmp/out.txt")).is_none());
-    }
+    fn test_codex_invalid_payloads_return_none() {
+        let cases = [
+            ("malformed json", "not valid json {{{".to_string()),
+            (
+                "empty command",
+                json!({
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Bash",
+                    "tool_input": { "command": "" }
+                })
+                .to_string(),
+            ),
+            (
+                "missing tool_input",
+                json!({
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Bash"
+                })
+                .to_string(),
+            ),
+        ];
 
-    #[test]
-    fn test_codex_empty_command_returns_none() {
-        let input = json!({
-            "hook_event_name": "PreToolUse",
-            "tool_name": "Bash",
-            "tool_input": { "command": "" }
-        })
-        .to_string();
-        assert!(run_codex_allowed(&input).is_none());
-    }
-
-    #[test]
-    fn test_codex_malformed_json_returns_none() {
-        assert!(run_codex_inner("not valid json {{{").is_none());
-    }
-
-    #[test]
-    fn test_codex_no_tool_input_returns_none() {
-        let input = json!({
-            "hook_event_name": "PreToolUse",
-            "tool_name": "Bash"
-        })
-        .to_string();
-        assert!(run_codex_inner(&input).is_none());
+        for (name, input) in cases {
+            assert!(run_codex_inner(&input).is_none(), "{name}");
+        }
     }
 
     #[test]
