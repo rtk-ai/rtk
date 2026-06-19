@@ -85,6 +85,11 @@ struct Cli {
     #[arg(long, global = true)]
     ultra_compact: bool,
 
+    /// Stable mode: rewrite absolute cwd/home paths to ./~ for byte-identical,
+    /// prompt-cache-friendly output (also via [cache] stable or RTK_STABLE=1)
+    #[arg(long, global = true)]
+    stable: bool,
+
     /// Set SKIP_ENV_VALIDATION=1 for child processes (Next.js, tsc, lint, prisma)
     #[arg(long = "skip-env", global = true)]
     skip_env: bool,
@@ -1420,6 +1425,23 @@ where
     }
 }
 
+/// Resolve stable mode: `--stable` flag, then `RTK_STABLE` env, then
+/// `[cache] stable` config. Config is only read when flag and env are unset.
+fn resolve_stable(flag: bool) -> bool {
+    if flag {
+        return true;
+    }
+    if let Ok(value) = std::env::var("RTK_STABLE") {
+        let value = value.trim().to_ascii_lowercase();
+        if matches!(value.as_str(), "1" | "true" | "yes" | "on") {
+            return true;
+        }
+    }
+    core::config::Config::load()
+        .map(|config| config.cache.stable)
+        .unwrap_or(false)
+}
+
 fn run_cli() -> Result<i32> {
     // Fire-and-forget telemetry ping (1/day, non-blocking)
     core::telemetry::maybe_ping();
@@ -1433,6 +1455,10 @@ fn run_cli() -> Result<i32> {
             return run_fallback(e);
         }
     };
+
+    // Cache-prefix alignment: byte-stable output via --stable, RTK_STABLE, or
+    // [cache] stable. Set once, read in the central print path.
+    core::stable::set_enabled(resolve_stable(cli.stable));
 
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
     // Skip for Gain — it shows its own inline hook warning.

@@ -7,6 +7,7 @@ use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
 use crate::core::tracking;
 
 pub fn print_with_hint(filtered: &str, raw: &str, tee_label: &str, exit_code: i32) {
+    let filtered = crate::core::stable::apply(filtered);
     if let Some(hint) = crate::core::tee::tee_and_hint(raw, tee_label, exit_code) {
         println!("{}\n{}", filtered, hint);
     } else {
@@ -111,7 +112,9 @@ where
     } else {
         raw
     };
-    let filtered = filter_fn(text_to_filter, exit_code);
+    // Stable mode normalizes machine paths here so every captured-filter command
+    // (find, grep, ...) gets byte-identical output, not just tee'd ones.
+    let filtered = crate::core::stable::apply(&filter_fn(text_to_filter, exit_code));
 
     if let Some(label) = opts.tee_label {
         print_with_hint(&filtered, raw, label, exit_code);

@@ -7,6 +7,7 @@ pub mod constants;
 pub mod display_helpers;
 pub mod filter;
 pub mod runner;
+pub mod stable;
 pub mod stream;
 pub mod tee;
 pub mod telemetry;

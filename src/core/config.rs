@@ -21,6 +21,17 @@ pub struct Config {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub cache: CacheConfig,
+}
+
+/// Cache-prefix alignment: deterministic, byte-stable output for prompt caching.
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct CacheConfig {
+    /// Rewrite absolute cwd/home prefixes to `.`/`~` so output is byte-identical
+    /// across machines and runs (also via `--stable` / `RTK_STABLE=1`).
+    #[serde(default)]
+    pub stable: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
