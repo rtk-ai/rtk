@@ -7,11 +7,13 @@ use anyhow::Result;
 
 const MAX_XFAIL: usize = CAP_WARNINGS;
 const MAX_PYTEST_FAILURES: usize = CAP_WARNINGS;
+const MAX_PYTEST_ERRORS: usize = CAP_WARNINGS;
 
 #[derive(Debug, PartialEq)]
 enum ParseState {
     Header,
     TestProgress,
+    Errors,
     Failures,
     Summary,
 }
@@ -56,13 +58,16 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "pytest",
         &args.join(" "),
         filter_pytest_output,
-        runner::RunOptions::stdout_only().tee("pytest"),
+        runner::RunOptions::with_tee("pytest"),
     )
 }
 
 pub(crate) fn filter_pytest_output(output: &str) -> String {
     let mut state = ParseState::Header;
     let mut test_files: Vec<String> = Vec::new();
+    let mut pytest_errors: Vec<String> = Vec::new();
+    let mut current_error: Vec<String> = Vec::new();
+    let mut summary_errors: Vec<String> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     let mut current_failure: Vec<String> = Vec::new();
     let mut xfail_lines: Vec<String> = Vec::new();
@@ -75,12 +80,26 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         if trimmed.starts_with("===") && trimmed.contains("test session starts") {
             state = ParseState::Header;
             continue;
+        } else if trimmed.starts_with("===") && trimmed.contains("ERRORS") {
+            if !current_failure.is_empty() {
+                failures.push(current_failure.join("\n"));
+                current_failure.clear();
+            }
+            state = ParseState::Errors;
+            continue;
         } else if trimmed.starts_with("===") && trimmed.contains("FAILURES") {
+            if !current_error.is_empty() {
+                pytest_errors.push(current_error.join("\n"));
+                current_error.clear();
+            }
             state = ParseState::Failures;
             continue;
         } else if trimmed.starts_with("===") && trimmed.contains("short test summary") {
             state = ParseState::Summary;
-            // Save current failure if any
+            if !current_error.is_empty() {
+                pytest_errors.push(current_error.join("\n"));
+                current_error.clear();
+            }
             if !current_failure.is_empty() {
                 failures.push(current_failure.join("\n"));
                 current_failure.clear();
@@ -89,7 +108,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         } else if trimmed.starts_with("===")
             && (trimmed.contains("passed")
                 || trimmed.contains("failed")
-                || trimmed.contains("skipped"))
+                || trimmed.contains("skipped")
+                || trimmed.contains("error"))
         {
             summary_line = trimmed.to_string();
             continue;
@@ -98,12 +118,21 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
             && !trimmed.starts_with("===")
             && !trimmed.starts_with("FAILED")
             && !trimmed.starts_with("ERROR")
-            && (trimmed.contains(" passed")
+            && (((trimmed.contains(" passed")
                 || trimmed.contains(" failed")
-                || trimmed.contains(" skipped"))
-            && trimmed.contains(" in ")
+                || trimmed.contains(" skipped")
+                || trimmed.contains(" error"))
+                && trimmed.contains(" in "))
+                || trimmed.contains("errors during collection"))
         {
             summary_line = trimmed.to_string();
+            continue;
+        } else if matches!(state, ParseState::Header)
+            && (trimmed.starts_with("ImportError while loading conftest")
+                || trimmed.starts_with("ConftestImportFailure"))
+        {
+            state = ParseState::Errors;
+            current_error.push(trimmed.to_string());
             continue;
         }
 
@@ -123,6 +152,18 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
                     test_files.push(trimmed.to_string());
                 }
             }
+            ParseState::Errors => {
+                let starts_error = trimmed.contains("ERROR collecting")
+                    || trimmed.contains("ERROR at setup")
+                    || trimmed.contains("ERROR at teardown");
+                if starts_error && !current_error.is_empty() {
+                    pytest_errors.push(current_error.join("\n"));
+                    current_error.clear();
+                }
+                if !trimmed.is_empty() && !trimmed.starts_with("===") {
+                    current_error.push(trimmed.to_string());
+                }
+            }
             ParseState::Failures => {
                 // Collect failure details
                 if trimmed.starts_with("___") {
@@ -137,9 +178,10 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
                 }
             }
             ParseState::Summary => {
-                // FAILED test lines
-                if trimmed.starts_with("FAILED") || trimmed.starts_with("ERROR") {
+                if trimmed.starts_with("FAILED") {
                     failures.push(trimmed.to_string());
+                } else if trimmed.starts_with("ERROR") {
+                    summary_errors.push(trimmed.to_string());
                 } else if trimmed.starts_with("XFAIL") || trimmed.starts_with("XPASS") {
                     xfail_lines.push(trimmed.to_string());
                 }
@@ -148,12 +190,24 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
     }
 
     // Save last failure if any
+    if !current_error.is_empty() {
+        pytest_errors.push(current_error.join("\n"));
+    }
     if !current_failure.is_empty() {
         failures.push(current_failure.join("\n"));
     }
+    if pytest_errors.is_empty() {
+        pytest_errors = summary_errors;
+    }
 
     // Build compact output
-    build_pytest_summary(&summary_line, &test_files, &failures, &xfail_lines)
+    build_pytest_summary(
+        &summary_line,
+        &test_files,
+        &pytest_errors,
+        &failures,
+        &xfail_lines,
+    )
 }
 
 #[derive(Default)]
@@ -163,11 +217,13 @@ struct PytestCounts {
     skipped: usize,
     xfailed: usize,
     xpassed: usize,
+    errors: usize,
 }
 
 fn build_pytest_summary(
     summary: &str,
     _test_files: &[String],
+    pytest_errors: &[String],
     failures: &[String],
     xfail_lines: &[String],
 ) -> String {
@@ -178,20 +234,39 @@ fn build_pytest_summary(
         skipped,
         xfailed,
         xpassed,
+        errors,
     } = counts;
+    let error_count = errors.max(pytest_errors.len());
 
-    if passed == 0 && failed == 0 && skipped == 0 && xfailed == 0 && xpassed == 0 {
+    if passed == 0
+        && failed == 0
+        && skipped == 0
+        && xfailed == 0
+        && xpassed == 0
+        && error_count == 0
+    {
         return "Pytest: No tests collected".to_string();
     }
 
     let extras_present = skipped > 0 || xfailed > 0 || xpassed > 0 || !xfail_lines.is_empty();
 
-    if failed == 0 && passed > 0 && !extras_present {
+    if failed == 0 && passed > 0 && error_count == 0 && !extras_present {
         return format!("Pytest: {} passed", passed);
     }
 
     let mut result = String::new();
-    result.push_str(&format!("Pytest: {} passed, {} failed", passed, failed));
+    if summary.is_empty() && error_count > 0 {
+        result.push_str("Pytest: collection failed");
+    } else {
+        result.push_str(&format!("Pytest: {} passed, {} failed", passed, failed));
+        if error_count > 0 {
+            result.push_str(&format!(
+                ", {} error{}",
+                error_count,
+                if error_count == 1 { "" } else { "s" }
+            ));
+        }
+    }
     if skipped > 0 {
         result.push_str(&format!(", {} skipped", skipped));
     }
@@ -214,6 +289,32 @@ fn build_pytest_summary(
             result.push_str(&format!("  … +{} more\n", xfail_lines.len() - MAX_XFAIL));
             let all_xfail = xfail_lines.join("\n");
             if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_xfail, "pytest-xfail", MAX_XFAIL + 1) {
+                result.push_str(&format!("  {}\n", hint));
+            }
+        }
+    }
+
+    if !pytest_errors.is_empty() {
+        result.push_str("\nErrors:\n");
+        for (i, error) in pytest_errors.iter().take(MAX_PYTEST_ERRORS).enumerate() {
+            let lines: Vec<&str> = error.lines().collect();
+            let heading = lines
+                .first()
+                .map(|line| line.trim_matches(|c| c == '_' || c == '=').trim())
+                .unwrap_or("collection error");
+            result.push_str(&format!("{}. [ERROR] {}\n", i + 1, truncate(heading, 140)));
+
+            for line in select_pytest_error_details(&lines) {
+                result.push_str(&format!("     {}\n", truncate(line, 120)));
+            }
+        }
+        if pytest_errors.len() > MAX_PYTEST_ERRORS {
+            result.push_str(&format!(
+                "  … +{} more errors\n",
+                pytest_errors.len() - MAX_PYTEST_ERRORS
+            ));
+            let all_errors = pytest_errors.join("\n\n");
+            if let Some(hint) = crate::core::tee::force_tee_hint(&all_errors, "pytest-errors") {
                 result.push_str(&format!("  {}\n", hint));
             }
         }
@@ -285,6 +386,38 @@ fn build_pytest_summary(
     result.trim().to_string()
 }
 
+fn select_pytest_error_details<'a>(lines: &'a [&'a str]) -> Vec<&'a str> {
+    const MAX_DETAILS: usize = 3;
+
+    let terminal_error = lines.iter().skip(1).rev().find_map(|line| {
+        let trimmed = line.trim();
+        (trimmed.starts_with('E')
+            || trimmed.contains("ModuleNotFoundError")
+            || trimmed.contains("No module named"))
+        .then_some(trimmed)
+    });
+
+    let context_limit = MAX_DETAILS - usize::from(terminal_error.is_some());
+    let context: Vec<&str> = lines
+        .iter()
+        .skip(1)
+        .map(|line| line.trim())
+        .filter(|line| {
+            Some(*line) != terminal_error
+                && (line.contains("ImportError")
+                    || line.contains("conftest.py")
+                    || line.contains(".py:"))
+        })
+        .collect();
+    let context_start = context.len().saturating_sub(context_limit);
+    let mut details = context[context_start..].to_vec();
+
+    if let Some(error) = terminal_error {
+        details.push(error);
+    }
+    details
+}
+
 fn parse_summary_line(summary: &str) -> PytestCounts {
     let mut counts = PytestCounts::default();
 
@@ -309,6 +442,8 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
                 counts.failed = n;
             } else if word.contains("skipped") {
                 counts.skipped = n;
+            } else if word.contains("error") {
+                counts.errors = n;
             }
         }
     }
@@ -514,6 +649,106 @@ collected 3 items
             !result.contains("No tests collected"),
             "Should not say 'No tests collected' when tests were skipped. Got: {}",
             result
+        );
+    }
+
+    #[test]
+    fn test_filter_pytest_directory_all_tests_run() {
+        let output = r#"..                                                                       [100%]
+2 passed in 0.03s"#;
+
+        assert_eq!(filter_pytest_output(output), "Pytest: 2 passed");
+    }
+
+    #[test]
+    fn test_filter_pytest_directory_mixed_failure_and_collection_error() {
+        let output = include_str!("../../../tests/fixtures/pytest/pytest9_partial_import_error.txt");
+        let expected = r#"Pytest: 0 passed, 1 failed, 1 error
+
+Errors:
+1. [ERROR] ERROR collecting tests/python/partial/test_missing_dependency.py
+     /usr/lib/python3.14/importlib/__init__.py:88: in import_module
+     tests/python/partial/test_missing_dependency.py:1: in <module>
+     E   ModuleNotFoundError: No module named 'rtk_missing_dependency_partial'
+
+Failures:
+1. [FAIL] test_loadable_failure_is_reported
+     tests/python/partial/test_failure.py:2: in test_loadable_failure_is_reported
+     assert "actual" == "expected"
+     E   AssertionError: assert 'actual' == 'expected'"#;
+
+        assert_eq!(filter_pytest_output(output), expected);
+    }
+
+    #[test]
+    fn test_filter_pytest_directory_all_collection_imports_fail() {
+        let output = include_str!("../../../tests/fixtures/pytest/pytest9_all_import_errors.txt");
+        let expected = r#"Pytest: 0 passed, 0 failed, 2 errors
+
+Errors:
+1. [ERROR] ERROR collecting tests/python/all_missing/test_missing_one.py
+     /usr/lib/python3.14/importlib/__init__.py:88: in import_module
+     tests/python/all_missing/test_missing_one.py:1: in <module>
+     E   ModuleNotFoundError: No module named 'rtk_missing_dependency_one'
+2. [ERROR] ERROR collecting tests/python/all_missing/test_missing_two.py
+     /usr/lib/python3.14/importlib/__init__.py:88: in import_module
+     tests/python/all_missing/test_missing_two.py:1: in <module>
+     E   ModuleNotFoundError: No module named 'rtk_missing_dependency_two'"#;
+
+        assert_eq!(filter_pytest_output(output), expected);
+    }
+
+    #[test]
+    fn test_filter_pytest_directory_core_loader_import_fails() {
+        let output = include_str!("../../../tests/fixtures/pytest/pytest9_loader_import_error.txt");
+        let expected = r#"Pytest: collection failed
+
+Errors:
+1. [ERROR] ImportError while loading conftest '/repo/tests/python/loader_missing/conftest.py'.
+     tests/python/loader_missing/conftest.py:1: in <module>
+     E   ModuleNotFoundError: No module named 'rtk_missing_core_loader_dependency'"#;
+
+        assert_eq!(filter_pytest_output(output), expected);
+    }
+
+    #[test]
+    fn test_filter_pytest_transitive_import_error() {
+        let output = include_str!("../../../tests/fixtures/pytest/pytest9_transitive_import_error.txt");
+        let expected = r#"Pytest: 0 passed, 0 failed, 1 error
+
+Errors:
+1. [ERROR] ERROR collecting case_transitive.py
+     tests/transitive_import_error/sample_package/__init__.py:1: in <module>
+     tests/transitive_import_error/sample_package/inner.py:1: in <module>
+     E   ModuleNotFoundError: No module named 'rtk_missing_transitive_dependency'"#;
+
+        assert_eq!(filter_pytest_output(output), expected);
+    }
+
+    #[test]
+    fn test_filter_pytest_setup_error_is_not_labeled_collection_error() {
+        let output = include_str!("../../../tests/fixtures/pytest/pytest9_setup_error.txt");
+        let expected = r#"Pytest: 0 passed, 0 failed, 1 error
+
+Errors:
+1. [ERROR] ERROR at setup of test_setup_error_is_reported
+     tests/setup_error/conftest.py:6: in broken_setup
+     E   ModuleNotFoundError: No module named 'rtk_missing_setup_dependency'"#;
+
+        assert_eq!(filter_pytest_output(output), expected);
+    }
+
+    #[test]
+    fn test_filter_pytest_error_output_saves_tokens() {
+        let output = include_str!("../../../tests/fixtures/pytest/pytest9_transitive_import_error.txt");
+        let filtered = filter_pytest_output(output);
+        let input_tokens = crate::core::utils::count_tokens(output);
+        let output_tokens = crate::core::utils::count_tokens(&filtered);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+
+        assert!(
+            savings >= 60.0,
+            "expected at least 60% savings, got {savings:.1}%"
         );
     }
 }

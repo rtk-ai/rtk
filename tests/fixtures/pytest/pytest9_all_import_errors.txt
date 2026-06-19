@@ -1,0 +1,21 @@
+==================================== ERRORS ====================================
+_ ERROR collecting tests/python/all_missing/test_missing_one.py _
+ImportError while importing test module '/repo/tests/python/all_missing/test_missing_one.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.14/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+tests/python/all_missing/test_missing_one.py:1: in <module>
+    import rtk_missing_dependency_one
+E   ModuleNotFoundError: No module named 'rtk_missing_dependency_one'
+_ ERROR collecting tests/python/all_missing/test_missing_two.py _
+ImportError while importing test module '/repo/tests/python/all_missing/test_missing_two.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.14/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+tests/python/all_missing/test_missing_two.py:1: in <module>
+    import rtk_missing_dependency_two
+E   ModuleNotFoundError: No module named 'rtk_missing_dependency_two'
+!!!!!!!!!!!!!!!!!!! Interrupted: 2 errors during collection !!!!!!!!!!!!!!!!!!!!
+2 errors in 0.12s

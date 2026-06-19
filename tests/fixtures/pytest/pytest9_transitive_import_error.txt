@@ -1,0 +1,17 @@
+==================================== ERRORS ====================================
+_____________________ ERROR collecting case_transitive.py ______________________
+ImportError while importing test module '/repo/tests/transitive_import_error/case_transitive.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.14/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/transitive_import_error/case_transitive.py:1: in <module>
+    from sample_package import VALUE
+tests/transitive_import_error/sample_package/__init__.py:1: in <module>
+    from .inner import VALUE
+tests/transitive_import_error/sample_package/inner.py:1: in <module>
+    import rtk_missing_transitive_dependency
+E   ModuleNotFoundError: No module named 'rtk_missing_transitive_dependency'
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.06s
