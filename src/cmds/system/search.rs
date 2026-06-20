@@ -543,8 +543,9 @@ pub fn run(
     let capped = shown < total_matches || skipped_files > 0;
     let rtk_output = if capped {
         format!(
-            "{} matches in {} files:\n\n{}",
+            "{} matches ({} shown) in {} files:\n\n{}",
             total_matches,
+            shown,
             by_file.len(),
             body
         )
