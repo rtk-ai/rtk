@@ -1,7 +1,7 @@
 //! Shows users how many tokens RTK has saved them over time.
 
 use crate::core::display_helpers::{format_duration, print_period_table};
-use crate::core::tracking::{DayStats, MonthStats, SessionStat, Tracker, WeekStats};
+use crate::core::tracking::{DayStats, GainSummary, MonthStats, SessionStat, Tracker, WeekStats};
 use crate::core::utils::format_tokens;
 use crate::hooks::hook_check;
 use anyhow::{Context, Result};
@@ -49,12 +49,19 @@ pub fn run(
     }
 
     if let Some(session_filter) = session {
-        // "" means bare --session (show all); non-empty means filter by prefix
-        let filter = if session_filter.is_empty() { None } else { Some(session_filter) };
-        let sessions = tracker
-            .get_by_session(filter)
-            .context("Failed to load session data from database")?;
-        return show_session_view(&sessions, filter);
+        if session_filter.is_empty() {
+            // bare --session: show session list
+            let sessions = tracker
+                .get_by_session(None)
+                .context("Failed to load session data from database")?;
+            return show_session_view(&sessions, None);
+        } else {
+            // --session <id>: show full gain detail scoped to this session
+            let summary = tracker
+                .get_summary_for_session(session_filter)
+                .context("Failed to load session summary from database")?;
+            return show_session_detail(session_filter, &summary);
+        }
     }
 
     // Handle export formats
@@ -707,10 +714,9 @@ fn show_session_view(sessions: &[SessionStat], filter: Option<&str>) -> Result<(
         return Ok(());
     }
 
-    let title = if filter.is_some() {
-        format!("RTK Session Savings — {}", sessions[0].session_id)
-    } else {
-        "RTK Session Savings".to_string()
+    let title = match filter {
+        Some(f) => format!("RTK Session Savings — prefix '{f}'"),
+        None => "RTK Session Savings".to_string(),
     };
     println!("{}", styled(&title, true));
     println!("{}", "─".repeat(62));
@@ -733,11 +739,7 @@ fn show_session_view(sessions: &[SessionStat], filter: Option<&str>) -> Result<(
                 format!("{}d ago", secs / 86400)
             }
         };
-        let short_id = if s.session_id.len() >= 8 {
-            &s.session_id[..8]
-        } else {
-            &s.session_id
-        };
+        let short_id: String = s.session_id.chars().take(8).collect();
         let pct_cell = colorize_pct_cell(s.avg_savings_pct, &format!("{:.1}%", s.avg_savings_pct));
         println!(
             "{:<10}  {:<12}  {:>5}  {:>8}  {}",
@@ -758,6 +760,113 @@ fn show_session_view(sessions: &[SessionStat], filter: Option<&str>) -> Result<(
         total_cmds,
         format_tokens(total_saved),
     );
+    Ok(())
+}
+
+fn show_session_detail(session_filter: &str, summary: &GainSummary) -> Result<()> {
+    if summary.total_commands == 0 {
+        println!("No data found for session '{session_filter}'.");
+        return Ok(());
+    }
+
+    println!(
+        "{}",
+        styled(
+            &format!("RTK Token Savings — Session {session_filter}"),
+            true
+        )
+    );
+    println!("{}", "═".repeat(60));
+    println!();
+
+    print_kpi("Total commands", summary.total_commands.to_string());
+    print_kpi("Input tokens", format_tokens(summary.total_input));
+    print_kpi("Output tokens", format_tokens(summary.total_output));
+    print_kpi(
+        "Tokens saved",
+        format!(
+            "{} ({:.1}%)",
+            format_tokens(summary.total_saved),
+            summary.avg_savings_pct
+        ),
+    );
+    print_kpi(
+        "Total exec time",
+        format!(
+            "{} (avg {})",
+            format_duration(summary.total_time_ms),
+            format_duration(summary.avg_time_ms)
+        ),
+    );
+    print_efficiency_meter(summary.avg_savings_pct);
+    println!();
+
+    if !summary.by_command.is_empty() {
+        println!("{}", styled("By Command", true));
+
+        let cmd_width = 24usize;
+        let impact_width = 10usize;
+        let count_width = summary
+            .by_command
+            .iter()
+            .map(|(_, count, _, _, _)| count.to_string().len())
+            .max()
+            .unwrap_or(5)
+            .max(5);
+        let saved_width = summary
+            .by_command
+            .iter()
+            .map(|(_, _, saved, _, _)| format_tokens(*saved).len())
+            .max()
+            .unwrap_or(5)
+            .max(5);
+        let time_width = summary
+            .by_command
+            .iter()
+            .map(|(_, _, _, _, avg_time)| format_duration(*avg_time).len())
+            .max()
+            .unwrap_or(6)
+            .max(6);
+
+        let table_width =
+            3 + 2 + cmd_width + 2 + count_width + 2 + saved_width + 2 + 6 + 2 + time_width + 2 + impact_width;
+        println!("{}", "─".repeat(table_width));
+        println!(
+            "{:>3}  {:<cmd_width$}  {:>count_width$}  {:>saved_width$}  {:>6}  {:>time_width$}  {:<impact_width$}",
+            "#", "Command", "Count", "Saved", "Avg%", "Time", "Impact",
+            cmd_width = cmd_width, count_width = count_width,
+            saved_width = saved_width, time_width = time_width,
+            impact_width = impact_width
+        );
+        println!("{}", "─".repeat(table_width));
+
+        let max_saved = summary
+            .by_command
+            .iter()
+            .map(|(_, _, saved, _, _)| *saved)
+            .max()
+            .unwrap_or(1);
+
+        for (idx, (cmd, count, saved, pct, avg_time)) in summary.by_command.iter().enumerate() {
+            let row_idx = format!("{:>2}.", idx + 1);
+            let cmd_cell = style_command_cell(&truncate_for_column(cmd, cmd_width));
+            let count_cell = format!("{:>count_width$}", count, count_width = count_width);
+            let saved_cell =
+                format!("{:>saved_width$}", format_tokens(*saved), saved_width = saved_width);
+            let pct_plain = format!("{:>6}", format!("{pct:.1}%"));
+            let pct_cell = colorize_pct_cell(*pct, &pct_plain);
+            let time_cell =
+                format!("{:>time_width$}", format_duration(*avg_time), time_width = time_width);
+            let impact = mini_bar(*saved, max_saved, impact_width);
+            println!(
+                "{}  {}  {}  {}  {}  {}  {}",
+                row_idx, cmd_cell, count_cell, saved_cell, pct_cell, time_cell, impact
+            );
+        }
+        println!("{}", "─".repeat(table_width));
+        println!();
+    }
+
     Ok(())
 }
 

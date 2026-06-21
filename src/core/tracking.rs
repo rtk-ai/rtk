@@ -1000,31 +1000,128 @@ impl Tracker {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Get per-session token savings, most recent session first.
+    /// Get full gain summary scoped to sessions whose ID starts with `prefix`.
     ///
-    /// Only returns sessions with a non-empty `session_id` (i.e. commands
-    /// recorded while `CLAUDE_CODE_SESSION_ID` was set in the environment).
-    /// Limited to the 20 most recent sessions.
+    /// Mirrors `get_summary_filtered` but filters by `session_id GLOB prefix*`
+    /// instead of project path. Used by `rtk gain --session <id>`.
+    pub fn get_summary_for_session(&self, prefix: &str) -> Result<GainSummary> {
+        let glob = format!("{prefix}*");
+        let mut total_commands = 0usize;
+        let mut total_input = 0usize;
+        let mut total_output = 0usize;
+        let mut total_saved = 0usize;
+        let mut total_time_ms = 0u64;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms
+             FROM commands
+             WHERE session_id GLOB ?1",
+        )?;
+        let rows = stmt.query_map(params![glob], |row| {
+            Ok((
+                row.get::<_, i64>(0)? as usize,
+                row.get::<_, i64>(1)? as usize,
+                row.get::<_, i64>(2)? as usize,
+                row.get::<_, i64>(3)? as u64,
+            ))
+        })?;
+        for row in rows {
+            let (input, output, saved, time_ms) = row?;
+            total_commands += 1;
+            total_input += input;
+            total_output += output;
+            total_saved += saved;
+            total_time_ms += time_ms;
+        }
+
+        let avg_savings_pct = if total_input > 0 {
+            (total_saved as f64 / total_input as f64) * 100.0
+        } else {
+            0.0
+        };
+        let avg_time_ms = if total_commands > 0 {
+            total_time_ms / total_commands as u64
+        } else {
+            0
+        };
+
+        let by_command = {
+            let mut stmt = self.conn.prepare(
+                "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)
+                 FROM commands
+                 WHERE session_id GLOB ?1
+                 GROUP BY rtk_cmd
+                 ORDER BY SUM(saved_tokens) DESC
+                 LIMIT 10",
+            )?;
+            let rows = stmt.query_map(params![glob], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)? as usize,
+                    row.get::<_, i64>(2)? as usize,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, f64>(4)? as u64,
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        let by_day = {
+            let mut stmt = self.conn.prepare(
+                "SELECT DATE(timestamp), SUM(saved_tokens)
+                 FROM commands
+                 WHERE session_id GLOB ?1
+                 GROUP BY DATE(timestamp)
+                 ORDER BY DATE(timestamp) ASC
+                 LIMIT 30",
+            )?;
+            let rows = stmt.query_map(params![glob], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        Ok(GainSummary {
+            total_commands,
+            total_input,
+            total_output,
+            total_saved,
+            avg_savings_pct,
+            total_time_ms,
+            avg_time_ms,
+            by_command,
+            by_day,
+        })
+    }
+
     /// Get per-session token savings, most recent session first.
     ///
     /// When `filter` is `Some(prefix)`, only sessions whose ID starts with
     /// that prefix are returned (useful for short IDs like `"2a35ea7f"`).
     /// When `filter` is `None`, returns up to 20 most recent sessions.
+    /// Rows with empty `session_id` (recorded outside Claude Code) are excluded.
     pub fn get_by_session(&self, filter: Option<&str>) -> Result<Vec<SessionStat>> {
-        let prefix_filter = filter.map(|f| format!("{f}%"));
+        // Use GLOB (not LIKE) to match project convention — avoids _ and % in user input
+        // acting as wildcards. GLOB uses * for any-sequence, consistent with project_path filter.
+        let prefix_filter = filter.map(|f| format!("{f}*"));
+        // LIMIT only applies to the "show all" view; prefix searches return all matches.
+        let limit: i64 = if filter.is_some() { i64::MAX } else { 20 };
         let mut stmt = self.conn.prepare(
-            "SELECT session_id, MAX(timestamp), COUNT(*), SUM(saved_tokens), AVG(savings_pct)
+            "SELECT session_id, MAX(timestamp), COUNT(*),
+                    COALESCE(SUM(saved_tokens), 0), COALESCE(AVG(savings_pct), 0.0)
              FROM commands
              WHERE session_id != ''
-               AND (?1 IS NULL OR session_id LIKE ?1)
+               AND (?1 IS NULL OR session_id GLOB ?1)
              GROUP BY session_id
              ORDER BY MAX(timestamp) DESC
-             LIMIT 20",
+             LIMIT ?2",
         )?;
 
-        let rows = stmt.query_map(params![prefix_filter], |row| {
+        let rows = stmt.query_map(params![prefix_filter, limit], |row| {
             let last_seen = DateTime::parse_from_rfc3339(&row.get::<_, String>(1)?)
                 .map(|dt| dt.with_timezone(&Utc))
+                // Deliberate fallback: a corrupt timestamp floats to top rather than
+                // failing the entire query — consistent with get_recent_filtered.
                 .unwrap_or_else(|_| Utc::now());
             Ok(SessionStat {
                 session_id: row.get(0)?,
