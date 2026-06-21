@@ -339,13 +339,25 @@ enum PayloadAction {
     Ignore,
 }
 
+fn claude_payload_input(v: &Value) -> Option<(&Value, &str)> {
+    for key in ["tool_input", "input"] {
+        if let Some(input) = v.get(key) {
+            if let Some(cmd) = input
+                .get("command")
+                .and_then(|c| c.as_str())
+                .filter(|c| !c.is_empty())
+            {
+                return Some((input, cmd));
+            }
+        }
+    }
+
+    None
+}
+
 fn process_claude_payload(v: &Value) -> PayloadAction {
-    let cmd = match v
-        .pointer("/tool_input/command")
-        .and_then(|c| c.as_str())
-        .filter(|c| !c.is_empty())
-    {
-        Some(c) => c,
+    let (input, cmd) = match claude_payload_input(v) {
+        Some((input, cmd)) => (input, cmd),
         None => return PayloadAction::Ignore,
     };
 
@@ -367,7 +379,7 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
     };
 
     let updated_input = {
-        let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+        let mut ti = input.clone();
         if let Some(obj) = ti.as_object_mut() {
             obj.insert("command".into(), Value::String(rewritten.clone()));
         }
@@ -904,6 +916,18 @@ mod tests {
         .to_string()
     }
 
+    fn claude_current_input_with_fields(cmd: &str, timeout: u64, description: &str) -> String {
+        json!({
+            "tool": "Bash",
+            "input": {
+                "command": cmd,
+                "timeout": timeout,
+                "description": description
+            }
+        })
+        .to_string()
+    }
+
     #[test]
     fn test_claude_rewrite_git_status() {
         let result = run_claude_inner(&claude_input("git status")).unwrap();
@@ -924,6 +948,17 @@ mod tests {
         assert_eq!(updated["command"], "rtk git status");
         assert_eq!(updated["timeout"], 30000);
         assert_eq!(updated["description"], "Check repo status");
+    }
+
+    #[test]
+    fn test_claude_rewrite_accepts_current_tool_input_keys() {
+        let input = claude_current_input_with_fields("grep -r hello .", 30000, "Search repo");
+        let result = run_claude_inner(&input).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let updated = &v["hookSpecificOutput"]["updatedInput"];
+        assert_eq!(updated["command"], "rtk grep -r hello .");
+        assert_eq!(updated["timeout"], 30000);
+        assert_eq!(updated["description"], "Search repo");
     }
 
     #[test]
