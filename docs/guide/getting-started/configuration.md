@@ -52,12 +52,16 @@ exclude_commands = []       # commands to never auto-rewrite
 
 [layers]
 decorative = "reasonable"   # chrome removal: "none" | "light" | "reasonable" | "high"
-dedup = "exact"             # collapse repeated lines (fallback): "none" | "exact" | "normalized"
+dedup = "none"              # collapse repeated lines: "none" | "exact" | "normalized"
 truncate = "reasonable"     # item caps "show N, +M more": "none" | "light" | "reasonable" | "high"
 exclude = []                # extra commands to leave unfiltered (raw passthrough)
+
+# Optional per-group overrides (group = command ecosystem). See Filter Layers.
+# [layers.js]
+# dedup = "exact"
 ```
 
-Every layer accepts `"none"` to turn it off. The default keeps RTK's current behavior.
+Every layer accepts `"none"` to turn it off. The default keeps RTK's current behavior. See **[Filter Layers](./filter-layers.md)** for the full reference.
 
 For full details on what is collected, opt-out options, and GDPR rights, see [Telemetry & Privacy](../resources/telemetry.md).
 
@@ -67,8 +71,9 @@ For full details on what is collected, opt-out options, and GDPR rights, see [Te
 |----------|-------------|
 | `RTK_DISABLED=1` | Disable RTK for a single command (`RTK_DISABLED=1 git status`) |
 | `RTK_DECORATIVE_LEVEL` | Decorative level for this invocation (`none`/`light`/`reasonable`/`high`) |
-| `RTK_DEDUP_LEVEL` | Dedup level for the fallback (`none`/`exact`/`normalized`) |
+| `RTK_DEDUP_LEVEL` | Dedup level for this invocation (`none`/`exact`/`normalized`) |
 | `RTK_TRUNCATE_LEVEL` | Item-cap level for this invocation (`none`/`light`/`reasonable`/`high`) |
+| `RTK_<GROUP>_<LAYER>_LEVEL` | Per-group override, e.g. `RTK_JS_TRUNCATE_LEVEL` (see [Filter Layers](./filter-layers.md)) |
 | `RTK_TEE_DIR` | Override the tee directory |
 | `RTK_TELEMETRY_DISABLED=1` | Disable telemetry |
 | `RTK_HOOK_AUDIT=1` | Enable hook audit logging |
@@ -76,77 +81,34 @@ For full details on what is collected, opt-out options, and GDPR rights, see [Te
 
 ## Filter layers
 
-Before each command's own filter, RTK runs a generic pipeline of layers. Today
-that is the **decorative** layer — lossless chrome removal applied to every
-command routed through RTK (and to otherwise-unsupported commands via the global
-fallback).
+Before each command's own filter, RTK runs generic layers — `decorative` (chrome
+removal), `dedup` (collapse repeats), and the `truncate` dial (item caps). Each
+has levels from `none` (off) to `high` (most compression), set globally in
+`[layers]` above or per command group via `[layers.<group>]` /
+`RTK_<GROUP>_<LAYER>_LEVEL`.
 
-```toml
-[layers]
-decorative = "reasonable"
-exclude = ["mytool"]
-```
+| Layer | Levels | Default |
+|-------|--------|---------|
+| `decorative` | none / light / reasonable / high | reasonable |
+| `dedup` | none / exact / normalized | none (off) |
+| `truncate` | none / light / reasonable / high | reasonable |
 
-| `decorative` | What it removes |
-|--------------|-----------------|
-| `none` | nothing (layer off) |
-| `light` | ANSI color codes only (fully lossless) |
-| `reasonable` (default) | ANSI + trailing whitespace + collapses blank-line runs |
-| `high` | + drops pure box-drawing / separator lines |
-
-Override for a single invocation:
+Quick overrides:
 
 ```bash
-RTK_DECORATIVE_LEVEL=high rtk <command>
+RTK_DECORATIVE_LEVEL=high rtk cargo build
+RTK_TRUNCATE_LEVEL=none   rtk pip list        # show everything
+RTK_JS_DEDUP_LEVEL=exact  rtk vitest          # per-group
 ```
 
-Every layer also accepts `none` to disable it (e.g. `RTK_DECORATIVE_LEVEL=none`
-for raw output).
+See **[Filter Layers](./filter-layers.md)** for the full reference: every level,
+the group list, precedence, and examples.
 
-### Truncate (item caps)
+### Excluding commands
 
-Each command caps how many items it lists ("show N errors, +M more"). The
-`truncate` level scales those caps — higher = more compression (fewer items):
-
-| `truncate` | Effect on caps |
-|------------|----------------|
-| `none` | no cap (show everything) |
-| `light` | looser caps (×2 — show more) |
-| `reasonable` (default) | today's per-command caps, unchanged |
-| `high` | tighter caps (÷2 — fewer items, more compression) |
-
-```bash
-RTK_TRUNCATE_LEVEL=high rtk cargo clippy   # fewer items shown
-RTK_TRUNCATE_LEVEL=none rtk pip list       # no truncation
-```
-
-### Dedup (unsupported commands)
-
-For commands RTK doesn't have a specific filter for, it also collapses consecutive
-repeated lines into `[×N] line` — useful for noisy logs, retries, and repeated warnings.
-
-| `dedup` | Behavior |
-|---------|----------|
-| `none` | no collapse (layer off) |
-| `exact` (default) | collapse byte-identical consecutive lines |
-| `normalized` | mask volatile tokens (numbers, hex, timestamps) first, then collapse near-identical lines |
-
-```bash
-RTK_DEDUP_LEVEL=normalized rtk <command>
-```
-
-### Excluding commands from the pipeline
-
-Raw-output commands must stay byte-exact, so RTK never filters them: `cat`,
-`head`, `tail`, `base64`, `xxd`, `hexdump`, `od`, `strings`, `dd`. Add your own
-with `[layers].exclude` (the `exclude` key under `[layers]`):
-
-```toml
-[layers]
-exclude = ["mytool", "dump-binary"]
-```
-
-Matching is by command name (basename), so `/usr/bin/cat` and `cat` both match.
+Raw-output commands stay byte-exact and are never filtered: `cat`, `head`,
+`tail`, `base64`, `xxd`, `hexdump`, `od`, `strings`, `dd`. Add your own under
+`[layers].exclude`; matching is by command basename.
 
 ## Tee system
 

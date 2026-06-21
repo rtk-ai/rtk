@@ -6,7 +6,7 @@
 
 use crate::core::runner;
 use crate::core::truncate::caps;
-use crate::core::utils::ruby_exec;
+use crate::core::utils::{ruby_exec, strip_ansi};
 use anyhow::Result;
 
 /// Decide whether to use `rake test` or `rails test` based on args.
@@ -100,7 +100,8 @@ enum ParseState {
 /// 8 runs, 7 assertions, 1 failures, 1 errors, 0 skips
 /// ```
 fn filter_minitest_output(output: &str) -> String {
-    let clean = output;
+    // Strip ANSI anyway for now, parsing depends on it
+    let clean = strip_ansi(output);
     let mut state = ParseState::Header;
     let mut failures: Vec<String> = Vec::new();
     let mut current_failure: Vec<String> = Vec::new();
@@ -262,6 +263,14 @@ fn parse_minitest_summary(summary: &str) -> (usize, usize, usize, usize, usize) 
 mod tests {
     use super::*;
     use crate::core::utils::count_tokens;
+
+    #[test]
+    fn test_filter_minitest_handles_ansi() {
+        // Filter must work whether or not the decorative layer stripped ANSI.
+        let clean = "# Running:\n........\n8 runs, 9 assertions, 0 failures, 0 errors, 0 skips";
+        let ansi = "# Running:\n\x1b[32m........\x1b[0m\n8 runs, 9 assertions, 0 failures, 0 errors, 0 skips";
+        assert_eq!(filter_minitest_output(ansi), filter_minitest_output(clean));
+    }
 
     #[test]
     fn test_filter_minitest_all_pass() {

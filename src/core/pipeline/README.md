@@ -1,18 +1,20 @@
 # Filter Pipeline
 
-Generic, layered output filtering applied **before** each command's own filter.
-A command's bespoke filter always runs last; the pipeline handles the
-cross-cutting layers (currently: decorative chrome removal).
+Generic, layered output filtering wrapped around each command's own filter: the
+pipeline strips decorative chrome **before** the command's filter, collapses
+consecutive repeats (`dedup`) **after** it, and exposes a `truncate` dial the
+filter reads for its item caps.
 
 ## Concepts
 
-- **Node layer** — a generic transformation pass run before the custom filter.
-  Each lives in its own file with a whole-string (captured) and per-line
-  (streaming) form:
+- **Node layer** — a generic transformation pass run around the custom filter
+  (decorative pre-custom; dedup post-custom in `run`). Each lives in its own file
+  with a whole-string (captured) and per-line (streaming) form:
   - `decorative` — chrome removal (ANSI, blank runs, box-drawing). Safe pre-custom.
-  - `dedup` — collapse consecutive repeats into `[×N] line`. Default **off**: it
-    must run after parsing, so today it's enabled only in the global fallback
-    (no parser to corrupt).
+  - `dedup` — collapse consecutive repeats into `[×N] line`. Default **off**. Runs
+    **post-custom** in `run` (after the command's filter, so it can't corrupt a
+    parser). The streaming path still wraps it pre-custom, so there it's wired
+    only for the parser-less fallback.
 - **Dial layer** — not a pass; a global level the command's own renderer reads.
   - `truncate` — scales the item caps (`core::truncate::caps()`): each command
     keeps deciding *which* items to cap, but reads a level-scaled value instead of
@@ -51,14 +53,20 @@ Commands that bypass `runner` (direct `stream::exec_capture` /
 ## Global fallback
 
 Unsupported commands (no `cmds/` handler, no TOML filter) reach `run_fallback`
-in `main.rs`. Routing order: **cmds → TOML → global fallback**. The fallback:
+in `main.rs`. Routing order: **cmds → TOML → global fallback**. A TOML match
+runs its own filter, then `route_toml_output` sends the result through the
+decorative + dedup layers (global levels; not the truncate dial or per-group).
+The fallback:
 
 - **terminal stdout** → passthrough (inherit stdio) so interactive apps and
   color work.
 - **excluded command** (`is_excluded`) → passthrough untouched, so raw-output
   commands (`cat`, `head`, …) stay byte-exact.
 - **otherwise (piped)** → stream through the pipeline with an `Identity` custom
-  filter (decorative only, no command-specific filtering).
+  filter (`FALLBACK_ROUTING` wires decorative + dedup; dedup is off unless a
+  dedup level is configured). No command-specific filtering.
+- when every routed layer resolves to off, `is_noop()` short-circuits to native
+  exec (byte-identical output/exit/stream ordering).
 
 The exclude list is a built-in `const` set in `levels.rs`, extended by the user
 via `[layers].exclude`.
@@ -66,18 +74,29 @@ via `[layers].exclude`.
 ## Level resolution (`levels.rs`)
 
 Resolved once per process (cached in a `OnceLock`) to keep config off the hot
-path. Precedence, highest first:
+path. `main.rs` calls `set_group()` with the running command's folder group
+(from `GROUPS`/`group_for_command`) *before* the first level read. Precedence,
+highest first:
 
-1. env (`RTK_DECORATIVE_LEVEL`, `RTK_DEDUP_LEVEL`)
-2. config `[layers]` (`~/.config/rtk/config.toml`)
-3. built-in default (`reasonable`)
+1. group env — `RTK_<GROUP>_<LAYER>_LEVEL` (hyphens in the group → underscores,
+   e.g. `golangci-lint` → `RTK_GOLANGCI_LINT_<LAYER>_LEVEL`)
+2. group config — `[layers.<group>]`
+3. global env — `RTK_<LAYER>_LEVEL`
+4. global config — `[layers]`
+5. built-in default
+
+`GROUPS` maps each `cmds/` folder to its commands (the per-group config surface).
+The runtime can't see a command's source folder, so the mapping is explicit; the
+`groups_match_subcommands` test (in `main.rs`) guards it against typos/renames,
+and an unlisted command falls through to the global `[layers]`.
 
 ## Adding a layer
 
-1. New file `pipeline/<layer>.rs` with its level enum + whole-string and (if
-   line-oriented) per-line forms.
-2. Add a field to `Routing`.
+1. New file `pipeline/<layer>.rs` with its level enum (incl. a `None` = off
+   variant) + whole-string and (if line-oriented) per-line forms.
+2. Add a field to `Routing` if a command must be able to opt out in code.
 3. Apply it in `Pipeline::run` (and `stream` if it has a per-line form), in
-   canonical order, before the custom step.
-4. If user-tunable, add a field to `Levels` + `LayersConfig` and resolve it in
-   `levels.rs`.
+   canonical order. Node layers that need clean (parsed) input run *after* the
+   custom step, like `dedup`.
+4. If user-tunable, add a field to `Levels` + `LayersConfig` (+ `GroupLayers` for
+   per-group) and resolve it in `levels.rs::resolve`.

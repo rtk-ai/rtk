@@ -2,7 +2,7 @@
 
 use crate::core::runner;
 use crate::core::truncate::caps;
-use crate::core::utils::{resolved_command, tool_exists, truncate};
+use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
 use regex::Regex;
 
@@ -60,7 +60,8 @@ fn filter_next_build(output: &str) -> String {
     let mut errors = 0;
     let mut build_time = String::new();
 
-    let clean_output = output;
+    // Strip ANSI anyway for now, parsing depends on it
+    let clean_output = strip_ansi(output);
 
     for line in clean_output.lines() {
         // Count route types by symbol
@@ -185,6 +186,14 @@ fn extract_time(line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_filter_next_build_handles_ansi() {
+        // Filter must work whether or not the decorative layer stripped ANSI.
+        let clean = "○ /  1.2 kB  132 kB\n✓ Built in 34.2s\n";
+        let ansi = "\x1b[32m○\x1b[0m /  1.2 kB  132 kB\n\x1b[32m✓\x1b[0m Built in 34.2s\n";
+        assert_eq!(filter_next_build(ansi), filter_next_build(clean));
+    }
 
     #[test]
     fn test_filter_next_build() {

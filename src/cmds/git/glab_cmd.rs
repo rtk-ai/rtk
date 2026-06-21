@@ -13,7 +13,7 @@
 use super::git;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::caps;
-use crate::core::utils::{ok_confirmation, resolved_command, truncate};
+use crate::core::utils::{ok_confirmation, resolved_command, strip_ansi, truncate};
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -783,11 +783,12 @@ fn ci_trace(args: &[String]) -> Result<i32> {
     )
 }
 
-/// Filter CI job trace output: strip section markers and runner boilerplate.
-/// Keep warnings, errors, and build output. (ANSI is stripped upstream by the
-/// decorative pipeline layer.)
+/// Filter CI job trace output: strip ANSI, section markers, and runner
+/// boilerplate. Keep warnings, errors, and build output.
 fn filter_ci_trace(raw: &str) -> String {
-    let cleaned = BARE_ANSI_RE.replace_all(raw, "");
+    // Strip ANSI anyway for now, parsing depends on it
+    let cleaned = strip_ansi(raw);
+    let cleaned = BARE_ANSI_RE.replace_all(&cleaned, "");
     let cleaned = SECTION_MARKER_RE.replace_all(&cleaned, "");
 
     let mut filtered = String::new();
@@ -1007,6 +1008,14 @@ fn run_passthrough_with_extra(cmd: &str, base_args: &[&str], extra_args: &[Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_filter_ci_trace_handles_ansi() {
+        // Filter must work whether or not the decorative layer stripped ANSI.
+        let clean = "Running with gitlab-runner\nnpm run build\nJob failed\n";
+        let ansi = "\x1b[0;33mRunning with gitlab-runner\x1b[0;m\n\x1b[32mnpm run build\x1b[0m\nJob failed\n";
+        assert_eq!(filter_ci_trace(ansi), filter_ci_trace(clean));
+    }
 
     #[test]
     fn test_state_icon_opened() {

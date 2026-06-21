@@ -1,7 +1,7 @@
 //! Filters mypy type-checking output, grouping errors by file.
 
 use crate::core::runner;
-use crate::core::utils::{resolved_command, tool_exists, truncate};
+use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
 use regex::Regex;
 use std::collections::HashMap;
@@ -41,6 +41,8 @@ struct MypyError {
 }
 
 pub fn filter_mypy_output(output: &str) -> String {
+    // Strip ANSI anyway for now, parsing depends on it
+    let output = strip_ansi(output);
     lazy_static::lazy_static! {
         // file.py:12: error: Message [error-code]
         // file.py:12:5: error: Message [error-code]
@@ -215,6 +217,14 @@ pub fn filter_mypy_output(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_filter_mypy_handles_ansi() {
+        // Filter must work whether or not the decorative layer stripped ANSI.
+        let clean = "src/a.py:12: error: Bad [return-value]\nFound 1 error in 1 file (checked 1 source file)\n";
+        let ansi = "\x1b[1msrc/a.py\x1b[0m:12: \x1b[31merror\x1b[0m: Bad [return-value]\nFound 1 error in 1 file (checked 1 source file)\n";
+        assert_eq!(filter_mypy_output(ansi), filter_mypy_output(clean));
+    }
 
     #[test]
     fn test_filter_mypy_errors_grouped_by_file() {

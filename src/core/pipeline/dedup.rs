@@ -6,8 +6,8 @@ use regex::Regex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum DedupLevel {
-    None,
     #[default]
+    None,
     Exact,
     Normalized,
 }

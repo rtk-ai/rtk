@@ -26,7 +26,7 @@ use cmds::system::{
 
 use anyhow::{Context, Result};
 use clap::error::ErrorKind;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -1224,7 +1224,10 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                     None
                 };
 
-                let filtered = core::toml_filter::apply_filter(filter, &combined_raw);
+                let filtered = core::pipeline::route_toml_output(&core::toml_filter::apply_filter(
+                    filter,
+                    &combined_raw,
+                ));
                 println!("{}", filtered);
                 if let Some(hint) = tee_hint {
                     println!("{}", hint);
@@ -1434,14 +1437,29 @@ fn run_cli() -> Result<i32> {
     // Fire-and-forget telemetry ping (1/day, non-blocking)
     core::telemetry::maybe_ping();
 
-    let cli = match Cli::try_parse() {
-        Ok(cli) => cli,
+    // Parse via matches so we can read the subcommand name (the per-group layer
+    // key) without a hand-maintained command→group table. This is exactly what
+    // Cli::try_parse does internally, split open to grab subcommand_name().
+    let matches = match Cli::command().try_get_matches() {
+        Ok(m) => m,
         Err(e) => {
             if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
                 e.exit();
             }
             return run_fallback(e);
         }
+    };
+    // Set the layer group before anything reads resolved levels (the resolution
+    // is cached on first read, so this must precede every caps()/is_excluded()).
+    if let Some(group) = matches
+        .subcommand_name()
+        .and_then(core::pipeline::group_for_command)
+    {
+        core::pipeline::set_group(group);
+    }
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(e) => return run_fallback(e),
     };
 
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
@@ -2569,6 +2587,23 @@ mod tests {
     use super::*;
     use clap::Parser;
     use std::cell::Cell;
+
+    // Guards the per-group folder table (pipeline::GROUPS): every listed command
+    // must be a real clap subcommand, so a typo or rename can't silently break a
+    // user's `[layers.<group>]` config.
+    #[test]
+    fn groups_match_subcommands() {
+        let cmd = Cli::command();
+        let names: Vec<&str> = cmd.get_subcommands().map(|c| c.get_name()).collect();
+        for (folder, cmds) in crate::core::pipeline::GROUPS {
+            for c in *cmds {
+                assert!(
+                    names.contains(c),
+                    "pipeline::GROUPS[{folder}] lists '{c}', which is not a clap subcommand"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_git_commit_single_message() {

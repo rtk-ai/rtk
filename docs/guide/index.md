@@ -60,6 +60,7 @@ See [Discover and Session](./analytics/discover.md) for details.
 ## Further reading
 
 - [Configuration](./getting-started/configuration.md) — config.toml, global flags, env vars, tee recovery
+- [Filter Layers](./getting-started/filter-layers.md) — tune decorative/dedup/truncate globally or per command group
 - [Troubleshooting](./resources/troubleshooting.md) — common issues and fixes
 - [Telemetry & Privacy](./resources/telemetry.md) — what RTK collects and how to opt out
 - [ARCHITECTURE.md](https://github.com/rtk-ai/rtk/blob/master/ARCHITECTURE.md) — system design for contributors

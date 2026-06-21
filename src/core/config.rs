@@ -157,7 +157,7 @@ fn default_decorative() -> String {
 }
 
 fn default_dedup() -> String {
-    "exact".to_string()
+    "none".to_string()
 }
 
 fn default_truncate() -> String {
@@ -178,6 +178,18 @@ pub struct LayersConfig {
     /// Extra commands excluded from the global fallback pipeline (raw passthrough).
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// Per-group overrides, e.g. `[layers.js]`. Keyed by cmds/ folder group.
+    #[serde(flatten, default)]
+    pub groups: std::collections::HashMap<String, GroupLayers>,
+}
+
+/// Optional per-group layer overrides under `[layers.<group>]`. Any unset field
+/// falls back to the global `[layers]` value.
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct GroupLayers {
+    pub decorative: Option<String>,
+    pub dedup: Option<String>,
+    pub truncate: Option<String>,
 }
 
 impl Default for LayersConfig {
@@ -187,6 +199,7 @@ impl Default for LayersConfig {
             dedup: default_dedup(),
             truncate: default_truncate(),
             exclude: Vec::new(),
+            groups: std::collections::HashMap::new(),
         }
     }
 }
@@ -258,6 +271,49 @@ exclude_commands = ["curl", "gh"]
 "#;
         let config: Config = toml::from_str(toml).expect("valid toml");
         assert_eq!(config.hooks.exclude_commands, vec!["curl", "gh"]);
+    }
+
+    #[test]
+    fn test_layers_global_and_per_group_parse() {
+        let toml = r#"
+[layers]
+dedup = "none"
+truncate = "high"
+
+[layers.js]
+dedup = "exact"
+
+[layers.git]
+decorative = "high"
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.layers.dedup, "none");
+        assert_eq!(config.layers.truncate, "high");
+        // Per-group subtables land in the flattened map, not the scalar fields.
+        assert_eq!(
+            config
+                .layers
+                .groups
+                .get("js")
+                .and_then(|g| g.dedup.as_deref()),
+            Some("exact")
+        );
+        assert_eq!(
+            config
+                .layers
+                .groups
+                .get("git")
+                .and_then(|g| g.decorative.as_deref()),
+            Some("high")
+        );
+        assert!(!config.layers.groups.contains_key("dedup"));
+    }
+
+    #[test]
+    fn test_default_config_roundtrips() {
+        // flatten + map must not break TOML serialization (rtk init / save).
+        let s = toml::to_string_pretty(&Config::default()).expect("serialize");
+        let _: Config = toml::from_str(&s).expect("reparse");
     }
 
     #[test]

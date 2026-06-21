@@ -7,20 +7,33 @@ mod dedup;
 mod levels;
 
 pub use levels::is_excluded;
-pub use levels::TruncateLevel;
+pub use levels::set_group;
+#[cfg(test)]
+pub use levels::GROUPS;
+pub use levels::{group_for_command, TruncateLevel};
 
 /// The resolved truncate level, for `core::truncate::caps()`.
 pub fn truncate_level() -> TruncateLevel {
     levels::current().truncate
 }
 
+pub fn route_toml_output(text: &str) -> String {
+    Pipeline::with_routing(Routing {
+        decorative: true,
+        dedup: true,
+    })
+    .run(text, |s| s.to_string())
+}
+
 use crate::core::stream::StreamFilter;
+use levels::Levels;
 
 /// Per-command, code-level choice of which generic layers run around the
 /// command's own filter. Not user-configurable; the custom filter always runs.
 ///
-/// `dedup` defaults off: it must run after parsing, so it's only safe where
-/// there is no parser (the global fallback), not pre-custom for parsed commands.
+/// `dedup` defaults off. In `run` it executes after the custom filter
+/// (post-parse), so it is safe per command. The streaming path still wraps it
+/// pre-custom, so there it is only wired for the parser-less fallback.
 #[derive(Clone, Copy, Debug)]
 pub struct Routing {
     pub decorative: bool,
@@ -38,49 +51,85 @@ impl Default for Routing {
 
 pub struct Pipeline {
     routing: Routing,
+    levels: Levels,
 }
 
 impl Pipeline {
     pub fn with_routing(routing: Routing) -> Self {
-        Self { routing }
+        Self {
+            routing,
+            levels: *levels::current(),
+        }
     }
 
     // no filter enabled → native exec
     pub fn is_noop(&self) -> bool {
-        let lv = levels::current();
-        let dec = self.routing.decorative && lv.decorative != decorative::DecorativeLevel::None;
-        let ddp = self.routing.dedup && lv.dedup != dedup::DedupLevel::None;
+        let dec =
+            self.routing.decorative && self.levels.decorative != decorative::DecorativeLevel::None;
+        let ddp = self.routing.dedup && self.levels.dedup != dedup::DedupLevel::None;
         !dec && !ddp
     }
 
     pub fn run(&self, raw: &str, custom: impl Fn(&str) -> String) -> String {
-        let levels = levels::current();
         let mut data = raw.to_string();
         if self.routing.decorative {
-            data = decorative::apply(&data, levels.decorative);
+            data = decorative::apply(&data, self.levels.decorative);
         }
-        if self.routing.dedup {
-            data = dedup::apply(&data, levels.dedup);
+        // dedup runs on the filter's OUTPUT (post-parse) so it can't corrupt a
+        // parser; gated by the user level (off by default), so it works per-group.
+        let mut out = custom(&data);
+        if self.levels.dedup != dedup::DedupLevel::None {
+            out = dedup::apply(&out, self.levels.dedup);
         }
-        custom(&data)
+        out
     }
 
     pub fn stream<'a>(&self, inner: Box<dyn StreamFilter + 'a>) -> Box<dyn StreamFilter + 'a> {
-        let levels = levels::current();
         let mut filter = inner;
         if self.routing.dedup {
-            filter = dedup::wrap_stream(filter, levels.dedup);
+            filter = dedup::wrap_stream(filter, self.levels.dedup);
         }
         if self.routing.decorative {
-            filter = decorative::wrap_stream(filter, levels.decorative);
+            filter = decorative::wrap_stream(filter, self.levels.decorative);
         }
         filter
+    }
+
+    #[cfg(test)]
+    fn with_levels(routing: Routing, levels: Levels) -> Self {
+        Self { routing, levels }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use decorative::DecorativeLevel as DL;
+    use dedup::DedupLevel as DD;
+
+    // Pin levels so tests don't depend on the machine's env/config.
+    fn lv(decorative: DL, dedup: DD) -> Levels {
+        Levels {
+            decorative,
+            dedup,
+            truncate: TruncateLevel::default(),
+        }
+    }
+
+    #[test]
+    fn toml_output_is_polished_not_corrupted() {
+        let routing = Routing {
+            decorative: true,
+            dedup: false,
+        };
+        let toml_out = "\x1b[32mok\x1b[0m   \n\n\nrest";
+        let cleaned = Pipeline::with_levels(routing, lv(DL::Reasonable, DD::None))
+            .run(toml_out, |s| s.to_string());
+        assert_eq!(cleaned, "ok\n\nrest");
+        let raw =
+            Pipeline::with_levels(routing, lv(DL::None, DD::None)).run(toml_out, |s| s.to_string());
+        assert_eq!(raw, toml_out);
+    }
 
     struct Echo;
     impl StreamFilter for Echo {
@@ -94,9 +143,10 @@ mod tests {
 
     #[test]
     fn run_applies_routing_then_custom() {
-        let out = Pipeline::with_routing(Routing::default()).run("\x1b[32mx\x1b[0m\ny", |s| {
-            format!("[{}]", s.replace('\n', "|"))
-        });
+        let out = Pipeline::with_levels(Routing::default(), lv(DL::Reasonable, DD::None))
+            .run("\x1b[32mx\x1b[0m\ny", |s| {
+                format!("[{}]", s.replace('\n', "|"))
+            });
         assert_eq!(out, "[x|y]");
     }
 
@@ -107,7 +157,8 @@ mod tests {
             decorative: false,
             dedup: false,
         };
-        let out = Pipeline::with_routing(off).run(raw, |s| s.to_string());
+        let out =
+            Pipeline::with_levels(off, lv(DL::Reasonable, DD::Exact)).run(raw, |s| s.to_string());
         assert_eq!(out, raw);
     }
 
@@ -117,7 +168,8 @@ mod tests {
             decorative: false,
             dedup: true,
         };
-        let out = Pipeline::with_routing(routing).run("a\na\nb", |s| s.to_string());
+        let out = Pipeline::with_levels(routing, lv(DL::Reasonable, DD::Exact))
+            .run("a\na\nb", |s| s.to_string());
         assert_eq!(out, "[×2] a\nb");
     }
 
@@ -128,7 +180,7 @@ mod tests {
             decorative: true,
             dedup: true,
         };
-        let out = Pipeline::with_routing(routing)
+        let out = Pipeline::with_levels(routing, lv(DL::Reasonable, DD::Exact))
             .run("\x1b[31mERR\x1b[0m\n\x1b[32mERR\x1b[0m", |s| s.to_string());
         assert_eq!(out, "[×2] ERR");
     }
@@ -139,7 +191,8 @@ mod tests {
             decorative: true,
             dedup: true,
         };
-        let mut f = Pipeline::with_routing(routing).stream(Box::new(Echo));
+        let mut f =
+            Pipeline::with_levels(routing, lv(DL::Reasonable, DD::Exact)).stream(Box::new(Echo));
         assert_eq!(f.feed_line("\x1b[31mERR\x1b[0m"), None);
         assert_eq!(f.feed_line("\x1b[32mERR\x1b[0m"), None);
         assert_eq!(f.flush(), "[×2] ERR");
@@ -151,14 +204,15 @@ mod tests {
             decorative: false,
             dedup: true,
         };
-        let out = Pipeline::with_routing(routing)
+        let out = Pipeline::with_levels(routing, lv(DL::Reasonable, DD::Exact))
             .run("\x1b[31mx\x1b[0m\n\x1b[31mx\x1b[0m", |s| s.to_string());
         assert_eq!(out, "[×2] \x1b[31mx\x1b[0m");
     }
 
     #[test]
     fn stream_decorates_lines_before_inner() {
-        let mut f = Pipeline::with_routing(Routing::default()).stream(Box::new(Echo));
+        let mut f = Pipeline::with_levels(Routing::default(), lv(DL::Reasonable, DD::None))
+            .stream(Box::new(Echo));
         let out = f.feed_line("\x1b[32mok\x1b[0m").unwrap();
         assert!(!out.contains('\x1b') && out.contains("ok"));
     }
@@ -169,7 +223,8 @@ mod tests {
             decorative: false,
             dedup: false,
         };
-        let mut f = Pipeline::with_routing(off).stream(Box::new(Echo));
+        let mut f =
+            Pipeline::with_levels(off, lv(DL::Reasonable, DD::Exact)).stream(Box::new(Echo));
         assert_eq!(
             f.feed_line("\x1b[32mok\x1b[0m"),
             Some("\x1b[32mok\x1b[0m".to_string())
