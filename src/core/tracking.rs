@@ -48,6 +48,11 @@ fn current_project_path_string() -> String {
         .unwrap_or_default()
 }
 
+/// Get the current Claude Code session ID from the environment.
+fn current_session_id() -> String {
+    std::env::var("CLAUDE_CODE_SESSION_ID").unwrap_or_default()
+}
+
 /// Build SQL filter params for project-scoped queries.
 /// Returns (exact_match, glob_prefix) for WHERE clause.
 /// Uses GLOB instead of LIKE to avoid `_` and `%` in paths acting as wildcards. // changed: GLOB
@@ -131,6 +136,24 @@ pub struct GainSummary {
     pub by_command: Vec<(String, usize, usize, f64, u64)>,
     /// Last 30 days of activity: (date, saved_tokens)
     pub by_day: Vec<(String, usize)>,
+}
+
+/// Per-session statistics for token savings.
+///
+/// Groups all commands recorded under the same `CLAUDE_CODE_SESSION_ID`
+/// so users can see how much each Claude Code session saved.
+#[derive(Debug)]
+pub struct SessionStat {
+    /// Short session ID (first 8 chars of the UUID)
+    pub session_id: String,
+    /// UTC timestamp of the most recent command in this session
+    pub last_seen: DateTime<Utc>,
+    /// Number of commands recorded for this session
+    pub commands: usize,
+    /// Total tokens saved across all commands in this session
+    pub saved_tokens: usize,
+    /// Average savings percentage across all commands in this session
+    pub avg_savings_pct: f64,
 }
 
 /// Daily statistics for token savings and execution metrics.
@@ -307,6 +330,15 @@ impl Tracker {
             "CREATE INDEX IF NOT EXISTS idx_project_path_timestamp ON commands(project_path, timestamp)",
             [],
         );
+        // Migration: add session_id column for per-session gain tracking
+        let _ = conn.execute(
+            "ALTER TABLE commands ADD COLUMN session_id TEXT DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_id ON commands(session_id)",
+            [],
+        );
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS parse_failures (
@@ -348,7 +380,8 @@ impl Tracker {
                 saved_tokens INTEGER NOT NULL,
                 savings_pct REAL NOT NULL,
                 exec_time_ms INTEGER DEFAULT 0,
-                project_path TEXT DEFAULT ''
+                project_path TEXT DEFAULT '',
+                session_id TEXT DEFAULT ''
             )",
             [],
         )?;
@@ -358,6 +391,10 @@ impl Tracker {
         )?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_project_path_timestamp ON commands(project_path, timestamp)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_id ON commands(session_id)",
             [],
         )?;
         self.conn.execute(
@@ -414,16 +451,18 @@ impl Tracker {
             0.0
         };
 
-        let project_path = current_project_path_string(); // added: record cwd
+        let project_path = current_project_path_string();
+        let session_id = current_session_id();
 
         self.conn.execute(
-            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", // added: project_path
+            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, session_id, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 Utc::now().to_rfc3339(),
                 original_cmd,
                 rtk_cmd,
-                project_path, // added
+                project_path,
+                session_id,
                 input_tokens as i64,
                 output_tokens as i64,
                 saved as i64,
@@ -957,6 +996,44 @@ impl Tracker {
                 })
             },
         )?;
+
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Get per-session token savings, most recent session first.
+    ///
+    /// Only returns sessions with a non-empty `session_id` (i.e. commands
+    /// recorded while `CLAUDE_CODE_SESSION_ID` was set in the environment).
+    /// Limited to the 20 most recent sessions.
+    /// Get per-session token savings, most recent session first.
+    ///
+    /// When `filter` is `Some(prefix)`, only sessions whose ID starts with
+    /// that prefix are returned (useful for short IDs like `"2a35ea7f"`).
+    /// When `filter` is `None`, returns up to 20 most recent sessions.
+    pub fn get_by_session(&self, filter: Option<&str>) -> Result<Vec<SessionStat>> {
+        let prefix_filter = filter.map(|f| format!("{f}%"));
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, MAX(timestamp), COUNT(*), SUM(saved_tokens), AVG(savings_pct)
+             FROM commands
+             WHERE session_id != ''
+               AND (?1 IS NULL OR session_id LIKE ?1)
+             GROUP BY session_id
+             ORDER BY MAX(timestamp) DESC
+             LIMIT 20",
+        )?;
+
+        let rows = stmt.query_map(params![prefix_filter], |row| {
+            let last_seen = DateTime::parse_from_rfc3339(&row.get::<_, String>(1)?)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            Ok(SessionStat {
+                session_id: row.get(0)?,
+                last_seen,
+                commands: row.get::<_, i64>(2)? as usize,
+                saved_tokens: row.get::<_, i64>(3)? as usize,
+                avg_savings_pct: row.get(4)?,
+            })
+        })?;
 
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -1684,6 +1761,169 @@ mod tests {
         assert_eq!(
             failures.total, 0,
             "parse_failures table should be empty after reset"
+        );
+    }
+
+    // ── get_by_session tests ──────────────────────────────────────────────────
+
+    fn insert_with_session(
+        tracker: &Tracker,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        input_tokens: usize,
+        output_tokens: usize,
+        session_id: &str,
+    ) {
+        let saved = input_tokens.saturating_sub(output_tokens);
+        let pct = if input_tokens > 0 {
+            saved as f64 / input_tokens as f64 * 100.0
+        } else {
+            0.0
+        };
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, session_id,
+                  input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+                 VALUES (datetime('now'), ?1, ?2, '', ?3, ?4, ?5, ?6, ?7, 10)",
+                rusqlite::params![
+                    original_cmd,
+                    rtk_cmd,
+                    session_id,
+                    input_tokens as i64,
+                    output_tokens as i64,
+                    saved as i64,
+                    pct,
+                ],
+            )
+            .expect("insert failed");
+    }
+
+    #[test]
+    fn test_get_by_session_groups_correctly() {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+
+        insert_with_session(&tracker, "git log", "rtk git log", 1000, 100, "sess-aaa");
+        insert_with_session(&tracker, "git status", "rtk git status", 500, 50, "sess-aaa");
+        insert_with_session(&tracker, "cargo test", "rtk cargo test", 2000, 200, "sess-bbb");
+
+        let sessions = tracker.get_by_session(None).expect("get_by_session failed");
+        assert_eq!(sessions.len(), 2, "should have 2 distinct sessions");
+
+        let aaa = sessions.iter().find(|s| s.session_id == "sess-aaa").unwrap();
+        assert_eq!(aaa.commands, 2);
+        assert_eq!(aaa.saved_tokens, 1350); // (1000-100) + (500-50)
+
+        let bbb = sessions.iter().find(|s| s.session_id == "sess-bbb").unwrap();
+        assert_eq!(bbb.commands, 1);
+        assert_eq!(bbb.saved_tokens, 1800);
+    }
+
+    #[test]
+    fn test_get_by_session_excludes_empty_session_id() {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+
+        // Insert directly with explicit empty session_id (simulates pre-session-tracking records)
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, session_id,
+                  input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+                 VALUES (datetime('now'), 'git status', 'rtk git status', '', '',
+                         500, 50, 450, 90.0, 10)",
+                [],
+            )
+            .expect("insert failed");
+        // command with a session ID
+        insert_with_session(&tracker, "git log", "rtk git log", 1000, 100, "sess-aaa");
+
+        let sessions = tracker.get_by_session(None).expect("get_by_session failed");
+        assert_eq!(sessions.len(), 1, "empty session_id must be excluded");
+        assert_eq!(sessions[0].session_id, "sess-aaa");
+    }
+
+    #[test]
+    fn test_get_by_session_orders_most_recent_first() {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+
+        // Insert older session first
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, session_id,
+                  input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+                 VALUES ('2026-01-01T00:00:00Z', 'git log', 'rtk git log', '', 'sess-old',
+                         1000, 100, 900, 90.0, 10)",
+                [],
+            )
+            .expect("insert failed");
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, session_id,
+                  input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+                 VALUES ('2026-06-01T00:00:00Z', 'cargo test', 'rtk cargo test', '', 'sess-new',
+                         2000, 200, 1800, 90.0, 10)",
+                [],
+            )
+            .expect("insert failed");
+
+        let sessions = tracker.get_by_session(None).expect("get_by_session failed");
+        assert_eq!(sessions[0].session_id, "sess-new", "newest session must be first");
+        assert_eq!(sessions[1].session_id, "sess-old");
+    }
+
+    #[test]
+    fn test_get_by_session_empty_db() {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+        let sessions = tracker.get_by_session(None).expect("get_by_session failed");
+        assert!(sessions.is_empty(), "empty db should return empty vec");
+    }
+
+    #[test]
+    fn test_get_by_session_prefix_filter() {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+
+        insert_with_session(&tracker, "git log", "rtk git log", 1000, 100, "aaaa-1111");
+        insert_with_session(&tracker, "git status", "rtk git status", 500, 50, "aaaa-2222");
+        insert_with_session(&tracker, "cargo test", "rtk cargo test", 2000, 200, "bbbb-3333");
+
+        // filter by "aaaa" prefix matches both aaaa-* sessions
+        let filtered = tracker
+            .get_by_session(Some("aaaa"))
+            .expect("get_by_session failed");
+        assert_eq!(filtered.len(), 2, "prefix 'aaaa' should match 2 sessions");
+        assert!(filtered.iter().all(|s| s.session_id.starts_with("aaaa")));
+
+        // filter by full ID matches exactly one
+        let exact = tracker
+            .get_by_session(Some("aaaa-1111"))
+            .expect("get_by_session failed");
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].session_id, "aaaa-1111");
+
+        // filter by non-matching prefix returns empty
+        let none = tracker
+            .get_by_session(Some("zzzz"))
+            .expect("get_by_session failed");
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn test_get_by_session_savings_pct() {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+
+        // 80% savings
+        insert_with_session(&tracker, "git log", "rtk git log", 1000, 200, "sess-x");
+        // 60% savings
+        insert_with_session(&tracker, "git status", "rtk git status", 1000, 400, "sess-x");
+
+        let sessions = tracker.get_by_session(None).expect("get_by_session failed");
+        assert_eq!(sessions.len(), 1);
+        let pct = sessions[0].avg_savings_pct;
+        assert!(
+            (pct - 70.0).abs() < 1.0,
+            "avg savings pct should be ~70%, got {pct:.1}%"
         );
     }
 }
