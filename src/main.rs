@@ -307,6 +307,7 @@ enum Commands {
     },
 
     /// Compact grep - strips whitespace, truncates, groups by file
+    #[command(disable_help_flag = true)]
     Grep {
         /// Max line length
         #[arg(short = 'l', long, default_value = "80")]
