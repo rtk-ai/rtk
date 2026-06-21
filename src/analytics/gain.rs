@@ -1,11 +1,11 @@
 //! Shows users how many tokens RTK has saved them over time.
 
 use crate::core::display_helpers::{format_duration, print_period_table};
-use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
+use crate::core::tracking::{DayStats, MonthStats, SessionStat, Tracker, WeekStats};
 use crate::core::utils::format_tokens;
 use crate::hooks::hook_check;
 use anyhow::{Context, Result};
-use chrono::Local;
+use chrono::{Local, Utc};
 use colored::Colorize;
 use serde::Serialize;
 use std::io::IsTerminal;
@@ -13,9 +13,10 @@ use std::path::PathBuf;
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
-    project: bool, // added: per-project scope flag
+    project: bool,
     graph: bool,
     history: bool,
+    session: Option<&str>,
     quota: bool,
     tier: &str,
     daily: bool,
@@ -45,6 +46,15 @@ pub fn run(
 
     if failures {
         return show_failures(&tracker);
+    }
+
+    if let Some(session_filter) = session {
+        // "" means bare --session (show all); non-empty means filter by prefix
+        let filter = if session_filter.is_empty() { None } else { Some(session_filter) };
+        let sessions = tracker
+            .get_by_session(filter)
+            .context("Failed to load session data from database")?;
+        return show_session_view(&sessions, filter);
     }
 
     // Handle export formats
@@ -682,6 +692,73 @@ fn check_rtk_disabled_bypass() -> Option<String> {
     } else {
         None
     }
+}
+
+fn show_session_view(sessions: &[SessionStat], filter: Option<&str>) -> Result<()> {
+    if sessions.is_empty() {
+        if let Some(f) = filter {
+            println!("No session found matching '{f}'.");
+        } else {
+            println!("No session data yet.");
+            println!(
+                "Session tracking requires CLAUDE_CODE_SESSION_ID to be set (Claude Code ≥ v2.x)."
+            );
+        }
+        return Ok(());
+    }
+
+    let title = if filter.is_some() {
+        format!("RTK Session Savings — {}", sessions[0].session_id)
+    } else {
+        "RTK Session Savings".to_string()
+    };
+    println!("{}", styled(&title, true));
+    println!("{}", "─".repeat(62));
+    println!(
+        "{:<10}  {:<12}  {:>5}  {:>8}  {:>6}",
+        "Session", "Last Seen", "Cmds", "Saved", "Avg%"
+    );
+    println!("{}", "─".repeat(62));
+
+    for s in sessions {
+        let age = {
+            let secs = (Utc::now() - s.last_seen).num_seconds().max(0) as u64;
+            if secs < 60 {
+                "just now".to_string()
+            } else if secs < 3600 {
+                format!("{}m ago", secs / 60)
+            } else if secs < 86400 {
+                format!("{}h ago", secs / 3600)
+            } else {
+                format!("{}d ago", secs / 86400)
+            }
+        };
+        let short_id = if s.session_id.len() >= 8 {
+            &s.session_id[..8]
+        } else {
+            &s.session_id
+        };
+        let pct_cell = colorize_pct_cell(s.avg_savings_pct, &format!("{:.1}%", s.avg_savings_pct));
+        println!(
+            "{:<10}  {:<12}  {:>5}  {:>8}  {}",
+            short_id,
+            age,
+            s.commands,
+            format_tokens(s.saved_tokens),
+            pct_cell,
+        );
+    }
+
+    println!("{}", "─".repeat(62));
+    let total_cmds: usize = sessions.iter().map(|s| s.commands).sum();
+    let total_saved: usize = sessions.iter().map(|s| s.saved_tokens).sum();
+    println!(
+        "Total: {} sessions  •  {} commands  •  {} saved",
+        sessions.len(),
+        total_cmds,
+        format_tokens(total_saved),
+    );
+    Ok(())
 }
 
 fn show_failures(tracker: &Tracker) -> Result<()> {
