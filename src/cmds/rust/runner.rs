@@ -17,6 +17,7 @@ lazy_static! {
         Regex::new(r"(?i)^.*\berr\b.*$").unwrap(),
         Regex::new(r"(?i)^.*warning[\s:\[].*$").unwrap(),
         Regex::new(r"(?i)^.*\bwarn\b.*$").unwrap(),
+        Regex::new(r"(?i)^.*\bfail\b.*$").unwrap(),
         Regex::new(r"(?i)^.*failed.*$").unwrap(),
         Regex::new(r"(?i)^.*failure.*$").unwrap(),
         Regex::new(r"(?i)^.*exception.*$").unwrap(),
@@ -363,5 +364,22 @@ Summary: 0 failed, 10 passed";
         assert!(summary.contains("OUTPUT (last 5 lines):"));
         assert!(!summary.contains("[FAIL] ERRORS:"));
         assert!(summary.contains("Summary: 0 failed, 10 passed"));
+    }
+
+    #[test]
+    fn test_extract_generic_runner_catches_fail_keyword() {
+        let output = "\
+setup complete
+fail: something went wrong
+line 3
+line 4
+line 5
+line 6";
+
+        let summary = extract_test_summary(output, "custom-test-runner", 1);
+
+        assert!(summary.contains("[FAIL] ERRORS:"));
+        assert!(summary.contains("fail: something went wrong"));
+        assert!(!summary.contains("OUTPUT (last 5 lines):"));
     }
 }
