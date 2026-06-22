@@ -433,36 +433,7 @@ pub fn run(
     // Derive total from parsed results so the header matches what we show.
     let total_matches: usize = by_file.values().map(|v| v.len()).sum();
 
-    let mut rtk_output = String::new();
-    rtk_output.push_str(&format!(
-        "{} matches in {} files:\n\n",
-        total_matches,
-        by_file.len()
-    ));
-
-    let mut shown = 0;
-    let mut files: Vec<_> = by_file.iter().collect();
-    files.sort_by_key(|(f, _)| *f);
-
-    let per_file = config::limits().grep_max_per_file;
-    for (file, matches) in files {
-        if shown >= max_results {
-            break;
-        }
-
-        let file_display = compact_path(file);
-        for (line_num, content) in matches.iter().take(per_file) {
-            if shown >= max_results {
-                break;
-            }
-            rtk_output.push_str(&format!("{}:{}:{}\n", file_display, line_num, content));
-            shown += 1;
-        }
-    }
-
-    if total_matches > shown {
-        rtk_output.push_str(&format!("[+{} more]\n", total_matches - shown));
-    }
+    let rtk_output = format_heading_output(total_matches, &by_file, max_results);
 
     print!("{}", rtk_output);
     timer.track(
@@ -517,6 +488,53 @@ fn has_format_flag<T: AsRef<str>>(extra_args: &[T]) -> bool {
                 | "--files"
         )
     })
+}
+
+fn format_heading_output(
+    total_matches: usize,
+    by_file: &HashMap<String, Vec<(usize, String)>>,
+    max_results: usize,
+) -> String {
+    let mut rtk_output = String::new();
+    rtk_output.push_str(&format!(
+        "{} matches in {} files:\n\n",
+        total_matches,
+        by_file.len()
+    ));
+
+    let mut shown = 0;
+    let mut files: Vec<_> = by_file.iter().collect();
+    files.sort_by_key(|(f, _)| *f);
+
+    let per_file = config::limits().grep_max_per_file;
+    for (file, matches) in files {
+        if shown >= max_results {
+            break;
+        }
+
+        let file_display = compact_path(file);
+        rtk_output.push_str(&format!("{}\n", file_display));
+
+        let mut file_shown = 0;
+        for (line_num, content) in matches.iter().take(per_file) {
+            if shown >= max_results {
+                break;
+            }
+            rtk_output.push_str(&format!("{}:{}\n", line_num, content));
+            shown += 1;
+            file_shown += 1;
+        }
+
+        if file_shown > 0 && shown < max_results {
+            rtk_output.push('\n');
+        }
+    }
+
+    if total_matches > shown {
+        rtk_output.push_str(&format!("[+{} more]\n", total_matches - shown));
+    }
+
+    rtk_output
 }
 
 fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &str) -> String {
@@ -1117,6 +1135,54 @@ mod tests {
     #[test]
     fn test_format_flag_ignores_normal_flags() {
         assert!(!has_format_flag(&["-i", "-w", "-A", "3"]));
+    }
+
+    #[test]
+    fn test_heading_output_groups_matches_by_file() {
+        let mut by_file = HashMap::new();
+        by_file.insert(
+            "src/core/filter.rs".to_string(),
+            vec![
+                (8, "pub enum FilterLevel {".to_string()),
+                (14, "impl FromStr for FilterLevel {".to_string()),
+            ],
+        );
+        by_file.insert(
+            "src/main.rs".to_string(),
+            vec![(101, "level: core::filter::FilterLevel,".to_string())],
+        );
+
+        let output = format_heading_output(3, &by_file, 20);
+
+        assert!(output.contains("3 matches in 2 files:\n\n"));
+        assert!(output.contains("src/core/filter.rs\n"));
+        assert!(output.contains("8:pub enum FilterLevel {\n"));
+        assert!(output.contains("14:impl FromStr for FilterLevel {\n"));
+        assert!(output.contains("src/main.rs\n"));
+        assert!(output.contains("101:level: core::filter::FilterLevel,\n"));
+        assert!(!output.contains("src/core/filter.rs:8:"));
+        assert!(!output.contains("src/main.rs:101:"));
+    }
+
+    #[test]
+    fn test_heading_output_keeps_global_overflow_count() {
+        let mut by_file = HashMap::new();
+        by_file.insert(
+            "src/core/filter.rs".to_string(),
+            vec![
+                (8, "one".to_string()),
+                (14, "two".to_string()),
+                (19, "three".to_string()),
+            ],
+        );
+
+        let output = format_heading_output(3, &by_file, 2);
+
+        assert!(output.contains("src/core/filter.rs\n"));
+        assert!(output.contains("8:one\n"));
+        assert!(output.contains("14:two\n"));
+        assert!(!output.contains("19:three\n"));
+        assert!(output.contains("[+1 more]\n"));
     }
 
     // Verify line numbers are always enabled in rg invocation (grep_cmd.rs:24).
