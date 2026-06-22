@@ -676,7 +676,7 @@ pub const RULES: &[RtkRule] = &[
         rtk_cmd: "rtk make",
         rewrite_prefixes: &["make"],
         category: "Build",
-        savings_pct: 65.0,
+        savings_pct: 90.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },

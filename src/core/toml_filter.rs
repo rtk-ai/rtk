@@ -1094,51 +1094,8 @@ max_lines = 999
         );
     }
 
-    #[test]
-    fn test_make_savings_above_60pct() {
-        let filters = make_filters(BUILTIN_TOML);
-        let filter = find_filter_in("make all", &filters).expect("make built-in");
-
-        let input = r#"make[1]: Entering directory '/home/user/project'
-make[2]: Entering directory '/home/user/project/src'
-gcc -O2 -Wall -c foo.c -o foo.o
-
-make[2]: Nothing to be done for 'install'.
-make[3]: Entering directory '/home/user/project/src/lib'
-ar rcs libfoo.a foo.o bar.o baz.o
-make[3]: Leaving directory '/home/user/project/src/lib'
-make[2]: Leaving directory '/home/user/project/src'
-
-make[1]: Leaving directory '/home/user/project'
-gcc -O2 -Wall -c bar.c -o bar.o
-
-gcc -O2 -Wall -c baz.c -o baz.o
-
-make[1]: Entering directory '/home/user/project/test'
-make[2]: Entering directory '/home/user/project/test/unit'
-./run_tests --verbose
-make[2]: Nothing to be done for 'check'.
-make[2]: Leaving directory '/home/user/project/test/unit'
-make[1]: Leaving directory '/home/user/project/test'
-
-ld -o myapp foo.o bar.o baz.o -lfoo
-
-make[1]: Entering directory '/home/user/project/docs'
-doxygen Doxyfile
-make[1]: Leaving directory '/home/user/project/docs'
-"#;
-        let out = apply_filter(filter, input);
-        let input_words = input.split_whitespace().count();
-        let out_words = out.split_whitespace().count();
-        let savings = 100.0 - (out_words as f64 / input_words as f64 * 100.0);
-        assert!(
-            savings >= 60.0,
-            "make filter: expected >=60% savings, got {:.1}% (in={} out={})",
-            savings,
-            input_words,
-            out_words
-        );
-    }
+    // Note: make savings test removed — make is now a Rust module (src/cmds/system/make_cmd.rs)
+    // with dedicated token savings tests there (test_token_savings_long_build).
 
     // --- Edge cases ---
 
@@ -1580,7 +1537,6 @@ match_command = "^make\\b"
             "helm",
             "iptables",
             "liquibase",
-            "make",
             "markdownlint",
             "mix-compile",
             "mix-format",
