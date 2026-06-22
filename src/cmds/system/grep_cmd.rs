@@ -500,8 +500,9 @@ fn parse_match_line(line: &str) -> Option<(String, usize, &str)> {
 
 fn has_format_flag<T: AsRef<str>>(extra_args: &[T]) -> bool {
     extra_args.iter().any(|arg| {
-        matches!(
-            arg.as_ref(),
+        let s = arg.as_ref();
+        if matches!(
+            s,
             "-c" | "--count"
                 | "--count-matches"
                 | "-l"
@@ -515,7 +516,20 @@ fn has_format_flag<T: AsRef<str>>(extra_args: &[T]) -> bool {
                 | "--json"
                 | "--passthru"
                 | "--files"
-        )
+        ) {
+            return true;
+        }
+        // extract_pattern_path merges boolean short flags into one cluster
+        // token (e.g. `-rln` becomes `-ln` after stripping `r`), so a format
+        // flag like `-l` can arrive bundled with others rather than as its
+        // own arg. Clusters only ever contain boolean letters (see
+        // parse_cluster), so scanning characters here is safe.
+        if let Some(rest) = s.strip_prefix('-') {
+            if !rest.is_empty() && !rest.starts_with('-') {
+                return rest.chars().any(|c| matches!(c, 'c' | 'l' | 'L' | 'o' | 'Z'));
+            }
+        }
+        false
     })
 }
 
@@ -1117,6 +1131,24 @@ mod tests {
     #[test]
     fn test_format_flag_ignores_normal_flags() {
         assert!(!has_format_flag(&["-i", "-w", "-A", "3"]));
+    }
+
+    #[test]
+    fn test_format_flag_detects_clustered_l() {
+        // `-rln` becomes `-ln` after extract_pattern_path strips the `r`.
+        // -l (files-with-matches) is bundled with -n here, not standalone.
+        assert!(has_format_flag(&["-ln"]));
+    }
+
+    #[test]
+    fn test_format_flag_detects_clustered_c() {
+        assert!(has_format_flag(&["-ic"]));
+    }
+
+    #[test]
+    fn test_format_flag_ignores_double_dash() {
+        // Long flags must not be mistaken for a short cluster.
+        assert!(!has_format_flag(&["--ignore-case"]));
     }
 
     // Verify line numbers are always enabled in rg invocation (grep_cmd.rs:24).
