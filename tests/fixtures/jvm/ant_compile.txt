@@ -1,0 +1,33 @@
+Buildfile: /home/runner/project/build.xml
+
+clean:
+   [delete] Deleting directory /home/runner/project/build
+
+init:
+    [mkdir] Created dir: /home/runner/project/build/classes
+    [mkdir] Created dir: /home/runner/project/build/test-classes
+    [mkdir] Created dir: /home/runner/project/build/reports
+
+compile:
+    [javac] Compiling 23 source files to /home/runner/project/build/classes
+    [javac] Note: /home/runner/project/src/com/example/util/StringUtils.java uses unchecked or unsafe operations.
+    [javac] Note: Recompile with -Xlint:unchecked for details.
+
+compile-tests:
+    [javac] Compiling 8 source files to /home/runner/project/build/test-classes
+    [javac] /home/runner/project/src/test/com/example/service/OrderServiceTest.java:42: error: cannot find symbol
+    [javac]     Order order = orderService.createOrder(null);
+    [javac]                                            ^
+    [javac]   symbol:   variable null
+    [javac]   location: class OrderServiceTest
+    [javac] /home/runner/project/src/test/com/example/service/OrderServiceTest.java:67: error: incompatible types
+    [javac]     List<String> ids = orderService.getOrderIds();
+    [javac]                                               ^
+    [javac]   required: List<String>
+    [javac]   found:    List<Long>
+    [javac] 2 errors
+
+BUILD FAILED
+/home/runner/project/build.xml:34: Compile failed; see the compiler error output for details.
+
+Total time: 3 seconds

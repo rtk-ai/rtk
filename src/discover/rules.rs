@@ -708,6 +708,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^ant\s+(build|clean|test|compile|package|install)\b",
+        rtk_cmd: "rtk ant",
+        rewrite_prefixes: &["ant"],
+        category: "Build",
+        savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^ping\b",
         rtk_cmd: "rtk ping",
         rewrite_prefixes: &["ping"],

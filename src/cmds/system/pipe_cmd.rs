@@ -26,6 +26,7 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
         "ruff-check" => Some(crate::cmds::python::ruff_cmd::filter_ruff_check_json),
         "ruff-format" => Some(crate::cmds::python::ruff_cmd::filter_ruff_format),
         "prettier" => Some(crate::cmds::js::prettier_cmd::filter_prettier_output),
+        "ant" => Some(crate::cmds::jvm::ant_cmd::filter_ant_build),
         _ => None,
     }
 }
@@ -230,7 +231,7 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
             anyhow::anyhow!(
                 "Unknown filter '{}'. Available: cargo-test, pytest, go-test, go-build, \
                  tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
-                 log, mypy, ruff-check, ruff-format, prettier",
+                 log, mypy, ruff-check, ruff-format, prettier, ant",
                 name
             )
         })?,

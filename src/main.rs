@@ -15,7 +15,7 @@ use cmds::js::{
     lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
     vitest_cmd,
 };
-use cmds::jvm::{gradlew_cmd, mvn_cmd};
+use cmds::jvm::{ant_cmd, gradlew_cmd, mvn_cmd};
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
@@ -742,6 +742,12 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Apache Ant commands with compact output (build, clean, test, compile, package, install)
+    Ant {
+        #[command(subcommand)]
+        command: AntCommands,
+    },
+
     /// Show hook rewrite audit metrics (requires RTK_HOOK_AUDIT=1)
     #[command(name = "hook-audit")]
     HookAudit {
@@ -1160,6 +1166,43 @@ enum GoCommands {
         args: Vec<String>,
     },
     /// Passthrough: runs any unsupported go subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Debug, Subcommand)]
+enum AntCommands {
+    /// Run the `build` target with compact output (use Other to invoke the default target instead)
+    Build {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Clean build artifacts with compact output
+    Clean {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Run tests with compact output
+    Test {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compile sources with compact output
+    Compile {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Package the project with compact output
+    Package {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Install artifacts with compact output
+    Install {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: run any other ant target with noise-filtered output
     #[command(external_subcommand)]
     Other(Vec<OsString>),
 }
@@ -2253,6 +2296,28 @@ fn run_cli() -> Result<i32> {
         Commands::Gradlew { args } => gradlew_cmd::run(&args, cli.verbose)?,
 
         Commands::Mvn { args } => mvn_cmd::run(&args, cli.verbose)?,
+
+        Commands::Ant { command } => match command {
+            AntCommands::Build { args } => {
+                ant_cmd::run(ant_cmd::AntCommand::Build, &args, cli.verbose)?
+            }
+            AntCommands::Clean { args } => {
+                ant_cmd::run(ant_cmd::AntCommand::Clean, &args, cli.verbose)?
+            }
+            AntCommands::Test { args } => {
+                ant_cmd::run(ant_cmd::AntCommand::Test, &args, cli.verbose)?
+            }
+            AntCommands::Compile { args } => {
+                ant_cmd::run(ant_cmd::AntCommand::Compile, &args, cli.verbose)?
+            }
+            AntCommands::Package { args } => {
+                ant_cmd::run(ant_cmd::AntCommand::Package, &args, cli.verbose)?
+            }
+            AntCommands::Install { args } => {
+                ant_cmd::run(ant_cmd::AntCommand::Install, &args, cli.verbose)?
+            }
+            AntCommands::Other(args) => ant_cmd::run_passthrough(&args, cli.verbose)?,
+        },
 
         Commands::HookAudit { since } => {
             hooks::hook_audit_cmd::run(since, cli.verbose)?;

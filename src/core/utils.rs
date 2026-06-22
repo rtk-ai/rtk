@@ -355,6 +355,42 @@ pub fn resolved_command(name: &str) -> Command {
     }
 }
 
+/// Resolve a build tool, preferring a project-local wrapper script.
+///
+/// Many JVM build tools ship a wrapper next to the project root (`mvnw`,
+/// `gradlew`, `antw`) that pins the tool version. Prefer it when present,
+/// otherwise fall back to PATH resolution via [`resolved_command`].
+///
+/// # Arguments
+/// * `name` - Build tool name (e.g., "mvn", "gradle", "ant")
+pub fn resolved_build_command(name: &str) -> Command {
+    let wrapper = format!("{}w", name);
+
+    // On Windows, prefer the native wrapper first — `./mvnw` (a shebang shell
+    // script) doesn't execute under CreateProcess, while `mvnw.cmd` /
+    // `gradlew.bat` do. Most repos ship both side-by-side.
+    #[cfg(target_os = "windows")]
+    {
+        for ext in &["cmd", "bat"] {
+            let win_wrapper = format!("{}.{}", wrapper, ext);
+            if std::path::Path::new(&win_wrapper).exists() {
+                return Command::new(format!(".\\{}", win_wrapper));
+            }
+        }
+    }
+
+    // Unix-style wrapper (macOS, Linux, also works under Git Bash if no .cmd).
+    #[cfg(not(target_os = "windows"))]
+    {
+        let unix_wrapper = std::path::Path::new(&wrapper);
+        if unix_wrapper.exists() {
+            return Command::new(format!("./{}", wrapper));
+        }
+    }
+
+    resolved_command(name)
+}
+
 /// Check if a tool exists on PATH (PATHEXT-aware on Windows).
 ///
 /// Replaces manual `Command::new("which").arg(tool)` checks that fail on Windows.

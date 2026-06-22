@@ -1,0 +1,52 @@
+[filters.ant]
+description = "Compact Apache Ant build output"
+match_command = "^ant\\s+\\w"
+strip_ansi = true
+strip_lines_matching = [
+  "^Buildfile:",
+  "^[a-z][a-zA-Z0-9_-]+:$",
+  "^\\s+\\[(echo|delete|mkdir|copy|move|propertyfile|fixcrlf)\\]",
+  "^\\s*$",
+]
+on_empty = "ant: ok"
+
+[[tests.ant]]
+name = "successful build collapses chatter, keeps BUILD SUCCESSFUL"
+input = """
+Buildfile: /path/to/build.xml
+
+clean:
+   [delete] Deleting directory /tmp/build
+
+init:
+    [mkdir] Created dir: /tmp/build/classes
+
+compile:
+    [javac] Compiling 47 source files to /tmp/build/classes
+
+BUILD SUCCESSFUL
+
+Total time: 4 seconds
+"""
+expected = "    [javac] Compiling 47 source files to /tmp/build/classes\nBUILD SUCCESSFUL\nTotal time: 4 seconds"
+
+[[tests.ant]]
+name = "failed compile preserves error line and BUILD FAILED"
+input = """
+Buildfile: /path/to/build.xml
+
+compile:
+    [javac] Compiling 3 source files to /tmp/build/classes
+    [javac] /path/Foo.java:42: error: cannot find symbol
+
+BUILD FAILED
+/path/build.xml:35: Compile failed; see the compiler error output for details.
+
+Total time: 2 seconds
+"""
+expected = "    [javac] Compiling 3 source files to /tmp/build/classes\n    [javac] /path/Foo.java:42: error: cannot find symbol\nBUILD FAILED\n/path/build.xml:35: Compile failed; see the compiler error output for details.\nTotal time: 2 seconds"
+
+[[tests.ant]]
+name = "empty input returns on_empty sentinel"
+input = ""
+expected = "ant: ok"
