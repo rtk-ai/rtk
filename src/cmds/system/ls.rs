@@ -2,8 +2,9 @@
 
 use super::constants::NOISE_DIRS;
 use crate::core::runner::{self, RunOptions};
+use crate::core::tracking::TimedExecution;
 use crate::core::truncate::{reduced, CAP_WARNINGS};
-use crate::core::utils::resolved_command;
+use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::Result;
 use regex::Regex;
 use std::io::IsTerminal;
@@ -47,6 +48,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
+
+    // On Windows (and any host lacking the Unix `ls` binary) fall back to a
+    // native Rust listing so `rtk ls` works without coreutils installed.
+    if !tool_exists("ls") {
+        return run_native(&paths, show_all, show_long, verbose);
+    }
 
     let mut cmd = resolved_command("ls");
     cmd.env("LC_ALL", "C");
@@ -124,6 +131,88 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             .early_exit_on_failure()
             .no_trailing_newline(),
     )
+}
+
+/// Native `ls` implementation used when the Unix binary is unavailable
+/// (e.g. on stock Windows). Synthesizes `ls -la`-style lines from the
+/// filesystem and reuses [`compact_ls`] so output matches the spawn path.
+///
+/// Note: POSIX permission bits don't exist on Windows, so synthetic perms
+/// (`drwxr-xr-x` for dirs, `-rw-r--r--` for files) are emitted; the `-l`
+/// octal column is therefore approximate on Windows.
+fn run_native(paths: &[&str], show_all: bool, show_long: bool, verbose: u8) -> Result<i32> {
+    let timer = TimedExecution::start();
+    let targets: Vec<&str> = if paths.is_empty() { vec!["."] } else { paths.to_vec() };
+
+    let mut raw = String::new();
+    let mut exit_code = 0;
+
+    for target in &targets {
+        match std::fs::metadata(target) {
+            Ok(meta) if meta.is_dir() => {
+                match std::fs::read_dir(target) {
+                    Ok(entries) => {
+                        let mut lines: Vec<String> = Vec::new();
+                        for entry in entries.flatten() {
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            if !show_all && name.starts_with('.') {
+                                continue;
+                            }
+                            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                            lines.push(synth_ls_line(&name, is_dir, size));
+                        }
+                        lines.sort();
+                        for line in lines {
+                            raw.push_str(&line);
+                            raw.push('\n');
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("ls: {target}: {e}");
+                        exit_code = 2;
+                    }
+                }
+            }
+            Ok(meta) => {
+                // A file argument: ls prints just the name.
+                raw.push_str(&synth_ls_line(target, false, meta.len()));
+                raw.push('\n');
+            }
+            Err(e) => {
+                eprintln!("ls: {target}: {e}");
+                exit_code = 2;
+            }
+        }
+    }
+
+    let (entries, summary, _parsed) = compact_ls(&raw, show_all, show_long);
+    let is_tty = std::io::stdout().is_terminal();
+    let filtered = if is_tty {
+        format!("{}{}", entries, summary)
+    } else {
+        entries
+    };
+
+    if verbose > 0 {
+        eprintln!("ls (native): {} target(s)", targets.len());
+    }
+
+    print!("{filtered}");
+    timer.track(
+        &format!("ls {}", targets.join(" ")),
+        "rtk ls",
+        &raw,
+        &filtered,
+    );
+    Ok(exit_code)
+}
+
+/// Build a synthetic `ls -la` line that [`parse_ls_line`] can parse.
+/// The date is a fixed valid anchor (not shown in compact output).
+fn synth_ls_line(name: &str, is_dir: bool, size: u64) -> String {
+    let perms = if is_dir { "drwxr-xr-x" } else { "-rw-r--r--" };
+    format!("{perms} 1 user group {size} Jan  1 00:00 {name}")
 }
 
 /// Format bytes into human-readable size
@@ -352,6 +441,40 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_synth_ls_line_parses() {
+        // A synthetic native line must be parseable by parse_ls_line.
+        let line = synth_ls_line("constants.rs", false, 542);
+        let parsed = parse_ls_line(&line).expect("synth line should parse");
+        let (file_type, _perms, size, name) = parsed;
+        assert_eq!(file_type, '-');
+        assert_eq!(size, 542);
+        assert_eq!(name, "constants.rs");
+    }
+
+    #[test]
+    fn test_synth_ls_line_dir() {
+        let line = synth_ls_line("src", true, 0);
+        let (file_type, _perms, _size, name) = parse_ls_line(&line).expect("dir line parses");
+        assert_eq!(file_type, 'd');
+        assert_eq!(name, "src");
+    }
+
+    #[test]
+    fn test_native_raw_round_trips_through_compact_ls() {
+        // Simulate native run_native output and verify compact_ls compresses it.
+        let mut raw = String::new();
+        raw.push_str(&synth_ls_line("src", true, 0));
+        raw.push('\n');
+        raw.push_str(&synth_ls_line("Cargo.toml", false, 1234));
+        raw.push('\n');
+        let (entries, _summary, parsed) = compact_ls(&raw, false, false);
+        assert_eq!(parsed, 2);
+        assert!(entries.contains("src/"));
+        assert!(entries.contains("Cargo.toml"));
+        assert!(entries.contains("1.2K"));
+    }
 
     #[test]
     fn test_compact_basic() {

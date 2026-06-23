@@ -7,10 +7,20 @@
 /// - `wc -c file.py`  → `978`
 /// - `wc -l *.py`     → table with common path prefix stripped
 use crate::core::runner::{self, RunOptions};
-use crate::core::utils::resolved_command;
+use crate::core::tracking::TimedExecution;
+use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::Result;
+use std::io::Read;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    let mode = detect_mode(args);
+
+    // On Windows (and any host lacking the Unix `wc` binary) fall back to a
+    // native Rust implementation so `rtk wc` works without coreutils installed.
+    if !tool_exists("wc") {
+        return run_native(args, &mode, verbose);
+    }
+
     let mut cmd = resolved_command("wc");
     for arg in args {
         cmd.arg(arg);
@@ -19,8 +29,6 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     if verbose > 0 {
         eprintln!("Running: wc {}", args.join(" "));
     }
-
-    let mode = detect_mode(args);
 
     // No file operands → wc reads from stdin. Forward rtk's stdin to the child
     // so `cat file | rtk wc` counts the piped data instead of reporting zero.
@@ -38,6 +46,172 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         |stdout| filter_wc_output(stdout, &mode),
         opts,
     )
+}
+
+/// Byte/word/line/char counts for a chunk of input.
+struct Counts {
+    lines: u64,
+    words: u64,
+    bytes: u64,
+    chars: u64,
+}
+
+impl Counts {
+    fn from_bytes(data: &[u8]) -> Self {
+        let bytes = data.len() as u64;
+        let lines = data.iter().filter(|&&b| b == b'\n').count() as u64;
+        let text = String::from_utf8_lossy(data);
+        let words = text.split_whitespace().count() as u64;
+        let chars = text.chars().count() as u64;
+        Counts {
+            lines,
+            words,
+            bytes,
+            chars,
+        }
+    }
+
+    fn add(&mut self, other: &Counts) {
+        self.lines += other.lines;
+        self.words += other.words;
+        self.bytes += other.bytes;
+        self.chars += other.chars;
+    }
+}
+
+/// Which numeric columns to emit, in `wc`'s fixed order (lines, words, chars, bytes).
+struct WcCols {
+    lines: bool,
+    words: bool,
+    chars: bool,
+    bytes: bool,
+}
+
+impl WcCols {
+    fn from_args(args: &[String]) -> Self {
+        let mut l = false;
+        let mut w = false;
+        let mut c = false;
+        let mut m = false;
+        let mut any = false;
+        for flag in args.iter().filter(|a| a.starts_with('-')) {
+            for ch in flag.chars().skip(1) {
+                match ch {
+                    'l' => {
+                        l = true;
+                        any = true;
+                    }
+                    'w' => {
+                        w = true;
+                        any = true;
+                    }
+                    'c' => {
+                        c = true;
+                        any = true;
+                    }
+                    'm' => {
+                        m = true;
+                        any = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // No selecting flag → default columns: lines, words, bytes.
+        if !any {
+            return WcCols {
+                lines: true,
+                words: true,
+                chars: false,
+                bytes: true,
+            };
+        }
+        WcCols {
+            lines: l,
+            words: w,
+            chars: m,
+            bytes: c,
+        }
+    }
+
+    /// Render the requested counts as a space-separated number string.
+    fn render(&self, c: &Counts) -> String {
+        let mut nums: Vec<String> = Vec::new();
+        if self.lines {
+            nums.push(c.lines.to_string());
+        }
+        if self.words {
+            nums.push(c.words.to_string());
+        }
+        if self.chars {
+            nums.push(c.chars.to_string());
+        }
+        if self.bytes {
+            nums.push(c.bytes.to_string());
+        }
+        nums.join(" ")
+    }
+}
+
+/// Native `wc` implementation used when the Unix binary is unavailable
+/// (e.g. on stock Windows). Produces output in the same shape the spawn
+/// path emits, then reuses [`filter_wc_output`].
+fn run_native(args: &[String], mode: &WcMode, verbose: u8) -> Result<i32> {
+    let timer = TimedExecution::start();
+    let cols = WcCols::from_args(args);
+
+    let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+
+    let mut raw = String::new();
+    let mut exit_code = 0;
+
+    if files.is_empty() {
+        // No file operands → read from stdin.
+        let mut buf = Vec::new();
+        std::io::stdin()
+            .read_to_end(&mut buf)
+            .map_err(|e| anyhow::anyhow!("wc: failed to read stdin: {e}"))?;
+        let counts = Counts::from_bytes(&buf);
+        raw.push_str(&cols.render(&counts));
+        raw.push('\n');
+    } else {
+        let mut total = Counts {
+            lines: 0,
+            words: 0,
+            bytes: 0,
+            chars: 0,
+        };
+        for file in &files {
+            match std::fs::read(file) {
+                Ok(data) => {
+                    let counts = Counts::from_bytes(&data);
+                    total.add(&counts);
+                    raw.push_str(&cols.render(&counts));
+                    raw.push(' ');
+                    raw.push_str(file);
+                    raw.push('\n');
+                }
+                Err(e) => {
+                    eprintln!("wc: {file}: {e}");
+                    exit_code = 1;
+                }
+            }
+        }
+        if files.len() > 1 {
+            raw.push_str(&cols.render(&total));
+            raw.push_str(" total\n");
+        }
+    }
+
+    let filtered = filter_wc_output(&raw, mode);
+
+    if verbose > 0 {
+        eprintln!("wc (native): {} files", files.len());
+    }
+
+    println!("{filtered}");
+    timer.track(&format!("wc {}", args.join(" ")), "rtk wc", &raw, &filtered);
+    Ok(exit_code)
 }
 
 /// Which columns the user requested
@@ -384,5 +558,59 @@ mod tests {
         let raw = "";
         let result = filter_wc_output(raw, &WcMode::Full);
         assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_counts_from_bytes() {
+        let c = Counts::from_bytes(b"hello world\nsecond line\n");
+        assert_eq!(c.lines, 2);
+        assert_eq!(c.words, 4);
+        assert_eq!(c.bytes, 24);
+        assert_eq!(c.chars, 24);
+    }
+
+    #[test]
+    fn test_counts_no_trailing_newline() {
+        let c = Counts::from_bytes(b"one two three");
+        assert_eq!(c.lines, 0);
+        assert_eq!(c.words, 3);
+        assert_eq!(c.bytes, 13);
+    }
+
+    #[test]
+    fn test_wccols_default_full() {
+        let cols = WcCols::from_args(&["file.txt".into()]);
+        let c = Counts {
+            lines: 10,
+            words: 20,
+            bytes: 100,
+            chars: 95,
+        };
+        // Default → lines words bytes (no chars).
+        assert_eq!(cols.render(&c), "10 20 100");
+    }
+
+    #[test]
+    fn test_wccols_lines_only() {
+        let cols = WcCols::from_args(&["-l".into(), "f".into()]);
+        let c = Counts {
+            lines: 42,
+            words: 0,
+            bytes: 0,
+            chars: 0,
+        };
+        assert_eq!(cols.render(&c), "42");
+    }
+
+    #[test]
+    fn test_wccols_chars_with_m() {
+        let cols = WcCols::from_args(&["-m".into(), "f".into()]);
+        let c = Counts {
+            lines: 0,
+            words: 0,
+            bytes: 100,
+            chars: 95,
+        };
+        assert_eq!(cols.render(&c), "95");
     }
 }
