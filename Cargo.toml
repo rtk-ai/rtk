@@ -47,7 +47,12 @@ toml = "0.8"
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+# Must stay "unwind": filter execution relies on std::panic::catch_unwind to
+# fail open (see core::stream and cmds::system::pipe_cmd — "filter panicked,
+# passing through raw output"). Under panic = "abort" that recovery is dead
+# code in release builds: any panic inside a filter aborts the whole process
+# with SIGABRT instead of degrading to raw passthrough.
+panic = "unwind"
 strip = true
 
 # cargo-deb configuration
