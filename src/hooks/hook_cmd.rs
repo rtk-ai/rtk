@@ -549,6 +549,14 @@ mod tests {
         crate::discover::registry::rewrite_command(cmd, excluded, &[])
     }
 
+    fn native_find_passthrough_cmd() -> &'static str {
+        r"find . \( -name '*.rs' -o -name '*.toml' \) -printf '%p\n'"
+    }
+
+    fn native_find_passthrough_rewritten() -> &'static str {
+        r"rtk find . \( -name '*.rs' -o -name '*.toml' \) -printf '%p\n'"
+    }
+
     // --- Copilot format detection ---
 
     fn vscode_input(tool: &str, cmd: &str) -> Value {
@@ -880,6 +888,50 @@ mod tests {
             rewrite_command_no_prefixes("RUST_LOG=debug cargo test", &[]),
             Some("RUST_LOG=debug rtk cargo test".into())
         );
+    }
+
+    #[test]
+    fn test_hook_formats_rewrite_native_find_passthrough_command() {
+        let cmd = native_find_passthrough_cmd();
+        let expected = native_find_passthrough_rewritten();
+
+        // Gemini and the hook installers all share the registry rewrite path.
+        assert_eq!(
+            rewrite_command_no_prefixes(cmd, &[]),
+            Some(expected.to_string())
+        );
+
+        let claude = run_claude_inner(&claude_input(cmd)).unwrap();
+        let claude_json: Value = serde_json::from_str(&claude).unwrap();
+        assert_eq!(
+            claude_json
+                .pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(|c| c.as_str()),
+            Some(expected)
+        );
+
+        let cursor = run_cursor_inner(&cursor_input(cmd));
+        let cursor_json: Value = serde_json::from_str(&cursor).unwrap();
+        assert_eq!(
+            cursor_json
+                .pointer("/updated_input/command")
+                .and_then(|c| c.as_str()),
+            Some(expected)
+        );
+
+        match detect_format(&vscode_input("runTerminalCommand", cmd)) {
+            HookFormat::VsCode { command } => assert_eq!(command, cmd),
+            HookFormat::CopilotCli { .. } | HookFormat::PassThrough => {
+                panic!("VS Code/Copilot hook input should be detected")
+            }
+        }
+
+        match detect_format(&copilot_cli_input(cmd)) {
+            HookFormat::CopilotCli { command } => assert_eq!(command, cmd),
+            HookFormat::VsCode { .. } | HookFormat::PassThrough => {
+                panic!("Copilot CLI hook input should be detected")
+            }
+        }
     }
 
     // --- Claude handler ---

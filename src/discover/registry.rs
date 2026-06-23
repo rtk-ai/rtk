@@ -1524,6 +1524,17 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_find_native_expression_passthrough_safe() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r"find . \( -name '*.rs' -o -name '*.toml' \) -printf '%p\n'",
+                &[]
+            ),
+            Some(r"rtk find . \( -name '*.rs' -o -name '*.toml' \) -printf '%p\n'".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_heredoc_returns_none() {
         assert_eq!(
             rewrite_command_no_prefixes("cat <<'EOF'\nfoo\nEOF", &[]),

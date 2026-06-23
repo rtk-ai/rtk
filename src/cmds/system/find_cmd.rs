@@ -1,9 +1,12 @@
 //! Filters find results by grouping files by directory.
 
-use crate::core::tracking;
+use crate::core::{runner, tracking};
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::collections::HashMap;
+use std::ffi::OsString;
+use std::fmt::Write as FmtWrite;
+use std::io::{self, Write as IoWrite};
 use std::path::Path;
 
 /// Match a filename against a glob pattern (supports `*` and `?`).
@@ -62,17 +65,170 @@ fn has_native_find_flags(args: &[String]) -> bool {
         .any(|a| a == "-name" || a == "-type" || a == "-maxdepth" || a == "-iname")
 }
 
-/// Native find flags that RTK cannot handle correctly.
-/// These involve compound predicates, actions, or semantics we don't support.
-const UNSUPPORTED_FIND_FLAGS: &[&str] = &[
-    "-not", "!", "-or", "-o", "-and", "-a", "-exec", "-execdir", "-delete", "-print0", "-newer",
-    "-perm", "-size", "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin", "-empty", "-link",
-    "-regex", "-iregex",
+/// Native find tokens that RTK's compact walker cannot model correctly.
+///
+/// These include boolean expressions, actions, output formatters, and predicates
+/// with semantics that differ from the simple path/name/type/depth scan below.
+/// When one appears, we preserve native `find` behavior via passthrough instead
+/// of silently ignoring part of the expression.
+const PASSTHROUGH_FIND_TOKENS: &[&str] = &[
+    "!",
+    "(",
+    ")",
+    ",",
+    "-not",
+    "-or",
+    "-o",
+    "-and",
+    "-a",
+    "-exec",
+    "-execdir",
+    "-ok",
+    "-okdir",
+    "-delete",
+    "-print",
+    "-print0",
+    "-printf",
+    "-fprintf",
+    "-prune",
+    "-quit",
+    "-newer",
+    "-newermt",
+    "-newerct",
+    "-anewer",
+    "-cnewer",
+    "-perm",
+    "-size",
+    "-mtime",
+    "-mmin",
+    "-atime",
+    "-amin",
+    "-ctime",
+    "-cmin",
+    "-used",
+    "-empty",
+    "-link",
+    "-links",
+    "-lname",
+    "-ilname",
+    "-regex",
+    "-iregex",
+    "-path",
+    "-ipath",
+    "-wholename",
+    "-iwholename",
+    "-mindepth",
+    "-depth",
+    "-xdev",
+    "-mount",
+    "-noleaf",
+    "-ignore_readdir_race",
+    "-noignore_readdir_race",
+    "-daystart",
+    "-user",
+    "-uid",
+    "-group",
+    "-gid",
+    "-nouser",
+    "-nogroup",
+    "-readable",
+    "-writable",
+    "-executable",
+    "-fstype",
+    "-xtype",
+    "-samefile",
+    "-inum",
+    "-true",
+    "-false",
+    "-ls",
+    "-fls",
+    "-follow",
+    "-L",
+    "-H",
+    "-P",
 ];
 
-fn has_unsupported_find_flags(args: &[String]) -> bool {
+fn has_passthrough_find_tokens(args: &[String]) -> bool {
     args.iter()
-        .any(|a| UNSUPPORTED_FIND_FLAGS.contains(&a.as_str()))
+        .any(|a| PASSTHROUGH_FIND_TOKENS.contains(&a.as_str()) || a.starts_with("-newer"))
+}
+
+fn is_supported_native_find_flag(arg: &str) -> bool {
+    matches!(arg, "-name" | "-iname" | "-type" | "-maxdepth")
+}
+
+fn is_rtk_find_flag(arg: &str) -> bool {
+    matches!(arg, "-m" | "--max" | "-t" | "--file-type")
+}
+
+fn looks_like_native_find_path(arg: &str) -> bool {
+    arg == "."
+        || arg == ".."
+        || arg.starts_with('/')
+        || arg.contains('/')
+        || arg.contains('\\')
+        || Path::new(arg).exists()
+}
+
+/// Returns true when the user appears to be using native `find` syntax that the
+/// compact implementation should not partially emulate.
+fn should_passthrough_to_native_find(args: &[String]) -> bool {
+    if args.is_empty() {
+        return false;
+    }
+
+    if has_passthrough_find_tokens(args) {
+        return true;
+    }
+
+    if !has_native_find_flags(args) {
+        if looks_like_native_find_path(&args[0]) {
+            let mut i = 1;
+            while i < args.len() {
+                let arg = args[i].as_str();
+                if is_rtk_find_flag(arg) {
+                    i += 2;
+                    continue;
+                }
+                if arg.starts_with('-') {
+                    return true;
+                }
+                i += 1;
+            }
+        }
+        return false;
+    }
+
+    // In native find mode, only a tiny set of flags are modeled by the compact
+    // walker. Unknown native flags should fall back to real find rather than
+    // being ignored and producing misleading results.
+    let mut i = 0;
+    if !args[0].starts_with('-') {
+        i = 1;
+    }
+
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if is_supported_native_find_flag(arg) {
+            i += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return true;
+        }
+        i += 1;
+    }
+
+    false
+}
+
+fn write_find_output(output: &str) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    match stdout.write_all(output.as_bytes()).and_then(|_| stdout.flush()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(e).context("failed to write find output"),
+    }
 }
 
 /// Parse arguments from raw args vec, supporting both native find and RTK syntax.
@@ -82,12 +238,6 @@ fn has_unsupported_find_flags(args: &[String]) -> bool {
 fn parse_find_args(args: &[String]) -> Result<FindArgs> {
     if args.is_empty() {
         return Ok(FindArgs::default());
-    }
-
-    if has_unsupported_find_flags(args) {
-        anyhow::bail!(
-            "rtk find does not support compound predicates or actions (e.g. -not, -exec). Use `find` directly."
-        );
     }
 
     if has_native_find_flags(args) {
@@ -177,7 +327,12 @@ fn parse_rtk_find_args(args: &[String]) -> Result<FindArgs> {
 }
 
 /// Entry point from main.rs — parses raw args then delegates to run().
-pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
+pub fn run_from_args(args: &[String], verbose: u8) -> Result<i32> {
+    if should_passthrough_to_native_find(args) {
+        let os_args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        return runner::run_passthrough("find", &os_args, verbose);
+    }
+
     let parsed = parse_find_args(args)?;
     run(
         &parsed.pattern,
@@ -187,7 +342,8 @@ pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
         &parsed.file_type,
         parsed.case_insensitive,
         verbose,
-    )
+    )?;
+    Ok(0)
 }
 
 pub fn run(
@@ -279,7 +435,7 @@ pub fn run(
 
     if files.is_empty() {
         let msg = format!("0 for '{}'", effective_pattern);
-        println!("{}", msg);
+        write_find_output(&format!("{}\n", msg))?;
         timer.track(
             &format!("find {} -name '{}'", path, effective_pattern),
             "rtk find",
@@ -311,8 +467,9 @@ pub fn run(
     let dirs_count = dirs.len();
     let total_files = files.len();
 
-    println!("{}F {}D:", total_files, dirs_count);
-    println!();
+    let mut rendered = String::new();
+    let _ = writeln!(&mut rendered, "{}F {}D:", total_files, dirs_count);
+    let _ = writeln!(&mut rendered);
 
     // Display with proper --max limiting (count individual files)
     let mut shown = 0;
@@ -330,7 +487,7 @@ pub fn run(
 
         let remaining_budget = max_results - shown;
         if files_in_dir.len() <= remaining_budget {
-            println!("{}/ {}", dir_display, files_in_dir.join(" "));
+            let _ = writeln!(&mut rendered, "{}/ {}", dir_display, files_in_dir.join(" "));
             shown += files_in_dir.len();
         } else {
             // Partial display: show only what fits in budget
@@ -339,14 +496,14 @@ pub fn run(
                 .take(remaining_budget)
                 .cloned()
                 .collect();
-            println!("{}/ {}", dir_display, partial.join(" "));
+            let _ = writeln!(&mut rendered, "{}/ {}", dir_display, partial.join(" "));
             shown += partial.len();
             break;
         }
     }
 
     if shown < total_files {
-        println!("+{} more", total_files - shown);
+        let _ = writeln!(&mut rendered, "+{} more", total_files - shown);
     }
 
     // Extension summary
@@ -361,7 +518,7 @@ pub fn run(
 
     let mut ext_line = String::new();
     if by_ext.len() > 1 {
-        println!();
+        let _ = writeln!(&mut rendered);
         let mut exts: Vec<_> = by_ext.iter().collect();
         exts.sort_by(|a, b| b.1.cmp(a.1));
         let ext_str: Vec<String> = exts
@@ -370,8 +527,10 @@ pub fn run(
             .map(|(e, c)| format!(".{}({})", e, c))
             .collect();
         ext_line = format!("ext: {}", ext_str.join(" "));
-        println!("{}", ext_line);
+        let _ = writeln!(&mut rendered, "{}", ext_line);
     }
+
+    write_find_output(&rendered)?;
 
     let rtk_output = format!("{}F {}D + {}", total_files, dirs_count, ext_line);
     timer.track(
@@ -493,20 +652,99 @@ mod tests {
         assert_eq!(parsed.path, ".");
     }
 
-    // --- parse_find_args: unsupported flags ---
+    // --- native find passthrough detection ---
 
     #[test]
-    fn parse_native_find_rejects_not() {
-        let result = parse_find_args(&args(&[".", "-name", "*.rs", "-not", "-name", "*_test.rs"]));
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("compound predicates"));
+    fn native_find_not_uses_passthrough() {
+        assert!(should_passthrough_to_native_find(&args(&[
+            ".",
+            "-name",
+            "*.rs",
+            "-not",
+            "-name",
+            "*_test.rs"
+        ])));
     }
 
     #[test]
-    fn parse_native_find_rejects_exec() {
-        let result = parse_find_args(&args(&[".", "-name", "*.tmp", "-exec", "rm", "{}", ";"]));
-        assert!(result.is_err());
+    fn native_find_exec_uses_passthrough() {
+        assert!(should_passthrough_to_native_find(&args(&[
+            ".",
+            "-name",
+            "*.tmp",
+            "-exec",
+            "rm",
+            "{}",
+            ";"
+        ])));
+    }
+
+    #[test]
+    fn native_find_or_expression_uses_passthrough() {
+        assert!(should_passthrough_to_native_find(&args(&[
+            ".",
+            "(",
+            "-name",
+            "*.rs",
+            "-o",
+            "-name",
+            "*.toml",
+            ")"
+        ])));
+    }
+
+    #[test]
+    fn native_find_printf_uses_passthrough() {
+        assert!(should_passthrough_to_native_find(&args(&[
+            ".",
+            "-name",
+            "*.rs",
+            "-printf",
+            "%p\\n"
+        ])));
+    }
+
+    #[test]
+    fn native_find_user_without_name_uses_passthrough() {
+        assert!(should_passthrough_to_native_find(&args(&[
+            ".",
+            "-user",
+            "root"
+        ])));
+    }
+
+    #[test]
+    fn native_find_unknown_path_flag_uses_passthrough() {
+        assert!(should_passthrough_to_native_find(&args(&[
+            ".",
+            "-samefile",
+            "Cargo.toml"
+        ])));
+    }
+
+    #[test]
+    fn native_find_simple_flags_stay_compact() {
+        assert!(!should_passthrough_to_native_find(&args(&[
+            "src",
+            "-name",
+            "*.rs",
+            "-type",
+            "f",
+            "-maxdepth",
+            "2"
+        ])));
+    }
+
+    #[test]
+    fn rtk_find_flags_do_not_use_passthrough() {
+        assert!(!should_passthrough_to_native_find(&args(&[
+            "*.rs",
+            "src",
+            "-m",
+            "10",
+            "-t",
+            "f"
+        ])));
     }
 
     // --- parse_find_args: RTK syntax ---
