@@ -430,39 +430,10 @@ pub fn run(
         by_file.entry(file).or_default().push((line_num, cleaned));
     }
 
-    // Derive total from parsed results so the header matches what we show.
+    // Derive total from parsed results so the overflow footer can report the
+    // true suppressed count while the header reports only displayed entries.
     let total_matches: usize = by_file.values().map(|v| v.len()).sum();
-
-    let mut rtk_output = String::new();
-    rtk_output.push_str(&format!(
-        "{} matches in {} files:\n\n",
-        total_matches,
-        by_file.len()
-    ));
-
-    let mut shown = 0;
-    let mut files: Vec<_> = by_file.iter().collect();
-    files.sort_by_key(|(f, _)| *f);
-
-    let per_file = config::limits().grep_max_per_file;
-    for (file, matches) in files {
-        if shown >= max_results {
-            break;
-        }
-
-        let file_display = compact_path(file);
-        for (line_num, content) in matches.iter().take(per_file) {
-            if shown >= max_results {
-                break;
-            }
-            rtk_output.push_str(&format!("{}:{}:{}\n", file_display, line_num, content));
-            shown += 1;
-        }
-    }
-
-    if total_matches > shown {
-        rtk_output.push_str(&format!("[+{} more]\n", total_matches - shown));
-    }
+    let rtk_output = render_grouped_matches(&by_file, total_matches, max_results);
 
     print!("{}", rtk_output);
     timer.track(
@@ -563,6 +534,45 @@ fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &
             format!("{}...", t)
         }
     }
+}
+
+fn render_grouped_matches(
+    by_file: &HashMap<String, Vec<(usize, String)>>,
+    total_matches: usize,
+    max_results: usize,
+) -> String {
+    let mut body = String::new();
+    let mut shown = 0;
+    let mut shown_files = 0;
+    let mut files: Vec<_> = by_file.iter().collect();
+    files.sort_by_key(|(f, _)| *f);
+
+    let per_file = config::limits().grep_max_per_file;
+    for (file, matches) in files {
+        if shown >= max_results {
+            break;
+        }
+
+        let file_display = compact_path(file);
+        let file_start = shown;
+        for (line_num, content) in matches.iter().take(per_file) {
+            if shown >= max_results {
+                break;
+            }
+            body.push_str(&format!("{}:{}:{}\n", file_display, line_num, content));
+            shown += 1;
+        }
+        if shown > file_start {
+            shown_files += 1;
+        }
+    }
+
+    let mut output = format!("{} matches in {} files:\n\n", shown, shown_files);
+    output.push_str(&body);
+    if total_matches > shown {
+        output.push_str(&format!("[+{} more]\n", total_matches - shown));
+    }
+    output
 }
 
 fn compact_path(path: &str) -> String {
@@ -1080,6 +1090,27 @@ mod tests {
             wrong_overflow, overflow,
             "capping before subtraction gives wrong overflow"
         );
+    }
+
+    #[test]
+    fn test_grep_header_reports_displayed_matches_when_capped() {
+        let mut by_file = HashMap::new();
+        by_file.insert(
+            "a.rs".to_string(),
+            vec![(1, "match one".to_string()), (2, "match two".to_string())],
+        );
+        by_file.insert(
+            "b.rs".to_string(),
+            vec![(3, "match three".to_string()), (4, "match four".to_string())],
+        );
+
+        let output = render_grouped_matches(&by_file, 4, 3);
+
+        assert!(
+            output.starts_with("3 matches in 2 files:\n\n"),
+            "header should report displayed counts, got: {output}"
+        );
+        assert!(output.ends_with("[+1 more]\n"));
     }
 
     // --- format flag detection ---
