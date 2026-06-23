@@ -3,12 +3,15 @@
 use anyhow::Result;
 
 use crate::core::toml_filter;
+use crate::core::utils;
 
 /// Run TOML filter inline tests.
 ///
 /// - `filter`: if `Some`, only run tests for that filter name
 /// - `require_all`: fail if any filter has no inline tests
 pub fn run(filter: Option<String>, require_all: bool) -> Result<()> {
+    check_environment();
+
     let results = toml_filter::run_filter_tests(filter.as_deref());
 
     let total = results.outcomes.len();
@@ -46,4 +49,25 @@ pub fn run(filter: Option<String>, require_all: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Print a one-line environment summary. On Windows, reports whether the
+/// UNIX-style commands rtk's filters rely on are available (provided by
+/// Microsoft Coreutils) and how to install them if not. No-op elsewhere, since
+/// these tools are part of the base system on Linux/macOS.
+fn check_environment() {
+    if cfg!(windows) {
+        let missing = utils::missing_coreutils();
+        if missing.is_empty() {
+            println!(
+                "coreutils: ok ({} commands on PATH)",
+                utils::COREUTILS_TOOLS.len()
+            );
+        } else {
+            println!(
+                "coreutils: missing {} — some filters (ls, wc, grep, …) will fall back to raw output.\n  Install with: winget install Microsoft.Coreutils",
+                missing.join(", ")
+            );
+        }
+    }
 }
