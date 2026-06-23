@@ -59,6 +59,16 @@ pub struct TrackingConfig {
     pub history_days: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub database_path: Option<PathBuf>,
+    /// Replace stored project paths with `<basename>#<8-hex-sha256>` so the
+    /// tracking DB does not pin a user's private filesystem layout. Defaults
+    /// to `true`; set to `false` to keep raw paths for `rtk gain --by-project`
+    /// scripts that depend on prefix matching.
+    #[serde(default = "default_true")]
+    pub hash_project_paths: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for TrackingConfig {
@@ -67,6 +77,7 @@ impl Default for TrackingConfig {
             enabled: true,
             history_days: DEFAULT_HISTORY_DAYS as u32,
             database_path: None,
+            hash_project_paths: true,
         }
     }
 }
@@ -183,6 +194,12 @@ impl Config {
 }
 
 fn get_config_path() -> Result<PathBuf> {
+    // Priority 1: explicit override (mirrors RTK_DB_PATH for `Tracker`).
+    // Mostly used by tests to keep `Config::load()` deterministic without
+    // touching the real `$HOME`.
+    if let Ok(custom) = std::env::var("RTK_CONFIG_PATH") {
+        return Ok(PathBuf::from(custom));
+    }
     let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
     Ok(config_dir.join(RTK_DATA_DIR).join(CONFIG_TOML))
 }
