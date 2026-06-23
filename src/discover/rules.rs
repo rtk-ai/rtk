@@ -753,6 +753,21 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^pulumi\s+(preview|up|destroy|refresh|stack)(\s|$)",
+        rtk_cmd: "rtk pulumi",
+        rewrite_prefixes: &["pulumi"],
+        category: "Infra",
+        savings_pct: 45.0,
+        subcmd_savings: &[
+            ("up", 66.0),
+            ("destroy", 72.0),
+            ("refresh", 35.0),
+            ("preview", 25.0),
+            ("stack", 29.0),
+        ],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^quarto\s+render",
         rtk_cmd: "rtk quarto",
         rewrite_prefixes: &["quarto"],
