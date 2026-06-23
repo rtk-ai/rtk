@@ -64,7 +64,7 @@ impl ToolRule {
     /// Effective strip_ansi: explicit value, else default (true iff capturing via pty).
     // Consumed by the pty capture path; without that feature it is still part of the
     // public config surface (rules parse regardless of which capture backends are built).
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "pty"), allow(dead_code))]
     pub fn strip_ansi_effective(&self) -> bool {
         self.strip_ansi.unwrap_or(self.capture == CaptureMode::Pty)
     }
@@ -88,6 +88,7 @@ pub struct ToolMatch {
 
 impl ToolMatch {
     /// True if this predicate matches the given command + argument list.
+    #[cfg_attr(not(feature = "pty"), allow(dead_code))]
     pub fn matches(&self, command: &str, args: &[String]) -> bool {
         if command != self.command {
             return false;
@@ -109,6 +110,7 @@ impl ToolMatch {
 
 impl Config {
     /// First `[[tools]]` rule whose `match` applies to this invocation, if any.
+    #[cfg_attr(not(feature = "pty"), allow(dead_code))]
     pub fn tool_rule_for(&self, command: &str, args: &[String]) -> Option<&ToolRule> {
         self.tools.iter().find(|r| r.match_.matches(command, args))
     }
