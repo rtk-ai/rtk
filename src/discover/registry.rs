@@ -513,7 +513,231 @@ pub fn rewrite_command(
         return Some(trimmed.to_string());
     }
 
+    // PowerShell cmdlet support (v1): only rewrite a bare, single-segment
+    // invocation. Piped/compound PS commands are left untouched so we never
+    // break a pipeline like `Get-ChildItem | Where-Object ...`.
+    if !has_compound {
+        if let Some(rewritten) = try_rewrite_powershell(trimmed) {
+            return Some(rewritten);
+        }
+    }
+
     rewrite_compound(trimmed, &compiled, &normalized_prefixes)
+}
+
+/// Quote an argument for the rewritten command line if it contains whitespace.
+fn quote_if_needed(s: &str) -> String {
+    if s.is_empty() || s.chars().any(char::is_whitespace) {
+        format!("\"{}\"", s)
+    } else {
+        s.to_string()
+    }
+}
+
+/// Translate a bare PowerShell cmdlet invocation into its `rtk` equivalent.
+///
+/// Supports the common file/search cmdlets (and their aliases). Returns `None`
+/// for anything unrecognized or using parameters we can't safely map, so the
+/// caller leaves the command untouched. Only invoked for single-segment
+/// (non-piped) commands.
+fn try_rewrite_powershell(cmd: &str) -> Option<String> {
+    let tokens = ps_split(cmd);
+    let (head, rest) = tokens.split_first()?;
+    match head.to_ascii_lowercase().as_str() {
+        "get-content" | "gc" | "type" => ps_get_content(rest),
+        "get-childitem" | "gci" | "dir" => ps_get_childitem(rest),
+        "select-string" | "sls" => ps_select_string(rest),
+        _ => None,
+    }
+}
+
+/// Tokenize a PowerShell command line. Unlike the bash lexer, a backslash is a
+/// literal character (Windows path separator), not an escape — so `src\cmds`
+/// survives intact. Single and double quotes group tokens and are stripped.
+fn ps_split(cmd: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut has_token = false;
+
+    for ch in cmd.chars() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                } else {
+                    cur.push(ch);
+                }
+            }
+            None => match ch {
+                '\'' | '"' => {
+                    quote = Some(ch);
+                    has_token = true;
+                }
+                c if c.is_whitespace() => {
+                    if has_token {
+                        tokens.push(std::mem::take(&mut cur));
+                        has_token = false;
+                    }
+                }
+                c => {
+                    cur.push(c);
+                    has_token = true;
+                }
+            },
+        }
+    }
+    if has_token {
+        tokens.push(cur);
+    }
+    tokens
+}
+
+/// `Get-Content [-Path] <file> [-TotalCount n] [-Tail n]` → `rtk read ...`
+fn ps_get_content(rest: &[String]) -> Option<String> {
+    let mut files: Vec<String> = Vec::new();
+    let mut max_lines: Option<String> = None;
+    let mut tail: Option<String> = None;
+
+    let mut i = 0;
+    while i < rest.len() {
+        let tok = &rest[i];
+        if let Some(name) = tok.strip_prefix('-') {
+            match name.to_ascii_lowercase().as_str() {
+                "path" | "literalpath" => {
+                    i += 1;
+                    if let Some(v) = rest.get(i) {
+                        files.push(v.clone());
+                    }
+                }
+                "totalcount" | "head" | "first" => {
+                    i += 1;
+                    max_lines = rest.get(i).cloned();
+                }
+                "tail" | "last" => {
+                    i += 1;
+                    tail = rest.get(i).cloned();
+                }
+                _ => {} // unknown switch: ignore
+            }
+        } else {
+            files.push(tok.clone());
+        }
+        i += 1;
+    }
+
+    if files.is_empty() {
+        return None;
+    }
+
+    let mut out = String::from("rtk read");
+    for f in &files {
+        out.push(' ');
+        out.push_str(&quote_if_needed(f));
+    }
+    if let Some(n) = max_lines {
+        out.push_str(" --max-lines ");
+        out.push_str(&n);
+    }
+    if let Some(n) = tail {
+        out.push_str(" --tail-lines ");
+        out.push_str(&n);
+    }
+    Some(out)
+}
+
+/// `Get-ChildItem [-Path] <dir> [-Recurse] [-Force]` → `rtk ls`/`rtk tree`.
+/// Bails on content-filtering params we can't faithfully map.
+fn ps_get_childitem(rest: &[String]) -> Option<String> {
+    let mut path: Option<String> = None;
+    let mut recurse = false;
+    let mut force = false;
+
+    let mut i = 0;
+    while i < rest.len() {
+        let tok = &rest[i];
+        if let Some(name) = tok.strip_prefix('-') {
+            match name.to_ascii_lowercase().as_str() {
+                "recurse" | "r" => recurse = true,
+                "force" => force = true,
+                "path" | "literalpath" => {
+                    i += 1;
+                    path = rest.get(i).cloned();
+                }
+                // Filtering params change which entries are returned — we can't
+                // reproduce them, so bail rather than mislead.
+                "filter" | "include" | "exclude" | "name" => return None,
+                _ => {}
+            }
+        } else {
+            path = Some(tok.clone());
+        }
+        i += 1;
+    }
+
+    let base = if recurse { "rtk tree" } else { "rtk ls" };
+    let mut out = String::from(base);
+    if force {
+        out.push_str(" -a");
+    }
+    if let Some(p) = path {
+        out.push(' ');
+        out.push_str(&quote_if_needed(&p));
+    }
+    Some(out)
+}
+
+/// `Select-String [-Pattern] <pat> [-Path] <files> [-CaseSensitive]` → `rtk grep`.
+/// Select-String is case-insensitive by default, so `-i` is added unless
+/// `-CaseSensitive` is present.
+fn ps_select_string(rest: &[String]) -> Option<String> {
+    let mut pattern: Option<String> = None;
+    let mut paths: Vec<String> = Vec::new();
+    let mut case_sensitive = false;
+
+    let mut i = 0;
+    while i < rest.len() {
+        let tok = &rest[i];
+        if let Some(name) = tok.strip_prefix('-') {
+            match name.to_ascii_lowercase().as_str() {
+                "pattern" => {
+                    i += 1;
+                    pattern = rest.get(i).cloned();
+                }
+                "path" | "literalpath" => {
+                    // Consume following non-flag tokens as paths.
+                    while let Some(v) = rest.get(i + 1) {
+                        if v.starts_with('-') {
+                            break;
+                        }
+                        paths.push(v.clone());
+                        i += 1;
+                    }
+                }
+                "casesensitive" => case_sensitive = true,
+                _ => {}
+            }
+        } else if pattern.is_none() {
+            pattern = Some(tok.clone());
+        } else {
+            paths.push(tok.clone());
+        }
+        i += 1;
+    }
+
+    let pattern = pattern?;
+
+    let mut out = String::from("rtk grep");
+    if !case_sensitive {
+        out.push_str(" -i");
+    }
+    out.push(' ');
+    out.push_str(&quote_if_needed(&pattern));
+    for p in &paths {
+        out.push(' ');
+        out.push_str(&quote_if_needed(p));
+    }
+    Some(out)
 }
 
 /// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each segment.
@@ -882,6 +1106,162 @@ mod tests {
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
+    }
+
+    // ── PowerShell cmdlet rewrites (Windows support) ──────────────────
+    fn ps_rewrite(cmd: &str) -> Option<String> {
+        super::rewrite_command(cmd, &[], &[])
+    }
+
+    #[test]
+    fn test_ps_get_content_positional() {
+        assert_eq!(
+            ps_rewrite("Get-Content README.md").as_deref(),
+            Some("rtk read README.md")
+        );
+    }
+
+    #[test]
+    fn test_ps_get_content_named_path_and_total() {
+        assert_eq!(
+            ps_rewrite("Get-Content -Path Cargo.toml -TotalCount 20").as_deref(),
+            Some("rtk read Cargo.toml --max-lines 20")
+        );
+    }
+
+    #[test]
+    fn test_ps_get_content_aliases() {
+        assert_eq!(
+            ps_rewrite("gc src/main.rs").as_deref(),
+            Some("rtk read src/main.rs")
+        );
+        assert_eq!(
+            ps_rewrite("type notes.txt").as_deref(),
+            Some("rtk read notes.txt")
+        );
+    }
+
+    #[test]
+    fn test_ps_get_content_tail() {
+        assert_eq!(
+            ps_rewrite("Get-Content log.txt -Tail 50").as_deref(),
+            Some("rtk read log.txt --tail-lines 50")
+        );
+    }
+
+    #[test]
+    fn test_ps_get_childitem_to_ls() {
+        assert_eq!(ps_rewrite("Get-ChildItem").as_deref(), Some("rtk ls"));
+        assert_eq!(
+            ps_rewrite("Get-ChildItem src").as_deref(),
+            Some("rtk ls src")
+        );
+        assert_eq!(ps_rewrite("gci -Path src").as_deref(), Some("rtk ls src"));
+    }
+
+    #[test]
+    fn test_ps_get_childitem_recurse_to_tree() {
+        assert_eq!(
+            ps_rewrite("Get-ChildItem -Recurse").as_deref(),
+            Some("rtk tree")
+        );
+        assert_eq!(
+            ps_rewrite("Get-ChildItem src -Recurse").as_deref(),
+            Some("rtk tree src")
+        );
+    }
+
+    #[test]
+    fn test_ps_get_childitem_force_shows_hidden() {
+        assert_eq!(
+            ps_rewrite("Get-ChildItem -Force").as_deref(),
+            Some("rtk ls -a")
+        );
+    }
+
+    #[test]
+    fn test_ps_get_childitem_filter_bails() {
+        // Content-filtering params we can't map → no rewrite.
+        assert_eq!(ps_rewrite("Get-ChildItem -Filter *.rs"), None);
+    }
+
+    #[test]
+    fn test_ps_select_string_positional() {
+        // Case-insensitive by default → -i added.
+        assert_eq!(
+            ps_rewrite("Select-String fn src").as_deref(),
+            Some("rtk grep -i fn src")
+        );
+    }
+
+    #[test]
+    fn test_ps_select_string_named() {
+        assert_eq!(
+            ps_rewrite("Select-String -Pattern \"fn run\" -Path src").as_deref(),
+            Some("rtk grep -i \"fn run\" src")
+        );
+    }
+
+    #[test]
+    fn test_ps_select_string_case_sensitive() {
+        assert_eq!(
+            ps_rewrite("Select-String -Pattern foo -Path bar -CaseSensitive").as_deref(),
+            Some("rtk grep foo bar")
+        );
+    }
+
+    #[test]
+    fn test_ps_select_string_alias() {
+        assert_eq!(
+            ps_rewrite("sls TODO .").as_deref(),
+            Some("rtk grep -i TODO .")
+        );
+    }
+
+    #[test]
+    fn test_ps_piped_cmdlet_not_rewritten() {
+        // v1 safety: never rewrite a cmdlet that is part of a pipeline.
+        assert_eq!(
+            ps_rewrite("Get-ChildItem | Where-Object Name -eq foo"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_ps_unknown_cmdlet_passthrough() {
+        assert_eq!(ps_rewrite("Get-Process"), None);
+    }
+
+    #[test]
+    fn test_ps_preserves_windows_backslash_paths() {
+        // Regression: backslash path separators must survive tokenization.
+        assert_eq!(
+            ps_rewrite("Get-ChildItem -Recurse src\\cmds").as_deref(),
+            Some("rtk tree src\\cmds")
+        );
+        assert_eq!(
+            ps_rewrite("Select-String -Pattern fn -Path src\\main.rs").as_deref(),
+            Some("rtk grep -i fn src\\main.rs")
+        );
+        assert_eq!(
+            ps_rewrite("Get-Content src\\core\\utils.rs").as_deref(),
+            Some("rtk read src\\core\\utils.rs")
+        );
+    }
+
+    #[test]
+    fn test_ps_split_quotes_and_backslash() {
+        let t = ps_split("Select-String -Pattern \"fn run\" -Path src\\main.rs");
+        assert_eq!(
+            t,
+            vec![
+                "Select-String",
+                "-Pattern",
+                "fn run",
+                "-Path",
+                "src\\main.rs"
+            ]
+        );
     }
 
     #[test]

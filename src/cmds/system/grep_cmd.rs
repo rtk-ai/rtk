@@ -2,7 +2,7 @@
 
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
-use crate::core::utils::resolved_command;
+use crate::core::utils::{resolved_command, tool_exists};
 use crate::core::{args_utils, config};
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -312,50 +312,64 @@ pub fn run(
         eprintln!("grep: '{}' in {}", pattern_display, path_display);
     }
 
-    let mut rg_cmd = resolved_command("rg");
-    // --no-ignore-vcs: match grep -r behavior (don't skip .gitignore'd files).
-    // Without this, rg returns 0 matches for files in .gitignore, causing
-    // false negatives that make AI agents draw wrong conclusions.
-    // Using --no-ignore-vcs (not --no-ignore) so .ignore/.rgignore are still respected.
-    // -H: always emit the filename.
-    // -0: NUL-separate filename. Allows the parser to disambiguate filenames or
-    // content containing `:digits:` patterns (issue #1436).
-    rg_cmd.args(["-nH0", "--no-heading", "--no-ignore-vcs"]);
+    // Fast path: when neither rg nor grep is installed (e.g. stock Windows),
+    // go straight to the native search. This avoids the misleading "Binary not
+    // found on PATH" warnings that `resolved_command` emits during the spawn
+    // attempts, since the native fallback succeeds anyway.
+    let have_external = tool_exists("rg") || tool_exists("grep");
 
-    if let Some(ft) = file_type {
-        rg_cmd.arg("--type").arg(ft);
-    }
+    let result = if !have_external {
+        native_grep(&patterns, &paths, &extra_args).context("grep/rg failed")?
+    } else {
+        let mut rg_cmd = resolved_command("rg");
+        // --no-ignore-vcs: match grep -r behavior (don't skip .gitignore'd files).
+        // Without this, rg returns 0 matches for files in .gitignore, causing
+        // false negatives that make AI agents draw wrong conclusions.
+        // Using --no-ignore-vcs (not --no-ignore) so .ignore/.rgignore are still respected.
+        // -H: always emit the filename.
+        // -0: NUL-separate filename. Allows the parser to disambiguate filenames or
+        // content containing `:digits:` patterns (issue #1436).
+        rg_cmd.args(["-nH0", "--no-heading", "--no-ignore-vcs"]);
 
-    // extra_args is already stripped of -r/-R/-recursive by extract_pattern_path
-    rg_cmd.args(&extra_args);
+        if let Some(ft) = file_type {
+            rg_cmd.arg("--type").arg(ft);
+        }
 
-    // All patterns as -e flags (BRE \| → | translation for rg's PCRE engine).
-    // Using -e keeps `--` semantically as a flag/path separator, not part of the pattern.
-    for p in &patterns {
-        rg_cmd.args(["-e", &p.replace(r"\|", "|")]);
-    }
+        // extra_args is already stripped of -r/-R/-recursive by extract_pattern_path
+        rg_cmd.args(&extra_args);
 
-    // `--` after all flags: prevents rg from interpreting path args starting
-    // with `-` as its own flags.
-    rg_cmd.arg("--");
-    rg_cmd.args(&paths);
+        // All patterns as -e flags (BRE \| → | translation for rg's PCRE engine).
+        // Using -e keeps `--` semantically as a flag/path separator, not part of the pattern.
+        for p in &patterns {
+            rg_cmd.args(["-e", &p.replace(r"\|", "|")]);
+        }
 
-    let result = exec_capture(&mut rg_cmd)
-        .or_else(|_| {
-            // rg unavailable: fall back to system grep with the original,
-            // untranslated patterns (grep interprets BRE natively).
-            let mut grep_cmd = resolved_command("grep");
-            grep_cmd.args(&extra_args);
-            for p in &patterns {
-                grep_cmd.args(["-e", p]);
-            }
-            // --null (not -Z): on BSD/macOS grep -Z means --decompress, not the
-            // NUL filename separator parse_match_line() needs (issue #2310).
-            grep_cmd.args(["-rnH", "--null", "--"]);
-            grep_cmd.args(&paths);
-            exec_capture(&mut grep_cmd)
-        })
-        .context("grep/rg failed")?;
+        // `--` after all flags: prevents rg from interpreting path args starting
+        // with `-` as its own flags.
+        rg_cmd.arg("--");
+        rg_cmd.args(&paths);
+
+        exec_capture(&mut rg_cmd)
+            .or_else(|_| {
+                // rg unavailable: fall back to system grep with the original,
+                // untranslated patterns (grep interprets BRE natively).
+                let mut grep_cmd = resolved_command("grep");
+                grep_cmd.args(&extra_args);
+                for p in &patterns {
+                    grep_cmd.args(["-e", p]);
+                }
+                // --null (not -Z): on BSD/macOS grep -Z means --decompress, not the
+                // NUL filename separator parse_match_line() needs (issue #2310).
+                grep_cmd.args(["-rnH", "--null", "--"]);
+                grep_cmd.args(&paths);
+                exec_capture(&mut grep_cmd)
+            })
+            .or_else(|_| {
+                // Neither rg nor grep on PATH (e.g. stock Windows): native search.
+                native_grep(&patterns, &paths, &extra_args)
+            })
+            .context("grep/rg failed")?
+    };
 
     // Passthrough output flags that produce output that is already small.
     if has_format_flag(&extra_args) {
@@ -487,6 +501,92 @@ pub fn run(
 ///
 /// Returns `None` for lines that do not match the expected shape (e.g. rg
 /// `-A`/`-B` context lines that use `-` as separator).
+/// Native regex search used when neither `rg` nor `grep` is on PATH
+/// (e.g. stock Windows). Emits matches in the NUL-separated
+/// `path\0linenum:content` format that [`parse_match_line`] expects, so the
+/// downstream grouping/compression pipeline works unchanged.
+///
+/// Honors `-i`/`--ignore-case` and `-v`/`--invert-match`. Respects
+/// `.gitignore` and skips hidden files (like the `find` filter), which differs
+/// slightly from `rg --no-ignore-vcs`; acceptable for the no-binary fallback.
+fn native_grep(
+    patterns: &[String],
+    paths: &[String],
+    extra_args: &[String],
+) -> Result<crate::core::stream::CaptureResult> {
+    use ignore::WalkBuilder;
+    use std::fmt::Write;
+
+    let case_insensitive = extra_args
+        .iter()
+        .any(|a| a == "-i" || a == "--ignore-case");
+    let invert = extra_args
+        .iter()
+        .any(|a| a == "-v" || a == "--invert-match");
+
+    let combined = patterns
+        .iter()
+        .map(|p| p.replace(r"\|", "|"))
+        .collect::<Vec<_>>()
+        .join("|");
+
+    let re = regex::RegexBuilder::new(&combined)
+        .case_insensitive(case_insensitive)
+        .build()
+        .context("invalid grep pattern")?;
+
+    let mut out = String::new();
+
+    let search_file = |path_display: &str, out: &mut String| {
+        let data = match std::fs::read(path_display) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        // Skip binary files (NUL byte in content).
+        if data.contains(&0) {
+            return;
+        }
+        let text = String::from_utf8_lossy(&data);
+        for (idx, line) in text.lines().enumerate() {
+            let is_match = re.is_match(line);
+            // Emit matches normally; with -v emit non-matches. Skip otherwise.
+            if is_match == invert {
+                continue;
+            }
+            // NUL-separate the filename so the parser can disambiguate.
+            let _ = writeln!(out, "{path_display}\u{0}{}:{line}", idx + 1);
+        }
+    };
+
+    for path in paths {
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.is_dir() => {
+                let walker = WalkBuilder::new(path)
+                    .hidden(true)
+                    .git_ignore(true)
+                    .git_global(true)
+                    .git_exclude(true)
+                    .build();
+                for entry in walker.flatten() {
+                    if entry.file_type().is_some_and(|t| t.is_file()) {
+                        let p = entry.path().to_string_lossy().replace('\\', "/");
+                        search_file(&p, &mut out);
+                    }
+                }
+            }
+            Ok(_) => search_file(path, &mut out),
+            Err(_) => {}
+        }
+    }
+
+    let exit_code = if out.is_empty() { 1 } else { 0 };
+    Ok(crate::core::stream::CaptureResult {
+        stdout: out,
+        stderr: String::new(),
+        exit_code,
+    })
+}
+
 fn parse_match_line(line: &str) -> Option<(String, usize, &str)> {
     lazy_static::lazy_static! {
         static ref MATCH_LINE_RE: Regex = Regex::new(r"^([^\x00]+)\x00(\d+):(.*)$").unwrap();
@@ -593,6 +693,71 @@ fn is_grep_error_exit(exit_code: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_native_grep_matches_file() {
+        let dir = std::env::temp_dir().join(format!("rtk_grep_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sample.txt");
+        std::fs::write(&file, "alpha\nbeta fn run\ngamma\nFN RUN upper\n").unwrap();
+        let file_str = file.to_string_lossy().replace('\\', "/");
+
+        // Case-sensitive: only the lowercase match.
+        let res = native_grep(
+            &["fn run".to_string()],
+            std::slice::from_ref(&file_str),
+            &[],
+        )
+        .unwrap();
+        assert!(res.stdout.contains("\u{0}2:beta fn run"));
+        assert!(!res.stdout.contains("FN RUN"));
+        assert_eq!(res.exit_code, 0);
+
+        // Case-insensitive (-i): both matches.
+        let res_i = native_grep(
+            &["fn run".to_string()],
+            std::slice::from_ref(&file_str),
+            &["-i".to_string()],
+        )
+        .unwrap();
+        assert!(res_i.stdout.contains("2:beta fn run"));
+        assert!(res_i.stdout.contains("4:FN RUN upper"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_native_grep_no_match_exit_1() {
+        let dir = std::env::temp_dir().join(format!("rtk_grep_nomatch_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("e.txt");
+        std::fs::write(&file, "nothing here\n").unwrap();
+        let res = native_grep(
+            &["zzz".to_string()],
+            &[file.to_string_lossy().to_string()],
+            &[],
+        )
+        .unwrap();
+        assert!(res.stdout.is_empty());
+        assert_eq!(res.exit_code, 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_native_grep_output_parses() {
+        // Native output must round-trip through parse_match_line.
+        let dir = std::env::temp_dir().join(format!("rtk_grep_parse_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("p.txt");
+        std::fs::write(&file, "match here\n").unwrap();
+        let file_str = file.to_string_lossy().replace('\\', "/");
+        let res = native_grep(&["match".to_string()], &[file_str], &[]).unwrap();
+        let line = res.stdout.lines().next().unwrap();
+        let (_f, line_num, content) = parse_match_line(line).expect("native line parses");
+        assert_eq!(line_num, 1);
+        assert_eq!(content, "match here");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn test_is_grep_error_exit() {
