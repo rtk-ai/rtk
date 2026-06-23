@@ -110,7 +110,7 @@ Typical savings: 60-99%.
 | Command | Savings | What changes |
 |---------|---------|--------------|
 | `ls` | 80% | Tree format with file counts |
-| `find` | 75% | Tree format |
+| `find` | 75% | Tree format for simple searches; native fallback for compound expressions/actions |
 | `grep` | 70% | Truncated lines, grouped by file |
 | `diff` | 65% | Context reduced |
 | `wc` | 60% | Compact counts |

@@ -62,6 +62,34 @@ rtk gain    # should now show token savings stats
    cat ~/.claude/settings.json | grep rtk
    ```
 
+## `rtk find` does not handle my native `find` expression
+
+**Symptom:** A command with native `find` predicates or actions behaves differently than expected:
+
+```bash
+rtk find . -type f \( -name 'package.json' -o -name 'Cargo.toml' \)
+```
+
+**Cause:** `rtk find` only compacts simple searches itself (`-name`, `-iname`, `-type`, `-maxdepth`). Compound expressions and actions need native `find` semantics.
+
+**Fix:** Recent RTK versions automatically fall back to native `find` for compound expressions/actions. To force raw native behavior explicitly:
+
+```bash
+rtk proxy find . -type f \( -name 'package.json' -o -name 'Cargo.toml' \)
+```
+
+## `rtk test -d path` does not check for a directory
+
+**Cause:** `rtk test` runs test-runner commands and filters failures. It is not POSIX `test`.
+
+**Fix:**
+
+```bash
+rtk run "test -d path"
+# or
+test -d path
+```
+
 ## RTK not found after `cargo install`
 
 **Symptom:**
