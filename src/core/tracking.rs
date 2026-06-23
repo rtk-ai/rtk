@@ -1354,9 +1354,32 @@ impl TimedExecution {
     /// timer.track("ls -la", "rtk ls", input, output);
     /// ```
     pub fn track(&self, original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
+        self.track_with_tokens(
+            original_cmd,
+            rtk_cmd,
+            estimate_tokens(input),
+            estimate_tokens(output),
+        );
+    }
+
+    /// Like [`track`], but accepts precomputed token counts so callers that
+    /// already estimated the input/output (e.g. the runner's output-fallback
+    /// decision) don't pay for re-estimation.
+    ///
+    /// Contract: the counts **must** come from [`estimate_tokens`] over the
+    /// same strings that would otherwise be passed to [`track`], so metrics
+    /// stay consistent with the rest of the database. This is `pub(crate)`
+    /// because it is internal-only; note that `pub(crate)` scopes visibility
+    /// but does not itself enforce the count-consistency contract above —
+    /// that remains a caller convention.
+    pub(crate) fn track_with_tokens(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        input_tokens: usize,
+        output_tokens: usize,
+    ) {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
-        let input_tokens = estimate_tokens(input);
-        let output_tokens = estimate_tokens(output);
 
         if let Ok(tracker) = Tracker::new() {
             let _ = tracker.record(
