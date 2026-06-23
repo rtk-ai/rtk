@@ -88,7 +88,6 @@ pub struct ToolMatch {
 
 impl ToolMatch {
     /// True if this predicate matches the given command + argument list.
-    #[allow(dead_code)]
     pub fn matches(&self, command: &str, args: &[String]) -> bool {
         if command != self.command {
             return false;
@@ -110,7 +109,6 @@ impl ToolMatch {
 
 impl Config {
     /// First `[[tools]]` rule whose `match` applies to this invocation, if any.
-    #[allow(dead_code)]
     pub fn tool_rule_for(&self, command: &str, args: &[String]) -> Option<&ToolRule> {
         self.tools.iter().find(|r| r.match_.matches(command, args))
     }
