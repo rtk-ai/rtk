@@ -1,6 +1,7 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
 use crate::core::args_utils;
+use crate::core::config;
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::stream::{
@@ -632,14 +633,31 @@ fn truncate_line(line: &str, width: usize) -> String {
 }
 
 pub(crate) fn format_status_output(porcelain: &str) -> String {
-    format_status_inner(porcelain, None)
+    let limits = config::limits();
+    format_status_inner(
+        porcelain,
+        None,
+        limits.status_max_files,
+        limits.status_max_untracked,
+    )
 }
 
 pub(crate) fn format_status_output_detached(porcelain: &str, detached_ref: &str) -> String {
-    format_status_inner(porcelain, Some(detached_ref))
+    let limits = config::limits();
+    format_status_inner(
+        porcelain,
+        Some(detached_ref),
+        limits.status_max_files,
+        limits.status_max_untracked,
+    )
 }
 
-fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
+fn format_status_inner(
+    porcelain: &str,
+    detached: Option<&str>,
+    max_files: usize,
+    max_untracked: usize,
+) -> String {
     let lines: Vec<&str> = porcelain
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -661,8 +679,32 @@ fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
         }
     }
 
+    let mut tracked_count = 0usize;
+    let mut tracked_hidden = 0usize;
+    let mut untracked_count = 0usize;
+    let mut untracked_hidden = 0usize;
+
     for line in lines.iter().skip(1) {
-        output.push((*line).to_string());
+        if line.starts_with("??") {
+            untracked_count += 1;
+            if untracked_count <= max_untracked {
+                output.push((*line).to_string());
+            } else {
+                untracked_hidden += 1;
+            }
+        } else {
+            tracked_count += 1;
+            if tracked_count <= max_files {
+                output.push((*line).to_string());
+            } else {
+                tracked_hidden += 1;
+            }
+        }
+    }
+
+    if tracked_hidden > 0 || untracked_hidden > 0 {
+        let total = tracked_hidden + untracked_hidden;
+        output.push(format!("[+{} hidden, use git status]", total));
     }
 
     if lines.len() == 1 && lines[0].starts_with("##") {
@@ -3095,25 +3137,112 @@ no changes added to commit (use "git add" and/or "git commit -a")
     // --- truncation accuracy ---
 
     #[test]
-    fn test_format_status_output_shows_every_file_when_many_are_dirty() {
+    fn test_format_status_output_shows_every_file_when_under_limit() {
         let mut porcelain = String::from("## main...origin/main\n");
-        for i in 0..25 {
+        for i in 0..10 {
             porcelain.push_str(&format!("M  staged_file_{}.rs\n", i));
         }
-        let result = format_status_output(&porcelain);
+        let result = format_status_inner(&porcelain, None, 15, 10);
         assert!(
-            result.contains("staged_file_24.rs"),
+            result.contains("staged_file_9.rs"),
             "Expected the last staged file to remain visible, got:\n{}",
             result
         );
         assert!(
-            result.lines().count() == 26,
-            "Expected branch + all 25 staged files, got:\n{}",
+            !result.contains("[+"),
+            "Files under limit should not show overflow marker:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_format_status_caps_tracked_files_at_limit() {
+        let mut porcelain = String::from("## main...origin/main\n");
+        for i in 0..25 {
+            porcelain.push_str(&format!("M  staged_file_{}.rs\n", i));
+        }
+        let result = format_status_inner(&porcelain, None, 15, 10);
+        assert!(
+            result.contains("staged_file_14.rs"),
+            "15th file (index 14) should be shown, got:\n{}",
             result
         );
         assert!(
-            !result.contains("... +"),
-            "Status output must not hide dirty paths behind overflow markers:\n{}",
+            !result.contains("staged_file_15.rs"),
+            "16th file should be hidden, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("[+10 hidden, use git status]"),
+            "Expected overflow hint for 10 hidden files, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_format_status_caps_untracked_files_separately() {
+        let mut porcelain = String::from("## main\n");
+        for i in 0..5 {
+            porcelain.push_str(&format!("M  modified_{}.rs\n", i));
+        }
+        for i in 0..15 {
+            porcelain.push_str(&format!("?? untracked_{}.txt\n", i));
+        }
+        let result = format_status_inner(&porcelain, None, 15, 10);
+        assert!(
+            result.contains("modified_4.rs"),
+            "All 5 modified files should be shown, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("untracked_9.txt"),
+            "10th untracked file should be shown, got:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("untracked_10.txt"),
+            "11th untracked file should be hidden, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("[+5 hidden, use git status]"),
+            "Expected overflow hint for 5 hidden untracked files, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_format_status_caps_both_buckets() {
+        let mut porcelain = String::from("## develop\n");
+        for i in 0..20 {
+            porcelain.push_str(&format!("M  file_{}.rs\n", i));
+        }
+        for i in 0..15 {
+            porcelain.push_str(&format!("?? new_{}.txt\n", i));
+        }
+        let result = format_status_inner(&porcelain, None, 15, 10);
+        assert!(
+            result.contains("[+10 hidden, use git status]"),
+            "Expected combined overflow of 5 tracked + 5 untracked = 10, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_format_status_no_cap_with_high_limits() {
+        let mut porcelain = String::from("## main\n");
+        for i in 0..25 {
+            porcelain.push_str(&format!("M  staged_file_{}.rs\n", i));
+        }
+        let result = format_status_inner(&porcelain, None, 100, 100);
+        assert!(
+            result.contains("staged_file_24.rs"),
+            "All files should be visible with high limits, got:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("[+"),
+            "No overflow marker with high limits, got:\n{}",
             result
         );
     }
