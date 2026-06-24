@@ -565,7 +565,7 @@ fn rewrite_compound(
                 let rewritten = if is_pipe_incompatible {
                     seg.to_string()
                 } else {
-                    rewrite_segment(seg, excluded, transparent_prefixes)
+                    rewrite_segment_for_consumer(seg, excluded, transparent_prefixes, true)
                         .unwrap_or_else(|| seg.to_string())
                 };
                 if rewritten != seg {
@@ -719,7 +719,16 @@ fn rewrite_segment(
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
 ) -> Option<String> {
-    rewrite_segment_inner(seg, excluded, transparent_prefixes, 0)
+    rewrite_segment_for_consumer(seg, excluded, transparent_prefixes, false)
+}
+
+fn rewrite_segment_for_consumer(
+    seg: &str,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+    stdout_is_piped: bool,
+) -> Option<String> {
+    rewrite_segment_inner(seg, excluded, transparent_prefixes, 0, stdout_is_piped)
 }
 
 fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
@@ -734,6 +743,7 @@ fn rewrite_segment_inner(
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
     depth: usize,
+    stdout_is_piped: bool,
 ) -> Option<String> {
     let trimmed = seg.trim();
     if trimmed.is_empty() {
@@ -755,8 +765,13 @@ fn rewrite_segment_inner(
             );
             return None;
         }
-        let rewritten =
-            rewrite_segment_inner(rest_after_env, excluded, transparent_prefixes, depth + 1)?;
+        let rewritten = rewrite_segment_inner(
+            rest_after_env,
+            excluded,
+            transparent_prefixes,
+            depth + 1,
+            stdout_is_piped,
+        )?;
         return Some(format!("{}{}", env_prefix, rewritten));
     }
 
@@ -765,8 +780,14 @@ fn rewrite_segment_inner(
             if rest.is_empty() {
                 return None;
             }
-            return rewrite_segment_inner(rest, excluded, transparent_prefixes, depth + 1)
-                .map(|rewritten| format!("{} {}", prefix, rewritten));
+            return rewrite_segment_inner(
+                rest,
+                excluded,
+                transparent_prefixes,
+                depth + 1,
+                stdout_is_piped,
+            )
+            .map(|rewritten| format!("{} {}", prefix, rewritten));
         }
     }
 
@@ -777,8 +798,14 @@ fn rewrite_segment_inner(
             if rest.is_empty() {
                 return None;
             }
-            return rewrite_segment_inner(rest, excluded, transparent_prefixes, depth + 1)
-                .map(|rewritten| format!("{} {}", prefix, rewritten));
+            return rewrite_segment_inner(
+                rest,
+                excluded,
+                transparent_prefixes,
+                depth + 1,
+                stdout_is_piped,
+            )
+            .map(|rewritten| format!("{} {}", prefix, rewritten));
         }
     }
 
@@ -789,6 +816,10 @@ fn rewrite_segment_inner(
     // Already RTK — pass through unchanged
     if cmd_part.starts_with("rtk ") || cmd_part == "rtk" {
         return Some(trimmed.to_string());
+    }
+
+    if git_command_should_stay_raw(cmd_part, redirect_suffix, stdout_is_piped) {
+        return None;
     }
 
     if cmd_part.starts_with("head -") || cmd_part.starts_with("tail ") {
@@ -858,6 +889,85 @@ fn rewrite_segment_inner(
     }
 
     None
+}
+
+fn git_command_should_stay_raw(
+    cmd_part: &str,
+    redirect_suffix: &str,
+    stdout_is_piped: bool,
+) -> bool {
+    if git_command_tail_tokens(cmd_part).is_none() {
+        return false;
+    }
+
+    stdout_is_piped
+        || git_command_requests_machine_output(cmd_part)
+        || redirect_suffix_redirects_stdout(redirect_suffix)
+}
+
+fn git_command_tail_tokens(cmd: &str) -> Option<Vec<&str>> {
+    let tokens = split_token_spans(cmd);
+    let first = tokens.first()?.0;
+    if first != "git" && first != "yadm" {
+        return None;
+    }
+
+    let mut i = 1;
+    while i < tokens.len() {
+        let token = tokens[i].0;
+        match token {
+            "-C" | "-c" | "--git-dir" | "--work-tree" => i += 2,
+            "--no-pager" | "--no-optional-locks" | "--bare" | "--literal-pathspecs" => i += 1,
+            _ if token.starts_with("--git-dir=") || token.starts_with("--work-tree=") => i += 1,
+            _ => break,
+        }
+    }
+
+    Some(tokens[i..].iter().map(|token| token.0).collect())
+}
+
+fn git_command_requests_machine_output(cmd: &str) -> bool {
+    let Some(tokens) = git_command_tail_tokens(cmd) else {
+        return false;
+    };
+    if tokens.len() < 2 {
+        return false;
+    }
+
+    git_args_request_machine_output(&tokens[1..])
+}
+
+fn git_args_request_machine_output(args: &[&str]) -> bool {
+    args.iter().enumerate().any(|(idx, arg)| {
+        matches!(
+            *arg,
+            "-z" | "--no-color"
+                | "--porcelain"
+                | "--name-only"
+                | "--name-status"
+                | "--numstat"
+                | "--raw"
+                | "--word-porcelain"
+        ) || arg.starts_with("--porcelain=")
+            || arg.starts_with("--format=")
+            || *arg == "--format"
+            || arg.starts_with("--pretty=format:")
+            || arg.starts_with("--pretty=tformat:")
+            || (*arg == "--pretty"
+                && args.get(idx + 1).is_some_and(|next| {
+                    next.starts_with("format:") || next.starts_with("tformat:")
+                }))
+    })
+}
+
+fn redirect_suffix_redirects_stdout(redirect_suffix: &str) -> bool {
+    tokenize(redirect_suffix).iter().any(|token| {
+        if token.kind != TokenKind::Redirect {
+            return false;
+        }
+        let value = token.value.as_str();
+        value == ">" || value == ">>" || value.starts_with("1>") || value.starts_with("&>")
+    })
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -1241,6 +1351,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_rewrite_git_machine_output_flags_passthrough() {
+        for cmd in [
+            "git status --porcelain",
+            "git status --porcelain=v2",
+            "git log --format=%H",
+            "git log --pretty=format:%H",
+            "git diff --name-only HEAD~1..HEAD",
+            "git diff --name-status",
+            "git diff --numstat",
+            "git diff -z --name-only",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_rewrite_git_piped_stdout_passthrough() {
+        for cmd in [
+            "git status --porcelain | wc -l",
+            "git log --format=%H | sort",
+            "git diff | wc -l",
+            "git -C /tmp/repo diff | wc -l",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_rewrite_git_stdout_file_redirect_passthrough() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git diff > patch.diff", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("git status 1>/tmp/status.txt", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("git status 2>/tmp/status.err", &[]),
+            Some("rtk git status 2>/tmp/status.err".into())
+        );
+    }
+
     // --- git -C <path> support (#555) ---
 
     #[test]
@@ -1262,8 +1416,8 @@ mod tests {
     #[test]
     fn test_rewrite_git_dash_c_diff() {
         assert_eq!(
-            rewrite_command_no_prefixes("git -C /home/user/project diff --name-only", &[]),
-            Some("rtk git -C /home/user/project diff --name-only".into())
+            rewrite_command_no_prefixes("git -C /home/user/project diff --cached", &[]),
+            Some("rtk git -C /home/user/project diff --cached".into())
         );
     }
 
@@ -1489,10 +1643,10 @@ mod tests {
 
     #[test]
     fn test_rewrite_pipe_first_only() {
-        // After a pipe, the filter command stays raw
+        // Git output feeding a program stays raw.
         assert_eq!(
             rewrite_command_no_prefixes("git log -10 | grep feat", &[]),
-            Some("rtk git log -10 | grep feat".into())
+            None
         );
     }
 
@@ -1720,10 +1874,10 @@ mod tests {
 
     #[test]
     fn test_rewrite_redirect_double() {
-        // Double redirect: only last one stripped, but full command rewrites correctly
+        // Stdout file redirects make git output program-bound, so keep it raw.
         assert_eq!(
             rewrite_command_no_prefixes("git status 2>&1 >/dev/null", &[]),
-            Some("rtk git status 2>&1 >/dev/null".into())
+            None
         );
     }
 
@@ -3313,7 +3467,7 @@ mod tests {
     fn test_rewrite_compound_pipe_git_grep() {
         assert_eq!(
             rewrite_command_no_prefixes("git log -10 | grep feat", &[]),
-            Some("rtk git log -10 | grep feat".into())
+            None
         );
     }
 
@@ -4047,7 +4201,7 @@ mod tests {
     fn test_rewrite_pipe_then_and() {
         assert_eq!(
             rewrite_command_no_prefixes("git log | head -5 && git stash", &[]),
-            Some("rtk git log | head -5 && rtk git stash".into())
+            Some("git log | head -5 && rtk git stash".into())
         );
     }
 
@@ -4090,7 +4244,7 @@ mod tests {
     fn test_rewrite_multi_pipe_then_and() {
         assert_eq!(
             rewrite_command_no_prefixes("git log | head | tail && git status", &[]),
-            Some("rtk git log | head | tail && rtk git status".into())
+            Some("git log | head | tail && rtk git status".into())
         );
     }
 

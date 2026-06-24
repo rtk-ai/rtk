@@ -67,6 +67,39 @@ fn uses_compact_status_path(args: &[String]) -> bool {
     saw_branch
 }
 
+fn status_args_request_machine_output(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| arg == "-z" || arg == "--porcelain" || arg.starts_with("--porcelain="))
+}
+
+fn log_args_request_machine_output(args: &[String]) -> bool {
+    args.iter().enumerate().any(|(idx, arg)| {
+        arg == "--format"
+            || arg.starts_with("--format=")
+            || arg.starts_with("--pretty=format:")
+            || arg.starts_with("--pretty=tformat:")
+            || (arg == "--pretty"
+                && args
+                    .get(idx + 1)
+                    .is_some_and(|next| next.starts_with("format:") || next.starts_with("tformat:")))
+    })
+}
+
+fn diff_args_request_machine_output(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "-z"
+                | "--no-color"
+                | "--name-only"
+                | "--name-status"
+                | "--numstat"
+                | "--raw"
+                | "--word-porcelain"
+        )
+    })
+}
+
 fn build_status_command(args: &[String], global_args: &[String]) -> Command {
     let mut cmd = git_cmd(global_args);
     cmd.arg("status");
@@ -119,10 +152,12 @@ fn run_diff(
         .iter()
         .any(|arg| arg == "--stat" || arg == "--numstat" || arg == "--shortstat");
 
+    let wants_machine_output = diff_args_request_machine_output(args);
+
     // Check if user wants compact diff (default RTK behavior)
     let wants_compact = !args.iter().any(|arg| arg == "--no-compact");
 
-    if wants_stat || !wants_compact {
+    if wants_machine_output || wants_stat || !wants_compact {
         // User wants stat or explicitly no compacting - pass through directly
         let mut cmd = git_cmd(global_args);
         cmd.arg("diff");
@@ -140,7 +175,11 @@ fn run_diff(
             return Ok(result.exit_code);
         }
 
-        println!("{}", result.stdout.trim());
+        if wants_machine_output {
+            print!("{}", result.stdout);
+        } else {
+            println!("{}", result.stdout.trim());
+        }
 
         timer.track(
             &format!("git diff {}", args.join(" ")),
@@ -424,6 +463,31 @@ fn run_log(
     global_args: &[String],
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+
+    if log_args_request_machine_output(args) {
+        let mut cmd = git_cmd(global_args);
+        cmd.arg("log");
+        for arg in args {
+            cmd.arg(arg);
+        }
+
+        let result = exec_capture(&mut cmd).context("Failed to run git log")?;
+        if !result.success() {
+            eprintln!("{}", result.stderr);
+            return Ok(result.exit_code);
+        }
+
+        print!("{}", result.stdout);
+
+        timer.track(
+            &format!("git log {}", args.join(" ")),
+            &format!("rtk git log {} (passthrough)", args.join(" ")),
+            &result.stdout,
+            &result.stdout,
+        );
+
+        return Ok(0);
+    }
 
     let mut cmd = git_cmd(global_args);
     cmd.arg("log");
@@ -814,6 +878,40 @@ fn filter_status_with_args(output: &str) -> String {
 
 fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+
+    if status_args_request_machine_output(args) {
+        let mut cmd = git_cmd(global_args);
+        cmd.arg("status");
+        cmd.args(args);
+        let result = exec_capture(&mut cmd).context("Failed to run git status")?;
+
+        if !result.success() {
+            if !result.stderr.trim().is_empty() {
+                eprint!("{}", result.stderr);
+            }
+            timer.track(
+                &format!("git status {}", args.join(" ")),
+                &format!("rtk git status {} (passthrough)", args.join(" ")),
+                &result.stdout,
+                &result.stdout,
+            );
+            return Ok(result.exit_code);
+        }
+
+        if verbose > 0 || !result.stderr.is_empty() {
+            eprint!("{}", result.stderr);
+        }
+        print!("{}", result.stdout);
+
+        timer.track(
+            &format!("git status {}", args.join(" ")),
+            &format!("rtk git status {} (passthrough)", args.join(" ")),
+            &result.stdout,
+            &result.stdout,
+        );
+
+        return Ok(0);
+    }
 
     // Keep a narrow compact path for no-arg status and branch/short-only flags.
     // More complex explicit args still use the existing minimal-filter path.
@@ -1850,6 +1948,44 @@ mod tests {
             })
             .collect();
         assert!(envs.contains(&("LC_ALL".to_string(), "C".to_string())));
+    }
+
+    #[test]
+    fn test_git_status_machine_output_args_passthrough() {
+        assert!(status_args_request_machine_output(&["--porcelain".to_string()]));
+        assert!(status_args_request_machine_output(&[
+            "--porcelain=v2".to_string()
+        ]));
+        assert!(status_args_request_machine_output(&["-z".to_string()]));
+        assert!(!status_args_request_machine_output(&["--short".to_string()]));
+    }
+
+    #[test]
+    fn test_git_log_machine_output_args_passthrough() {
+        assert!(log_args_request_machine_output(&["--format=%H".to_string()]));
+        assert!(log_args_request_machine_output(&[
+            "--pretty=format:%H".to_string()
+        ]));
+        assert!(log_args_request_machine_output(&[
+            "--format".to_string(),
+            "%H".to_string()
+        ]));
+        assert!(!log_args_request_machine_output(&["--oneline".to_string()]));
+    }
+
+    #[test]
+    fn test_git_diff_machine_output_args_passthrough() {
+        for args in [
+            vec!["--name-only".to_string()],
+            vec!["--name-status".to_string()],
+            vec!["--numstat".to_string()],
+            vec!["--raw".to_string()],
+            vec!["--word-porcelain".to_string()],
+            vec!["-z".to_string(), "--name-only".to_string()],
+        ] {
+            assert!(diff_args_request_machine_output(&args), "{args:?}");
+        }
+        assert!(!diff_args_request_machine_output(&[]));
     }
 
     #[test]
