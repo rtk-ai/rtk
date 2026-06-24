@@ -980,8 +980,7 @@ impl Tracker {
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
             let cmd: String = row.get(0)?;
-            // Extract just the command name (e.g. "rtk git status" → "git")
-            Ok(cmd.split_whitespace().nth(1).unwrap_or(&cmd).to_string())
+            Ok(telemetry_command_label(&cmd))
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
@@ -1050,6 +1049,7 @@ impl Tracker {
     }
 
     /// Count commands with low savings (<30%) — filters that need improvement.
+    /// Reports only the coarse command label to avoid leaking args into telemetry.
     pub fn low_savings_commands(&self, limit: usize) -> Result<Vec<(String, f64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT rtk_cmd, AVG(savings_pct) as avg_sav FROM commands
@@ -1061,8 +1061,7 @@ impl Tracker {
         let rows = stmt.query_map(params![limit as i64], |row| {
             let cmd: String = row.get(0)?;
             let sav: f64 = row.get(1)?;
-            let short = cmd.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
-            Ok((short, sav))
+            Ok((telemetry_command_label(&cmd), sav))
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
@@ -1215,6 +1214,30 @@ fn categorize_command(rtk_cmd: &str) -> String {
         _ => "other",
     }
     .to_string()
+}
+
+/// Return a coarse command label for telemetry without command arguments.
+fn telemetry_command_label(rtk_cmd: &str) -> String {
+    let mut parts = rtk_cmd.split_whitespace();
+    let first = match parts.next() {
+        Some(part) => part,
+        None => return "other".to_string(),
+    };
+
+    let label = if first == "rtk" {
+        parts.next().unwrap_or(first)
+    } else if let Some(label) = first.strip_prefix("rtk:") {
+        label
+    } else {
+        first
+    }
+    .trim_end_matches(':');
+
+    if label.is_empty() {
+        "other".to_string()
+    } else {
+        label.to_string()
+    }
 }
 
 fn get_db_path() -> Result<PathBuf> {
@@ -1589,6 +1612,40 @@ mod tests {
         let (exact, glob) = project_filter_params(None);
         assert!(exact.is_none());
         assert!(glob.is_none());
+    }
+
+    #[test]
+    fn test_low_savings_commands_reports_tool_only_without_args() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+
+        tracker
+            .record(
+                "curl https://api.example.com/private?token=secret",
+                "rtk proxy https://api.example.com/private?token=secret --header Bearer_secret",
+                100,
+                90,
+                5,
+            )
+            .expect("Failed to record proxy command");
+        tracker
+            .record(
+                "cat /Users/alice/.aws/credentials",
+                "rtk:toml /Users/alice/.aws/credentials --token secret",
+                100,
+                85,
+                5,
+            )
+            .expect("Failed to record toml command");
+
+        let mut commands: Vec<String> = tracker
+            .low_savings_commands(10)
+            .expect("Failed to get low savings commands")
+            .into_iter()
+            .map(|(cmd, _)| cmd)
+            .collect();
+        commands.sort();
+
+        assert_eq!(commands, vec!["proxy".to_string(), "toml".to_string()]);
     }
 
     // 11. GLOB pattern safe with underscores in path names // added
