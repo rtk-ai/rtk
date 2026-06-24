@@ -148,15 +148,33 @@ fn unquote_command_path(path: &str) -> String {
     }
 }
 
+fn has_windows_absolute_prefix(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    (bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/'))
+        || path.starts_with(r"\\")
+        || path.starts_with("//")
+}
+
+fn is_portable_absolute_path(path: &str) -> bool {
+    Path::new(path).is_absolute() || path.starts_with('/') || has_windows_absolute_prefix(path)
+}
+
+fn portable_file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
 fn is_absolute_rtk_hook_command(command: &str) -> bool {
     let Some(exe) = command.trim().strip_suffix(" hook claude") else {
         return false;
     };
     let exe = unquote_command_path(exe);
-    let path = Path::new(&exe);
-    let file_name = path.file_name().and_then(|name| name.to_str());
+    let file_name = portable_file_name(&exe);
 
-    path.is_absolute() && matches!(file_name, Some("rtk" | "rtk.exe"))
+    is_portable_absolute_path(&exe)
+        && (file_name == "rtk" || file_name.eq_ignore_ascii_case("rtk.exe"))
 }
 
 fn is_claude_native_hook_command(command: &str) -> bool {
@@ -5384,6 +5402,23 @@ mod tests {
                     "hooks": [{
                         "type": "command",
                         "command": "/opt/homebrew/bin/rtk hook claude"
+                    }]
+                }]
+            }
+        });
+
+        assert!(hook_already_present(&json_content, CLAUDE_HOOK_COMMAND));
+    }
+
+    #[test]
+    fn test_hook_already_present_windows_absolute_native_command() {
+        let json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": r#""C:\Program Files\rtk\rtk.exe" hook claude"#
                     }]
                 }]
             }
