@@ -934,20 +934,21 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
             .with_context(|| format!("Failed to read hooks.json: {}", hooks_json_path.display()))?;
         match remove_codex_hook_from_json(&content, CODEX_HOOK_COMMAND)? {
             Some(new_content) if new_content.is_empty() => {
+                let empty_hooks_json = "{}\n";
                 if dry_run {
                     println!(
-                        "[dry-run] would remove empty hooks.json: {}",
+                        "[dry-run] would clear empty hooks.json: {}",
                         hooks_json_path.display()
                     );
                 } else {
-                    fs::remove_file(&hooks_json_path).with_context(|| {
-                        format!("Failed to remove hooks.json: {}", hooks_json_path.display())
+                    atomic_write(&hooks_json_path, empty_hooks_json).with_context(|| {
+                        format!("Failed to clear hooks.json: {}", hooks_json_path.display())
                     })?;
                     if verbose > 0 {
-                        eprintln!("Removed empty hooks.json: {}", hooks_json_path.display());
+                        eprintln!("Cleared empty hooks.json: {}", hooks_json_path.display());
                     }
                 }
-                removed.push(format!("hooks.json: {}", hooks_json_path.display()));
+                removed.push("hooks.json: cleared RTK-only content".to_string());
             }
             Some(new_content) => {
                 if dry_run {
@@ -5882,7 +5883,7 @@ mod tests {
     }
 
     #[test]
-    fn test_uninstall_codex_at_deletes_hooks_json_when_only_rtk_entry_present() {
+    fn test_uninstall_codex_at_clears_hooks_json_when_only_rtk_entry_present() {
         let temp = TempDir::new().unwrap();
         let codex_dir = temp.path();
         let hooks_json = codex_dir.join("hooks.json");
@@ -5906,10 +5907,8 @@ mod tests {
         .unwrap();
 
         uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
-        assert!(
-            !hooks_json.exists(),
-            "hooks.json with only rtk entry must be deleted"
-        );
+        let cleared = fs::read_to_string(&hooks_json).unwrap();
+        assert_eq!(cleared, "{}\n", "RTK-only hooks.json must be cleared");
     }
 
     #[test]
