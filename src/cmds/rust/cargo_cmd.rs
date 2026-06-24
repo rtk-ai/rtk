@@ -93,7 +93,11 @@ impl BlockHandler for CargoBuildHandler {
         !(line.trim().is_empty() && block.len() > 3)
     }
 
-    fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+    fn format_summary(&self, _exit_code: i32, raw: &str) -> Option<String> {
+        if raw.trim().is_empty() {
+            return None;
+        }
+
         if self.error_count == 0 && self.warnings == 0 {
             let mut s = format!("cargo build ({} crates compiled)", self.compiled);
             if let Some(ref finished) = self.finished_line {
@@ -758,6 +762,10 @@ fn filter_cargo_nextest(output: &str) -> String {
 }
 
 fn filter_cargo_build(output: &str) -> String {
+    if output.trim().is_empty() {
+        return String::new();
+    }
+
     let mut handler = CargoBuildHandler::new();
     let mut blocks: Vec<Vec<String>> = Vec::new();
     let mut current_block: Vec<String> = Vec::new();
@@ -1351,6 +1359,11 @@ mod tests {
         let result = filter_cargo_build(output);
         assert!(result.contains("cargo build"));
         assert!(result.contains("3 crates compiled"));
+    }
+
+    #[test]
+    fn test_filter_cargo_build_quiet_success_preserves_empty_output() {
+        assert_eq!(filter_cargo_build(""), "");
     }
 
     #[test]
@@ -2108,6 +2121,13 @@ error: test run failed
         assert!(result.contains("3 crates compiled"), "got: {}", result);
         assert!(result.contains("Finished"), "got: {}", result);
         assert!(!result.contains("Compiling"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_cargo_build_stream_quiet_success_preserves_empty_output() {
+        let mut f = BlockStreamFilter::new(CargoBuildHandler::new());
+        let result = run_block_filter(&mut f, "", 0);
+        assert_eq!(result, "");
     }
 
     #[test]
