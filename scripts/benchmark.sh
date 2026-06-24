@@ -346,8 +346,18 @@ bench "wc" "wc Cargo.toml src/main.rs" "$RTK wc Cargo.toml src/main.rs"
 # ===================
 section "curl"
 if command -v curl &> /dev/null; then
-  bench "curl json" "curl -s https://mockhttp.org/json" "$RTK curl https://mockhttp.org/json"
-  bench "curl text" "curl -s https://mockhttp.org/robots.txt" "$RTK curl https://mockhttp.org/robots.txt"
+  CURL_JSON_FILE="/tmp/rtk_bench_curl.json"
+  CURL_TEXT_FILE="/tmp/rtk_bench_curl.txt"
+  cat > "$CURL_JSON_FILE" << 'JSONEOF'
+{"slideshow":{"author":"Yours Truly","date":"date of publication","title":"Sample Slide Show"}}
+JSONEOF
+  cat > "$CURL_TEXT_FILE" << 'TEXTEOF'
+User-agent: *
+Disallow: /deny
+TEXTEOF
+  bench "curl json" "curl -s file://$CURL_JSON_FILE" "$RTK curl file://$CURL_JSON_FILE"
+  bench "curl text" "curl -s file://$CURL_TEXT_FILE" "$RTK curl file://$CURL_TEXT_FILE"
+  rm -f "$CURL_JSON_FILE" "$CURL_TEXT_FILE"
 fi
 
 # ===================
