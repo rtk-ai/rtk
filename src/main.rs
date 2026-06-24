@@ -1765,6 +1765,7 @@ fn run_cli() -> Result<i32> {
 
         Commands::Diff { file1, file2 } => {
             if let Some(f2) = file2 {
+                // GNU diff exit-code contract: 0 identical, 1 differ, 2 error.
                 diff_cmd::run(&file1, &f2, cli.verbose)?
             } else {
                 diff_cmd::run_stdin(cli.verbose)?;
