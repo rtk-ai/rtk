@@ -105,6 +105,67 @@ fn print_dry_run_footer() {
     println!("\n[dry-run] Nothing written.");
 }
 
+fn claude_hook_command() -> Result<String> {
+    let exe = std::env::current_exe().context("Failed to resolve current rtk executable")?;
+    Ok(format!("{} hook claude", quote_command_path(&exe)))
+}
+
+#[cfg(windows)]
+fn quote_command_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    format!("\"{}\"", path.replace('"', "\\\""))
+}
+
+#[cfg(not(windows))]
+fn quote_command_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    if path.bytes().all(|b| {
+        matches!(
+            b,
+            b'a'..=b'z'
+                | b'A'..=b'Z'
+                | b'0'..=b'9'
+                | b'/'
+                | b'.'
+                | b'_'
+                | b'-'
+        )
+    }) {
+        path.into_owned()
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
+}
+
+fn unquote_command_path(path: &str) -> String {
+    let path = path.trim();
+    if path.len() >= 2 && path.starts_with('\'') && path.ends_with('\'') {
+        path[1..path.len() - 1].replace("'\\''", "'")
+    } else if path.len() >= 2 && path.starts_with('"') && path.ends_with('"') {
+        path[1..path.len() - 1].replace("\\\"", "\"")
+    } else {
+        path.to_string()
+    }
+}
+
+fn is_absolute_rtk_hook_command(command: &str) -> bool {
+    let Some(exe) = command.trim().strip_suffix(" hook claude") else {
+        return false;
+    };
+    let exe = unquote_command_path(exe);
+    let path = Path::new(&exe);
+    let file_name = path.file_name().and_then(|name| name.to_str());
+
+    path.is_absolute() && matches!(file_name, Some("rtk" | "rtk.exe"))
+}
+
+fn is_claude_native_hook_command(command: &str) -> bool {
+    let command = command.trim();
+    command == CLAUDE_HOOK_COMMAND
+        || claude_hook_command().is_ok_and(|current| command == current)
+        || is_absolute_rtk_hook_command(command)
+}
+
 // Legacy full instructions for backward compatibility (--claude-md mode)
 const RTK_INSTRUCTIONS: &str = r##"<!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands
@@ -546,7 +607,9 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
             for hook in hooks_array {
                 if let Some(command) = hook.get("command").and_then(|c| c.as_str()) {
                     // Match both legacy script path and new binary command
-                    if command.contains(REWRITE_HOOK_FILE) || command == CLAUDE_HOOK_COMMAND {
+                    let is_rtk_hook = command.contains(REWRITE_HOOK_FILE)
+                        || is_claude_native_hook_command(command);
+                    if is_rtk_hook {
                         return false;
                     }
                 }
@@ -1112,7 +1175,9 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
         .any(|cmd| {
-            cmd == hook_command || cmd == CLAUDE_HOOK_COMMAND || cmd.contains(REWRITE_HOOK_FILE)
+            cmd == hook_command
+                || cmd.contains(REWRITE_HOOK_FILE)
+                || is_claude_native_hook_command(cmd)
         })
 }
 
@@ -1137,6 +1202,7 @@ fn run_default_mode(
 
     // 1. Migrate old hook script if present
     migrate_old_hook_script(ctx);
+    let hook_command = claude_hook_command()?;
 
     // 2. Write RTK.md
     write_if_changed(&rtk_md_path, RTK_SLIM, RTK_MD, ctx)?;
@@ -1155,7 +1221,7 @@ fn run_default_mode(
     // 4. Print success message (skip in dry-run)
     if !dry_run {
         println!("\nRTK hook registered (global).\n");
-        println!("  Command:   {}", CLAUDE_HOOK_COMMAND);
+        println!("  Command:   {}", hook_command);
         println!("  RTK.md:    {} (10 lines)", rtk_md_path.display());
         if let Some(path) = &opencode_plugin_path {
             println!("  OpenCode:  {}", path.display());
@@ -1170,7 +1236,7 @@ fn run_default_mode(
 
     // 5. Patch settings.json with binary command
     let patch_result =
-        patch_settings_json_command(CLAUDE_HOOK_COMMAND, patch_mode, install_opencode, ctx)?;
+        patch_settings_json_command(&hook_command, patch_mode, install_opencode, ctx)?;
 
     // Report result
     if !dry_run {
@@ -1431,6 +1497,7 @@ fn run_hook_only_mode(
 
     // Migrate old hook script if present
     migrate_old_hook_script(ctx);
+    let hook_command = claude_hook_command()?;
 
     let opencode_plugin_path = if install_opencode {
         let path = prepare_opencode_plugin_path()?;
@@ -1442,7 +1509,7 @@ fn run_hook_only_mode(
 
     if !dry_run {
         println!("\nRTK hook registered (hook-only mode).\n");
-        println!("  Command: {}", CLAUDE_HOOK_COMMAND);
+        println!("  Command: {}", hook_command);
         if let Some(path) = &opencode_plugin_path {
             println!("  OpenCode: {}", path.display());
         }
@@ -1453,7 +1520,7 @@ fn run_hook_only_mode(
 
     // Patch settings.json with binary command
     let patch_result =
-        patch_settings_json_command(CLAUDE_HOOK_COMMAND, patch_mode, install_opencode, ctx)?;
+        patch_settings_json_command(&hook_command, patch_mode, install_opencode, ctx)?;
 
     // Report result
     if !dry_run {
@@ -5309,6 +5376,23 @@ mod tests {
     }
 
     #[test]
+    fn test_hook_already_present_absolute_native_command() {
+        let json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/opt/homebrew/bin/rtk hook claude"
+                    }]
+                }]
+            }
+        });
+
+        assert!(hook_already_present(&json_content, CLAUDE_HOOK_COMMAND));
+    }
+
+    #[test]
     fn test_hook_not_present_other_hooks() {
         let json_content = serde_json::json!({
             "hooks": {
@@ -5544,6 +5628,40 @@ mod tests {
                         "hooks": [{
                             "type": "command",
                             "command": CLAUDE_HOOK_COMMAND
+                        }]
+                    }
+                ]
+            }
+        });
+
+        let removed = remove_hook_from_json(&mut json_content);
+        assert!(removed);
+
+        let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool_use.len(), 1);
+        assert_eq!(
+            pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap(),
+            "/some/other/hook.sh"
+        );
+    }
+
+    #[test]
+    fn test_remove_hook_from_json_absolute_native_command() {
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/some/other/hook.sh"
+                        }]
+                    },
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/usr/local/bin/rtk hook claude"
                         }]
                     }
                 ]
@@ -5897,6 +6015,40 @@ mod tests {
         }
     }
 
+    fn claude_settings_commands(claude_dir: &Path) -> Vec<String> {
+        let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        root["hooks"][PRE_TOOL_USE_KEY]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["hooks"][0]["command"].as_str())
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn first_claude_settings_command(claude_dir: &Path) -> String {
+        claude_settings_commands(claude_dir)
+            .into_iter()
+            .next()
+            .unwrap()
+    }
+
+    fn assert_absolute_claude_hook_command(command: &str) {
+        assert_ne!(
+            command, CLAUDE_HOOK_COMMAND,
+            "Claude hook must not rely on PATH lookup"
+        );
+        let exe = command
+            .strip_suffix(" hook claude")
+            .expect("hook command must keep hook claude arguments");
+        let exe = exe.trim_matches('"').trim_matches('\'');
+        assert!(
+            Path::new(exe).is_absolute(),
+            "hook executable must be absolute, got {command:?}"
+        );
+    }
+
     #[test]
     fn test_global_default_mode_creates_artifacts() {
         let tmp = TempDir::new().unwrap();
@@ -5911,11 +6063,19 @@ mod tests {
 
             let settings = claude_dir.join(SETTINGS_JSON);
             assert!(settings.exists(), "settings.json must be created");
-            let content = fs::read_to_string(&settings).unwrap();
-            assert!(
-                content.contains(CLAUDE_HOOK_COMMAND),
-                "settings.json must contain hook command"
-            );
+            let command = first_claude_settings_command(claude_dir);
+            assert_absolute_claude_hook_command(&command);
+        });
+    }
+
+    #[test]
+    fn test_global_default_mode_uses_absolute_claude_hook_command() {
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+
+            let command = first_claude_settings_command(claude_dir);
+            assert_absolute_claude_hook_command(&command);
         });
     }
 
@@ -5943,9 +6103,9 @@ mod tests {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
 
-            let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
-            let count = settings.matches(CLAUDE_HOOK_COMMAND).count();
-            assert_eq!(count, 1, "hook command must appear exactly once");
+            let commands = claude_settings_commands(claude_dir);
+            assert_eq!(commands.len(), 1, "hook command must appear exactly once");
+            assert_absolute_claude_hook_command(&commands[0]);
         });
     }
 
@@ -5963,11 +6123,8 @@ mod tests {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
 
             assert!(claude_dir.join(RTK_MD).exists(), "RTK.md must be created");
-            let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
-            assert!(
-                settings.contains(CLAUDE_HOOK_COMMAND),
-                "hook must be in settings.json after upgrade"
-            );
+            let command = first_claude_settings_command(claude_dir);
+            assert_absolute_claude_hook_command(&command);
         });
     }
 
@@ -6002,11 +6159,19 @@ mod tests {
                 !claude_dir.join(RTK_MD).exists(),
                 "RTK.md must NOT be created in hook-only mode"
             );
-            let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
-            assert!(
-                settings.contains(CLAUDE_HOOK_COMMAND),
-                "settings.json must contain hook command"
-            );
+            let command = first_claude_settings_command(claude_dir);
+            assert_absolute_claude_hook_command(&command);
+        });
+    }
+
+    #[test]
+    fn test_global_hook_only_mode_uses_absolute_claude_hook_command() {
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            run_hook_only_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+
+            let command = first_claude_settings_command(claude_dir);
+            assert_absolute_claude_hook_command(&command);
         });
     }
 
