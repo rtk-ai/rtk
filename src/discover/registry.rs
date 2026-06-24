@@ -4314,13 +4314,10 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_gradle() {
+    fn test_classify_gradle_not_rewritten() {
         assert!(matches!(
             classify_command("gradle build"),
-            Classification::Supported {
-                rtk_equivalent: "rtk gradlew",
-                ..
-            }
+            Classification::Unsupported { .. }
         ));
     }
 
@@ -4349,11 +4346,8 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_gradle() {
-        assert_eq!(
-            rewrite_command_no_prefixes("gradle build", &[]),
-            Some("rtk gradlew build".into())
-        );
+    fn test_rewrite_gradle_not_rewritten() {
+        assert_eq!(rewrite_command_no_prefixes("gradle build", &[]), None);
     }
 
     #[test]
