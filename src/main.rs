@@ -1465,19 +1465,153 @@ where
     }
 }
 
-fn run_cli() -> Result<i32> {
-    // Fire-and-forget telemetry ping (1/day, non-blocking)
-    core::telemetry::maybe_ping();
+/// What to do when rtk is launched, decided once from argv[0].
+enum Argv0Dispatch {
+    Cli,
+    /// Parse `synth`; on parse failure, exec the real tool (`base`/`args`).
+    Synthesized {
+        synth: Vec<OsString>,
+        base: String,
+        args: Vec<OsString>,
+    },
+    Passthrough {
+        base: String,
+        args: Vec<OsString>,
+    },
+}
 
-    let cli = match Cli::try_parse() {
-        Ok(cli) => cli,
-        Err(e) => {
-            if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
-                e.exit();
+/// Multi-call dispatch from argv[0]: a `<tool>` symlink (e.g. `head` -> rtk) is
+/// translated to the equivalent `rtk <sub>` argv, else routed to the real tool.
+fn argv0_dispatch() -> Argv0Dispatch {
+    let mut raw: Vec<OsString> = std::env::args_os().collect();
+    let base = raw
+        .first()
+        .and_then(|a| Path::new(a).file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    if !discover::registry::is_known_tool(&base) {
+        return Argv0Dispatch::Cli;
+    }
+
+    let tool_args = raw.split_off(1);
+
+    let (excluded, transparent) = core::config::Config::load()
+        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
+        .unwrap_or_default();
+
+    match synthesize_rtk_argv(&base, &tool_args, &excluded, &transparent) {
+        Some(synth) => Argv0Dispatch::Synthesized {
+            synth,
+            base,
+            args: tool_args,
+        },
+        None => Argv0Dispatch::Passthrough {
+            base,
+            args: tool_args,
+        },
+    }
+}
+
+/// Pure core of [`argv0_dispatch`]: map a literal `(tool, args)` to an
+/// `rtk <sub> ...` argv, or `None` when there is no rtk equivalent.
+///
+/// The rewrite registry works on shell strings, but `args` are already-split
+/// literals. To avoid a lossy quote/escape round-trip, the rewrite is used only
+/// to derive the `rtk <sub>` prefix: the unchanged tail is spliced back from the
+/// original `OsString` args verbatim.
+fn synthesize_rtk_argv(
+    base: &str,
+    args: &[OsString],
+    excluded: &[String],
+    transparent: &[String],
+) -> Option<Vec<OsString>> {
+    let mut cmd = String::from(base);
+    for a in args {
+        cmd.push(' ');
+        cmd.push_str(&a.to_string_lossy());
+    }
+
+    // argv elements are literal, but `rewrite_command` parses shell syntax. Only
+    // proceed if the join round-trips exactly (one `Arg` per element); otherwise
+    // a literal `&&`/pipe/space would be misread, so pass through to the tool.
+    let toks = discover::lexer::tokenize(&cmd);
+    if toks.len() != args.len() + 1
+        || toks
+            .iter()
+            .any(|t| t.kind != discover::lexer::TokenKind::Arg)
+    {
+        return None;
+    }
+
+    let rewritten = discover::registry::rewrite_command(&cmd, excluded, transparent)?;
+    if rewritten == cmd {
+        return None;
+    }
+    let rtk_toks = discover::lexer::shell_split(&rewritten);
+    if rtk_toks.first().map(String::as_str) != Some("rtk") {
+        return None;
+    }
+
+    // Match the shared suffix in `shell_split` space, then rebuild the tail
+    // from original `OsString` args (preserves quotes/escapes/non-UTF8).
+    let orig_toks = discover::lexer::shell_split(&cmd);
+    let shared = rtk_toks
+        .iter()
+        .rev()
+        .zip(orig_toks.iter().rev())
+        .take_while(|(rewritten_tok, orig)| rewritten_tok == orig)
+        .count()
+        .min(args.len());
+
+    let mut synth: Vec<OsString> = rtk_toks[..rtk_toks.len() - shared]
+        .iter()
+        .map(OsString::from)
+        .collect();
+    synth.extend(args[args.len() - shared..].iter().cloned());
+    Some(synth)
+}
+
+/// Exec the real tool behind an argv[0] symlink (self-excluding resolution).
+#[cfg(unix)]
+fn exec_real_tool(base: &str, args: &[OsString]) -> Result<i32> {
+    use std::os::unix::process::CommandExt;
+    let path = core::utils::resolve_binary(base)?;
+    let err = std::process::Command::new(path).args(args).exec();
+    Err(anyhow::anyhow!("failed to exec '{}': {}", base, err))
+}
+
+/// Non-Unix fallback: no `exec`, so spawn, wait, and forward the exit code.
+#[cfg(not(unix))]
+fn exec_real_tool(base: &str, args: &[OsString]) -> Result<i32> {
+    let path = core::utils::resolve_binary(base)?;
+    let status = std::process::Command::new(path)
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to exec '{}'", base))?;
+    Ok(status.code().unwrap_or(1))
+}
+
+fn run_cli() -> Result<i32> {
+    let cli = match argv0_dispatch() {
+        Argv0Dispatch::Synthesized { synth, base, args } => match Cli::try_parse_from(&synth) {
+            Ok(cli) => cli,
+            Err(_) => return exec_real_tool(&base, &args),
+        },
+        // No telemetry on passthrough — symlinked tools must stay observably transparent.
+        Argv0Dispatch::Passthrough { base, args } => return exec_real_tool(&base, &args),
+        Argv0Dispatch::Cli => match Cli::try_parse() {
+            Ok(cli) => cli,
+            Err(e) => {
+                if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
+                    e.exit();
+                }
+                return run_fallback(e);
             }
-            return run_fallback(e);
-        }
+        },
     };
+
+    core::telemetry::maybe_ping();
 
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
     // Skip for Gain — it shows its own inline hook warning.
@@ -3434,5 +3568,67 @@ mod tests {
             }
             _ => panic!("Expected Init command"),
         }
+    }
+
+    fn synth(base: &str, args: &[&str]) -> Option<Vec<String>> {
+        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        synthesize_rtk_argv(base, &args, &[], &[]).map(|v| {
+            v.into_iter()
+                .map(|o| o.to_string_lossy().into_owned())
+                .collect()
+        })
+    }
+
+    #[test]
+    fn argv0_known_tool_with_rewrite_yields_rtk_argv() {
+        assert_eq!(
+            synth("git", &["log"]),
+            Some(vec!["rtk".into(), "git".into(), "log".into()])
+        );
+    }
+
+    #[test]
+    fn argv0_known_tool_alias_maps_to_subcommand() {
+        assert_eq!(
+            synth("head", &["file.txt"]),
+            Some(vec!["rtk".into(), "read".into(), "file.txt".into()])
+        );
+    }
+
+    #[test]
+    fn argv0_invoked_as_rtk_is_none() {
+        assert_eq!(synth("rtk", &["git", "log"]), None);
+    }
+
+    #[test]
+    fn argv0_unknown_tool_is_none() {
+        assert_eq!(synth("totally-not-a-tool", &["--help"]), None);
+    }
+
+    #[test]
+    fn argv0_known_tool_without_rewrite_is_none() {
+        // `git` is known but a bare `git` has no rewritable subcommand.
+        assert_eq!(synth("git", &[]), None);
+    }
+
+    #[test]
+    fn argv0_literal_operator_arg_falls_through() {
+        // A literal `&&` arg must not be reinterpreted as a shell operator.
+        assert_eq!(synth("git", &["log", "&&", "rm", "-rf", "x"]), None);
+    }
+
+    #[test]
+    fn argv0_arg_with_quotes_survives_verbatim() {
+        // The tail must be spliced from the original argv, not re-split from the
+        // rewritten shell string (which would strip the literal quotes).
+        assert_eq!(
+            synth("git", &["log", "--format='%h'"]),
+            Some(vec![
+                "rtk".into(),
+                "git".into(),
+                "log".into(),
+                "--format='%h'".into(),
+            ])
+        );
     }
 }

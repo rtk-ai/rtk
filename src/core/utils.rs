@@ -7,7 +7,8 @@
 
 use anyhow::{Context, Result};
 use regex::Regex;
-use std::path::PathBuf;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Truncates a string to `max_len` characters, appending `...` if needed.
@@ -320,7 +321,36 @@ pub fn package_manager_exec(tool: &str) -> Command {
 /// # Returns
 /// Full path to the resolved binary, or error if not found.
 pub fn resolve_binary(name: &str) -> Result<PathBuf> {
-    which::which(name).context(format!("Binary '{}' not found on PATH", name))
+    let candidates = which::which_all(name)
+        .map_err(anyhow::Error::new)
+        .with_context(|| format!("Binary '{}' not found on PATH", name))?;
+    first_non_self_candidate(candidates)
+        .with_context(|| format!("Binary '{}' not found on PATH", name))
+}
+
+/// First candidate that isn't an rtk multi-call shim (a symlink whose target's
+/// file name is `rtk`).
+fn first_non_self_candidate(candidates: impl IntoIterator<Item = PathBuf>) -> Result<PathBuf> {
+    for candidate in candidates {
+        if is_rtk_shim(&candidate) {
+            continue;
+        }
+        return Ok(candidate);
+    }
+    anyhow::bail!("no non-self candidate")
+}
+
+fn is_rtk_shim(p: &Path) -> bool {
+    match std::fs::symlink_metadata(p) {
+        Ok(m) if m.file_type().is_symlink() => {
+            std::fs::canonicalize(p)
+                .ok()
+                .as_deref()
+                .and_then(Path::file_name)
+                == Some(OsStr::new("rtk"))
+        }
+        _ => false,
+    }
 }
 
 /// Create a `Command` with PATHEXT-aware binary resolution.
@@ -599,6 +629,54 @@ mod tests {
             "resolved path filename should start with 'cargo', got: {}",
             filename
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_first_non_self_candidate_skips_rtk_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = std::env::temp_dir().join(format!("rtk_self_excl_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let fake_rtk = tmp.join("rtk");
+        std::fs::write(&fake_rtk, "").unwrap();
+        let shim = tmp.join("head");
+        symlink(&fake_rtk, &shim).unwrap();
+        let real = tmp.join("real_head");
+        std::fs::write(&real, "").unwrap();
+
+        let picked = first_non_self_candidate(vec![shim, real.clone()]);
+
+        std::fs::remove_dir_all(&tmp).ok();
+        assert_eq!(picked.unwrap(), real, "must skip the rtk-symlink candidate");
+    }
+
+    #[test]
+    fn test_first_non_self_candidate_returns_first_when_none_is_self() {
+        // Matches legacy `which::which` behavior when no candidate is a shim.
+        let a = PathBuf::from("/usr/bin/cargo");
+        let b = PathBuf::from("/usr/local/bin/cargo");
+        let picked = first_non_self_candidate(vec![a.clone(), b]).unwrap();
+        assert_eq!(picked, a);
+    }
+
+    #[test]
+    fn test_first_non_self_candidate_empty_is_err() {
+        assert!(first_non_self_candidate(Vec::<PathBuf>::new()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_first_non_self_candidate_does_not_skip_regular_file_named_rtk() {
+        let tmp = std::env::temp_dir().join(format!("rtk_regfile_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let regular_rtk = tmp.join("rtk");
+        std::fs::write(&regular_rtk, "").unwrap();
+
+        let picked = first_non_self_candidate(vec![regular_rtk.clone()]).unwrap();
+
+        std::fs::remove_dir_all(&tmp).ok();
+        assert_eq!(picked, regular_rtk);
     }
 
     // ===== resolved_command tests (issue #212) =====

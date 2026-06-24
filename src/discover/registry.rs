@@ -44,6 +44,11 @@ pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
     }
 }
 
+/// Whether `name` is a base tool rtk knows how to rewrite (e.g. "git", "head").
+pub fn is_known_tool(name: &str) -> bool {
+    RULES.iter().any(|r| r.rewrite_prefixes.contains(&name))
+}
+
 lazy_static! {
     static ref REGEX_SET: RegexSet =
         RegexSet::new(RULES.iter().map(|r| r.pattern)).expect("invalid regex patterns");

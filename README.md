@@ -317,6 +317,26 @@ rtk init --show             # Verify installation
 
 After install, **restart Claude Code**.
 
+### Manual: tool-name symlinks (advanced)
+
+If you can't use the hook (e.g. a shell or agent that doesn't support command interception), rtk also runs as a **multi-call binary** like busybox: symlink a supported tool's name to the rtk executable and rtk transparently rewrites the invocation, falling back to the real tool when it has no equivalent.
+
+```bash
+# Put the symlinks early on PATH so they shadow the real tools.
+mkdir -p ~/.rtk/shims
+ln -s "$(command -v rtk)" ~/.rtk/shims/head
+ln -s "$(command -v rtk)" ~/.rtk/shims/git
+export PATH="$HOME/.rtk/shims:$PATH"
+
+head file.txt        # runs `rtk read file.txt`
+git log              # runs `rtk git log`
+head -c 10 file.bin  # no usable rtk rewrite -> execs the real `head`
+```
+
+Notes:
+- Only tools rtk knows how to rewrite are intercepted; everything else (and any invocation with no rtk equivalent) execs the genuine tool found further down `PATH`.
+- Unix only. There is no `exec` on native Windows and symlinks need elevated privileges, so use WSL or the hook there instead.
+
 ## Windows
 
 RTK works on Windows with some limitations. The auto-rewrite hook (`rtk-rewrite.sh`) requires a Unix shell, so on native Windows RTK falls back to **CLAUDE.md injection mode** — your AI assistant receives RTK instructions but commands are not rewritten automatically.
