@@ -44,8 +44,7 @@ fn main() {
     // Validate: parse the combined TOML to catch errors at build time
     let parsed: toml::Value = combined.parse().unwrap_or_else(|e| {
         panic!(
-            "TOML validation failed for combined filters:\n{}\n\nCheck src/filters/*.toml files",
-            e
+            "TOML validation failed for combined filters:\n{e}\n\nCheck src/filters/*.toml files"
         )
     });
 
@@ -54,10 +53,7 @@ fn main() {
         let mut seen: HashSet<String> = HashSet::new();
         for key in filters.keys() {
             if !seen.insert(key.clone()) {
-                panic!(
-                    "Duplicate filter name '{}' found across src/filters/*.toml files",
-                    key
-                );
+                panic!("Duplicate filter name '{key}' found across src/filters/*.toml files");
             }
         }
     }

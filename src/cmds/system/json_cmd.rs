@@ -1,6 +1,6 @@
 //! Inspects JSON structure without showing values, saving tokens on large payloads.
 
-use crate::core::tracking;
+use crate::core::{tracking, utils::utf8_prefix_by_byte_limit};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::fs;
@@ -106,8 +106,8 @@ fn compact_json(value: &Value, depth: usize, max_depth: usize) -> String {
         Value::Number(n) => format!("{}{}", indent, n),
         Value::String(s) => {
             if s.len() > 80 {
-                let end = s.floor_char_boundary(77);
-                format!("{}\"{}...\"", indent, &s[..end])
+                let truncated = utf8_prefix_by_byte_limit(s, 77);
+                format!("{}\"{}...\"", indent, truncated)
             } else {
                 format!("{}\"{}\"", indent, s)
             }

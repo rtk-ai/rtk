@@ -34,6 +34,16 @@ pub fn truncate(s: &str, max_len: usize) -> String {
     }
 }
 
+/// Return a prefix whose byte length is at most `max_bytes`, without splitting
+/// a multi-byte UTF-8 character.
+pub fn utf8_prefix_by_byte_limit(s: &str, max_bytes: usize) -> &str {
+    let mut end = s.len().min(max_bytes);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Strip ANSI escape codes (colors, styles) from a string.
 ///
 /// # Arguments
@@ -552,6 +562,18 @@ mod tests {
         let cjk = "你好世界测试字符串";
         let result = truncate(cjk, 6);
         assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_utf8_prefix_by_byte_limit_stops_before_multibyte_boundary() {
+        let input = "abcé";
+        assert_eq!(utf8_prefix_by_byte_limit(input, 4), "abc");
+    }
+
+    #[test]
+    fn test_utf8_prefix_by_byte_limit_accepts_exact_boundary() {
+        let input = "abcé";
+        assert_eq!(utf8_prefix_by_byte_limit(input, 5), "abcé");
     }
 
     // ===== resolve_binary tests (issue #212) =====
