@@ -1,13 +1,15 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
 use crate::core::args_utils;
+use crate::core::config;
 use crate::core::stream::{
     self, exec_capture, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode,
 };
 use crate::core::tracking;
 use crate::core::truncate::CAP_WARNINGS;
-use crate::core::utils::{exit_code_from_output, exit_code_from_status, resolved_command};
+use crate::core::utils::{exit_code_from_output, exit_code_from_status, resolved_command, truncate};
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::process::Command;
 use std::process::Stdio;
@@ -24,6 +26,7 @@ pub enum GitCommand {
     Pull,
     Branch,
     Fetch,
+    Grep,
     Stash { subcommand: Option<String> },
     Worktree,
 }
@@ -96,6 +99,7 @@ pub fn run(
         GitCommand::Pull => run_pull(args, verbose, global_args),
         GitCommand::Branch => run_branch(args, verbose, global_args),
         GitCommand::Fetch => run_fetch(args, verbose, global_args),
+        GitCommand::Grep => run_grep(args, verbose, global_args),
         GitCommand::Stash { subcommand } => {
             run_stash(subcommand.as_deref(), args, verbose, global_args)
         }
@@ -1486,6 +1490,137 @@ fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32
     Ok(0)
 }
 
+fn git_grep_passthrough_flag(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        if arg.starts_with("--format") {
+            return true;
+        }
+        if let Some(flags) = arg.strip_prefix('-').filter(|s| !s.starts_with('-')) {
+            return flags.chars().any(|ch| matches!(ch, 'c' | 'h' | 'l' | 'L' | 'o' | 'z' | 'Z'));
+        }
+        matches!(
+            arg.as_str(),
+            "-c" | "--count"
+                | "-h"
+                | "--no-filename"
+                | "--name-only"
+                | "-l"
+                | "--files-with-matches"
+                | "-L"
+                | "--files-without-match"
+                | "-o"
+                | "--only-matching"
+                | "-z"
+                | "-Z"
+                | "--null"
+                | "--heading"
+        )
+    })
+}
+
+fn format_git_grep_output(output: &str) -> Option<String> {
+    let max_results = config::limits().grep_max_results;
+    let per_file = config::limits().grep_max_per_file;
+    let total_matches = output.lines().count();
+    let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
+
+    for line in output.lines() {
+        let parts: Vec<&str> = line.splitn(3, ':').collect();
+        if parts.len() != 3 {
+            continue;
+        }
+        let Ok(line_num) = parts[1].parse::<usize>() else {
+            continue;
+        };
+        by_file
+            .entry(parts[0].to_string())
+            .or_default()
+            .push((line_num, truncate(parts[2].trim(), 80)));
+    }
+
+    if by_file.is_empty() {
+        return None;
+    }
+
+    let mut rtk_output = String::new();
+    rtk_output.push_str(&format!(
+        "{} matches in {} files:\n\n",
+        total_matches,
+        by_file.len()
+    ));
+
+    let mut shown = 0;
+    let mut files: Vec<_> = by_file.iter().collect();
+    files.sort_by_key(|(file, _)| *file);
+
+    for (file, matches) in files {
+        if shown >= max_results {
+            break;
+        }
+        for (line_num, content) in matches.iter().take(per_file) {
+            if shown >= max_results {
+                break;
+            }
+            rtk_output.push_str(&format!("{}:{}:{}\n", file, line_num, content));
+            shown += 1;
+        }
+    }
+
+    if total_matches > shown {
+        rtk_output.push_str(&format!("[+{} more]\n", total_matches - shown));
+    }
+
+    Some(rtk_output)
+}
+
+fn run_grep(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    if verbose > 0 {
+        eprintln!("git grep");
+    }
+
+    if git_grep_passthrough_flag(args) {
+        let mut cmd = git_cmd(global_args);
+        cmd.arg("grep").args(args);
+        let status = cmd.status().context("Failed to run git grep")?;
+        let args_str = args.join(" ");
+        timer.track_passthrough(
+            &format!("git grep {}", args_str),
+            &format!("rtk git grep {} (passthrough)", args_str),
+        );
+        return Ok(exit_code_from_status(&status, "git grep"));
+    }
+
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("grep").arg("-n").arg("--no-color").args(args);
+    let result = exec_capture(&mut cmd).context("Failed to run git grep")?;
+    let raw = result.combined();
+
+    if !result.success() {
+        if !result.stderr.trim().is_empty() {
+            eprintln!("{}", result.stderr.trim());
+        }
+        return Ok(result.exit_code);
+    }
+
+    let Some(filtered) = format_git_grep_output(&result.stdout) else {
+        print!("{}", result.stdout);
+        timer.track_passthrough("git grep", "rtk git grep (unparsed passthrough)");
+        return Ok(result.exit_code);
+    };
+
+    print!("{}", filtered);
+    timer.track(
+        &format!("git grep {}", args.join(" ")),
+        "rtk git grep",
+        &raw,
+        &filtered,
+    );
+
+    Ok(result.exit_code)
+}
+
 /// Format status message for stash operations.
 /// - For create operations (push/save): checks for "No local changes"
 /// - For other operations: uses "ok stash <subcommand>" format
@@ -2169,6 +2304,20 @@ A  added.rs
         // Test that run_passthrough compiles and has correct signature
         let _args: Vec<OsString> = vec![OsString::from("tag"), OsString::from("--list")];
         // Compile-time verification that the function exists with correct signature
+    }
+
+    #[test]
+    fn test_git_grep_passthrough_flag_detects_machine_output() {
+        assert!(git_grep_passthrough_flag(&["-l".to_string()]));
+        assert!(git_grep_passthrough_flag(&["-lz".to_string()]));
+        assert!(git_grep_passthrough_flag(&["--format=%(path)".to_string()]));
+        assert!(git_grep_passthrough_flag(&["--name-only".to_string()]));
+        assert!(git_grep_passthrough_flag(&["--null".to_string()]));
+        assert!(!git_grep_passthrough_flag(&[
+            "-n".to_string(),
+            "-i".to_string(),
+            "alpha".to_string()
+        ]));
     }
 
     #[test]

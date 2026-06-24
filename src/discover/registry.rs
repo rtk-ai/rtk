@@ -898,6 +898,22 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_git_grep_and_passthrough_git_readers() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git grep alpha", &[]),
+            Some("rtk git grep alpha".to_string())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("git rev-parse --show-toplevel", &[]),
+            Some("rtk git rev-parse --show-toplevel".to_string())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("git ls-files src", &[]),
+            Some("rtk git ls-files src".to_string())
+        );
+    }
+
+    #[test]
     fn test_classify_yadm_status() {
         assert_eq!(
             classify_command("yadm status"),

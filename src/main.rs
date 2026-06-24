@@ -854,6 +854,12 @@ enum GitCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Compact git grep output
+    Grep {
+        /// Git grep arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Stash management (list, show, pop, apply, drop)
     Stash {
         /// Subcommand: list, show, pop, apply, drop, push
@@ -1646,6 +1652,13 @@ fn run_cli() -> Result<i32> {
                 )?,
                 GitCommands::Fetch { args } => git::run(
                     git::GitCommand::Fetch,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Grep { args } => git::run(
+                    git::GitCommand::Grep,
                     &args,
                     None,
                     cli.verbose,
