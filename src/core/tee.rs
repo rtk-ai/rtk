@@ -1,11 +1,75 @@
 //! Raw output recovery -- saves unfiltered output to disk on command failure.
+//!
+//! ## Sensitive-output handling (see `docs/superpowers/specs/2026-05-20-…`)
+//!
+//! Three layers of defence, increasing strictness:
+//!
+//! 1. **Per-slug blocklist** — commands that *always* deal in credentials
+//!    (e.g. `aws_secretsmanager_get-secret-value`, `kubectl_get_secret`,
+//!    `op_*`, `vault_*`) short-circuit before any disk write and emit no
+//!    hint at all. See [`is_blocklisted_slug`].
+//! 2. **Content-level redactor** — all surviving writes pass through
+//!    [`crate::core::redact::redact_content`] which masks Bearer tokens,
+//!    `AKIA…` keys, `ghp_…` PATs, URL userinfo, and inline credential env
+//!    assignments. If any matches were found, a `--- rtk: N credential-like
+//!    patterns redacted ---` audit header is prepended to the on-disk file.
+//! 3. **Per-call-site Sensitive opt-in** — callers that know they handle
+//!    credentials (`aws_cmd.rs`, `curl_cmd.rs`, `psql_cmd.rs`) use the
+//!    `*_sensitive` variants below. These force the redactor pass even when
+//!    the slug is not on the blocklist, so a yet-to-be-classified sensitive
+//!    command still gets scrubbed.
 
 use super::constants::RTK_DATA_DIR;
 use crate::core::config::Config;
+use crate::core::redact;
 use std::path::PathBuf;
 
 /// Minimum output size to tee (smaller outputs don't need recovery)
 const MIN_TEE_SIZE: usize = 500;
+
+/// Per-slug blocklist for commands that should *never* persist raw output
+/// to disk, regardless of content. Matched with `slug.starts_with(prefix)`
+/// so e.g. `aws_secretsmanager` covers `aws_secretsmanager_get-secret-value`,
+/// `aws_secretsmanager_list-secrets`, etc.
+///
+/// Sourced from the security & privacy design doc, Finding 4.
+const SENSITIVE_SLUG_PREFIXES: &[&str] = &[
+    // AWS secret/identity surfaces
+    "aws_secretsmanager",
+    "aws_kms",
+    "aws_sts_get-session-token",
+    "aws_sts_assume-role",
+    // Kubernetes
+    "kubectl_get_secret",
+    "kubectl_describe_secret",
+    // GitHub / GitLab CLIs
+    "gh_secret",
+    "gh_auth",
+    "glab_secret",
+    "glab_auth",
+    // Password / secret managers
+    "op_",
+    "vault_",
+    "doppler_",
+    "bw_",
+    "pass_",
+    // Helm values often contain secrets
+    "helm_get_values",
+    // Git config can leak credential.helper / PATs
+    "git_config",
+];
+
+/// Audit header prepended to tee files when the content redactor fired.
+fn redaction_header(count: usize) -> String {
+    format!("--- rtk: {} credential-like patterns redacted ---\n", count)
+}
+
+/// True when the slug matches any sensitive prefix from `SENSITIVE_SLUG_PREFIXES`.
+fn is_blocklisted_slug(slug: &str) -> bool {
+    SENSITIVE_SLUG_PREFIXES
+        .iter()
+        .any(|prefix| slug.starts_with(prefix))
+}
 
 /// Default max files to keep in tee directory
 const DEFAULT_MAX_FILES: usize = 20;
@@ -102,15 +166,42 @@ fn should_tee(
     tee_dir
 }
 
+/// Whether the content redactor should be applied unconditionally
+/// (`Forced`, used by `*_sensitive` variants for known-credential-bearing
+/// commands) or only when the default safety-net policy says to (`Auto`).
+///
+/// At present `Auto` *also* runs the redactor on every write — the safety net
+/// is on by default. `Forced` exists so the call-site intent stays explicit
+/// and so a future config knob that lets users opt out of `Auto` redaction
+/// (e.g. `RTK_TEE_REDACT=0`) will still leave `Sensitive` callers protected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RedactPolicy {
+    Auto,
+    Forced,
+}
+
 /// Write raw output to a tee file in the given directory.
 /// Returns file path on success.
+///
+/// Refuses to write (returns `None`) when `command_slug` matches a prefix in
+/// [`SENSITIVE_SLUG_PREFIXES`]. For all surviving writes, the content is
+/// passed through [`redact::redact_content`] — if any credential-shaped
+/// substring was masked, a one-line audit header is prepended to the file.
 fn write_tee_file(
     raw: &str,
     command_slug: &str,
     tee_dir: &std::path::Path,
     max_file_size: usize,
     max_files: usize,
+    policy: RedactPolicy,
 ) -> Option<PathBuf> {
+    // Layer 1: hard blocklist. Refuse to write at all for slugs known to deal
+    // in secrets — the cost of a missed recovery is "the LLM can't read the
+    // failed secret-fetch", which is the correct trade-off.
+    if is_blocklisted_slug(command_slug) {
+        return None;
+    }
+
     std::fs::create_dir_all(tee_dir).ok()?;
 
     let slug = sanitize_slug(command_slug);
@@ -121,9 +212,28 @@ fn write_tee_file(
     let filename = format!("{}_{}.log", epoch, slug);
     let filepath = tee_dir.join(filename);
 
+    // Layer 2: content-level redactor. Single-pass over `lazy_static!`-cached
+    // regex, a no-op (byte-identical output, no header) when the input has no
+    // credential-shaped substrings — so the cost on clean cargo-test /
+    // npm-install output is one regex scan per pattern, no allocations.
+    //
+    // `Auto` and `Forced` currently behave identically; the policy is plumbed
+    // through so the `*_sensitive` callers remain explicit even if a future
+    // config flag turns `Auto` off.
+    let _ = policy; // reserved for future per-policy behaviour
+    let (scrubbed, match_count) = redact::redact_content(raw);
+    let body: std::borrow::Cow<'_, str> = if match_count > 0 {
+        std::borrow::Cow::Owned(format!("{}{}", redaction_header(match_count), scrubbed))
+    } else if scrubbed == raw {
+        // Fast path: byte-identical output, avoid the second allocation.
+        std::borrow::Cow::Borrowed(raw)
+    } else {
+        std::borrow::Cow::Owned(scrubbed)
+    };
+
     // Truncate at max_file_size (find a safe UTF-8 char boundary)
-    let content = if raw.len() > max_file_size {
-        let boundary = raw
+    let content = if body.len() > max_file_size {
+        let boundary = body
             .char_indices()
             .take_while(|(i, _)| *i < max_file_size)
             .last()
@@ -131,11 +241,11 @@ fn write_tee_file(
             .unwrap_or(0);
         format!(
             "{}\n\n--- truncated at {} bytes ---",
-            &raw[..boundary],
+            &body[..boundary],
             max_file_size
         )
     } else {
-        raw.to_string()
+        body.into_owned()
     };
 
     std::fs::write(&filepath, content).ok()?;
@@ -149,6 +259,15 @@ fn write_tee_file(
 /// Write raw output to tee file if conditions are met.
 /// Returns file path on success, None if skipped/failed.
 pub fn tee_raw(raw: &str, command_slug: &str, exit_code: i32) -> Option<PathBuf> {
+    tee_raw_with_policy(raw, command_slug, exit_code, RedactPolicy::Auto)
+}
+
+fn tee_raw_with_policy(
+    raw: &str,
+    command_slug: &str,
+    exit_code: i32,
+    policy: RedactPolicy,
+) -> Option<PathBuf> {
     // Check RTK_TEE=0 env override (disable)
     if std::env::var("RTK_TEE").ok().as_deref() == Some("0") {
         return None;
@@ -165,6 +284,7 @@ pub fn tee_raw(raw: &str, command_slug: &str, exit_code: i32) -> Option<PathBuf>
         &tee_dir,
         config.tee.max_file_size,
         config.tee.max_files,
+        policy,
     )
 }
 
@@ -189,6 +309,14 @@ pub fn tee_and_hint(raw: &str, command_slug: &str, exit_code: i32) -> Option<Str
 }
 
 fn force_tee_path(content: &str, command_slug: &str) -> Option<PathBuf> {
+    force_tee_path_with_policy(content, command_slug, RedactPolicy::Auto)
+}
+
+fn force_tee_path_with_policy(
+    content: &str,
+    command_slug: &str,
+    policy: RedactPolicy,
+) -> Option<PathBuf> {
     if std::env::var("RTK_TEE").ok().as_deref() == Some("0") {
         return None;
     }
@@ -212,6 +340,7 @@ fn force_tee_path(content: &str, command_slug: &str) -> Option<PathBuf> {
         &tee_dir,
         config.tee.max_file_size,
         config.tee.max_files,
+        policy,
     )
 }
 
@@ -228,6 +357,49 @@ pub fn force_tee_tail_hint(
     line_offset: usize,
 ) -> Option<String> {
     let path = force_tee_path(content, command_slug)?;
+    Some(format!(
+        "[see remaining: tail -n +{} {}]",
+        line_offset,
+        display_path(&path)
+    ))
+}
+
+// --- Sensitive variants ---
+//
+// Call sites that know they're dealing with credential-shaped content
+// (`aws_cmd.rs`, `curl_cmd.rs`, `psql_cmd.rs`) use these variants. They
+// share the existing tee bookkeeping (rotation, mode, MIN_TEE_SIZE) but
+// force the content redactor pass and stay scrubbed even if a future
+// config knob lets users disable the default Auto redaction.
+
+/// Like [`tee_and_hint`], but force the credential redactor unconditionally.
+///
+/// Use for command families where output is known to often contain
+/// secrets (AWS API responses, curl bodies, psql results that may carry
+/// connection strings in NOTICE lines, …).
+pub fn tee_and_hint_sensitive(raw: &str, command_slug: &str, exit_code: i32) -> Option<String> {
+    let path = tee_raw_with_policy(raw, command_slug, exit_code, RedactPolicy::Forced)?;
+    Some(format_hint(&path))
+}
+
+/// Like [`force_tee_hint`], but force the credential redactor unconditionally.
+pub fn force_tee_hint_sensitive(raw: &str, command_slug: &str) -> Option<String> {
+    let path = force_tee_path_with_policy(raw, command_slug, RedactPolicy::Forced)?;
+    Some(format_hint(&path))
+}
+
+/// Like [`force_tee_tail_hint`], but force the credential redactor unconditionally.
+///
+/// Reserved for future call sites that emit a `tail -n +offset` recovery
+/// hint for known-credential-bearing command families (none ship today but
+/// the variant is documented as part of the sensitive surface).
+#[allow(dead_code)]
+pub fn force_tee_tail_hint_sensitive(
+    content: &str,
+    command_slug: &str,
+    line_offset: usize,
+) -> Option<String> {
+    let path = force_tee_path_with_policy(content, command_slug, RedactPolicy::Forced)?;
     Some(format!(
         "[see remaining: tail -n +{} {}]",
         line_offset,
@@ -272,6 +444,11 @@ impl Default for TeeConfig {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// Serialises tests that touch `RTK_TEE*` / `RTK_CONFIG_PATH` env vars so
+    /// parallel `cargo test` runs don't see each other's `set_var`. Tests
+    /// that don't mutate env can run concurrently without taking this lock.
+    static TEE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_sanitize_slug() {
@@ -346,6 +523,7 @@ mod tests {
             tmpdir.path(),
             DEFAULT_MAX_FILE_SIZE,
             20,
+            RedactPolicy::Auto,
         );
         assert!(result.is_some());
 
@@ -360,7 +538,14 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let big_output = "x".repeat(2000);
         // Set max_file_size to 1000 bytes
-        let result = write_tee_file(&big_output, "test", tmpdir.path(), 1000, 20);
+        let result = write_tee_file(
+            &big_output,
+            "test",
+            tmpdir.path(),
+            1000,
+            20,
+            RedactPolicy::Auto,
+        );
         assert!(result.is_some());
 
         let path = result.unwrap();
@@ -380,7 +565,14 @@ mod tests {
         assert_eq!(japanese.len(), 999);
 
         // Truncate at 998 — falls in the middle of the 333rd character
-        let result = write_tee_file(&japanese, "test_utf8", tmpdir.path(), 998, 20);
+        let result = write_tee_file(
+            &japanese,
+            "test_utf8",
+            tmpdir.path(),
+            998,
+            20,
+            RedactPolicy::Auto,
+        );
         assert!(result.is_some());
 
         let path = result.unwrap();
@@ -398,7 +590,14 @@ mod tests {
         assert_eq!(emojis.len(), 400);
 
         // Truncate at 201 — falls mid-emoji (4-byte boundary is at 200, 204)
-        let result = write_tee_file(&emojis, "test_emoji", tmpdir.path(), 201, 20);
+        let result = write_tee_file(
+            &emojis,
+            "test_emoji",
+            tmpdir.path(),
+            201,
+            20,
+            RedactPolicy::Auto,
+        );
         assert!(result.is_some());
 
         let path = result.unwrap();
@@ -501,7 +700,9 @@ directory = "/tmp/rtk-tee"
 
     #[test]
     fn test_force_tee_hint_respects_env_disable() {
-        // When RTK_TEE=0, force_tee_hint should return None
+        // When RTK_TEE=0, force_tee_hint should return None.
+        // Serialise via TEE_ENV_LOCK so we don't race other env-touching tests.
+        let _guard = TEE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("RTK_TEE", "0");
         let large_output = "x".repeat(1000);
         let hint = force_tee_hint(&large_output, "test_cmd");
@@ -523,5 +724,265 @@ directory = "/tmp/rtk-tee"
         assert!(hint.starts_with("[see remaining: tail -n +22 "));
         assert!(hint.ends_with(']'));
         assert!(hint.contains("123_docker_images.log"));
+    }
+
+    // --- Sensitive output handling (Finding 4) ---
+    //
+    // The slug-blocklist tests stay below `write_tee_file` so they don't
+    // touch the user's real `~/.config/rtk/` or `~/.local/share/rtk/`.
+    // The high-level `*_sensitive` tests set `RTK_TEE_DIR` to a tempdir
+    // and `RTK_CONFIG_PATH` to a non-existent path so `Config::load()`
+    // returns the default config without reading the user's file. They
+    // serialise via the module-level `TEE_ENV_LOCK` above to keep
+    // concurrent `cargo test` runs deterministic.
+
+    #[test]
+    fn test_blocklisted_slug_skips_write() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let content = "AWS secret payload that must never hit disk\n".repeat(20);
+        let result = write_tee_file(
+            &content,
+            "aws_secretsmanager_get-secret-value",
+            tmpdir.path(),
+            DEFAULT_MAX_FILE_SIZE,
+            20,
+            RedactPolicy::Auto,
+        );
+        assert!(result.is_none(), "blocklisted slug must refuse to write");
+
+        // And no file should have been created in the tempdir.
+        let count = fs::read_dir(tmpdir.path())
+            .expect("read tempdir")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "log"))
+            .count();
+        assert_eq!(count, 0, "no .log file may exist for blocklisted slug");
+    }
+
+    #[test]
+    fn test_redactor_masks_bearer_in_content() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let content = format!(
+            "{}\nFailed request — Authorization: Bearer abc123XYZdef456GHIjkl\n{}",
+            "noise line ".repeat(30),
+            "more noise ".repeat(30),
+        );
+        let result = write_tee_file(
+            &content,
+            "cargo_test",
+            tmpdir.path(),
+            DEFAULT_MAX_FILE_SIZE,
+            20,
+            RedactPolicy::Auto,
+        );
+        let path = result.expect("write_tee_file should succeed");
+        let written = fs::read_to_string(&path).expect("read written file");
+
+        assert!(
+            written.contains("Bearer ****"),
+            "Bearer token must be masked: {}",
+            written
+        );
+        assert!(
+            !written.contains("abc123XYZdef456GHIjkl"),
+            "raw bearer token must not survive: {}",
+            written
+        );
+        assert!(
+            written.starts_with("--- rtk: 1 credential-like patterns redacted ---\n"),
+            "audit header must be prepended: {}",
+            &written[..written.len().min(120)],
+        );
+    }
+
+    #[test]
+    fn test_redactor_passes_through_clean_content() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let content = "running 12 tests\n".repeat(60); // > MIN_TEE_SIZE
+        let result = write_tee_file(
+            &content,
+            "cargo_test",
+            tmpdir.path(),
+            DEFAULT_MAX_FILE_SIZE,
+            20,
+            RedactPolicy::Auto,
+        );
+        let path = result.expect("write_tee_file should succeed");
+        let written = fs::read_to_string(&path).expect("read written file");
+
+        assert_eq!(
+            written, content,
+            "clean content must be byte-identical (no header, no mutation)"
+        );
+        assert!(
+            !written.contains("--- rtk:"),
+            "no audit header for clean content"
+        );
+    }
+
+    #[test]
+    fn test_redactor_masks_aws_keys() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        // Synthetic, scanner-safe AWS-style key (Z-suffixed) — matches
+        // RTK's CREDENTIAL_PREFIX_RE without being a real AWS access key.
+        let content = format!(
+            "Failed deploy:\nAccessKeyId: AKIAZZZZZZZZZZZZZZZZ\n{}",
+            "trailing noise ".repeat(40),
+        );
+        let result = write_tee_file(
+            &content,
+            "docker_inspect",
+            tmpdir.path(),
+            DEFAULT_MAX_FILE_SIZE,
+            20,
+            RedactPolicy::Auto,
+        );
+        let path = result.expect("write_tee_file should succeed");
+        let written = fs::read_to_string(&path).expect("read written file");
+
+        assert!(
+            !written.contains("AKIAZZZZZZZZZZZZZZZZ"),
+            "AKIA-prefixed key must be masked: {}",
+            written
+        );
+        assert!(
+            written.contains("****"),
+            "redactor must leave its **** marker: {}",
+            written
+        );
+        assert!(
+            written.starts_with("--- rtk: 1 credential-like patterns redacted ---\n"),
+            "audit header must be prepended: {}",
+            &written[..written.len().min(120)],
+        );
+    }
+
+    #[test]
+    fn test_tee_and_hint_sensitive_always_redacts() {
+        let _guard = TEE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        // Point Config::load() at a non-existent path so it returns
+        // Config::default() (tee enabled, mode = Failures).
+        let fake_config = tmpdir.path().join("no-such-config.toml");
+        std::env::set_var("RTK_CONFIG_PATH", &fake_config);
+        std::env::set_var("RTK_TEE_DIR", tmpdir.path());
+        std::env::remove_var("RTK_TEE");
+
+        // Non-blocklisted slug, exit_code != 0 (so default Failures mode tees).
+        let content = format!(
+            "request failed:\nAuthorization: Bearer abc123XYZdef456GHIjkl\n{}",
+            "padding ".repeat(80),
+        );
+        let hint = tee_and_hint_sensitive(&content, "cargo_test", 1);
+
+        // Restore env before any assertion can fail the test.
+        std::env::remove_var("RTK_CONFIG_PATH");
+        std::env::remove_var("RTK_TEE_DIR");
+
+        let hint = hint.expect("sensitive tee should write for non-blocklisted slug");
+        assert!(hint.starts_with("[full output: "), "hint shape: {hint}");
+
+        // Find the file inside the tempdir and assert it's scrubbed.
+        let entry = fs::read_dir(tmpdir.path())
+            .expect("read tempdir")
+            .filter_map(|e| e.ok())
+            .find(|e| e.path().extension().is_some_and(|x| x == "log"))
+            .expect("tee file must exist");
+        let written = fs::read_to_string(entry.path()).expect("read tee file");
+
+        assert!(
+            written.contains("Bearer ****"),
+            "sensitive variant must redact Bearer: {}",
+            written
+        );
+        assert!(
+            !written.contains("abc123XYZdef456GHIjkl"),
+            "raw bearer must not survive: {}",
+            written
+        );
+        assert!(
+            written.starts_with("--- rtk: "),
+            "audit header must be prepended: {}",
+            &written[..written.len().min(120)],
+        );
+    }
+
+    #[test]
+    fn test_aws_sts_get_session_token_does_not_persist_to_disk() {
+        let _guard = TEE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let fake_config = tmpdir.path().join("no-such-config.toml");
+        std::env::set_var("RTK_CONFIG_PATH", &fake_config);
+        std::env::set_var("RTK_TEE_DIR", tmpdir.path());
+        std::env::remove_var("RTK_TEE");
+
+        // Slug matches `aws_sts_get-session-token` prefix → blocklisted.
+        let content = format!(
+            "{{\"Credentials\":{{\"AccessKeyId\":\"AKIAZZZZZZZZZZZZZZZZ\",\"SecretAccessKey\":\"xyz\"}}}}\n{}",
+            "padding ".repeat(80),
+        );
+        let hint = tee_and_hint_sensitive(&content, "aws_sts_get-session-token", 1);
+
+        std::env::remove_var("RTK_CONFIG_PATH");
+        std::env::remove_var("RTK_TEE_DIR");
+
+        assert!(
+            hint.is_none(),
+            "blocklisted slug must not emit a tee hint: {:?}",
+            hint
+        );
+        let log_count = fs::read_dir(tmpdir.path())
+            .expect("read tempdir")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "log"))
+            .count();
+        assert_eq!(
+            log_count, 0,
+            "blocklisted slug must not persist any .log file"
+        );
+    }
+
+    #[test]
+    fn test_is_blocklisted_slug_examples() {
+        // Positive: all the slugs from the design doc Finding 4.
+        for slug in [
+            "aws_secretsmanager_get-secret-value",
+            "aws_kms_decrypt",
+            "aws_sts_get-session-token",
+            "aws_sts_assume-role",
+            "kubectl_get_secret_my-secret",
+            "kubectl_describe_secret_my-secret",
+            "gh_secret_set",
+            "gh_auth_status",
+            "glab_secret_list",
+            "glab_auth_login",
+            "op_item_get",
+            "vault_kv_get",
+            "doppler_secrets",
+            "bw_get_password",
+            "pass_show",
+            "helm_get_values_release",
+            "git_config_user.email",
+        ] {
+            assert!(is_blocklisted_slug(slug), "slug {slug} must be blocklisted");
+        }
+        // Negative: ordinary slugs must not be blocked.
+        for slug in [
+            "cargo_test",
+            "cargo_build",
+            "npm_install",
+            "docker_ps",
+            "kubectl_get_pods",
+            "git_log",
+            "git_status",
+            "gh_pr_view",
+        ] {
+            assert!(
+                !is_blocklisted_slug(slug),
+                "slug {slug} must NOT be blocklisted"
+            );
+        }
     }
 }
