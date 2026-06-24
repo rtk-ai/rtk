@@ -2002,6 +2002,17 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_podman_run() {
+        assert!(matches!(
+            classify_command("podman run --rm ubuntu bash"),
+            Classification::Supported {
+                rtk_equivalent: "rtk podman",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn test_classify_kubectl_describe() {
         assert!(matches!(
             classify_command("kubectl describe pod mypod"),
@@ -2094,6 +2105,26 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_podman_commands() {
+        assert_eq!(
+            rewrite_command_no_prefixes("podman ps", &[]),
+            Some("rtk podman ps".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("podman images", &[]),
+            Some("rtk podman images".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("podman logs app", &[]),
+            Some("rtk podman logs app".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("podman exec app psql -U postgres", &[]),
+            Some("rtk podman exec app psql -U postgres".into())
+        );
+    }
+
+    #[test]
     fn test_classify_swift_test() {
         assert!(matches!(
             classify_command("swift test"),
@@ -2137,6 +2168,22 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("docker compose build", &[]),
             Some("rtk docker compose build".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_podman_compose_supported_subcommands() {
+        assert_eq!(
+            rewrite_command_no_prefixes("podman compose ps", &[]),
+            Some("rtk podman compose ps".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("podman compose logs web", &[]),
+            Some("rtk podman compose logs web".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("podman compose build", &[]),
+            Some("rtk podman compose build".into())
         );
     }
 
