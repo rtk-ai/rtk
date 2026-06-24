@@ -287,6 +287,12 @@ enum Commands {
         command: DockerCommands,
     },
 
+    /// Podman commands with compact output
+    Podman {
+        #[command(subcommand)]
+        command: DockerCommands,
+    },
+
     /// Kubectl commands with compact output
     Kubectl {
         #[command(subcommand)]
@@ -1380,6 +1386,44 @@ fn build_k8s_logs_args(pod: String, container: Option<String>) -> Vec<String> {
     args
 }
 
+fn run_container_command(engine: &str, command: DockerCommands, verbose: u8) -> Result<i32> {
+    match command {
+        DockerCommands::Ps { all } => {
+            let cmd = if all {
+                container::ContainerCmd::DockerPsAll
+            } else {
+                container::ContainerCmd::DockerPs
+            };
+            container::run_container_engine(engine, cmd, &[], verbose)
+        }
+        DockerCommands::Images => container::run_container_engine(
+            engine,
+            container::ContainerCmd::DockerImages,
+            &[],
+            verbose,
+        ),
+        DockerCommands::Logs { container: c } => container::run_container_engine(
+            engine,
+            container::ContainerCmd::DockerLogs,
+            &[c],
+            verbose,
+        ),
+        DockerCommands::Compose { command: compose } => match compose {
+            ComposeCommands::Ps { all } => container::run_compose_ps(engine, all, verbose),
+            ComposeCommands::Logs { service, tail } => {
+                container::run_compose_logs(engine, service.as_deref(), tail, verbose)
+            }
+            ComposeCommands::Build { service } => {
+                container::run_compose_build(engine, service.as_deref(), verbose)
+            }
+            ComposeCommands::Other(args) => {
+                container::run_compose_passthrough(engine, &args, verbose)
+            }
+        },
+        DockerCommands::Other(args) => container::run_container_passthrough(engine, &args, verbose),
+    }
+}
+
 /// Merge pnpm global filters args with other ones for standard String-based commands
 fn merge_pnpm_args(filters: &[String], args: &[String]) -> Vec<String> {
     filters
@@ -1789,35 +1833,8 @@ fn run_cli() -> Result<i32> {
             DotnetCommands::Other(args) => dotnet_cmd::run_passthrough(&args, cli.verbose)?,
         },
 
-        Commands::Docker { command } => match command {
-            DockerCommands::Ps { all } => {
-                let cmd = if all {
-                    container::ContainerCmd::DockerPsAll
-                } else {
-                    container::ContainerCmd::DockerPs
-                };
-                container::run(cmd, &[], cli.verbose)?
-            }
-            DockerCommands::Images => {
-                container::run(container::ContainerCmd::DockerImages, &[], cli.verbose)?
-            }
-            DockerCommands::Logs { container: c } => {
-                container::run(container::ContainerCmd::DockerLogs, &[c], cli.verbose)?
-            }
-            DockerCommands::Compose { command: compose } => match compose {
-                ComposeCommands::Ps { all } => container::run_compose_ps(all, cli.verbose)?,
-                ComposeCommands::Logs { service, tail } => {
-                    container::run_compose_logs(service.as_deref(), tail, cli.verbose)?
-                }
-                ComposeCommands::Build { service } => {
-                    container::run_compose_build(service.as_deref(), cli.verbose)?
-                }
-                ComposeCommands::Other(args) => {
-                    container::run_compose_passthrough(&args, cli.verbose)?
-                }
-            },
-            DockerCommands::Other(args) => container::run_docker_passthrough(&args, cli.verbose)?,
-        },
+        Commands::Docker { command } => run_container_command("docker", command, cli.verbose)?,
+        Commands::Podman { command } => run_container_command("podman", command, cli.verbose)?,
 
         Commands::Kubectl { command } => match command {
             KubectlCommands::Get { args } => container::run_kubectl_get(&args, cli.verbose)?,
@@ -2570,6 +2587,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Log { .. }
             | Commands::Dotnet { .. }
             | Commands::Docker { .. }
+            | Commands::Podman { .. }
             | Commands::Kubectl { .. }
             | Commands::Oc { .. }
             | Commands::Summary { .. }
@@ -2761,6 +2779,18 @@ mod tests {
     }
 
     #[test]
+    fn test_try_parse_podman_ps_all() {
+        let cli = Cli::try_parse_from(["rtk", "podman", "ps", "-a"]).unwrap();
+
+        match cli.command {
+            Commands::Podman {
+                command: DockerCommands::Ps { all },
+            } => assert!(all),
+            _ => panic!("Expected Podman Ps command"),
+        }
+    }
+
+    #[test]
     fn test_try_parse_oc_get() {
         let cli = Cli::try_parse_from(["rtk", "oc", "get", "pods", "-n", "default"]).unwrap();
 
@@ -2940,6 +2970,7 @@ mod tests {
             "log",
             "dotnet",
             "docker",
+            "podman",
             "kubectl",
             "oc",
             "summary",
