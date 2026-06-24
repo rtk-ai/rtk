@@ -1,8 +1,11 @@
 use anyhow::Result;
 use std::io::Read;
 
-use crate::core::stream::RAW_CAP;
-use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
+use crate::core::{
+    stream::RAW_CAP,
+    truncate::{CAP_LIST, CAP_WARNINGS},
+    utils::utf8_prefix_by_byte_limit,
+};
 
 const MAX_PIPE_MATCHES: usize = CAP_WARNINGS;
 const MAX_PIPE_FILES: usize = CAP_WARNINGS;
@@ -140,10 +143,7 @@ fn find_wrapper(input: &str) -> String {
 }
 
 pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
-    let end = input.len().min(1024);
-    // Avoid panic: byte 1024 may fall inside a multi-byte UTF-8 char
-    let end = input.floor_char_boundary(end);
-    let first_1k = &input[..end];
+    let first_1k = utf8_prefix_by_byte_limit(input, 1024);
 
     if first_1k.contains("test result:") && first_1k.contains("passed;") {
         return crate::cmds::rust::cargo_cmd::filter_cargo_test;
