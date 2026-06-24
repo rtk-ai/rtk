@@ -4,6 +4,7 @@ use crate::core::filter::{self, FilterLevel, Language};
 use crate::core::tracking;
 use anyhow::{Context, Result};
 use std::fs;
+use std::io::{self, Write};
 use std::path::Path;
 
 pub fn run(
@@ -70,13 +71,14 @@ pub fn run(
     } else {
         filtered.clone()
     };
-    print!("{}", rtk_output);
-    timer.track(
-        &format!("cat {}", file.display()),
-        "rtk read",
-        &content,
-        &rtk_output,
-    );
+    if write_stdout(&rtk_output)? {
+        timer.track(
+            &format!("cat {}", file.display()),
+            "rtk read",
+            &content,
+            &rtk_output,
+        );
+    }
     Ok(())
 }
 
@@ -87,7 +89,7 @@ pub fn run_stdin(
     line_numbers: bool,
     verbose: u8,
 ) -> Result<()> {
-    use std::io::{self, Read as IoRead};
+    use std::io::Read as IoRead;
 
     let timer = tracking::TimedExecution::start();
 
@@ -134,10 +136,21 @@ pub fn run_stdin(
     } else {
         filtered.clone()
     };
-    print!("{}", rtk_output);
+    if !write_stdout(&rtk_output)? {
+        return Ok(());
+    }
 
     timer.track("cat - (stdin)", "rtk read -", &content, &rtk_output);
     Ok(())
+}
+
+fn write_stdout(content: &str) -> Result<bool> {
+    let mut stdout = io::stdout().lock();
+    match stdout.write_all(content.as_bytes()) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(false),
+        Err(e) => Err(e).context("failed writing read output"),
+    }
 }
 
 fn format_with_line_numbers(content: &str) -> String {
