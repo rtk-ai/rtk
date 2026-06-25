@@ -61,7 +61,7 @@ rtk init --show    # shows hook status
 ### Cursor
 
 ```bash
-rtk init --global --cursor
+rtk init --global --agent cursor
 ```
 
 Restart Cursor. The hook uses `preToolUse` with Cursor's `updated_input` format.
@@ -140,7 +140,7 @@ The plugin fails open. If `rtk` is missing at load time, the hook is not registe
 ### Cline / Roo Code
 
 ```bash
-rtk init --cline    # creates .clinerules in current project
+rtk init --agent cline    # creates .clinerules in current project
 ```
 
 Cline reads `.clinerules` as custom instructions. RTK adds guidance telling Cline to prefer `rtk <cmd>` over raw commands.
@@ -148,13 +148,14 @@ Cline reads `.clinerules` as custom instructions. RTK adds guidance telling Clin
 ### Windsurf
 
 ```bash
-rtk init --windsurf    # creates .windsurfrules in current project
+rtk init --global --agent windsurf    # creates .windsurfrules in current project
 ```
 
 ### Codex CLI
 
 ```bash
-rtk init --codex    # creates AGENTS.md or patches existing one
+rtk init --codex           # project-scoped (AGENTS.md)
+rtk init --global --codex  # user-global (~/.codex/AGENTS.md)
 ```
 
 ### Kilo Code

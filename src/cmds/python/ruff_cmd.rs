@@ -144,7 +144,6 @@ pub fn filter_ruff_check_json(output: &str) -> String {
         result.push_str(&format!(" ({} fixable)", fixable_count));
     }
     result.push('\n');
-    result.push_str("═══════════════════════════════════════\n");
 
     // Show top rules
     let mut rule_counts: Vec<_> = by_rule.iter().collect();
@@ -288,7 +287,6 @@ pub fn filter_ruff_format(output: &str) -> String {
                 "Ruff format: {} files need formatting\n",
                 files_to_format.len()
             ));
-            result.push_str("═══════════════════════════════════════\n");
 
             const MAX_RUFF_FORMAT_FILES: usize = CAP_WARNINGS;
             for (i, file) in files_to_format

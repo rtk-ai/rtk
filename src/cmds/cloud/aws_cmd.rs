@@ -3,6 +3,7 @@
 //! Replaces verbose `--output table`/`text` with JSON, then compresses.
 //! Specialized filters for high-frequency commands (STS, S3, EC2, ECS, RDS, CloudFormation).
 
+use crate::core::guard::never_worse;
 use crate::core::tee::force_tee_hint;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_INVENTORY, CAP_LIST};
@@ -215,7 +216,7 @@ fn is_structured_operation(args: &[String]) -> bool {
         || op == "receive-message"
 }
 
-/// Generic strategy: force --output json for structured ops, compress via json_cmd schema
+/// Generic strategy: force --output json for structured ops, compress via json_cmd compact (values preserved)
 fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -256,10 +257,11 @@ fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -
         return Ok(crate::core::utils::exit_code_from_output(&output, "aws"));
     }
 
-    let filtered = match json_cmd::filter_json_string(&raw, JSON_COMPRESS_DEPTH) {
-        Ok(schema) => {
-            println!("{}", schema);
-            schema
+    let filtered = match json_cmd::filter_json_compact(&raw, JSON_COMPRESS_DEPTH) {
+        Ok(compact) => {
+            let compact = never_worse(&raw, &compact).to_string();
+            println!("{}", compact);
+            compact
         }
         Err(_) => {
             // Fallback: print raw (maybe not JSON)
@@ -361,19 +363,14 @@ fn run_aws_filtered(
         FilterResult::new(stdout.clone())
     });
 
-    if result.truncated {
-        if let Some(hint) = crate::core::tee::force_tee_hint(&raw, &slug) {
-            println!("{}\n{}", result.text, hint);
-        } else {
-            println!("{}", result.text);
-        }
-    } else if let Some(hint) = crate::core::tee::tee_and_hint(&raw, &slug, 0) {
-        println!("{}\n{}", result.text, hint);
+    let hint = if result.truncated {
+        crate::core::tee::force_tee_hint(&raw, &slug)
     } else {
-        println!("{}", result.text);
-    }
+        crate::core::tee::tee_and_hint(&raw, &slug, 0)
+    };
+    let shown = crate::core::runner::emit_guarded(&result.text, hint.as_deref(), &raw);
 
-    timer.track(&cmd_label, &rtk_label, &raw, &result.text);
+    timer.track(&cmd_label, &rtk_label, &raw, &shown);
     Ok(0)
 }
 
@@ -410,17 +407,14 @@ fn run_s3_ls(extra_args: &[String], verbose: u8) -> Result<i32> {
     }
 
     let result = filter_s3_ls(&stdout);
-    if result.truncated {
-        if let Some(hint) = crate::core::tee::force_tee_hint(&raw, "aws_s3_ls") {
-            println!("{}\n{}", result.text, hint);
-        } else {
-            println!("{}", result.text);
-        }
+    let hint = if result.truncated {
+        crate::core::tee::force_tee_hint(&raw, "aws_s3_ls")
     } else {
-        println!("{}", result.text);
-    }
+        None
+    };
+    let shown = crate::core::runner::emit_guarded(&result.text, hint.as_deref(), &raw);
 
-    timer.track("aws s3 ls", "rtk aws s3 ls", &raw, &result.text);
+    timer.track("aws s3 ls", "rtk aws s3 ls", &raw, &shown);
     Ok(0)
 }
 
@@ -463,17 +457,14 @@ fn run_s3_transfer(operation: &str, extra_args: &[String], verbose: u8) -> Resul
     }
 
     let result = filter_s3_transfer(&stdout);
-    if result.truncated {
-        if let Some(hint) = force_tee_hint(&raw, &slug) {
-            println!("{}\n{}", result.text, hint);
-        } else {
-            println!("{}", result.text);
-        }
+    let hint = if result.truncated {
+        force_tee_hint(&raw, &slug)
     } else {
-        println!("{}", result.text);
-    }
+        None
+    };
+    let shown = crate::core::runner::emit_guarded(&result.text, hint.as_deref(), &raw);
 
-    timer.track(&cmd_label, &rtk_label, &raw, &result.text);
+    timer.track(&cmd_label, &rtk_label, &raw, &shown);
     Ok(0)
 }
 
@@ -2748,5 +2739,30 @@ upload: file10.txt to s3://bucket/file10.txt
         let result = filter_cfn_events(&json).unwrap();
         // Should report all 30 failures, not capped at MAX_ITEMS (20)
         assert!(result.text.contains("30 failed"));
+    }
+
+    // Regression: generic AWS path (unsupported subcommand returning JSON) must
+    // compress responses while preserving values, not collapse them to schema
+    // type names. Calls the primitive used at aws_cmd.rs run_generic line 259.
+    #[test]
+    fn test_aws_unsupported_subcommand_json_preserves_values() {
+        let fixture = include_str!(
+            "../../../tests/fixtures/aws_backup_describe_global_settings.json"
+        );
+        let output = json_cmd::filter_json_compact(fixture, JSON_COMPRESS_DEPTH)
+            .expect("filter_json_compact must not error on valid AWS JSON");
+
+        assert!(
+            output.contains("\"false\""),
+            "values must be preserved (expected literal \"false\"), got:\n{output}"
+        );
+        assert!(
+            !output.contains(": string"),
+            "schema-type leakage detected (\": string\" found), got:\n{output}"
+        );
+        assert!(
+            output.contains("isMpaEnabled"),
+            "object keys must be preserved, got:\n{output}"
+        );
     }
 }

@@ -248,7 +248,6 @@ bench "deps" "cat Cargo.toml" "$RTK deps"
 section "env"
 bench "env" "env" "$RTK env"
 bench "env -f PATH" "env | grep PATH" "$RTK env -f PATH"
-bench "env --show-all" "env" "$RTK env --show-all"
 
 # ===================
 # err

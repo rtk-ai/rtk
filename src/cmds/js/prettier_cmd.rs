@@ -94,7 +94,6 @@ pub fn filter_prettier_output(output: &str) -> String {
                 "Prettier: {} files need formatting\n",
                 files_to_format.len()
             ));
-            result.push_str("═══════════════════════════════════════\n");
 
             const MAX_PRETTIER_FILES: usize = CAP_WARNINGS;
             for (i, file) in files_to_format.iter().take(MAX_PRETTIER_FILES).enumerate() {

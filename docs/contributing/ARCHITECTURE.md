@@ -746,7 +746,7 @@ Single-threaded execution with `Mutex<Option<Tracker>>` for future-proofing. No 
 └────────────────────────────────────────────────────────────────────────┘
 
 main.rs:47-49
-#[arg(short, long, action = clap::ArgAction::Count, global = true)]
+#[arg(short, long, action = clap::ArgAction::Count)]
 verbose: u8,
 
 Levels:
@@ -773,7 +773,7 @@ if verbose > 0 {
 └────────────────────────────────────────────────────────────────────────┘
 
 main.rs:51-53
-#[arg(short = 'u', long, global = true)]
+#[arg(long, global = true)]
 ultra_compact: bool,
 
 Features:

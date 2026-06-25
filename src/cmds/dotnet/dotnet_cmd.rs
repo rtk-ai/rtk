@@ -1,6 +1,7 @@
 //! Filters dotnet CLI output — build, test, and format results.
 
 use crate::binlog;
+use crate::core::guard::never_worse;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
@@ -54,13 +55,14 @@ pub fn run_format(args: &[String], verbose: u8) -> Result<i32> {
     let check_mode = !has_write_mode_override(args);
     let filtered =
         format_report_summary_or_raw(report_path.as_deref(), check_mode, &raw, command_started_at);
-    println!("{}", filtered);
+    let shown = never_worse(&raw, &filtered);
+    println!("{}", shown);
 
     timer.track(
         &format!("dotnet format {}", args.join(" ")),
         &format!("rtk dotnet format {}", args.join(" ")),
         &raw,
-        &filtered,
+        shown,
     );
 
     if cleanup_report_path {
@@ -138,7 +140,7 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
     let raw = format!("{}\n{}", result.stdout, result.stderr);
     let command_success = result.success();
 
-    let filtered = match subcommand {
+    let (filtered, needs_raw_fallback) = match subcommand {
         "build" => {
             let binlog_summary = if should_expect_binlog && binlog_path.exists() {
                 normalize_build_summary(
@@ -151,7 +153,7 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
             let raw_summary =
                 normalize_build_summary(binlog::parse_build_from_text(&raw), command_success);
             let summary = merge_build_summaries(binlog_summary, raw_summary);
-            format_build_output(&summary, &binlog_path)
+            (format_build_output(&summary, &binlog_path), true)
         }
         "test" => {
             // First try to parse from binlog/console output
@@ -181,11 +183,18 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
             let raw_diagnostics =
                 normalize_build_summary(binlog::parse_build_from_text(&raw), command_success);
             let test_build_summary = merge_build_summaries(binlog_diagnostics, raw_diagnostics);
-            format_test_output(
-                &summary,
-                &test_build_summary.errors,
-                &test_build_summary.warnings,
-                &binlog_path,
+            // The `Failed Tests:` section already carries failure detail parsed from
+            // TRX/console; skip the raw-stdout prepend when it would only duplicate it.
+            // See issue #2501.
+            let needs_raw = test_needs_raw_fallback(&summary);
+            (
+                format_test_output(
+                    &summary,
+                    &test_build_summary.errors,
+                    &test_build_summary.warnings,
+                    &binlog_path,
+                ),
+                needs_raw,
             )
         }
         "restore" => {
@@ -203,32 +212,30 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
 
             let (raw_errors, raw_warnings) = binlog::parse_restore_issues_from_text(&raw);
 
-            format_restore_output(&summary, &raw_errors, &raw_warnings, &binlog_path)
+            (
+                format_restore_output(&summary, &raw_errors, &raw_warnings, &binlog_path),
+                true,
+            )
         }
-        _ => raw.clone(),
+        _ => (raw.clone(), true),
     };
 
-    let output_to_print = if !command_success {
-        let stdout_trimmed = result.stdout.trim();
-        let stderr_trimmed = result.stderr.trim();
-        if !stdout_trimmed.is_empty() {
-            format!("{}\n\n{}", stdout_trimmed, filtered)
-        } else if !stderr_trimmed.is_empty() {
-            format!("{}\n\n{}", stderr_trimmed, filtered)
-        } else {
-            filtered
-        }
-    } else {
-        filtered
-    };
+    let output_to_print = compose_failure_output(
+        command_success,
+        needs_raw_fallback,
+        &result.stdout,
+        &result.stderr,
+        &filtered,
+    );
 
-    println!("{}", output_to_print);
+    let shown = never_worse(&raw, &output_to_print);
+    println!("{}", shown);
 
     timer.track(
         &format!("dotnet {} {}", subcommand, args.join(" ")),
         &format!("rtk dotnet {} {}", subcommand, args.join(" ")),
         &raw,
-        &output_to_print,
+        shown,
     );
 
     cleanup_temp_file(&binlog_path);
@@ -368,7 +375,6 @@ fn format_dotnet_format_output(
     }
 
     let mut output = format!("Format: {} files need formatting", changed_count);
-    output.push_str("\n---------------------------------------");
 
     const MAX_FORMAT_FILES: usize = CAP_LIST;
     for (index, file) in summary
@@ -1056,12 +1062,6 @@ fn format_build_output(summary: &binlog::BuildSummary, _binlog_path: &Path) -> S
         }
     }
 
-    let sep = if !warnings.is_empty() || !errors.is_empty() {
-        "---------------------------------------"
-    } else {
-        ""
-    };
-
     let verdict = format!(
         "{} dotnet build: {} projects, {} errors, {} warnings ({})",
         status_icon,
@@ -1076,11 +1076,58 @@ fn format_build_output(summary: &binlog::BuildSummary, _binlog_path: &Path) -> S
     // definitive verdict. Mirrors native `dotnet build`, which ends with
     // `Build succeeded.` / `Build FAILED.`. See issue #1574.
     // Warnings before errors: errors survive `| tail -N` immediately above the verdict.
-    [warnings, errors, sep.into(), verdict]
+    [warnings, errors, verdict]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Decides whether the raw stdout/stderr should be prepended ahead of the
+/// filtered `dotnet test` summary on a failing run.
+///
+/// On failure the orchestrator can prepend the raw command output as a safety
+/// net. For `test`, the filtered `Failed Tests:` section already reproduces each
+/// failure (name + message + clipped stack) parsed from TRX/console, so the
+/// prepend would only duplicate every failure block — the source of the +65%
+/// inflation in issue #2501.
+///
+/// Keep the raw fallback only when the structured section can't stand on its own:
+/// no failures were parsed, the parsed list is shorter than `summary.failed`
+/// (some failures never made it into the section), or some parsed failure has no
+/// detail (filter blind).
+fn test_needs_raw_fallback(summary: &binlog::TestSummary) -> bool {
+    summary.failed_tests.is_empty()
+        || summary.failed_tests.len() < summary.failed
+        || summary.failed_tests.iter().any(|t| t.details.is_empty())
+}
+
+/// Composes the final output for a (possibly failing) run: the filtered summary,
+/// optionally prefixed with raw stdout/stderr as a fallback.
+///
+/// On success, or when `needs_raw_fallback` is false, only the filtered summary
+/// is emitted. Otherwise the raw stdout (or stderr if stdout is empty) is
+/// prepended so nothing is lost when the filter couldn't capture the failure.
+fn compose_failure_output(
+    command_success: bool,
+    needs_raw_fallback: bool,
+    stdout: &str,
+    stderr: &str,
+    filtered: &str,
+) -> String {
+    if command_success || !needs_raw_fallback {
+        return filtered.to_string();
+    }
+
+    let stdout_trimmed = stdout.trim();
+    let stderr_trimmed = stderr.trim();
+    if !stdout_trimmed.is_empty() {
+        format!("{}\n\n{}", stdout_trimmed, filtered)
+    } else if !stderr_trimmed.is_empty() {
+        format!("{}\n\n{}", stderr_trimmed, filtered)
+    } else {
+        filtered.to_string()
+    }
 }
 
 /// Format the test summary for stdout.
@@ -1218,24 +1265,9 @@ fn format_test_output(
         }
     }
 
-    let sep = if !failed_tests_section.is_empty()
-        || !warnings_section.is_empty()
-        || !errors_section.is_empty()
-    {
-        "---------------------------------------"
-    } else {
-        ""
-    };
-
     // Status line emitted last; see format_build_output (issue #1574).
     // Warnings before errors: errors survive `| tail -N` immediately above the verdict.
-    [
-        failed_tests_section,
-        warnings_section,
-        errors_section,
-        sep.into(),
-        header,
-    ]
+    [failed_tests_section, warnings_section, errors_section, header]
     .into_iter()
     .filter(|s| !s.is_empty())
     .collect::<Vec<_>>()
@@ -1311,12 +1343,6 @@ fn format_restore_output(
         }
     }
 
-    let sep = if !warnings_section.is_empty() || !errors_section.is_empty() {
-        "---------------------------------------"
-    } else {
-        ""
-    };
-
     let verdict = format!(
         "{} dotnet restore: {} projects, {} errors, {} warnings ({})",
         status_icon, summary.restored_projects, summary.errors, summary.warnings, duration
@@ -1324,7 +1350,7 @@ fn format_restore_output(
 
     // Status line emitted last; see format_build_output (issue #1574).
     // Warnings before errors: errors survive `| tail -N` immediately above the verdict.
-    [warnings_section, errors_section, sep.into(), verdict]
+    [warnings_section, errors_section, verdict]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
@@ -1431,6 +1457,130 @@ mod tests {
         let output = format_test_output(&summary, &[], &[], Path::new("/tmp/test.binlog"));
         assert!(output.contains("10 passed, 1 failed"));
         assert!(output.contains("MyTests.ShouldFail"));
+    }
+
+    // Regression tests for issue #2501: on failing test runs the raw stdout was
+    // prepended in front of the filtered `Failed Tests:` section, duplicating every
+    // failure block (+65% vs raw). `test_needs_raw_fallback` must suppress the raw
+    // prepend when the structured section already carries failure detail, while
+    // keeping it when the filter couldn't capture the failures.
+
+    #[test]
+    fn test_needs_raw_fallback_false_when_failures_have_detail() {
+        // Every reported failure was parsed and carries detail: the structured
+        // section stands alone, so the raw prepend is dropped (issue #2501).
+        let failed_tests: Vec<binlog::FailedTest> = (0..5)
+            .map(|i| binlog::FailedTest {
+                name: format!("MyTests.Case{i}"),
+                details: vec!["Assert.True() Failure".to_string()],
+            })
+            .collect();
+        let summary = binlog::TestSummary {
+            passed: 717,
+            failed: 5,
+            skipped: 0,
+            total: 722,
+            project_count: 1,
+            failed_tests,
+            duration_text: Some("2 s".to_string()),
+        };
+        assert!(!test_needs_raw_fallback(&summary));
+    }
+
+    #[test]
+    fn test_needs_raw_fallback_true_when_parsed_list_incomplete() {
+        // summary.failed reports 5, but only 3 blocks were parsed (each with
+        // detail). The 2 missing failures live only in raw stdout — keep the
+        // fallback so they aren't silently dropped.
+        let summary = binlog::TestSummary {
+            passed: 717,
+            failed: 5,
+            skipped: 0,
+            total: 722,
+            project_count: 1,
+            failed_tests: vec![
+                binlog::FailedTest {
+                    name: "MyTests.One".to_string(),
+                    details: vec!["Assert.True() Failure".to_string()],
+                },
+                binlog::FailedTest {
+                    name: "MyTests.Two".to_string(),
+                    details: vec!["Assert.Equal() Failure".to_string()],
+                },
+                binlog::FailedTest {
+                    name: "MyTests.Three".to_string(),
+                    details: vec!["Assert.Null() Failure".to_string()],
+                },
+            ],
+            duration_text: Some("2 s".to_string()),
+        };
+        assert!(test_needs_raw_fallback(&summary));
+    }
+
+    #[test]
+    fn test_needs_raw_fallback_true_when_no_failures_parsed() {
+        // Build failure / crash: command failed but nothing landed in failed_tests.
+        let summary = binlog::TestSummary {
+            failed: 1,
+            total: 1,
+            ..Default::default()
+        };
+        assert!(test_needs_raw_fallback(&summary));
+    }
+
+    #[test]
+    fn test_needs_raw_fallback_true_when_a_failure_lacks_detail() {
+        // Self-closing <UnitTestResult> with no <ErrorInfo>: name only, no detail.
+        let summary = binlog::TestSummary {
+            failed: 1,
+            total: 1,
+            failed_tests: vec![binlog::FailedTest {
+                name: "MyTests.NoDetail".to_string(),
+                details: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        assert!(test_needs_raw_fallback(&summary));
+    }
+
+    #[test]
+    fn test_compose_failure_output_drops_raw_when_no_fallback_needed() {
+        // The raw stdout contains the inline failure; the filtered section also
+        // contains it. With needs_raw_fallback=false, the failure must appear once.
+        let raw_stdout = "  failed MyTests.HasRestriction\n    Assert.True() Failure";
+        let filtered =
+            "Failed Tests:\n  MyTests.HasRestriction\n    Assert.True() Failure\n\nfail dotnet test: 717 passed, 5 failed";
+        let output = compose_failure_output(false, false, raw_stdout, "", filtered);
+
+        assert_eq!(output, filtered);
+        assert_eq!(output.matches("HasRestriction").count(), 1);
+    }
+
+    #[test]
+    fn test_compose_failure_output_prepends_raw_when_fallback_needed() {
+        let raw_stdout = "Build FAILED.\n  Program.cs(1,1): error CS1002";
+        let filtered = "fail dotnet test: 0 passed, 1 failed";
+        // command_success=false, needs_raw_fallback=true → raw is prepended.
+        let output = compose_failure_output(false, true, raw_stdout, "", filtered);
+
+        assert!(output.starts_with("Build FAILED."));
+        assert!(output.ends_with(filtered));
+    }
+
+    #[test]
+    fn test_compose_failure_output_uses_stderr_when_stdout_empty() {
+        let filtered = "fail dotnet test: 0 passed, 1 failed";
+        let output = compose_failure_output(false, true, "   ", "boom on stderr", filtered);
+
+        assert!(output.starts_with("boom on stderr"));
+        assert!(output.ends_with(filtered));
+    }
+
+    #[test]
+    fn test_compose_failure_output_returns_filtered_on_success() {
+        let filtered = "ok dotnet test: 722 tests passed";
+        let output = compose_failure_output(true, true, "ignored raw", "ignored", filtered);
+        assert_eq!(output, filtered);
     }
 
     #[test]

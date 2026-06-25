@@ -383,13 +383,21 @@ fn write_if_changed(path: &Path, content: &str, name: &str, ctx: InitContext) ->
     }
 }
 
+/// Resolve the final write target: if `path` is a symlink, follow it so
+/// the atomic rename lands on the real file and the symlink is preserved.
+fn resolve_atomic_target(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Atomic write using tempfile + rename
 /// Prevents corruption on crash/interrupt
+/// Follows symlinks so the link itself is preserved.
 fn atomic_write(path: &Path, content: &str) -> Result<()> {
-    let parent = path.parent().with_context(|| {
+    let target = resolve_atomic_target(path);
+    let parent = target.parent().with_context(|| {
         format!(
             "Cannot write to {}: path has no parent directory",
-            path.display()
+            target.display()
         )
     })?;
 
@@ -403,10 +411,10 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
         .with_context(|| format!("Failed to write {} bytes to temp file", content.len()))?;
 
     // Atomic rename
-    temp_file.persist(path).with_context(|| {
+    temp_file.persist(&target).with_context(|| {
         format!(
             "Failed to atomically replace {} (disk full?)",
-            path.display()
+            target.display()
         )
     })?;
 
@@ -499,7 +507,10 @@ fn prompt_telemetry_consent() -> Result<()> {
 }
 
 fn print_manual_instructions(hook_command: &str, include_opencode: bool) {
-    println!("\n  MANUAL STEP: Add this to ~/.claude/settings.json:");
+    let settings_path = resolve_claude_dir()
+        .unwrap_or_else(|_| PathBuf::from(format!("~/{}", CLAUDE_DIR)))
+        .join(SETTINGS_JSON);
+    println!("\n  MANUAL STEP: Add this to {}:", settings_path.display());
     println!("  {{");
     println!("    \"hooks\": {{ \"PreToolUse\": [{{");
     println!("      \"matcher\": \"Bash\",");
@@ -2710,11 +2721,23 @@ fn resolve_home_subdir(subdir: &str) -> Result<PathBuf> {
         })
 }
 
-fn resolve_claude_dir() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var("RTK_CLAUDE_DIR") {
-        return Ok(PathBuf::from(dir));
+pub fn resolve_claude_dir() -> Result<PathBuf> {
+    resolve_claude_dir_from(
+        std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
+        dirs::home_dir(),
+    )
+}
+
+fn resolve_claude_dir_from(
+    claude_dir: Option<PathBuf>,
+    home_dir: Option<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(path) = claude_dir.filter(|path| !path.as_os_str().is_empty()) {
+        return Ok(path);
     }
-    resolve_home_subdir(CLAUDE_DIR)
+    home_dir
+        .map(|h| h.join(CLAUDE_DIR))
+        .context("Cannot determine Claude config directory. Set $CLAUDE_CONFIG_DIR or $HOME.")
 }
 
 fn resolve_codex_dir() -> Result<PathBuf> {
@@ -5000,6 +5023,46 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_claude_dir_prefers_rtk_override() {
+        let result = resolve_claude_dir_from(
+            Some(PathBuf::from("/custom/rtk-claude")),
+            Some(PathBuf::from("/home/user")),
+        )
+        .unwrap();
+        assert_eq!(result, PathBuf::from("/custom/rtk-claude"));
+    }
+
+    #[test]
+    fn test_resolve_claude_dir_uses_claude_config_dir() {
+        let result = resolve_claude_dir_from(
+            Some(PathBuf::from("/custom/claude-config")),
+            Some(PathBuf::from("/home/user")),
+        )
+        .unwrap();
+        assert_eq!(result, PathBuf::from("/custom/claude-config"));
+    }
+
+    #[test]
+    fn test_resolve_claude_dir_falls_back_to_home() {
+        let result = resolve_claude_dir_from(None, Some(PathBuf::from("/home/user"))).unwrap();
+        assert_eq!(result, PathBuf::from("/home/user/.claude"));
+    }
+
+    #[test]
+    fn test_resolve_claude_dir_ignores_empty_overrides() {
+        let empty =
+            resolve_claude_dir_from(Some(PathBuf::new()), Some(PathBuf::from("/home/user")))
+                .unwrap();
+        assert_eq!(empty, PathBuf::from("/home/user/.claude"));
+    }
+
+    #[test]
+    fn test_resolve_claude_dir_errors_without_home() {
+        let err = resolve_claude_dir_from(None, None).unwrap_err();
+        assert!(err.to_string().contains("Cannot determine Claude config"));
+    }
+
+    #[test]
     fn test_resolve_hermes_home_prefers_hermes_home() {
         let hermes_home = OsString::from("~/custom hermes home");
         let home_dir = PathBuf::from("/tmp/home");
@@ -5347,6 +5410,48 @@ mod tests {
         assert!(file_path.exists());
         let written = fs::read_to_string(&file_path).unwrap();
         assert_eq!(written, content);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_preserves_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let target_path = temp.path().join("real-settings.json");
+        let link_path = temp.path().join("settings.json");
+
+        fs::write(&target_path, "{}").expect("seed target file");
+        symlink(&target_path, &link_path).expect("create symlink");
+
+        atomic_write(&link_path, "{\"hooks\":{}}").unwrap();
+
+        let meta = fs::symlink_metadata(&link_path).unwrap();
+        assert!(meta.file_type().is_symlink(), "symlink must survive");
+        let written = fs::read_to_string(&target_path).unwrap();
+        assert_eq!(written, "{\"hooks\":{}}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_preserves_relative_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let subdir = temp.path().join("real");
+        fs::create_dir(&subdir).unwrap();
+        let target_path = subdir.join("settings.json");
+        let link_path = temp.path().join("settings.json");
+
+        fs::write(&target_path, "{}").expect("seed target file");
+        symlink(Path::new("real/settings.json"), &link_path).expect("create relative symlink");
+
+        atomic_write(&link_path, "{\"patched\":true}").unwrap();
+
+        let meta = fs::symlink_metadata(&link_path).unwrap();
+        assert!(meta.file_type().is_symlink(), "symlink must survive");
+        let written = fs::read_to_string(&target_path).unwrap();
+        assert_eq!(written, "{\"patched\":true}");
     }
 
     // Test for preserve_order round-trip
@@ -5769,12 +5874,12 @@ mod tests {
         let claude_dir = tmp.path().join(CLAUDE_DIR);
         fs::create_dir_all(&claude_dir).unwrap();
 
-        let orig = std::env::var_os("RTK_CLAUDE_DIR");
-        std::env::set_var("RTK_CLAUDE_DIR", &claude_dir);
+        let orig = std::env::var_os("CLAUDE_CONFIG_DIR");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &claude_dir);
         f(&claude_dir);
         match orig {
-            Some(v) => std::env::set_var("RTK_CLAUDE_DIR", v),
-            None => std::env::remove_var("RTK_CLAUDE_DIR"),
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
         }
     }
 

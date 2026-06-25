@@ -15,6 +15,10 @@ pub struct ParsedToken {
 }
 
 pub fn tokenize(input: &str) -> Vec<ParsedToken> {
+    tokenize_inner(input, false)
+}
+
+fn tokenize_inner(input: &str, emit_newline: bool) -> Vec<ParsedToken> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut current_start: usize = 0;
@@ -226,6 +230,16 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
                 });
                 current_start = byte_pos;
             }
+            '\n' | '\r' if emit_newline => {
+                flush_arg(&mut tokens, &mut current, current_start);
+                tokens.push(ParsedToken {
+                    kind: TokenKind::Operator,
+                    value: "\n".into(),
+                    offset: byte_pos,
+                });
+                byte_pos += char_len;
+                current_start = byte_pos;
+            }
             c if c.is_whitespace() => {
                 flush_arg(&mut tokens, &mut current, current_start);
                 byte_pos += c.len_utf8();
@@ -256,6 +270,106 @@ fn flush_arg(tokens: &mut Vec<ParsedToken>, current: &mut String, offset: usize)
             offset,
         });
     }
+}
+
+/// True for constructs the permission gate can't decompose, so they must never
+/// be auto-allowed: command/process substitution, or a real file-target redirect
+/// (fd-dup like `2>&1` and `/dev/null` are exempt). Separators and subshells are
+/// handled by [`split_for_permissions`], not flagged here.
+pub fn contains_unattestable_construct(cmd: &str) -> bool {
+    if contains_substitution(cmd) {
+        return true;
+    }
+    let tokens = tokenize(cmd);
+    tokens
+        .iter()
+        .enumerate()
+        .any(|(i, tok)| tok.kind == TokenKind::Redirect && redirect_has_file_target(&tokens, i))
+}
+
+/// Quote-aware: bash runs backtick/`$(...)` unquoted and inside double quotes,
+/// but treats single-quoted text literally; `<(`/`>(` is unquoted-only.
+fn contains_substitution(cmd: &str) -> bool {
+    let bytes = cmd.as_bytes();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if !in_single => {
+                i += 2;
+                continue;
+            }
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'`' if !in_single => return true,
+            b'$' if !in_single && bytes.get(i + 1) == Some(&b'(') => return true,
+            b'<' | b'>' if !in_single && !in_double && bytes.get(i + 1) == Some(&b'(') => {
+                return true
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+// `>&N`/`>&-` (and `N>&M`) is fd-dup/close; bare `>&` before a word is
+// `>word 2>&1` — a file target.
+fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool {
+    let value = &tokens[i].value;
+    if let Some(pos) = value.find(">&") {
+        let tail = &value[pos + 2..];
+        if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit() || c == '-') {
+            return false;
+        }
+    }
+    match tokens.get(i + 1) {
+        Some(next) if next.kind == TokenKind::Arg => next.value != "/dev/null",
+        _ => true,
+    }
+}
+
+/// Like [`split_on_operators`] but also breaks on newline, background `&`, and
+/// subshell `( ... )`, and truncates each segment at its first redirect.
+/// Callers must still gate on [`contains_unattestable_construct`] first.
+pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return vec![];
+    }
+
+    let tokens = tokenize_inner(trimmed, true);
+    let mut results = Vec::new();
+    let mut seg_start: usize = 0;
+    let mut seg_end: Option<usize> = None;
+
+    for tok in &tokens {
+        let is_boundary = match tok.kind {
+            TokenKind::Operator | TokenKind::Pipe => true,
+            TokenKind::Shellism => matches!(tok.value.as_str(), "&" | "(" | ")"),
+            _ => false,
+        };
+
+        if is_boundary {
+            let end = seg_end.take().unwrap_or(tok.offset);
+            let segment = trimmed[seg_start..end].trim();
+            if !segment.is_empty() {
+                results.push(segment);
+            }
+            seg_start = tok.offset + tok.value.len();
+        } else if tok.kind == TokenKind::Redirect && seg_end.is_none() {
+            seg_end = Some(tok.offset);
+        }
+    }
+
+    let end = seg_end.unwrap_or(trimmed.len());
+    let tail = trimmed[seg_start..end].trim();
+    if !tail.is_empty() {
+        results.push(tail);
+    }
+
+    results
 }
 
 /// Split a shell command on operators (`&&`, `||`, `;`) and optionally pipes (`|`),
@@ -1029,5 +1143,165 @@ mod tests {
     fn test_split_on_operators_empty() {
         assert!(split_on_operators("", false).is_empty());
         assert!(split_on_operators("  ", true).is_empty());
+    }
+
+    // --- contains_unattestable_construct (security) -------------------------
+
+    #[test]
+    fn test_unattestable_backtick() {
+        assert!(contains_unattestable_construct("git status `whoami`"));
+    }
+
+    #[test]
+    fn test_unattestable_command_substitution() {
+        assert!(contains_unattestable_construct(
+            "git log --pretty=$(rm -rf ~)"
+        ));
+    }
+
+    #[test]
+    fn test_unattestable_process_substitution() {
+        assert!(contains_unattestable_construct("diff <(secret) <(other)"));
+        assert!(contains_unattestable_construct("tee >(cat)"));
+    }
+
+    #[test]
+    fn test_unattestable_substitution_inside_double_quotes() {
+        assert!(contains_unattestable_construct(
+            r#"git log --pretty="$(rm -rf ~)""#
+        ));
+        assert!(contains_unattestable_construct(
+            r#"git log --pretty="`rm -rf ~`""#
+        ));
+        assert!(contains_unattestable_construct(
+            r#"git -c x="$(whoami)" status"#
+        ));
+    }
+
+    #[test]
+    fn test_attestable_substitution_inside_single_quotes() {
+        assert!(!contains_unattestable_construct("echo '$(rm -rf ~)'"));
+        assert!(!contains_unattestable_construct("echo '`whoami`'"));
+        assert!(!contains_unattestable_construct(r#"echo "\$(rm -rf ~)""#));
+    }
+
+    #[test]
+    fn test_unattestable_file_redirects() {
+        assert!(contains_unattestable_construct("git log > /tmp/x"));
+        // nosemgrep: sensitive-path-reference -- test fixture
+        assert!(contains_unattestable_construct("echo evil >> ~/.bashrc"));
+        assert!(contains_unattestable_construct("cmd &> /tmp/x"));
+        // nosemgrep: sensitive-path-reference -- test fixture
+        assert!(contains_unattestable_construct("cat < /etc/passwd"));
+        assert!(contains_unattestable_construct("cat << EOF"));
+    }
+
+    #[test]
+    fn test_unattestable_ampersand_file_redirect() {
+        // `>&word` (word not a number) == `>word 2>&1` — a file write.
+        assert!(contains_unattestable_construct("git status >& /tmp/evil"));
+        // nosemgrep: sensitive-path-reference -- test fixture
+        assert!(contains_unattestable_construct("cat x >&~/.bashrc"));
+        assert!(contains_unattestable_construct("echo hi 2>& /tmp/evil"));
+    }
+
+    #[test]
+    fn test_attestable_fd_dup_and_devnull_redirects() {
+        assert!(!contains_unattestable_construct("git status 2>&1"));
+        assert!(!contains_unattestable_construct("cmd >&2"));
+        assert!(!contains_unattestable_construct("cmd 2>&-"));
+        assert!(!contains_unattestable_construct("cmd 2>/dev/null"));
+        assert!(!contains_unattestable_construct("cmd > /dev/null"));
+        assert!(!contains_unattestable_construct("cmd &> /dev/null"));
+        assert!(!contains_unattestable_construct("cmd >& /dev/null"));
+    }
+
+    #[test]
+    fn test_attestable_subshell_and_separators() {
+        assert!(!contains_unattestable_construct(
+            "(git status; cargo build)"
+        ));
+        assert!(!contains_unattestable_construct(
+            "git status && cargo build"
+        ));
+        assert!(!contains_unattestable_construct("git status; cargo build"));
+        assert!(!contains_unattestable_construct("git log | head"));
+        assert!(!contains_unattestable_construct("sleep 1 &"));
+        assert!(!contains_unattestable_construct("git status\ncargo build"));
+    }
+
+    #[test]
+    fn test_attestable_variable_expansion() {
+        assert!(!contains_unattestable_construct("echo $HOME"));
+        assert!(!contains_unattestable_construct("echo ${HOME}"));
+        assert!(!contains_unattestable_construct("git status"));
+        assert!(!contains_unattestable_construct(""));
+    }
+
+    // --- split_for_permissions ---------------------------------------------
+
+    #[test]
+    fn test_split_perms_operators() {
+        assert_eq!(
+            split_for_permissions("git status && cargo build"),
+            vec!["git status", "cargo build"]
+        );
+        assert_eq!(
+            split_for_permissions("git status; cargo build"),
+            vec!["git status", "cargo build"]
+        );
+        assert_eq!(
+            split_for_permissions("git log | head"),
+            vec!["git log", "head"]
+        );
+    }
+
+    #[test]
+    fn test_split_perms_newline() {
+        assert_eq!(
+            split_for_permissions("git status\ncargo build"),
+            vec!["git status", "cargo build"]
+        );
+    }
+
+    #[test]
+    fn test_split_perms_background_ampersand() {
+        assert_eq!(
+            split_for_permissions("git status & rm -rf ~"),
+            vec!["git status", "rm -rf ~"]
+        );
+        assert_eq!(split_for_permissions("sleep 1 &"), vec!["sleep 1"]);
+    }
+
+    #[test]
+    fn test_split_perms_subshell() {
+        assert_eq!(
+            split_for_permissions("(git status; cargo build)"),
+            vec!["git status", "cargo build"]
+        );
+        assert_eq!(split_for_permissions("((a; b); c)"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_split_perms_truncates_at_redirect() {
+        assert_eq!(split_for_permissions("git status 2>&1"), vec!["git status"]);
+        assert_eq!(split_for_permissions("git log > /tmp/x"), vec!["git log"]);
+        assert_eq!(
+            split_for_permissions("git push --force 2>&1"),
+            vec!["git push --force"]
+        );
+    }
+
+    #[test]
+    fn test_split_perms_newline_inside_quotes_not_split() {
+        let segments = split_for_permissions("echo 'line1\nline2'");
+        assert_eq!(segments.len(), 1);
+        assert!(segments[0].starts_with("echo"));
+    }
+
+    #[test]
+    fn test_split_perms_empty() {
+        assert!(split_for_permissions("").is_empty());
+        assert!(split_for_permissions("   ").is_empty());
     }
 }
