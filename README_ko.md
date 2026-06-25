@@ -17,7 +17,7 @@
 <p align="center">
   <a href="https://www.rtk-ai.app">웹사이트</a> &bull;
   <a href="#설치">설치</a> &bull;
-  <a href="docs/TROUBLESHOOTING.md">문제 해결</a> &bull;
+  <a href="https://www.rtk-ai.app/guide/troubleshooting">문제 해결</a> &bull;
   <a href="docs/contributing/ARCHITECTURE.md">아키텍처</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
@@ -165,7 +165,7 @@ rtk discover                    # 놓친 절약 기회 발견
 
 ## 문서
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - 일반적인 문제 해결
+- **[문제 해결](https://www.rtk-ai.app/guide/troubleshooting)** - 일반적인 문제 해결
 - **[INSTALL.md](INSTALL.md)** - 상세 설치 가이드
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - 기술 아키텍처
 
