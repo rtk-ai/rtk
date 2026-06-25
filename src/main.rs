@@ -2957,10 +2957,7 @@ mod tests {
         if let Ok(cli) = result {
             match cli.command {
                 Commands::Gain {
-                    serve,
-                    open,
-                    port,
-                    ..
+                    serve, open, port, ..
                 } => {
                     assert!(serve);
                     assert!(open);
