@@ -102,7 +102,7 @@ impl BlockHandler for CargoBuildHandler {
             Some(format!("{}\n", s))
         } else {
             Some(format!(
-                "═══════════════════════════════════════\ncargo build: {} errors, {} warnings ({} crates)\n",
+                "cargo build: {} errors, {} warnings ({} crates)\n",
                 self.error_count, self.warnings, self.compiled
             ))
         }
@@ -488,7 +488,6 @@ fn filter_cargo_install(output: &str) -> String {
                 deps_info
             ));
         }
-        result.push_str("═══════════════════════════════════════\n");
 
         const MAX_INSTALL_ERRORS: usize = CAP_ERRORS;
         for (i, err) in errors.iter().enumerate().take(MAX_INSTALL_ERRORS) {
@@ -796,7 +795,7 @@ fn filter_cargo_build(output: &str) -> String {
     }
 
     let mut result = format!(
-        "cargo build: {} errors, {} warnings ({} crates)\n═══════════════════════════════════════\n",
+        "cargo build: {} errors, {} warnings ({} crates)\n",
         handler.error_count, handler.warnings, handler.compiled
     );
     const MAX_CHECK_BLOCKS: usize = CAP_ERRORS;
@@ -1011,7 +1010,6 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
 
     if !failures.is_empty() {
         result.push_str(&format!("FAILURES ({}):\n", failures.len()));
-        result.push_str("═══════════════════════════════════════\n");
         const MAX_FAILURES: usize = CAP_WARNINGS;
         for (i, failure) in failures.iter().enumerate().take(MAX_FAILURES) {
             result.push_str(&format!("{}. {}\n", i + 1, truncate(failure, 200)));
@@ -1168,7 +1166,6 @@ fn filter_cargo_clippy(output: &str) -> String {
         "cargo clippy: {} errors, {} warnings\n",
         error_count, warning_count
     ));
-    result.push_str("═══════════════════════════════════════\n");
 
     // Show full error blocks so developers can see what needs fixing
     if !error_blocks.is_empty() {

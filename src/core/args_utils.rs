@@ -1,23 +1,27 @@
 //! Utility functions for argument handling, particularly for restoring "--" escape
 //! arguments that clap consumes during parsing.
 
-/// Restores "--" escape arguments that clap consumed.
-/// Handles:
-/// - Single/multiple "--" swallowed by clap (restores each at its original position)
-/// - "--" already present in parsed (no change)
-/// - No "--" in original command (no injection)
-/// - Args appearing before/after "--" in original (preserves order)
-/// - Interleaved "--" and args (preserves relative positions, e.g., "-- arg1 -- arg2")
-/// - Duplicate args on both sides of "--"
+/// Restores `--` tokens that clap consumed when using `trailing_var_arg = true`.
 ///
-/// Returns parsed_args unchanged if raw has same or fewer "--" than parsed
-/// (meaning clap didn't consume any, or preserved them).
+/// Returns `parsed_args` unchanged when `raw_args` has the same or fewer `--` tokens
+/// than `parsed_args` (nothing was consumed). Otherwise restores all consumed `--` at
+/// their original positions by returning the user-args suffix of `raw_args` verbatim.
 pub fn restore_double_dash(parsed_args: &[String]) -> Vec<String> {
     let raw_args: Vec<String> = std::env::args().collect();
     restore_double_dash_with_raw(parsed_args, &raw_args)
 }
 
 /// Testable version that takes raw_args explicitly.
+///
+/// Precondition: all callers use `trailing_var_arg = true`, which guarantees that
+/// `parsed_args` is the exact suffix of `raw_args` minus any `--` tokens that clap
+/// stripped. This makes the user-args region length-deterministic:
+///
+///   user_region_len   = parsed_args.len() + missing_dashes
+///   user_region_start = raw_args.len() - user_region_len
+///
+/// Returning `raw_args[user_region_start..]` restores all stripped `--` tokens at
+/// their original positions without any value-based matching.
 pub fn restore_double_dash_with_raw(parsed_args: &[String], raw_args: &[String]) -> Vec<String> {
     let raw_dash_count = raw_args.iter().filter(|a| a.as_str() == "--").count();
     let parsed_dash_count = parsed_args.iter().filter(|a| a.as_str() == "--").count();
@@ -26,36 +30,15 @@ pub fn restore_double_dash_with_raw(parsed_args: &[String], raw_args: &[String])
         return parsed_args.to_vec();
     }
 
-    // Find all positions of "--" in raw_args (skip index 0 = "rtk")
-    let mut dash_positions: Vec<usize> = Vec::new();
-    for (i, arg) in raw_args.iter().enumerate().skip(1) {
-        if arg == "--" {
-            dash_positions.push(i);
-        }
-    }
+    let missing_dashes = raw_dash_count - parsed_dash_count;
+    let user_region_len = parsed_args.len() + missing_dashes;
 
-    if dash_positions.is_empty() {
+    if raw_args.len() <= user_region_len {
         return parsed_args.to_vec();
     }
 
-    // Build result by inserting "--" at correct positions relative to parsed args
-    let mut result = Vec::new();
-    let mut raw_idx = 1; // start after "rtk"
-    let mut dash_idx = 0;
-
-    while raw_idx < raw_args.len() {
-        // Check if current position is a "--" that was swallowed
-        if dash_idx < dash_positions.len() && raw_idx == dash_positions[dash_idx] {
-            result.push("--".to_string());
-            dash_idx += 1;
-        } else if parsed_args.contains(&raw_args[raw_idx]) {
-            // This arg is in parsed_args, add it
-            result.push(raw_args[raw_idx].clone());
-        }
-        raw_idx += 1;
-    }
-
-    result
+    let user_region_start = raw_args.len() - user_region_len;
+    raw_args[user_region_start..].to_vec()
 }
 
 #[cfg(test)]
@@ -117,14 +100,6 @@ mod tests {
         let raw = vec!["rtk", "git", "diff", "--", "--"];
         let parsed = vec!["--"];
         assert_eq!(restore_with_raw(&parsed, &raw), vec!["--", "--"]);
-    }
-
-    #[test]
-    fn test_compound_command_with_dashes() {
-        // Multiple segments with "--" → restore all
-        let raw = vec!["rtk", "cmd1", "--", "arg1", "&&", "cmd2", "--", "file"];
-        let parsed = vec!["file"];
-        assert_eq!(restore_with_raw(&parsed, &raw), vec!["--", "--", "file"]);
     }
 
     // ============ "--" already present (no change needed) ============
@@ -204,6 +179,39 @@ mod tests {
         let raw = vec!["rtk", "cargo", "clippy", "-D", "warnings"];
         let parsed = vec!["-D", "warnings"];
         assert_eq!(restore_with_raw(&parsed, &raw), vec!["-D", "warnings"]);
+    }
+
+    // ============ Positional collision with command token ============
+
+    #[test]
+    fn test_positional_equals_subcommand() {
+        // rtk git diff -- diff: filename "diff" same value as subcommand token
+        let raw = vec!["rtk", "git", "diff", "--", "diff"];
+        let parsed = vec!["diff"];
+        assert_eq!(restore_with_raw(&parsed, &raw), vec!["--", "diff"]);
+    }
+
+    #[test]
+    fn test_cargo_test_named_cargo() {
+        // rtk cargo test cargo -- --nocapture: test named "cargo"
+        let raw = vec!["rtk", "cargo", "test", "cargo", "--", "--nocapture"];
+        let parsed = vec!["cargo", "--nocapture"];
+        assert_eq!(
+            restore_with_raw(&parsed, &raw),
+            vec!["cargo", "--", "--nocapture"]
+        );
+    }
+
+    #[test]
+    fn test_consecutive_dashes_before_file() {
+        // rtk git diff -- -- file: stable regardless of how many "--" clap consumed
+        let raw = vec!["rtk", "git", "diff", "--", "--", "file"];
+        // Case A: clap consumed one, kept second as positional
+        let parsed_a = vec!["--", "file"];
+        assert_eq!(restore_with_raw(&parsed_a, &raw), vec!["--", "--", "file"]);
+        // Case B: clap consumed both
+        let parsed_b = vec!["file"];
+        assert_eq!(restore_with_raw(&parsed_b, &raw), vec!["--", "--", "file"]);
     }
 
     // ============ Git diff specific cases ============

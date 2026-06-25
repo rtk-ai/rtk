@@ -1,0 +1,87 @@
+[INFO] Scanning for projects...
+[INFO] ------------------------------------------------------------------------
+[INFO] Reactor Build Order:
+[INFO] 
+[INFO] multi-module-skeleton                                              [pom]
+[INFO] child-a                                                            [jar]
+[INFO] child-b                                                            [jar]
+[INFO] 
+[INFO] ---------------< com.example.rtk:multi-module-skeleton >----------------
+[INFO] Building multi-module-skeleton 1.0.0-SNAPSHOT                      [1/3]
+[INFO]   from pom.xml
+[INFO] --------------------------------[ pom ]---------------------------------
+[INFO] 
+[INFO] --- install:3.1.2:install (default-install) @ multi-module-skeleton ---
+[INFO] Installing /tmp/rtk-reactor/pom.xml to /home/vcyber/.m2/repository/com/example/rtk/multi-module-skeleton/1.0.0-SNAPSHOT/multi-module-skeleton-1.0.0-SNAPSHOT.pom
+[INFO] 
+[INFO] ----------------------< com.example.rtk:child-a >-----------------------
+[INFO] Building child-a 1.0.0-SNAPSHOT                                    [2/3]
+[INFO]   from child-a/pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ child-a ---
+[INFO] skip non existing resourceDirectory /tmp/rtk-reactor/child-a/src/main/resources
+[INFO] 
+[INFO] --- compiler:3.13.0:compile (default-compile) @ child-a ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO] 
+[INFO] --- resources:3.3.1:testResources (default-testResources) @ child-a ---
+[INFO] skip non existing resourceDirectory /tmp/rtk-reactor/child-a/src/test/resources
+[INFO] 
+[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ child-a ---
+[INFO] No sources to compile
+[INFO] 
+[INFO] --- surefire:2.17:test (default-test) @ child-a ---
+[INFO] No tests to run.
+[INFO] 
+[INFO] --- jar:3.1.2:jar (default-jar) @ child-a ---
+[INFO] 
+[INFO] --- install:3.1.2:install (default-install) @ child-a ---
+[INFO] Installing /tmp/rtk-reactor/child-a/pom.xml to /home/vcyber/.m2/repository/com/example/rtk/child-a/1.0.0-SNAPSHOT/child-a-1.0.0-SNAPSHOT.pom
+[INFO] Installing /tmp/rtk-reactor/child-a/target/child-a-1.0.0-SNAPSHOT.jar to /home/vcyber/.m2/repository/com/example/rtk/child-a/1.0.0-SNAPSHOT/child-a-1.0.0-SNAPSHOT.jar
+[INFO] 
+[INFO] ----------------------< com.example.rtk:child-b >-----------------------
+[INFO] Building child-b 1.0.0-SNAPSHOT                                    [3/3]
+[INFO]   from child-b/pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ child-b ---
+[INFO] skip non existing resourceDirectory /tmp/rtk-reactor/child-b/src/main/resources
+[INFO] 
+[INFO] --- compiler:3.13.0:compile (default-compile) @ child-b ---
+[INFO] Recompiling the module because of changed source code.
+[INFO] Compiling 1 source file with javac [debug target 21] to target/classes
+[INFO] -------------------------------------------------------------
+[ERROR] COMPILATION ERROR : 
+[INFO] -------------------------------------------------------------
+[ERROR] /tmp/rtk-reactor/child-b/src/main/java/Empty.java:[1,22] cannot find symbol
+  symbol:   class BogusType
+  location: class Empty
+[INFO] 1 error
+[INFO] -------------------------------------------------------------
+[INFO] ------------------------------------------------------------------------
+[INFO] Reactor Summary for multi-module-skeleton 1.0.0-SNAPSHOT:
+[INFO] 
+[INFO] multi-module-skeleton .............................. SUCCESS [  0.369 s]
+[INFO] child-a ............................................ SUCCESS [  1.657 s]
+[INFO] child-b ............................................ FAILURE [  0.940 s]
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  3.193 s
+[INFO] Finished at: 2026-05-25T12:11:41-03:00
+[INFO] ------------------------------------------------------------------------
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:3.13.0:compile (default-compile) on project child-b: Compilation failure
+[ERROR] /tmp/rtk-reactor/child-b/src/main/java/Empty.java:[1,22] cannot find symbol
+[ERROR]   symbol:   class BogusType
+[ERROR]   location: class Empty
+[ERROR] -> [Help 1]
+[ERROR] 
+[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.
+[ERROR] Re-run Maven using the -X switch to enable full debug logging.
+[ERROR] 
+[ERROR] For more information about the errors and possible solutions, please read the following articles:
+[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/MojoFailureException
+[ERROR] 
+[ERROR] After correcting the problems, you can resume the build with the command
+[ERROR]   mvn <args> -rf :child-b

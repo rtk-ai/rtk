@@ -199,17 +199,14 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         _ => filter_generic_lint(&raw),
     };
 
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "lint", result.exit_code) {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
+    let hint = crate::core::tee::tee_and_hint(&raw, "lint", result.exit_code);
+    let shown = crate::core::runner::emit_guarded(&filtered, hint.as_deref(), &raw);
 
     timer.track(
         &format!("{} {}", linter, args.join(" ")),
         &format!("rtk lint {} {}", linter, args.join(" ")),
         &raw,
-        &filtered,
+        &shown,
     );
 
     if !result.success() {
@@ -268,7 +265,6 @@ fn filter_eslint_json(output: &str) -> String {
         "ESLint: {} errors, {} warnings in {} files\n",
         total_errors, total_warnings, total_files
     ));
-    result.push_str("═══════════════════════════════════════\n");
 
     // Show top rules
     let mut rule_counts: Vec<_> = by_rule.iter().collect();
@@ -394,7 +390,6 @@ fn filter_pylint_json(output: &str) -> String {
         result.push('\n');
     }
 
-    result.push_str("═══════════════════════════════════════\n");
 
     // Show top symbols (rules)
     let mut symbol_counts: Vec<_> = by_symbol.iter().collect();
@@ -471,7 +466,6 @@ fn filter_generic_lint(output: &str) -> String {
 
     let mut result = String::new();
     result.push_str(&format!("Lint: {} errors, {} warnings\n", errors, warnings));
-    result.push_str("═══════════════════════════════════════\n");
 
     const MAX_ISSUES: usize = CAP_ERRORS;
     for issue in issues.iter().take(MAX_ISSUES) {

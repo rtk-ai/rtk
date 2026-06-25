@@ -1,5 +1,6 @@
 //! Runs code formatters (Prettier, Ruff) and shows only files that changed.
 
+use crate::core::guard::never_worse;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::CAP_WARNINGS;
@@ -124,13 +125,14 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         _ => raw.trim().to_string(),
     };
 
-    println!("{}", filtered);
+    let shown = never_worse(&raw, &filtered);
+    println!("{}", shown);
 
     timer.track(
         &format!("{} {}", formatter, user_args.join(" ")),
         &format!("rtk format {} {}", formatter, user_args.join(" ")),
         &raw,
-        &filtered,
+        shown,
     );
 
     Ok(result.exit_code)
@@ -235,7 +237,6 @@ fn filter_black_output(output: &str) -> String {
             "Format (black): {} files need formatting\n",
             count
         ));
-        result.push_str("═══════════════════════════════════════\n");
 
         if !files_to_format.is_empty() {
             const MAX_FORMAT_FILES: usize = CAP_WARNINGS;

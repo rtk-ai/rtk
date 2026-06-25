@@ -9,14 +9,14 @@
  * Rust registry, not this file.
  */
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 
 let rtkAvailable: boolean | null = null;
 
 function checkRtk(): boolean {
   if (rtkAvailable !== null) return rtkAvailable;
   try {
-    execSync("which rtk", { stdio: "ignore" });
+    execFileSync("which", ["rtk"], { stdio: "ignore" });
     rtkAvailable = true;
   } catch {
     rtkAvailable = false;
@@ -26,10 +26,12 @@ function checkRtk(): boolean {
 
 function tryRewrite(command: string): string | null {
   try {
-    const result = execSync(`rtk rewrite ${JSON.stringify(command)}`, {
+    const result = execFileSync("rtk", ["rewrite", command], {
       encoding: "utf-8",
       timeout: 2000,
-    }).trim();
+    })
+      .toString()
+      .trim();
     return result && result !== command ? result : null;
   } catch {
     return null;

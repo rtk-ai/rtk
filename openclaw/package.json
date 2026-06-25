@@ -22,8 +22,5 @@
     "index.ts",
     "openclaw.plugin.json",
     "README.md"
-  ],
-  "peerDependencies": {
-    "rtk": ">=0.28.0"
-  }
+  ]
 }
