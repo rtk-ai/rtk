@@ -39,8 +39,14 @@ if [ -z "$CMD" ]; then
 fi
 
 # Delegate all rewrite logic to the Rust binary.
-# rtk rewrite exits 1 when there's no rewrite — hook passes through silently.
-REWRITTEN=$(rtk rewrite "$CMD" 2>/dev/null) || { echo '{}'; exit 0; }
+# Exit codes: 0 = allow rewrite, 1 = no rewrite (passthrough),
+#             2 = deny, 3 = ask (Cursor has no ask UX, treat as allow).
+REWRITTEN=$(rtk rewrite "$CMD" 2>/dev/null)
+RC=$?
+if [ "$RC" -eq 1 ] || [ "$RC" -eq 2 ] || [ -z "$REWRITTEN" ]; then
+  echo '{}'
+  exit 0
+fi
 
 # No change — nothing to do.
 if [ "$CMD" = "$REWRITTEN" ]; then
