@@ -181,6 +181,34 @@ fn strip_rg_only<T: AsRef<str>>(extra_args: &[T]) -> Vec<&str> {
     out
 }
 
+/// Translate GNU grep's `--include=GLOB` / `--exclude=GLOB` into ripgrep's glob
+/// flags so the fast rg path handles them directly instead of erroring out and
+/// falling back to system grep. ripgrep has no `--include`; it filters with
+/// `-g GLOB` (and `-g !GLOB` to exclude). grep's GLOB syntax is rg-glob
+/// compatible, so only the flag spelling changes — the value passes through
+/// unchanged. Every other arg is forwarded verbatim.
+///
+/// Only the `=` form is handled: that is the sole spelling GNU/BSD grep accept
+/// for these flags. The grep fallback path keeps the originals untranslated
+/// (grep understands `--include` natively), so an rg-rejected invocation still
+/// works there. (#2131)
+fn translate_grep_globs<T: AsRef<str>>(extra_args: &[T]) -> Vec<String> {
+    let mut out = Vec::with_capacity(extra_args.len());
+    for arg in extra_args {
+        let a = arg.as_ref();
+        if let Some(glob) = a.strip_prefix("--include=") {
+            out.push("-g".to_string());
+            out.push(glob.to_string());
+        } else if let Some(glob) = a.strip_prefix("--exclude=") {
+            out.push("-g".to_string());
+            out.push(format!("!{glob}"));
+        } else {
+            out.push(a.to_string());
+        }
+    }
+    out
+}
+
 fn has_shape_flag<T: AsRef<str>>(extra_args: &[T]) -> bool {
     extra_args.iter().any(|arg| {
         let name = arg.as_ref().split('=').next().unwrap_or("");
@@ -340,7 +368,10 @@ fn grep_capture<T: AsRef<str>>(
     if let Some(ft) = file_type {
         rg_cmd.arg("--type").arg(ft);
     }
-    rg_cmd.args(extra_args.iter().map(|a| a.as_ref()));
+    // Translate grep's --include/--exclude to rg's -g so the fast rg path
+    // handles them instead of erroring and falling back to grep (#2131).
+    let rg_extra = translate_grep_globs(extra_args);
+    rg_cmd.args(&rg_extra);
     for p in patterns {
         rg_cmd.args(["-e", &p.replace(r"\|", "|")]);
     }
@@ -1090,6 +1121,36 @@ mod tests {
             flags.contains(&"*.rs".to_string()),
             "r in glob value must not be stripped"
         );
+    }
+
+    // --- grep --include/--exclude → rg -g translation (#2131) ---
+
+    #[test]
+    fn test_translate_include_glob() {
+        // grep --include=GLOB → rg -g GLOB (rg has no --include)
+        let out = translate_grep_globs(&["--include=*.rs"]);
+        assert_eq!(out, vec!["-g", "*.rs"]);
+    }
+
+    #[test]
+    fn test_translate_exclude_glob() {
+        // grep --exclude=GLOB → rg -g !GLOB (rg negates a glob with a leading !)
+        let out = translate_grep_globs(&["--exclude=*.txt"]);
+        assert_eq!(out, vec!["-g", "!*.txt"]);
+    }
+
+    #[test]
+    fn test_translate_globs_mixed_preserves_order_and_passthrough() {
+        // include/exclude translated; unrelated flags forwarded verbatim, order kept
+        let out = translate_grep_globs(&["-i", "--include=*.rs", "--exclude=*.min.js", "-w"]);
+        assert_eq!(out, vec!["-i", "-g", "*.rs", "-g", "!*.min.js", "-w"]);
+    }
+
+    #[test]
+    fn test_translate_globs_noop_without_include_exclude() {
+        // nothing to translate: args returned unchanged
+        let out = translate_grep_globs(&["-i", "-A", "2"]);
+        assert_eq!(out, vec!["-i", "-A", "2"]);
     }
 
     // --- long value-taking flags (Bug 5) ---
