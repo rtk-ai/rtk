@@ -576,11 +576,14 @@ pub fn run(
         .count();
 
     let mut rtk_output = String::new();
-    rtk_output.push_str(&format!(
-        "{} matches in {} files:\n\n",
-        total_matches,
-        by_file.len()
-    ));
+    if total_matches > 1 || by_file.len() > 1 {
+        let match_word = if total_matches == 1 { "match" } else { "matches" };
+        let file_word = if by_file.len() == 1 { "file" } else { "files" };
+        rtk_output.push_str(&format!(
+            "{} {} in {} {}:\n\n",
+            total_matches, match_word, by_file.len(), file_word
+        ));
+    }
 
     let mut shown = 0;
     let mut files: Vec<_> = by_file.iter().collect();
