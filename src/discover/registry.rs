@@ -1364,6 +1364,9 @@ fn rewrite_segment_inner(
     if context == RewriteContext::Normal
         && (cmd_part.starts_with("head -") || cmd_part.starts_with("tail "))
     {
+        if is_excluded(cmd_part, excluded) {
+            return None;
+        }
         return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
     }
 
@@ -3043,6 +3046,32 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("tail --lines 7 a.log b.log", &[]),
             None
+        );
+    }
+
+    // --- head/tail exclude_commands ---
+
+    #[test]
+    fn test_rewrite_head_excluded() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head -20 package.json", &["head".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tail_excluded() {
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -n 10 server.log", &["tail".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_not_excluded_when_tail_is() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head -20 package.json", &["tail".to_string()]),
+            Some("rtk read package.json --max-lines 20".into())
         );
     }
 
