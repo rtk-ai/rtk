@@ -59,11 +59,8 @@ fn run_gt_filtered(
         filter_fn(&clean)
     };
 
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, tee_label, cmd_output.exit_code) {
-        println!("{}\n{}", output, hint);
-    } else {
-        println!("{}", output);
-    }
+    let hint = crate::core::tee::tee_and_hint(&raw, tee_label, cmd_output.exit_code);
+    let shown = crate::core::runner::emit_guarded(&output, hint.as_deref(), &raw);
 
     if !cmd_output.stderr.trim().is_empty() {
         eprintln!("{}", cmd_output.stderr.trim());
@@ -75,7 +72,7 @@ fn run_gt_filtered(
         format!("gt {} {}", subcmd_str, args.join(" "))
     };
     let rtk_label = format!("rtk {}", label);
-    timer.track(&label, &rtk_label, &raw, &output);
+    timer.track(&label, &rtk_label, &raw, &shown);
 
     Ok(cmd_output.exit_code)
 }

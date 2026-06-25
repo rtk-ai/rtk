@@ -5,6 +5,37 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.4](https://github.com/rtk-ai/rtk/compare/v0.42.3...v0.42.4) (2026-06-12)
+
+
+### Bug Fixes
+
+* **aws:** preserve values in JSON output for unsupported subcommands ([9574007](https://github.com/rtk-ai/rtk/commit/9574007f77fa7051e93d10c512809e60ed61ac57))
+* **ci:** pin fixture line endings, harden CRLF tests ([be28a51](https://github.com/rtk-ai/rtk/commit/be28a511797fb5214ff0784f57f491d2b7dd0e71))
+* **curl:** passthrough binary downloads to prevent UTF-8 corruption ([#1087](https://github.com/rtk-ai/rtk/issues/1087)) ([35273c2](https://github.com/rtk-ai/rtk/commit/35273c2dc1c94dd93ba97555e72b4e46928574b6))
+* **filters:** remove max_lines cap from helm filter that truncates template output ([63a76de](https://github.com/rtk-ai/rtk/commit/63a76dedff245173a8e9240e09c741552f318de3))
+* **init:** respect CLAUDE_CONFIG_DIR for global paths ([05de9d3](https://github.com/rtk-ai/rtk/commit/05de9d366aff627f044e0a40daf5fcbcf277ea30)), closes [#633](https://github.com/rtk-ai/rtk/issues/633)
+* minor print_manual_instructions regression ([6785a6c](https://github.com/rtk-ai/rtk/commit/6785a6c7695d7273e722214a295249a84819b6f0))
+* **mvn:** re-arm failure trail on per-test sublines ([1050cfe](https://github.com/rtk-ai/rtk/commit/1050cfeadcc3fd2b34df3401c6ec3aa09f0cd199))
+* **mvn:** strip post-failure help boilerplate in non-quiet mode ([df76528](https://github.com/rtk-ai/rtk/commit/df76528dd36dba4a58163a4827d34fbb9e7c17ca))
+* **security:** harden installer checksum, filter-trust, meta-command ([769b6ce](https://github.com/rtk-ai/rtk/commit/769b6ce5a44ec696bf40d845a7fea35cdb5f7699))
+* **security:** harden installer checksum, filter-trust, meta-command fallthrough ([9cc4937](https://github.com/rtk-ai/rtk/commit/9cc4937dac3ba9aa27147699afe66a2842e7bffc))
+* **security:** harden meta command list check ([069a089](https://github.com/rtk-ai/rtk/commit/069a089c409193115b83fd27438d1bd73bf876b0))
+
+## [0.42.3](https://github.com/rtk-ai/rtk/compare/v0.42.2...v0.42.3) (2026-06-05)
+
+
+### Bug Fixes
+
+* **openclaw:** no execSync to avoid async dangerous cmds ([f525cee](https://github.com/rtk-ai/rtk/commit/f525ceecf4dbaa522d70b83ca36cac5992684a92))
+* **permissions:** &gt;&file redirect no allow + scope Gemini/Cursor config ([e16aa26](https://github.com/rtk-ai/rtk/commit/e16aa26162a95bd99c954c0236b5353ffe89db00))
+* **permissions:** add test for cursor and gemini settings perm ([1ccf6e3](https://github.com/rtk-ai/rtk/commit/1ccf6e3da72b6c2feff43bbc4d9fc3ed2e4cd083))
+* **permissions:** cursor and gemini use correct permissions settings file ([a4bb55e](https://github.com/rtk-ai/rtk/commit/a4bb55efa9be1b0bf69ccc2cff9ddcbf2af7a48d))
+* **permissions:** never auto-allow not evaluable + defer to the agent ([952245d](https://github.com/rtk-ai/rtk/commit/952245d39d099ed9a804dbba21bb0486f6aede16))
+* **permissions:** project-first config lookup for Gemini/Cursor ([f88b6be](https://github.com/rtk-ai/rtk/commit/f88b6bec1323265cfced77c449bd795f2506cc90))
+* **security:** port permission hardening from master + Copilot CLI adaptation ([e1cd274](https://github.com/rtk-ai/rtk/commit/e1cd274ab9f3d473b694547e511e5baf1eae9734))
+* semgrep markers on test-fixture sensitive paths ([66d66b1](https://github.com/rtk-ai/rtk/commit/66d66b1fe6293e0f93d9797ae04e72b7ca40eaa0))
+
 ## [0.42.2](https://github.com/rtk-ai/rtk/compare/v0.42.1...v0.42.2) (2026-06-05)
 
 

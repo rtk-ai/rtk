@@ -1,6 +1,7 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
 use crate::core::args_utils;
+use crate::core::guard::never_worse;
 use crate::core::stream::{
     self, exec_capture, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode,
 };
@@ -179,9 +180,6 @@ fn run_diff(
         eprintln!("Git diff summary:");
     }
 
-    // Print stat summary first
-    println!("{}", result.stdout.trim());
-
     // Now get actual diff but compact it
     let mut diff_cmd = git_cmd(global_args);
     diff_cmd.arg("diff");
@@ -191,20 +189,22 @@ fn run_diff(
 
     let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git diff")?;
 
-    let mut final_output = result.stdout.clone();
-    if !diff_result.stdout.is_empty() {
-        println!("\nChanges:");
+    let printed = if !diff_result.stdout.is_empty() {
         let compacted = compact_diff(&diff_result.stdout, max_lines.unwrap_or(500));
-        println!("{}", compacted);
-        final_output.push_str("\nChanges:\n");
-        final_output.push_str(&compacted);
-    }
+        format!("{}\n\nChanges:\n{}", result.stdout.trim(), compacted)
+    } else {
+        result.stdout.trim().to_string()
+    };
+
+    let raw = format!("{}\n{}", result.stdout, diff_result.stdout);
+    let shown = never_worse(&raw, &printed);
+    println!("{}", shown);
 
     timer.track(
         &format!("git diff {}", args.join(" ")),
         &format!("rtk git diff {}", args.join(" ")),
-        &format!("{}\n{}", result.stdout, diff_result.stdout),
-        &final_output,
+        &raw,
+        shown,
     );
 
     Ok(0)
@@ -279,7 +279,7 @@ fn run_show(
         eprintln!("{}", summary_result.stderr);
         return Ok(summary_result.exit_code);
     }
-    println!("{}", summary_result.stdout.trim());
+    let mut printed = summary_result.stdout.trim().to_string();
 
     // Step 2: --stat summary
     let mut stat_cmd = git_cmd(global_args);
@@ -290,7 +290,8 @@ fn run_show(
     let stat_result = exec_capture(&mut stat_cmd).context("Failed to run git show --stat")?;
     let stat_text = stat_result.stdout.trim();
     if !stat_text.is_empty() {
-        println!("{}", stat_text);
+        printed.push('\n');
+        printed.push_str(stat_text);
     }
 
     // Step 3: compacted diff
@@ -302,21 +303,23 @@ fn run_show(
     let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git show (diff)")?;
     let diff_text = diff_result.stdout.trim();
 
-    let mut final_output = summary_result.stdout.clone();
     if !diff_text.is_empty() {
         if verbose > 0 {
-            println!("\nChanges:");
+            printed.push_str("\n\nChanges:");
         }
         let compacted = compact_diff(diff_text, max_lines.unwrap_or(500));
-        println!("{}", compacted);
-        final_output.push_str(&format!("\n{}", compacted));
+        printed.push('\n');
+        printed.push_str(&compacted);
     }
+
+    let shown = never_worse(&raw_output, &printed);
+    println!("{}", shown);
 
     timer.track(
         &format!("git show {}", args.join(" ")),
         &format!("rtk git show {}", args.join(" ")),
         &raw_output,
-        &final_output,
+        shown,
     );
 
     Ok(0)
@@ -489,6 +492,7 @@ fn run_log(
 
     // Post-process: truncate long messages, cap lines only if RTK set the default
     let filtered = filter_log_output(&result.stdout, limit, user_set_limit, has_format_flag);
+    let filtered = never_worse(&result.stdout, &filtered).to_string();
     println!("{}", filtered);
 
     timer.track(
@@ -840,6 +844,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 
         // Apply minimal filtering: strip ANSI, remove hints, empty lines
         let filtered = filter_status_with_args(&result.stdout);
+        let filtered = never_worse(&result.stdout, &filtered).to_string();
         print!("{}", filtered);
 
         timer.track(
@@ -875,7 +880,8 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         } else {
             format!("rtk git status {}", args.join(" "))
         };
-        timer.track(&original_cmd, &rtk_cmd, &raw_output, &message);
+        let shown = never_worse(&raw_output, &message);
+        timer.track(&original_cmd, &rtk_cmd, &raw_output, shown);
         return Ok(result.exit_code);
     }
 
@@ -892,7 +898,8 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         None => formatted,
     };
 
-    println!("{}", final_output);
+    let shown = never_worse(&raw_output, &final_output);
+    println!("{}", shown);
 
     let original_cmd = if args.is_empty() {
         "git status".to_string()
@@ -905,7 +912,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         format!("rtk git status {}", args.join(" "))
     };
 
-    timer.track(&original_cmd, &rtk_cmd, &raw_output, &final_output);
+    timer.track(&original_cmd, &rtk_cmd, &raw_output, shown);
 
     Ok(0)
 }
@@ -1370,6 +1377,7 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     }
 
     let filtered = filter_branch_output(&result.stdout);
+    let filtered = never_worse(&result.stdout, &filtered).to_string();
     println!("{}", filtered);
 
     timer.track(
@@ -1525,13 +1533,15 @@ fn run_stash(
             let result = exec_capture(&mut cmd).context("Failed to run git stash list")?;
 
             if result.stdout.trim().is_empty() {
-                let msg = "No stashes";
-                println!("{}", msg);
-                timer.track("git stash list", "rtk git stash list", &result.stdout, msg);
-                return Ok(0);
+                if !result.success() && !result.stderr.trim().is_empty() {
+                    eprintln!("{}", result.stderr.trim());
+                }
+                timer.track("git stash list", "rtk git stash list", &result.stdout, "");
+                return Ok(result.exit_code);
             }
 
             let filtered = filter_stash_list(&result.stdout);
+            let filtered = never_worse(&result.stdout, &filtered).to_string();
             println!("{}", filtered);
             timer.track(
                 "git stash list",
@@ -1548,21 +1558,22 @@ fn run_stash(
             }
             let result = exec_capture(&mut cmd).context("Failed to run git stash show")?;
 
-            let filtered = if result.stdout.trim().is_empty() {
-                let msg = "Empty stash";
-                println!("{}", msg);
-                msg.to_string()
-            } else {
-                let compacted = compact_diff(&result.stdout, 100);
-                println!("{}", compacted);
-                compacted
-            };
+            if result.stdout.trim().is_empty() {
+                if !result.success() && !result.stderr.trim().is_empty() {
+                    eprintln!("{}", result.stderr.trim());
+                }
+                timer.track("git stash show", "rtk git stash show", &result.stdout, "");
+                return Ok(result.exit_code);
+            }
 
+            let compacted = compact_diff(&result.stdout, 100);
+            let compacted = never_worse(&result.stdout, &compacted).to_string();
+            println!("{}", compacted);
             timer.track(
                 "git stash show",
                 "rtk git stash show",
                 &result.stdout,
-                &filtered,
+                &compacted,
             );
         }
         Some("apply") | Some("branch") | Some("clear") | Some("create") | Some("drop")
@@ -1715,6 +1726,7 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
     let result = exec_capture(&mut cmd).context("Failed to run git worktree list")?;
 
     let filtered = filter_worktree_list(&result.stdout);
+    let filtered = never_worse(&result.stdout, &filtered).to_string();
     println!("{}", filtered);
     timer.track(
         "git worktree list",

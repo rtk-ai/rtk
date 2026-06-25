@@ -37,13 +37,18 @@ pub enum IntegrityStatus {
     OrphanedHash,
 }
 
-/// Compute SHA-256 hash of a file, returned as lowercase hex
+/// Compute SHA-256 hash of a file, returned as lowercase hex.
 pub fn compute_hash(path: &Path) -> Result<String> {
     let content =
         fs::read(path).with_context(|| format!("Failed to read file: {}", path.display()))?;
+    Ok(compute_hash_bytes(&content))
+}
+
+/// Compute SHA-256 of an in-memory byte buffer, returned as lowercase hex.
+pub fn compute_hash_bytes(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(&content);
-    Ok(format!("{:x}", hasher.finalize()))
+    hasher.update(content);
+    format!("{:x}", hasher.finalize())
 }
 
 /// Derive the hash file path from the hook path

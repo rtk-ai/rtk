@@ -390,6 +390,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^oc\s+(get|logs|describe|apply|status|adm)",
+        rtk_cmd: "rtk oc",
+        rewrite_prefixes: &["oc"],
+        category: "Infra",
+        savings_pct: 85.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^tree(\s|$)",
         rtk_cmd: "rtk tree",
         rewrite_prefixes: &["tree"],
@@ -741,6 +750,21 @@ pub const RULES: &[RtkRule] = &[
         category: "System",
         savings_pct: 60.0,
         subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^pulumi\s+(preview|up|destroy|refresh|stack)(\s|$)",
+        rtk_cmd: "rtk pulumi",
+        rewrite_prefixes: &["pulumi"],
+        category: "Infra",
+        savings_pct: 45.0,
+        subcmd_savings: &[
+            ("up", 66.0),
+            ("destroy", 72.0),
+            ("refresh", 35.0),
+            ("preview", 25.0),
+            ("stack", 29.0),
+        ],
         subcmd_status: &[],
     },
     RtkRule {
