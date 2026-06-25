@@ -430,9 +430,15 @@ enum Commands {
         /// Generate a local web dashboard with charts
         #[arg(long)]
         web: bool,
+        /// Serve a local live dashboard that refreshes as commands are tracked
+        #[arg(long)]
+        serve: bool,
         /// Open the generated web dashboard in the default browser
-        #[arg(long, requires = "web")]
+        #[arg(long)]
         open: bool,
+        /// Port for the --serve live dashboard
+        #[arg(long, default_value = "7878")]
+        port: u16,
         /// Write the generated web dashboard to this HTML file
         #[arg(long = "web-output", requires = "web")]
         web_output: Option<PathBuf>,
@@ -2005,7 +2011,9 @@ fn run_cli() -> Result<i32> {
             all,
             format,
             web,
+            serve,
             open,
+            port,
             web_output,
             failures,
             reset,
@@ -2023,7 +2031,9 @@ fn run_cli() -> Result<i32> {
                 all,
                 &format,
                 web,
+                serve,
                 open,
+                port,
                 web_output.as_deref(),
                 failures,
                 reset,
@@ -2923,13 +2933,38 @@ mod tests {
             match cli.command {
                 Commands::Gain {
                     web,
+                    serve,
                     open,
+                    port,
                     web_output,
                     ..
                 } => {
                     assert!(web);
+                    assert!(!serve);
                     assert!(open);
+                    assert_eq!(port, 7878);
                     assert_eq!(web_output, Some(PathBuf::from("dashboard.html")));
+                }
+                _ => panic!("Expected Gain command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_gain_serve_flags_parse() {
+        let result = Cli::try_parse_from(["rtk", "gain", "--serve", "--open", "--port", "9001"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Gain {
+                    serve,
+                    open,
+                    port,
+                    ..
+                } => {
+                    assert!(serve);
+                    assert!(open);
+                    assert_eq!(port, 9001);
                 }
                 _ => panic!("Expected Gain command"),
             }

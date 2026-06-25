@@ -4,12 +4,13 @@ use crate::core::display_helpers::{format_duration, print_period_table};
 use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
 use crate::core::utils::format_tokens;
 use crate::hooks::hook_check;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::Local;
 use colored::Colorize;
 use serde::Serialize;
 use std::fs;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -26,7 +27,9 @@ pub fn run(
     all: bool,
     format: &str,
     web: bool,
+    serve: bool,
     open: bool,
+    port: u16,
     web_output: Option<&Path>,
     failures: bool,
     reset: bool,
@@ -35,6 +38,10 @@ pub fn run(
 ) -> Result<()> {
     let tracker = Tracker::new().context("Failed to initialize tracking database")?;
     let project_scope = resolve_project_scope(project)?; // added: resolve project path
+
+    if open && !web && !serve {
+        bail!("--open requires --web or --serve");
+    }
 
     if reset {
         if !yes && !confirm_reset()? {
@@ -50,6 +57,10 @@ pub fn run(
 
     if failures {
         return show_failures(&tracker);
+    }
+
+    if serve {
+        return serve_web_dashboard(project_scope, open, port);
     }
 
     if web {
@@ -558,11 +569,42 @@ fn export_web_dashboard(
     open: bool,
     output: Option<&Path>,
 ) -> Result<()> {
+    let data = build_web_dashboard_data(tracker, project_scope)?;
+    let html = render_web_dashboard(&data, false)?;
+    let path = output
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| std::env::temp_dir().join("rtk-gain-dashboard.html"));
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create dashboard output directory {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    fs::write(&path, html)
+        .with_context(|| format!("Failed to write web dashboard to {}", path.display()))?;
+
+    println!("Web dashboard written to {}", path.display());
+
+    if open {
+        open_dashboard(&path)?;
+    }
+
+    Ok(())
+}
+
+fn build_web_dashboard_data(
+    tracker: &Tracker,
+    project_scope: Option<&str>,
+) -> Result<WebDashboardData> {
     let summary = tracker
         .get_summary_filtered(project_scope)
         .context("Failed to load token savings summary from database")?;
 
-    let data = WebDashboardData {
+    Ok(WebDashboardData {
         generated_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         scope: WebScope {
             kind: if project_scope.is_some() {
@@ -597,41 +639,17 @@ fn export_web_dashboard(
         daily: tracker.get_all_days_filtered(project_scope)?,
         weekly: tracker.get_by_week_filtered(project_scope)?,
         monthly: tracker.get_by_month_filtered(project_scope)?,
-    };
-
-    let html = render_web_dashboard(&data)?;
-    let path = output
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| std::env::temp_dir().join("rtk-gain-dashboard.html"));
-
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "Failed to create dashboard output directory {}",
-                parent.display()
-            )
-        })?;
-    }
-
-    fs::write(&path, html)
-        .with_context(|| format!("Failed to write web dashboard to {}", path.display()))?;
-
-    println!("Web dashboard written to {}", path.display());
-
-    if open {
-        open_dashboard(&path)?;
-    }
-
-    Ok(())
+    })
 }
 
-fn render_web_dashboard(data: &WebDashboardData) -> Result<String> {
+fn render_web_dashboard(data: &WebDashboardData, live: bool) -> Result<String> {
     let json = serde_json::to_string(data)?
         .replace('&', "\\u0026")
         .replace('<', "\\u003c")
         .replace('>', "\\u003e")
         .replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029");
+    let live_endpoint = if live { "\"/api/gain\"" } else { "null" };
     Ok(format!(
         r#"<!doctype html>
 <html lang="en">
@@ -771,7 +789,8 @@ th {{ color: var(--muted); font-weight: 650; }}
   </section>
 </main>
 <script>
-const data = {json};
+let data = {json};
+const liveEndpoint = {live_endpoint};
 
 const fmt = new Intl.NumberFormat();
 const short = value => {{
@@ -789,22 +808,24 @@ const esc = value => String(value).replace(/[&<>"']/g, char => ({{
   "'": "&#39;",
 }}[char]));
 
-document.getElementById("subtitle").textContent =
-  data.scope.path ? `${{data.scope.kind}} scope: ${{data.scope.path}}` : "Global token savings analytics";
-document.getElementById("meta").innerHTML =
-  `Generated ${{data.generated_at}}<br>${{data.daily.length}} daily points`;
+function renderSummary() {{
+  document.getElementById("subtitle").textContent =
+    data.scope.path ? `${{data.scope.kind}} scope: ${{data.scope.path}}` : "Global token savings analytics";
+  document.getElementById("meta").innerHTML =
+    `Updated ${{data.generated_at}}<br>${{data.daily.length}} daily points`;
 
-const stats = [
-  ["Commands", fmt.format(data.summary.total_commands)],
-  ["Input Tokens", short(data.summary.total_input)],
-  ["Output Tokens", short(data.summary.total_output)],
-  ["Tokens Saved", `${{short(data.summary.total_saved)}} (${{
-    pct(data.summary.avg_savings_pct)
-  }})`],
-];
-document.getElementById("stats").innerHTML = stats.map(([label, value]) =>
-  `<article class="stat"><span class="label">${{label}}</span><div class="value">${{value}}</div></article>`
-).join("");
+  const stats = [
+    ["Commands", fmt.format(data.summary.total_commands)],
+    ["Input Tokens", short(data.summary.total_input)],
+    ["Output Tokens", short(data.summary.total_output)],
+    ["Tokens Saved", `${{short(data.summary.total_saved)}} (${{
+      pct(data.summary.avg_savings_pct)
+    }})`],
+  ];
+  document.getElementById("stats").innerHTML = stats.map(([label, value]) =>
+    `<article class="stat"><span class="label">${{label}}</span><div class="value">${{value}}</div></article>`
+  ).join("");
+}}
 
 function renderDailyChart() {{
   const host = document.getElementById("dailyChart");
@@ -868,14 +889,115 @@ function renderCommandTable() {{
   </table>`;
 }}
 
-renderDailyChart();
-renderCommandTable();
+function renderDashboard() {{
+  renderSummary();
+  renderDailyChart();
+  renderCommandTable();
+}}
+
+async function refreshDashboard() {{
+  if (!liveEndpoint) return;
+  try {{
+    const response = await fetch(liveEndpoint, {{ cache: "no-store" }});
+    if (!response.ok) return;
+    data = await response.json();
+    renderDashboard();
+  }} catch (_error) {{
+  }}
+}}
+
+renderDashboard();
+if (liveEndpoint) {{
+  setInterval(refreshDashboard, 2000);
+}}
 </script>
 </body>
 </html>
 "#,
-        json = json
+        json = json,
+        live_endpoint = live_endpoint
     ))
+}
+
+fn serve_web_dashboard(project_scope: Option<String>, open: bool, port: u16) -> Result<()> {
+    let addr = format!("127.0.0.1:{port}");
+    let listener = TcpListener::bind(&addr)
+        .with_context(|| format!("Failed to start dashboard server on http://{addr}"))?;
+    let url = format!("http://{addr}/");
+
+    println!("RTK Gain live dashboard serving at {url}");
+    println!("Press Ctrl+C to stop.");
+
+    if open {
+        open_url(&url)?;
+    }
+
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                if let Err(err) = handle_dashboard_request(stream, project_scope.as_deref()) {
+                    eprintln!("dashboard request failed: {err}");
+                }
+            }
+            Err(err) => eprintln!("dashboard connection failed: {err}"),
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_dashboard_request(mut stream: TcpStream, project_scope: Option<&str>) -> Result<()> {
+    let mut buffer = [0_u8; 2048];
+    let read = stream
+        .read(&mut buffer)
+        .context("Failed to read dashboard request")?;
+    let request = String::from_utf8_lossy(&buffer[..read]);
+    let path = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/");
+
+    match path {
+        "/" | "/index.html" => {
+            let tracker = Tracker::new().context("Failed to initialize tracking database")?;
+            let data = build_web_dashboard_data(&tracker, project_scope)?;
+            let html = render_web_dashboard(&data, true)?;
+            write_http_response(&mut stream, "200 OK", "text/html; charset=utf-8", &html)?;
+        }
+        "/api/gain" => {
+            let tracker = Tracker::new().context("Failed to initialize tracking database")?;
+            let data = build_web_dashboard_data(&tracker, project_scope)?;
+            let json = serde_json::to_string(&data)?;
+            write_http_response(&mut stream, "200 OK", "application/json", &json)?;
+        }
+        _ => {
+            write_http_response(
+                &mut stream,
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                "not found",
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn write_http_response(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &str,
+) -> Result<()> {
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
+        body.as_bytes().len()
+    );
+    stream
+        .write_all(response.as_bytes())
+        .context("Failed to write dashboard response")?;
+    Ok(())
 }
 
 fn open_dashboard(path: &Path) -> Result<()> {
@@ -904,6 +1026,35 @@ fn open_dashboard(path: &Path) -> Result<()> {
     command
         .spawn()
         .with_context(|| format!("Failed to open dashboard {}", path.display()))?;
+
+    Ok(())
+}
+
+fn open_url(url: &str) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "start", "", url]);
+        cmd
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut cmd = Command::new("open");
+        cmd.arg(url);
+        cmd
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut cmd = Command::new("xdg-open");
+        cmd.arg(url);
+        cmd
+    };
+
+    command
+        .spawn()
+        .with_context(|| format!("Failed to open dashboard {url}"))?;
 
     Ok(())
 }
