@@ -1,10 +1,11 @@
 {
   "id": "rtk-rewrite",
   "name": "RTK Token Optimizer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Transparently rewrites shell commands to their RTK equivalents for 60-90% LLM token savings",
   "homepage": "https://github.com/rtk-ai/rtk",
   "license": "Apache-2.0",
+  "activation": { "onCapabilities": ["hook"] },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
