@@ -3909,7 +3909,7 @@ git status                 rtk git status
 git log -10                rtk git log -10
 cargo test                 rtk cargo test
 docker ps                  rtk docker ps
-kubectl get pods           rtk kubectl pods
+kubectl get pods           rtk kubectl get pods
 ```
 
 ## Meta commands (use directly)
@@ -6573,6 +6573,20 @@ mod tests {
         assert!(content.contains(RTK_BLOCK_START));
         assert!(content.contains(RTK_BLOCK_END));
         assert!(content.contains("rtk cargo test"));
+    }
+
+    #[test]
+    fn test_copilot_instructions_preserve_kubectl_get_subcommand() {
+        let temp = TempDir::new().unwrap();
+        let instructions_path = temp.path().join(".github").join("copilot-instructions.md");
+
+        run_copilot_at(temp.path(), InitContext::default()).unwrap();
+
+        let content = fs::read_to_string(&instructions_path).unwrap();
+        assert!(
+            content.contains("kubectl get pods           rtk kubectl get pods"),
+            "Copilot instructions must preserve the kubectl get subcommand. Got: {content}"
+        );
     }
 
     #[test]
