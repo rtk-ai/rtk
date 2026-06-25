@@ -100,6 +100,7 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
             && !trimmed.starts_with("ERROR")
             && (trimmed.contains(" passed")
                 || trimmed.contains(" failed")
+                || trimmed.contains(" error")
                 || trimmed.contains(" skipped"))
             && trimmed.contains(" in ")
         {
@@ -160,6 +161,7 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
 struct PytestCounts {
     passed: usize,
     failed: usize,
+    errors: usize,
     skipped: usize,
     xfailed: usize,
     xpassed: usize,
@@ -175,12 +177,19 @@ fn build_pytest_summary(
     let PytestCounts {
         passed,
         failed,
+        errors,
         skipped,
         xfailed,
         xpassed,
     } = counts;
 
-    if passed == 0 && failed == 0 && skipped == 0 && xfailed == 0 && xpassed == 0 {
+    if passed == 0
+        && failed == 0
+        && errors == 0
+        && skipped == 0
+        && xfailed == 0
+        && xpassed == 0
+    {
         return "Pytest: No tests collected".to_string();
     }
 
@@ -192,6 +201,10 @@ fn build_pytest_summary(
 
     let mut result = String::new();
     result.push_str(&format!("Pytest: {} passed, {} failed", passed, failed));
+    if errors > 0 {
+        let label = if errors == 1 { "error" } else { "errors" };
+        result.push_str(&format!(", {} {}", errors, label));
+    }
     if skipped > 0 {
         result.push_str(&format!(", {} skipped", skipped));
     }
@@ -307,6 +320,8 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
                 counts.passed = n;
             } else if word.contains("failed") {
                 counts.failed = n;
+            } else if word.contains("error") {
+                counts.errors = n;
             } else if word.contains("skipped") {
                 counts.skipped = n;
             }
@@ -402,13 +417,16 @@ collected 0 items
     #[test]
     fn test_parse_summary_line() {
         let c = parse_summary_line("=== 5 passed in 0.50s ===");
-        assert_eq!((c.passed, c.failed, c.skipped), (5, 0, 0));
+        assert_eq!((c.passed, c.failed, c.errors, c.skipped), (5, 0, 0, 0));
 
         let c = parse_summary_line("=== 4 passed, 1 failed in 0.50s ===");
-        assert_eq!((c.passed, c.failed, c.skipped), (4, 1, 0));
+        assert_eq!((c.passed, c.failed, c.errors, c.skipped), (4, 1, 0, 0));
 
         let c = parse_summary_line("=== 3 passed, 1 failed, 2 skipped in 1.0s ===");
-        assert_eq!((c.passed, c.failed, c.skipped), (3, 1, 2));
+        assert_eq!((c.passed, c.failed, c.errors, c.skipped), (3, 1, 0, 2));
+
+        let c = parse_summary_line("=== 1 error in 0.12s ===");
+        assert_eq!((c.passed, c.failed, c.errors, c.skipped), (0, 0, 1, 0));
 
         let c = parse_summary_line("=== 2 passed, 1 failed, 2 xfailed, 1 xpassed in 1.0s ===");
         assert_eq!(
@@ -515,5 +533,45 @@ collected 3 items
             "Should not say 'No tests collected' when tests were skipped. Got: {}",
             result
         );
+    }
+
+    #[test]
+    fn test_filter_pytest_collection_error_summary() {
+        let output = r#"=== test session starts ===
+collected 0 items / 1 error
+
+=== ERRORS ===
+___ ERROR collecting tests/test_bad.py ___
+ImportError: cannot import name 'missing'
+
+=== short test summary info ===
+ERROR tests/test_bad.py
+=== 1 error in 0.12s ==="#;
+
+        let result = filter_pytest_output(output);
+        assert!(
+            !result.contains("No tests collected"),
+            "Should not say 'No tests collected' when collection errors occurred. Got: {}",
+            result
+        );
+        assert!(result.contains("1 error"), "got: {result}");
+        assert!(result.contains("tests/test_bad.py"), "got: {result}");
+    }
+
+    #[test]
+    fn test_filter_pytest_quiet_mode_error_summary() {
+        let output = r#"=== test session starts ===
+collected 0 items / 1 error
+
+ERROR tests/test_bad.py
+1 error in 0.12s"#;
+
+        let result = filter_pytest_output(output);
+        assert!(
+            !result.contains("No tests collected"),
+            "Should not say 'No tests collected' when quiet error summary is present. Got: {}",
+            result
+        );
+        assert!(result.contains("1 error"), "got: {result}");
     }
 }
