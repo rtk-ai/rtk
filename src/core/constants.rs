@@ -4,6 +4,7 @@ pub const CONFIG_TOML: &str = "config.toml";
 pub const FILTERS_TOML: &str = "filters.toml";
 pub const TRUSTED_FILTERS_JSON: &str = "trusted_filters.json";
 pub const DEFAULT_HISTORY_DAYS: i64 = 90;
+pub const CLEANUP_INTERVAL_HOURS: i64 = 24;
 
 /// RTK-only subcommands that should never fall back to raw execution.
 /// When adding a new RTK-only subcommand to `Commands`, add its clap name here.
