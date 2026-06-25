@@ -112,6 +112,14 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
 }
 
 fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
+    // MSBuild query invocations (-getProperty / -getItem / -getTargetResult) make dotnet
+    // print only the requested value(s) to stdout — which may be empty or arbitrary text.
+    // Injecting a binlog and compacting that output would corrupt or discard the result,
+    // so run these verbatim.
+    if is_query_invocation(args) {
+        return run_dotnet_query_passthrough(subcommand, args, verbose);
+    }
+
     let timer = tracking::TimedExecution::start();
     let binlog_path = build_binlog_path(subcommand);
     let should_expect_binlog = subcommand != "test" || has_binlog_arg(args);
@@ -248,6 +256,43 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
     if verbose > 0 {
         eprintln!("Binlog cleaned up: {}", binlog_path.display());
     }
+
+    Ok(result.exit_code)
+}
+
+/// Run a dotnet MSBuild query invocation verbatim: no binlog injection, no compaction.
+/// The requested value(s) are printed to stdout exactly as dotnet emits them.
+fn run_dotnet_query_passthrough(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = resolved_command("dotnet");
+    cmd.env(DOTNET_CLI_UI_LANGUAGE, DOTNET_CLI_UI_LANGUAGE_VALUE);
+    cmd.arg(subcommand);
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    if verbose > 0 {
+        eprintln!(
+            "Running (query passthrough): dotnet {} {}",
+            subcommand,
+            args.join(" ")
+        );
+    }
+
+    let result = exec_capture(&mut cmd)
+        .with_context(|| format!("Failed to run dotnet {}", subcommand))?;
+
+    print!("{}", result.stdout);
+    eprint!("{}", result.stderr);
+
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
+    timer.track(
+        &format!("dotnet {} {}", subcommand, args.join(" ")),
+        &format!("rtk dotnet {} {}", subcommand, args.join(" ")),
+        &raw,
+        &raw,
+    );
 
     Ok(result.exit_code)
 }
@@ -550,6 +595,32 @@ fn build_effective_dotnet_args(
     }
 
     effective
+}
+
+/// MSBuild query switches that make dotnet print only the requested value(s) to stdout.
+const MSBUILD_QUERY_SWITCHES: [&str; 3] = ["getproperty", "getitem", "gettargetresult"];
+
+/// Detect an MSBuild query invocation: `-getProperty:`, `-getItem:`, or `-getTargetResult:`.
+///
+/// Handles all three MSBuild switch prefixes (`-`, `--`, `/`), requires a mandatory `:` after
+/// the keyword (so `-getPropertyGroup` does not match), and compares case-insensitively to
+/// mirror MSBuild's own switch parsing.
+fn is_query_invocation(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        let stripped = arg
+            .strip_prefix("--")
+            .or_else(|| arg.strip_prefix('-'))
+            .or_else(|| arg.strip_prefix('/'));
+        let Some(rest) = stripped else {
+            return false;
+        };
+        let Some((keyword, _value)) = rest.split_once(':') else {
+            return false;
+        };
+        MSBUILD_QUERY_SWITCHES
+            .iter()
+            .any(|switch| keyword.eq_ignore_ascii_case(switch))
+    })
 }
 
 fn has_binlog_arg(args: &[String]) -> bool {
@@ -1409,6 +1480,37 @@ mod tests {
 
         let args = vec!["--configuration".to_string(), "Release".to_string()];
         assert!(!has_binlog_arg(&args));
+    }
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_is_query_invocation_detects_switches() {
+        assert!(is_query_invocation(&args(&["-getProperty:OutputPath"])));
+        assert!(is_query_invocation(&args(&["--getProperty:OutputPath"])));
+        assert!(is_query_invocation(&args(&["/getProperty:OutputPath"])));
+        assert!(is_query_invocation(&args(&["-getItem:Compile"])));
+        assert!(is_query_invocation(&args(&["-getTargetResult:Build"])));
+        // Case-insensitive, mirroring MSBuild.
+        assert!(is_query_invocation(&args(&["-GETPROPERTY:Foo"])));
+        // Present among other args.
+        assert!(is_query_invocation(&args(&[
+            "MyApp.csproj",
+            "-getProperty:TargetFramework"
+        ])));
+    }
+
+    #[test]
+    fn test_is_query_invocation_rejects_non_queries() {
+        assert!(!is_query_invocation(&args(&["build"])));
+        assert!(!is_query_invocation(&args(&["--configuration", "Release"])));
+        // Mandatory colon: a longer switch name without ':' must not match.
+        assert!(!is_query_invocation(&args(&["-getPropertyGroup"])));
+        assert!(!is_query_invocation(&args(&["-getProperty"])));
+        // Empty args.
+        assert!(!is_query_invocation(&[]));
     }
 
     #[test]
