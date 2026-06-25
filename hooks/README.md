@@ -42,6 +42,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
 - **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, `isToolCallEventType` guard, in-place mutation, `~/.pi/agent/extensions/`
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
+- **[`devin/`](devin/README.md)** — Binary hook (`rtk hook devin`), `PreToolUse` JSON format (Claude-compatible), patches `~/.config/devin/config.json`
 
 ## Supported Agents
 
@@ -58,6 +59,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | OpenCode | TypeScript plugin (`tool.execute.before`) | In-place mutation | Yes |
 | Pi | TypeScript extension (`tool_call` event) | In-place mutation | Yes |
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
+| Devin for Terminal | Rust binary (`rtk hook devin`) | Transparent rewrite | Yes (`updatedInput`) |
 
 ## JSON Formats by Agent
 
@@ -84,6 +86,14 @@ Each agent subdirectory has its own README with hook-specific details:
   }
 }
 ```
+
+### Devin for Terminal (Binary Hook)
+
+**Input**: Same as Claude Code.
+
+**Output**: Same as Claude Code format (with `updatedInput`).
+
+Devin uses the same JSON protocol as Claude Code. The `rtk hook devin` binary command delegates to the Claude payload processor, so no shell script or `jq` is needed.
 
 ### Cursor (Shell Hook)
 

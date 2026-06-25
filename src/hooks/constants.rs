@@ -1,6 +1,7 @@
 pub const REWRITE_HOOK_FILE: &str = "rtk-rewrite.sh";
 pub const GEMINI_HOOK_FILE: &str = "rtk-hook-gemini.sh";
 pub const CLAUDE_DIR: &str = ".claude";
+pub const DEVIN_DIR: &str = ".config/devin";
 pub const HOOKS_SUBDIR: &str = "hooks";
 pub const SETTINGS_JSON: &str = "settings.json";
 pub const SETTINGS_LOCAL_JSON: &str = "settings.local.json";
@@ -12,6 +13,10 @@ pub const BEFORE_TOOL_KEY: &str = "BeforeTool";
 pub const CLAUDE_HOOK_COMMAND: &str = "rtk hook claude";
 /// Native Rust hook command for Cursor (replaces rtk-rewrite.sh).
 pub const CURSOR_HOOK_COMMAND: &str = "rtk hook cursor";
+/// Native Rust hook command for Devin for Terminal.
+/// Devin uses the Claude-compatible PreToolUse JSON protocol, so the
+/// binary hook delegates to the same payload processor as `rtk hook claude`.
+pub const DEVIN_HOOK_COMMAND: &str = "rtk hook devin";
 
 pub const CONFIG_DIR: &str = ".config";
 pub const OPENCODE_SUBDIR: &str = "opencode";
