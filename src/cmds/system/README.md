@@ -8,6 +8,7 @@
 - `grep_cmd.rs` reads `core/config` for `limits.grep_max_results` and `limits.grep_max_per_file`. Format-altering flags (`-c`, `-l`, `-L`, `-o`, `-Z`) bypass RTK filtering and run raw.
 - `local_llm.rs` (`rtk smart`) uses `core/filter` for heuristic file summarization
 - `format_cmd.rs` is a cross-ecosystem dispatcher: auto-detects and routes to `prettier_cmd` or `ruff_cmd` (black is handled inline, not as a separate module)
+- `clang_format_cmd.rs` wraps `clang-format -i`: snapshots input files, preserves diagnostics, and reports only files whose bytes changed
 
 ## Cross-command
 

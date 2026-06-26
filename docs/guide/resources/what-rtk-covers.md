@@ -94,6 +94,12 @@ Typical savings: 60-99%.
 | `dotnet test` | 85-90% | Failures only |
 | `dotnet format` | 75% | Changed files only |
 
+## C / C++
+
+| Command | Savings | What changes |
+|---------|---------|--------------|
+| `clang-format -i` | 70% | Changed files only; diagnostics preserved |
+
 ## Docker / Kubernetes
 
 | Command | Savings | What changes |
