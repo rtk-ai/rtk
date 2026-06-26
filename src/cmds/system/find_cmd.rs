@@ -5,6 +5,7 @@ use crate::core::tracking;
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::Path;
 
 /// Match a filename against a glob pattern (supports `*` and `?`).
@@ -63,17 +64,109 @@ fn has_native_find_flags(args: &[String]) -> bool {
         .any(|a| a == "-name" || a == "-type" || a == "-maxdepth" || a == "-iname")
 }
 
-/// Native find flags that RTK cannot handle correctly.
-/// These involve compound predicates, actions, or semantics we don't support.
-const UNSUPPORTED_FIND_FLAGS: &[&str] = &[
-    "-not", "!", "-or", "-o", "-and", "-a", "-exec", "-execdir", "-delete", "-print0", "-newer",
-    "-perm", "-size", "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin", "-empty", "-link",
-    "-regex", "-iregex",
+fn is_supported_native_find_flag(flag: &str) -> bool {
+    matches!(flag, "-name" | "-type" | "-maxdepth" | "-iname")
+}
+
+/// Native find actions we never execute for safety.
+const DANGEROUS_FIND_ACTIONS: &[&str] = &["-delete", "-exec", "-execdir", "-ok", "-okdir"];
+
+/// Native find tokens that should auto-passthrough to preserve semantics.
+const SAFE_NATIVE_PASSTHROUGH_TOKENS: &[&str] = &[
+    "(", ")", "!", "-not", "-or", "-o", "-and", "-a", "-print", "-print0", "-path", "-ipath",
+    "-size", "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin", "-newer", "-regex",
+    "-iregex", "-perm", "-empty", "-link",
 ];
 
-fn has_unsupported_find_flags(args: &[String]) -> bool {
+#[derive(Debug)]
+enum FindInvocation {
+    Filtered(FindArgs),
+    Passthrough,
+}
+
+fn is_rtk_find_flag(flag: &str) -> bool {
+    matches!(flag, "-m" | "--max" | "-t" | "--file-type")
+}
+
+fn is_glob_pattern(value: &str) -> bool {
+    value.contains('*') || value.contains('?') || value.contains('[')
+}
+
+fn contains_dangerous_find_actions(args: &[String]) -> bool {
     args.iter()
-        .any(|a| UNSUPPORTED_FIND_FLAGS.contains(&a.as_str()))
+        .any(|arg| DANGEROUS_FIND_ACTIONS.contains(&arg.as_str()))
+}
+
+fn should_passthrough_to_native_find(args: &[String]) -> bool {
+    if args.is_empty() {
+        return false;
+    }
+
+    if args
+        .iter()
+        .any(|arg| SAFE_NATIVE_PASSTHROUGH_TOKENS.contains(&arg.as_str()))
+    {
+        return true;
+    }
+
+    let start_paths_before_expression = args
+        .iter()
+        .take_while(|arg| {
+            !arg.starts_with('-') && !SAFE_NATIVE_PASSTHROUGH_TOKENS.contains(&arg.as_str())
+        })
+        .count();
+    if !is_glob_pattern(&args[0]) && start_paths_before_expression > 1 && has_native_find_flags(args)
+    {
+        return true;
+    }
+
+    if has_native_find_flags(args) {
+        let first = args[0].as_str();
+        if !first.starts_with('-') && !is_glob_pattern(first) && !Path::new(first).exists() {
+            return true;
+        }
+    }
+
+    // Any non-RTK flag in a native-looking invocation should passthrough.
+    let has_non_rtk_flag = args
+        .iter()
+        .any(|arg| {
+            arg.starts_with('-') && !is_rtk_find_flag(arg) && !is_supported_native_find_flag(arg)
+        });
+    if !has_non_rtk_flag {
+        return false;
+    }
+
+    if has_native_find_flags(args) {
+        return true;
+    }
+
+    let first = args[0].as_str();
+    let starts_like_native_find = first.starts_with('-')
+        || (first != "." && first != ".." && !is_glob_pattern(first) && Path::new(first).exists());
+
+    if starts_like_native_find {
+        return true;
+    }
+
+    // `find . -foo` is native syntax even when the flag is unknown to RTK.
+    !first.starts_with('-')
+        && !is_glob_pattern(first)
+        && args.iter().skip(1).any(|arg| arg.starts_with('-'))
+}
+
+fn classify_find_invocation(args: &[String]) -> Result<FindInvocation> {
+    if contains_dangerous_find_actions(args) {
+        anyhow::bail!(
+            "rtk find blocked dangerous native find action (-delete/-exec/-execdir/-ok/-okdir). Run `find` directly."
+        );
+    }
+
+    if should_passthrough_to_native_find(args) {
+        return Ok(FindInvocation::Passthrough);
+    }
+
+    Ok(FindInvocation::Filtered(parse_find_args(args)?))
 }
 
 /// Parse arguments from raw args vec, supporting both native find and RTK syntax.
@@ -83,12 +176,6 @@ fn has_unsupported_find_flags(args: &[String]) -> bool {
 fn parse_find_args(args: &[String]) -> Result<FindArgs> {
     if args.is_empty() {
         return Ok(FindArgs::default());
-    }
-
-    if has_unsupported_find_flags(args) {
-        anyhow::bail!(
-            "rtk find does not support compound predicates or actions (e.g. -not, -exec). Use `find` directly."
-        );
     }
 
     if has_native_find_flags(args) {
@@ -178,17 +265,25 @@ fn parse_rtk_find_args(args: &[String]) -> Result<FindArgs> {
 }
 
 /// Entry point from main.rs — parses raw args then delegates to run().
-pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
-    let parsed = parse_find_args(args)?;
-    run(
-        &parsed.pattern,
-        &parsed.path,
-        parsed.max_results,
-        parsed.max_depth,
-        &parsed.file_type,
-        parsed.case_insensitive,
-        verbose,
-    )
+pub fn run_from_args(args: &[String], verbose: u8) -> Result<i32> {
+    match classify_find_invocation(args)? {
+        FindInvocation::Filtered(parsed) => {
+            run(
+                &parsed.pattern,
+                &parsed.path,
+                parsed.max_results,
+                parsed.max_depth,
+                &parsed.file_type,
+                parsed.case_insensitive,
+                verbose,
+            )?;
+            Ok(0)
+        }
+        FindInvocation::Passthrough => {
+            let os_args: Vec<OsString> = args.iter().map(OsString::from).collect();
+            crate::core::runner::run_passthrough("find", &os_args, verbose)
+        }
+    }
 }
 
 pub fn run(
@@ -493,20 +588,82 @@ mod tests {
         assert_eq!(parsed.path, ".");
     }
 
-    // --- parse_find_args: unsupported flags ---
+    // --- classify_find_invocation: passthrough and hard-fail ---
 
     #[test]
-    fn parse_native_find_rejects_not() {
-        let result = parse_find_args(&args(&[".", "-name", "*.rs", "-not", "-name", "*_test.rs"]));
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("compound predicates"));
+    fn classify_native_supported_flags_is_filtered() {
+        let invocation =
+            classify_find_invocation(&args(&[".", "-name", "*.rs", "-type", "f"])).unwrap();
+        assert!(matches!(invocation, FindInvocation::Filtered(_)));
     }
 
     #[test]
-    fn parse_native_find_rejects_exec() {
-        let result = parse_find_args(&args(&[".", "-name", "*.tmp", "-exec", "rm", "{}", ";"]));
-        assert!(result.is_err());
+    fn classify_rtk_pattern_path_and_max_is_filtered() {
+        let invocation = classify_find_invocation(&args(&["*.rs", "src", "-m", "5"])).unwrap();
+        assert!(matches!(invocation, FindInvocation::Filtered(_)));
+    }
+
+    #[test]
+    fn classify_rtk_exact_pattern_and_path_is_filtered() {
+        let invocation = classify_find_invocation(&args(&["Cargo.toml", "src"])).unwrap();
+        assert!(matches!(invocation, FindInvocation::Filtered(_)));
+    }
+
+    #[test]
+    fn classify_native_compound_predicate_passthrough() {
+        let invocation = classify_find_invocation(&args(&[
+            ".",
+            "-name",
+            "*.rs",
+            "-o",
+            "-name",
+            "*.md",
+        ]))
+        .unwrap();
+        assert!(matches!(invocation, FindInvocation::Passthrough));
+    }
+
+    #[test]
+    fn classify_native_unknown_flag_passthrough() {
+        let invocation = classify_find_invocation(&args(&[".", "-name", "*.rs", "-bogus-flag"])).unwrap();
+        assert!(matches!(invocation, FindInvocation::Passthrough));
+    }
+
+    #[test]
+    fn classify_native_path_predicate_passthrough() {
+        let invocation = classify_find_invocation(&args(&[".", "-path", "*/src/*"])).unwrap();
+        assert!(matches!(invocation, FindInvocation::Passthrough));
+    }
+
+    #[test]
+    fn classify_native_multiple_start_paths_passthrough() {
+        let invocation =
+            classify_find_invocation(&args(&["src", "tests", "-name", "*.rs"])).unwrap();
+        assert!(matches!(invocation, FindInvocation::Passthrough));
+    }
+
+    #[test]
+    fn classify_native_missing_explicit_path_passthrough() {
+        let invocation =
+            classify_find_invocation(&args(&["/definitely/missing/rtk-find-path", "-name", "*.rs"]))
+                .unwrap();
+        assert!(matches!(invocation, FindInvocation::Passthrough));
+    }
+
+    #[test]
+    fn classify_dangerous_delete_is_blocked() {
+        let err = classify_find_invocation(&args(&[".", "-name", "*.tmp", "-delete"])).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("blocked dangerous native find action"));
+    }
+
+    #[test]
+    fn classify_dangerous_exec_is_blocked() {
+        let err =
+            classify_find_invocation(&args(&[".", "-name", "*.tmp", "-exec", "rm", "{}", ";"]))
+                .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("blocked dangerous native find action"));
     }
 
     // --- parse_find_args: RTK syntax ---
@@ -555,6 +712,17 @@ mod tests {
         // Simulates: rtk find *.rs src
         let result = run_from_args(&args(&["*.rs", "src"]), 0);
         assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_from_args_missing_native_path_returns_find_exit_code() {
+        let missing = std::env::temp_dir()
+            .join(format!("rtk-find-missing-{}", std::process::id()))
+            .to_string_lossy()
+            .to_string();
+        let result = run_from_args(&args(&[missing.as_str(), "-name", "*.rs"]), 0).unwrap();
+        assert_ne!(result, 0);
     }
 
     #[test]
