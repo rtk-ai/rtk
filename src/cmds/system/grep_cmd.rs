@@ -1,5 +1,6 @@
 //! Filters grep output by grouping matches by file.
 
+use crate::core::guard::never_worse;
 use crate::core::stream::{exec_capture, CaptureResult};
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, strip_ansi};
@@ -398,7 +399,18 @@ fn passthrough<T: AsRef<str>>(
     let result = grep_capture(base, grep_base, file_type, extra_args, patterns, paths)
         .context("grep/rg failed")?;
 
-    print!("{}", strip_ansi(&result.stdout));
+    // Fold a shared absolute/long directory prefix into a one-line header so
+    // file-list output (`-l`/`-L`/`--files`) and other path-shaped passthrough
+    // doesn't repeat the same prefix on every line. Lossless + never-worse
+    // guarded: non-path output finds no common prefix and is emitted verbatim.
+    let cleaned = strip_ansi(&result.stdout);
+    let lines: Vec<&str> = cleaned.lines().filter(|l| !l.is_empty()).collect();
+    let output = match fold_path_prefix(&lines) {
+        Some(folded) => never_worse(&cleaned, &folded).to_string(),
+        None => cleaned.clone(),
+    };
+
+    print!("{}", output);
     if !result.stderr.is_empty() {
         eprint!("{}", result.stderr.trim());
     }
@@ -410,9 +422,14 @@ fn passthrough<T: AsRef<str>>(
         format!("{} '{}' {}", joined.join(" "), pattern_display, path_display)
     };
 
-    timer.track_passthrough(
+    // Account real bytes so prefix-folding savings are measured. When nothing
+    // folded (output == cleaned) this records equal in/out — no dilution, same
+    // net effect as the old track_passthrough.
+    timer.track(
         &format!("grep {}", args_display),
         &format!("rtk grep {} (passthrough)", args_display),
+        &cleaned,
+        &output,
     );
     Ok(result.exit_code)
 }
@@ -724,6 +741,77 @@ fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &
     }
 }
 
+/// Factor the longest common directory prefix out of a list of paths.
+///
+/// `grep -l` / `-L` / `--files` emit one path per line, and when the search
+/// root is an absolute path (e.g. agents passing `/home/user/project/...`) every
+/// line repeats the same long prefix — pure redundancy that `passthrough()` used
+/// to forward verbatim (0% savings, issue: prefix-folding gap). This collapses
+/// that shared prefix into a single header line and emits only the differing
+/// tails:
+///
+/// ```text
+/// /home/ubuntu/git/proj/src/   (12 files)
+/// a/foo.rs
+/// a/bar.rs
+/// b/baz.rs
+/// ```
+///
+/// The transform is lossless — every input path is recoverable as
+/// `header_prefix + tail` — so no truncation/recovery hint is needed. Returns
+/// `None` (caller keeps raw output) when there is nothing worth folding: fewer
+/// than two paths, or no shared directory component.
+fn fold_path_prefix(paths: &[&str]) -> Option<String> {
+    if paths.len() < 2 {
+        return None;
+    }
+
+    // Common prefix is computed on whole directory *components*, never a partial
+    // segment — so `/a/foobar` and `/a/foobaz` share `/a/`, not `/a/fooba`.
+    fn split_dirs(p: &str) -> Vec<&str> {
+        match p.rsplit_once('/') {
+            Some((dir, _)) => dir.split('/').collect(),
+            None => Vec::new(),
+        }
+    }
+
+    let first_dirs = split_dirs(paths[0]);
+    let mut common = first_dirs.len();
+    for p in &paths[1..] {
+        let dirs = split_dirs(p);
+        let mut shared = 0;
+        while shared < common && shared < dirs.len() && dirs[shared] == first_dirs[shared] {
+            shared += 1;
+        }
+        common = shared;
+        if common == 0 {
+            return None;
+        }
+    }
+    if common == 0 {
+        return None;
+    }
+
+    // Reconstruct the prefix string from the shared leading components, taking
+    // care to preserve a leading "/" on absolute paths (split on "/abc" yields
+    // a leading empty component).
+    let prefix_components = &first_dirs[..common];
+    let prefix = format!("{}/", prefix_components.join("/"));
+    // Guard against a degenerate prefix that saves nothing (e.g. "/" alone).
+    if prefix.len() <= 1 {
+        return None;
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!("{} ({} files)\n", prefix, paths.len()));
+    for p in paths {
+        let tail = p.strip_prefix(&prefix).unwrap_or(p);
+        out.push_str(tail);
+        out.push('\n');
+    }
+    Some(out)
+}
+
 fn compact_path(path: &str) -> String {
     if path.len() <= 50 {
         return path.to_string();
@@ -778,6 +866,87 @@ mod tests {
         let path = "/Users/patrick/dev/project/src/components/Button.tsx";
         let compact = compact_path(path);
         assert!(compact.len() <= 60);
+    }
+
+    // --- fold_path_prefix ---
+
+    #[test]
+    fn test_fold_prefix_basic_absolute() {
+        // The motivating case: -l output, every line shares a long abs prefix.
+        let paths = vec![
+            "/home/ubuntu/git/proj/src/a/foo.rs",
+            "/home/ubuntu/git/proj/src/a/bar.rs",
+            "/home/ubuntu/git/proj/src/b/baz.rs",
+        ];
+        let folded = fold_path_prefix(&paths).expect("should fold a shared prefix");
+        assert_eq!(
+            folded,
+            "/home/ubuntu/git/proj/src/ (3 files)\na/foo.rs\na/bar.rs\nb/baz.rs\n"
+        );
+        // Lossless: every original path is recoverable as prefix + tail.
+        let prefix = folded.lines().next().unwrap().split(' ').next().unwrap();
+        for p in &paths {
+            assert!(p.starts_with(prefix));
+        }
+    }
+
+    #[test]
+    fn test_fold_prefix_single_path_returns_none() {
+        // Nothing to fold against; caller keeps raw.
+        assert!(fold_path_prefix(&["/a/b/c.rs"]).is_none());
+    }
+
+    #[test]
+    fn test_fold_prefix_no_common_dir_returns_none() {
+        // Disjoint roots → no shared component → None.
+        assert!(fold_path_prefix(&["/aaa/x.rs", "/bbb/y.rs"]).is_none());
+    }
+
+    #[test]
+    fn test_fold_prefix_component_boundary_not_partial() {
+        // /a/foobar and /a/foobaz share /a/, NOT /a/fooba — common prefix is
+        // computed on whole path components.
+        let paths = vec!["/a/foobar/x.rs", "/a/foobaz/y.rs"];
+        let folded = fold_path_prefix(&paths).expect("should fold at /a/");
+        assert_eq!(folded, "/a/ (2 files)\nfoobar/x.rs\nfoobaz/y.rs\n");
+    }
+
+    #[test]
+    fn test_fold_prefix_relative_paths() {
+        let paths = vec!["src/a/foo.rs", "src/a/bar.rs", "src/b/baz.rs"];
+        let folded = fold_path_prefix(&paths).expect("should fold relative prefix");
+        assert_eq!(folded, "src/ (3 files)\na/foo.rs\na/bar.rs\nb/baz.rs\n");
+    }
+
+    #[test]
+    fn test_fold_prefix_bare_filenames_returns_none() {
+        // No directory component anywhere → nothing to factor out.
+        assert!(fold_path_prefix(&["foo.rs", "bar.rs"]).is_none());
+    }
+
+    #[test]
+    fn test_fold_prefix_root_only_returns_none() {
+        // Shared component reduces to just "/" — folding saves nothing.
+        assert!(fold_path_prefix(&["/x.rs", "/y.rs"]).is_none());
+    }
+
+    #[test]
+    fn test_fold_prefix_is_smaller_than_raw() {
+        // The whole point: folded output must be shorter than the raw list when
+        // the shared prefix is long.
+        let paths = vec![
+            "/home/ubuntu/git/proj/src/a/foo.rs",
+            "/home/ubuntu/git/proj/src/a/bar.rs",
+            "/home/ubuntu/git/proj/src/a/qux.rs",
+        ];
+        let raw = paths.join("\n");
+        let folded = fold_path_prefix(&paths).unwrap();
+        assert!(
+            folded.len() < raw.len(),
+            "folded ({}) should be shorter than raw ({})",
+            folded.len(),
+            raw.len()
+        );
     }
 
     #[test]
