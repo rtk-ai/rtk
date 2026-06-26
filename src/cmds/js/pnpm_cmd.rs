@@ -1,5 +1,6 @@
 //! Filters pnpm output — dependency trees, install logs, outdated packages.
 
+use crate::core::guard::never_worse;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::CAP_LIST;
@@ -405,13 +406,14 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
         }
     };
 
-    println!("{}", filtered);
+    let shown = never_worse(&result.stdout, &filtered);
+    println!("{}", shown);
 
     timer.track(
         &format!("pnpm list --depth={}", depth),
         &format!("rtk pnpm list --depth={}", depth),
         &result.stdout,
-        &filtered,
+        shown,
     );
 
     Ok(0)
@@ -455,13 +457,15 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
         }
     };
 
-    if filtered.trim().is_empty() {
-        println!("All packages up-to-date");
+    let display = if filtered.trim().is_empty() {
+        "All packages up-to-date".to_string()
     } else {
-        println!("{}", filtered);
-    }
+        filtered.clone()
+    };
+    let shown = never_worse(&combined, &display);
+    println!("{}", shown);
 
-    timer.track("pnpm outdated", "rtk pnpm outdated", &combined, &filtered);
+    timer.track("pnpm outdated", "rtk pnpm outdated", &combined, shown);
 
     Ok(0)
 }
@@ -490,9 +494,10 @@ fn run_install(args: &[String], verbose: u8) -> Result<i32> {
     let combined = result.combined();
     let filtered = filter_pnpm_install(&combined);
 
-    println!("{}", filtered);
+    let shown = never_worse(&combined, &filtered);
+    println!("{}", shown);
 
-    timer.track("pnpm install", "rtk pnpm install", &combined, &filtered);
+    timer.track("pnpm install", "rtk pnpm install", &combined, shown);
 
     Ok(0)
 }

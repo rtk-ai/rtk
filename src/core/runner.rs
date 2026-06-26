@@ -28,12 +28,28 @@ impl Drop for PanicHookGuard {
     }
 }
 
-pub fn print_with_hint(filtered: &str, raw: &str, tee_label: &str, exit_code: i32) {
-    if let Some(hint) = crate::core::tee::tee_and_hint(raw, tee_label, exit_code) {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
+/// Compose `filtered` with an optional recovery `hint`, cap the total at `raw`
+/// (never emit more tokens than the command), print it, and return what was
+/// emitted so the caller tracks exactly that.
+pub fn emit_guarded(filtered: &str, hint: Option<&str>, raw: &str) -> String {
+    let body = match hint {
+        Some(h) => format!("{}\n{}", filtered, h),
+        None => filtered.to_string(),
+    };
+    let shown = crate::core::guard::never_worse(raw, &body).to_string();
+    println!("{}", shown);
+    shown
+}
+
+pub fn print_with_hint(
+    filtered: &str,
+    tee_raw: &str,
+    guard_raw: &str,
+    tee_label: &str,
+    exit_code: i32,
+) -> String {
+    let hint = crate::core::tee::tee_and_hint(tee_raw, tee_label, exit_code);
+    emit_guarded(filtered, hint.as_deref(), guard_raw)
 }
 
 #[derive(Default)]
@@ -173,24 +189,29 @@ where
         return Ok(exit_code);
     }
 
-    if let Some(label) = opts.tee_label {
-        print_with_hint(&filtered, raw, label, exit_code);
-    } else if opts.no_trailing_newline {
-        print!("{}", filtered);
-    } else {
-        println!("{}", filtered);
-    }
-
     let raw_for_tracking = if opts.filter_stdout_only {
         raw_stdout
     } else {
         raw
     };
+
+    let shown = if let Some(label) = opts.tee_label {
+        print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
+    } else {
+        let guarded = crate::core::guard::never_worse(raw_for_tracking, &filtered).to_string();
+        if opts.no_trailing_newline {
+            print!("{}", guarded);
+        } else {
+            println!("{}", guarded);
+        }
+        guarded
+    };
+
     timer.track(
         cmd_label,
         &format!("rtk {}", cmd_label),
         raw_for_tracking,
-        &filtered,
+        &shown,
     );
     Ok(exit_code)
 }

@@ -1,6 +1,7 @@
 //! Reads source files with optional language-aware filtering to strip boilerplate.
 
 use crate::core::filter::{self, FilterLevel, FilterStrategy, Language};
+use crate::core::guard::never_worse;
 use crate::core::tracking;
 use anyhow::{Context, Result};
 use std::fs;
@@ -93,17 +94,21 @@ pub fn run(
         content.lines().count(),
     );
 
-    let rtk_output = if line_numbers {
-        format_with_line_numbers(&filtered)
+    let (raw, rtk_output) = if line_numbers {
+        (
+            format_with_line_numbers(&content),
+            format_with_line_numbers(&filtered),
+        )
     } else {
-        filtered.clone()
+        (content.clone(), filtered.clone())
     };
-    print!("{}", rtk_output);
+    let shown = never_worse(&raw, &rtk_output);
+    print!("{}", shown);
     timer.track(
         &format!("cat {}", file.display()),
         "rtk read",
-        &content,
-        &rtk_output,
+        &raw,
+        shown,
     );
     Ok(())
 }
@@ -163,14 +168,18 @@ pub fn run_stdin(
         content.lines().count(),
     );
 
-    let rtk_output = if line_numbers {
-        format_with_line_numbers(&filtered)
+    let (raw, rtk_output) = if line_numbers {
+        (
+            format_with_line_numbers(&content),
+            format_with_line_numbers(&filtered),
+        )
     } else {
-        filtered.clone()
+        (content.clone(), filtered.clone())
     };
-    print!("{}", rtk_output);
+    let shown = never_worse(&raw, &rtk_output);
+    print!("{}", shown);
 
-    timer.track("cat - (stdin)", "rtk read -", &content, &rtk_output);
+    timer.track("cat - (stdin)", "rtk read -", &raw, shown);
     Ok(())
 }
 

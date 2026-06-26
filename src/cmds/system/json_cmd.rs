@@ -1,5 +1,6 @@
 //! Inspects JSON structure without showing values, saving tokens on large payloads.
 
+use crate::core::guard::never_worse;
 use crate::core::tracking;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -52,12 +53,13 @@ pub fn run(file: &Path, max_depth: usize, schema_only: bool, verbose: u8) -> Res
     } else {
         filter_json_compact(&content, max_depth)?
     };
-    println!("{}", output);
+    let shown = never_worse(&content, &output);
+    println!("{}", shown);
     timer.track(
         &format!("cat {}", file.display()),
         "rtk json",
         &content,
-        &output,
+        shown,
     );
     Ok(())
 }
@@ -81,8 +83,9 @@ pub fn run_stdin(max_depth: usize, schema_only: bool, verbose: u8) -> Result<()>
     } else {
         filter_json_compact(&content, max_depth)?
     };
-    println!("{}", output);
-    timer.track("cat - (stdin)", "rtk json -", &content, &output);
+    let shown = never_worse(&content, &output);
+    println!("{}", shown);
+    timer.track("cat - (stdin)", "rtk json -", &content, shown);
     Ok(())
 }
 

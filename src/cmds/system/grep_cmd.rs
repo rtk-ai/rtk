@@ -1,8 +1,8 @@
 //! Filters grep output by grouping matches by file.
 
-use crate::core::stream::exec_capture;
+use crate::core::stream::{exec_capture, CaptureResult};
 use crate::core::tracking;
-use crate::core::utils::resolved_command;
+use crate::core::utils::{resolved_command, strip_ansi};
 use crate::core::{args_utils, config};
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -161,6 +161,69 @@ fn is_known_boolean_long_flag(arg: &str) -> bool {
     )
 }
 
+/// Ripgrep-only flags the grep fallback drops so grep doesn't abort (issue #2167).
+const RG_ONLY_LONG: &[&str] = &[
+    "--glob",
+    "--iglob",
+    "--type",
+    "--type-not",
+    "--type-add",
+    "--type-clear",
+    "--hidden",
+    "--no-ignore",
+    "--pcre2",
+    "--json",
+    "--stats",
+    "--sort",
+    "--sortr",
+    "--engine",
+    "--mmap",
+    "--no-mmap",
+    "--trim",
+    "--one-file-system",
+    "--max-columns",
+    "--max-depth",
+    "--max-filesize",
+    "--path-separator",
+    "--field-context-separator",
+    "--field-match-separator",
+    "--pre",
+    "--pre-glob",
+];
+
+fn strip_rg_only<T: AsRef<str>>(extra_args: &[T]) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut skip_next = false;
+    for arg in extra_args {
+        let a = arg.as_ref();
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let name = a.split('=').next().unwrap_or(a);
+        let rg_only = RG_ONLY_LONG.contains(&name) || a == "-g" || a == "-T";
+        if rg_only {
+            let takes_value = a == "-g" || a == "-T" || VALUE_FLAGS_LONG.contains(&name);
+            if takes_value && !a.contains('=') {
+                skip_next = true;
+            }
+            continue;
+        }
+        out.push(a);
+    }
+    out
+}
+
+fn has_shape_flag<T: AsRef<str>>(extra_args: &[T]) -> bool {
+    extra_args.iter().any(|arg| {
+        let name = arg.as_ref().split('=').next().unwrap_or("");
+        matches!(
+            name,
+            "--column" | "--vimgrep" | "-b" | "--byte-offset" | "--null-data"
+        )
+    })
+}
+
 /// Extracts `(patterns, paths, flags)` from the raw trailing args.
 ///
 /// - `patterns`: positional pattern + all `-e`/`--regexp` values. Empty → error.
@@ -294,6 +357,109 @@ fn extract_pattern_path<T: AsRef<str>>(args: &[T]) -> (Vec<String>, Vec<String>,
     (patterns, paths, flags)
 }
 
+fn unparsed_signal(stdout: &str) -> usize {
+    stdout
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && trimmed != "--" && parse_match_line(line).is_none()
+        })
+        .count()
+}
+
+/// Run rg; fall back to system grep when rg can't run or rejects the invocation
+/// (exit 2, no output) so any grep-ism (e.g. --include) still works (#2543).
+/// #2167: if grep also aborts on a flag, retry it bare.
+fn grep_capture<T: AsRef<str>>(
+    rg_base: &[&str],
+    grep_base: &[&str],
+    file_type: Option<&str>,
+    extra_args: &[T],
+    patterns: &[String],
+    paths: &[String],
+) -> Result<CaptureResult> {
+    let mut rg_cmd = resolved_command("rg");
+    rg_cmd.args(rg_base);
+    if let Some(ft) = file_type {
+        rg_cmd.arg("--type").arg(ft);
+    }
+    rg_cmd.args(extra_args.iter().map(|a| a.as_ref()));
+    for p in patterns {
+        rg_cmd.args(["-e", &p.replace(r"\|", "|")]);
+    }
+    rg_cmd.arg("--");
+    rg_cmd.args(paths);
+
+    match exec_capture(&mut rg_cmd) {
+        Ok(r) if !(r.exit_code == 2 && r.stdout.is_empty()) => Ok(r),
+        _ => {
+            // --null not -Z: BSD grep -Z is --decompress (#2310); strip_rg_only (#2167).
+            let stripped = strip_rg_only(extra_args);
+            let result = run_grep_fallback(grep_base, file_type, &stripped, patterns, paths)?;
+            if result.exit_code == 2 && result.stdout.is_empty() && result.stderr.contains("option") {
+                // grep aborted on an rg-only flag that strip_rg_only missed; retry bare (#2167).
+                run_grep_fallback(grep_base, file_type, &[], patterns, paths)
+            } else {
+                Ok(result)
+            }
+        }
+    }
+}
+
+fn run_grep_fallback(
+    grep_base: &[&str],
+    file_type: Option<&str>,
+    extra_args: &[&str],
+    patterns: &[String],
+    paths: &[String],
+) -> Result<CaptureResult> {
+    let mut grep_cmd = resolved_command("grep");
+    grep_cmd.args(grep_base);
+    // file_type cannot be translated to grep syntax; silently skip.
+    let _ = file_type;
+    grep_cmd.args(extra_args);
+    for p in patterns {
+        grep_cmd.args(["-e", p]);
+    }
+    grep_cmd.arg("--");
+    grep_cmd.args(paths);
+    exec_capture(&mut grep_cmd).context("grep/rg failed")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn passthrough<T: AsRef<str>>(
+    timer: &tracking::TimedExecution,
+    base: &[&str],
+    grep_base: &[&str],
+    file_type: Option<&str>,
+    extra_args: &[T],
+    patterns: &[String],
+    paths: &[String],
+    pattern_display: &str,
+    path_display: &str,
+) -> Result<i32> {
+    let result = grep_capture(base, grep_base, file_type, extra_args, patterns, paths)
+        .context("grep/rg failed")?;
+
+    print!("{}", strip_ansi(&result.stdout));
+    if !result.stderr.is_empty() {
+        eprint!("{}", result.stderr.trim());
+    }
+
+    let args_display = if extra_args.is_empty() {
+        format!("'{}' {}", pattern_display, path_display)
+    } else {
+        let joined: Vec<&str> = extra_args.iter().map(|a| a.as_ref()).collect();
+        format!("{} '{}' {}", joined.join(" "), pattern_display, path_display)
+    };
+
+    timer.track_passthrough(
+        &format!("grep {}", args_display),
+        &format!("rtk grep {} (passthrough)", args_display),
+    );
+    Ok(result.exit_code)
+}
+
 pub fn run(
     max_line_len: usize,
     max_results: usize,
@@ -352,136 +518,73 @@ pub fn run(
         eprintln!("grep: '{}' in {}", pattern_display, path_display);
     }
 
-    let mut rg_cmd = resolved_command("rg");
-    // --no-ignore-vcs: match grep -r behavior (do not skip .gitignore'd files).
-    // -H: always emit the filename.
-    // -0: NUL-separate filename so paths containing ':' parse correctly.
-    rg_cmd.args(["-nH0", "--no-heading", "--no-ignore-vcs"]);
-
-    if let Some(ft) = file_type {
-        rg_cmd.arg("--type").arg(ft);
-    }
-
-    for arg in &extra_args {
-        if let Some(glob_pattern) = arg.strip_prefix("--include=") {
-            rg_cmd.arg("--glob").arg(glob_pattern);
-            continue;
-        }
-        rg_cmd.arg(arg);
-    }
-
-    for p in &patterns {
-        rg_cmd.args(["-e", &p.replace(r"\|", "|")]);
-    }
-    rg_cmd.arg("--");
-    rg_cmd.args(&paths);
-
-    let result = (|| -> Result<_> {
-        match exec_capture(&mut rg_cmd) {
-            Ok(result) => Ok(result),
-            Err(_) => {
-                let mut grep_cmd = resolved_command("grep");
-                let grep_safe_args = grep_fallback_args(&extra_args);
-                // --null (not -Z): on BSD/macOS grep -Z means --decompress, not the
-                // NUL filename separator parse_match_line() needs (issue #2310).
-                grep_cmd.args(["-rnH", "--null"]);
-                grep_cmd.args(&grep_safe_args);
-                for p in &patterns {
-                    grep_cmd.args(["-e", p]);
-                }
-                grep_cmd.arg("--");
-                grep_cmd.args(&paths);
-                exec_capture(&mut grep_cmd).context("grep/rg failed")
-            }
-        }
-    })()?;
-
-    // Format flags (--count, --files-with-matches, etc.) return structured
-    // output that is compact per line but can accumulate to 600KB+ across
-    // large repos. For --count specifically, summarize top matches by count.
-    if has_format_flag(&extra_args) {
-        let has_count = extra_args.iter().any(|a| a == "-c" || a == "--count");
-        let lines: Vec<&str> = result.stdout.lines().collect();
-        let total_lines = lines.len();
-
-        if has_count && total_lines > 50 {
-            let mut entries: Vec<(&str, usize)> = Vec::new();
-            for line in &lines {
-                if let Some((file, count_str)) = line.rsplit_once(':') {
-                    if let Ok(cnt) = count_str.parse::<usize>() {
-                        entries.push((file, cnt));
-                    }
-                }
-            }
-            if entries.is_empty() {
-                print!("{}", result.stdout);
-            } else {
-                entries.sort_by(|a, b| b.1.cmp(&a.1));
-                let total_matches: usize = entries.iter().map(|e| e.1).sum();
-                let top_n = 20;
-                for (file, cnt) in entries.iter().take(top_n) {
-                    println!("{:>6}  {}", cnt, file);
-                }
-                if entries.len() > top_n {
-                    println!("  ...  ({} more files)", entries.len() - top_n);
-                }
-                println!("\n{} files, {} total matches", entries.len(), total_matches);
-            }
-        } else if total_lines > 200 {
-            let head: Vec<&str> = lines.iter().take(200).copied().collect();
-            println!("{}", head.join("\n"));
-            println!(
-                "... ({} lines truncated, {} total)",
-                total_lines - 200,
-                total_lines
-            );
-        } else {
-            print!("{}", result.stdout);
-        }
-
-        if !result.stderr.is_empty() {
-            eprint!("{}", result.stderr.trim());
-        }
-
-        let args_display = if extra_args.is_empty() {
-            format!("'{}' {}", pattern_display, path_display)
-        } else {
-            format!(
-                "{} '{}' {}",
-                extra_args.join(" "),
-                pattern_display,
-                path_display
-            )
-        };
-
-        timer.track_passthrough(
-            &format!("grep {}", args_display),
-            &format!("rtk grep {} (passthrough)", args_display),
+    // format/shape flags: native passthrough, no -0 NUL leak (#2333).
+    if has_format_flag(&extra_args) || has_shape_flag(&extra_args) {
+        return passthrough(
+            &timer,
+            &["--no-heading", "--no-ignore-vcs"],
+            &["-r"],
+            file_type,
+            &extra_args,
+            &patterns,
+            &paths,
+            &pattern_display,
+            &path_display,
         );
-        return Ok(result.exit_code);
     }
+
+    // GROUP path: -0 NUL-disambiguates file:line for the reparse (#1436).
+    let result = grep_capture(
+        &["-nH0", "--no-heading", "--no-ignore-vcs"],
+        &["-rnH", "--null"],
+        file_type,
+        &extra_args,
+        &patterns,
+        &paths,
+    )
+    .context("grep/rg failed")?;
 
     let exit_code = result.exit_code;
     let raw_output = result.combined();
 
     if result.stdout.trim().is_empty() {
-        if exit_code != 1 && !result.stderr.trim().is_empty() {
-            eprint!("{}", result.stderr);
-            timer.track_passthrough(
+        if is_grep_error_exit(exit_code) {
+            if !result.stderr.trim().is_empty() {
+                eprintln!("{}", result.stderr.trim());
+            }
+            let msg = format!("grep failed with exit code {}", exit_code);
+            timer.track(
                 &format!("grep -rn '{}' {}", pattern_display, path_display),
-                "rtk grep (error passthrough)",
+                "rtk grep",
+                &raw_output,
+                &msg,
             );
+            eprintln!("{}", msg);
             return Ok(exit_code);
         }
-        let msg = format!("0 matches for '{}'", pattern_display);
-        println!("{}", msg);
         timer.track(
             &format!("grep -rn '{}' {}", pattern_display, path_display),
             "rtk grep",
             &raw_output,
-            &msg,
+            "",
         );
         return Ok(exit_code);
+    }
+
+    // Safety net: unparseable shape → passthrough verbatim, never silently drop (#2333).
+    let signal = unparsed_signal(&raw_output);
+    if signal > 0 {
+        return passthrough(
+            &timer,
+            &["-nH", "--no-heading", "--no-ignore-vcs"],
+            &["-rnH"],
+            file_type,
+            &extra_args,
+            &patterns,
+            &paths,
+            &pattern_display,
+            &path_display,
+        );
     }
 
     let context_re = if context_only {
@@ -494,16 +597,23 @@ pub fn run(
         None
     };
 
-    let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
-    for line in result.stdout.lines() {
-        let Some((file, line_num, content)) = parse_match_line(line) else {
+    let mut by_file: HashMap<String, Vec<(usize, bool, String)>> = HashMap::new();
+    for line in raw_output.lines() {
+        let Some((file, line_num, is_match, content)) = parse_match_line(line) else {
             continue;
         };
         let cleaned = clean_line(content, max_line_len, context_re.as_ref(), &pattern_display);
-        by_file.entry(file).or_default().push((line_num, cleaned));
+        by_file
+            .entry(file)
+            .or_default()
+            .push((line_num, is_match, cleaned));
     }
 
-    let total_matches: usize = by_file.values().map(|v| v.len()).sum();
+    let total_matches: usize = by_file
+        .values()
+        .flat_map(|v| v.iter())
+        .filter(|(_, is_match, _)| *is_match)
+        .count();
     let mut rtk_output = String::new();
     rtk_output.push_str(&format!(
         "{} matches in {} files:\n\n",
@@ -516,61 +626,76 @@ pub fn run(
     files.sort_by_key(|(f, _)| *f);
 
     let per_file = config::limits().grep_max_per_file;
-    for (file, matches) in files {
+    for (file, entries) in files {
         if shown >= max_results {
             break;
         }
 
         let file_display = compact_path(file);
-        for (line_num, content) in matches.iter().take(per_file) {
+        for (line_num, is_match, content) in entries.iter().take(per_file) {
             if shown >= max_results {
                 break;
             }
-            rtk_output.push_str(&format!("{}:{}:{}\n", file_display, line_num, content));
+            if *is_match {
+                rtk_output.push_str(&format!("{}:{}:{}\n", file_display, line_num, content));
+            } else {
+                rtk_output.push_str(&format!("{}-{}-{}\n", file_display, line_num, content));
+            }
             shown += 1;
         }
     }
 
-    if total_matches > shown {
-        rtk_output.push_str(&format!("[+{} more]\n", total_matches - shown));
+    let total_lines: usize = by_file.values().map(|v| v.len()).sum();
+    if total_lines > shown {
+        rtk_output.push_str(&format!("[+{} more]\n", total_lines - shown));
     }
-    let mut tracked_output = rtk_output.clone();
     if exit_code != 0 && !result.stderr.trim().is_empty() {
         eprint!("{}", result.stderr);
-        tracked_output.push_str(&result.stderr);
     }
 
-    print!("{}", rtk_output);
+    // Never-worse: show plain `file:line:content` (NUL `-0` -> `:`) if grouping didn't shrink it.
+    let plain = raw_output.replace('\0', ":");
+    let output = if rtk_output.len() < plain.len() {
+        rtk_output
+    } else {
+        plain
+    };
+
+    print!("{}", output);
     timer.track(
         &format!("grep -rn '{}' {}", pattern_display, path_display),
         "rtk grep",
         &raw_output,
-        &tracked_output,
+        &output,
     );
 
     Ok(exit_code)
 }
 
-/// Parses a single rg/grep match line of the form `file\0line_number:content`.
+/// Parses a single rg/grep match or context line of the form
+/// `file\0line_number[:-]content`.
 ///
 /// Requires the underlying command to be invoked with `-0` (rg) or `--null`
-/// (grep) so the filename is NUL-separated from `line:content`. NUL cannot
-/// appear in
-/// file paths, so the parser is unambiguous regardless of:
+/// (grep) so the filename is NUL-separated from `line[:-]content`. NUL cannot
+/// appear in file paths, so the parser is unambiguous regardless of:
 ///   - content with `:` or `::` (e.g. `ClassRegistry::init(...)`, issue #1436);
 ///   - paths with embedded `:` (Windows drive letters, weird filenames like
 ///     `badly_named:52:file.txt`).
 ///
-/// Returns `None` for lines that do not match the expected shape (e.g. rg
-/// `-A`/`-B` context lines that use `-` as separator).
-fn parse_match_line(line: &str) -> Option<(String, usize, &str)> {
+/// Returns `None` for lines that do not match the expected shape.
+/// The `bool` in the tuple is `true` for match lines (`:` separator) and
+/// `false` for context lines (`-` separator, emitted by -A/-B/-C).
+fn parse_match_line(line: &str) -> Option<(String, usize, bool, &str)> {
     lazy_static::lazy_static! {
-        static ref MATCH_LINE_RE: Regex = Regex::new(r"^([^\x00]+)\x00(\d+):(.*)$").unwrap();
+        static ref MATCH_LINE_RE: Regex = Regex::new(r"^([^\x00]+)\x00(\d+)([:-])(.*)$").unwrap();
     }
     MATCH_LINE_RE.captures(line).and_then(|caps| {
-        let (_, [file, line_num, content]) = caps.extract();
-        let line_num: usize = line_num.parse().ok()?;
-        Some((file.to_string(), line_num, content))
+        let file = caps.get(1)?.as_str().to_string();
+        let line_num: usize = caps.get(2)?.as_str().parse().ok()?;
+        let sep = caps.get(3)?.as_str();
+        let content = caps.get(4)?.as_str();
+        let is_match = sep == ":";
+        Some((file, line_num, is_match, content))
     })
 }
 
@@ -659,9 +784,28 @@ fn compact_path(path: &str) -> String {
     )
 }
 
+/// grep/rg convention: exit 1 = no match found (normal), exit >= 2 = real
+/// error (bad regex, tool crash, missing binary). An error must surface to the
+/// user, never be silently reported as a false "0 matches".
+fn is_grep_error_exit(exit_code: i32) -> bool {
+    exit_code >= 2
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_grep_error_exit() {
+        // exit 0 = matches, exit 1 = no match: both normal, not errors.
+        assert!(!is_grep_error_exit(0));
+        assert!(!is_grep_error_exit(1));
+        // exit >= 2 = real error (bad regex, tool crash, missing binary).
+        // Must surface, never become a false "0 matches".
+        assert!(is_grep_error_exit(2));
+        assert!(is_grep_error_exit(3));
+        assert!(is_grep_error_exit(127));
+    }
 
     #[test]
     fn test_clean_line() {
@@ -1261,6 +1405,39 @@ mod tests {
         assert_eq!(status, 0);
     }
 
+    #[test]
+    fn test_strip_rg_only_drops_glob_and_value() {
+        assert_eq!(strip_rg_only(&["--glob", "*.rs", "-i"]), vec!["-i"]);
+        assert_eq!(strip_rg_only(&["-g", "*.rs", "-i"]), vec!["-i"]);
+    }
+
+    #[test]
+    fn test_strip_rg_only_drops_inline_glob() {
+        assert_eq!(strip_rg_only(&["--glob=*.rs", "-i"]), vec!["-i"]);
+    }
+
+    #[test]
+    fn test_strip_rg_only_drops_bool_flags() {
+        assert_eq!(
+            strip_rg_only(&["--hidden", "--pcre2", "--json", "-n"]),
+            vec!["-n"]
+        );
+    }
+
+    #[test]
+    fn test_strip_rg_only_drops_type_and_value() {
+        assert_eq!(strip_rg_only(&["--type", "rust", "-w"]), vec!["-w"]);
+        assert_eq!(strip_rg_only(&["-T", "rust", "-w"]), vec!["-w"]);
+    }
+
+    #[test]
+    fn test_strip_rg_only_keeps_grep_compatible() {
+        assert_eq!(
+            strip_rg_only(&["-i", "-w", "-A", "3", "-v"]),
+            vec!["-i", "-w", "-A", "3", "-v"]
+        );
+    }
+
     // Verify line numbers are always enabled in rg invocation (grep_cmd.rs:24).
     // The -n/--line-numbers clap flag in main.rs is a no-op accepted for compat.
     #[test]
@@ -1280,14 +1457,15 @@ mod tests {
     }
 
     // --- issue #1436: parse_match_line robustness ---
-    // Input shape is `file\0line:content` (rg --null / grep -Z).
+    // Input shape is `file\0line[:-]content` (rg --null / grep -Z).
 
     #[test]
     fn test_parse_match_line_simple() {
         let line = "file.php\x0010:use Foo\\Bar;";
-        let (file, line_num, content) = parse_match_line(line).unwrap();
+        let (file, line_num, is_match, content) = parse_match_line(line).unwrap();
         assert_eq!(file, "file.php");
         assert_eq!(line_num, 10);
+        assert!(is_match);
         assert_eq!(content, "use Foo\\Bar;");
     }
 
@@ -1297,9 +1475,10 @@ mod tests {
     #[test]
     fn test_parse_match_line_content_with_double_colon() {
         let line = "externalImportShell.class.php\x0081:        $this->queueProcessModel = ClassRegistry::init('Collections.QueueProcess');";
-        let (file, line_num, content) = parse_match_line(line).unwrap();
+        let (file, line_num, is_match, content) = parse_match_line(line).unwrap();
         assert_eq!(file, "externalImportShell.class.php");
         assert_eq!(line_num, 81);
+        assert!(is_match);
         assert_eq!(
             content,
             "        $this->queueProcessModel = ClassRegistry::init('Collections.QueueProcess');"
@@ -1311,9 +1490,10 @@ mod tests {
     #[test]
     fn test_parse_match_line_windows_path() {
         let line = "C:\\src\\file.rs\x0042:fn main() {}";
-        let (file, line_num, content) = parse_match_line(line).unwrap();
+        let (file, line_num, is_match, content) = parse_match_line(line).unwrap();
         assert_eq!(file, r"C:\src\file.rs");
         assert_eq!(line_num, 42);
+        assert!(is_match);
         assert_eq!(content, "fn main() {}");
     }
 
@@ -1322,9 +1502,10 @@ mod tests {
     #[test]
     fn test_parse_match_line_filename_with_colons() {
         let line = "badly_named:52:file.txt\x001:xxx";
-        let (file, line_num, content) = parse_match_line(line).unwrap();
+        let (file, line_num, is_match, content) = parse_match_line(line).unwrap();
         assert_eq!(file, "badly_named:52:file.txt");
         assert_eq!(line_num, 1);
+        assert!(is_match);
         assert_eq!(content, "xxx");
     }
 
@@ -1333,9 +1514,10 @@ mod tests {
     #[test]
     fn test_parse_match_line_content_with_digit_colons() {
         let line = "log.txt\x007:debug: counter is :42: now";
-        let (file, line_num, content) = parse_match_line(line).unwrap();
+        let (file, line_num, is_match, content) = parse_match_line(line).unwrap();
         assert_eq!(file, "log.txt");
         assert_eq!(line_num, 7);
+        assert!(is_match);
         assert_eq!(content, "debug: counter is :42: now");
     }
 
@@ -1354,10 +1536,22 @@ mod tests {
     #[test]
     fn test_parse_match_line_empty_content() {
         let line = "file.rs\x007:";
-        let (file, line_num, content) = parse_match_line(line).unwrap();
+        let (file, line_num, is_match, content) = parse_match_line(line).unwrap();
         assert_eq!(file, "file.rs");
         assert_eq!(line_num, 7);
+        assert!(is_match);
         assert_eq!(content, "");
+    }
+
+    // Context line: separator is `-` → is_match==false
+    #[test]
+    fn test_parse_match_line_context_line() {
+        let line = "file.txt\x004-after1";
+        let (file, line_num, is_match, content) = parse_match_line(line).unwrap();
+        assert_eq!(file, "file.txt");
+        assert_eq!(line_num, 4);
+        assert!(!is_match, "dash separator must yield is_match==false");
+        assert_eq!(content, "after1");
     }
 
     #[test]
@@ -1378,6 +1572,51 @@ mod tests {
             );
         }
         // If rg is not installed, skip gracefully (test still passes)
+    }
+
+    // --- unparsed_signal ---
+
+    #[test]
+    fn test_unparsed_signal_parseable_lines_yield_zero() {
+        // NUL-separated match lines all parse → signal == 0
+        let stdout = "file.txt\x001:hello\nfile.txt\x002:world\n";
+        assert_eq!(unparsed_signal(stdout), 0);
+    }
+
+    #[test]
+    fn test_unparsed_signal_context_separator_not_counted() {
+        // The `--` context separator emitted by rg/grep between match groups
+        // must not be counted as an unparsed line.
+        let stdout = "file.txt\x001:hello\n--\nfile.txt\x003:world\n";
+        assert_eq!(unparsed_signal(stdout), 0);
+    }
+
+    #[test]
+    fn test_unparsed_signal_empty_line_not_counted() {
+        let stdout = "file.txt\x001:hello\n\nfile.txt\x002:world\n";
+        assert_eq!(unparsed_signal(stdout), 0);
+    }
+
+    #[test]
+    fn test_unparsed_signal_bare_colon_line_counted() {
+        // A line like "file.rs:1:content" (no NUL) is what --heading or
+        // --no-filename output looks like — it must be counted.
+        let stdout = "file.rs:1:content\n";
+        assert_eq!(unparsed_signal(stdout), 1);
+    }
+
+    #[test]
+    fn test_unparsed_signal_binary_notice_counted() {
+        // rg emits "Binary file foo matches" for binary files; no NUL → counted.
+        let stdout = "Binary file foo matches\n";
+        assert_eq!(unparsed_signal(stdout), 1);
+    }
+
+    #[test]
+    fn test_unparsed_signal_context_lines_parse_ok() {
+        // Context lines (dash separator) parse via the updated regex → not counted.
+        let stdout = "file.txt\x003-context_before\nfile.txt\x004:match\nfile.txt\x005-context_after\n";
+        assert_eq!(unparsed_signal(stdout), 0);
     }
 }
 

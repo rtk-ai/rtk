@@ -1,5 +1,6 @@
 //! Compares two files and shows only the changed lines.
 
+use crate::core::guard::never_worse;
 use crate::core::tracking;
 use anyhow::Result;
 use std::fs;
@@ -20,12 +21,13 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
 
     let (rtk, exit_code) = render_file_diff(file1, file2, &content1, &content2);
 
-    print!("{}", rtk);
+    let shown = never_worse(&raw, &rtk);
+    print!("{}", shown);
     timer.track(
         &format!("diff {} {}", file1.display(), file2.display()),
         "rtk diff",
         &raw,
-        &rtk,
+        shown,
     );
     Ok(exit_code)
 }
@@ -61,9 +63,10 @@ pub fn run_stdin(_verbose: u8) -> Result<()> {
 
     // Parse unified diff format
     let condensed = condense_unified_diff(&input);
-    println!("{}", condensed);
+    let shown = never_worse(&input, &condensed);
+    println!("{}", shown);
 
-    timer.track("diff (stdin)", "rtk diff (stdin)", &input, &condensed);
+    timer.track("diff (stdin)", "rtk diff (stdin)", &input, shown);
 
     Ok(())
 }

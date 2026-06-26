@@ -1,5 +1,6 @@
 //! Deduplicates repeated log lines and shows counts instead.
 
+use crate::core::guard::never_worse;
 use crate::core::tracking;
 use crate::core::truncate::{reduced, CAP_WARNINGS};
 use anyhow::Result;
@@ -31,12 +32,13 @@ pub fn run_file(file: &Path, verbose: u8) -> Result<()> {
 
     let content = fs::read_to_string(file)?;
     let result = analyze_logs(&content);
-    println!("{}", result);
+    let shown = never_worse(&content, &result);
+    println!("{}", shown);
     timer.track(
         &format!("cat {}", file.display()),
         "rtk log",
         &content,
-        &result,
+        shown,
     );
     Ok(())
 }
@@ -53,9 +55,10 @@ pub fn run_stdin(_verbose: u8) -> Result<()> {
     }
 
     let result = analyze_logs(&content);
-    println!("{}", result);
+    let shown = never_worse(&content, &result);
+    println!("{}", shown);
 
-    timer.track("log (stdin)", "rtk log (stdin)", &content, &result);
+    timer.track("log (stdin)", "rtk log (stdin)", &content, shown);
 
     Ok(())
 }

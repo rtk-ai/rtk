@@ -199,17 +199,14 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         _ => filter_generic_lint(&raw),
     };
 
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "lint", result.exit_code) {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
+    let hint = crate::core::tee::tee_and_hint(&raw, "lint", result.exit_code);
+    let shown = crate::core::runner::emit_guarded(&filtered, hint.as_deref(), &raw);
 
     timer.track(
         &format!("{} {}", linter, args.join(" ")),
         &format!("rtk lint {} {}", linter, args.join(" ")),
         &raw,
-        &filtered,
+        &shown,
     );
 
     if !result.success() {
