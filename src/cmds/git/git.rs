@@ -68,6 +68,16 @@ fn uses_compact_status_path(args: &[String]) -> bool {
     saw_branch
 }
 
+/// True when the user requested a machine-readable status format whose output is
+/// a stable contract that scripts parse (test for emptiness, split on NUL). RTK
+/// must stream these verbatim: substituting "ok" for a clean tree, dropping
+/// untracked entries, or reflowing NUL-delimited output all break parsers.
+/// Mirrors Design Philosophy #1 — respect explicitly-requested detail.
+fn uses_machine_status_format(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| a == "--porcelain" || a.starts_with("--porcelain=") || a == "-z")
+}
+
 fn build_status_command(args: &[String], global_args: &[String]) -> Command {
     let mut cmd = git_cmd(global_args);
     cmd.arg("status");
@@ -818,6 +828,32 @@ fn filter_status_with_args(output: &str) -> String {
 
 fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+
+    // Machine-readable formats (--porcelain, --porcelain=v1/v2, -z) are a parsing
+    // contract: callers test the output for emptiness and split it on NUL. Stream
+    // them byte-for-byte — running them through filter_status_with_args would turn
+    // a clean tree into "ok" (breaking `[ -z "$(git status --porcelain)" ]`) and
+    // can mangle NUL-delimited output. Respect the explicitly-requested format.
+    if uses_machine_status_format(args) {
+        let mut cmd = git_cmd_c_locale(global_args);
+        cmd.arg("status");
+        cmd.args(args);
+        let result = exec_capture(&mut cmd).context("Failed to run git status")?;
+
+        if !result.stderr.is_empty() && (verbose > 0 || !result.success()) {
+            eprint!("{}", result.stderr);
+        }
+        print!("{}", result.stdout);
+
+        timer.track(
+            &format!("git status {}", args.join(" ")),
+            &format!("rtk git status {}", args.join(" ")),
+            &result.stdout,
+            &result.stdout,
+        );
+
+        return Ok(result.exit_code);
+    }
 
     // Keep a narrow compact path for no-arg status and branch/short-only flags.
     // More complex explicit args still use the existing minimal-filter path.
@@ -1894,6 +1930,24 @@ mod tests {
         assert!(!uses_compact_status_path(&["--short".to_string()]));
         assert!(!uses_compact_status_path(&["--porcelain".to_string()]));
         assert!(!uses_compact_status_path(&["-uno".to_string()]));
+    }
+
+    #[test]
+    fn test_uses_machine_status_format() {
+        // Machine-readable contracts → verbatim passthrough.
+        assert!(uses_machine_status_format(&["--porcelain".to_string()]));
+        assert!(uses_machine_status_format(&["--porcelain=v1".to_string()]));
+        assert!(uses_machine_status_format(&["--porcelain=v2".to_string()]));
+        assert!(uses_machine_status_format(&["-z".to_string()]));
+        assert!(uses_machine_status_format(&[
+            "--porcelain".to_string(),
+            "-uall".to_string()
+        ]));
+        // Human/compact formats keep RTK's summary behavior.
+        assert!(!uses_machine_status_format(&[]));
+        assert!(!uses_machine_status_format(&["-s".to_string()]));
+        assert!(!uses_machine_status_format(&["--short".to_string()]));
+        assert!(!uses_machine_status_format(&["-b".to_string()]));
     }
 
     #[test]
