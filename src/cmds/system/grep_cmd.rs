@@ -575,12 +575,7 @@ pub fn run(
         .filter(|(_, is_match, _)| *is_match)
         .count();
 
-    let mut rtk_output = String::new();
-    rtk_output.push_str(&format!(
-        "{} matches in {} files:\n\n",
-        total_matches,
-        by_file.len()
-    ));
+    let mut body_output = String::new();
 
     let mut shown = 0;
     let mut files: Vec<_> = by_file.iter().collect();
@@ -598,9 +593,9 @@ pub fn run(
                 break;
             }
             if *is_match {
-                rtk_output.push_str(&format!("{}:{}:{}\n", file_display, line_num, content));
+                body_output.push_str(&format!("{}:{}:{}\n", file_display, line_num, content));
             } else {
-                rtk_output.push_str(&format!("{}-{}-{}\n", file_display, line_num, content));
+                body_output.push_str(&format!("{}-{}-{}\n", file_display, line_num, content));
             }
             shown += 1;
         }
@@ -608,8 +603,21 @@ pub fn run(
 
     let total_lines: usize = by_file.values().map(|v| v.len()).sum();
     if total_lines > shown {
-        rtk_output.push_str(&format!("[+{} more]\n", total_lines - shown));
+        body_output.push_str(&format!("[+{} more]\n", total_lines - shown));
     }
+
+    let should_show_header =
+        total_matches > 1 || by_file.len() > 1 || total_lines != total_matches || total_lines > shown;
+    let rtk_output = if should_show_header {
+        format!(
+            "{} matches in {} files:\n\n{}",
+            total_matches,
+            by_file.len(),
+            body_output
+        )
+    } else {
+        body_output
+    };
 
     // Never-worse: show plain `file:line:content` (NUL `-0` -> `:`) if grouping didn't shrink it.
     let plain = raw_output.replace('\0', ":");
