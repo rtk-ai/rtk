@@ -476,7 +476,6 @@ fn main() {
 
     #[test]
     fn test_minimal_keeps_code_with_inline_block_marker() {
-        // `/*` inside a string literal is not a comment opener
         let code = "let glob = \"src/*.rs\";\nfn bar() {}\nfn baz() {}";
         let filter = MinimalFilter;
         let result = filter.filter(code, &Language::Rust);
