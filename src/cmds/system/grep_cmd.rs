@@ -7,6 +7,20 @@ use crate::core::{args_utils, config};
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::path::{Component, Path};
+
+/// Glob passed to ripgrep to skip Claude Code's worktree checkouts.
+///
+/// Claude Code creates throwaway branch checkouts under `.claude/worktrees`.
+/// They are gitignored and out of scope for normal scans, but `rtk grep`
+/// passes `--no-ignore-vcs`, and users may add `--hidden`, so ripgrep would
+/// otherwise descend into them. The leading `**/` matches at any depth,
+/// including the repository-root `.claude/worktrees`; the trailing `/**`
+/// excludes the directory's contents. Applied only when the requested paths are
+/// not already inside `.claude/worktrees`. Added before any user-supplied args
+/// so a later user `--glob` can still re-include the directory.
+const WORKTREES_RG_GLOB: &str = "!**/.claude/worktrees/**";
 
 /// Short single-char flags that consume one following token (or inline remainder)
 /// as their value. `-e` is handled separately — its value goes to `patterns`.
@@ -335,10 +349,14 @@ fn grep_capture<T: AsRef<str>>(
     patterns: &[String],
     paths: &[String],
 ) -> Result<CaptureResult> {
+    let skip_worktrees = should_skip_claude_worktrees_by_default(paths);
     let mut rg_cmd = resolved_command("rg");
     rg_cmd.args(rg_base);
     if let Some(ft) = file_type {
         rg_cmd.arg("--type").arg(ft);
+    }
+    if skip_worktrees {
+        rg_cmd.args(["--glob", WORKTREES_RG_GLOB]);
     }
     rg_cmd.args(extra_args.iter().map(|a| a.as_ref()));
     for p in patterns {
@@ -355,9 +373,10 @@ fn grep_capture<T: AsRef<str>>(
             let result = run_grep_fallback(grep_base, file_type, &stripped, patterns, paths)?;
             if result.exit_code == 2 && result.stdout.is_empty() && result.stderr.contains("option") {
                 // grep aborted on an rg-only flag that strip_rg_only missed; retry bare (#2167).
-                run_grep_fallback(grep_base, file_type, &[], patterns, paths)
+                let result = run_grep_fallback(grep_base, file_type, &[], patterns, paths)?;
+                Ok(filter_grep_fallback_result(result, skip_worktrees))
             } else {
-                Ok(result)
+                Ok(filter_grep_fallback_result(result, skip_worktrees))
             }
         }
     }
@@ -381,6 +400,20 @@ fn run_grep_fallback(
     grep_cmd.arg("--");
     grep_cmd.args(paths);
     exec_capture(&mut grep_cmd).context("grep/rg failed")
+}
+
+fn filter_grep_fallback_result(mut result: CaptureResult, skip_worktrees: bool) -> CaptureResult {
+    if !skip_worktrees {
+        return result;
+    }
+
+    let original_stdout = result.stdout.clone();
+    result.stdout = filter_claude_worktree_matches(&result.stdout);
+    if result.exit_code == 0 && !original_stdout.trim().is_empty() && result.stdout.trim().is_empty()
+    {
+        result.exit_code = 1;
+    }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -747,6 +780,73 @@ fn compact_path(path: &str) -> String {
 /// user, never be silently reported as a false "0 matches".
 fn is_grep_error_exit(exit_code: i32) -> bool {
     exit_code >= 2
+}
+
+fn should_skip_claude_worktrees_by_default(paths: &[String]) -> bool {
+    !paths.iter().any(|path| path_points_inside_claude_worktrees(path))
+}
+
+fn path_points_inside_claude_worktrees(path: &str) -> bool {
+    let mut normalized = Vec::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Prefix(_) | Component::RootDir => normalized.clear(),
+        }
+    }
+
+    let mut previous_was_claude = false;
+    for part in normalized {
+        if previous_was_claude && part == OsStr::new("worktrees") {
+            return true;
+        }
+        previous_was_claude = part == OsStr::new(".claude");
+    }
+    false
+}
+
+fn filter_claude_worktree_matches(stdout: &str) -> String {
+    if stdout.ends_with('\0') && !stdout.contains('\n') {
+        return filter_nul_separated_paths(stdout);
+    }
+
+    let mut filtered = String::with_capacity(stdout.len());
+    for line in stdout.split_inclusive('\n') {
+        if !line_points_inside_claude_worktrees(line)
+            && !line_without_newline_points_inside_claude_worktrees(line)
+        {
+            filtered.push_str(line);
+        }
+    }
+    filtered
+}
+
+fn filter_nul_separated_paths(stdout: &str) -> String {
+    let mut filtered = String::with_capacity(stdout.len());
+    for path in stdout.split_inclusive('\0') {
+        let path_without_nul = path.strip_suffix('\0').unwrap_or(path);
+        if !path_points_inside_claude_worktrees(path_without_nul) {
+            filtered.push_str(path);
+        }
+    }
+    filtered
+}
+
+fn line_points_inside_claude_worktrees(line: &str) -> bool {
+    let Some((path, _)) = line.split_once('\0') else {
+        return false;
+    };
+    path_points_inside_claude_worktrees(path)
+}
+
+fn line_without_newline_points_inside_claude_worktrees(line: &str) -> bool {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    let path = line.split_once(':').map_or(line, |(path, _)| path);
+    path_points_inside_claude_worktrees(path)
 }
 
 #[cfg(test)]
@@ -1445,6 +1545,162 @@ mod tests {
             );
         }
         // If rg is not installed, skip gracefully (test still passes)
+    }
+
+    // --- issue #2147: skip .claude/worktrees by default ---
+
+    #[test]
+    fn test_worktrees_glob_matches_any_depth() {
+        assert!(WORKTREES_RG_GLOB.starts_with("!**/"));
+        assert!(WORKTREES_RG_GLOB.contains(".claude/worktrees"));
+        assert!(WORKTREES_RG_GLOB.ends_with("/**"));
+    }
+
+    #[test]
+    fn test_skip_worktrees_default_for_normal_paths() {
+        let paths = vec![".".to_string(), "src/worktrees".to_string()];
+        assert!(should_skip_claude_worktrees_by_default(&paths));
+    }
+
+    #[test]
+    fn test_do_not_skip_worktrees_for_explicit_claude_worktrees_path() {
+        let paths = vec!["src".to_string(), ".claude/worktrees".to_string()];
+        assert!(!should_skip_claude_worktrees_by_default(&paths));
+    }
+
+    #[test]
+    fn test_path_points_inside_claude_worktrees() {
+        assert!(path_points_inside_claude_worktrees(".claude/worktrees"));
+        assert!(path_points_inside_claude_worktrees(
+            "./.claude/worktrees/session"
+        ));
+        assert!(path_points_inside_claude_worktrees(
+            "/tmp/repo/.claude/worktrees/wt/file.rs"
+        ));
+        assert!(!path_points_inside_claude_worktrees("."));
+        assert!(!path_points_inside_claude_worktrees("src/worktrees"));
+        assert!(!path_points_inside_claude_worktrees(
+            ".claude/../src/worktrees"
+        ));
+    }
+
+    #[test]
+    fn test_grep_fallback_filter_skips_only_claude_worktrees() {
+        let stdout = concat!(
+            "src/worktrees/file.rs\x001:NEEDLE\n",
+            ".claude/worktrees/wt/file.rs\x001:NEEDLE\n",
+            "nested/.claude/worktrees/wt/lib.rs\x001:NEEDLE\n",
+            "src/other.rs\x001:NEEDLE\n",
+        );
+        let filtered = filter_claude_worktree_matches(stdout);
+
+        assert!(filtered.contains("src/worktrees/file.rs"));
+        assert!(filtered.contains("src/other.rs"));
+        assert!(!filtered.contains(".claude/worktrees"));
+    }
+
+    #[test]
+    fn test_grep_fallback_filter_handles_nul_separated_format_output() {
+        let stdout = concat!(
+            "src/worktrees/file.rs\x00",
+            ".claude/worktrees/wt/file.rs\x00",
+            "src/other.rs\x00",
+        );
+        let filtered = filter_claude_worktree_matches(stdout);
+
+        assert!(filtered.contains("src/worktrees/file.rs\x00"));
+        assert!(filtered.contains("src/other.rs\x00"));
+        assert!(!filtered.contains(".claude/worktrees"));
+    }
+
+    #[test]
+    fn test_grep_fallback_filter_handles_plain_path_output() {
+        let stdout = concat!(
+            "src/worktrees/file.rs\n",
+            ".claude/worktrees/wt/file.rs\n",
+            "src/other.rs\n",
+        );
+        let filtered = filter_claude_worktree_matches(stdout);
+
+        assert!(filtered.contains("src/worktrees/file.rs\n"));
+        assert!(filtered.contains("src/other.rs\n"));
+        assert!(!filtered.contains(".claude/worktrees"));
+    }
+
+    #[test]
+    fn test_grep_fallback_filter_preserves_single_match_without_trailing_newline() {
+        let stdout = "src/worktrees/file.rs\x001:NEEDLE";
+        assert_eq!(filter_claude_worktree_matches(stdout), stdout);
+    }
+
+    #[test]
+    fn test_grep_fallback_filter_drops_single_claude_worktree_match_without_trailing_newline() {
+        let stdout = ".claude/worktrees/wt/file.rs\x001:NEEDLE";
+        assert_eq!(filter_claude_worktree_matches(stdout), "");
+    }
+
+    #[test]
+    fn test_rg_worktrees_glob_accepted() {
+        let mut cmd = resolved_command("rg");
+        cmd.args([
+            "-n",
+            "--no-heading",
+            "--no-ignore-vcs",
+            "--glob",
+            WORKTREES_RG_GLOB,
+            "NONEXISTENT_PATTERN_12345",
+            ".",
+        ]);
+        if let Ok(output) = cmd.output() {
+            assert!(
+                output.status.code() == Some(1) || output.status.success(),
+                "rg should accept the .claude/worktrees exclusion glob"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rg_behavior_skips_claude_worktrees() {
+        use std::fs;
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let root = dir.path();
+        for rel in [
+            ".claude/worktrees/wt/main.rs",
+            "sub/.claude/worktrees/wt/lib.rs",
+            "keep.rs",
+        ] {
+            let file = root.join(rel);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, "fn NEEDLE() {}\n").unwrap();
+        }
+
+        let mut cmd = resolved_command("rg");
+        cmd.args([
+            "-nH0",
+            "--no-heading",
+            "--no-ignore-vcs",
+            "--glob",
+            WORKTREES_RG_GLOB,
+            "--hidden",
+            "-e",
+            "NEEDLE",
+            "--",
+            root.to_str().expect("utf-8 temp path"),
+        ]);
+        let Ok(output) = cmd.output() else {
+            return;
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        assert!(
+            stdout.contains("keep.rs"),
+            "non-worktree file must still match, got: {stdout:?}"
+        );
+        assert!(
+            !stdout.contains("worktrees"),
+            "rg must not descend into .claude/worktrees, got: {stdout:?}"
+        );
     }
 
     // --- unparsed_signal ---
