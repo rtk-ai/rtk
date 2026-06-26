@@ -202,11 +202,12 @@ Supporte a la fois la syntaxe RTK et la syntaxe native `find` (`-name`, `-type`,
 
 ### `rtk grep` -- Recherche dans le contenu
 
-**Objectif :** Remplace `grep` et `rg` avec une sortie groupee par fichier, tronquee.
+**Objectif :** Remplace `grep` avec une sortie groupee par fichier, tronquee. Pour ripgrep, utilisez `rtk rg`, qui conserve le moteur `rg` et applique le meme regroupement de sortie.
 
 **Syntaxe :**
 ```bash
 rtk grep <pattern> [chemin] [options]
+rtk rg <pattern> [chemin] [options]
 ```
 
 **Options :**
@@ -219,13 +220,13 @@ rtk grep <pattern> [chemin] [options]
 | `--file-type` | `-t` | tous | Filtrer par type (ts, py, rust, etc.) |
 | `--line-numbers` | `-n` | oui | Numeros de ligne (toujours actif) |
 
-Les arguments supplementaires sont transmis a `rg` (ripgrep). Les flags qui changent le format de sortie (`-c`, `-l`, `-L`, `-o`, `-Z`) passent directement a `rg`/`grep` sans filtrage RTK.
+Les arguments supplementaires sont transmis au moteur invoque : `rtk grep` execute `grep`, tandis que `rtk rg` execute `rg` (ripgrep). Les flags qui changent le format de sortie (`-c`, `-l`, `-L`, `-o`, `-Z`) passent directement au moteur sous-jacent sans filtrage RTK.
 
 **Economies :** ~80%
 
 **Avant / Apres :**
 ```
-# rg "fn run" (20 lignes)                   # rtk grep "fn run" (10 lignes)
+# rg "fn run" (20 lignes)                   # rtk rg "fn run" (10 lignes)
 src/git.rs:45:pub fn run(...)                src/git.rs
 src/git.rs:120:fn run_status(...)              45: pub fn run(...)
 src/ls.rs:12:pub fn run(...)                   120: fn run_status(...)
@@ -1255,7 +1256,8 @@ rtk verify
 | `gh pr/issue/run` | `rtk gh ...` |
 | `cargo test/build/clippy/check` | `rtk cargo ...` |
 | `cat/head/tail <fichier>` | `rtk read <fichier>` |
-| `rg/grep <pattern>` | `rtk grep <pattern>` |
+| `grep <pattern>` | `rtk grep <pattern>` |
+| `rg <pattern>` | `rtk rg <pattern>` |
 | `ls` | `rtk ls` |
 | `tree` | `rtk tree` |
 | `wc` | `rtk wc` |

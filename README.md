@@ -120,7 +120,9 @@ git status  # Automatically rewritten to rtk git status
 
 Hook-based agents rewrite Bash commands (e.g., `git status` -> `rtk git status`) before execution. Plugin-based agents, including Hermes, use their plugin API to rewrite commands before execution. The agent receives compact output without needing to call `rtk` explicitly.
 
-**Important:** the hook only runs on Bash tool calls. Claude Code built-in tools like `Read`, `Grep`, and `Glob` do not pass through the Bash hook, so they are not auto-rewritten. To get RTK's compact output for those workflows, use shell commands (`cat`/`head`/`tail`, `rg`/`grep`, `find`) or call `rtk read`, `rtk grep`, or `rtk find` directly.
+**Important:** the hook only runs on Bash tool calls. Claude Code built-in tools like `Read`, `Grep`, and `Glob` do not pass through the Bash hook, so they are not auto-rewritten. To get RTK's compact output for those workflows, use shell commands (`cat`/`head`/`tail`, `rg`/`grep`, `find`) or call `rtk read`, `rtk grep`, `rtk rg`, or `rtk find` directly.
+
+RTK preserves the search tool you invoke: `grep` is rewritten to `rtk grep` and still runs system `grep`; `rg` is rewritten to `rtk rg` and runs ripgrep. Install ripgrep if you want your agent or shell workflow to use `rg`, but RTK will not silently swap `grep` commands to ripgrep.
 
 ## How It Works
 
@@ -149,7 +151,8 @@ rtk read file.rs                # Smart file reading
 rtk read file.rs -l aggressive  # Signatures only (strips bodies)
 rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
-rtk grep "pattern" .            # Grouped search results
+rtk grep "pattern" .            # Grouped system grep results
+rtk rg "pattern" .              # Grouped ripgrep results (requires rg)
 rtk diff file1 file2            # Condensed diff (exit 1 if files differ)
 ```
 
