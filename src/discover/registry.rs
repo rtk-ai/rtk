@@ -1423,9 +1423,75 @@ mod tests {
 
     #[test]
     fn test_rewrite_rg_pattern() {
+        // `rg` routes to `rtk rg` (ripgrep passthrough), not `rtk grep`.
         assert_eq!(
             rewrite_command_no_prefixes("rg \"fn main\"", &[]),
-            Some("rtk grep \"fn main\"".into())
+            Some("rtk rg \"fn main\"".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_grep_pattern() {
+        // `grep` stays on the `rtk grep` filter.
+        assert_eq!(
+            rewrite_command_no_prefixes("grep \"fn main\" src/", &[]),
+            Some("rtk grep \"fn main\" src/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_forwards_args_to_rtk_rg() {
+        // The rewrite only swaps the target (`rg` → `rtk rg`); every argument is
+        // carried over verbatim. The split matters because of the TARGET: `rtk rg`
+        // falls through `run_fallback` to the real ripgrep, so ripgrep-only flags
+        // and flag ordering reach ripgrep intact instead of hitting the
+        // grep-flavored `rtk grep` runtime path (grep_cmd.rs) that drops/rejects them.
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --hidden -g '*.rs' --stats foo", &[]),
+            Some("rtk rg --hidden -g '*.rs' --stats foo".into())
+        );
+        // `-r` means ripgrep's --replace (NOT grep's recursive). It must reach
+        // `rtk rg` verbatim; routing it to `rtk grep` would strip it at runtime.
+        assert_eq!(
+            rewrite_command_no_prefixes("rg -r 'NEW' pattern", &[]),
+            Some("rtk rg -r 'NEW' pattern".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_pathless_pattern() {
+        // Path-less `rg PATTERN` (ripgrep recurses CWD) must reach real ripgrep
+        // via `rtk rg`, not `rtk grep` (which would read stdin under system grep).
+        assert_eq!(
+            rewrite_command_no_prefixes("rg TODO", &[]),
+            Some("rtk rg TODO".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_rg_routes_to_rtk_rg() {
+        // `rtk rg` is a verbatim passthrough, so estimated savings is 0%.
+        assert_eq!(
+            classify_command("rg --glob '*.py' alpha"),
+            Classification::Supported {
+                rtk_equivalent: "rtk rg",
+                category: "Files",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_grep_routes_to_rtk_grep() {
+        assert_eq!(
+            classify_command("grep -rn pattern src/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk grep",
+                category: "Files",
+                estimated_savings_pct: 75.0,
+                status: RtkStatus::Existing,
+            }
         );
     }
 

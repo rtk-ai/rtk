@@ -42,7 +42,7 @@ rtk filters and compresses command outputs before they reach your LLM context. S
 |-----------|-----------|----------|-----|---------|
 | `ls` / `tree` | 10x | 2,000 | 400 | -80% |
 | `cat` / `read` | 20x | 40,000 | 12,000 | -70% |
-| `grep` / `rg` | 8x | 16,000 | 3,200 | -80% |
+| `grep` | 8x | 16,000 | 3,200 | -80% |
 | `git status` | 10x | 3,000 | 600 | -80% |
 | `git diff` | 5x | 10,000 | 2,500 | -75% |
 | `git log` | 5x | 2,500 | 500 | -80% |
@@ -55,6 +55,11 @@ rtk filters and compresses command outputs before they reach your LLM context. S
 | **Total** | | **~118,000** | **~23,900** | **-80%** |
 
 > Estimates based on medium-sized TypeScript/Rust projects. Actual savings vary by project size.
+
+**Note on `rg`:** `rg` (ripgrep) is rewritten to `rtk rg`, a verbatim passthrough that forwards
+every argument to ripgrep and preserves its exact semantics. It is intentionally absent from the
+table above — as a passthrough it does not filter output, so it yields **no token savings**.
+Ripgrep's output is already compact, so preserving it verbatim is preferred over grouping.
 
 ## Installation
 
@@ -120,7 +125,7 @@ git status  # Automatically rewritten to rtk git status
 
 Hook-based agents rewrite Bash commands (e.g., `git status` -> `rtk git status`) before execution. Plugin-based agents, including Hermes, use their plugin API to rewrite commands before execution. The agent receives compact output without needing to call `rtk` explicitly.
 
-**Important:** the hook only runs on Bash tool calls. Claude Code built-in tools like `Read`, `Grep`, and `Glob` do not pass through the Bash hook, so they are not auto-rewritten. To get RTK's compact output for those workflows, use shell commands (`cat`/`head`/`tail`, `rg`/`grep`, `find`) or call `rtk read`, `rtk grep`, or `rtk find` directly.
+**Important:** the hook only runs on Bash tool calls. Claude Code built-in tools like `Read`, `Grep`, and `Glob` do not pass through the Bash hook, so they are not auto-rewritten. To get RTK's compact output for those workflows, use shell commands (`cat`/`head`/`tail`, `grep`, `rg`, `find`) or call `rtk read`, `rtk grep`, `rtk rg`, or `rtk find` directly. (`rtk rg` is the verbatim passthrough noted above.)
 
 ## How It Works
 

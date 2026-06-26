@@ -107,7 +107,13 @@ test_rewrite "grep -rn pattern src/" \
 
 test_rewrite "rg pattern src/" \
   "rg pattern src/" \
-  "rtk grep pattern src/"
+  "rtk rg pattern src/"
+
+# rg keeps ripgrep-only flags (e.g. -g/--glob, -r=--replace) on the rtk rg
+# passthrough path instead of the grep-flavored rtk grep translation.
+test_rewrite "rg -g '*.rs' pattern" \
+  "rg -g '*.rs' pattern" \
+  "rtk rg -g '*.rs' pattern"
 
 test_rewrite "cargo test" \
   "cargo test" \

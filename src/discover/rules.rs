@@ -88,10 +88,33 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
+    // `rg` and `grep` are split into two rules so each stays on its own backend.
+    // `rtk grep` runs ripgrep but applies grep-flavored argument translation
+    // (strips -r/-R/--recursive, translates BRE `\|` to PCRE `|`, defaults the
+    // path to `.`, forwards only a curated rg-flag allowlist). That translation
+    // corrupts genuine ripgrep invocations: ripgrep-only flags (`--hidden`,
+    // `-g`/`--glob`, `--stats`, `-uu`, `-P`, `--json`) and arbitrary flag
+    // ordering get dropped or rejected, and `rg PATTERN` (recursive over CWD)
+    // is mishandled (#1824, #2167, #2301, #2338). Routing `rg` to `rtk rg`
+    // keeps it on a faithful ripgrep path — `rtk rg` is not a Clap subcommand,
+    // so it falls through `run_fallback` in `main.rs`, which executes the real
+    // `rg` binary with every argument forwarded verbatim (metrics still tracked).
     RtkRule {
-        pattern: r"^(rg|grep)\s+",
+        pattern: r"^rg\s+",
+        rtk_cmd: "rtk rg",
+        rewrite_prefixes: &["rg"],
+        category: "Files",
+        // `rtk rg` is a verbatim passthrough (no output filtering), so the
+        // estimated savings is 0% — anything higher makes `rtk discover`
+        // falsely report `rg` as a high-value missed optimization.
+        savings_pct: 0.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^grep\s+",
         rtk_cmd: "rtk grep",
-        rewrite_prefixes: &["rg", "grep"],
+        rewrite_prefixes: &["grep"],
         category: "Files",
         savings_pct: 75.0,
         subcmd_savings: &[],
