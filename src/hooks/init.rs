@@ -4210,6 +4210,22 @@ mod tests {
     }
 
     #[test]
+    fn test_copilot_instructions_kubectl_example_preserves_subcommand() {
+        // Regression test for #2471: the mapping example previously rewrote
+        // "kubectl get pods" to "rtk kubectl pods", silently dropping `get`.
+        // The real rewrite rule (src/discover/rules.rs, rtk_cmd: "rtk kubectl")
+        // preserves the subcommand, so the doc example must match that behavior.
+        assert!(
+            COPILOT_INSTRUCTIONS.contains("kubectl get pods           rtk kubectl get pods"),
+            "COPILOT_INSTRUCTIONS kubectl example must map to `rtk kubectl get pods`"
+        );
+        assert!(
+            !COPILOT_INSTRUCTIONS.contains("rtk kubectl pods"),
+            "COPILOT_INSTRUCTIONS must not drop the `get` subcommand from the kubectl example"
+        );
+    }
+
+    #[test]
     fn test_init_has_version_marker() {
         assert!(
             RTK_INSTRUCTIONS.contains(RTK_BLOCK_START),
