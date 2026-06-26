@@ -40,7 +40,23 @@ fn render_file_diff(file1: &Path, file2: &Path, content1: &str, content2: &str) 
     let diff = compute_diff(&lines1, &lines2);
 
     if diff.changes.is_empty() {
-        return ("[ok] Files are identical\n".to_string(), 0);
+        // `str::lines()` strips `\r` along with `\n`, so two files whose
+        // lines are textually identical but whose raw bytes differ (CRLF
+        // vs LF terminators, or a missing trailing newline) collapse to an
+        // empty diff here. Fall back to a byte comparison before declaring
+        // the files identical — see #2627.
+        if content1 == content2 {
+            return ("[ok] Files are identical\n".to_string(), 0);
+        }
+        return (
+            format!(
+                "{} → {}\n   Files differ only in {} (no visible line changes)\n",
+                file1.display(),
+                file2.display(),
+                describe_byte_only_difference(content1, content2)
+            ),
+            1,
+        );
     }
 
     let mut rtk = String::new();
@@ -143,6 +159,21 @@ fn compute_diff(lines1: &[&str], lines2: &[&str]) -> DiffResult {
         modified,
         changes,
     }
+}
+
+/// Explains a byte-level difference between two files whose `str::lines()`
+/// output is identical (so `compute_diff` found no changes). Used when the
+/// files are not byte-equal but no line-level diff was detected.
+fn describe_byte_only_difference(content1: &str, content2: &str) -> String {
+    let crlf1 = content1.contains("\r\n");
+    let crlf2 = content2.contains("\r\n");
+    if crlf1 != crlf2 {
+        return "line endings (CRLF vs LF)".to_string();
+    }
+    if content1.ends_with('\n') != content2.ends_with('\n') {
+        return "trailing newline".to_string();
+    }
+    "line endings or trailing whitespace".to_string()
 }
 
 fn similarity(a: &str, b: &str) -> f64 {
@@ -358,6 +389,74 @@ mod tests {
         );
         assert!(out.contains("[ok] Files are identical"));
         assert_eq!(code, 0);
+    }
+
+    // --- render_file_diff (issue #2627 regression: CRLF vs LF) ---
+
+    #[test]
+    fn test_render_crlf_vs_lf_not_identical() {
+        // Same text content, different line terminators. `str::lines()`
+        // strips both `\n` and `\r\n` uniformly, so the line-based diff
+        // sees no changes — the byte-comparison fallback must catch this.
+        let (out, code) = render_file_diff(
+            Path::new("crlf.txt"),
+            Path::new("lf.txt"),
+            "a\r\nb\r\nc\r\n",
+            "a\nb\nc\n",
+        );
+        assert!(
+            !out.contains("identical"),
+            "CRLF vs LF files reported as identical:\n{}",
+            out
+        );
+        assert!(out.contains("CRLF vs LF"));
+        assert_eq!(code, 1, "differing files must exit 1 (diff convention)");
+    }
+
+    #[test]
+    fn test_render_trailing_newline_diff_not_identical() {
+        // Same lines, but one file has a trailing newline and the other
+        // doesn't — also invisible to `str::lines()`.
+        let (out, code) = render_file_diff(
+            Path::new("with_nl.txt"),
+            Path::new("no_nl.txt"),
+            "a\nb\n",
+            "a\nb",
+        );
+        assert!(
+            !out.contains("identical"),
+            "trailing-newline-only diff reported as identical:\n{}",
+            out
+        );
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn test_render_crlf_both_files_still_identical() {
+        // Both files use CRLF consistently and have the same content —
+        // must still report identical (this is the true byte-equal case).
+        let (out, code) =
+            render_file_diff(Path::new("a.txt"), Path::new("b.txt"), "a\r\nb\r\n", "a\r\nb\r\n");
+        assert!(out.contains("[ok] Files are identical"));
+        assert_eq!(code, 0);
+    }
+
+    // --- describe_byte_only_difference ---
+
+    #[test]
+    fn test_describe_byte_only_difference_crlf_vs_lf() {
+        assert_eq!(
+            describe_byte_only_difference("a\r\nb\r\n", "a\nb\n"),
+            "line endings (CRLF vs LF)"
+        );
+    }
+
+    #[test]
+    fn test_describe_byte_only_difference_trailing_newline() {
+        assert_eq!(
+            describe_byte_only_difference("a\nb\n", "a\nb"),
+            "trailing newline"
+        );
     }
 
     #[test]
