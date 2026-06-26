@@ -417,7 +417,6 @@ mod tests {
 
     #[test]
     fn test_diff_trouble_distinct_from_differ_and_same() {
-        // POSIX diff: 0 = same, 1 = differ, 2 = trouble — all distinct.
         assert_ne!(DIFF_EXIT_TROUBLE, 0);
         assert_ne!(DIFF_EXIT_TROUBLE, 1);
     }
