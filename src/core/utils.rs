@@ -355,6 +355,62 @@ pub fn resolved_command(name: &str) -> Command {
     }
 }
 
+/// Build the PowerShell argument tail that runs a parsed command line
+/// (`program` + `args`) as a native PowerShell command.
+///
+/// PowerShell concatenates the tokens that follow `-Command` into the command
+/// text, so cmdlets (`Get-ChildItem`), functions, and aliases run natively.
+/// `-NoProfile` keeps startup fast and predictable — built-in cmdlets always
+/// resolve, though profile-defined custom aliases/functions will not.
+///
+/// Pure and cross-platform so the argument shape can be unit-tested everywhere;
+/// only invoked from the Windows arm of [`passthrough_command`], hence the
+/// `dead_code` allowance on non-Windows non-test builds.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn powershell_invocation(program: &str, args: &[String]) -> Vec<String> {
+    let mut v = vec![
+        "-NoProfile".to_string(),
+        "-NoLogo".to_string(),
+        "-Command".to_string(),
+        program.to_string(),
+    ];
+    v.extend(args.iter().cloned());
+    v
+}
+
+/// PowerShell executable to use, preferring PowerShell 7+ (`pwsh`) and falling
+/// back to Windows PowerShell (`powershell`).
+#[cfg(windows)]
+pub fn powershell_exe() -> &'static str {
+    if tool_exists("pwsh") {
+        "pwsh"
+    } else {
+        "powershell"
+    }
+}
+
+/// Build the passthrough `Command` for a parsed command line, with `args`
+/// already applied.
+///
+/// On Windows, a command that does not resolve to a PATH binary is assumed to be
+/// PowerShell-native — a cmdlet/function/alias (e.g. `Get-ChildItem`) or a
+/// cmd.exe builtin (e.g. `dir`) — and is run through PowerShell, since such
+/// commands are not standalone executables. On every other platform this is
+/// equivalent to `resolved_command(program).args(args)`.
+pub fn passthrough_command(program: &str, args: &[String]) -> Command {
+    #[cfg(windows)]
+    {
+        if resolve_binary(program).is_err() {
+            let mut c = Command::new(powershell_exe());
+            c.args(powershell_invocation(program, args));
+            return c;
+        }
+    }
+    let mut c = resolved_command(program);
+    c.args(args);
+    c
+}
+
 /// Check if a tool exists on PATH (PATHEXT-aware on Windows).
 ///
 /// Replaces manual `Command::new("which").arg(tool)` checks that fail on Windows.
@@ -646,6 +702,32 @@ mod tests {
         );
     }
 
+    // ===== PowerShell passthrough tests (PR #2355) =====
+
+    #[test]
+    fn test_powershell_invocation_no_args() {
+        let argv = powershell_invocation("Get-ChildItem", &[]);
+        assert_eq!(
+            argv,
+            vec!["-NoProfile", "-NoLogo", "-Command", "Get-ChildItem"]
+        );
+    }
+
+    #[test]
+    fn test_powershell_invocation_with_args() {
+        let argv = powershell_invocation("Get-Content", &["foo.txt".to_string()]);
+        assert_eq!(
+            argv,
+            vec![
+                "-NoProfile",
+                "-NoLogo",
+                "-Command",
+                "Get-Content",
+                "foo.txt"
+            ]
+        );
+    }
+
     // ===== tool_exists tests (issue #212) =====
 
     #[test]
@@ -806,6 +888,32 @@ mod tests {
             assert!(
                 result.is_ok(),
                 "which_in should find .cmd wrapper on Windows"
+            );
+        }
+
+        #[test]
+        fn test_passthrough_command_routes_cmdlet_to_powershell() {
+            // Get-ChildItem is a PowerShell cmdlet, not a PATH binary, so
+            // passthrough_command must route it through PowerShell.
+            let cmd = passthrough_command("Get-ChildItem", &[]);
+            let program = cmd.get_program().to_string_lossy().to_lowercase();
+            assert!(
+                program.contains("powershell") || program.contains("pwsh"),
+                "cmdlet should route through PowerShell, got program: {}",
+                program
+            );
+        }
+
+        #[test]
+        fn test_passthrough_command_uses_direct_exec_for_path_binary() {
+            // A resolvable binary (cargo is always on PATH in CI) must be
+            // executed directly, never via PowerShell.
+            let cmd = passthrough_command("cargo", &["--version".to_string()]);
+            let program = cmd.get_program().to_string_lossy().to_lowercase();
+            assert!(
+                !program.contains("powershell") && !program.contains("pwsh"),
+                "resolvable binary should run directly, got program: {}",
+                program
             );
         }
     }

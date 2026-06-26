@@ -341,6 +341,18 @@ winget install Microsoft.Coreutils
 
 It ships each utility under its standard name (`ls.exe`, `grep.exe`, …) on PATH, which RTK resolves via the `which` crate. Filters whose engine is pure Rust (`rtk find`, `rtk read`, `rtk json`, …) work with no extra install. If a wrapped tool is missing, the corresponding filter falls back to raw command output — `rtk verify` reports which tools are present.
 
+### PowerShell-native commands
+
+PowerShell cmdlets (`Get-ChildItem`, `Get-Content`, `Select-String`, …), functions, aliases, and cmd.exe builtins (`dir`, `echo`) are not standalone executables on PATH — they only exist inside a shell. When RTK can't resolve a command as a PATH binary on Windows, it runs it through PowerShell instead of failing, so these work transparently:
+
+```powershell
+rtk Get-ChildItem        # runs via PowerShell
+rtk Get-Content file.txt # runs via PowerShell
+rtk dir                  # cmd builtin → PowerShell alias
+```
+
+RTK prefers PowerShell 7+ (`pwsh`) and falls back to Windows PowerShell (`powershell`), and runs with `-NoProfile` for fast, predictable execution. Output is passed through unfiltered; commands that RTK has a dedicated filter for (and whose tool is on PATH) are still filtered as usual.
+
 ### WSL
 
 [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) is still fully supported — inside WSL, RTK behaves exactly like Linux. It is now an option, not a requirement.
@@ -351,6 +363,7 @@ It ships each utility under its standard name (`ls.exe`, `grep.exe`, …) on PAT
 | Auto-rewrite hook (`rtk hook claude`) | Full | Full | Full |
 | `rtk init -g` | Hook mode | Hook mode | Hook mode |
 | UNIX-style filters (ls, grep, wc) | With Coreutils | Built-in | Built-in |
+| PowerShell-native commands (cmdlets) | Via PowerShell | n/a | n/a |
 | `rtk gain` / analytics | Full | Full | Full |
 
 ## Supported AI Tools
