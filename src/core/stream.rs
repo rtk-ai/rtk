@@ -250,6 +250,38 @@ fn collapse_terminal_control(text: &str) -> String {
 
     while let Some(ch) = chars.next() {
         match ch {
+            '\u{1b}' if chars.peek() == Some(&'[') => {
+                chars.next();
+                let mut params = String::new();
+                let mut final_byte = None;
+
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        final_byte = Some(c);
+                        break;
+                    }
+                    params.push(c);
+                }
+
+                match final_byte {
+                    Some('K') => apply_erase_in_line(&mut line, &mut cursor, &params),
+                    Some(final_byte) => {
+                        write_terminal_char(&mut line, &mut cursor, '\u{1b}');
+                        write_terminal_char(&mut line, &mut cursor, '[');
+                        for c in params.chars() {
+                            write_terminal_char(&mut line, &mut cursor, c);
+                        }
+                        write_terminal_char(&mut line, &mut cursor, final_byte);
+                    }
+                    None => {
+                        write_terminal_char(&mut line, &mut cursor, '\u{1b}');
+                        write_terminal_char(&mut line, &mut cursor, '[');
+                        for c in params.chars() {
+                            write_terminal_char(&mut line, &mut cursor, c);
+                        }
+                    }
+                }
+            }
             '\r' if chars.peek() == Some(&'\n') => {
                 chars.next();
                 visible.extend(line.drain(..));
@@ -268,18 +300,46 @@ fn collapse_terminal_control(text: &str) -> String {
                 cursor = cursor.saturating_sub(1);
             }
             ch => {
-                if cursor < line.len() {
-                    line[cursor] = ch;
-                } else {
-                    line.push(ch);
-                }
-                cursor += 1;
+                write_terminal_char(&mut line, &mut cursor, ch);
             }
         }
     }
 
     visible.extend(line);
     visible
+}
+
+fn write_terminal_char(line: &mut Vec<char>, cursor: &mut usize, ch: char) {
+    if *cursor < line.len() {
+        line[*cursor] = ch;
+    } else {
+        line.push(ch);
+    }
+    *cursor += 1;
+}
+
+fn apply_erase_in_line(line: &mut Vec<char>, cursor: &mut usize, params: &str) {
+    let mode = params
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .parse::<u8>()
+        .unwrap_or(0);
+
+    match mode {
+        1 => {
+            let end = (*cursor).min(line.len());
+            line.drain(..end);
+            *cursor = 0;
+        }
+        2 => {
+            line.clear();
+            *cursor = 0;
+        }
+        _ => {
+            line.truncate((*cursor).min(line.len()));
+        }
+    }
 }
 
 // ISSUE #897: ChildGuard RAII prevents zombie processes that caused kernel panic
@@ -845,6 +905,35 @@ pub(crate) mod tests {
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly).unwrap();
         assert_eq!(result.raw_stdout, "step 2\n");
         assert_eq!(result.filtered, "step 2\n");
+    }
+
+    #[test]
+    fn test_collapse_terminal_control_erases_to_line_end() {
+        assert_eq!(
+            collapse_terminal_control("Downloading 100%\r\u{1b}[KDone\n"),
+            "Done\n"
+        );
+    }
+
+    #[test]
+    fn test_collapse_terminal_control_erases_tail_from_mid_line() {
+        assert_eq!(collapse_terminal_control("abcdef\rXY\u{1b}[K\n"), "XY\n");
+    }
+
+    #[test]
+    fn test_collapse_terminal_control_preserves_sgr_sequences() {
+        assert_eq!(
+            collapse_terminal_control("\u{1b}[32mPASS\u{1b}[0m\n"),
+            "\u{1b}[32mPASS\u{1b}[0m\n"
+        );
+    }
+
+    #[test]
+    fn test_collapse_terminal_control_keeps_bare_cr_tail() {
+        assert_eq!(
+            collapse_terminal_control("Downloading 100%\rDone\n"),
+            "Doneloading 100%\n"
+        );
     }
 
     #[test]
