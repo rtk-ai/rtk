@@ -441,10 +441,11 @@ fn run_log(
         arg.starts_with("--oneline") || arg.starts_with("--pretty") || arg.starts_with("--format")
     });
 
-    // Check if user provided limit flag (-N, -n N, --max-count=N, --max-count N)
+    // Check if user provided limit flag (-N, -n N, -nN, --max-count=N, --max-count N)
     let has_limit_flag = args.iter().any(|arg| {
         (arg.starts_with('-') && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit()))
             || arg == "-n"
+            || (arg.starts_with("-n") && arg[2..].bytes().next().is_some_and(|b| b.is_ascii_digit()))
             || arg.starts_with("--max-count")
     });
 
@@ -522,6 +523,12 @@ fn parse_user_limit(args: &[String]) -> Option<usize> {
             && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
         {
             if let Ok(n) = arg[1..].parse::<usize>() {
+                return Some(n);
+            }
+        }
+        // -n20 (combined form)
+        if let Some(rest) = arg.strip_prefix("-n") {
+            if let Ok(n) = rest.parse::<usize>() {
                 return Some(n);
             }
         }
@@ -2704,6 +2711,12 @@ A  added.rs
     #[test]
     fn test_parse_user_limit_combined() {
         let args: Vec<String> = vec!["-20".into()];
+        assert_eq!(parse_user_limit(&args), Some(20));
+    }
+
+    #[test]
+    fn test_parse_user_limit_n_combined() {
+        let args: Vec<String> = vec!["-n20".into()];
         assert_eq!(parse_user_limit(&args), Some(20));
     }
 
