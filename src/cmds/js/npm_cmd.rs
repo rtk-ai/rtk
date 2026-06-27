@@ -71,6 +71,21 @@ const NPM_SUBCOMMANDS: &[&str] = &[
     "start",
     "stop",
     "restart",
+    "completion",
+    "edit",
+    "explore",
+    "find-dupes",
+    "help-search",
+    "hook",
+    "install-ci-test",
+    "install-test",
+    "ll",
+    "org",
+    "query",
+    "run-script",
+    "sbom",
+    "shrinkwrap",
+    "unstar",
 ];
 
 pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
@@ -226,6 +241,29 @@ npm notice
 
         // Explicit "run" should NOT inject another "run"
         assert!(!needs_run_injection(&["run", "build"]));
+    }
+
+    #[test]
+    fn test_hyphenated_subcommands_no_run_injection() {
+        fn needs_run_injection(arg: &str) -> bool {
+            let is_run_explicit = arg == "run";
+            let is_subcommand = NPM_SUBCOMMANDS.contains(&arg) || arg.starts_with('-');
+            !is_run_explicit && !is_subcommand
+        }
+
+        for subcmd in &[
+            "find-dupes",
+            "help-search",
+            "install-ci-test",
+            "install-test",
+            "run-script",
+            "dist-tag",
+        ] {
+            assert!(
+                !needs_run_injection(subcmd),
+                "'npm {subcmd}' incorrectly got 'run' injected"
+            );
+        }
     }
 
     #[test]
