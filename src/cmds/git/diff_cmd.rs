@@ -100,41 +100,74 @@ fn format_diff_changes(diff: &DiffResult) -> String {
 }
 
 fn compute_diff(lines1: &[&str], lines2: &[&str]) -> DiffResult {
+    let m = lines1.len();
+    let n = lines2.len();
+
+    // LCS DP table: dp[i][j] = length of LCS of lines1[..i] and lines2[..j]
+    let mut dp = vec![vec![0u32; n + 1]; m + 1];
+    for i in 1..=m {
+        for j in 1..=n {
+            dp[i][j] = if lines1[i - 1] == lines2[j - 1] {
+                dp[i - 1][j - 1] + 1
+            } else {
+                dp[i - 1][j].max(dp[i][j - 1])
+            };
+        }
+    }
+
+    // Backtrack to produce edit script (collected in reverse, then reversed)
+    let mut raw_ops: Vec<(char, usize, &str)> = Vec::new();
+    let mut i = m;
+    let mut j = n;
+    while i > 0 || j > 0 {
+        if i > 0 && j > 0 && lines1[i - 1] == lines2[j - 1] {
+            i -= 1;
+            j -= 1;
+        } else if j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) {
+            raw_ops.push(('A', j, lines2[j - 1]));
+            j -= 1;
+        } else {
+            raw_ops.push(('R', i, lines1[i - 1]));
+            i -= 1;
+        }
+    }
+    raw_ops.reverse();
+
+    // Merge adjacent remove+add pairs into "modified" when lines are similar
     let mut changes = Vec::new();
-    let mut added = 0;
-    let mut removed = 0;
-    let mut modified = 0;
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    let mut modified = 0usize;
+    let mut idx = 0;
 
-    // Simple line-by-line comparison (not optimal but fast)
-    let max_len = lines1.len().max(lines2.len());
+    while idx < raw_ops.len() {
+        let (op, ln, content) = raw_ops[idx];
 
-    for i in 0..max_len {
-        let l1 = lines1.get(i).copied();
-        let l2 = lines2.get(i).copied();
-
-        match (l1, l2) {
-            (Some(a), Some(b)) if a != b => {
-                // Check if it's similar (modification) or completely different
-                if similarity(a, b) > 0.5 {
-                    changes.push(DiffChange::Modified(i + 1, a.to_string(), b.to_string()));
-                    modified += 1;
-                } else {
-                    changes.push(DiffChange::Removed(i + 1, a.to_string()));
-                    changes.push(DiffChange::Added(i + 1, b.to_string()));
-                    removed += 1;
-                    added += 1;
-                }
+        if op == 'R' && idx + 1 < raw_ops.len() && raw_ops[idx + 1].0 == 'A' {
+            let (_, _, new_content) = raw_ops[idx + 1];
+            if similarity(content, new_content) > 0.5 {
+                changes.push(DiffChange::Modified(
+                    ln,
+                    content.to_string(),
+                    new_content.to_string(),
+                ));
+                modified += 1;
+                idx += 2;
+                continue;
             }
-            (Some(a), None) => {
-                changes.push(DiffChange::Removed(i + 1, a.to_string()));
+        }
+
+        match op {
+            'R' => {
+                changes.push(DiffChange::Removed(ln, content.to_string()));
                 removed += 1;
             }
-            (None, Some(b)) => {
-                changes.push(DiffChange::Added(i + 1, b.to_string()));
+            _ => {
+                changes.push(DiffChange::Added(ln, content.to_string()));
                 added += 1;
             }
-            _ => {}
         }
+        idx += 1;
     }
 
     DiffResult {
@@ -307,6 +340,29 @@ mod tests {
         assert_eq!(result.added, 0);
         assert_eq!(result.removed, 0);
         assert!(result.changes.is_empty());
+    }
+
+    #[test]
+    fn test_compute_diff_insertion_no_cascade() {
+        // Issue #1869: inserting one line should NOT cascade into false positives.
+        // The naive index-based algorithm reported 16 removed + 17 added for a
+        // single insertion in a 20-line file.
+        let a: Vec<&str> = (1..=20).map(|_| "line").collect();
+        let mut b = a.clone();
+        b.insert(4, "INSERTED");
+        let result = compute_diff(&a, &b);
+        assert_eq!(result.added, 1, "should report exactly 1 added line");
+        assert_eq!(result.removed, 0, "should report 0 removed lines");
+        assert_eq!(result.modified, 0, "should report 0 modified lines");
+    }
+
+    #[test]
+    fn test_compute_diff_deletion_no_cascade() {
+        let a = vec!["a", "b", "c", "d", "e"];
+        let b = vec!["a", "c", "d", "e"];
+        let result = compute_diff(&a, &b);
+        assert_eq!(result.removed, 1, "should report exactly 1 removed line");
+        assert_eq!(result.added, 0);
     }
 
     // --- render_file_diff (issue #2364 regression) ---
