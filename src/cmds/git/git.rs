@@ -441,10 +441,15 @@ fn run_log(
         arg.starts_with("--oneline") || arg.starts_with("--pretty") || arg.starts_with("--format")
     });
 
-    // Check if user provided limit flag (-N, -n N, --max-count=N, --max-count N)
+    // Check if user provided limit flag (-N, -n N, -nN, --max-count=N, --max-count N)
     let has_limit_flag = args.iter().any(|arg| {
-        (arg.starts_with('-') && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit()))
+        // -N form (e.g., -20)
+        (arg.starts_with('-') && arg.len() > 1 && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit()))
+            // -nN form (e.g., -n20)
+            || (arg.starts_with("-n") && arg.len() > 2 && arg.chars().nth(2).is_some_and(|c| c.is_ascii_digit()))
+            // -n as standalone token
             || arg == "-n"
+            // --max-count forms
             || arg.starts_with("--max-count")
     });
 
@@ -512,7 +517,7 @@ fn run_log(
 
 /// Filter git log output: truncate long messages, cap lines
 /// Parse the user-specified limit from git log args.
-/// Handles: -20, -n 20, --max-count=20, --max-count 20
+/// Handles: -20, -n 20, -n, -n20, --max-count=20, --max-count 20
 fn parse_user_limit(args: &[String]) -> Option<usize> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -522,6 +527,12 @@ fn parse_user_limit(args: &[String]) -> Option<usize> {
             && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
         {
             if let Ok(n) = arg[1..].parse::<usize>() {
+                return Some(n);
+            }
+        }
+        // -n20 (combined -nN form)
+        if arg.starts_with("-n") && arg.len() > 2 && arg.chars().nth(2).is_some_and(|c| c.is_ascii_digit()) {
+            if let Ok(n) = arg[2..].parse::<usize>() {
                 return Some(n);
             }
         }
@@ -2723,6 +2734,18 @@ A  added.rs
     fn test_parse_user_limit_max_count_space() {
         let args: Vec<String> = vec!["--max-count".into(), "25".into()];
         assert_eq!(parse_user_limit(&args), Some(25));
+    }
+
+    #[test]
+    fn test_parse_user_limit_n_combined() {
+        let args: Vec<String> = vec!["-n20".into()];
+        assert_eq!(parse_user_limit(&args), Some(20));
+    }
+
+    #[test]
+    fn test_parse_user_limit_n_combined_single_digit() {
+        let args: Vec<String> = vec!["-n5".into()];
+        assert_eq!(parse_user_limit(&args), Some(5));
     }
 
     #[test]
