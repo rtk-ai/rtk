@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use std::process::Command;
 
+use crate::core::config;
 use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
 use crate::core::tracking;
 
@@ -81,6 +82,18 @@ impl<'a> RunOptions<'a> {
 pub type CaptureFilter<'a> = Box<dyn Fn(&str) -> String + 'a>;
 pub type ExitAwareCaptureFilter<'a> = Box<dyn Fn(&str, i32) -> String + 'a>;
 
+/// Whether the raw output is short enough that compression adds no value.
+/// When true, the caller should emit the raw output unchanged.
+///
+/// Both conditions must be met (AND): short lines AND small bytes.
+fn should_auto_passthrough(output: &str, cfg: &config::PassthroughConfig) -> bool {
+    let line_threshold = cfg.effective_line_threshold();
+    let byte_threshold = cfg.effective_byte_threshold();
+
+    let line_count = output.lines().count();
+    line_count <= line_threshold && output.len() <= byte_threshold
+}
+
 pub enum RunMode<'a> {
     Filtered(CaptureFilter<'a>),
     FilteredWithExit(ExitAwareCaptureFilter<'a>),
@@ -127,6 +140,23 @@ where
     } else {
         raw
     };
+
+    // Short-output auto-passthrough: skip compression when output is already minimal.
+    let passthrough_cfg = config::passthrough();
+    if should_auto_passthrough(text_to_filter, &passthrough_cfg) {
+        if opts.no_trailing_newline {
+            print!("{}", text_to_filter);
+        } else {
+            println!("{}", text_to_filter);
+        }
+        // Emit stderr if it exists and wasn't already included in the filtered text.
+        if !opts.filter_stdout_only && !result.raw_stderr.trim().is_empty() {
+            eprint!("{}", result.raw_stderr);
+        }
+        timer.track_passthrough(cmd_label, &format!("rtk {} (auto-passthrough)", cmd_label));
+        return Ok(exit_code);
+    }
+
     let filtered = filter_fn(text_to_filter, exit_code);
 
     let raw_for_tracking = if opts.filter_stdout_only {
@@ -283,4 +313,84 @@ pub fn run_streamed(
         RunMode::Streamed(filter),
         opts,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Default config: both thresholds 0 → effective defaults 5/500 kick in.
+    fn default_cfg() -> config::PassthroughConfig {
+        config::PassthroughConfig::default()
+    }
+
+    #[test]
+    fn test_should_auto_passthrough_short_output() {
+        assert!(should_auto_passthrough("ok\n", &default_cfg()));
+        assert!(should_auto_passthrough(
+            "line1\nline2\nline3\n",
+            &default_cfg()
+        ));
+        assert!(should_auto_passthrough(
+            "To github.com:user/repo.git\n   abc..def main -> main\n",
+            &default_cfg()
+        ));
+    }
+
+    #[test]
+    fn test_should_auto_passthrough_long_output() {
+        let six_lines = "1\n2\n3\n4\n5\n6\n";
+        assert!(!should_auto_passthrough(six_lines, &default_cfg()));
+    }
+
+    #[test]
+    fn test_should_auto_passthrough_large_bytes() {
+        // ≤5 lines but >500 bytes → no passthrough
+        let long_line = format!("{}\n", "x".repeat(501));
+        assert!(!should_auto_passthrough(&long_line, &default_cfg()));
+    }
+
+    #[test]
+    fn test_should_auto_passthrough_empty_output() {
+        assert!(should_auto_passthrough("", &default_cfg()));
+    }
+
+    #[test]
+    fn test_should_auto_passthrough_exact_threshold() {
+        let five_lines = "1\n2\n3\n4\n5\n";
+        assert!(should_auto_passthrough(five_lines, &default_cfg()));
+
+        let six_lines = "1\n2\n3\n4\n5\n6\n";
+        assert!(!should_auto_passthrough(six_lines, &default_cfg()));
+    }
+
+    #[test]
+    fn test_should_auto_passthrough_both_conditions_required() {
+        // 3 lines (≤5) but >500 bytes → no passthrough
+        let fat = format!("a\nb\n{}\n", "x".repeat(500));
+        assert!(!should_auto_passthrough(&fat, &default_cfg()));
+    }
+
+    #[test]
+    fn test_should_auto_passthrough_custom_thresholds() {
+        let cfg = config::PassthroughConfig {
+            short_line_threshold: 2,
+            short_byte_threshold: 100,
+        };
+        assert!(should_auto_passthrough("ok\n", &cfg));
+        assert!(!should_auto_passthrough("1\n2\n3\n", &cfg)); // 3 lines > 2
+    }
+
+    #[test]
+    fn test_should_auto_passthrough_opt_out_via_tiny_thresholds() {
+        // To opt out, set short_line_threshold = 1 and short_byte_threshold = 1.
+        let cfg = config::PassthroughConfig {
+            short_line_threshold: 1,
+            short_byte_threshold: 1,
+        };
+        // "ok\n" is 3 bytes > 1 → no passthrough
+        assert!(!should_auto_passthrough("ok\n", &cfg));
+        // "" is 0 bytes ≤ 1 and 0 lines ≤ 1 → passthrough (empty is always safe)
+        assert!(should_auto_passthrough("", &cfg));
+    }
 }

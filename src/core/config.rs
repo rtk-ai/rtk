@@ -21,6 +21,8 @@ pub struct Config {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub passthrough: PassthroughConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -111,6 +113,38 @@ impl Default for FilterConfig {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
+pub struct PassthroughConfig {
+    /// Auto-passthrough when output has ≤ N lines.
+    /// 0 = disabled. Default (from Default impl): 5.
+    #[serde(default)]
+    pub short_line_threshold: usize,
+
+    /// Auto-passthrough when output has ≤ N bytes.
+    /// 0 = disabled. Default (from Default impl): 500.
+    #[serde(default)]
+    pub short_byte_threshold: usize,
+}
+
+impl PassthroughConfig {
+    /// Effective thresholds: use configured values if non-zero, else built-in defaults.
+    pub fn effective_line_threshold(&self) -> usize {
+        if self.short_line_threshold > 0 {
+            self.short_line_threshold
+        } else {
+            5
+        }
+    }
+
+    pub fn effective_byte_threshold(&self) -> usize {
+        if self.short_byte_threshold > 0 {
+            self.short_byte_threshold
+        } else {
+            500
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TelemetryConfig {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -148,6 +182,11 @@ impl Default for LimitsConfig {
 /// Get limits config. Falls back to defaults if config can't be loaded.
 pub fn limits() -> LimitsConfig {
     Config::load().map(|c| c.limits).unwrap_or_default()
+}
+
+/// Get passthrough config. Falls back to defaults if config can't be loaded.
+pub fn passthrough() -> PassthroughConfig {
+    Config::load().map(|c| c.passthrough).unwrap_or_default()
 }
 
 impl Config {
@@ -295,5 +334,54 @@ consent_date = "2026-04-10T12:00:00Z"
             config.telemetry.consent_date.as_deref(),
             Some("2026-04-10T12:00:00Z")
         );
+    }
+
+    #[test]
+    fn test_passthrough_config_default() {
+        let config = PassthroughConfig::default();
+        assert_eq!(config.short_line_threshold, 0);
+        assert_eq!(config.short_byte_threshold, 0);
+        // Effective defaults kick in when thresholds are 0
+        assert_eq!(config.effective_line_threshold(), 5);
+        assert_eq!(config.effective_byte_threshold(), 500);
+    }
+
+    #[test]
+    fn test_passthrough_config_deserialize() {
+        let toml = r#"
+[passthrough]
+short_line_threshold = 3
+short_byte_threshold = 200
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.passthrough.short_line_threshold, 3);
+        assert_eq!(config.passthrough.short_byte_threshold, 200);
+        assert_eq!(config.passthrough.effective_line_threshold(), 3);
+        assert_eq!(config.passthrough.effective_byte_threshold(), 200);
+    }
+
+    #[test]
+    fn test_passthrough_config_missing_section() {
+        let toml = r#"
+[tracking]
+enabled = true
+history_days = 90
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.passthrough.short_line_threshold, 0);
+        assert_eq!(config.passthrough.short_byte_threshold, 0);
+    }
+
+    #[test]
+    fn test_passthrough_config_zero_means_disabled() {
+        let config = PassthroughConfig {
+            short_line_threshold: 0,
+            short_byte_threshold: 0,
+        };
+        // 0/0 means "use effective defaults" (5/500), not "disabled".
+        // To opt out of auto-passthrough, set thresholds to tiny values
+        // (e.g. short_line_threshold = 1, short_byte_threshold = 1).
+        assert_eq!(config.effective_line_threshold(), 5);
+        assert_eq!(config.effective_byte_threshold(), 500);
     }
 }
