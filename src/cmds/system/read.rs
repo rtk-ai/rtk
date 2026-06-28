@@ -64,16 +64,8 @@ pub fn run(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
-
-    let (raw, rtk_output) = if line_numbers {
-        (
-            format_with_line_numbers(&content),
-            format_with_line_numbers(&filtered),
-        )
-    } else {
-        (content.clone(), filtered.clone())
-    };
+    let (raw, rtk_output) =
+        prepare_outputs(&content, &filtered, max_lines, tail_lines, line_numbers, &lang);
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
     timer.track(
@@ -116,7 +108,7 @@ pub fn run_stdin(
 
     // Apply filter
     let filter = filter::get_filter(level);
-    let mut filtered = filter.filter(&content, &lang);
+    let filtered = filter.filter(&content, &lang);
 
     if verbose > 0 {
         let original_lines = content.lines().count();
@@ -132,16 +124,8 @@ pub fn run_stdin(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
-
-    let (raw, rtk_output) = if line_numbers {
-        (
-            format_with_line_numbers(&content),
-            format_with_line_numbers(&filtered),
-        )
-    } else {
-        (content.clone(), filtered.clone())
-    };
+    let (raw, rtk_output) =
+        prepare_outputs(&content, &filtered, max_lines, tail_lines, line_numbers, &lang);
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
 
@@ -157,6 +141,27 @@ fn format_with_line_numbers(content: &str) -> String {
         out.push_str(&format!("{:>width$} │ {}\n", i + 1, line, width = width));
     }
     out
+}
+
+fn prepare_outputs(
+    content: &str,
+    filtered: &str,
+    max_lines: Option<usize>,
+    tail_lines: Option<usize>,
+    line_numbers: bool,
+    lang: &Language,
+) -> (String, String) {
+    let raw_windowed = apply_line_window(content, max_lines, tail_lines, lang);
+    let filtered_windowed = apply_line_window(filtered, max_lines, tail_lines, lang);
+
+    if line_numbers {
+        (
+            format_with_line_numbers(&raw_windowed),
+            format_with_line_numbers(&filtered_windowed),
+        )
+    } else {
+        (raw_windowed, filtered_windowed)
+    }
 }
 
 fn apply_line_window(
@@ -234,6 +239,29 @@ fn main() {{
         let output = apply_line_window(input, Some(2), None, &Language::Unknown);
         assert!(output.starts_with("a\n"));
         assert!(output.contains("more lines"));
+    }
+
+    #[test]
+    fn test_prepare_outputs_max_lines_windows_tracking_baseline() {
+        let input = "alpha\nbravo\ncharlie\ndelta\n";
+        let (raw, rtk_output) =
+            prepare_outputs(input, input, Some(2), None, false, &Language::Unknown);
+
+        assert_eq!(raw, rtk_output);
+        assert!(raw.starts_with("alpha\n"));
+        assert!(raw.contains("more lines"));
+        assert!(!raw.contains("bravo"));
+        assert!(!raw.contains("charlie"));
+    }
+
+    #[test]
+    fn test_prepare_outputs_tail_lines_windows_tracking_baseline() {
+        let input = "alpha\nbravo\ncharlie\ndelta\n";
+        let (raw, rtk_output) =
+            prepare_outputs(input, input, None, Some(2), false, &Language::Unknown);
+
+        assert_eq!(raw, "charlie\ndelta\n");
+        assert_eq!(rtk_output, raw);
     }
 
     fn rtk_bin() -> std::path::PathBuf {
