@@ -845,6 +845,15 @@ fn rewrite_segment_inner(
         }
     }
 
+    // #1627: macOS ls -O / -@ / -e exist specifically to surface metadata
+    // columns (BSD file flags, extended attributes, ACL entries). The rtk
+    // ls filter collapses listings to a `name size` form and strips those
+    // columns — leave the user's ls invocation alone in that case so the
+    // requested metadata round-trips cleanly.
+    if rule.rtk_cmd == "rtk ls" && has_ls_metadata_flag(cmd_clean) {
+        return None;
+    }
+
     // Try each rewrite prefix (longest first) with word-boundary check
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(cmd_part, prefix) {
@@ -858,6 +867,20 @@ fn rewrite_segment_inner(
     }
 
     None
+}
+
+/// Detect macOS-only `ls` metadata flags whose entire purpose is to surface
+/// extra columns the rtk ls filter strips (#1627): `-O` (BSD file flags),
+/// `-@` (extended attributes), `-e` (ACL entries), and any cluster that
+/// contains them like `-lO`, `-lOe`, `-l@e`.
+fn has_ls_metadata_flag(cmd: &str) -> bool {
+    cmd.split_whitespace().any(|tok| {
+        if !tok.starts_with('-') || tok.starts_with("--") || tok == "-" {
+            return false;
+        }
+        let chars = &tok[1..];
+        chars.contains('O') || chars.contains('@') || chars.contains('e')
+    })
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -3542,6 +3565,65 @@ mod tests {
             rewrite_command_no_prefixes("gh pr list", &[]),
             Some("rtk gh pr list".into())
         );
+    }
+
+    // --- #1627: ls -O / -@ / -e (macOS metadata flags) passthrough ---
+
+    #[test]
+    fn test_rewrite_ls_metadata_flag_o_skipped() {
+        assert_eq!(rewrite_command("ls -lO some/dir", &[]), None);
+        assert_eq!(rewrite_command("ls -O", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_ls_metadata_flag_at_skipped() {
+        assert_eq!(rewrite_command("ls -l@ some/dir", &[]), None);
+        assert_eq!(rewrite_command("ls -@", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_ls_metadata_flag_acl_skipped() {
+        // -e (ACL entries) is macOS-only; the rtk ls filter strips it.
+        assert_eq!(rewrite_command("ls -le some/dir", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_ls_metadata_flag_combined_skipped() {
+        assert_eq!(rewrite_command("ls -lO@e some/dir", &[]), None);
+        assert_eq!(rewrite_command("ls -O -@ -e some/dir", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_ls_without_metadata_still_rewrites() {
+        // The standard cases the listing-compression filter is built for must
+        // keep working — only metadata-inspection invocations are passed through.
+        assert_eq!(rewrite_command("ls", &[]), Some("rtk ls".into()));
+        assert_eq!(rewrite_command("ls -l", &[]), Some("rtk ls -l".into()));
+        assert_eq!(rewrite_command("ls -la", &[]), Some("rtk ls -la".into()));
+        assert_eq!(
+            rewrite_command("ls some/dir", &[]),
+            Some("rtk ls some/dir".into())
+        );
+    }
+
+    #[test]
+    fn test_has_ls_metadata_flag_unit() {
+        assert!(has_ls_metadata_flag("ls -O"));
+        assert!(has_ls_metadata_flag("ls -lO"));
+        assert!(has_ls_metadata_flag("ls -@"));
+        assert!(has_ls_metadata_flag("ls -e"));
+        assert!(has_ls_metadata_flag("ls -lOe"));
+        assert!(has_ls_metadata_flag("ls -O some/dir"));
+
+        assert!(!has_ls_metadata_flag("ls"));
+        assert!(!has_ls_metadata_flag("ls -l"));
+        assert!(!has_ls_metadata_flag("ls -la"));
+        assert!(!has_ls_metadata_flag("ls -lah"));
+        assert!(!has_ls_metadata_flag("ls some/dir"));
+        // Long opts must not trigger.
+        assert!(!has_ls_metadata_flag("ls --color=auto"));
+        // The "--" args separator must not trigger.
+        assert!(!has_ls_metadata_flag("ls -- some/dir"));
     }
 
     // --- #508: RTK_DISABLED detection helpers ---
