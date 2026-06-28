@@ -88,6 +88,12 @@ static TEST_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("valid regex")
 });
+static MTP_MULTILINE_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?mi)Test\s+run\s+summary:\s*(?:Passed!|Failed!)\s*\n\s*total:\s*(?P<total>\d+)\s*\n\s*failed:\s*(?P<failed>\d+)\s*\n\s*(?:succeeded|passed):\s*(?P<passed>\d+)\s*\n\s*skipped:\s*(?P<skipped>\d+)\s*\n\s*duration:\s*(?P<duration>[^\r\n]+)"
+    )
+    .expect("valid regex")
+});
 static FAILED_TEST_HEAD_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^\s*Failed\s+(?P<name>[^\r\n\[]+)\s+\[[^\]\r\n]+\]\s*$").expect("valid regex")
 });
@@ -918,6 +924,31 @@ pub fn parse_test_from_text(text: &str) -> TestSummary {
         }
     }
 
+    if summary.total == 0 {
+        if let Some(captures) = MTP_MULTILINE_SUMMARY_RE.captures_iter(&scrubbed).last() {
+            summary.passed = captures
+                .name("passed")
+                .and_then(|m| m.as_str().parse::<usize>().ok())
+                .unwrap_or(summary.passed);
+            summary.failed = captures
+                .name("failed")
+                .and_then(|m| m.as_str().parse::<usize>().ok())
+                .unwrap_or(summary.failed);
+            summary.skipped = captures
+                .name("skipped")
+                .and_then(|m| m.as_str().parse::<usize>().ok())
+                .unwrap_or(summary.skipped);
+            summary.total = captures
+                .name("total")
+                .and_then(|m| m.as_str().parse::<usize>().ok())
+                .unwrap_or(summary.total);
+
+            if let Some(duration) = captures.name("duration") {
+                summary.duration_text = Some(duration.as_str().trim().to_string());
+            }
+        }
+    }
+
     let lines: Vec<&str> = scrubbed.lines().collect();
     let mut idx = 0;
     while idx < lines.len() {
@@ -1663,5 +1694,43 @@ Time Elapsed 00:00:00.12
 
         let selected = select_best_issues(primary.clone(), fallback);
         assert_eq!(selected, primary);
+    }
+
+    #[test]
+    fn test_parse_test_from_text_mtp_multiline_passed() {
+        let input = "\
+Determining projects to restore...
+  All projects are up-to-date for restore.
+Test run summary: Passed!
+  total: 72
+  failed: 0
+  succeeded: 72
+  skipped: 0
+  duration: 1s 672ms
+";
+        let summary = parse_test_from_text(input);
+        assert_eq!(summary.total, 72);
+        assert_eq!(summary.passed, 72);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped, 0);
+        assert_eq!(summary.duration_text.as_deref(), Some("1s 672ms"));
+    }
+
+    #[test]
+    fn test_parse_test_from_text_mtp_multiline_failed() {
+        let input = "\
+Test run summary: Failed!
+  total: 50
+  failed: 3
+  succeeded: 45
+  skipped: 2
+  duration: 2s 100ms
+";
+        let summary = parse_test_from_text(input);
+        assert_eq!(summary.total, 50);
+        assert_eq!(summary.passed, 45);
+        assert_eq!(summary.failed, 3);
+        assert_eq!(summary.skipped, 2);
+        assert_eq!(summary.duration_text.as_deref(), Some("2s 100ms"));
     }
 }
