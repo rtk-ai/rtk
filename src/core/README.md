@@ -125,7 +125,7 @@ When the truncated output is a **flat list** and the hidden items start at a pre
 
 ### Truncation Caps (`truncate`)
 
-`src/core/truncate.rs` defines four global cap policies — `CAP_ERRORS`, `CAP_WARNINGS`, `CAP_LIST`, `CAP_INVENTORY` — for the data classes RTK filters truncate. Each filter binds the right CAP to a local `const MAX_*` so the cap is one named jump away from the call site. These CAPs are the staging point for filter-level cap configuration (planned, not yet implemented): once the config surface lands, overriding `CAP_LIST` in `~/.config/rtk/config.toml` will tune every list filter in one place instead of editing 20+ files.
+`src/core/truncate.rs` defines five global cap policies — `CAP_ERRORS`, `CAP_WARNINGS`, `CAP_LIST`, `CAP_INVENTORY`, `CAP_DOCUMENT` — for the data classes RTK filters truncate. Each filter binds the right CAP to a local `const MAX_*` so the cap is one named jump away from the call site. These CAPs are the staging point for filter-level cap configuration (planned, not yet implemented): once the config surface lands, overriding `CAP_LIST` in `~/.config/rtk/config.toml` will tune every list filter in one place instead of editing 20+ files.
 
 **Config policy.** Configured values are accepted as-is, including `0`, which means "summary only" — the filter still prints the count and the `[full output: …]` recovery hint, just no individual items. Caps are never refused and rtk never aborts on them, in keeping with the never-block-the-user fallback philosophy.
 

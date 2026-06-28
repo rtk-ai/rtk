@@ -9,6 +9,9 @@ pub const CAP_WARNINGS: usize = 10;
 pub const CAP_LIST: usize = 20;
 /// Inventories (`pip list`, `docker images`): exhaustive lookups.
 pub const CAP_INVENTORY: usize = 50;
+/// Document bodies (`textutil` conversions): a generous preview before the
+/// `[N more lines]` marker, since prose has lower signal density than a list.
+pub const CAP_DOCUMENT: usize = 60;
 
 /// A cap reduced for a verbose data class. Falls back to `cap` when `by >= cap`
 /// so a deviation can never empty the list; `0` stays `0`. `const fn`, underflow-safe.

@@ -8,6 +8,7 @@
 - `search.rs` backs both `rtk grep` and `rtk rg`: it runs the invoked engine (never substituting one for the other) and groups its output, reading `core/config` for `limits.grep_max_results` and `limits.grep_max_per_file`. Format-altering flags (`-c`, `-l`, `-L`, `-o`, `-Z`) bypass RTK filtering and run raw.
 - `local_llm.rs` (`rtk smart`) uses `core/filter` for heuristic file summarization
 - `format_cmd.rs` is a cross-ecosystem dispatcher: auto-detects and routes to `prettier_cmd` or `ruff_cmd` (black is handled inline, not as a separate module)
+- `textutil_cmd.rs` (`rtk textutil`, macOS) reuses the `read` blank-line/trailing-whitespace pass for `txt` conversions sent to stdout, folds `-info` into one line, and passes any other invocation through raw
 
 ## Cross-command
 
