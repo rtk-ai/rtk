@@ -8,6 +8,21 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+/// Known ruff subcommands that are NOT `check` and should be passed through
+/// unchanged. Shared between production code and tests to avoid drift.
+const RUFF_SUBCOMMANDS: &[&str] = &[
+    "check",
+    "format",
+    "rule",
+    "config",
+    "linter",
+    "clean",
+    "server",
+    "analyze",
+    "version",
+    "generate-shell-completion",
+];
+
 #[derive(Debug, Deserialize)]
 struct RuffLocation {
     row: usize,
@@ -34,7 +49,7 @@ struct RuffDiagnostic {
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let is_check = args.is_empty()
         || args[0] == "check"
-        || (!args[0].starts_with('-') && args[0] != "format" && args[0] != "version");
+        || (!args[0].starts_with('-') && !RUFF_SUBCOMMANDS.contains(&args[0].as_str()));
 
     let is_format = args.iter().any(|a| a == "format");
 
@@ -463,5 +478,45 @@ Would reformat: tests/test_utils.py
             "tests/test.py"
         );
         assert_eq!(compact_path("relative/file.py"), "file.py");
+    }
+
+    // --- subcommand routing (#2669) ---
+
+    #[test]
+    fn test_ruff_subcommand_routing() {
+        // Uses the shared RUFF_SUBCOMMANDS constant — no drift between prod and test
+        fn needs_check_injection(args: &[&str]) -> bool {
+            if args.is_empty() {
+                return true;
+            }
+            args[0] == "check"
+                || (!args[0].starts_with('-')
+                    && !RUFF_SUBCOMMANDS.contains(&args[0]))
+        }
+
+        // Known non-check subcommands must NOT get "check --output-format=json" injected
+        for subcmd in &["format", "rule", "config", "linter", "clean", "server",
+                        "analyze", "version", "generate-shell-completion"] {
+            assert!(
+                !needs_check_injection(&[subcmd]),
+                "'ruff {}' should NOT inject 'check'",
+                subcmd
+            );
+        }
+
+        // "check" itself SHOULD get check handling
+        assert!(needs_check_injection(&["check"]));
+        assert!(needs_check_injection(&["check", "src/"]));
+
+        // Bare path targets SHOULD get check injected (existing behavior)
+        assert!(needs_check_injection(&["src/"]));
+        assert!(needs_check_injection(&["my_module.py"]));
+
+        // Flags should NOT get check injected
+        assert!(!needs_check_injection(&["--version"]));
+        assert!(!needs_check_injection(&["-h"]));
+
+        // No args → bare "ruff" → check
+        assert!(needs_check_injection(&[]));
     }
 }
