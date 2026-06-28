@@ -397,30 +397,24 @@ mod tests {
 
     #[test]
     fn test_save_telemetry_consent_roundtrip() {
-        let dir = TempDir::new().expect("tempdir");
-        let config_dir = dir.path().join("rtk");
-        fs::create_dir_all(&config_dir).expect("create config dir");
+        let telemetry = TelemetryConfig {
+            consent_given: None,
+            enabled: false,
+            consent_date: None,
+        };
+        with_temp_config(telemetry, |_dir| {
+            // Test enabling
+            save_telemetry_consent(true).expect("save consent true");
+            let config = crate::core::config::Config::load().expect("load config");
+            assert!(config.telemetry.enabled);
+            assert_eq!(config.telemetry.consent_given, Some(true));
 
-        let original = std::env::var("RTK_CONFIG_DIR").ok();
-        std::env::set_var("RTK_CONFIG_DIR", dir.path());
-
-        // Test enabling
-        save_telemetry_consent(true).expect("save consent true");
-        let config = crate::core::config::Config::load().expect("load config");
-        assert!(config.telemetry.enabled);
-        assert_eq!(config.telemetry.consent_given, Some(true));
-
-        // Test disabling
-        save_telemetry_consent(false).expect("save consent false");
-        let config = crate::core::config::Config::load().expect("load config");
-        assert!(!config.telemetry.enabled);
-        assert_eq!(config.telemetry.consent_given, Some(false));
-
-        if let Some(orig) = original {
-            std::env::set_var("RTK_CONFIG_DIR", orig);
-        } else {
-            std::env::remove_var("RTK_CONFIG_DIR");
-        }
+            // Test disabling
+            save_telemetry_consent(false).expect("save consent false");
+            let config = crate::core::config::Config::load().expect("load config");
+            assert!(!config.telemetry.enabled);
+            assert_eq!(config.telemetry.consent_given, Some(false));
+        });
     }
 
     #[test]
