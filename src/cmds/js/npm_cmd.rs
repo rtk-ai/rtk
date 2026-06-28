@@ -6,6 +6,7 @@ use anyhow::Result;
 
 /// Known npm subcommands that should NOT get "run" injected.
 /// Shared between production code and tests to avoid drift.
+/// Updated to include all 15 missing subcommands from npm 10.8.2 (issue #2663).
 const NPM_SUBCOMMANDS: &[&str] = &[
     "install",
     "i",
@@ -71,6 +72,22 @@ const NPM_SUBCOMMANDS: &[&str] = &[
     "start",
     "stop",
     "restart",
+    // Added in fix for #2663 - 15 missing official npm subcommands
+    "completion",
+    "edit",
+    "explore",
+    "find-dupes",
+    "help-search",
+    "hook",
+    "install-ci-test",
+    "install-test",
+    "ll",
+    "org",
+    "query",
+    "run-script",
+    "sbom",
+    "shrinkwrap",
+    "unstar",
 ];
 
 pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
