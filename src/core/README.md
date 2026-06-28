@@ -83,6 +83,7 @@ enabled = true
 
 [hooks]
 exclude_commands = ["curl", "playwright"]  # Never auto-rewrite these
+allow_ask_commands = ["jest", "vitest"]    # Auto-allow ask-level rewrites
 
 [limits]
 grep_max_results = 200

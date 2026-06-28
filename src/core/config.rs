@@ -30,6 +30,11 @@ pub struct HooksConfig {
     #[serde(default)]
     pub exclude_commands: Vec<String>,
 
+    /// Ask-level rewritten commands that should be auto-allowed by hooks.
+    /// Entries are command names, e.g. ["jest", "vitest"].
+    #[serde(default)]
+    pub allow_ask_commands: Vec<String>,
+
     /// Wrapper prefixes that should be transparently stripped before routing
     /// to a filter, then re-prepended on the rewrite. For example, with
     /// `transparent_prefixes = ["docker exec mycontainer"]`, the command
@@ -223,7 +228,18 @@ exclude_commands = ["curl", "gh"]
     fn test_hooks_config_default_empty() {
         let config = Config::default();
         assert!(config.hooks.exclude_commands.is_empty());
+        assert!(config.hooks.allow_ask_commands.is_empty());
         assert!(config.hooks.transparent_prefixes.is_empty());
+    }
+
+    #[test]
+    fn test_hooks_config_allow_ask_commands_deserialize() {
+        let toml = r#"
+[hooks]
+allow_ask_commands = ["jest", "vitest"]
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.hooks.allow_ask_commands, vec!["jest", "vitest"]);
     }
 
     #[test]
@@ -248,6 +264,7 @@ exclude_commands = ["curl"]
 "#;
         let config: Config = toml::from_str(toml).expect("valid toml");
         assert_eq!(config.hooks.exclude_commands, vec!["curl"]);
+        assert!(config.hooks.allow_ask_commands.is_empty());
         assert!(config.hooks.transparent_prefixes.is_empty());
     }
 
@@ -260,6 +277,7 @@ history_days = 90
 "#;
         let config: Config = toml::from_str(toml).expect("valid toml");
         assert!(config.hooks.exclude_commands.is_empty());
+        assert!(config.hooks.allow_ask_commands.is_empty());
     }
 
     #[test]
