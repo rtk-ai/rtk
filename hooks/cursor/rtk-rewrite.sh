@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# rtk-hook-version: 1
+# rtk-hook-version: 2
 # RTK Cursor Agent hook — rewrites shell commands to use rtk for token savings.
 # Works with both Cursor editor and cursor-cli (they share ~/.cursor/hooks.json).
 # Cursor preToolUse hook format: receives JSON on stdin, returns JSON on stdout.
@@ -39,15 +39,23 @@ if [ -z "$CMD" ]; then
 fi
 
 # Delegate all rewrite logic to the Rust binary.
-# rtk rewrite exits 1 when there's no rewrite — hook passes through silently.
-REWRITTEN=$(rtk rewrite "$CMD" 2>/dev/null) || { echo '{}'; exit 0; }
+REWRITTEN=$(rtk rewrite "$CMD" 2>/dev/null)
+EXIT_CODE=$?
 
-# No change — nothing to do.
-if [ "$CMD" = "$REWRITTEN" ]; then
+# 1 = No RTK equivalent, 2 = Deny rule matched
+if [ "$EXIT_CODE" -eq 1 ] || [ "$EXIT_CODE" -eq 2 ]; then
   echo '{}'
   exit 0
 fi
 
+# No change — nothing to do.
+if [ -z "$REWRITTEN" ] || [ "$CMD" = "$REWRITTEN" ]; then
+  echo '{}'
+  exit 0
+fi
+
+# Exit code 0 (Allow) or 3 (Ask/Default).
+# Cursor's hook model currently requires "permission": "allow" to auto-run the rewritten command.
 jq -n --arg cmd "$REWRITTEN" '{
   "permission": "allow",
   "updated_input": { "command": $cmd }
