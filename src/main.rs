@@ -49,6 +49,8 @@ pub enum AgentTarget {
     Pi,
     /// Hermes CLI
     Hermes,
+    /// Kiro (AWS AI IDE)
+    Kiro,
 }
 
 #[derive(Parser)]
@@ -1944,6 +1946,11 @@ fn run_cli() -> Result<i32> {
                     );
                 }
                 hooks::init::run_antigravity_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Kiro) {
+                if global {
+                    anyhow::bail!("Kiro is project-scoped. Use: rtk init --agent kiro");
+                }
+                hooks::init::run_kiro_mode(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
             } else {

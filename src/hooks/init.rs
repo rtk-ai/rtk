@@ -1757,6 +1757,63 @@ fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
+// ─── Kiro support ─────────────────────────────────────────────
+
+const KIRO_RULES: &str = include_str!("../../hooks/kiro/rules.md");
+
+pub fn run_kiro_mode(ctx: InitContext) -> Result<()> {
+    run_kiro_mode_at(&std::env::current_dir()?, ctx)
+}
+
+fn run_kiro_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+    // Kiro reads .kiro/steering/ from the project root (workspace-scoped)
+    let target_dir = base_dir.join(".kiro/steering");
+    let rules_path = target_dir.join("rtk-rules.md");
+
+    let existing = fs::read_to_string(&rules_path).unwrap_or_default();
+    if existing.contains("RTK") || existing.contains("rtk") {
+        if !dry_run {
+            println!("\nRTK already configured for Kiro in this project.\n");
+            println!("  Rules: .kiro/steering/rtk-rules.md (already present)");
+        }
+    } else {
+        let new_content = if existing.trim().is_empty() {
+            KIRO_RULES.to_string()
+        } else {
+            format!("{}\n\n{}", existing.trim(), KIRO_RULES)
+        };
+        if dry_run {
+            println!(
+                "[dry-run] would write {}: (and create parent dir if missing)",
+                rules_path.display()
+            );
+            if verbose > 0 {
+                println!("[dry-run] content:\n{}", new_content);
+            }
+        } else {
+            fs::create_dir_all(&target_dir).context("Failed to create .kiro/steering directory")?;
+            fs::write(&rules_path, &new_content)
+                .context("Failed to write .kiro/steering/rtk-rules.md")?;
+
+            if verbose > 0 {
+                eprintln!("Wrote .kiro/steering/rtk-rules.md");
+            }
+
+            println!("\nRTK configured for Kiro.\n");
+            println!("  Rules: .kiro/steering/rtk-rules.md (installed)");
+        }
+    }
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        println!("  Kiro will now use rtk commands for token savings.");
+        println!("  Test with: git status\n");
+    }
+
+    Ok(())
+}
+
 // ─── Hermes support ────────────────────────────────────────────
 
 const HERMES_PLUGIN_INIT: &str = include_str!("../../hooks/hermes/rtk-rewrite/__init__.py");
@@ -4463,6 +4520,31 @@ mod tests {
 
         // Second run should not overwrite
         run_antigravity_mode_at(temp.path(), InitContext::default()).unwrap();
+        let second = fs::read_to_string(&path).unwrap();
+        assert_eq!(first, second, "Idempotent: content should not change");
+    }
+
+    #[test]
+    fn test_kiro_mode_creates_rules_file() {
+        let temp = TempDir::new().unwrap();
+        run_kiro_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let rules_path = temp.path().join(".kiro/steering/rtk-rules.md");
+        assert!(rules_path.exists(), "Rules file should be created");
+        let content = fs::read_to_string(&rules_path).unwrap();
+        assert!(content.contains("RTK"), "Rules file should contain RTK");
+    }
+
+    #[test]
+    fn test_kiro_mode_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        run_kiro_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let path = temp.path().join(".kiro/steering/rtk-rules.md");
+        let first = fs::read_to_string(&path).unwrap();
+
+        // Second run should not overwrite
+        run_kiro_mode_at(temp.path(), InitContext::default()).unwrap();
         let second = fs::read_to_string(&path).unwrap();
         assert_eq!(first, second, "Idempotent: content should not change");
     }
