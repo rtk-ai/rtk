@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# rtk-hook-version: 1
+# rtk-hook-version: 2
 # RTK Cursor Agent hook — rewrites shell commands to use rtk for token savings.
 # Works with both Cursor editor and cursor-cli (they share ~/.cursor/hooks.json).
 # Cursor preToolUse hook format: receives JSON on stdin, returns JSON on stdout.
@@ -39,14 +39,28 @@ if [ -z "$CMD" ]; then
 fi
 
 # Delegate all rewrite logic to the Rust binary.
-# rtk rewrite exits 1 when there's no rewrite — hook passes through silently.
-REWRITTEN=$(rtk rewrite "$CMD" 2>/dev/null) || { echo '{}'; exit 0; }
+# rtk rewrite returns exit 3 on successful rewrite, 0 when no rewrite needed.
+REWRITTEN=$(rtk rewrite "$CMD" 2>/dev/null)
+RTK_EXIT=$?
 
-# No change — nothing to do.
-if [ "$CMD" = "$REWRITTEN" ]; then
+# Exit 0 = no rewrite needed, exit 3 = successfully rewritten
+# Any other exit code indicates an actual error
+if [ "$RTK_EXIT" -ne 0 ] && [ "$RTK_EXIT" -ne 3 ]; then
   echo '{}'
   exit 0
 fi
+
+# No change — nothing to do (same text, or empty stdout despite exit 0/3).
+if [ -z "$REWRITTEN" ] || [ "$CMD" = "$REWRITTEN" ]; then
+  echo '{}'
+  exit 0
+fi
+
+# Cursor expects JSON with "permission" and optional "updated_input".
+# rtk rewrite: exit 0 = no rewrite needed; exit 3 = rewritten successfully (RTK uses 3
+# as a success code, unlike typical shell conventions). Either way, when we emit
+# updated_input, Cursor requires "permission": "allow" so the tool runs with the
+# new command (rather than ask/deny/default pass-through).
 
 jq -n --arg cmd "$REWRITTEN" '{
   "permission": "allow",
