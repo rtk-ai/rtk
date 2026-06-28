@@ -8,6 +8,7 @@ pub mod filter;
 pub mod guard;
 pub mod runner;
 pub mod stream;
+pub mod structured;
 pub mod tee;
 pub mod telemetry;
 pub mod telemetry_cmd;
