@@ -168,12 +168,15 @@ pub fn tee_raw(raw: &str, command_slug: &str, exit_code: i32) -> Option<PathBuf>
     )
 }
 
+/// Render a tee file path for display in a hint.
+///
+/// The absolute path is used, without the `~` home-directory shorthand. Hints
+/// are copied verbatim into follow-up shell commands by users and LLM agents,
+/// and `~` does not expand inside quotes while home paths can contain spaces
+/// (e.g. macOS `~/Library/Application Support`), so the shortened form was not
+/// safely usable. The path passed in is already absolute (built from
+/// `data_local_dir()`). See https://github.com/rtk-ai/rtk/issues/1644.
 fn display_path(path: &std::path::Path) -> String {
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(relative) = path.strip_prefix(&home) {
-            return format!("~/{}", relative.display());
-        }
-    }
     path.display().to_string()
 }
 
@@ -215,13 +218,13 @@ fn force_tee_path(content: &str, command_slug: &str) -> Option<PathBuf> {
     )
 }
 
-/// Returns `[full output: ~/path]`, or None if tee is disabled/skipped.
+/// Returns `[full output: /abs/path]`, or None if tee is disabled/skipped.
 pub fn force_tee_hint(raw: &str, command_slug: &str) -> Option<String> {
     let path = force_tee_path(raw, command_slug)?;
     Some(format_hint(&path))
 }
 
-/// Returns `[see remaining: tail -n +{line_offset} ~/path]`, or None if tee is disabled/skipped.
+/// Returns `[see remaining: tail -n +{line_offset} /abs/path]`, or None if tee is disabled/skipped.
 pub fn force_tee_tail_hint(
     content: &str,
     command_slug: &str,
@@ -445,6 +448,28 @@ mod tests {
         assert!(hint.starts_with("[full output: "));
         assert!(hint.ends_with(']'));
         assert!(hint.contains("123_cargo_test.log"));
+    }
+
+    #[test]
+    fn test_display_path_is_shell_safe_for_home_paths() {
+        // Regression for #1644: a path under the home directory used to be
+        // rendered with the `~` shorthand, which is not copy-pasteable — `~`
+        // does not expand inside quotes and home paths can contain spaces.
+        // The hint must render the absolute path instead.
+        if let Some(home) = dirs::home_dir() {
+            let path = home.join("Library/Application Support/rtk/tee/123_curl.log");
+
+            let display = display_path(&path);
+            assert!(
+                !display.contains('~'),
+                "display_path must not use the `~` shorthand: {display}"
+            );
+            assert_eq!(display, path.display().to_string());
+
+            let hint = format_hint(&path);
+            assert_eq!(hint, format!("[full output: {}]", path.display()));
+            assert!(!hint.contains('~'));
+        }
     }
 
     #[test]
