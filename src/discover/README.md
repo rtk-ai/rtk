@@ -21,7 +21,7 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 → [Arg("cargo"), Arg("test"), Redirect("2>&1"), Operator("&&"), Arg("git"), Arg("status")]
 ```
 
-**Compound splitting** — The rewrite engine walks the tokens, splitting on `Operator` (`&&`, `||`, `;`) and `Pipe` (`|`). Each segment is rewritten independently. For pipes, only the left side is rewritten (the pipe consumer like `grep` or `head` runs raw). `find`/`fd` before a pipe is never rewritten because rtk's grouped output format breaks pipe consumers like `xargs`.
+**Compound splitting** — The rewrite engine walks the tokens, splitting on `Operator` (`&&`, `||`, `;`) and `Pipe` (`|`). Each segment is rewritten independently. For pipes, only the left side is rewritten (the pipe consumer like `grep` or `head` runs raw). `find`/`fd` before a pipe is never rewritten because rtk's grouped output format breaks pipe consumers like `xargs`. One exception runs in the pipe tail: an `xargs <cmd>` stage resolves its command at runtime, so the command after `xargs` (and any of its own flags) is rewritten if it's RTK-handled — e.g. `… | xargs grep -nE pat` → `… | xargs rtk grep -nE pat`. The same `xargs` rewrite applies to a standalone `xargs <cmd>` segment.
 
 **Per-segment rewriting** — Each segment goes through:
 

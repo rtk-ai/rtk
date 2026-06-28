@@ -581,13 +581,25 @@ fn rewrite_compound(
 
                 match pipe_group_end {
                     Some(next_op) => {
+                        let tail = cmd[tok.offset..next_op.offset].trim();
+                        let tail_rewritten =
+                            rewrite_pipe_group_tail(tail, excluded, transparent_prefixes);
+                        if tail_rewritten.is_some() {
+                            any_changed = true;
+                        }
                         result.push(' ');
-                        result.push_str(cmd[tok.offset..next_op.offset].trim());
+                        result.push_str(tail_rewritten.as_deref().unwrap_or(tail));
                         seg_start = next_op.offset;
                     }
                     None => {
+                        let tail = cmd[tok.offset..].trim_start();
+                        let tail_rewritten =
+                            rewrite_pipe_group_tail(tail, excluded, transparent_prefixes);
+                        if tail_rewritten.is_some() {
+                            any_changed = true;
+                        }
                         result.push(' ');
-                        result.push_str(cmd[tok.offset..].trim_start());
+                        result.push_str(tail_rewritten.as_deref().unwrap_or(tail));
                         return if any_changed { Some(result) } else { None };
                     }
                 }
@@ -782,6 +794,14 @@ fn rewrite_segment_inner(
         }
     }
 
+    // `xargs <cmd>` resolves its command at runtime, so a bare `xargs grep …`
+    // skips the parse-time rewrite. Rewrite the command xargs will execute while
+    // leaving xargs and its own flags untouched. Applies whether xargs is a
+    // standalone segment or a pipe target (see `rewrite_pipe_group_tail`).
+    if strip_word_prefix(trimmed, "xargs").is_some() {
+        return rewrite_xargs(trimmed, excluded, transparent_prefixes, depth);
+    }
+
     // Strip trailing stderr/stdout redirects before matching (#530)
     // e.g. "git status 2>&1" → match "git status", re-append " 2>&1"
     let (cmd_part, redirect_suffix) = strip_trailing_redirects(trimmed);
@@ -870,6 +890,135 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
         && cmd.as_bytes()[prefix.len()] == b' '
     {
         Some(cmd[prefix.len() + 1..].trim_start())
+    } else {
+        None
+    }
+}
+
+/// `xargs` flags that consume the *following* token as their value. Inline forms
+/// (`-n4`, `-I{}`, `--max-args=4`) carry the value in the same token and are not
+/// listed here.
+const XARGS_VALUE_FLAGS: &[&str] = &[
+    "-n",
+    "-L",
+    "-P",
+    "-I",
+    "-i",
+    "-s",
+    "-d",
+    "-E",
+    "-a",
+    "--max-args",
+    "--max-lines",
+    "--max-procs",
+    "--replace",
+    "--max-chars",
+    "--delimiter",
+    "--arg-file",
+    "--eof",
+];
+
+/// Rewrite the runtime-resolved command in an `xargs <cmd>` invocation.
+///
+/// `xargs` resolves its command at execution time, so a bare `xargs grep …`
+/// bypasses the parse-time matcher and leaks token savings. We skip past
+/// `xargs`' own options (and the value any of them consume), then rewrite the
+/// command that follows through the normal segment rewriter — leaving `xargs`
+/// and its flags exactly as written. Returns `None` when there is no command,
+/// or the command has no RTK equivalent.
+fn rewrite_xargs(
+    seg: &str,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+    depth: usize,
+) -> Option<String> {
+    let rest = strip_word_prefix(seg.trim(), "xargs")?;
+    if rest.is_empty() {
+        return None;
+    }
+
+    let tokens = split_token_spans(rest);
+    let mut i = 0;
+    while i < tokens.len() {
+        let (tok, start, _) = tokens[i];
+        if tok.starts_with('-') {
+            // Bare value-taking flags (`-n 4`, `-I {}`) also consume the next token;
+            // inline forms (`-n4`, `--max-args=4`) do not.
+            if XARGS_VALUE_FLAGS.contains(&tok) {
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+
+        // First non-flag token is the command xargs will execute.
+        let inner = rest[start..].trim();
+        let rewritten_inner =
+            rewrite_segment_inner(inner, excluded, transparent_prefixes, depth + 1)?;
+        if rewritten_inner == inner {
+            return None;
+        }
+        let flags = rest[..start].trim();
+        let rewritten = if flags.is_empty() {
+            format!("xargs {}", rewritten_inner)
+        } else {
+            format!("xargs {} {}", flags, rewritten_inner)
+        };
+        return Some(rewritten);
+    }
+
+    None
+}
+
+/// Rewrite `xargs <cmd>` stages inside a pipe-group tail (the verbatim region
+/// from the first `|` of a pipe group up to the next operator). Every stage is
+/// preserved byte-for-byte except an `xargs` stage whose runtime command we
+/// rewrite, so ordinary pipe consumers (`grep`, `head`, `wc`, …) still run raw
+/// while the xargs indirection no longer bypasses RTK. Returns `None` when no
+/// stage changed.
+fn rewrite_pipe_group_tail(
+    tail: &str,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+) -> Option<String> {
+    let pipe_offsets: Vec<usize> = tokenize(tail)
+        .iter()
+        .filter(|t| t.kind == TokenKind::Pipe)
+        .map(|t| t.offset)
+        .collect();
+    if pipe_offsets.is_empty() {
+        return None;
+    }
+
+    let mut out = String::with_capacity(tail.len() + 16);
+    let mut cursor = 0usize;
+    let mut any_changed = false;
+
+    for (idx, &pipe_off) in pipe_offsets.iter().enumerate() {
+        let stage_start = pipe_off + 1; // byte just after the single-byte '|'
+        let stage_end = match pipe_offsets.get(idx + 1) {
+            Some(&next) => next,
+            None => tail.len(),
+        };
+        let raw_stage = &tail[stage_start..stage_end];
+        let trimmed = raw_stage.trim();
+
+        if let Some(rewritten) = rewrite_xargs(trimmed, excluded, transparent_prefixes, 0) {
+            // Copy everything up to this stage (prior stages and the '|') verbatim,
+            // then splice in the rewrite while preserving the stage's own padding.
+            out.push_str(&tail[cursor..stage_start]);
+            let leading = raw_stage.len() - raw_stage.trim_start().len();
+            out.push_str(&raw_stage[..leading]);
+            out.push_str(&rewritten);
+            out.push_str(&raw_stage[leading + trimmed.len()..]);
+            cursor = stage_end;
+            any_changed = true;
+        }
+    }
+
+    if any_changed {
+        out.push_str(&tail[cursor..]);
+        Some(out)
     } else {
         None
     }
@@ -1498,11 +1647,12 @@ mod tests {
 
     #[test]
     fn test_rewrite_find_pipe_skipped() {
-        // find in a pipe should NOT be rewritten — rtk find output format
-        // is incompatible with pipe consumers like xargs (#439)
+        // `find` in a pipe is still NOT rewritten — rtk find output format is
+        // incompatible with pipe consumers like xargs (#439). The command xargs
+        // resolves at runtime (`grep`) IS rewritten so it no longer bypasses RTK.
         assert_eq!(
             rewrite_command_no_prefixes("find . -name '*.rs' | xargs grep 'fn run'", &[]),
-            None
+            Some("find . -name '*.rs' | xargs rtk grep 'fn run'".into())
         );
     }
 
@@ -1510,6 +1660,60 @@ mod tests {
     fn test_rewrite_find_pipe_xargs_wc() {
         assert_eq!(
             rewrite_command_no_prefixes("find src -type f | wc -l", &[]),
+            None
+        );
+    }
+
+    // --- xargs runtime-command indirection ---
+
+    #[test]
+    fn test_rewrite_xargs_pipe_target() {
+        // `xargs <cmd>` resolves its command at runtime; the upstream producer
+        // rewrites and the xargs-executed command must rewrite too.
+        assert_eq!(
+            rewrite_command_no_prefixes("ls *.js | xargs grep -nE pat", &[]),
+            Some("rtk ls *.js | xargs rtk grep -nE pat".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_xargs_standalone() {
+        // `xargs grep …` with no upstream pipe still gets the inner command rewritten.
+        assert_eq!(
+            rewrite_command_no_prefixes("xargs grep -nE pat", &[]),
+            Some("xargs rtk grep -nE pat".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_xargs_skips_own_flags() {
+        // xargs flags (and any value they consume) are preserved verbatim;
+        // only the command that follows is rewritten.
+        assert_eq!(
+            rewrite_command_no_prefixes("xargs -n 1 grep -nE pat", &[]),
+            Some("xargs -n 1 rtk grep -nE pat".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("xargs -0 -I {} grep -nE pat {}", &[]),
+            Some("xargs -0 -I {} rtk grep -nE pat {}".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_xargs_unsupported_inner_unchanged() {
+        // The command xargs runs has no RTK equivalent → no rewrite emitted.
+        // `find` producer stays raw, isolating the xargs decision.
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -type f | xargs htop", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_xargs_no_command_unchanged() {
+        // Bare `xargs` (no command, or flags only) has nothing to rewrite.
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -type f | xargs", &[]),
             None
         );
     }
