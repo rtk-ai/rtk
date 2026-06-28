@@ -31,10 +31,30 @@ struct RuffDiagnostic {
     fix: Option<RuffFix>,
 }
 
+/// Known ruff subcommands that should NOT get "check --output-format=json" injected.
+/// Based on `ruff --help` output. Only "check" and "format" need special handling;
+/// all other subcommands pass through unmodified.
+const RUFF_SUBCOMMANDS: &[&str] = &[
+    "check",
+    "format",
+    "version",
+    "rule",
+    "config",
+    "linter",
+    "clean",
+    "server",
+    "analyze",
+    "generate-shell-completion",
+    "help",
+];
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    // Determine if this is a "check" invocation (needs JSON output for filtering)
+    // Only "check" subcommand or path-like arguments trigger the check filter.
     let is_check = args.is_empty()
         || args[0] == "check"
-        || (!args[0].starts_with('-') && args[0] != "format" && args[0] != "version");
+        || (!args[0].starts_with('-')
+            && !RUFF_SUBCOMMANDS.contains(&args[0].as_str()));
 
     let is_format = args.iter().any(|a| a == "format");
 
