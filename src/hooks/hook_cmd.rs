@@ -35,6 +35,9 @@ enum HookFormat {
     /// Carries the full parsed `toolArgs` object so we can rewrite `command` while preserving
     /// host-supplied metadata (description, initial_wait, mode, …) the tool requires.
     CopilotCli { command: String, args: Value },
+    /// JetBrains IDE (Copilot plugin): camelCase `toolName` = `"run_in_terminal"`.
+    /// JetBrains ignores `modifiedArgs` — only honors `permissionDecision: "deny"`.
+    CopilotIde { command: String },
     /// Non-bash tool, already uses rtk, or unknown format — pass through silently.
     PassThrough,
 }
@@ -62,6 +65,7 @@ pub fn run_copilot() -> Result<()> {
     match detect_format(&v) {
         HookFormat::VsCode { command } => handle_vscode(&command),
         HookFormat::CopilotCli { command, args } => handle_copilot_cli(&command, &args),
+        HookFormat::CopilotIde { command } => handle_copilot_ide(&command),
         HookFormat::PassThrough => Ok(()),
     }
 }
@@ -83,8 +87,9 @@ fn detect_format(v: &Value) -> HookFormat {
         return HookFormat::PassThrough;
     }
 
-    // Copilot CLI: camelCase keys, toolArgs is a JSON-encoded string
+    // Copilot CLI / JetBrains: camelCase keys
     if let Some(tool_name) = v.get("toolName").and_then(|t| t.as_str()) {
+        let tool_name = tool_name.trim();
         if tool_name == "bash" {
             if let Some(tool_args_str) = v.get("toolArgs").and_then(|t| t.as_str()) {
                 if let Ok(tool_args) = serde_json::from_str::<Value>(tool_args_str) {
@@ -96,6 +101,22 @@ fn detect_format(v: &Value) -> HookFormat {
                         return HookFormat::CopilotCli {
                             command: cmd.to_string(),
                             args: tool_args,
+                        };
+                    }
+                }
+            }
+        }
+        if tool_name == "run_in_terminal" {
+            if let Some(tool_args_str) = v.get("toolArgs").and_then(|t| t.as_str()) {
+                if let Ok(tool_args) = serde_json::from_str::<Value>(tool_args_str) {
+                    if let Some(cmd) = tool_args
+                        .get("command")
+                        .and_then(|c| c.as_str())
+                        .map(|c| c.trim())
+                        .filter(|c| !c.is_empty())
+                    {
+                        return HookFormat::CopilotIde {
+                            command: cmd.to_string(),
                         };
                     }
                 }
@@ -220,6 +241,40 @@ fn copilot_cli_response_from_decision(
         response["permissionDecision"] = json!("allow");
     }
     Some(response)
+}
+
+// ── Copilot IDE (JetBrains) hook ──────────────────────────────
+
+fn handle_copilot_ide(cmd: &str) -> Result<()> {
+    if let Some(response) = copilot_ide_response(cmd) {
+        let _ = writeln!(io::stdout(), "{response}");
+    }
+    Ok(())
+}
+
+fn copilot_ide_response(cmd: &str) -> Option<Value> {
+    copilot_ide_response_from_decision(decide_hook_action(cmd, permissions::Host::Claude), cmd)
+}
+
+fn copilot_ide_response_from_decision(decision: HookDecision, cmd: &str) -> Option<Value> {
+    match decision {
+        HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten) => {
+            audit_log("rewrite", cmd, rewritten);
+            Some(json!({
+                "permissionDecision": "deny",
+                "permissionDecisionReason":
+                    format!("RTK: re-run as `{}` instead.", rewritten)
+            }))
+        }
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            Some(json!({
+                "permissionDecision": "deny",
+                "permissionDecisionReason": "Blocked by RTK permission rule"
+            }))
+        }
+        HookDecision::Defer => None,
+    }
 }
 
 // ── Gemini hook ───────────────────────────────────────────────
@@ -615,6 +670,96 @@ mod tests {
     #[test]
     fn test_detect_unknown_is_passthrough() {
         assert!(matches!(detect_format(&json!({})), HookFormat::PassThrough));
+    }
+
+    // --- JetBrains (CopilotIde) format detection ---
+
+    fn jetbrains_input(tool_name: &str, cmd: &str) -> Value {
+        let args = serde_json::to_string(&json!({ "command": cmd })).unwrap();
+        json!({ "toolName": tool_name, "toolArgs": args })
+    }
+
+    #[test]
+    fn test_detect_jetbrains_run_in_terminal() {
+        assert!(matches!(
+            detect_format(&jetbrains_input("run_in_terminal", "git status")),
+            HookFormat::CopilotIde { .. }
+        ));
+    }
+
+    #[test]
+    fn test_detect_jetbrains_command_trimmed() {
+        let v = jetbrains_input("run_in_terminal", "  git status  ");
+        match detect_format(&v) {
+            HookFormat::CopilotIde { command } => {
+                assert_eq!(command, "git status");
+            }
+            other => panic!("expected CopilotIde, got {:?}", format_name(&other)),
+        }
+    }
+
+    #[test]
+    fn test_detect_jetbrains_other_tools_passthrough() {
+        let v = jetbrains_input("open_file", "path/to/file");
+        assert!(matches!(detect_format(&v), HookFormat::PassThrough));
+    }
+
+    #[test]
+    fn test_detect_camelcase_bash_unchanged() {
+        assert!(matches!(
+            detect_format(&copilot_cli_input("git status")),
+            HookFormat::CopilotCli { .. }
+        ));
+    }
+
+    #[test]
+    fn test_copilot_ide_deny_with_suggestion() {
+        let r = copilot_ide_response_from_decision(
+            HookDecision::AskRewrite("rtk cargo test".into()),
+            "cargo test",
+        )
+        .unwrap();
+        assert_eq!(r["permissionDecision"], "deny");
+        assert!(
+            r["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("rtk cargo test"),
+            "reason should suggest the rewritten command"
+        );
+    }
+
+    #[test]
+    fn test_copilot_ide_allow_rewrite_also_denies() {
+        let r = copilot_ide_response_from_decision(
+            HookDecision::AllowRewrite("rtk git status".into()),
+            "git status",
+        )
+        .unwrap();
+        assert_eq!(
+            r["permissionDecision"], "deny",
+            "JetBrains ignores modifiedArgs — must deny with suggestion"
+        );
+    }
+
+    #[test]
+    fn test_copilot_ide_already_rtk_passthrough() {
+        assert!(copilot_ide_response("rtk git status").is_none());
+    }
+
+    #[test]
+    fn test_copilot_ide_unsupported_passthrough() {
+        assert!(copilot_ide_response("htop").is_none());
+    }
+
+    #[cfg(test)]
+    fn format_name(f: &HookFormat) -> &'static str {
+        match f {
+            HookFormat::VsCode { .. } => "VsCode",
+            HookFormat::CopilotCli { .. } => "CopilotCli",
+            HookFormat::CopilotIde { .. } => "CopilotIde",
+            HookFormat::PassThrough => "PassThrough",
+        }
     }
 
     #[test]
