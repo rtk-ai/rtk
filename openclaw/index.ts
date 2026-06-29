@@ -24,6 +24,29 @@ function checkRtk(): boolean {
   return rtkAvailable;
 }
 
+function getRewriteExitStatus(error: unknown): number | null {
+  if (!error || typeof error !== "object" || !("status" in error)) {
+    return null;
+  }
+
+  const status = error.status;
+  return typeof status === "number" ? status : null;
+}
+
+function getRewriteStdout(error: unknown): string {
+  if (!error || typeof error !== "object" || !("stdout" in error)) {
+    return "";
+  }
+
+  const stdout = error.stdout;
+
+  if (typeof stdout === "string") {
+    return stdout.trim();
+  }
+
+  return Buffer.isBuffer(stdout) ? stdout.toString("utf-8").trim() : "";
+}
+
 function tryRewrite(command: string): string | null {
   try {
     const result = execFileSync("rtk", ["rewrite", command], {
@@ -33,8 +56,11 @@ function tryRewrite(command: string): string | null {
       .toString()
       .trim();
     return result && result !== command ? result : null;
-  } catch {
-    return null;
+  } catch (error) {
+    const stdout = getRewriteStdout(error);
+    return getRewriteExitStatus(error) === 3 && stdout && stdout !== command
+      ? stdout
+      : null;
   }
 }
 
