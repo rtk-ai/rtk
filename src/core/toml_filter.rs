@@ -1306,6 +1306,13 @@ match_command = "^terraform"
     }
 
     #[test]
+    fn test_builtin_bru_filter_matches_path_invocation() {
+        let lookup = lookup_command_for_filter("../../client/node_modules/.bin/bru run Identity");
+        let found = find_matching_filter(&lookup).expect("bru built-in filter");
+        assert_eq!(found.name, "bru");
+    }
+
+    #[test]
     fn test_project_filters_priority_over_builtin() {
         // Project filter has same name but different max_lines — project wins
         let project = make_filters(
@@ -1869,6 +1876,7 @@ match_command = "^make\\b"
 
         let expected = [
             "ansible-playbook",
+            "bru",
             "brew-install",
             "composer-install",
             "df",
@@ -1927,8 +1935,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            63,
-            "Expected exactly 63 built-in filters, got {}. \
+            64,
+            "Expected exactly 64 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );

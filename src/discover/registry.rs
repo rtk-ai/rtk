@@ -3325,6 +3325,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_classify_bru_run() {
+        assert!(matches!(
+            classify_command("bru run Identity/Token"),
+            Classification::Supported {
+                rtk_equivalent: "rtk bru",
+                category: "Tests",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_bru_run() {
+        assert_eq!(
+            rewrite_command_no_prefixes("bru run Identity/Token", &[]),
+            Some("rtk bru run Identity/Token".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bru_node_modules_path() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "../../client/node_modules/.bin/bru run Identity/Token",
+                &[]
+            ),
+            Some(
+                "rtk ../../client/node_modules/.bin/bru run Identity/Token".to_string()
+            ),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npx_bru() {
+        assert_eq!(
+            rewrite_command_no_prefixes("npx bru run Identity/Token", &[]),
+            Some("rtk npx bru run Identity/Token".to_string()),
+        );
+    }
+
     // --- Gradle ---
 
     #[test]
