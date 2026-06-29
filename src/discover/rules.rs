@@ -331,6 +331,24 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^yarn\s+ng\s+test\b",
+        rtk_cmd: "rtk yarn",
+        rewrite_prefixes: &["yarn"],
+        category: "Tests",
+        savings_pct: 85.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^(?:[^\s]+/)*ng\s+test\b",
+        rtk_cmd: "rtk ng",
+        rewrite_prefixes: &["ng"],
+        category: "Tests",
+        savings_pct: 85.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?playwright",
         rtk_cmd: "rtk playwright",
         rewrite_prefixes: &[

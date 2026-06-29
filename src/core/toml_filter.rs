@@ -1306,6 +1306,13 @@ match_command = "^terraform"
     }
 
     #[test]
+    fn test_builtin_ng_test_filter_matches_path_invocation() {
+        let lookup = lookup_command_for_filter("node_modules/.bin/ng test auth");
+        let found = find_matching_filter(&lookup).expect("ng-test built-in filter");
+        assert_eq!(found.name, "ng-test");
+    }
+
+    #[test]
     fn test_project_filters_priority_over_builtin() {
         // Project filter has same name but different max_lines — project wins
         let project = make_filters(
@@ -1884,6 +1891,7 @@ match_command = "^make\\b"
             "markdownlint",
             "mix-compile",
             "mix-format",
+            "ng-test",
             "ping",
             "pio-run",
             "poetry-install",
@@ -1927,8 +1935,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            63,
-            "Expected exactly 63 built-in filters, got {}. \
+            64,
+            "Expected exactly 64 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
