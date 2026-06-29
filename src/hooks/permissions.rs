@@ -223,11 +223,6 @@ fn global_config(dir: &str, file: &str) -> Option<Value> {
     read_json(&dirs::home_dir()?.join(dir).join(file))
 }
 
-pub(crate) fn cursor_has_explicit_rules() -> bool {
-    let (deny, ask, allow) = load_cursor_rules();
-    !deny.is_empty() || !ask.is_empty() || !allow.is_empty()
-}
-
 fn load_cursor_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut deny = Vec::new();
     let mut allow = Vec::new();
