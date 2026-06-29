@@ -9,33 +9,50 @@
  * Rust registry, not this file.
  */
 
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 
-let rtkAvailable: boolean | null = null;
+const MIN_SUPPORTED_RTK_MINOR = 23;
+const REWRITE_TIMEOUT_MS = 2_000;
 
-function checkRtk(): boolean {
-  if (rtkAvailable !== null) return rtkAvailable;
-  try {
-    execFileSync("which", ["rtk"], { stdio: "ignore" });
-    rtkAvailable = true;
-  } catch {
-    rtkAvailable = false;
+function parseSemver(raw: string): [number, number, number] | null {
+  const m = raw.trim().match(/(\d+)\.(\d+)\.(\d+)/);
+  if (!m) return null;
+  return [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)];
+}
+
+function probeRtk(): boolean {
+  const result = spawnSync("rtk", ["--version"], {
+    encoding: "utf-8",
+    timeout: REWRITE_TIMEOUT_MS,
+  });
+  if (result.error) {
+    console.warn("[rtk] rtk probe failed unexpectedly — plugin disabled", result.error);
+    return false;
   }
-  return rtkAvailable;
+  if (result.status !== 0) {
+    console.warn("[rtk] rtk binary not found in PATH — plugin disabled");
+    return false;
+  }
+  const parsed = parseSemver((result.stdout ?? "").replace(/^rtk\s+/, ""));
+  if (!parsed) return true;
+  const [major, minor] = parsed;
+  if (major === 0 && minor < MIN_SUPPORTED_RTK_MINOR) {
+    console.warn(
+      `[rtk] rtk ${(result.stdout ?? "").trim()} is too old (need >= 0.23.0) — plugin disabled`
+    );
+    return false;
+  }
+  return true;
 }
 
 function tryRewrite(command: string): string | null {
-  try {
-    const result = execFileSync("rtk", ["rewrite", command], {
-      encoding: "utf-8",
-      timeout: 2000,
-    })
-      .toString()
-      .trim();
-    return result && result !== command ? result : null;
-  } catch {
-    return null;
-  }
+  const result = spawnSync("rtk", ["rewrite", command], {
+    encoding: "utf-8",
+    timeout: REWRITE_TIMEOUT_MS,
+  });
+  if (result.status !== 0 && result.status !== 3) return null;
+  const stdout = (result.stdout ?? "").trim();
+  return stdout && stdout !== command ? stdout : null;
 }
 
 export default function register(api: any) {
@@ -45,10 +62,7 @@ export default function register(api: any) {
 
   if (!enabled) return;
 
-  if (!checkRtk()) {
-    console.warn("[rtk] rtk binary not found in PATH — plugin disabled");
-    return;
-  }
+  if (!probeRtk()) return;
 
   api.on(
     "before_tool_call",
@@ -56,7 +70,9 @@ export default function register(api: any) {
       if (event.toolName !== "exec") return;
 
       const command = event.params?.command;
-      if (typeof command !== "string") return;
+      if (typeof command !== "string" || !command.trim()) return;
+      if (command.startsWith("rtk ")) return;
+      if (process.env.RTK_DISABLED === "1") return;
 
       const rewritten = tryRewrite(command);
       if (!rewritten) return;
