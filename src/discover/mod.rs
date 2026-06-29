@@ -72,6 +72,13 @@ pub fn run(
         }
     }
 
+    // On Windows, if no sessions found, provide helpful info about session location
+    if cfg!(target_os = "windows") && sessions.is_empty() {
+        eprintln!(
+            "\n[rtk] Note: On Windows, Claude Code sessions are stored in:\n  %USERPROFILE%\\.claude\\projects\\\nIf this directory doesn't exist, Claude Code may not have been run yet,\nor sessions may be in a different location."
+        );
+    }
+
     let mut total_commands: usize = 0;
     let mut already_rtk: usize = 0;
     let mut parse_errors: usize = 0;
