@@ -488,7 +488,7 @@ pub fn run_cursor() -> Result<()> {
             cursor_allow(&rewritten)
         }
         HookDecision::AskRewrite(rewritten) => {
-            audit_log("rewrite", &cmd, &rewritten);
+            audit_log("ask", &cmd, &rewritten);
             cursor_ask(&rewritten)
         }
         other => {
