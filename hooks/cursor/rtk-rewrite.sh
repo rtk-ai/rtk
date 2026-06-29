@@ -43,7 +43,7 @@ fi
 #             2 = deny, 3 = ask.
 REWRITTEN=$(rtk rewrite "$CMD" 2>/dev/null)
 RC=$?
-if [ "$RC" -eq 1 ] || [ "$RC" -eq 2 ]; then
+if [ "$RC" -ne 0 ] && [ "$RC" -ne 3 ]; then
   echo '{}'
   exit 0
 fi
@@ -61,6 +61,7 @@ if [ "$RC" -eq 3 ]; then
 fi
 
 jq -n --arg cmd "$REWRITTEN" --arg perm "$PERMISSION" '{
+  "continue": true,
   "permission": $perm,
   "updated_input": { "command": $cmd }
 }'

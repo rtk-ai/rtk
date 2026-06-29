@@ -1065,6 +1065,9 @@ mod tests {
         let v: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["permission"], "ask");
         assert_eq!(v["updated_input"]["command"], "rtk git status");
+        // `continue: true` keeps the Cursor preToolUse panel from collapsing
+        // to `Output: {}`; without it the rewrite is invisible to users.
+        assert_eq!(v["continue"], true);
     }
 
     #[test]
