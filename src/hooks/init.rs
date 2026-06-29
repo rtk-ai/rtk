@@ -133,6 +133,10 @@ git add . && git commit -m "msg" && git push
 rtk git add . && rtk git commit -m "msg" && rtk git push
 ```
 
+## Output Transparency
+
+RTK intentionally compresses and restructures command output to save tokens. Filtered output may look different from raw command output — for example, grep results grouped by file, test output showing only failures, or logs deduplicated with counts. This is expected and correct. If you need the exact unfiltered output of any command, use `rtk proxy <cmd>`.
+
 ## RTK Commands by Workflow
 
 ### Build & Compile (80-90% savings)
