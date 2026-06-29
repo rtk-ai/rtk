@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# rtk-hook-version: 1
+# rtk-hook-version: 2
 # RTK Cursor Agent hook — rewrites shell commands to use rtk for token savings.
 # Works with both Cursor editor and cursor-cli (they share ~/.cursor/hooks.json).
 # Cursor preToolUse hook format: receives JSON on stdin, returns JSON on stdout.
@@ -8,6 +8,12 @@
 # This is a thin delegating hook: all rewrite logic lives in `rtk rewrite`,
 # which is the single source of truth (src/discover/registry.rs).
 # To add or change rewrite rules, edit the Rust registry — not this file.
+#
+# Exit code protocol for `rtk rewrite`:
+#   0 + stdout  Rewrite found, no deny/ask rule matched → auto-allow
+#   1           No RTK equivalent → pass through unchanged
+#   2           Deny rule matched → pass through unchanged
+#   3 + stdout  Ask rule matched → rewrite but omit auto-allow (Cursor prompts)
 
 if ! command -v jq &>/dev/null; then
   echo "[rtk] WARNING: jq is not installed. Hook cannot rewrite commands. Install jq: https://jqlang.github.io/jq/download/" >&2
@@ -39,14 +45,19 @@ if [ -z "$CMD" ]; then
 fi
 
 # Delegate all rewrite logic to the Rust binary.
-# rtk rewrite exits 1 when there's no rewrite — hook passes through silently.
-REWRITTEN=$(rtk rewrite "$CMD" 2>/dev/null) || { echo '{}'; exit 0; }
+# Capture exit code explicitly — exit 3 (ask) still carries rewritten stdout.
+EXIT_CODE=0
+REWRITTEN=$(rtk rewrite "$CMD" 2>/dev/null) || EXIT_CODE=$?
 
-# No change — nothing to do.
-if [ "$CMD" = "$REWRITTEN" ]; then
-  echo '{}'
-  exit 0
-fi
+case $EXIT_CODE in
+  0|3)
+    [ -z "$REWRITTEN" ] || [ "$CMD" = "$REWRITTEN" ] && { echo '{}'; exit 0; }
+    ;;
+  *)
+    echo '{}'
+    exit 0
+    ;;
+esac
 
 jq -n --arg cmd "$REWRITTEN" '{
   "permission": "allow",
