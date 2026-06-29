@@ -1,6 +1,12 @@
-//! Filters grep output by grouping matches by file.
+//! Shared search-output filter for `rtk grep` and `rtk rg`.
+//!
+//! Runs the agent's exact engine (grep or rg) — never substituting one for the
+//! other — and compresses its output by grouping matches by file, capping, and
+//! teeing overflow. The engine differs only in which binary and parse flags are
+//! used (see `Engine`); the compression is identical because both emit the same
+//! `file:line:content` shape.
 
-use crate::core::stream::{exec_capture, CaptureResult};
+use crate::core::stream::{exec_capture, exec_capture_stdin, CaptureResult};
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, strip_ansi};
 use crate::core::{args_utils, config};
@@ -71,12 +77,10 @@ enum ClusterResult {
 
 /// Parse the content of a short flag cluster (everything after the leading `-`).
 ///
-/// Scans left-to-right: strips `r`/`R`, accumulates boolean flag letters, and
+/// Scans left-to-right, accumulating boolean flag letters — including `r`/`R`,
+/// which pass through to grep (recursion is the agent's choice, not RTK's) — and
 /// stops at the first value-taking flag (from `VALUE_FLAGS_SHORT` or `e`).
-/// Everything after that flag char in the cluster is its inline value and is
-/// returned verbatim — no `r`/`R` stripping is applied to it.
-///
-/// This is the only place in the codebase that touches cluster bytes.
+/// Everything after that flag char is its inline value, returned verbatim.
 fn parse_cluster(rest: &str) -> ClusterResult {
     let bytes = rest.as_bytes();
     let mut raw_prefix = String::new();
@@ -85,11 +89,10 @@ fn parse_cluster(rest: &str) -> ClusterResult {
         let ch = bytes[j];
         let is_e = ch == b'e';
         if is_e || VALUE_FLAGS_SHORT.contains(&ch) {
-            let prefix = strip_r(&raw_prefix);
-            // Inline value = bytes after this char; returned verbatim (no stripping).
             let inline = std::str::from_utf8(&bytes[j + 1..])
                 .unwrap_or("")
                 .to_string();
+            let prefix = (!raw_prefix.is_empty()).then_some(raw_prefix);
             return ClusterResult::ValueTaking {
                 prefix,
                 flag: ch as char,
@@ -99,129 +102,29 @@ fn parse_cluster(rest: &str) -> ClusterResult {
         raw_prefix.push(ch as char);
         j += 1;
     }
-    ClusterResult::Boolean(strip_r(&raw_prefix))
+    ClusterResult::Boolean((!raw_prefix.is_empty()).then_some(raw_prefix))
 }
 
-/// Strip `r`/`R` from a string of flag letters.
-/// Returns `None` when nothing remains after stripping.
-///
-/// Only called on accumulated flag letters (never on inline values).
-/// `strip_r("carrot")` → `Some("caot")` — this shows exactly why it must not
-/// touch value bytes; that corruption was the original `-ecarrot` bug.
-fn strip_r(flag_letters: &str) -> Option<String> {
-    let s: String = flag_letters
+/// Unique, descriptive tee slug for a file's overflow matches. `idx` disambiguates
+/// files within one grep; the tee filename's epoch handles separate runs.
+fn grep_slug(idx: usize, path: &str) -> String {
+    let cleaned: String = path
         .chars()
-        .filter(|&c| c != 'r' && c != 'R')
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
+    let tail = &cleaned[cleaned.len().saturating_sub(32)..];
+    format!("grep_{}_{}", idx, tail)
+}
+
+/// Format a file's matches as `path<sep>line<sep>content`. Tee blocks use the
+/// real (un-compacted) `path` so recovered lines stay openable.
+fn match_block(path: &str, entries: &[(usize, bool, String)]) -> String {
+    let mut s = String::new();
+    for (line_num, is_match, content) in entries {
+        let sep = if *is_match { ':' } else { '-' };
+        s.push_str(&format!("{}{}{}{}{}\n", path, sep, line_num, sep, content));
     }
-}
-
-/// Drop `--recursive` (grep-ism); pass all other long flags through unchanged.
-fn strip_recursive(arg: &str) -> Option<String> {
-    match arg {
-        "--recursive" => None,
-        _ => Some(arg.to_string()),
-    }
-}
-
-fn is_known_boolean_long_flag(arg: &str) -> bool {
-    matches!(
-        arg,
-        "--count"
-            | "--count-matches"
-            | "--files"
-            | "--files-with-matches"
-            | "--files-without-match"
-            | "--fixed-strings"
-            | "--follow"
-            | "--hidden"
-            | "--ignore-case"
-            | "--json"
-            | "--line-number"
-            | "--no-heading"
-            | "--no-ignore"
-            | "--no-ignore-dot"
-            | "--no-ignore-parent"
-            | "--no-ignore-vcs"
-            | "--no-messages"
-            | "--null"
-            | "--only-matching"
-            | "--passthru"
-            | "--perl-regexp"
-            | "--smart-case"
-            | "--text"
-            | "--trim"
-            | "--type-list"
-            | "--with-filename"
-            | "--word-regexp"
-    )
-}
-
-/// Ripgrep-only flags the grep fallback drops so grep doesn't abort (issue #2167).
-const RG_ONLY_LONG: &[&str] = &[
-    "--glob",
-    "--iglob",
-    "--type",
-    "--type-not",
-    "--type-add",
-    "--type-clear",
-    "--hidden",
-    "--no-ignore",
-    "--pcre2",
-    "--json",
-    "--stats",
-    "--sort",
-    "--sortr",
-    "--engine",
-    "--mmap",
-    "--no-mmap",
-    "--trim",
-    "--one-file-system",
-    "--max-columns",
-    "--max-depth",
-    "--max-filesize",
-    "--path-separator",
-    "--field-context-separator",
-    "--field-match-separator",
-    "--pre",
-    "--pre-glob",
-];
-
-fn strip_rg_only<T: AsRef<str>>(extra_args: &[T]) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut skip_next = false;
-    for arg in extra_args {
-        let a = arg.as_ref();
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        let name = a.split('=').next().unwrap_or(a);
-        let rg_only = RG_ONLY_LONG.contains(&name) || a == "-g" || a == "-T";
-        if rg_only {
-            let takes_value = a == "-g" || a == "-T" || VALUE_FLAGS_LONG.contains(&name);
-            if takes_value && !a.contains('=') {
-                skip_next = true;
-            }
-            continue;
-        }
-        out.push(a);
-    }
-    out
-}
-
-fn has_shape_flag<T: AsRef<str>>(extra_args: &[T]) -> bool {
-    extra_args.iter().any(|arg| {
-        let name = arg.as_ref().split('=').next().unwrap_or("");
-        matches!(
-            name,
-            "--column" | "--vimgrep" | "-b" | "--byte-offset" | "--null-data"
-        )
-    })
+    s
 }
 
 /// Extracts `(patterns, paths, flags)` from the raw trailing args.
@@ -278,20 +181,7 @@ fn extract_pattern_path<T: AsRef<str>>(args: &[T]) -> (Vec<String>, Vec<String>,
                 }
                 continue;
             }
-            // Drop --recursive; pass known flags through. If the first token is
-            // an unknown --dash string, treat it as a grep pattern instead of
-            // letting rg reject it as an unknown flag.
-            if let Some(cleaned) = strip_recursive(arg) {
-                if is_known_boolean_long_flag(arg)
-                    || arg.contains('=')
-                    || !positionals.is_empty()
-                    || !e_patterns.is_empty()
-                {
-                    flags.push(cleaned);
-                } else {
-                    positionals.push(cleaned);
-                }
-            }
+            flags.push(arg.to_string());
             i += 1;
             continue;
         }
@@ -367,125 +257,108 @@ fn unparsed_signal(stdout: &str) -> usize {
         .count()
 }
 
-/// Run rg; fall back to system grep when rg can't run or rejects the invocation
-/// (exit 2, no output) so any grep-ism (e.g. --include) still works (#2543).
-/// #2167: if grep also aborts on a flag, retry it bare.
-fn grep_capture<T: AsRef<str>>(
-    rg_base: &[&str],
-    grep_base: &[&str],
-    file_type: Option<&str>,
-    extra_args: &[T],
-    patterns: &[String],
-    paths: &[String],
-) -> Result<CaptureResult> {
-    let mut rg_cmd = resolved_command("rg");
-    rg_cmd.args(rg_base);
-    if let Some(ft) = file_type {
-        rg_cmd.arg("--type").arg(ft);
-    }
-    rg_cmd.args(extra_args.iter().map(|a| a.as_ref()));
-    for p in patterns {
-        rg_cmd.args(["-e", &p.replace(r"\|", "|")]);
-    }
-    rg_cmd.arg("--");
-    rg_cmd.args(paths);
+/// Run real grep so matches and the savings baseline match the agent's command;
+/// rg is the fallback when grep is absent, rejects a flag, or `--type` is used.
+/// The search engine the agent actually invoked. RTK runs this binary verbatim
+/// and never substitutes one for the other.
+#[derive(Clone, Copy)]
+pub enum Engine {
+    Grep,
+    Rg,
+}
 
-    match exec_capture(&mut rg_cmd) {
-        Ok(r) if !(r.exit_code == 2 && r.stdout.is_empty()) => Ok(r),
-        _ => {
-            // --null not -Z: BSD grep -Z is --decompress (#2310); strip_rg_only (#2167).
-            let stripped = strip_rg_only(extra_args);
-            let result = run_grep_fallback(grep_base, file_type, &stripped, patterns, paths)?;
-            if result.exit_code == 2 && result.stdout.is_empty() && result.stderr.contains("option") {
-                // grep aborted on an rg-only flag that strip_rg_only missed; retry bare (#2167).
-                run_grep_fallback(grep_base, file_type, &[], patterns, paths)
-            } else {
-                Ok(result)
-            }
+impl Engine {
+    fn bin(self) -> &'static str {
+        match self {
+            Engine::Grep => "grep",
+            Engine::Rg => "rg",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        self.bin()
+    }
+
+    /// `-n -H --null` are parse aids (NUL keeps the regroup unambiguous, #1436);
+    /// `-I` skips binary noise (-a overrides).
+    fn parse_flags(self) -> &'static [&'static str] {
+        match self {
+            Engine::Grep => &["-n", "-H", "-I", "--null"],
+            Engine::Rg => &["-n", "--with-filename", "--null"],
         }
     }
 }
 
-fn run_grep_fallback(
-    grep_base: &[&str],
-    file_type: Option<&str>,
-    extra_args: &[&str],
-    patterns: &[String],
-    paths: &[String],
-) -> Result<CaptureResult> {
-    let mut grep_cmd = resolved_command("grep");
-    grep_cmd.args(grep_base);
-    // file_type cannot be translated to grep syntax; silently skip.
-    let _ = file_type;
-    grep_cmd.args(extra_args);
-    for p in patterns {
-        grep_cmd.args(["-e", p]);
-    }
-    grep_cmd.arg("--");
-    grep_cmd.args(paths);
-    exec_capture(&mut grep_cmd).context("grep/rg failed")
-}
-
-#[allow(clippy::too_many_arguments)]
-fn passthrough<T: AsRef<str>>(
-    timer: &tracking::TimedExecution,
-    base: &[&str],
-    grep_base: &[&str],
-    file_type: Option<&str>,
+/// Runs the agent's exact engine + flags for the grouping path, appending only the
+/// parse aids (see `Engine::parse_flags`).
+fn engine_capture<T: AsRef<str>>(
+    engine: Engine,
     extra_args: &[T],
     patterns: &[String],
     paths: &[String],
-    pattern_display: &str,
-    path_display: &str,
+) -> Result<CaptureResult> {
+    let mut cmd = resolved_command(engine.bin());
+    cmd.args(engine.parse_flags());
+    for a in extra_args {
+        cmd.arg(a.as_ref());
+    }
+    for p in patterns {
+        cmd.args(["-e", p]);
+    }
+    cmd.arg("--");
+    cmd.args(paths);
+    exec_capture_stdin(&mut cmd).context("search failed")
+}
+
+/// Runs the agent's command verbatim for forms RTK does not group: format/shape
+/// flags and pattern-less modes (`--files`, `--type-list`).
+fn passthrough<T: AsRef<str>>(
+    timer: &tracking::TimedExecution,
+    engine: Engine,
+    args: &[T],
+    real_cmd: &str,
 ) -> Result<i32> {
-    let result = grep_capture(base, grep_base, file_type, extra_args, patterns, paths)
-        .context("grep/rg failed")?;
+    let mut cmd = resolved_command(engine.bin());
+    for a in args {
+        cmd.arg(a.as_ref());
+    }
+    let result = exec_capture_stdin(&mut cmd).context("search failed")?;
 
     print!("{}", strip_ansi(&result.stdout));
     if !result.stderr.is_empty() {
-        eprint!("{}", result.stderr.trim());
+        eprint!("{}", result.stderr);
     }
 
-    let args_display = if extra_args.is_empty() {
-        format!("'{}' {}", pattern_display, path_display)
-    } else {
-        let joined: Vec<&str> = extra_args.iter().map(|a| a.as_ref()).collect();
-        format!("{} '{}' {}", joined.join(" "), pattern_display, path_display)
-    };
-
-    timer.track_passthrough(
-        &format!("grep {}", args_display),
-        &format!("rtk grep {} (passthrough)", args_display),
-    );
+    timer.track_passthrough(real_cmd, &format!("rtk {} (passthrough)", real_cmd));
     Ok(result.exit_code)
 }
 
+fn has_short_flag(flags: &[String], ch: char) -> bool {
+    flags
+        .iter()
+        .any(|f| f.starts_with('-') && !f.starts_with("--") && f[1..].contains(ch))
+}
+
 pub fn run(
+    engine: Engine,
     max_line_len: usize,
     max_results: usize,
     context_only: bool,
-    file_type: Option<&str>,
     args: &[String],
     verbose: u8,
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    // --version / --help: pass through to rg without filtering.
+    // --version / --help: pass through to the engine without filtering.
     // Note: Clap strips `--` before populating trailing_var_arg, so both
     // `rtk grep --version` and `rtk grep -- --version` land here identically.
     if args
         .iter()
         .any(|a| a == "--version" || a == "--help" || a == "-h")
     {
-        let mut rg_cmd = resolved_command("rg");
-        rg_cmd.args(args);
-        let result = exec_capture(&mut rg_cmd)
-            .or_else(|_| {
-                let mut grep_cmd = resolved_command("grep");
-                grep_cmd.args(args);
-                exec_capture(&mut grep_cmd)
-            })
-            .context("grep/rg failed")?;
+        let mut cmd = resolved_command(engine.bin());
+        cmd.args(args);
+        let result = exec_capture(&mut cmd).context("search failed")?;
         print!("{}", result.stdout);
         if !result.stderr.is_empty() {
             eprint!("{}", result.stderr);
@@ -493,13 +366,15 @@ pub fn run(
         return Ok(result.exit_code);
     }
 
-    // Re-insert `--` when clap's trailing_var_arg consumed it.
+    // Re-insert `--` when clap's trailing_var_arg consumed it
     let args = args_utils::restore_double_dash(args);
+    let real_cmd = format!("{} {}", engine.label(), args.join(" "));
+    let rtk_label = format!("rtk {}", engine.label());
+
     let (patterns, paths, extra_args) = extract_pattern_path(&args);
 
     if patterns.is_empty() {
-        eprintln!("rtk grep: pattern required (positional or -e)");
-        return Ok(1);
+        return passthrough(&timer, engine, &args, &real_cmd);
     }
 
     let pattern_display = if patterns.len() == 1 {
@@ -507,84 +382,36 @@ pub fn run(
     } else {
         patterns.join("|")
     };
-    let paths = if paths.is_empty() {
-        vec![".".to_string()]
-    } else {
-        paths
-    };
+
     let path_display = paths.join(" ");
 
     if verbose > 0 {
         eprintln!("grep: '{}' in {}", pattern_display, path_display);
     }
 
-    // format/shape flags: native passthrough, no -0 NUL leak (#2333).
-    if has_format_flag(&extra_args) || has_shape_flag(&extra_args) {
-        return passthrough(
-            &timer,
-            &["--no-heading", "--no-ignore-vcs"],
-            &["-r"],
-            file_type,
-            &extra_args,
-            &patterns,
-            &paths,
-            &pattern_display,
-            &path_display,
-        );
+    // format/shape flags (-c/-l/-o/...): already-minimal native output, passthrough.
+    if has_format_flag(&extra_args) {
+        return passthrough(&timer, engine, &args, &real_cmd);
     }
 
-    // GROUP path: -0 NUL-disambiguates file:line for the reparse (#1436).
-    let result = grep_capture(
-        &["-nH0", "--no-heading", "--no-ignore-vcs"],
-        &["-rnH", "--null"],
-        file_type,
-        &extra_args,
-        &patterns,
-        &paths,
-    )
-    .context("grep/rg failed")?;
+    let result = engine_capture(engine, &extra_args, &patterns, &paths)?;
 
     let exit_code = result.exit_code;
-    let raw_output = result.combined();
+    let raw_output = result.stdout.clone();
 
-    if result.stdout.trim().is_empty() {
-        if is_grep_error_exit(exit_code) {
-            if !result.stderr.trim().is_empty() {
-                eprintln!("{}", result.stderr.trim());
-            }
-            let msg = format!("grep failed with exit code {}", exit_code);
-            timer.track(
-                &format!("grep -rn '{}' {}", pattern_display, path_display),
-                "rtk grep",
-                &raw_output,
-                &msg,
-            );
-            eprintln!("{}", msg);
-            return Ok(exit_code);
-        }
-        timer.track(
-            &format!("grep -rn '{}' {}", pattern_display, path_display),
-            "rtk grep",
-            &raw_output,
-            "",
-        );
-        return Ok(exit_code);
+    // Unparseable shape re-runs verbatim below (with its own stderr), so handle it
+    // before surfacing this run's stderr (#2333).
+    if unparsed_signal(&raw_output) > 0 {
+        return passthrough(&timer, engine, &args, &real_cmd);
     }
 
-    // Safety net: unparseable shape → passthrough verbatim, never silently drop (#2333).
-    let signal = unparsed_signal(&raw_output);
-    if signal > 0 {
-        return passthrough(
-            &timer,
-            &["-nH", "--no-heading", "--no-ignore-vcs"],
-            &["-rnH"],
-            file_type,
-            &extra_args,
-            &patterns,
-            &paths,
-            &pattern_display,
-            &path_display,
-        );
+    if !result.stderr.is_empty() {
+        eprint!("{}", result.stderr);
+    }
+
+    if result.stdout.trim().is_empty() {
+        timer.track(&real_cmd, &rtk_label, &raw_output, "");
+        return Ok(exit_code);
     }
 
     let context_re = if context_only {
@@ -614,60 +441,125 @@ pub fn run(
         .flat_map(|v| v.iter())
         .filter(|(_, is_match, _)| *is_match)
         .count();
-    let mut rtk_output = String::new();
-    rtk_output.push_str(&format!(
-        "{} matches in {} files:\n\n",
-        total_matches,
-        by_file.len()
-    ));
 
-    let mut shown = 0;
+    // Mirror what the real command prints: the filename only when grep/rg would
+    // show one (multiple files, a directory, -r or -H), the line number only with
+    // -n. We force -nH--null for robust parsing, then drop what the engine itself
+    // would not have shown.
+    let show_file = by_file.len() > 1
+        || paths.len() > 1
+        || paths.iter().any(|p| std::path::Path::new(p).is_dir())
+        || has_short_flag(&extra_args, 'H')
+        || has_short_flag(&extra_args, 'r')
+        || has_short_flag(&extra_args, 'R')
+        || extra_args
+            .iter()
+            .any(|f| f == "--with-filename" || f == "--recursive");
+    // Always surface the line number (the openable position) unless the agent
+    // explicitly turned it off; the filename is the only conditional part.
+    let show_line = !has_short_flag(&extra_args, 'N')
+        && !extra_args.iter().any(|f| f == "--no-line-number");
+
+    // Faithful baseline: exactly what the real command prints, full content.
+    let mut plain = String::new();
+    for line in raw_output.lines() {
+        let Some((file, line_num, is_match, content)) = parse_match_line(line) else {
+            continue;
+        };
+        let sep = if is_match { ':' } else { '-' };
+        if show_file {
+            plain.push_str(&file);
+            plain.push(sep);
+        }
+        if show_line {
+            plain.push_str(&line_num.to_string());
+            plain.push(sep);
+        }
+        plain.push_str(content);
+        plain.push('\n');
+    }
+
+    let per_file = config::limits().grep_max_per_file;
     let mut files: Vec<_> = by_file.iter().collect();
     files.sort_by_key(|(f, _)| *f);
 
-    let per_file = config::limits().grep_max_per_file;
-    for (file, entries) in files {
+    let mut body = String::new();
+    let mut shown = 0;
+    let mut skipped_files = 0;
+    let mut skipped_block = String::new();
+    for (idx, (file, entries)) in files.into_iter().enumerate() {
         if shown >= max_results {
-            break;
+            skipped_files += 1;
+            skipped_block.push_str(&match_block(file, entries));
+            continue;
         }
 
         let file_display = compact_path(file);
+        let mut file_shown = 0;
         for (line_num, is_match, content) in entries.iter().take(per_file) {
             if shown >= max_results {
                 break;
             }
-            if *is_match {
-                rtk_output.push_str(&format!("{}:{}:{}\n", file_display, line_num, content));
-            } else {
-                rtk_output.push_str(&format!("{}-{}-{}\n", file_display, line_num, content));
+            let sep = if *is_match { ':' } else { '-' };
+            if show_file {
+                body.push_str(&file_display);
+                body.push(sep);
             }
+            if show_line {
+                body.push_str(&line_num.to_string());
+                body.push(sep);
+            }
+            body.push_str(content);
+            body.push('\n');
             shown += 1;
+            file_shown += 1;
+        }
+
+        let remaining = entries.len() - file_shown;
+        if remaining == 0 {
+            continue;
+        }
+        // Tee the file's full matches (real path) so the tail hint recovers them
+        // openably, skipping the lines already shown.
+        let full_block = match_block(file, entries);
+        match crate::core::tee::force_tee_tail_hint(&full_block, &grep_slug(idx, file), file_shown + 1)
+        {
+            Some(hint) => {
+                body.push_str(&format!("  +{} more in {} {}\n", remaining, file_display, hint))
+            }
+            None => body.push_str(&format!("  +{} more in {}\n", remaining, file_display)),
         }
     }
 
-    let total_lines: usize = by_file.values().map(|v| v.len()).sum();
-    if total_lines > shown {
-        rtk_output.push_str(&format!("[+{} more]\n", total_lines - shown));
-    }
-    if exit_code != 0 && !result.stderr.trim().is_empty() {
-        eprint!("{}", result.stderr);
+    if skipped_files > 0 {
+        let hint = crate::core::tee::force_tee_tail_hint(&skipped_block, "grep_skipped", 1)
+            .map(|h| format!(" {}", h))
+            .unwrap_or_default();
+        body.push_str(&format!("+{} more files{}\n", skipped_files, hint));
     }
 
-    // Never-worse: show plain `file:line:content` (NUL `-0` -> `:`) if grouping didn't shrink it.
-    let plain = raw_output.replace('\0', ":");
-    let output = if rtk_output.len() < plain.len() {
+    // Switch to the grouped form only when capping actually shrank the output;
+    // otherwise emit the faithful baseline, so RTK never exceeds the real command.
+    let capped = shown < total_matches || skipped_files > 0;
+    let rtk_output = if capped {
+        format!(
+            "{} matches in {} files:\n\n{}",
+            total_matches,
+            by_file.len(),
+            body
+        )
+    } else {
+        body
+    };
+
+    let output = if capped && rtk_output.len() < plain.len() {
         rtk_output
     } else {
         plain
     };
 
     print!("{}", output);
-    timer.track(
-        &format!("grep -rn '{}' {}", pattern_display, path_display),
-        "rtk grep",
-        &raw_output,
-        &output,
-    );
+    timer.track(&real_cmd, &rtk_label, &raw_output, &output);
 
     Ok(exit_code)
 }
@@ -700,23 +592,37 @@ fn parse_match_line(line: &str) -> Option<(String, usize, bool, &str)> {
 }
 
 fn has_format_flag<T: AsRef<str>>(extra_args: &[T]) -> bool {
+    // Minimal/shape forms the agent already chose; short flags scanned per-letter
+    // so clusters like -rl/-rq route through, plus their long forms.
+    const LONG: &[&str] = &[
+        "--count",
+        "--count-matches",
+        "--files-with-matches",
+        "--files-without-match",
+        "--only-matching",
+        "--quiet",
+        "--silent",
+        "--byte-offset",
+        "--column",
+        "--vimgrep",
+        "--null",
+        "--null-data",
+        "--json",
+        "--passthru",
+        "--files",
+    ];
     extra_args.iter().any(|arg| {
-        matches!(
-            arg.as_ref(),
-            "-c" | "--count"
-                | "--count-matches"
-                | "-l"
-                | "--files-with-matches"
-                | "-L"
-                | "--files-without-match"
-                | "-o"
-                | "--only-matching"
-                | "-Z"
-                | "--null"
-                | "--json"
-                | "--passthru"
-                | "--files"
-        )
+        let a = arg.as_ref();
+        if a.starts_with("--") {
+            LONG.contains(&a.split('=').next().unwrap_or(a))
+        } else if let Some(letters) = a.strip_prefix('-').filter(|s| !s.is_empty()) {
+            // -c count, -l/-L lists, -o only-matching, -q quiet, -b byte-offset, -Z/-z NUL
+            letters
+                .chars()
+                .any(|ch| matches!(ch, 'c' | 'l' | 'L' | 'o' | 'q' | 'b' | 'Z' | 'z'))
+        } else {
+            false
+        }
     })
 }
 
@@ -784,28 +690,9 @@ fn compact_path(path: &str) -> String {
     )
 }
 
-/// grep/rg convention: exit 1 = no match found (normal), exit >= 2 = real
-/// error (bad regex, tool crash, missing binary). An error must surface to the
-/// user, never be silently reported as a false "0 matches".
-fn is_grep_error_exit(exit_code: i32) -> bool {
-    exit_code >= 2
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_is_grep_error_exit() {
-        // exit 0 = matches, exit 1 = no match: both normal, not errors.
-        assert!(!is_grep_error_exit(0));
-        assert!(!is_grep_error_exit(1));
-        // exit >= 2 = real error (bad regex, tool crash, missing binary).
-        // Must surface, never become a false "0 matches".
-        assert!(is_grep_error_exit(2));
-        assert!(is_grep_error_exit(3));
-        assert!(is_grep_error_exit(127));
-    }
 
     #[test]
     fn test_clean_line() {
@@ -838,14 +725,6 @@ mod tests {
         assert!(!cleaned.is_empty());
     }
 
-    // Fix: BRE \| alternation is translated to PCRE | for rg
-    #[test]
-    fn test_bre_alternation_translated() {
-        let pattern = r"fn foo\|pub.*bar";
-        let rg_pattern = pattern.replace(r"\|", "|");
-        assert_eq!(rg_pattern, "fn foo|pub.*bar");
-    }
-
     // --- parse_cluster ---
 
     fn vt(prefix: Option<&str>, flag: char, inline: &str) -> ClusterResult {
@@ -858,17 +737,26 @@ mod tests {
 
     #[test]
     fn test_parse_cluster_boolean_only() {
-        // Pure boolean clusters: r/R stripped, remainder emitted
-        assert_eq!(parse_cluster("r"), ClusterResult::Boolean(None));
-        assert_eq!(parse_cluster("R"), ClusterResult::Boolean(None));
-        assert_eq!(parse_cluster("rR"), ClusterResult::Boolean(None));
+        // Pure boolean clusters: r/R kept and passed through to grep
+        assert_eq!(
+            parse_cluster("r"),
+            ClusterResult::Boolean(Some("r".to_string()))
+        );
+        assert_eq!(
+            parse_cluster("R"),
+            ClusterResult::Boolean(Some("R".to_string()))
+        );
+        assert_eq!(
+            parse_cluster("rR"),
+            ClusterResult::Boolean(Some("rR".to_string()))
+        );
         assert_eq!(
             parse_cluster("rn"),
-            ClusterResult::Boolean(Some("n".to_string()))
+            ClusterResult::Boolean(Some("rn".to_string()))
         );
         assert_eq!(
             parse_cluster("Rni"),
-            ClusterResult::Boolean(Some("ni".to_string()))
+            ClusterResult::Boolean(Some("Rni".to_string()))
         );
         assert_eq!(
             parse_cluster("n"),
@@ -914,14 +802,14 @@ mod tests {
 
     #[test]
     fn test_parse_cluster_rne() {
-        // -rne: r stripped, n in boolean prefix, e is value-taking (empty inline)
-        assert_eq!(parse_cluster("rne"), vt(Some("n"), 'e', ""));
+        // r/R pass through; e is value-taking (empty inline)
+        assert_eq!(parse_cluster("rne"), vt(Some("rn"), 'e', ""));
     }
 
     #[test]
     fn test_parse_cluster_r_a() {
-        // -rA: r stripped, A is value-taking (empty inline → consume next token)
-        assert_eq!(parse_cluster("rA"), vt(None, 'A', ""));
+        // r passes through in the prefix; A is value-taking
+        assert_eq!(parse_cluster("rA"), vt(Some("r"), 'A', ""));
     }
 
     #[test]
@@ -946,30 +834,6 @@ mod tests {
     fn test_parse_cluster_short_max_columns() {
         assert_eq!(parse_cluster("M"), vt(None, 'M', ""));
         assert_eq!(parse_cluster("M120"), vt(None, 'M', "120"));
-    }
-
-    // --- strip_r ---
-
-    #[test]
-    fn test_strip_r() {
-        assert_eq!(strip_r("r"), None);
-        assert_eq!(strip_r("R"), None);
-        assert_eq!(strip_r("rR"), None);
-        assert_eq!(strip_r(""), None);
-        assert_eq!(strip_r("rn"), Some("n".to_string()));
-        assert_eq!(strip_r("Rni"), Some("ni".to_string()));
-        assert_eq!(strip_r("i"), Some("i".to_string()));
-        // Shows why it must only be called on flag letters, not value bytes:
-        assert_eq!(strip_r("carrot"), Some("caot".to_string()));
-    }
-
-    // --- strip_recursive ---
-
-    #[test]
-    fn test_strip_recursive() {
-        assert_eq!(strip_recursive("--recursive"), None);
-        assert_eq!(strip_recursive("--glob"), Some("--glob".to_string()));
-        assert_eq!(strip_recursive("--type"), Some("--type".to_string()));
     }
 
     // --- extract_pattern_path ---
@@ -1000,30 +864,30 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_cluster_strip_r() {
-        // -rn: r stripped, n forwarded (not leaked to rg as --replace value)
+    fn test_extract_cluster_keeps_r() {
+        // -rn: r kept, passed straight to grep
         let (patterns, paths, flags) = extract_pattern_path(&["-rn", "foo", "src"]);
         assert_eq!(patterns, vec!["foo"]);
         assert_eq!(paths, vec!["src"]);
-        assert_eq!(flags, vec!["-n"]);
+        assert_eq!(flags, vec!["-rn"]);
     }
 
     #[test]
     fn test_extract_cluster_ending_in_e() {
-        // -rne PATTERN: r stripped, n in prefix, e consumes PATTERN as pattern
+        // -rne PATTERN: rn kept, e consumes PATTERN as the pattern
         let (patterns, paths, flags) = extract_pattern_path(&["-rne", "PATTERN", "src"]);
         assert_eq!(patterns, vec!["PATTERN"]);
         assert_eq!(paths, vec!["src"]);
-        assert_eq!(flags, vec!["-n"]);
+        assert_eq!(flags, vec!["-rn"]);
     }
 
     #[test]
     fn test_extract_cluster_ending_in_value_flag() {
-        // -rA 2: r stripped, A consumes 2 as context value
+        // -rA 2: r kept as its own flag, A consumes 2 as context value
         let (patterns, paths, flags) = extract_pattern_path(&["-rA", "2", "foo", "src"]);
         assert_eq!(patterns, vec!["foo"]);
         assert_eq!(paths, vec!["src"]);
-        assert_eq!(flags, vec!["-A", "2"]);
+        assert_eq!(flags, vec!["-r", "-A", "2"]);
     }
 
     #[test]
@@ -1268,7 +1132,7 @@ mod tests {
     fn test_grep_overflow_uses_uncapped_total() {
         // Confirm the grep overflow invariant: matches vec is never capped before overflow calc.
         // If total_matches > per_file, overflow = total_matches - per_file (not capped).
-        // This documents that grep_cmd.rs avoids the diff_cmd bug (cap at N then compute N-10).
+        // This documents that the search filter avoids the diff_cmd bug (cap at N then compute N-10).
         let per_file = config::limits().grep_max_per_file;
         let total_matches = per_file + 42;
         let overflow = total_matches - per_file;
@@ -1320,129 +1184,43 @@ mod tests {
         assert!(!has_format_flag(&["-i", "-w", "-A", "3"]));
     }
 
-    // Grep fallback must convert rg long-form flags to grep equivalents.
     #[test]
-    fn test_grep_fallback_converts_long_flags() {
-        let conversions = [
-            ("--files-with-matches", "-l"),
-            ("--files-without-match", "-L"),
-            ("--only-matching", "-o"),
-            ("--null", "--null"),
-            ("-Z", "--null"),
-            ("--count", "-c"),
-        ];
-        for (rg_flag, grep_flag) in &conversions {
-            let extra_args = vec![rg_flag.to_string()];
-            let converted = grep_fallback_args(&extra_args);
-            assert_eq!(
-                converted[0], *grep_flag,
-                "{} should convert to {}",
-                rg_flag, grep_flag
-            );
-        }
+    fn test_format_flag_detects_clusters() {
+        // clustered minimal forms must route to passthrough, not GROUP
+        assert!(has_format_flag(&["-rl"]));
+        assert!(has_format_flag(&["-rc"]));
+        assert!(has_format_flag(&["-rq"]));
+        assert!(has_format_flag(&["-rln"]));
+        assert!(has_format_flag(&["-cr"]));
     }
 
     #[test]
-    fn test_grep_fallback_drops_rg_glob_short_flag_and_value() {
-        let args = vec![
-            "-g".to_string(),
-            "*.ts".to_string(),
-            "--hidden".to_string(),
-            "-i".to_string(),
-        ];
-        assert_eq!(grep_fallback_args(&args), vec!["-i".to_string()]);
+    fn test_format_flag_detects_quiet_and_shape() {
+        assert!(has_format_flag(&["-q"]));
+        assert!(has_format_flag(&["--quiet"]));
+        assert!(has_format_flag(&["--silent"]));
+        assert!(has_format_flag(&["-b"]));
+        assert!(has_format_flag(&["--byte-offset"]));
+        assert!(has_format_flag(&["--column"]));
+        assert!(has_format_flag(&["--vimgrep"]));
+        assert!(has_format_flag(&["-z"]));
+        assert!(has_format_flag(&["--null-data"]));
     }
 
     #[test]
-    fn test_grep_fallback_drops_rg_files_and_glob_equals() {
-        let args = vec![
-            "--files".to_string(),
-            "--glob=*.rs".to_string(),
-            "--files-with-matches".to_string(),
-        ];
-        assert_eq!(grep_fallback_args(&args), vec!["-l".to_string()]);
+    fn test_format_flag_compresses_default_and_context() {
+        // compressible forms must NOT passthrough
+        assert!(!has_format_flag(&["-rn"]));
+        assert!(!has_format_flag(&["-A", "3"]));
+        assert!(!has_format_flag(&["-v"]));
+        assert!(!has_format_flag(&["-rin"]));
     }
 
-    #[test]
-    fn test_grep_fallback_drops_rg_smart_case() {
-        let args = vec![
-            "-S".to_string(),
-            "--smart-case".to_string(),
-            "-i".to_string(),
-        ];
-        assert_eq!(grep_fallback_args(&args), vec!["-i".to_string()]);
-    }
-
-    #[test]
-    fn test_grep_dash_prefixed_pattern_is_not_treated_as_flag() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("sample.txt");
-        std::fs::write(&file, "--reason: pending\nother\n").unwrap();
-
-        let path = dir.path().to_string_lossy().to_string();
-        let args = vec!["--reason".to_string(), path];
-        let status = run(80, 10, false, None, &args, 0).unwrap();
-        assert_eq!(status, 0);
-    }
-
-    #[test]
-    fn test_grep_multiple_paths_are_passed_after_pattern() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = dir.path().join("first");
-        let second = dir.path().join("second");
-        std::fs::create_dir_all(&first).unwrap();
-        std::fs::create_dir_all(&second).unwrap();
-        std::fs::write(first.join("a.txt"), "Codex native hook\n").unwrap();
-        std::fs::write(second.join("b.txt"), "Prompt-level other agent\n").unwrap();
-
-        let args = vec![
-            "-n".to_string(),
-            "Codex|Prompt-level".to_string(),
-            first.to_string_lossy().to_string(),
-            second.to_string_lossy().to_string(),
-        ];
-        let status = run(80, 10, false, None, &args, 0).unwrap();
-        assert_eq!(status, 0);
-    }
-
-    #[test]
-    fn test_strip_rg_only_drops_glob_and_value() {
-        assert_eq!(strip_rg_only(&["--glob", "*.rs", "-i"]), vec!["-i"]);
-        assert_eq!(strip_rg_only(&["-g", "*.rs", "-i"]), vec!["-i"]);
-    }
-
-    #[test]
-    fn test_strip_rg_only_drops_inline_glob() {
-        assert_eq!(strip_rg_only(&["--glob=*.rs", "-i"]), vec!["-i"]);
-    }
-
-    #[test]
-    fn test_strip_rg_only_drops_bool_flags() {
-        assert_eq!(
-            strip_rg_only(&["--hidden", "--pcre2", "--json", "-n"]),
-            vec!["-n"]
-        );
-    }
-
-    #[test]
-    fn test_strip_rg_only_drops_type_and_value() {
-        assert_eq!(strip_rg_only(&["--type", "rust", "-w"]), vec!["-w"]);
-        assert_eq!(strip_rg_only(&["-T", "rust", "-w"]), vec!["-w"]);
-    }
-
-    #[test]
-    fn test_strip_rg_only_keeps_grep_compatible() {
-        assert_eq!(
-            strip_rg_only(&["-i", "-w", "-A", "3", "-v"]),
-            vec!["-i", "-w", "-A", "3", "-v"]
-        );
-    }
-
-    // Verify line numbers are always enabled in rg invocation (grep_cmd.rs:24).
+    // Verify line numbers are always enabled in the engine invocation (parse_flags).
     // The -n/--line-numbers clap flag in main.rs is a no-op accepted for compat.
     #[test]
     fn test_rg_always_has_line_numbers() {
-        // grep_cmd::run() always passes "-n" to rg (line 24).
+        // engine_capture always passes "-n" to the engine via parse_flags().
         // This test documents that -n is built-in, so the clap flag is safe to ignore.
         let mut cmd = resolved_command("rg");
         cmd.args(["-n", "--no-heading", "NONEXISTENT_PATTERN_12345", "."]);
@@ -1456,7 +1234,7 @@ mod tests {
         // If rg is not installed, skip gracefully (test still passes)
     }
 
-    // --- issue #1436: parse_match_line robustness ---
+    // --- issues #1436 / #1613: parse_match_line robustness (single-file colon misparse) ---
     // Input shape is `file\0line[:-]content` (rg --null / grep -Z).
 
     #[test]
@@ -1554,26 +1332,6 @@ mod tests {
         assert_eq!(content, "after1");
     }
 
-    #[test]
-    fn test_rg_no_ignore_vcs_flag_accepted() {
-        // Verify rg accepts --no-ignore-vcs (used to match grep -r behavior for .gitignore)
-        let mut cmd = resolved_command("rg");
-        cmd.args([
-            "-n",
-            "--no-heading",
-            "--no-ignore-vcs",
-            "NONEXISTENT_PATTERN_12345",
-            ".",
-        ]);
-        if let Ok(output) = cmd.output() {
-            assert!(
-                output.status.code() == Some(1) || output.status.success(),
-                "rg --no-ignore-vcs should be accepted"
-            );
-        }
-        // If rg is not installed, skip gracefully (test still passes)
-    }
-
     // --- unparsed_signal ---
 
     #[test]
@@ -1618,61 +1376,4 @@ mod tests {
         let stdout = "file.txt\x003-context_before\nfile.txt\x004:match\nfile.txt\x005-context_after\n";
         assert_eq!(unparsed_signal(stdout), 0);
     }
-}
-
-fn grep_fallback_args(extra_args: &[String]) -> Vec<String> {
-    let mut grep_safe_args: Vec<String> = Vec::new();
-    let mut skip_next = false;
-    for arg in extra_args {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        let s = arg.as_str();
-        if matches!(
-            s,
-            "-g" | "--glob"
-                | "--type"
-                | "--type-add"
-                | "--type-not"
-                | "--iglob"
-                | "--type-clear"
-                | "--sort"
-                | "--sortr"
-                | "--max-depth"
-                | "--max-filesize"
-        ) {
-            skip_next = true;
-            continue;
-        }
-        if matches!(
-            s,
-            "--files"
-                | "--no-ignore"
-                | "--no-ignore-parent"
-                | "--no-ignore-vcs"
-                | "--no-ignore-dot"
-                | "--hidden"
-                | "--follow"
-                | "--trim"
-                | "--passthru"
-                | "-S"
-                | "--smart-case"
-        ) || s.starts_with("--type-")
-            || s.starts_with("--glob=")
-            || s.starts_with("-g")
-        {
-            continue;
-        }
-        let converted = match s {
-            "--files-with-matches" => "-l",
-            "--files-without-match" => "-L",
-            "--only-matching" => "-o",
-            "-Z" | "--null" => "--null",
-            "--count" => "-c",
-            _ => s,
-        };
-        grep_safe_args.push(converted.to_string());
-    }
-    grep_safe_args
 }

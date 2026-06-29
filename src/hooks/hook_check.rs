@@ -92,6 +92,60 @@ fn codex_hook_registered(home: &Path) -> bool {
     hook_command_registered_in_json(&home.join(CODEX_DIR).join(HOOKS_JSON), CODEX_HOOK_COMMAND)
 }
 
+fn split_hook_command(command: &str) -> Option<(&str, &str)> {
+    let command = command.trim();
+    if command.is_empty() {
+        return None;
+    }
+
+    let bytes = command.as_bytes();
+    if matches!(bytes.first(), Some(b'"' | b'\'')) {
+        let quote = bytes[0];
+        let end = bytes
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find_map(|(idx, byte)| (*byte == quote).then_some(idx))?;
+        let program = &command[1..end];
+        let rest = command[end + 1..].trim();
+        return Some((program, rest));
+    }
+
+    let split_at = command.find(char::is_whitespace).unwrap_or(command.len());
+    let program = &command[..split_at];
+    let rest = command[split_at..].trim();
+    Some((program, rest))
+}
+
+fn hook_program_is_rtk(program: &str) -> bool {
+    let file_name = program
+        .trim_matches(|c| c == '"' || c == '\'')
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+
+    matches!(file_name.as_str(), "rtk" | "rtk.exe")
+}
+
+fn hook_command_equivalent(actual: &str, expected: &str) -> bool {
+    if actual == expected {
+        return true;
+    }
+
+    let Some((expected_program, expected_args)) = split_hook_command(expected) else {
+        return false;
+    };
+    if !hook_program_is_rtk(expected_program) {
+        return false;
+    }
+
+    let Some((actual_program, actual_args)) = split_hook_command(actual) else {
+        return false;
+    };
+    hook_program_is_rtk(actual_program) && actual_args.eq_ignore_ascii_case(expected_args)
+}
+
 fn hook_command_registered_in_json(path: &Path, command: &str) -> bool {
     let content = match std::fs::read_to_string(path) {
         Ok(c) if !c.trim().is_empty() => c,
@@ -121,7 +175,7 @@ fn hook_command_registered_in_json(path: &Path, command: &str) -> bool {
                     .into_iter()
                     .flatten()
                     .filter_map(|hook| hook.get("command")?.as_str())
-                    .any(|cmd| cmd == command)
+                    .any(|cmd| hook_command_equivalent(cmd, command))
         })
     })
 }
@@ -345,17 +399,16 @@ mod tests {
     }
 
     fn complete_hook_json(command: &str) -> String {
-        format!(
-            r#"{{
-              "hooks": {{
-                "PreToolUse": [
-                  {{"matcher": "Bash", "hooks": [{{"type": "command", "command": "{command}"}}]}},
-                  {{"matcher": "Shell", "hooks": [{{"type": "command", "command": "{command}"}}]}},
-                  {{"matcher": "PowerShell", "hooks": [{{"type": "command", "command": "{command}"}}]}}
+        serde_json::json!({
+            "hooks": {
+                PRE_TOOL_USE_KEY: [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": command}]},
+                    {"matcher": "Shell", "hooks": [{"type": "command", "command": command}]},
+                    {"matcher": "PowerShell", "hooks": [{"type": "command", "command": command}]}
                 ]
-              }}
-            }}"#
-        )
+            }
+        })
+        .to_string()
     }
 
     #[test]
@@ -379,6 +432,36 @@ mod tests {
         .unwrap();
 
         assert!(binary_hook_registered(&claude_dir));
+    }
+
+    #[test]
+    fn test_binary_hook_registered_accepts_absolute_rtk_exe() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path().join(CLAUDE_DIR);
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let absolute = r#"C:\Users\Administrator\.local\bin\rtk.exe hook claude"#;
+        std::fs::write(claude_dir.join(SETTINGS_JSON), complete_hook_json(absolute)).unwrap();
+        std::fs::write(
+            claude_dir.join(SETTINGS_LOCAL_JSON),
+            complete_hook_json(absolute),
+        )
+        .unwrap();
+
+        assert!(binary_hook_registered(&claude_dir));
+    }
+
+    #[test]
+    fn test_codex_hook_registered_accepts_absolute_rtk_exe() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let codex_dir = tmp.path().join(CODEX_DIR);
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::write(
+            codex_dir.join(HOOKS_JSON),
+            complete_hook_json(r#"C:\Users\Administrator\.local\bin\rtk.exe hook codex"#),
+        )
+        .unwrap();
+
+        assert!(codex_hook_registered(tmp.path()));
     }
 
     #[test]

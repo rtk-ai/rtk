@@ -1,6 +1,7 @@
 #![cfg(unix)]
-//! Integration tests for the GROUP path with context flags (-A/-B/-C) and the
-//! safety-net passthrough for flags that break the NUL-based reparse.
+//! Integration tests for the shared grep/rg compression filter: the GROUP path
+//! with context flags (-A/-B/-C) and the safety-net passthrough for flags (some
+//! grep-only like -I, some rg-only like --heading/-p) that break the NUL reparse.
 
 use std::process::Command;
 
@@ -26,7 +27,7 @@ fn write_temp(content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
 // --- context compression (the gain win) ---
 
 #[test]
-fn after_context_yields_grouped_header_with_correct_match_count() {
+fn single_file_context_shown_without_header() {
     if !rg_available() {
         return;
     }
@@ -41,16 +42,12 @@ fn after_context_yields_grouped_header_with_correct_match_count() {
     let stdout = String::from_utf8_lossy(&out.stdout);
 
     assert!(
-        stdout.contains("1 matches"),
-        "header must count only the match line, not context lines:\n{stdout}"
+        !stdout.contains("matches in"),
+        "single-file search must not add a grouped header:\n{stdout}"
     );
     assert!(
-        stdout.contains("after1"),
-        "after-context line 1 missing:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("after2"),
-        "after-context line 2 missing:\n{stdout}"
+        stdout.contains("after1") && stdout.contains("after2"),
+        "after-context lines must be shown:\n{stdout}"
     );
 }
 
@@ -61,7 +58,7 @@ fn after_context_uses_dash_separator_for_context_lines() {
     }
     let (_dir, path) = write_temp("MATCH\nafter1\n");
     let out = rtk()
-        .args(["grep", "-A1", "MATCH", path.to_str().unwrap()])
+        .args(["grep", "-nA1", "MATCH", path.to_str().unwrap()])
         .output()
         .expect("rtk grep");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -74,12 +71,12 @@ fn after_context_uses_dash_separator_for_context_lines() {
 }
 
 #[test]
-fn plain_grep_still_shows_grouped_header() {
+fn capped_single_file_shows_header() {
     if !rg_available() {
         return;
     }
-    let long = "x".repeat(120);
-    let content = format!("foo {long}\nbaz\nfoo {long}\n");
+    let filler: String = (0..40).map(|i| format!("w{i} ")).collect();
+    let content: String = (0..60).map(|i| format!("foo {i} {filler}\n")).collect();
     let (_dir, path) = write_temp(&content);
     let out = rtk()
         .args(["grep", "foo", path.to_str().unwrap()])
@@ -89,7 +86,7 @@ fn plain_grep_still_shows_grouped_header() {
 
     assert!(
         stdout.contains("matches in"),
-        "grouped header must show when grouping compresses:\n{stdout}"
+        "header must show once capping compresses:\n{stdout}"
     );
 }
 
@@ -120,7 +117,7 @@ fn no_line_number_flag_produces_output_not_zero_matches() {
     }
     let (_dir, path) = write_temp("hello world\n");
     let out = rtk()
-        .args(["grep", "-N", "hello", path.to_str().unwrap()])
+        .args(["rg", "-N", "hello", path.to_str().unwrap()])
         .output()
         .expect("rtk grep");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -164,7 +161,7 @@ fn heading_flag_produces_output_not_zero_matches() {
     }
     let (_dir, path) = write_temp("hello world\n");
     let out = rtk()
-        .args(["grep", "--heading", "hello", path.to_str().unwrap()])
+        .args(["rg", "--heading", "hello", path.to_str().unwrap()])
         .output()
         .expect("rtk grep");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -186,7 +183,7 @@ fn pretty_flag_produces_output_not_zero_matches() {
     }
     let (_dir, path) = write_temp("hello world\n");
     let out = rtk()
-        .args(["grep", "-p", "hello", path.to_str().unwrap()])
+        .args(["rg", "-p", "hello", path.to_str().unwrap()])
         .output()
         .expect("rtk grep");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -210,7 +207,7 @@ fn column_flag_output_has_no_nul() {
     }
     let (_dir, path) = write_temp("hello world\n");
     let out = rtk()
-        .args(["grep", "--column", "hello", path.to_str().unwrap()])
+        .args(["rg", "--column", "hello", path.to_str().unwrap()])
         .output()
         .expect("rtk grep");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -231,6 +228,7 @@ fn count_tokens(s: &str) -> usize {
     s.split_whitespace().count()
 }
 
+// Covers #545: grep savings are measured against the real grep output.
 #[test]
 fn bulky_grep_yields_token_savings() {
     if !rg_available() {
@@ -238,7 +236,7 @@ fn bulky_grep_yields_token_savings() {
     }
     let filler: String = (0..50).map(|i| format!("word{i} ")).collect();
     let mut content = String::new();
-    for i in 0..20 {
+    for i in 0..60 {
         content.push_str(&format!("MATCH line {i} {filler}\n"));
     }
     let (_dir, path) = write_temp(&content);
@@ -309,8 +307,8 @@ fn small_grep_not_worse_than_plain() {
     let stdout = String::from_utf8_lossy(&out.stdout);
 
     assert!(
-        stdout.contains(":1:foo"),
-        "should show the match:\n{stdout}"
+        stdout.trim() == "1:foo",
+        "single-file grep must equal `grep -n` (position, no filename):\n{stdout}"
     );
     assert!(
         !stdout.contains("matches in"),
@@ -348,5 +346,33 @@ fn bundled_files_with_matches_cluster_lists_files() {
     assert!(
         !stdout.contains("c.txt"),
         "-rln must not list non-matching files:\n{stdout}"
+    );
+}
+
+// A match inside a binary file is noise (grep prints only a "binary file matches"
+// notice); skip it by default, but `-a` lets the agent opt back into the content.
+#[test]
+fn binary_match_is_skipped_unless_text_requested() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = dir.path().join("blob.bin");
+    std::fs::write(&p, b"SECRET\x00\x01binary\xff\xfe").expect("write");
+    let path = p.to_str().unwrap();
+
+    let out = rtk().args(["grep", "SECRET", path]).output().expect("rtk");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "binary match must be skipped as noise by default"
+    );
+    assert!(out.stdout.is_empty(), "no binary content by default");
+
+    let out = rtk()
+        .args(["grep", "-a", "SECRET", path])
+        .output()
+        .expect("rtk -a");
+    assert_eq!(out.status.code(), Some(0), "-a must surface the match");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("SECRET"),
+        "-a must show the binary content"
     );
 }

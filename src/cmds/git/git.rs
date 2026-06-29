@@ -1138,39 +1138,45 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     let exit_code = exit_code_from_output(&output, "git commit");
     let raw_output = format!("{}\n{}", stdout, stderr);
 
-    if output.status.success() {
-        // Extract commit hash from output like "[main abc1234] message"
-        // or "[main (root-commit) abc1234] message" (incl. localized variants)
-        // The hash is always the last whitespace-separated token before ']'.
-        let compact = if let Some(line) = stdout.lines().next() {
-            parse_commit_output(line)
-        } else {
-            "ok".to_string()
-        };
-
-        println!("{}", compact);
-
-        timer.track(&original_cmd, "rtk git commit", &raw_output, &compact);
-    } else if stderr.contains("nothing to commit") || stdout.contains("nothing to commit") {
-        println!("ok (nothing to commit)");
-        timer.track(
-            &original_cmd,
-            "rtk git commit",
-            &raw_output,
-            "ok (nothing to commit)",
-        );
-    } else {
-        if !stderr.trim().is_empty() {
-            eprint!("{}", stderr);
+    match classify_commit_outcome(output.status.success(), &stdout, exit_code) {
+        CommitOutcome::Ok(compact) => {
+            println!("{}", compact);
+            timer.track(&original_cmd, "rtk git commit", &raw_output, &compact);
+            Ok(0)
         }
-        if !stdout.trim().is_empty() {
-            eprint!("{}", stdout);
+        CommitOutcome::Failed(code) => {
+            if !stderr.trim().is_empty() {
+                eprint!("{}", stderr);
+            }
+            if !stdout.trim().is_empty() {
+                eprint!("{}", stdout);
+            }
+            timer.track(&original_cmd, "rtk git commit", &raw_output, &raw_output);
+            Ok(code)
         }
-        timer.track(&original_cmd, "rtk git commit", &raw_output, &raw_output);
-        return Ok(exit_code);
     }
+}
 
-    Ok(0)
+/// Outcome of a `git commit`: a non-success status propagates the exit code
+/// rather than being reported as "ok" (#2494).
+enum CommitOutcome {
+    Ok(String),
+    Failed(i32),
+}
+
+/// Classify a `git commit` result.
+fn classify_commit_outcome(success: bool, stdout: &str, exit_code: i32) -> CommitOutcome {
+    if success {
+        // Extract commit hash from output
+        let compact = stdout
+            .lines()
+            .next()
+            .map(parse_commit_output)
+            .unwrap_or_else(|| "ok".to_string());
+        CommitOutcome::Ok(compact)
+    } else {
+        CommitOutcome::Failed(exit_code)
+    }
 }
 
 // Git push progress prefixes (stderr) — dropped from the stream.
@@ -1832,6 +1838,19 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
     cmd.args(["worktree", "list"]);
     let result = exec_capture(&mut cmd).context("Failed to run git worktree list")?;
 
+    if !result.success() {
+        if !result.stderr.trim().is_empty() {
+            eprintln!("{}", result.stderr);
+        }
+        timer.track(
+            "git worktree list",
+            "rtk git worktree",
+            &result.stdout,
+            &result.stderr,
+        );
+        return Ok(result.exit_code);
+    }
+
     let filtered = filter_worktree_list(&result.stdout);
     let filtered = never_worse(&result.stdout, &filtered).to_string();
     println!("{}", filtered);
@@ -2014,6 +2033,30 @@ mod tests {
     }
 
     #[test]
+    fn test_run_status_compact_propagates_non_repo_failure() {
+        // #2497: a `git status` failure other than "not a git repository"
+        // (here: a corrupt index) must propagate a non-zero exit, not be
+        // flattened into "Clean working tree" + exit 0.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().to_string_lossy().into_owned();
+        assert!(
+            Command::new("git")
+                .args(["-C", &p, "init", "-q"])
+                .status()
+                .expect("git init")
+                .success(),
+            "git init should succeed"
+        );
+        std::fs::write(dir.path().join(".git/index"), "corrupt-index").expect("corrupt index");
+        let global = vec!["-C".to_string(), p];
+        let code = run_status(&[], 0, &global).expect("run_status");
+        assert_ne!(
+            code, 0,
+            "corrupt-index git status must not be reported as success"
+        );
+    }
+
+    #[test]
     fn test_compact_diff() {
         let diff = r#"diff --git a/foo.rs b/foo.rs
 --- a/foo.rs
@@ -2155,6 +2198,22 @@ mod tests {
     }
 
     #[test]
+    fn test_run_stash_list_propagates_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global = vec!["-C".to_string(), dir.path().to_string_lossy().into_owned()];
+        let code = run_stash(Some("list"), &[], 0, &global).expect("run_stash list");
+        assert_ne!(code, 0, "git stash list failure must propagate");
+    }
+
+    #[test]
+    fn test_run_stash_show_propagates_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global = vec!["-C".to_string(), dir.path().to_string_lossy().into_owned()];
+        let code = run_stash(Some("show"), &[], 0, &global).expect("run_stash show");
+        assert_ne!(code, 0, "git stash show failure must propagate");
+    }
+
+    #[test]
     fn test_filter_worktree_list() {
         let output =
             "/home/user/project  abc1234 [main]\n/home/user/worktrees/feat  def5678 [feature]\n";
@@ -2162,6 +2221,16 @@ mod tests {
         assert!(result.contains("abc1234"));
         assert!(result.contains("[main]"));
         assert!(result.contains("[feature]"));
+    }
+
+    #[test]
+    fn test_run_worktree_list_propagates_failure() {
+        // #2497: `git worktree list` outside a repo exits non-zero; rtk must not
+        // report success (empty output + exit 0).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global = vec!["-C".to_string(), dir.path().to_string_lossy().into_owned()];
+        let code = run_worktree(&[], 0, &global).expect("run_worktree");
+        assert_ne!(code, 0, "git worktree list failure must propagate");
     }
 
     #[test]
@@ -2575,6 +2644,44 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     fn test_parse_commit_output_empty() {
         assert_eq!(parse_commit_output(""), "ok");
+    }
+
+    // --- commit outcome classification (issue #2494) ---
+
+    #[test]
+    fn test_classify_commit_success_extracts_hash() {
+        match classify_commit_outcome(true, "[main abc1234def] add feature", 0) {
+            CommitOutcome::Ok(s) => assert_eq!(s, "ok abc1234"),
+            CommitOutcome::Failed(_) => panic!("successful commit must be Ok"),
+        }
+    }
+
+    #[test]
+    fn test_classify_commit_success_empty_stdout() {
+        match classify_commit_outcome(true, "", 0) {
+            CommitOutcome::Ok(s) => assert_eq!(s, "ok"),
+            CommitOutcome::Failed(_) => panic!("successful commit must be Ok"),
+        }
+    }
+
+    #[test]
+    fn test_classify_commit_nothing_to_commit_is_failure() {
+        match classify_commit_outcome(
+            false,
+            "On branch main\nnothing to commit, working tree clean",
+            1,
+        ) {
+            CommitOutcome::Failed(code) => assert_eq!(code, 1),
+            CommitOutcome::Ok(s) => panic!("nothing-to-commit must not be ok: {}", s),
+        }
+    }
+
+    #[test]
+    fn test_classify_commit_hook_abort_propagates_exit_code() {
+        match classify_commit_outcome(false, "pre-commit hook failed", 2) {
+            CommitOutcome::Failed(code) => assert_eq!(code, 2),
+            CommitOutcome::Ok(_) => panic!("hook abort must be a failure"),
+        }
     }
 
     /// Regression test: --oneline and other user format flags must preserve all commits.

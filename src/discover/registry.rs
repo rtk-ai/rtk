@@ -1728,7 +1728,7 @@ mod tests {
     fn test_rewrite_rg_glob_search_still_rewrites() {
         assert_eq!(
             rewrite_command_no_prefixes(r#"rg -n "DB_HOST" server/src -g "*.ts""#, &[]),
-            Some(r#"rtk grep -n "DB_HOST" server/src -g "*.ts""#.into())
+            Some(r#"rtk rg -n "DB_HOST" server/src -g "*.ts""#.into())
         );
     }
 
@@ -1867,7 +1867,7 @@ mod tests {
                 r#"grep -rn "fn main" src/"#,
                 r#"rtk grep -rn "fn main" src/"#,
             ),
-            (r#"rg "fn main" src/"#, r#"rtk grep "fn main" src/"#),
+            (r#"rg "fn main" src/"#, r#"rtk rg "fn main" src/"#),
             ("cargo test", "rtk cargo test"),
             ("pytest", "rtk pytest"),
             ("npm test", "rtk npm test"),
@@ -1934,7 +1934,7 @@ mod tests {
     fn test_rewrite_rg_pattern() {
         assert_eq!(
             rewrite_command_no_prefixes("rg \"fn main\"", &[]),
-            Some("rtk grep \"fn main\"".into())
+            Some("rtk rg \"fn main\"".into())
         );
     }
 
