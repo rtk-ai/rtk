@@ -334,8 +334,7 @@ Scope: all 6 workspace projects
     #[test]
     fn test_extract_json_object_cjk_with_prefix() {
         let input = "경고: 무시됨\n{\"result\": \"한국어 테스트\", \"ok\": true}\n";
-        let extracted =
-            extract_json_object(input).expect("Should extract JSON after CJK prefix");
+        let extracted = extract_json_object(input).expect("Should extract JSON after CJK prefix");
         assert!(extracted.starts_with('{'));
         assert!(extracted.ends_with('}'));
         assert!(extracted.contains("한국어 테스트"));
@@ -343,10 +342,8 @@ Scope: all 6 workspace projects
 
     #[test]
     fn test_extract_json_object_nested_cjk() {
-        let input =
-            r#"{"data": {"名前": "太郎", "挨拶": "こんにちは"}, "ok": true}"#;
-        let extracted =
-            extract_json_object(input).expect("Should extract nested JSON with CJK");
+        let input = r#"{"data": {"名前": "太郎", "挨拶": "こんにちは"}, "ok": true}"#;
+        let extracted = extract_json_object(input).expect("Should extract nested JSON with CJK");
         assert_eq!(extracted, input);
     }
 }
