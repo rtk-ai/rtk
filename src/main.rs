@@ -1111,6 +1111,12 @@ enum CargoCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Task (cargo-task) with compact output (strip cargo-task preamble, keep errors/status)
+    Task {
+        /// Additional cargo task arguments (e.g., task name)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported cargo subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -2115,6 +2121,9 @@ fn run_cli() -> Result<i32> {
             }
             CargoCommands::Nextest { args } => {
                 cargo_cmd::run(cargo_cmd::CargoCommand::Nextest, &args, cli.verbose)?
+            }
+            CargoCommands::Task { args } => {
+                cargo_cmd::run(cargo_cmd::CargoCommand::Task, &args, cli.verbose)?
             }
             CargoCommands::Other(args) => cargo_cmd::run_passthrough(&args, cli.verbose)?,
         },
