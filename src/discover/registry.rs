@@ -2406,6 +2406,27 @@ mod tests {
         );
     }
 
+    // --- git tag ---
+
+    #[test]
+    fn test_classify_git_tag() {
+        assert!(matches!(
+            classify_command("git tag v1.0.0"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_git_tag() {
+        assert_eq!(
+            rewrite_command("git tag v1.0.0", &[]),
+            Some("rtk git tag v1.0.0".into())
+        );
+    }
+
     // --- Go tooling ---
 
     #[test]
