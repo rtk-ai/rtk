@@ -31,6 +31,14 @@ const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
 const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
 
+fn count_lines(content: &str) -> usize {
+    content.lines().count()
+}
+
+fn rtk_slim_line_count() -> usize {
+    count_lines(RTK_SLIM)
+}
+
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
 # Filters here override user-global and built-in filters.
@@ -1154,9 +1162,14 @@ fn run_default_mode(
 
     // 4. Print success message (skip in dry-run)
     if !dry_run {
+        let rtk_md_lines = rtk_slim_line_count();
         println!("\nRTK hook registered (global).\n");
         println!("  Command:   {}", CLAUDE_HOOK_COMMAND);
-        println!("  RTK.md:    {} (10 lines)", rtk_md_path.display());
+        println!(
+            "  RTK.md:    {} ({} lines)",
+            rtk_md_path.display(),
+            rtk_md_lines
+        );
         if let Some(path) = &opencode_plugin_path {
             println!("  OpenCode:  {}", path.display());
         }
@@ -1164,7 +1177,10 @@ fn run_default_mode(
 
         if migrated {
             println!("\n  [ok] Migrated: removed 137-line RTK block from CLAUDE.md");
-            println!("              replaced with @RTK.md (10 lines)");
+            println!(
+                "              replaced with @RTK.md ({} lines)",
+                rtk_md_lines
+            );
         }
     }
 
@@ -4289,6 +4305,24 @@ mod tests {
 
         let content = fs::read_to_string(&rtk_md_path).unwrap();
         assert_eq!(content, RTK_SLIM);
+    }
+
+    #[test]
+    fn test_rtk_slim_reference_points_to_cli_help() {
+        assert!(
+            !RTK_SLIM.contains("CLAUDE.md"),
+            "RTK.md must not point back to CLAUDE.md because CLAUDE.md imports RTK.md"
+        );
+        assert!(
+            RTK_SLIM.contains("rtk --help"),
+            "RTK.md should point readers to the CLI help for the full command reference"
+        );
+    }
+
+    #[test]
+    fn test_rtk_slim_line_count_matches_embedded_content() {
+        assert_eq!(count_lines("one\ntwo\nthree\n"), 3);
+        assert_eq!(rtk_slim_line_count(), count_lines(RTK_SLIM));
     }
 
     #[test]
