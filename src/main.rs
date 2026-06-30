@@ -12,8 +12,8 @@ use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
-    lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
-    vitest_cmd,
+    bun_cmd, lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd,
+    tsc_cmd, vitest_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
@@ -549,6 +549,20 @@ enum Commands {
     /// npx with intelligent routing (tsc, eslint, prisma -> specialized filters)
     Npx {
         /// npx arguments (command + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// bun run / bun test / bun x with filtered output (strip boilerplate)
+    Bun {
+        /// bun arguments (subcommand + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// bunx with intelligent routing (tsc, eslint, prisma -> specialized filters)
+    Bunx {
+        /// bunx arguments (command + options)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2219,6 +2233,36 @@ fn run_cli() -> Result<i32> {
                 "prettier" => prettier_cmd::run(&args[1..], cli.verbose)?,
                 "playwright" => playwright_cmd::run(&args[1..], cli.verbose)?,
                 _ => npm_cmd::exec(&args, cli.verbose, cli.skip_env)?,
+            }
+        }
+
+        Commands::Bun { args } => bun_cmd::run(&args, cli.verbose, cli.skip_env)?,
+
+        Commands::Bunx { args } => {
+            if args.is_empty() {
+                anyhow::bail!("bunx requires a command argument");
+            }
+
+            // Intelligent routing: delegate to specialized filters (mirrors npx).
+            match args[0].as_str() {
+                "tsc" | "typescript" => tsc_cmd::run(&args[1..], cli.verbose)?,
+                "eslint" => lint_cmd::run(&args[1..], cli.verbose)?,
+                "prisma" => match args.get(1).map(|s| s.as_str()) {
+                    Some("generate") => prisma_cmd::run(
+                        prisma_cmd::PrismaCommand::Generate,
+                        &args[2..],
+                        cli.verbose,
+                    )?,
+                    Some("db") if args.get(2).map(|s| s.as_str()) == Some("push") => {
+                        prisma_cmd::run(prisma_cmd::PrismaCommand::DbPush, &args[3..], cli.verbose)?
+                    }
+                    // Other prisma subcommands run through the bunx filter.
+                    _ => bun_cmd::exec(&args, cli.verbose, cli.skip_env)?,
+                },
+                "next" => next_cmd::run(&args[1..], cli.verbose)?,
+                "prettier" => prettier_cmd::run(&args[1..], cli.verbose)?,
+                "playwright" => playwright_cmd::run(&args[1..], cli.verbose)?,
+                _ => bun_cmd::exec(&args, cli.verbose, cli.skip_env)?,
             }
         }
 

@@ -3061,6 +3061,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_rewrite_bun() {
+        assert_eq!(
+            rewrite_command_no_prefixes("bun run typecheck", &[]),
+            Some("rtk bun run typecheck".to_string()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("bun test", &[]),
+            Some("rtk bun test".to_string()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("bun x cowsay hi", &[]),
+            Some("rtk bun x cowsay hi".to_string()),
+        );
+        // `bun build` is bun's bundler, not a script run — must NOT be rewritten.
+        assert_eq!(rewrite_command_no_prefixes("bun build ./src", &[]), None);
+        // `bun install` must NOT be rewritten.
+        assert_eq!(rewrite_command_no_prefixes("bun install", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_bunx() {
+        assert_eq!(
+            rewrite_command_no_prefixes("bunx svgo", &[]),
+            Some("rtk bunx svgo".to_string()),
+        );
+    }
+
     // --- Gradle ---
 
     #[test]
