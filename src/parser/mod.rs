@@ -171,9 +171,7 @@ pub fn extract_json_object(input: &str) -> Option<&str> {
     let mut depth = 0;
     let mut in_string = false;
     let mut escape_next = false;
-    let chars: Vec<char> = input[start_pos..].chars().collect();
-
-    for (i, &ch) in chars.iter().enumerate() {
+    for (byte_offset, ch) in input[start_pos..].char_indices() {
         if escape_next {
             escape_next = false;
             continue;
@@ -186,8 +184,7 @@ pub fn extract_json_object(input: &str) -> Option<&str> {
             '}' if !in_string => {
                 depth -= 1;
                 if depth == 0 {
-                    // Found matching closing brace
-                    let end_pos = start_pos + i + 1; // +1 to include the `}`
+                    let end_pos = start_pos + byte_offset + ch.len_utf8();
                     return Some(&input[start_pos..end_pos]);
                 }
             }
@@ -317,6 +314,39 @@ Scope: all 6 workspace projects
         let input = r#"{"numTotalTests": 1, "message": "test {should} not confuse parser"}"#;
         let extracted = extract_json_object(input).expect("Should extract JSON");
         assert!(extracted.contains("test {should} not confuse parser"));
+        assert_eq!(extracted, input);
+    }
+
+    #[test]
+    fn test_extract_json_object_cjk() {
+        let input = r#"{"message": "안녕하세요 세계", "count": 1}"#;
+        let extracted = extract_json_object(input).expect("Should extract JSON with CJK");
+        assert_eq!(extracted, input);
+    }
+
+    #[test]
+    fn test_extract_json_object_emoji() {
+        let input = r#"{"status": "🎉 passed", "emoji": "✅🔴🟡"}"#;
+        let extracted = extract_json_object(input).expect("Should extract JSON with emoji");
+        assert_eq!(extracted, input);
+    }
+
+    #[test]
+    fn test_extract_json_object_cjk_with_prefix() {
+        let input = "경고: 무시됨\n{\"result\": \"한국어 테스트\", \"ok\": true}\n";
+        let extracted =
+            extract_json_object(input).expect("Should extract JSON after CJK prefix");
+        assert!(extracted.starts_with('{'));
+        assert!(extracted.ends_with('}'));
+        assert!(extracted.contains("한국어 테스트"));
+    }
+
+    #[test]
+    fn test_extract_json_object_nested_cjk() {
+        let input =
+            r#"{"data": {"名前": "太郎", "挨拶": "こんにちは"}, "ok": true}"#;
+        let extracted =
+            extract_json_object(input).expect("Should extract nested JSON with CJK");
         assert_eq!(extracted, input);
     }
 }
