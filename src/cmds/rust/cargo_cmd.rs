@@ -298,7 +298,33 @@ fn run_cargo_streamed(
     )
 }
 
+fn has_json_message_format(args: &[String]) -> bool {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--message-format=json"
+            || arg == "--message-format=json-diagnostic-rendered-ansi"
+            || arg == "--message-format=json-render-diagnostics"
+        {
+            return true;
+        }
+        if arg.starts_with("--message-format=") && arg.contains("json") {
+            return true;
+        }
+        if arg == "--message-format" {
+            if let Some(val) = iter.next() {
+                if val.contains("json") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn run_build(args: &[String], verbose: u8) -> Result<i32> {
+    if has_json_message_format(args) {
+        return run_cargo_filtered("build", args, verbose, |s| s.to_string());
+    }
     run_cargo_streamed(
         "build",
         args,
@@ -321,6 +347,9 @@ fn run_clippy(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 fn run_check(args: &[String], verbose: u8) -> Result<i32> {
+    if has_json_message_format(args) {
+        return run_cargo_filtered("check", args, verbose, |s| s.to_string());
+    }
     run_cargo_streamed(
         "check",
         args,
@@ -2212,5 +2241,77 @@ error: could not compile `rtk` (test "repro_compile_fail") due to 1 previous err
         let result = run_block_filter(&mut f, input, 1);
         assert!(result.contains("cargo test:"), "got: {}", result);
         assert!(result.contains("1 errors"), "got: {}", result);
+    }
+
+    // --- has_json_message_format ---
+
+    #[test]
+    fn test_json_format_inline_eq() {
+        assert!(has_json_message_format(&[
+            "--message-format=json".into()
+        ]));
+    }
+
+    #[test]
+    fn test_json_format_space_separated() {
+        assert!(has_json_message_format(&[
+            "--message-format".into(),
+            "json".into(),
+        ]));
+    }
+
+    #[test]
+    fn test_json_format_rendered_ansi() {
+        assert!(has_json_message_format(&[
+            "--message-format=json-diagnostic-rendered-ansi".into()
+        ]));
+    }
+
+    #[test]
+    fn test_json_format_render_diagnostics() {
+        assert!(has_json_message_format(&[
+            "--message-format=json-render-diagnostics".into()
+        ]));
+    }
+
+    #[test]
+    fn test_json_format_space_rendered() {
+        assert!(has_json_message_format(&[
+            "--message-format".into(),
+            "json-diagnostic-rendered-ansi".into(),
+        ]));
+    }
+
+    #[test]
+    fn test_non_json_format_not_detected() {
+        assert!(!has_json_message_format(&[
+            "--message-format=human".into()
+        ]));
+    }
+
+    #[test]
+    fn test_no_format_flag() {
+        assert!(!has_json_message_format(&[
+            "--release".into(),
+            "-p".into(),
+            "my-crate".into(),
+        ]));
+    }
+
+    #[test]
+    fn test_json_format_among_other_args() {
+        assert!(has_json_message_format(&[
+            "--release".into(),
+            "-p".into(),
+            "my-crate".into(),
+            "--message-format=json".into(),
+        ]));
+    }
+
+    #[test]
+    fn test_json_format_trailing_message_format_no_value() {
+        assert!(!has_json_message_format(&[
+            "--message-format".into(),
+        ]));
     }
 }
