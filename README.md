@@ -123,6 +123,8 @@ Hook-based agents rewrite Bash commands (e.g., `git status` -> `rtk git status`)
 
 **Important:** the hook only runs on Bash tool calls. Claude Code built-in tools like `Read`, `Grep`, and `Glob` do not pass through the Bash hook, so they are not auto-rewritten. To get RTK's compact output for those workflows, use shell commands (`cat`/`head`/`tail`, `rg`/`grep`, `find`) or call `rtk read`, `rtk grep`, or `rtk find` directly.
 
+> **Tip:** Install [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) — it's significantly faster than GNU grep and RTK's `rtk rg` runs it natively with the same compact output filter.
+
 ## How It Works
 
 ```
@@ -150,7 +152,8 @@ rtk read file.rs                # Smart file reading
 rtk read file.rs -l aggressive  # Signatures only (strips bodies)
 rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
-rtk grep "pattern" .            # Grouped search results
+rtk grep "pattern" .            # Grouped grep search results (install ripgrep for faster searches)
+rtk rg "pattern" .              # Native ripgrep search
 rtk diff file1 file2            # Condensed diff (exit 1 if files differ)
 ```
 
