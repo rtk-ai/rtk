@@ -1,0 +1,126 @@
+Loading DSL extension classes... Done
+Loading Rails application... Done
+Loading DSL compiler classes... Done
+Compiling DSL RBI files...
+
+WARNING: Multiple constants with the same name: `RuboCop::Cop::EnforceSuperclass`
+Make sure some object is not holding onto these constants during an app reload.
+   identical  sorbet/rbi/dsl/abstract_controller/rendering.rbi
+   identical  sorbet/rbi/dsl/abstract_controller/caching.rbi
+   identical  sorbet/rbi/dsl/abstract_controller/helpers.rbi
+   identical  sorbet/rbi/dsl/abstract_controller/callbacks.rbi
+   identical  sorbet/rbi/dsl/abstract_controller/url_for.rbi
+   identical  sorbet/rbi/dsl/abstract_controller/caching/fragments.rbi
+   identical  sorbet/rbi/dsl/action_cable/channel/periodic_timers.rbi
+   identical  sorbet/rbi/dsl/action_cable/channel/callbacks.rbi
+   identical  sorbet/rbi/dsl/action_cable/connection/identification.rbi
+   identical  sorbet/rbi/dsl/action_cable/connection/callbacks.rbi
+   identical  sorbet/rbi/dsl/action_controller/caching.rbi
+   identical  sorbet/rbi/dsl/action_controller/etag_with_flash.rbi
+   identical  sorbet/rbi/dsl/action_controller/etag_with_template_digest.rbi
+   identical  sorbet/rbi/dsl/action_controller/content_security_policy.rbi
+   identical  sorbet/rbi/dsl/action_controller/conditional_get.rbi
+   identical  sorbet/rbi/dsl/action_controller/form_builder.rbi
+   identical  sorbet/rbi/dsl/action_controller/data_streaming.rbi
+   identical  sorbet/rbi/dsl/action_controller/live.rbi
+   identical  sorbet/rbi/dsl/action_controller/flash.rbi
+   identical  sorbet/rbi/dsl/action_controller/renderers.rbi
+   identical  sorbet/rbi/dsl/action_controller/helpers.rbi
+   identical  sorbet/rbi/dsl/action_controller/params_wrapper.rbi
+   identical  sorbet/rbi/dsl/action_controller/renderers/all.rbi
+   identical  sorbet/rbi/dsl/action_controller/request_forgery_protection.rbi
+   identical  sorbet/rbi/dsl/action_controller/test_case/behavior.rbi
+   identical  sorbet/rbi/dsl/action_controller/rescue.rbi
+   identical  sorbet/rbi/dsl/action_dispatch/assertions.rbi
+   identical  sorbet/rbi/dsl/action_dispatch/integration_test.rbi
+   identical  sorbet/rbi/dsl/action_controller/redirecting.rbi
+   identical  sorbet/rbi/dsl/action_dispatch/routing/route_set/mounted_helpers.rbi
+   identical  sorbet/rbi/dsl/action_view/helpers/form_helper.rbi
+   identical  sorbet/rbi/dsl/action_dispatch/routing/url_for.rbi
+   identical  sorbet/rbi/dsl/action_view/helpers/text_helper.rbi
+   identical  sorbet/rbi/dsl/action_controller/url_for.rbi
+   identical  sorbet/rbi/dsl/action_view/helpers/form_tag_helper.rbi
+   identical  sorbet/rbi/dsl/action_view/rendering.rbi
+   identical  sorbet/rbi/dsl/action_view/helpers.rbi
+   identical  sorbet/rbi/dsl/active_job/callbacks.rbi
+   identical  sorbet/rbi/dsl/action_view/layouts.rbi
+   identical  sorbet/rbi/dsl/active_job/enqueuing.rbi
+   identical  sorbet/rbi/dsl/active_job/exceptions.rbi
+   identical  sorbet/rbi/dsl/active_job/logging.rbi
+   identical  sorbet/rbi/dsl/active_job/execution.rbi
+   identical  sorbet/rbi/dsl/active_job/queue_adapter.rbi
+   identical  sorbet/rbi/dsl/active_job/queue_priority.rbi
+   identical  sorbet/rbi/dsl/active_job/queue_name.rbi
+   identical  sorbet/rbi/dsl/active_job/test_helper/test_queue_adapter.rbi
+   identical  sorbet/rbi/dsl/active_model/attribute_methods.rbi
+   identical  sorbet/rbi/dsl/active_model/api.rbi
+   identical  sorbet/rbi/dsl/active_model/conversion.rbi
+   identical  sorbet/rbi/dsl/active_model/attributes.rbi
+   identical  sorbet/rbi/dsl/active_model/serializers/json.rbi
+   identical  sorbet/rbi/dsl/active_model/dirty.rbi
+   identical  sorbet/rbi/dsl/active_model/attributes/normalization.rbi
+   identical  sorbet/rbi/dsl/active_model/validations/callbacks.rbi
+   identical  sorbet/rbi/dsl/active_model/validations.rbi
+   identical  sorbet/rbi/dsl/active_model/model.rbi
+   identical  sorbet/rbi/dsl/active_record/attribute_methods.rbi
+   identical  sorbet/rbi/dsl/active_record/attribute_methods/serialization.rbi
+   identical  sorbet/rbi/dsl/active_record/attribute_methods/dirty.rbi
+   identical  sorbet/rbi/dsl/active_record/attributes.rbi
+   identical  sorbet/rbi/dsl/active_record/callbacks.rbi
+   identical  sorbet/rbi/dsl/active_record/counter_cache.rbi
+   identical  sorbet/rbi/dsl/active_record/encryption/encryptable_record.rbi
+   identical  sorbet/rbi/dsl/active_record/core.rbi
+   identical  sorbet/rbi/dsl/active_record/attribute_methods/time_zone_conversion.rbi
+   identical  sorbet/rbi/dsl/active_record/locking/optimistic.rbi
+   identical  sorbet/rbi/dsl/active_record/integration.rbi
+   identical  sorbet/rbi/dsl/active_record/nested_attributes.rbi
+   identical  sorbet/rbi/dsl/active_record/readonly_attributes.rbi
+   identical  sorbet/rbi/dsl/active_record/reflection.rbi
+   identical  sorbet/rbi/dsl/active_record/scoping.rbi
+   identical  sorbet/rbi/dsl/active_record/scoping/default.rbi
+   identical  sorbet/rbi/dsl/active_record/model_schema.rbi
+   identical  sorbet/rbi/dsl/active_record/secure_password.rbi
+   identical  sorbet/rbi/dsl/active_record/inheritance.rbi
+   identical  sorbet/rbi/dsl/active_record/signed_id.rbi
+   identical  sorbet/rbi/dsl/active_record/timestamp.rbi
+   identical  sorbet/rbi/dsl/active_record/serialization.rbi
+   identical  sorbet/rbi/dsl/active_record/token_for.rbi
+   identical  sorbet/rbi/dsl/active_support/callbacks.rbi
+   identical  sorbet/rbi/dsl/active_support/actionable_error.rbi
+   identical  sorbet/rbi/dsl/active_support/rescuable.rbi
+   identical  sorbet/rbi/dsl/active_support/testing/file_fixtures.rbi
+   identical  sorbet/rbi/dsl/active_support/environment_inquirer.rbi
+   identical  sorbet/rbi/dsl/application_controller.rbi
+   identical  sorbet/rbi/dsl/app/cleanup_job.rbi
+   identical  sorbet/rbi/dsl/app/scheduled_job.rbi
+   identical  sorbet/rbi/dsl/app/webhook_handler_job.rbi
+   identical  sorbet/rbi/dsl/app/model.rbi
+   identical  sorbet/rbi/dsl/app/user.rbi
+   identical  sorbet/rbi/dsl/good_job/active_job_extensions/concurrency.rbi
+   identical  sorbet/rbi/dsl/good_job/active_job_extensions/labels.rbi
+   identical  sorbet/rbi/dsl/good_job/active_job_extensions/notify_options.rbi
+   identical  sorbet/rbi/dsl/good_job/advisory_lockable.rbi
+   identical  sorbet/rbi/dsl/good_job/application_controller.rbi
+   identical  sorbet/rbi/dsl/good_job/frontends_controller.rbi
+   identical  sorbet/rbi/dsl/good_job/batch_record.rbi
+   identical  sorbet/rbi/dsl/good_job/discrete_execution.rbi
+   identical  sorbet/rbi/dsl/good_job/execution.rbi
+   identical  sorbet/rbi/dsl/good_job/process.rbi
+   identical  sorbet/rbi/dsl/good_job/setting.rbi
+   identical  sorbet/rbi/dsl/good_job/job.rbi
+   identical  sorbet/rbi/dsl/solid_cable/trim_job.rbi
+   identical  sorbet/rbi/dsl/solid_cache/expiry_job.rbi
+   identical  sorbet/rbi/dsl/solid_cable/message.rbi
+   identical  sorbet/rbi/dsl/solid_cache/entry.rbi
+   identical  sorbet/rbi/dsl/time.rbi
+   identical  sorbet/rbi/dsl/turbo/streams/action_broadcast_job.rbi
+   identical  sorbet/rbi/dsl/turbo/streams/broadcast_stream_job.rbi
+   identical  sorbet/rbi/dsl/turbo/streams/broadcast_job.rbi
+
+Done
+
+Checking generated RBI files...  Done
+  No errors found
+
+All operations performed in working directory.
+Please review changes and commit them.
