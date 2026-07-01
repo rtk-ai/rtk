@@ -686,6 +686,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^cmake\b",
+        rtk_cmd: "rtk cmake",
+        rewrite_prefixes: &["cmake"],
+        category: "Build",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^df(\s|$)",
         rtk_cmd: "rtk df",
         rewrite_prefixes: &["df"],

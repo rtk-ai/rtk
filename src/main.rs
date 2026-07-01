@@ -16,6 +16,7 @@ use cmds::js::{
     vitest_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
+use cmds::native::cmake_cmd;
 use cmds::php::{ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpunit_cmd, pint_cmd};
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
@@ -777,6 +778,14 @@ enum Commands {
     Gt {
         #[command(subcommand)]
         command: GtCommands,
+    },
+
+    /// CMake build/configure with compact output — progress collapsed, diagnostics kept
+    #[command(name = "cmake")]
+    Cmake {
+        /// Additional cmake arguments (e.g. --build, --target, -S, -B)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     /// golangci-lint wrapper with compact `run` support and passthrough for other invocations
@@ -2326,6 +2335,7 @@ fn run_cli() -> Result<i32> {
             GtCommands::Other(args) => gt_cmd::run_other(&args, cli.verbose)?,
         },
 
+        Commands::Cmake { args } => cmake_cmd::run(&args, cli.verbose)?,
         Commands::GolangciLint { args } => golangci_cmd::run(&args, cli.verbose)?,
 
         Commands::Gradlew { args } => gradlew_cmd::run(&args, cli.verbose)?,
@@ -2681,6 +2691,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Uv { .. }
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
+            | Commands::Cmake { .. }
             | Commands::Gt { .. }
     )
 }
@@ -3044,6 +3055,7 @@ mod tests {
             "format",
             "playwright",
             "cargo",
+            "cmake",
             "npm",
             "npx",
             "curl",
