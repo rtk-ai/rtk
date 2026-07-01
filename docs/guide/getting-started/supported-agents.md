@@ -186,17 +186,22 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Claude Code and Cursor use native Rust subcommands (`rtk hook claude` / `rtk hook cursor`) and run on every platform including native Windows; Gemini's hook is still a shell wrapper and needs WSL on Windows. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
 
 ## Windows support
 
-The shell hook (`rtk-rewrite.sh`) requires a Unix shell. On native Windows:
+The Claude Code and Cursor hooks are native Rust subcommands (`rtk hook claude`, `rtk hook cursor`) that read JSON from stdin and write JSON to stdout. They do **not** depend on a Unix shell, so they work on native Windows exactly like macOS/Linux:
 
-- `rtk init -g` automatically falls back to **CLAUDE.md injection mode** (prompt-level instructions)
+- `rtk init -g` registers the real `rtk hook claude` auto-rewrite hook (no CLAUDE.md fallback)
 - Filters work normally (`rtk cargo test`, `rtk git status`)
-- Auto-rewrite does not work — the AI assistant is instructed to use RTK but commands are not intercepted
+- Auto-rewrite works — commands are intercepted and rewritten before the agent sees them
 
-For full hook support on Windows, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). Inside WSL, all agents with shell hook integration (Claude Code, Cursor, Gemini) work identically to Linux.
+Some agents still ship Unix-shell wrappers that need a shell on Windows:
+
+- **Gemini CLI**: the hook is registered as a `#!/bin/bash` wrapper script, so on native Windows it requires [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) until it migrates to the native `rtk hook gemini` subcommand.
+- **Rules-file agents** (Cline, Windsurf, Codex, Kilo Code, Antigravity) are prompt-level and platform-independent.
+
+WSL remains fully supported for every agent and behaves identically to Linux.
 
 ## Graceful degradation
 
