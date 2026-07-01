@@ -355,6 +355,16 @@ pub fn resolved_command(name: &str) -> Command {
     }
 }
 
+/// Build an npx command with auto-approval for first-run installs.
+///
+/// This prevents interactive prompts from blocking execution when npx
+/// needs to install a package that isn't already cached locally.
+pub fn npx_command() -> Command {
+    let mut cmd = resolved_command("npx");
+    cmd.arg("--yes");
+    cmd
+}
+
 /// Check if a tool exists on PATH (PATHEXT-aware on Windows).
 ///
 /// Replaces manual `Command::new("which").arg(tool)` checks that fail on Windows.
@@ -401,6 +411,16 @@ pub fn human_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_npx_command_adds_auto_yes_arg() {
+        let cmd = npx_command();
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, vec!["--yes"]);
+    }
 
     #[test]
     fn test_truncate_short_string() {
