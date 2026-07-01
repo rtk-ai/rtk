@@ -190,13 +190,15 @@ Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on
 
 ## Windows support
 
-The shell hook (`rtk-rewrite.sh`) requires a Unix shell. On native Windows:
+Claude Code supports the native Windows hook path. On native Windows:
 
-- `rtk init -g` automatically falls back to **CLAUDE.md injection mode** (prompt-level instructions)
+- `rtk init -g` installs a Claude Code PreToolUse hook that runs `rtk hook claude`
 - Filters work normally (`rtk cargo test`, `rtk git status`)
-- Auto-rewrite does not work — the AI assistant is instructed to use RTK but commands are not intercepted
+- Auto-rewrite works for Claude Code's `Bash` tool
 
-For full hook support on Windows, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). Inside WSL, all agents with shell hook integration (Claude Code, Cursor, Gemini) work identically to Linux.
+One caveat remains: if Claude Code is configured to use the PowerShell tool (`CLAUDE_CODE_USE_POWERSHELL_TOOL=1`), commands are not rewritten yet because the hook matcher targets `Bash`. That gap is tracked in [#1319](https://github.com/rtk-ai/rtk/issues/1319).
+
+For Linux-like shell-script integrations on Windows, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). Inside WSL, all agents with shell hook integration (Claude Code, Cursor, Gemini) work identically to Linux.
 
 ## Graceful degradation
 
