@@ -6,6 +6,7 @@ pub mod git;
 pub mod go;
 pub mod js;
 pub mod jvm;
+pub mod p4;
 pub mod python;
 pub mod ruby;
 pub mod rust;
