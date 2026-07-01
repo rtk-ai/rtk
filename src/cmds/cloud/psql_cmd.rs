@@ -4,13 +4,14 @@
 //! and produces compact tab-separated or key=value output.
 
 use crate::core::runner::{self, RunOptions};
+use crate::core::truncate::CAP_LIST;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
 
-const MAX_TABLE_ROWS: usize = 30;
-const MAX_EXPANDED_RECORDS: usize = 20;
+const MAX_TABLE_ROWS: usize = CAP_LIST;
+const MAX_EXPANDED_RECORDS: usize = CAP_LIST;
 
 lazy_static! {
     static ref EXPANDED_RECORD: Regex = Regex::new(r"-\[ RECORD \d+ \]-").unwrap();
@@ -250,10 +251,10 @@ mod tests {
         let input = lines.join("\n");
 
         let result = filter_table(&input);
-        assert!(result.contains("... +10 more rows"));
-        // Header + 30 data rows + overflow line
+        assert!(result.contains("... +20 more rows"));
+        // Header + MAX_TABLE_ROWS data rows + overflow line
         let result_lines: Vec<&str> = result.lines().collect();
-        assert_eq!(result_lines.len(), 32); // 1 header + 30 data + 1 overflow
+        assert_eq!(result_lines.len(), MAX_TABLE_ROWS + 2); // 1 header + data + 1 overflow
     }
 
     #[test]

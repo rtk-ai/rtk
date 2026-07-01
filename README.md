@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://github.com/rtk-ai/rtk/workflows/Security%20Check/badge.svg" alt="CI"></a>
   <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk" alt="Release"></a>
-  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
   <a href="https://discord.gg/RySmvNF5kF"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord" alt="Discord"></a>
   <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk" alt="Homebrew"></a>
 </p>
@@ -28,7 +28,8 @@
   <a href="README_zh.md">中文</a> &bull;
   <a href="README_ja.md">日本語</a> &bull;
   <a href="README_ko.md">한국어</a> &bull;
-  <a href="README_es.md">Espanol</a>
+  <a href="README_es.md">Espanol</a> &bull;
+  <a href="README_pt.md">Português</a>
 </p>
 
 ---
@@ -106,10 +107,11 @@ rtk init -g                     # Claude Code / Copilot (default)
 rtk init -g --gemini            # Gemini CLI
 rtk init -g --codex             # Codex (OpenAI)
 rtk init -g --agent cursor      # Cursor
-rtk init --agent windsurf       # Windsurf
+rtk init -g --agent windsurf    # Windsurf
 rtk init --agent cline          # Cline / Roo Code
 rtk init --agent kilocode       # Kilo Code
 rtk init --agent antigravity    # Google Antigravity
+rtk init -g --agent pi          # Pi
 rtk init --agent hermes         # Hermes
 
 # 2. Restart your AI tool, then test
@@ -148,7 +150,7 @@ rtk read file.rs -l aggressive  # Signatures only (strips bodies)
 rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
 rtk grep "pattern" .            # Grouped search results
-rtk diff file1 file2            # Condensed diff
+rtk diff file1 file2            # Condensed diff (exit 1 if files differ)
 ```
 
 ### Git
@@ -201,6 +203,7 @@ rtk rubocop                     # Ruby linting (JSON, -60%+)
 ### Package Managers
 ```bash
 rtk pnpm list                   # Compact dependency tree
+rtk uv run pytest               # Preserve uv env, errors only
 rtk pip list                    # Python packages (auto-detect uv)
 rtk pip outdated                # Outdated packages
 rtk bundle install              # Ruby gems (strip Using lines)
@@ -228,6 +231,18 @@ rtk docker compose ps           # Compose services
 rtk kubectl pods                # Compact pod list
 rtk kubectl logs <pod>          # Deduplicated logs
 rtk kubectl services            # Compact service list
+rtk oc get pods                 # OpenShift pod summary
+rtk oc get services             # OpenShift service list
+rtk oc logs <pod>               # Deduplicated logs
+```
+
+### Infrastructure as Code
+```bash
+rtk pulumi preview              # Strip header/URL/duration noise
+rtk pulumi up                   # Compact apply output
+rtk pulumi destroy              # Compact destroy output
+rtk pulumi refresh              # Drift summary
+rtk pulumi stack                # Stack metadata (strips owner/timestamps)
 ```
 
 ### Data & Analytics
@@ -351,7 +366,7 @@ rtk git status
 
 ## Supported AI Tools
 
-RTK supports 13 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents for 60-90% token savings where the agent supports command interception.
+RTK supports 14 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents for 60-90% token savings where the agent supports command interception.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -361,10 +376,11 @@ RTK supports 13 AI coding tools. Each integration rewrites shell commands to `rt
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
 | **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook |
 | **Codex** | `rtk init -g --codex` | AGENTS.md + RTK.md instructions |
-| **Windsurf** | `rtk init --agent windsurf` | .windsurfrules (project-scoped) |
+| **Windsurf** | `rtk init -g --agent windsurf` | .windsurfrules (project-scoped) |
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
 | **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |
+| **Pi** | `rtk init -g --agent pi` (global) | TypeScript extension (tool_call) |
 | **Hermes** | `rtk init --agent hermes` | Python plugin adapter (terminal command mutation via `rtk rewrite`) |
 | **Mistral Vibe** | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Blocked on upstream |
 | **Kilo Code** | `rtk init --agent kilocode` | .kilocode/rules/rtk-rules.md (project-scoped) |
@@ -483,7 +499,7 @@ Join the community on [Discord](https://discord.gg/RySmvNF5kF).
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+Apache License 2.0 - see [LICENSE](LICENSE) for details.
 
 ## Disclaimer
 

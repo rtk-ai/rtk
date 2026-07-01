@@ -8,19 +8,24 @@ use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
 use crate::hooks::constants::{
-    CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+    CONFIG_DIR, COPILOT_HOME_ENV, COPILOT_HOOK_FILE, COPILOT_INSTRUCTIONS_FILE, COPILOT_USER_DIR,
+    CURSOR_DIR, GEMINI_DIR, GITHUB_DIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
 };
 
 use super::constants::{
     BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
     GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
-    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY,
-    REWRITE_HOOK_FILE, SETTINGS_JSON,
+    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
+    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 
 // Embedded OpenCode plugin (auto-rewrite)
 const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
+
+// Embedded Pi extension (auto-rewrite)
+const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
 
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
@@ -178,6 +183,7 @@ rtk pnpm install        # Compact install output (90%)
 rtk npm run <script>    # Compact npm script output
 rtk npx <cmd>           # Compact npx command output
 rtk prisma              # Prisma without ASCII art (88%)
+rtk uv run <cmd>        # Compact uv project command output
 ```
 
 ### Files & Search (60-75% savings)
@@ -378,13 +384,21 @@ fn write_if_changed(path: &Path, content: &str, name: &str, ctx: InitContext) ->
     }
 }
 
+/// Resolve the final write target: if `path` is a symlink, follow it so
+/// the atomic rename lands on the real file and the symlink is preserved.
+fn resolve_atomic_target(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Atomic write using tempfile + rename
 /// Prevents corruption on crash/interrupt
+/// Follows symlinks so the link itself is preserved.
 fn atomic_write(path: &Path, content: &str) -> Result<()> {
-    let parent = path.parent().with_context(|| {
+    let target = resolve_atomic_target(path);
+    let parent = target.parent().with_context(|| {
         format!(
             "Cannot write to {}: path has no parent directory",
-            path.display()
+            target.display()
         )
     })?;
 
@@ -398,10 +412,10 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
         .with_context(|| format!("Failed to write {} bytes to temp file", content.len()))?;
 
     // Atomic rename
-    temp_file.persist(path).with_context(|| {
+    temp_file.persist(&target).with_context(|| {
         format!(
             "Failed to atomically replace {} (disk full?)",
-            path.display()
+            target.display()
         )
     })?;
 
@@ -494,7 +508,10 @@ fn prompt_telemetry_consent() -> Result<()> {
 }
 
 fn print_manual_instructions(hook_command: &str, include_opencode: bool) {
-    println!("\n  MANUAL STEP: Add this to ~/.claude/settings.json:");
+    let settings_path = resolve_claude_dir()
+        .unwrap_or_else(|_| PathBuf::from(format!("~/{}", CLAUDE_DIR)))
+        .join(SETTINGS_JSON);
+    println!("\n  MANUAL STEP: Add this to {}:", settings_path.display());
     println!("  {{");
     println!("    \"hooks\": {{ \"PreToolUse\": [{{");
     println!("      \"matcher\": \"Bash\",");
@@ -600,12 +617,13 @@ fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
     Ok(removed)
 }
 
-/// Full uninstall for Claude, Gemini, Codex, or Cursor artifacts.
+/// Full uninstall for Claude, Gemini, Codex, Cursor, or Pi artifacts.
 pub fn uninstall(
     global: bool,
     gemini: bool,
     codex: bool,
     cursor: bool,
+    pi: bool,
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
@@ -641,6 +659,11 @@ pub fn uninstall(
         if dry_run {
             print_dry_run_footer();
         }
+        return Ok(());
+    }
+
+    if pi {
+        uninstall_pi(global, ctx)?;
         return Ok(());
     }
 
@@ -1482,72 +1505,22 @@ fn run_claude_md_mode(global: bool, install_opencode: bool, ctx: InitContext) ->
         eprintln!("Writing rtk instructions to: {}", path.display());
     }
 
-    if path.exists() {
-        let existing = fs::read_to_string(&path)?;
-        // upsert_rtk_block handles all 4 cases: add, update, unchanged, malformed
-        let (new_content, action) = upsert_rtk_block(&existing, RTK_INSTRUCTIONS);
-
-        match action {
-            RtkBlockUpsert::Added => {
-                if dry_run {
-                    println!("[dry-run] would add rtk instructions to {}", path.display());
-                } else {
-                    fs::write(&path, new_content)?;
-                    println!("[ok] Added rtk instructions to existing {}", path.display());
-                }
-            }
-            RtkBlockUpsert::Updated => {
-                if dry_run {
-                    println!(
-                        "[dry-run] would update rtk instructions in {}",
-                        path.display()
-                    );
-                } else {
-                    fs::write(&path, new_content)?;
-                    println!("[ok] Updated rtk instructions in {}", path.display());
-                }
-            }
-            RtkBlockUpsert::Unchanged => {
-                if !dry_run {
-                    println!(
-                        "[ok] {} already contains up-to-date rtk instructions",
-                        path.display()
-                    );
-                }
-                return Ok(());
-            }
-            RtkBlockUpsert::Malformed => {
-                eprintln!(
-                    "[warn] Warning: Found '{}' without closing marker in {}",
-                    RTK_BLOCK_START,
-                    path.display()
-                );
-
-                if let Some((line_num, _)) = existing
-                    .lines()
-                    .enumerate()
-                    .find(|(_, line)| line.contains(RTK_BLOCK_START))
-                {
-                    eprintln!("    Location: line {}", line_num + 1);
-                }
-
-                eprintln!("    Action: Manually remove the incomplete block, then re-run:");
-                if global {
-                    eprintln!("            rtk init -g --claude-md");
-                } else {
-                    eprintln!("            rtk init --claude-md");
-                }
-                return Ok(());
-            }
-        }
-    } else if dry_run {
-        println!(
-            "[dry-run] would create {} with rtk instructions",
-            path.display()
-        );
+    let recovery_cmd = if global {
+        "rtk init -g --claude-md"
     } else {
-        fs::write(&path, RTK_INSTRUCTIONS)?;
-        println!("[ok] Created {} with rtk instructions", path.display());
+        "rtk init --claude-md"
+    };
+
+    let action = write_rtk_block(
+        &path,
+        RTK_INSTRUCTIONS,
+        "rtk instructions",
+        recovery_cmd,
+        ctx,
+    )?;
+
+    if matches!(action, RtkBlockUpsert::Unchanged) {
+        return Ok(());
     }
 
     if global {
@@ -2416,6 +2389,85 @@ fn upsert_rtk_block(content: &str, block: &str) -> (String, RtkBlockUpsert) {
     }
 }
 
+/// Idempotently write an RTK-owned marker block into `path`, preserving user content.
+///
+/// Reads the file (if any), passes it through [`upsert_rtk_block`], and writes the
+/// result back via [`atomic_write`]. Refuses to modify files containing an opening
+/// marker without a matching closing marker (bails with a diagnostic and the exact
+/// `recovery_cmd` to re-run after manual cleanup).
+///
+/// Returns the [`RtkBlockUpsert`] action so callers can branch on whether anything
+/// was actually changed (e.g., to skip post-install steps on `Unchanged`).
+///
+/// `label` is shown in user-facing messages (e.g., `"rtk instructions"`,
+/// `"Copilot instructions"`).
+fn write_rtk_block(
+    path: &Path,
+    block: &str,
+    label: &str,
+    recovery_cmd: &str,
+    ctx: InitContext,
+) -> Result<RtkBlockUpsert> {
+    let InitContext { dry_run, .. } = ctx;
+
+    let existing = if path.exists() {
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?
+    } else {
+        String::new()
+    };
+
+    let (new_content, action) = upsert_rtk_block(&existing, block);
+
+    match action {
+        RtkBlockUpsert::Added => {
+            if dry_run {
+                println!("[dry-run] would add {} to {}", label, path.display());
+            } else {
+                atomic_write(path, &new_content)
+                    .with_context(|| format!("Failed to write {}", path.display()))?;
+                println!("[ok] Added {} to {}", label, path.display());
+            }
+        }
+        RtkBlockUpsert::Updated => {
+            if dry_run {
+                println!("[dry-run] would update {} in {}", label, path.display());
+            } else {
+                atomic_write(path, &new_content)
+                    .with_context(|| format!("Failed to write {}", path.display()))?;
+                println!("[ok] Updated {} in {}", label, path.display());
+            }
+        }
+        RtkBlockUpsert::Unchanged => {
+            if !dry_run {
+                println!("[ok] {} already up to date in {}", label, path.display());
+            }
+        }
+        RtkBlockUpsert::Malformed => {
+            eprintln!(
+                "[warn] Found '{}' without closing marker in {}",
+                RTK_BLOCK_START,
+                path.display()
+            );
+            if let Some((line_num, _)) = existing
+                .lines()
+                .enumerate()
+                .find(|(_, line)| line.contains(RTK_BLOCK_START))
+            {
+                eprintln!("    Location: line {}", line_num + 1);
+            }
+            eprintln!("    Action: Manually remove the incomplete block, then re-run:");
+            eprintln!("            {recovery_cmd}");
+            anyhow::bail!(
+                "Refusing to modify malformed {} at {}",
+                label,
+                path.display()
+            );
+        }
+    }
+
+    Ok(action)
+}
+
 /// Patch CLAUDE.md: add @RTK.md, migrate if old block exists
 fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
     let InitContext { verbose, dry_run } = ctx;
@@ -2670,11 +2722,23 @@ fn resolve_home_subdir(subdir: &str) -> Result<PathBuf> {
         })
 }
 
-fn resolve_claude_dir() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var("RTK_CLAUDE_DIR") {
-        return Ok(PathBuf::from(dir));
+pub fn resolve_claude_dir() -> Result<PathBuf> {
+    resolve_claude_dir_from(
+        std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
+        dirs::home_dir(),
+    )
+}
+
+fn resolve_claude_dir_from(
+    claude_dir: Option<PathBuf>,
+    home_dir: Option<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(path) = claude_dir.filter(|path| !path.as_os_str().is_empty()) {
+        return Ok(path);
     }
-    resolve_home_subdir(CLAUDE_DIR)
+    home_dir
+        .map(|h| h.join(CLAUDE_DIR))
+        .context("Cannot determine Claude config directory. Set $CLAUDE_CONFIG_DIR or $HOME.")
 }
 
 fn resolve_codex_dir() -> Result<PathBuf> {
@@ -2720,6 +2784,144 @@ fn codex_rtk_md_ref(codex_dir: &Path) -> String {
 
 fn resolve_opencode_dir() -> Result<PathBuf> {
     resolve_home_subdir(CONFIG_DIR).map(|p| p.join(OPENCODE_SUBDIR))
+}
+
+// ─── Pi coding agent support ──────────────────────────────────────────
+
+/// Resolve Pi config directory, honouring `PI_CODING_AGENT_DIR` override.
+fn resolve_pi_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var(PI_CODING_AGENT_DIR_ENV) {
+        if !dir.is_empty() {
+            return Ok(PathBuf::from(dir));
+        }
+    }
+    resolve_home_subdir(PI_DIR)
+}
+
+/// Return the path to the installed Pi extension file.
+fn pi_plugin_path(pi_dir: &Path) -> PathBuf {
+    pi_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE)
+}
+
+/// Return the Pi extension install path for the given scope.
+/// global=true  → `$PI_CODING_AGENT_DIR/extensions/rtk.ts`
+/// global=false → `./.pi/extensions/rtk.ts`
+fn pi_plugin_path_for_scope(global: bool) -> Result<PathBuf> {
+    if global {
+        Ok(pi_plugin_path(&resolve_pi_dir()?))
+    } else {
+        Ok(PathBuf::from(PI_LOCAL_DIR)
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE))
+    }
+}
+
+/// Write the Pi extension file if missing or outdated. Returns true if written.
+fn ensure_pi_plugin_installed(path: &Path, ctx: InitContext) -> Result<bool> {
+    write_if_changed(path, PI_PLUGIN, "Pi extension", ctx)
+}
+
+/// Create the Pi extensions directory, or in dry-run mode, print a message only if
+/// the directory does not yet exist (avoids reporting no-op changes).
+fn ensure_pi_extensions_dir(parent: &Path, name: &str, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    if dry_run {
+        if !parent.exists() {
+            println!("[dry-run] would create {}: {}", name, parent.display());
+        }
+    } else {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}: {}", name, parent.display()))?;
+    }
+    Ok(())
+}
+
+/// Uninstall Pi extension for the given scope.
+/// Mirrors `uninstall_codex` / `uninstall_hermes`: extracted from the dispatcher
+/// so it can be tested and reasoned about independently.
+fn uninstall_pi(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+    let plugin_path = pi_plugin_path_for_scope(global)?;
+    let mut removed: Vec<String> = Vec::new();
+
+    if plugin_path.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove Pi extension: {}",
+                plugin_path.display()
+            );
+        } else {
+            // nosemgrep: filesystem-deletion -- Pi uninstall removes only the RTK-managed extension file.
+            fs::remove_file(&plugin_path).with_context(|| {
+                format!("Failed to remove Pi extension: {}", plugin_path.display())
+            })?;
+            if verbose > 0 {
+                eprintln!("Removed Pi extension: {}", plugin_path.display());
+            }
+            removed.push(format!("Pi extension: {}", plugin_path.display()));
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    } else if !removed.is_empty() {
+        println!("RTK uninstalled (Pi):");
+        for item in &removed {
+            println!("  - {}", item);
+        }
+        println!("\nRestart pi to apply changes.");
+    } else {
+        println!("RTK Pi extension was not installed (nothing to remove)");
+    }
+    Ok(())
+}
+
+/// Install the Pi extension (hook-only; no AGENTS.md injection).
+///
+/// global=true  → `$PI_CODING_AGENT_DIR/extensions/rtk.ts`
+/// global=false → `.pi/extensions/rtk.ts`
+pub fn run_pi_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext {
+        verbose: _,
+        dry_run,
+    } = ctx;
+    let plugin_path = if global {
+        let pi_dir = resolve_pi_dir()?;
+        let path = pi_plugin_path(&pi_dir);
+        if let Some(parent) = path.parent() {
+            ensure_pi_extensions_dir(parent, "Pi extensions directory", ctx)?;
+        }
+        path
+    } else {
+        let path = pi_plugin_path_for_scope(false)?;
+        if let Some(parent) = path.parent() {
+            ensure_pi_extensions_dir(parent, "local Pi extensions directory", ctx)?;
+        }
+        path
+    };
+
+    let installed = ensure_pi_plugin_installed(&plugin_path, ctx)?;
+
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        print_pi_result(&plugin_path, installed);
+    }
+
+    Ok(())
+}
+
+fn print_pi_result(plugin_path: &Path, installed: bool) {
+    let status = if installed {
+        "installed"
+    } else {
+        "already up to date"
+    };
+    println!("RTK Pi extension {}:", status);
+    println!("  Extension: {}", plugin_path.display());
+    println!();
+    println!("Pi will load the extension automatically on next start.");
+    println!("Verify: pi -e {} --no-session", plugin_path.display());
 }
 
 /// Return OpenCode plugin path: ~/.config/opencode/plugins/rtk.ts
@@ -3668,7 +3870,9 @@ fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
 
 // ── Copilot integration ─────────────────────────────────────
 
+// PreToolUse = VS Code schema, preToolUse = Copilot CLI schema (same file, both hosts).
 const COPILOT_HOOK_JSON: &str = r#"{
+  "version": 1,
   "hooks": {
     "PreToolUse": [
       {
@@ -3677,12 +3881,22 @@ const COPILOT_HOOK_JSON: &str = r#"{
         "cwd": ".",
         "timeout": 5
       }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "rtk hook copilot",
+        "powershell": "rtk hook copilot",
+        "cwd": ".",
+        "timeoutSec": 5
+      }
     ]
   }
 }
 "#;
 
-const COPILOT_INSTRUCTIONS: &str = r#"# RTK — Token-Optimized CLI
+const COPILOT_INSTRUCTIONS: &str = r#"<!-- rtk-instructions v2 -->
+# RTK — Token-Optimized CLI
 
 **rtk** is a CLI proxy that filters and compresses command outputs, saving 60-90% tokens.
 
@@ -3707,31 +3921,45 @@ rtk gain --history    # Per-command savings history
 rtk discover          # Find missed rtk opportunities
 rtk proxy <cmd>       # Run raw (no filtering) but track usage
 ```
+<!-- /rtk-instructions -->
 "#;
 
-/// Entry point for `rtk init --copilot`
+/// Entry point for `rtk init --copilot`.
+///
+/// Installs in the current working directory's `.github/` subdirectory.
 pub fn run_copilot(ctx: InitContext) -> Result<()> {
+    run_copilot_at(Path::new("."), ctx)
+}
+
+/// Same as [`run_copilot`] but operates relative to an explicit base path.
+///
+/// Used by tests to avoid mutating process-global `cwd` (which is racy under
+/// `cargo test`'s default parallel execution).
+fn run_copilot_at(base: &Path, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
-    // Install in current project's .github/ directory
-    let github_dir = Path::new(".github");
-    let hooks_dir = github_dir.join("hooks");
+    let github_dir = base.join(GITHUB_DIR);
+    let hooks_dir = github_dir.join(HOOKS_SUBDIR);
 
     if !dry_run {
-        fs::create_dir_all(&hooks_dir).context("Failed to create .github/hooks/ directory")?;
+        fs::create_dir_all(&hooks_dir)
+            .with_context(|| format!("Failed to create {} directory", hooks_dir.display()))?;
     }
 
-    // 1. Write hook config
-    let hook_path = hooks_dir.join("rtk-rewrite.json");
-    write_if_changed(&hook_path, COPILOT_HOOK_JSON, "Copilot hook config", ctx)?;
-
-    // 2. Write instructions
-    let instructions_path = github_dir.join("copilot-instructions.md");
-    write_if_changed(
+    // 1. Upsert RTK marker block in copilot-instructions.md (preserves user content).
+    //    Done BEFORE writing the hook config so a malformed file aborts the install
+    //    without leaving a stale hook on disk.
+    let instructions_path = github_dir.join(COPILOT_INSTRUCTIONS_FILE);
+    write_rtk_block(
         &instructions_path,
         COPILOT_INSTRUCTIONS,
         "Copilot instructions",
+        "rtk init --copilot",
         ctx,
     )?;
+
+    // 2. Write hook config (only reached if the upsert above succeeded).
+    let hook_path = hooks_dir.join(COPILOT_HOOK_FILE);
+    write_if_changed(&hook_path, COPILOT_HOOK_JSON, "Copilot hook config", ctx)?;
 
     if dry_run {
         print_dry_run_footer();
@@ -3745,6 +3973,210 @@ pub fn run_copilot(ctx: InitContext) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Entry point for `rtk init --uninstall --copilot` (project-scoped, like install).
+pub fn uninstall_copilot(ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let removed = uninstall_copilot_at(Path::new("."), ctx)?;
+
+    if removed.is_empty() {
+        println!("RTK Copilot support was not installed (nothing to remove)");
+    } else {
+        let header = if dry_run {
+            "[dry-run] would uninstall RTK (GitHub Copilot):"
+        } else {
+            "RTK uninstalled (GitHub Copilot):"
+        };
+        println!("{}", header);
+        for item in &removed {
+            println!("  - {}", item);
+        }
+        if !dry_run {
+            println!("\nRestart your IDE or Copilot CLI session to apply changes.");
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    }
+    Ok(())
+}
+
+/// Same as [`uninstall_copilot`] but operates relative to an explicit base path.
+fn uninstall_copilot_at(base: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    let InitContext { dry_run, .. } = ctx;
+    let github_dir = base.join(GITHUB_DIR);
+    let mut removed = Vec::new();
+
+    let hook_path = github_dir.join(HOOKS_SUBDIR).join(COPILOT_HOOK_FILE);
+    if hook_path.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove hook config: {}",
+                hook_path.display()
+            );
+        } else {
+            // nosemgrep: filesystem-deletion -- Copilot uninstall removes only the RTK-managed hook config.
+            fs::remove_file(&hook_path)
+                .with_context(|| format!("Failed to remove hook: {}", hook_path.display()))?;
+        }
+        removed.push(format!("Hook config: {}", hook_path.display()));
+    }
+
+    let instructions_path = github_dir.join(COPILOT_INSTRUCTIONS_FILE);
+    if instructions_path.exists() {
+        let content = fs::read_to_string(&instructions_path)
+            .with_context(|| format!("Failed to read {}", instructions_path.display()))?;
+        if content.contains(RTK_BLOCK_START) {
+            let (cleaned, did_remove) = remove_rtk_block(&content);
+            if did_remove {
+                if dry_run {
+                    println!(
+                        "[dry-run] would remove rtk-instructions block from {}",
+                        instructions_path.display()
+                    );
+                } else {
+                    atomic_write(&instructions_path, &cleaned).with_context(|| {
+                        format!("Failed to write {}", instructions_path.display())
+                    })?;
+                }
+                removed.push(format!(
+                    "{}: removed rtk-instructions block",
+                    COPILOT_INSTRUCTIONS_FILE
+                ));
+            }
+        }
+    }
+
+    Ok(removed)
+}
+
+fn copilot_user_dir() -> Result<PathBuf> {
+    if let Ok(custom) = std::env::var(COPILOT_HOME_ENV) {
+        return Ok(PathBuf::from(custom));
+    }
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    Ok(home.join(COPILOT_USER_DIR))
+}
+
+pub fn run_copilot_global(ctx: InitContext) -> Result<()> {
+    let copilot_dir = copilot_user_dir()?;
+    run_copilot_global_at(&copilot_dir, ctx)
+}
+
+fn run_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let hooks_dir = copilot_dir.join(HOOKS_SUBDIR);
+
+    if !dry_run {
+        fs::create_dir_all(&hooks_dir)
+            .with_context(|| format!("Failed to create {} directory", hooks_dir.display()))?;
+    }
+
+    let instructions_path = copilot_dir.join(COPILOT_INSTRUCTIONS_FILE);
+    write_rtk_block(
+        &instructions_path,
+        COPILOT_INSTRUCTIONS,
+        "Copilot user-level instructions",
+        "rtk init --global --copilot",
+        ctx,
+    )?;
+
+    let hook_path = hooks_dir.join(COPILOT_HOOK_FILE);
+    write_if_changed(
+        &hook_path,
+        COPILOT_HOOK_JSON,
+        "Copilot global hook config",
+        ctx,
+    )?;
+
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        println!("\nGitHub Copilot global integration installed (user-scoped).\n");
+        println!("  Hook config:    {}", hook_path.display());
+        println!("  Instructions:   {}", instructions_path.display());
+        println!("\n  Applies to all Copilot CLI sessions on this machine.");
+        println!("  Restart your Copilot CLI session to activate.\n");
+    }
+
+    Ok(())
+}
+
+pub fn uninstall_copilot_global(ctx: InitContext) -> Result<()> {
+    let copilot_dir = copilot_user_dir()?;
+    let InitContext { dry_run, .. } = ctx;
+    let removed = uninstall_copilot_global_at(&copilot_dir, ctx)?;
+
+    if removed.is_empty() {
+        println!("RTK global Copilot support was not installed (nothing to remove)");
+    } else {
+        let header = if dry_run {
+            "[dry-run] would uninstall RTK (global GitHub Copilot):"
+        } else {
+            "RTK uninstalled (global GitHub Copilot):"
+        };
+        println!("{}", header);
+        for item in &removed {
+            println!("  - {}", item);
+        }
+        if !dry_run {
+            println!("\nRestart your Copilot CLI session to apply changes.");
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    }
+    Ok(())
+}
+
+fn uninstall_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    let InitContext { dry_run, .. } = ctx;
+    let hook_path = copilot_dir.join(HOOKS_SUBDIR).join(COPILOT_HOOK_FILE);
+    let mut removed = Vec::new();
+
+    if hook_path.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove hook config: {}",
+                hook_path.display()
+            );
+        } else {
+            // nosemgrep: filesystem-deletion -- Copilot global uninstall removes only the RTK-managed hook config.
+            fs::remove_file(&hook_path)
+                .with_context(|| format!("Failed to remove hook: {}", hook_path.display()))?;
+        }
+        removed.push(format!("Hook config: {}", hook_path.display()));
+    }
+
+    let instructions_path = copilot_dir.join(COPILOT_INSTRUCTIONS_FILE);
+    if instructions_path.exists() {
+        let content = fs::read_to_string(&instructions_path)
+            .with_context(|| format!("Failed to read {}", instructions_path.display()))?;
+        if content.contains(RTK_BLOCK_START) {
+            let (cleaned, did_remove) = remove_rtk_block(&content);
+            if did_remove {
+                if dry_run {
+                    println!(
+                        "[dry-run] would remove rtk-instructions block from {}",
+                        instructions_path.display()
+                    );
+                } else {
+                    atomic_write(&instructions_path, &cleaned).with_context(|| {
+                        format!("Failed to write {}", instructions_path.display())
+                    })?;
+                }
+                removed.push(format!(
+                    "{}: removed rtk-instructions block",
+                    COPILOT_INSTRUCTIONS_FILE
+                ));
+            }
+        }
+    }
+
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -3766,6 +4198,7 @@ mod tests {
             "rtk prisma",
             "rtk pnpm",
             "rtk npm",
+            "rtk uv",
             "rtk curl",
             "rtk git",
             "rtk docker",
@@ -4592,6 +5025,46 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_claude_dir_prefers_rtk_override() {
+        let result = resolve_claude_dir_from(
+            Some(PathBuf::from("/custom/rtk-claude")),
+            Some(PathBuf::from("/home/user")),
+        )
+        .unwrap();
+        assert_eq!(result, PathBuf::from("/custom/rtk-claude"));
+    }
+
+    #[test]
+    fn test_resolve_claude_dir_uses_claude_config_dir() {
+        let result = resolve_claude_dir_from(
+            Some(PathBuf::from("/custom/claude-config")),
+            Some(PathBuf::from("/home/user")),
+        )
+        .unwrap();
+        assert_eq!(result, PathBuf::from("/custom/claude-config"));
+    }
+
+    #[test]
+    fn test_resolve_claude_dir_falls_back_to_home() {
+        let result = resolve_claude_dir_from(None, Some(PathBuf::from("/home/user"))).unwrap();
+        assert_eq!(result, PathBuf::from("/home/user/.claude"));
+    }
+
+    #[test]
+    fn test_resolve_claude_dir_ignores_empty_overrides() {
+        let empty =
+            resolve_claude_dir_from(Some(PathBuf::new()), Some(PathBuf::from("/home/user")))
+                .unwrap();
+        assert_eq!(empty, PathBuf::from("/home/user/.claude"));
+    }
+
+    #[test]
+    fn test_resolve_claude_dir_errors_without_home() {
+        let err = resolve_claude_dir_from(None, None).unwrap_err();
+        assert!(err.to_string().contains("Cannot determine Claude config"));
+    }
+
+    #[test]
     fn test_resolve_hermes_home_prefers_hermes_home() {
         let hermes_home = OsString::from("~/custom hermes home");
         let home_dir = PathBuf::from("/tmp/home");
@@ -4939,6 +5412,48 @@ mod tests {
         assert!(file_path.exists());
         let written = fs::read_to_string(&file_path).unwrap();
         assert_eq!(written, content);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_preserves_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let target_path = temp.path().join("real-settings.json");
+        let link_path = temp.path().join("settings.json");
+
+        fs::write(&target_path, "{}").expect("seed target file");
+        symlink(&target_path, &link_path).expect("create symlink");
+
+        atomic_write(&link_path, "{\"hooks\":{}}").unwrap();
+
+        let meta = fs::symlink_metadata(&link_path).unwrap();
+        assert!(meta.file_type().is_symlink(), "symlink must survive");
+        let written = fs::read_to_string(&target_path).unwrap();
+        assert_eq!(written, "{\"hooks\":{}}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_preserves_relative_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let subdir = temp.path().join("real");
+        fs::create_dir(&subdir).unwrap();
+        let target_path = subdir.join("settings.json");
+        let link_path = temp.path().join("settings.json");
+
+        fs::write(&target_path, "{}").expect("seed target file");
+        symlink(Path::new("real/settings.json"), &link_path).expect("create relative symlink");
+
+        atomic_write(&link_path, "{\"patched\":true}").unwrap();
+
+        let meta = fs::symlink_metadata(&link_path).unwrap();
+        assert!(meta.file_type().is_symlink(), "symlink must survive");
+        let written = fs::read_to_string(&target_path).unwrap();
+        assert_eq!(written, "{\"patched\":true}");
     }
 
     // Test for preserve_order round-trip
@@ -5352,18 +5867,35 @@ mod tests {
 
     use std::sync::Mutex;
     static CLAUDE_DIR_LOCK: Mutex<()> = Mutex::new(());
+    static PI_DIR_LOCK: Mutex<()> = Mutex::new(());
+    /// Serialises all tests that mutate the process-wide working directory.
+    static CWD_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
         let _guard = CLAUDE_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let claude_dir = tmp.path().join(CLAUDE_DIR);
         fs::create_dir_all(&claude_dir).unwrap();
 
-        let orig = std::env::var_os("RTK_CLAUDE_DIR");
-        std::env::set_var("RTK_CLAUDE_DIR", &claude_dir);
+        let orig = std::env::var_os("CLAUDE_CONFIG_DIR");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &claude_dir);
         f(&claude_dir);
         match orig {
-            Some(v) => std::env::set_var("RTK_CLAUDE_DIR", v),
-            None => std::env::remove_var("RTK_CLAUDE_DIR"),
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+    }
+
+    fn with_pi_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
+        let _guard = PI_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let pi_dir = tmp.path().join("pi_agent");
+        fs::create_dir_all(&pi_dir).unwrap();
+
+        let orig = std::env::var_os(PI_CODING_AGENT_DIR_ENV);
+        std::env::set_var(PI_CODING_AGENT_DIR_ENV, &pi_dir);
+        f(&pi_dir);
+        match orig {
+            Some(v) => std::env::set_var(PI_CODING_AGENT_DIR_ENV, v),
+            None => std::env::remove_var(PI_CODING_AGENT_DIR_ENV),
         }
     }
 
@@ -5394,7 +5926,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
-            uninstall(true, false, false, false, InitContext::default()).unwrap();
+            uninstall(true, false, false, false, false, InitContext::default()).unwrap();
 
             assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
             let settings_content =
@@ -5444,6 +5976,7 @@ mod tests {
     #[test]
     fn test_local_init_no_hook() {
         let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
 
@@ -5521,7 +6054,7 @@ mod tests {
                 dry_run: true,
                 ..Default::default()
             };
-            uninstall(true, false, false, false, dry).unwrap();
+            uninstall(true, false, false, false, false, dry).unwrap();
 
             // Files must still exist with identical content
             assert!(
@@ -5632,6 +6165,730 @@ mod tests {
         assert!(
             !cleaned.contains(RTK_BLOCK_END),
             "RTK end marker must be removed"
+        );
+    }
+
+    #[test]
+    fn test_claude_md_mode_refuses_malformed_block() {
+        // Mirrors `test_copilot_init_refuses_malformed_block`: a malformed
+        // CLAUDE.md previously emitted a warning and exited 0, silently
+        // skipping the OpenCode plugin step. The shared `write_rtk_block`
+        // dispatcher now bails for both paths.
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let claude_md = claude_dir.join(CLAUDE_MD);
+            let malformed = format!(
+                "# Existing notes\n\n{}\nincomplete RTK block\n",
+                RTK_BLOCK_START
+            );
+            fs::write(&claude_md, &malformed).unwrap();
+
+            let result = run_claude_md_mode(true, false, InitContext::default());
+
+            assert!(
+                result.is_err(),
+                "Malformed CLAUDE.md must cause a hard error, not silent skip"
+            );
+
+            let after = fs::read_to_string(&claude_md).unwrap();
+            assert_eq!(after, malformed, "File must not be modified when malformed");
+        });
+    }
+
+    // ─── Pi integration tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_run_pi_mode_global_installs_plugin() {
+        let tmp = TempDir::new().unwrap();
+        with_pi_dir_override(&tmp, |pi_dir| {
+            run_pi_mode(true, InitContext::default()).unwrap();
+
+            let plugin = pi_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
+            assert!(plugin.exists(), "global Pi extension must be created");
+
+            let content = fs::read_to_string(&plugin).unwrap();
+            assert!(
+                content.contains("rtk rewrite"),
+                "extension must delegate to rtk rewrite"
+            );
+        });
+    }
+
+    #[test]
+    fn test_run_pi_mode_local_installs_plugin() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let result = run_pi_mode(false, InitContext::default());
+        std::env::set_current_dir(&cwd).unwrap();
+        result.unwrap();
+
+        let plugin = tmp
+            .path()
+            .join(".pi")
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE);
+        assert!(plugin.exists(), "local Pi extension must be created");
+    }
+
+    #[test]
+    fn test_run_pi_mode_global_does_not_create_agents_md() {
+        let tmp = TempDir::new().unwrap();
+        with_pi_dir_override(&tmp, |pi_dir| {
+            run_pi_mode(true, InitContext::default()).unwrap();
+
+            let agents_md = pi_dir.join(AGENTS_MD);
+            assert!(!agents_md.exists(), "AGENTS.md must not be created");
+        });
+    }
+
+    #[test]
+    fn test_run_pi_mode_global_creates_plugin_when_dir_absent() {
+        let tmp = TempDir::new().unwrap();
+        let absent_dir = tmp.path().join("no_such_pi_dir");
+        let _guard = PI_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let orig = std::env::var_os(PI_CODING_AGENT_DIR_ENV);
+        std::env::set_var(PI_CODING_AGENT_DIR_ENV, &absent_dir);
+
+        let result = run_pi_mode(true, InitContext::default());
+
+        match orig {
+            Some(v) => std::env::set_var(PI_CODING_AGENT_DIR_ENV, v),
+            None => std::env::remove_var(PI_CODING_AGENT_DIR_ENV),
+        }
+
+        result.unwrap();
+
+        let plugin = absent_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
+        assert!(
+            plugin.exists(),
+            "plugin must be written even when dir was absent"
+        );
+
+        let agents_md = absent_dir.join(AGENTS_MD);
+        assert!(!agents_md.exists(), "AGENTS.md must not be created");
+    }
+
+    #[test]
+    fn test_pi_global_uninstall_removes_plugin() {
+        let tmp = TempDir::new().unwrap();
+        with_pi_dir_override(&tmp, |pi_dir| {
+            run_pi_mode(true, InitContext::default()).unwrap();
+
+            let plugin = pi_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
+            assert!(plugin.exists());
+
+            uninstall(true, false, false, false, true, InitContext::default()).unwrap();
+
+            assert!(!plugin.exists(), "plugin must be removed");
+        });
+    }
+
+    #[test]
+    fn test_pi_local_uninstall_removes_plugin() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        run_pi_mode(false, InitContext::default()).unwrap();
+        let result = uninstall(false, false, false, false, true, InitContext::default());
+        std::env::set_current_dir(&cwd).unwrap();
+        result.unwrap();
+
+        let plugin = tmp
+            .path()
+            .join(".pi")
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE);
+        assert!(!plugin.exists(), "local plugin must be removed");
+    }
+
+    #[test]
+    fn test_pi_plugin_path_for_scope_global() {
+        let tmp = TempDir::new().unwrap();
+        with_pi_dir_override(&tmp, |pi_dir| {
+            let path = pi_plugin_path_for_scope(true).unwrap();
+            assert_eq!(path, pi_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE));
+        });
+    }
+
+    #[test]
+    fn test_pi_plugin_path_for_scope_local() {
+        let path = pi_plugin_path_for_scope(false).unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from(PI_LOCAL_DIR)
+                .join(PI_EXTENSIONS_SUBDIR)
+                .join(PI_PLUGIN_FILE)
+        );
+    }
+
+    #[test]
+    fn test_run_pi_mode_global_dry_run_writes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        with_pi_dir_override(&tmp, |pi_dir| {
+            run_pi_mode(
+                true,
+                InitContext {
+                    verbose: 0,
+                    dry_run: true,
+                },
+            )
+            .unwrap();
+
+            assert!(
+                !pi_dir.join(PI_EXTENSIONS_SUBDIR).exists(),
+                "dry-run must not create the Pi extensions directory"
+            );
+            assert!(
+                !pi_dir
+                    .join(PI_EXTENSIONS_SUBDIR)
+                    .join(PI_PLUGIN_FILE)
+                    .exists(),
+                "dry-run must not create the Pi extension file"
+            );
+        });
+    }
+
+    #[test]
+    fn test_run_pi_mode_local_dry_run_writes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let result = run_pi_mode(
+            false,
+            InitContext {
+                verbose: 0,
+                dry_run: true,
+            },
+        );
+        std::env::set_current_dir(&cwd).unwrap();
+        result.unwrap();
+
+        assert!(
+            !tmp.path().join(".pi").join(PI_EXTENSIONS_SUBDIR).exists(),
+            "dry-run must not create .pi/extensions/"
+        );
+    }
+
+    #[test]
+    fn test_pi_global_uninstall_dry_run_keeps_plugin() {
+        let tmp = TempDir::new().unwrap();
+        with_pi_dir_override(&tmp, |pi_dir| {
+            run_pi_mode(true, InitContext::default()).unwrap();
+            let plugin = pi_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
+            assert!(
+                plugin.exists(),
+                "plugin must exist before uninstall dry-run"
+            );
+
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                true,
+                InitContext {
+                    verbose: 0,
+                    dry_run: true,
+                },
+            )
+            .unwrap();
+
+            assert!(
+                plugin.exists(),
+                "dry-run uninstall must not remove the Pi extension"
+            );
+        });
+    }
+
+    #[test]
+    fn test_pi_local_uninstall_dry_run_keeps_plugin() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        run_pi_mode(false, InitContext::default()).unwrap();
+        let plugin = tmp
+            .path()
+            .join(".pi")
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE);
+        assert!(
+            plugin.exists(),
+            "plugin must exist before uninstall dry-run"
+        );
+
+        let result = uninstall(
+            false,
+            false,
+            false,
+            false,
+            true,
+            InitContext {
+                verbose: 0,
+                dry_run: true,
+            },
+        );
+        std::env::set_current_dir(&cwd).unwrap();
+        result.unwrap();
+
+        assert!(
+            plugin.exists(),
+            "dry-run uninstall must not remove the local Pi extension"
+        );
+    }
+
+    // ─── Copilot tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_copilot_init_preserves_existing_instructions() {
+        let temp = TempDir::new().unwrap();
+        let github_dir = temp.path().join(".github");
+        fs::create_dir_all(&github_dir).unwrap();
+
+        let instructions_path = github_dir.join("copilot-instructions.md");
+        let user_content = "# My Copilot Instructions\n\n\
+            Always respond in Spanish.\n\
+            Never suggest npm; prefer pnpm.\n";
+        fs::write(&instructions_path, user_content).unwrap();
+
+        run_copilot_at(temp.path(), InitContext::default()).unwrap();
+
+        let final_content = fs::read_to_string(&instructions_path).unwrap();
+
+        assert!(
+            final_content.contains("Always respond in Spanish."),
+            "User custom rule was destroyed. Got: {final_content}"
+        );
+        assert!(
+            final_content.contains("Never suggest npm; prefer pnpm."),
+            "User custom rule was destroyed. Got: {final_content}"
+        );
+        assert!(
+            final_content.contains(RTK_BLOCK_START),
+            "RTK block start marker missing"
+        );
+        assert!(
+            final_content.contains(RTK_BLOCK_END),
+            "RTK block end marker missing"
+        );
+    }
+
+    #[test]
+    fn test_copilot_init_idempotent_repeats() {
+        let temp = TempDir::new().unwrap();
+        let github_dir = temp.path().join(".github");
+        fs::create_dir_all(&github_dir).unwrap();
+
+        run_copilot_at(temp.path(), InitContext::default()).unwrap();
+        let after_first = fs::read_to_string(github_dir.join("copilot-instructions.md")).unwrap();
+
+        run_copilot_at(temp.path(), InitContext::default()).unwrap();
+        let after_second = fs::read_to_string(github_dir.join("copilot-instructions.md")).unwrap();
+
+        assert_eq!(
+            after_first, after_second,
+            "Second init must be a no-op (idempotent)"
+        );
+
+        let count_start = after_first.matches(RTK_BLOCK_START).count();
+        let count_end = after_first.matches(RTK_BLOCK_END).count();
+        assert_eq!(
+            count_start, 1,
+            "RTK_BLOCK_START must appear once, got {count_start}"
+        );
+        assert_eq!(
+            count_end, 1,
+            "RTK_BLOCK_END must appear once, got {count_end}"
+        );
+    }
+
+    #[test]
+    fn test_copilot_init_updates_stale_block() {
+        let temp = TempDir::new().unwrap();
+        let github_dir = temp.path().join(".github");
+        fs::create_dir_all(&github_dir).unwrap();
+
+        let instructions_path = github_dir.join("copilot-instructions.md");
+        let stale = format!(
+            "# Project rules\n\nUse rg.\n\n{}\n# OLD RTK CONTENT\nrtk foo\n{}\n",
+            RTK_BLOCK_START, RTK_BLOCK_END
+        );
+        fs::write(&instructions_path, &stale).unwrap();
+
+        run_copilot_at(temp.path(), InitContext::default()).unwrap();
+
+        let updated = fs::read_to_string(&instructions_path).unwrap();
+
+        assert!(
+            updated.contains("Use rg."),
+            "User content outside the block must be preserved"
+        );
+        assert!(
+            !updated.contains("# OLD RTK CONTENT"),
+            "Stale RTK block content must be removed"
+        );
+        assert!(
+            updated.contains("rtk cargo test"),
+            "Fresh COPILOT_INSTRUCTIONS content must be present"
+        );
+    }
+
+    #[test]
+    fn test_copilot_init_dry_run_no_write() {
+        let temp = TempDir::new().unwrap();
+        let instructions_path = temp.path().join(".github").join("copilot-instructions.md");
+        assert!(!instructions_path.exists());
+
+        let ctx = InitContext {
+            dry_run: true,
+            ..InitContext::default()
+        };
+        run_copilot_at(temp.path(), ctx).unwrap();
+
+        assert!(
+            !instructions_path.exists(),
+            "Dry-run must not create copilot-instructions.md"
+        );
+    }
+
+    #[test]
+    fn test_copilot_init_fresh_install_creates_file() {
+        let temp = TempDir::new().unwrap();
+        let instructions_path = temp.path().join(".github").join("copilot-instructions.md");
+        assert!(!instructions_path.exists());
+
+        run_copilot_at(temp.path(), InitContext::default()).unwrap();
+
+        assert!(
+            instructions_path.exists(),
+            "Fresh install must create copilot-instructions.md"
+        );
+        let content = fs::read_to_string(&instructions_path).unwrap();
+        assert!(content.contains(RTK_BLOCK_START));
+        assert!(content.contains(RTK_BLOCK_END));
+        assert!(content.contains("rtk cargo test"));
+    }
+
+    #[test]
+    fn test_copilot_hook_json_serves_both_vscode_and_cli_schemas() {
+        let v: serde_json::Value = serde_json::from_str(COPILOT_HOOK_JSON).unwrap();
+
+        let vscode = &v["hooks"]["PreToolUse"][0];
+        assert_eq!(vscode["command"], "rtk hook copilot");
+        assert!(vscode["timeout"].is_number(), "VS Code uses `timeout`");
+
+        assert_eq!(v["version"], 1, "Copilot CLI requires top-level version");
+        let cli = &v["hooks"]["preToolUse"][0];
+        assert_eq!(cli["bash"], "rtk hook copilot");
+        assert_eq!(cli["powershell"], "rtk hook copilot");
+        assert!(
+            cli["timeoutSec"].is_number(),
+            "Copilot CLI uses `timeoutSec`"
+        );
+    }
+
+    #[test]
+    fn test_copilot_init_writes_dual_schema_to_disk() {
+        let temp = TempDir::new().unwrap();
+        run_copilot_at(temp.path(), InitContext::default()).unwrap();
+
+        let hook_path = temp
+            .path()
+            .join(".github")
+            .join("hooks")
+            .join("rtk-rewrite.json");
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&hook_path).unwrap()).unwrap();
+
+        assert_eq!(v["hooks"]["PreToolUse"][0]["command"], "rtk hook copilot");
+        assert_eq!(v["version"], 1);
+        assert_eq!(v["hooks"]["preToolUse"][0]["bash"], "rtk hook copilot");
+    }
+
+    #[test]
+    fn test_copilot_uninstall_removes_hook_and_block() {
+        let temp = TempDir::new().unwrap();
+        run_copilot_at(temp.path(), InitContext::default()).unwrap();
+
+        let hook_path = temp
+            .path()
+            .join(".github")
+            .join("hooks")
+            .join("rtk-rewrite.json");
+        let instructions_path = temp.path().join(".github").join("copilot-instructions.md");
+        assert!(hook_path.exists());
+
+        let removed = uninstall_copilot_at(temp.path(), InitContext::default()).unwrap();
+
+        assert!(!removed.is_empty());
+        assert!(!hook_path.exists(), "hook config must be removed");
+        let instructions = fs::read_to_string(&instructions_path).unwrap();
+        assert!(
+            !instructions.contains(RTK_BLOCK_START),
+            "RTK block must be removed"
+        );
+    }
+
+    #[test]
+    fn test_copilot_uninstall_preserves_user_instructions() {
+        let temp = TempDir::new().unwrap();
+        let github_dir = temp.path().join(".github");
+        fs::create_dir_all(&github_dir).unwrap();
+        let instructions_path = github_dir.join("copilot-instructions.md");
+        fs::write(&instructions_path, "# My rules\n\nAlways use pnpm.\n").unwrap();
+
+        run_copilot_at(temp.path(), InitContext::default()).unwrap();
+        uninstall_copilot_at(temp.path(), InitContext::default()).unwrap();
+
+        let after = fs::read_to_string(&instructions_path).unwrap();
+        assert!(after.contains("Always use pnpm."), "user content preserved");
+        assert!(!after.contains(RTK_BLOCK_START), "RTK block removed");
+    }
+
+    #[test]
+    fn test_copilot_uninstall_dry_run_keeps_files() {
+        let temp = TempDir::new().unwrap();
+        run_copilot_at(temp.path(), InitContext::default()).unwrap();
+        let hook_path = temp
+            .path()
+            .join(".github")
+            .join("hooks")
+            .join("rtk-rewrite.json");
+
+        let ctx = InitContext {
+            verbose: 0,
+            dry_run: true,
+        };
+        uninstall_copilot_at(temp.path(), ctx).unwrap();
+
+        assert!(hook_path.exists(), "dry-run must not remove hook config");
+    }
+
+    #[test]
+    fn test_copilot_uninstall_nothing_when_absent() {
+        let temp = TempDir::new().unwrap();
+        let removed = uninstall_copilot_at(temp.path(), InitContext::default()).unwrap();
+        assert!(removed.is_empty(), "nothing to remove in a clean project");
+    }
+
+    #[test]
+    fn test_copilot_install_does_not_touch_other_hooks() {
+        let temp = TempDir::new().unwrap();
+        let hooks_dir = temp.path().join(".github").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let other_hook = hooks_dir.join("user-policy.json");
+        let other_content =
+            r#"{"hooks":{"sessionStart":[{"type":"command","command":"echo hi"}]}}"#;
+        fs::write(&other_hook, other_content).unwrap();
+
+        run_copilot_at(temp.path(), InitContext::default()).unwrap();
+
+        assert!(other_hook.exists(), "third-party hook file must remain");
+        assert_eq!(
+            fs::read_to_string(&other_hook).unwrap(),
+            other_content,
+            "third-party hook content must be unchanged by rtk install"
+        );
+    }
+
+    #[test]
+    fn test_copilot_uninstall_does_not_touch_other_hooks() {
+        let temp = TempDir::new().unwrap();
+        run_copilot_at(temp.path(), InitContext::default()).unwrap();
+
+        let hooks_dir = temp.path().join(".github").join("hooks");
+        let other_hook = hooks_dir.join("user-policy.json");
+        let other_content =
+            r#"{"hooks":{"sessionStart":[{"type":"command","command":"echo hi"}]}}"#;
+        fs::write(&other_hook, other_content).unwrap();
+
+        uninstall_copilot_at(temp.path(), InitContext::default()).unwrap();
+
+        assert!(
+            other_hook.exists(),
+            "third-party hook file must survive rtk uninstall"
+        );
+        assert_eq!(
+            fs::read_to_string(&other_hook).unwrap(),
+            other_content,
+            "third-party hook content must be unchanged by rtk uninstall"
+        );
+        assert!(
+            !hooks_dir.join("rtk-rewrite.json").exists(),
+            "rtk's own hook must still be removed"
+        );
+    }
+
+    #[test]
+    fn test_copilot_global_install_writes_hook() {
+        let temp = TempDir::new().unwrap();
+        run_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+
+        let hook_path = temp.path().join("hooks").join("rtk-rewrite.json");
+        assert!(hook_path.exists());
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&hook_path).unwrap()).unwrap();
+        assert_eq!(v["version"], 1);
+        assert_eq!(v["hooks"]["PreToolUse"][0]["command"], "rtk hook copilot");
+        assert_eq!(v["hooks"]["preToolUse"][0]["bash"], "rtk hook copilot");
+    }
+
+    #[test]
+    fn test_copilot_global_install_writes_instructions() {
+        let temp = TempDir::new().unwrap();
+        run_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+        let instructions = temp.path().join(COPILOT_INSTRUCTIONS_FILE);
+        assert!(
+            instructions.exists(),
+            "user-level instructions must be written"
+        );
+        let content = fs::read_to_string(&instructions).unwrap();
+        assert!(content.contains(RTK_BLOCK_START));
+        assert!(content.contains("rtk cargo test"));
+    }
+
+    #[test]
+    fn test_copilot_global_install_preserves_existing_user_instructions() {
+        let temp = TempDir::new().unwrap();
+        let instructions = temp.path().join(COPILOT_INSTRUCTIONS_FILE);
+        fs::write(&instructions, "# My rules\n\nAlways use pnpm.\n").unwrap();
+
+        run_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+
+        let content = fs::read_to_string(&instructions).unwrap();
+        assert!(
+            content.contains("Always use pnpm."),
+            "user content must be preserved"
+        );
+        assert!(content.contains(RTK_BLOCK_START));
+    }
+
+    #[test]
+    fn test_copilot_global_uninstall_preserves_user_instructions() {
+        let temp = TempDir::new().unwrap();
+        let instructions = temp.path().join(COPILOT_INSTRUCTIONS_FILE);
+        fs::write(&instructions, "# My rules\n\nAlways use pnpm.\n").unwrap();
+
+        run_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+        uninstall_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+
+        let content = fs::read_to_string(&instructions).unwrap();
+        assert!(content.contains("Always use pnpm."));
+        assert!(!content.contains(RTK_BLOCK_START), "RTK block removed");
+    }
+
+    #[test]
+    fn test_copilot_global_uninstall_removes_hook() {
+        let temp = TempDir::new().unwrap();
+        run_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+        let hook_path = temp.path().join("hooks").join("rtk-rewrite.json");
+        assert!(hook_path.exists());
+
+        let removed = uninstall_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+        assert!(!removed.is_empty());
+        assert!(!hook_path.exists());
+    }
+
+    #[test]
+    fn test_copilot_global_uninstall_nothing_when_absent() {
+        let temp = TempDir::new().unwrap();
+        let removed = uninstall_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn test_copilot_global_install_does_not_touch_other_hooks() {
+        let temp = TempDir::new().unwrap();
+        let hooks_dir = temp.path().join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let other = hooks_dir.join("notification-hooks.json");
+        let payload = r#"{"version":1,"hooks":{"agentStop":[{"type":"command","bash":"true"}]}}"#;
+        fs::write(&other, payload).unwrap();
+
+        run_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+
+        assert_eq!(fs::read_to_string(&other).unwrap(), payload);
+    }
+
+    #[test]
+    fn test_copilot_global_uninstall_does_not_touch_other_hooks() {
+        let temp = TempDir::new().unwrap();
+        run_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+        let hooks_dir = temp.path().join("hooks");
+        let other = hooks_dir.join("notification-hooks.json");
+        let payload = r#"{"version":1,"hooks":{"agentStop":[{"type":"command","bash":"true"}]}}"#;
+        fs::write(&other, payload).unwrap();
+
+        uninstall_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+
+        assert!(other.exists());
+        assert_eq!(fs::read_to_string(&other).unwrap(), payload);
+        assert!(!hooks_dir.join("rtk-rewrite.json").exists());
+    }
+
+    #[test]
+    fn test_copilot_global_install_dry_run_writes_nothing() {
+        let temp = TempDir::new().unwrap();
+        let ctx = InitContext {
+            verbose: 0,
+            dry_run: true,
+        };
+        run_copilot_global_at(temp.path(), ctx).unwrap();
+        assert!(!temp.path().join("hooks").join("rtk-rewrite.json").exists());
+    }
+
+    #[test]
+    fn test_copilot_init_refuses_malformed_block() {
+        let temp = TempDir::new().unwrap();
+        let github_dir = temp.path().join(".github");
+        fs::create_dir_all(&github_dir).unwrap();
+
+        let instructions_path = github_dir.join("copilot-instructions.md");
+        let malformed = format!("# My rules\n\n{}\nincomplete RTK block\n", RTK_BLOCK_START);
+        fs::write(&instructions_path, &malformed).unwrap();
+
+        let result = run_copilot_at(temp.path(), InitContext::default());
+
+        assert!(
+            result.is_err(),
+            "Malformed file must cause an error, not silent rewrite"
+        );
+
+        let after = fs::read_to_string(&instructions_path).unwrap();
+        assert_eq!(after, malformed, "File must not be modified when malformed");
+    }
+
+    #[test]
+    fn test_copilot_init_malformed_leaves_no_hook_on_disk() {
+        // Regression: a malformed copilot-instructions.md aborted the install
+        // mid-way, but the hook config had already been written. The upsert
+        // now runs first, so the hook config must not appear when the upsert
+        // bails.
+        let temp = TempDir::new().unwrap();
+        let github_dir = temp.path().join(".github");
+        fs::create_dir_all(&github_dir).unwrap();
+
+        let instructions_path = github_dir.join("copilot-instructions.md");
+        let malformed = format!("# My rules\n\n{}\nincomplete RTK block\n", RTK_BLOCK_START);
+        fs::write(&instructions_path, &malformed).unwrap();
+
+        let hook_path = github_dir.join("hooks").join("rtk-rewrite.json");
+
+        let result = run_copilot_at(temp.path(), InitContext::default());
+
+        assert!(result.is_err(), "Malformed file must cause a hard error");
+        assert!(
+            !hook_path.exists(),
+            "Hook config must not be written when the upsert aborts: {}",
+            hook_path.display()
         );
     }
 }

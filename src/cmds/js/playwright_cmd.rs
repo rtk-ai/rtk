@@ -314,17 +314,14 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         }
     };
 
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "playwright", result.exit_code) {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
+    let hint = crate::core::tee::tee_and_hint(&raw, "playwright", result.exit_code);
+    let shown = crate::core::runner::emit_guarded(&filtered, hint.as_deref(), &raw);
 
     timer.track(
         &format!("playwright {}", args.join(" ")),
         &format!("rtk playwright {}", args.join(" ")),
         &raw,
-        &filtered,
+        &shown,
     );
 
     // Preserve exit code for CI/CD

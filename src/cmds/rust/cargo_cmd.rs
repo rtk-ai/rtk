@@ -1,7 +1,9 @@
 //! Filters cargo output — build errors, test results, clippy warnings.
 
+use crate::core::args_utils;
 use crate::core::runner;
 use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
+use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
 use std::cmp::Ordering;
@@ -28,45 +30,6 @@ pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<i32> {
         CargoCommand::Install => run_install(args, verbose),
         CargoCommand::Nextest => run_nextest(args, verbose),
     }
-}
-
-/// Reconstruct args with `--` separator preserved from the original command line.
-/// Clap strips `--` from parsed args, but cargo subcommands need it to separate
-/// their own flags from test runner flags (e.g. `cargo test -- --nocapture`).
-fn restore_double_dash(args: &[String]) -> Vec<String> {
-    let raw_args: Vec<String> = std::env::args().collect();
-    restore_double_dash_with_raw(args, &raw_args)
-}
-
-/// Testable version that takes raw_args explicitly.
-fn restore_double_dash_with_raw(args: &[String], raw_args: &[String]) -> Vec<String> {
-    if args.is_empty() {
-        return args.to_vec();
-    }
-
-    // If args already contain `--` (Clap preserved it), no restoration needed
-    if args.iter().any(|a| a == "--") {
-        return args.to_vec();
-    }
-
-    // Find `--` in the original command line
-    let sep_pos = match raw_args.iter().position(|a| a == "--") {
-        Some(pos) => pos,
-        None => return args.to_vec(),
-    };
-
-    // Count how many of our parsed args appeared before `--` in the original.
-    // Args before `--` are positional (e.g. test name), args after are flags.
-    let args_before_sep = raw_args[..sep_pos]
-        .iter()
-        .filter(|a| args.contains(a))
-        .count();
-
-    let mut result = Vec::with_capacity(args.len() + 1);
-    result.extend_from_slice(&args[..args_before_sep]);
-    result.push("--".to_string());
-    result.extend_from_slice(&args[args_before_sep..]);
-    result
 }
 
 // --- Stream handlers ---
@@ -139,7 +102,7 @@ impl BlockHandler for CargoBuildHandler {
             Some(format!("{}\n", s))
         } else {
             Some(format!(
-                "═══════════════════════════════════════\ncargo build: {} errors, {} warnings ({} crates)\n",
+                "cargo build: {} errors, {} warnings ({} crates)\n",
                 self.error_count, self.warnings, self.compiled
             ))
         }
@@ -290,7 +253,7 @@ where
     let mut cmd = resolved_command("cargo");
     cmd.arg(subcommand);
 
-    let restored_args = restore_double_dash(args);
+    let restored_args = args_utils::restore_double_dash(args);
     for arg in &restored_args {
         cmd.arg(arg);
     }
@@ -317,7 +280,7 @@ fn run_cargo_streamed(
     let mut cmd = resolved_command("cargo");
     cmd.arg(subcommand);
 
-    let restored_args = restore_double_dash(args);
+    let restored_args = args_utils::restore_double_dash(args);
     for arg in &restored_args {
         cmd.arg(arg);
     }
@@ -525,9 +488,9 @@ fn filter_cargo_install(output: &str) -> String {
                 deps_info
             ));
         }
-        result.push_str("═══════════════════════════════════════\n");
 
-        for (i, err) in errors.iter().enumerate().take(15) {
+        const MAX_INSTALL_ERRORS: usize = CAP_ERRORS;
+        for (i, err) in errors.iter().enumerate().take(MAX_INSTALL_ERRORS) {
             result.push_str(err);
             result.push('\n');
             if i < errors.len() - 1 {
@@ -535,8 +498,16 @@ fn filter_cargo_install(output: &str) -> String {
             }
         }
 
-        if errors.len() > 15 {
-            result.push_str(&format!("\n... +{} more issues\n", errors.len() - 15));
+        if errors.len() > MAX_INSTALL_ERRORS {
+            result.push_str(&format!(
+                "\n… +{} more issues\n",
+                errors.len() - MAX_INSTALL_ERRORS
+            ));
+            let all_errors = errors.join("\n\n");
+            if let Some(hint) = crate::core::tee::force_tee_hint(&all_errors, "cargo-build-errors")
+            {
+                result.push_str(&format!("  {}\n", hint));
+            }
         }
 
         return result.trim().to_string();
@@ -824,18 +795,30 @@ fn filter_cargo_build(output: &str) -> String {
     }
 
     let mut result = format!(
-        "cargo build: {} errors, {} warnings ({} crates)\n═══════════════════════════════════════\n",
+        "cargo build: {} errors, {} warnings ({} crates)\n",
         handler.error_count, handler.warnings, handler.compiled
     );
-    for (i, blk) in blocks.iter().enumerate().take(15) {
+    const MAX_CHECK_BLOCKS: usize = CAP_ERRORS;
+    for (i, blk) in blocks.iter().enumerate().take(MAX_CHECK_BLOCKS) {
         result.push_str(&blk.join("\n"));
         result.push('\n');
         if i < blocks.len() - 1 {
             result.push('\n');
         }
     }
-    if blocks.len() > 15 {
-        result.push_str(&format!("\n... +{} more issues\n", blocks.len() - 15));
+    if blocks.len() > MAX_CHECK_BLOCKS {
+        result.push_str(&format!(
+            "\n… +{} more issues\n",
+            blocks.len() - MAX_CHECK_BLOCKS
+        ));
+        let all_blocks: String = blocks
+            .iter()
+            .map(|b| b.join("\n"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if let Some(hint) = crate::core::tee::force_tee_hint(&all_blocks, "cargo-check-issues") {
+            result.push_str(&format!("  {}\n", hint));
+        }
     }
     result.trim().to_string()
 }
@@ -1027,12 +1010,18 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
 
     if !failures.is_empty() {
         result.push_str(&format!("FAILURES ({}):\n", failures.len()));
-        result.push_str("═══════════════════════════════════════\n");
-        for (i, failure) in failures.iter().enumerate().take(10) {
+        const MAX_FAILURES: usize = CAP_WARNINGS;
+        for (i, failure) in failures.iter().enumerate().take(MAX_FAILURES) {
             result.push_str(&format!("{}. {}\n", i + 1, truncate(failure, 200)));
         }
-        if failures.len() > 10 {
-            result.push_str(&format!("\n... +{} more failures\n", failures.len() - 10));
+        if failures.len() > MAX_FAILURES {
+            result.push_str(&format!("\n… +{} more failures\n", failures.len() - MAX_FAILURES));
+            let all_failures = failures.join("\n\n");
+            if let Some(hint) =
+                crate::core::tee::force_tee_hint(&all_failures, "cargo-test-failures")
+            {
+                result.push_str(&format!("  {}\n", hint));
+            }
         }
         result.push('\n');
     }
@@ -1177,19 +1166,32 @@ fn filter_cargo_clippy(output: &str) -> String {
         "cargo clippy: {} errors, {} warnings\n",
         error_count, warning_count
     ));
-    result.push_str("═══════════════════════════════════════\n");
 
     // Show full error blocks so developers can see what needs fixing
     if !error_blocks.is_empty() {
+        const MAX_CLIPPY_ERRORS: usize = CAP_WARNINGS;
         result.push_str("\nErrors:\n");
-        for block in error_blocks.iter().take(10) {
+        for block in error_blocks.iter().take(MAX_CLIPPY_ERRORS) {
             for block_line in block {
                 result.push_str(&format!("  {}\n", truncate(block_line, 160)));
             }
             result.push('\n');
         }
-        if error_blocks.len() > 10 {
-            result.push_str(&format!("  ... +{} more errors\n", error_blocks.len() - 10));
+        if error_blocks.len() > MAX_CLIPPY_ERRORS {
+            result.push_str(&format!(
+                "  … +{} more errors\n",
+                error_blocks.len() - MAX_CLIPPY_ERRORS
+            ));
+            let all_blocks: String = error_blocks
+                .iter()
+                .map(|b| b.join("\n"))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if let Some(hint) =
+                crate::core::tee::force_tee_hint(&all_blocks, "cargo-clippy-errors")
+            {
+                result.push_str(&format!("  {}\n", hint));
+            }
         }
     }
 
@@ -1197,18 +1199,29 @@ fn filter_cargo_clippy(output: &str) -> String {
     let mut rule_counts: Vec<_> = by_rule.iter().collect();
     rule_counts.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
 
-    for (rule, locations) in rule_counts.iter().take(15) {
+    const MAX_RULES: usize = CAP_LIST;
+    for (rule, locations) in rule_counts.iter().take(MAX_RULES) {
         result.push_str(&format!("  {} ({}x)\n", rule, locations.len()));
         for loc in locations.iter().take(3) {
             result.push_str(&format!("    {}\n", loc));
         }
         if locations.len() > 3 {
-            result.push_str(&format!("    ... +{} more\n", locations.len() - 3));
+            result.push_str(&format!("    … +{} more\n", locations.len() - 3));
         }
     }
 
-    if by_rule.len() > 15 {
-        result.push_str(&format!("\n... +{} more rules\n", by_rule.len() - 15));
+    if by_rule.len() > MAX_RULES {
+        result.push_str(&format!("\n… +{} more rules\n", by_rule.len() - MAX_RULES));
+        let all_rules = rule_counts
+            .iter()
+            .map(|(rule, locs)| format!("{} ({}x)", rule, locs.len()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_rules, "cargo-clippy-rules", MAX_RULES + 1)
+        {
+            result.push_str(&format!("  {}\n", hint));
+        }
     }
 
     result.trim().to_string()
@@ -1221,6 +1234,7 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::args_utils::restore_double_dash_with_raw;
 
     #[test]
     fn test_restore_double_dash_with_separator() {
