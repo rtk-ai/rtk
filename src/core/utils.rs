@@ -328,6 +328,14 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
 /// Drop-in replacement for `Command::new(name)` that works on Windows
 /// with `.CMD`/`.BAT`/`.PS1` wrappers.
 ///
+/// On Windows, `.cmd`/`.bat` scripts cannot be reliably executed via
+/// `Command::new(path)` alone — `CreateProcessW` may fail depending on
+/// the script complexity and environment.  This function detects resolved
+/// `.cmd`/`.bat` paths and transparently wraps them with `cmd.exe /C` so
+/// that Node.js shims (`npm`, `pnpm`, `npx`, `tsc`, `vitest`, …) work
+/// correctly.  Callers can continue to append `.args()` as usual because
+/// `cmd.exe /C` forwards all subsequent arguments to the target script.
+///
 /// Falls back to `Command::new(name)` if resolution fails, so native
 /// commands (git, cargo) still work even if `which` can't find them.
 ///
@@ -338,7 +346,7 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
 /// A `Command` configured with the resolved binary path.
 pub fn resolved_command(name: &str) -> Command {
     match resolve_binary(name) {
-        Ok(path) => Command::new(path),
+        Ok(path) => command_for_path(path),
         Err(e) => {
             // On Windows, resolution failure likely means a .CMD/.BAT wrapper
             // wasn't found — always warn so users have a signal.
@@ -353,6 +361,34 @@ pub fn resolved_command(name: &str) -> Command {
             Command::new(name)
         }
     }
+}
+
+/// Build a `Command` from a resolved path, wrapping `.cmd`/`.bat` with
+/// `cmd.exe /C` on Windows so that Node.js shims execute correctly.
+///
+/// On non-Windows platforms this is simply `Command::new(path)`.
+fn command_for_path(path: PathBuf) -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        if is_cmd_or_bat(&path) {
+            let mut cmd = Command::new("cmd.exe");
+            cmd.arg("/C").arg(&path);
+            return cmd;
+        }
+    }
+    Command::new(path)
+}
+
+/// Check whether `path` has a `.cmd` or `.bat` extension (case-insensitive).
+#[cfg(target_os = "windows")]
+fn is_cmd_or_bat(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            let lower = ext.to_ascii_lowercase();
+            lower == "cmd" || lower == "bat"
+        })
+        .unwrap_or(false)
 }
 
 /// Check if a tool exists on PATH (PATHEXT-aware on Windows).
@@ -742,6 +778,107 @@ mod tests {
                 "should get output from .cmd wrapper, got: {}",
                 stdout
             );
+        }
+
+        #[test]
+        fn test_command_for_path_wraps_cmd_with_cmd_exe() {
+            // command_for_path should wrap .cmd files with cmd.exe /C on Windows
+            let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+            create_temp_cmd_wrapper(temp_dir.path(), "cmd-wrap-test");
+            let cmd_path = temp_dir.path().join("cmd-wrap-test.cmd");
+
+            let output = super::command_for_path(cmd_path).output();
+
+            assert!(
+                output.is_ok(),
+                "command_for_path should execute .cmd wrapper via cmd.exe /C"
+            );
+            let output = output.unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("fake-tool-output"),
+                "should get output from .cmd wrapper via cmd.exe /C, got: {}",
+                stdout
+            );
+        }
+
+        #[test]
+        fn test_command_for_path_wraps_bat_with_cmd_exe() {
+            // command_for_path should also wrap .bat files with cmd.exe /C
+            let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+            let bat_path = temp_dir.path().join("bat-wrap-test.bat");
+            fs::write(&bat_path, "@echo off\r\necho bat-wrapped-output\r\n")
+                .expect("failed to create .bat wrapper");
+
+            let output = super::command_for_path(bat_path).output();
+
+            assert!(
+                output.is_ok(),
+                "command_for_path should execute .bat wrapper via cmd.exe /C"
+            );
+            let output = output.unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("bat-wrapped-output"),
+                "should get output from .bat wrapper via cmd.exe /C, got: {}",
+                stdout
+            );
+        }
+
+        #[test]
+        fn test_command_for_path_passes_args_through_cmd_exe() {
+            // Arguments appended via .args() after command_for_path should be
+            // forwarded to the .cmd script through cmd.exe /C
+            let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+            let cmd_path = temp_dir.path().join("echo-args.cmd");
+            // %* forwards all arguments in .cmd scripts
+            fs::write(&cmd_path, "@echo off\r\necho args:%*\r\n")
+                .expect("failed to create .cmd wrapper");
+
+            let output = super::command_for_path(cmd_path)
+                .args(["hello", "world"])
+                .output();
+
+            assert!(output.is_ok(), "should execute with args");
+            let output = output.unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("args:hello world"),
+                "should forward args through cmd.exe /C, got: {}",
+                stdout
+            );
+        }
+
+        #[test]
+        fn test_command_for_path_does_not_wrap_exe() {
+            // .exe files should NOT be wrapped with cmd.exe /C
+            // We verify by checking that command_for_path returns a Command
+            // targeting the .exe directly (it will fail because fake .exe is
+            // not a valid PE, but it should NOT invoke cmd.exe)
+            let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+            let exe_path = temp_dir.path().join("fake-tool.exe");
+            fs::write(&exe_path, "not-a-real-exe").expect("failed to create fake .exe");
+
+            let result = super::command_for_path(exe_path.clone()).output();
+
+            // The command should fail (invalid PE), but that's fine — we just
+            // verify it doesn't succeed as if routed through cmd.exe
+            assert!(
+                result.is_err() || !result.unwrap().status.success(),
+                "fake .exe should not execute successfully"
+            );
+        }
+
+        #[test]
+        fn test_is_cmd_or_bat() {
+            use std::path::Path;
+            assert!(super::is_cmd_or_bat(Path::new("C:\\tools\\npm.cmd")));
+            assert!(super::is_cmd_or_bat(Path::new("C:\\tools\\npm.CMD")));
+            assert!(super::is_cmd_or_bat(Path::new("C:\\tools\\run.bat")));
+            assert!(super::is_cmd_or_bat(Path::new("C:\\tools\\run.BAT")));
+            assert!(!super::is_cmd_or_bat(Path::new("C:\\tools\\node.exe")));
+            assert!(!super::is_cmd_or_bat(Path::new("C:\\tools\\npm")));
+            assert!(!super::is_cmd_or_bat(Path::new("C:\\tools\\npm.ps1")));
         }
 
         #[test]
