@@ -12,7 +12,7 @@
  *   0 + stdout  Allow — rewrite found, explicitly allowed → auto-apply
  *   1           No RTK equivalent → pass through unchanged
  *   2           Deny rule matched → block the call
- *   3 + stdout  Ask rule matched (or default) → rewrite, require approval
+ *   3 + stdout  Ask rule matched (or default) → rewrite, approval depends on config
  *
  * See: src/hooks/rewrite_cmd.rs
  */
@@ -32,19 +32,19 @@ function checkRtk(): boolean {
   return rtkAvailable;
 }
 
+type RewriteVerdict = "ask" | "deny";
+
 /**
  * Delegate to `rtk rewrite` and interpret the exit code.
  *
  * Returns a tuple `[rewritten, verdict?]`:
  *   [string]        — rewrite, auto-apply (exit 0)
- *   [string, "ask"] — rewrite, require user approval (exit 3)
+ *   [string, "ask"] — rewrite, approval depends on config (exit 3)
  *   [null, "deny"]  — command matched a deny rule (exit 2)
  *   [null]          — no rewrite / passthrough (exit 1 or no change)
  */
-type RewriteVerdict = "ask" | "deny";
-
 function tryRewrite(
-  command: string
+  command: string,
 ): [string | null, RewriteVerdict?] {
   try {
     const result = execFileSync("rtk", ["rewrite", command], {
@@ -56,7 +56,7 @@ function tryRewrite(
     // Exit 0 — Allow: rewrite and auto-apply
     return [result && result !== command ? result : null];
   } catch (e: any) {
-    // Exit 3 — Ask: rewrite available but user must approve
+    // Exit 3 — Ask: rewrite available, approval depends on config
     if (e?.status === 3 && e.stdout) {
       const result = e.stdout.toString().trim();
       if (result && result !== command) return [result, "ask"];
@@ -76,6 +76,7 @@ export default function register(api: any) {
   const pluginConfig = api.config ?? {};
   const enabled = pluginConfig.enabled !== false;
   const verbose = pluginConfig.verbose === true;
+  const approvalMode: "auto" | "ask" = pluginConfig.approvalMode ?? "auto";
 
   if (!enabled) return;
 
@@ -109,7 +110,7 @@ export default function register(api: any) {
 
       if (verbose) {
         console.log(
-          `[rtk] ${command} -> ${rewritten}${verdict === "ask" ? " (approval required)" : ""}`
+          `[rtk] ${command} -> ${rewritten}${verdict === "ask" ? ` (${approvalMode === "auto" ? "auto-applied" : "approval required"})` : ""}`,
         );
       }
 
@@ -127,16 +128,13 @@ export default function register(api: any) {
         params: { ...event.params, command: rewritten },
       };
 
-      // Exit 3 — Ask: rewrite but require user approval
-      if (verdict === "ask") {
+      // Exit 3 — Ask: require approval only when approvalMode is "ask"
+      if (verdict === "ask" && approvalMode === "ask") {
         result.requireApproval = {
           title: "RTK rewrite suggestion",
           description: `Rewrite: \`${command}\` → \`${rewritten}\``,
           severity: "info",
           timeoutBehavior: "deny",
-          // "allow-always" omitted: OpenClaw does not auto-persist approval
-          // for plugin hooks — see:
-          // https://docs.openclaw.ai/plugins/plugin-permission-requests#troubleshooting
           allowedDecisions: ["allow-once", "deny"],
           onResolution: (decision: string) => {
             if (verbose) {
@@ -148,10 +146,10 @@ export default function register(api: any) {
 
       return result;
     },
-    { priority: 10 }
+    { priority: 10 },
   );
 
   if (verbose) {
-    console.log("[rtk] OpenClaw plugin registered");
+    console.log(`[rtk] OpenClaw plugin registered (approvalMode: ${approvalMode})`);
   }
 }
