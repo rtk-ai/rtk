@@ -34,6 +34,7 @@ Each subdirectory has its own README with file descriptions, parsing strategies,
 - **[`cloud/`](cloud/README.md)** — aws, docker/kubectl, curl, wget, psql — Docker/Kubectl sub-enums, JSON forced output
 - **[`system/`](system/README.md)** — ls, tree, read, grep, find, wc, env, json, log, deps, summary, format, smart — format_cmd routing, filter levels, language detection
 - **[`ruby/`](ruby/README.md)** — rake/rails test, rspec, rubocop — JSON injection pattern, `ruby_exec()` bundle exec auto-detection
+- **[`build/`](build/README.md)** — moon — task-runner orchestration with per-task underlying-tool routing via `moon query tasks` + StreamFilter state machine
 
 ## Execution Flow
 

@@ -1,0 +1,50 @@
+▮▮▮▮ Loading changed files
+Base revision: N/A
+Head revision: HEAD
+Changed files:
+	.claude/worktrees/auth-discord-notifier
+	.claude/worktrees/feat-cld+stale-reminder-dry
+	.claude/worktrees/ui-kit-toast-primitive
+	.gitignore
+	.playwright-mcp/page-2026-05-26T13-22-59-683Z.yml
+	.playwright-mcp/page-2026-05-26T13-25-27-180Z.yml
+	.playwright-mcp/page-2026-05-26T13-27-14-302Z.yml
+	.playwright-mcp/page-2026-05-26T13-30-08-686Z.yml
+	.playwright-mcp/page-2026-05-26T13-30-59-474Z.yml
+	.playwright-mcp/page-2026-05-26T13-32-35-321Z.yml
+	.playwright-mcp/page-2026-05-26T13-38-38-745Z.yml
+	.playwright-mcp/page-2026-05-26T13-58-35-446Z.yml
+	.playwright-mcp/page-2026-05-26T13-59-20-311Z.yml
+	.playwright-mcp/page-2026-05-26T14-01-45-605Z.yml
+	.playwright-mcp/page-2026-05-26T14-01-56-439Z.yml
+	.playwright-mcp/page-2026-05-26T14-23-40-101Z.yml
+	.playwright-mcp/page-2026-05-26T14-28-24-120Z.yml
+	.playwright-mcp/page-2026-05-26T14-28-31-682Z.yml
+	.playwright-mcp/page-2026-05-27T17-51-31-271Z.yml
+	docs/brand/logo/yeva-mark-square-512.png
+	frontend-loaded.png
+▮▮▮▮ Building action graph
+Action count: 6
+Requested targets: 1
+	audit:format
+Resolved targets: 1
+	audit:format
+▮▮▮▮ Executing action pipeline
+audit:format | Checking formatting...
+audit:format | All matched files use Prettier code style!
+▮▮▮▮ audit:format (cached, 7b3060c4)
+
+ SUMMARY 
+
+pass SyncWorkspace 
+pass SyncProject(core) (2ms)
+pass SyncProject(db) (2ms)
+pass SyncProject(config) (1ms)
+pass SyncProject(audit) (1ms)
+pass RunTask(audit:format) (cached, 35ms, 7b3060c4)
+
+ STATS 
+
+Actions: 6 completed (1 cached)
+   Time: 41ms
+

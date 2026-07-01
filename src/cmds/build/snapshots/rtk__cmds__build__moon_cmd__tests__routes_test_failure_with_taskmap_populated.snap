@@ -1,0 +1,33 @@
+---
+source: src/cmds/build/moon_cmd.rs
+assertion_line: 559
+expression: output
+---
+audit:test
+bun test v1.3.14 (0d9b296a)
+
+test/action-extractor.test.ts:
+16 | }
+17 | 
+18 | describe('AuditAction/AuditResource decorators', () => {
+19 | 	it('records action metadata', () => {
+20 | 		const action = Reflect.getMetadata(AUDIT_ACTION_KEY, MyController.prototype.getOne);
+21 | 		expect(action).toBe('INTENTIONALLY_BROKEN_FOR_RTK_FIXTURE');
+                      ^
+error: expect(received).toBe(expected)
+
+Expected: "INTENTIONALLY_BROKEN_FOR_RTK_FIXTURE"
+Received: "customers:read"
+
+      at <anonymous> (/Users/alex/Work/yulii/ops-platform/packages/audit/test/action-extractor.test.ts:21:18)
+(fail) AuditAction/AuditResource decorators > records action metadata [2.29ms]
+
+ 6 pass
+ 1 fail
+ 10 expect() calls
+Ran 7 tests across 3 files. [874.00ms]
+audit:test (924ms)
+Error: task_runner::run_failed
+
+  × Task audit:test failed to run.
+  ╰─▶ Process bun failed: exit code 1

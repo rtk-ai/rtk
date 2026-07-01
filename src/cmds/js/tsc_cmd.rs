@@ -104,7 +104,10 @@ impl BlockHandler for TscHandler {
     }
 }
 
-pub(crate) fn filter_tsc_output(output: &str) -> String {
+/// Offline filter entry point — used by `cmds::build::moon_cmd` to compress
+/// the body of a `tsc` task when run via `moon run`. Groups TypeScript errors
+/// by file and replaces the verbose compiler output with a compact summary.
+pub fn filter_tsc_output(output: &str) -> String {
     struct TsError {
         file: String,
         line: usize,

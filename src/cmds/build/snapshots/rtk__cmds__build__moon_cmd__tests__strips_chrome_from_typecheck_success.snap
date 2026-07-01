@@ -1,0 +1,44 @@
+---
+source: src/cmds/build/moon_cmd.rs
+expression: output
+---
+e2e:typecheck
+gateway:typecheck-test
+worker-ts:typecheck-test
+e2e:typecheck (404ms)
+core:typecheck
+gateway:typecheck-test (429ms)
+worker-ts:typecheck-test (451ms)
+core:typecheck (108ms)
+ui-kit:typecheck
+ui-kit:typecheck (87ms)
+worker-py:typecheck
+ worker-py:typecheck | Success: no issues found in 16 source files
+worker-py:typecheck (464ms)
+db:typecheck
+db:typecheck (100ms)
+policy:typecheck
+policy:typecheck (107ms)
+config:typecheck
+config:typecheck (101ms)
+plugin-sdk:typecheck
+plugin-sdk:typecheck (95ms)
+audit:typecheck
+audit:typecheck (104ms)
+bus:typecheck
+bus:typecheck (102ms)
+http:typecheck
+http:typecheck (106ms)
+sample:typecheck
+sample:typecheck (112ms)
+discord:typecheck
+discord:typecheck (115ms)
+worker-ts:typecheck
+worker-ts:typecheck (127ms)
+gateway:typecheck
+gateway:typecheck (125ms)
+frontend:typecheck
+frontend:typecheck (850ms)
+
+Tasks: 18 completed
+ Time: 3s 283ms
