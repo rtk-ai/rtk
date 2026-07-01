@@ -150,7 +150,7 @@ rtk read file.rs -l aggressive  # Signatures only (strips bodies)
 rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
 rtk grep "pattern" .            # Grouped search results
-rtk diff file1 file2            # Condensed diff
+rtk diff file1 file2            # Condensed diff (exit 1 if files differ)
 ```
 
 ### Git
@@ -203,6 +203,7 @@ rtk rubocop                     # Ruby linting (JSON, -60%+)
 ### Package Managers
 ```bash
 rtk pnpm list                   # Compact dependency tree
+rtk uv run pytest               # Preserve uv env, errors only
 rtk pip list                    # Python packages (auto-detect uv)
 rtk pip outdated                # Outdated packages
 rtk bundle install              # Ruby gems (strip Using lines)
@@ -230,6 +231,18 @@ rtk docker compose ps           # Compose services
 rtk kubectl pods                # Compact pod list
 rtk kubectl logs <pod>          # Deduplicated logs
 rtk kubectl services            # Compact service list
+rtk oc get pods                 # OpenShift pod summary
+rtk oc get services             # OpenShift service list
+rtk oc logs <pod>               # Deduplicated logs
+```
+
+### Infrastructure as Code
+```bash
+rtk pulumi preview              # Strip header/URL/duration noise
+rtk pulumi up                   # Compact apply output
+rtk pulumi destroy              # Compact destroy output
+rtk pulumi refresh              # Drift summary
+rtk pulumi stack                # Stack metadata (strips owner/timestamps)
 ```
 
 ### Data & Analytics

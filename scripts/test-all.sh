@@ -527,7 +527,9 @@ assert_ok      "rtk discover"                 rtk discover
 
 section "Diff"
 
-assert_ok      "rtk diff two files"           rtk diff Cargo.toml LICENSE
+assert_ok       "rtk diff identical files"     rtk diff Cargo.toml Cargo.toml
+assert_fails    "rtk diff differing files"     rtk diff Cargo.toml LICENSE
+assert_contains "rtk diff shows changes"       "added" rtk diff Cargo.toml LICENSE
 
 # ── 37. Wc ────────────────────────────────────────────
 

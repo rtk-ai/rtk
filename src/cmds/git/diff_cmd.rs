@@ -1,12 +1,14 @@
 //! Compares two files and shows only the changed lines.
 
+use crate::core::guard::never_worse;
 use crate::core::tracking;
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
 
-/// Ultra-condensed diff - only changed lines, no context
-pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<()> {
+/// Ultra-condensed diff - only changed lines, no context.
+/// Returns the diff-convention exit code: 0 if identical, 1 if files differ.
+pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -17,39 +19,38 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<()> {
     let content2 = fs::read_to_string(file2)?;
     let raw = format!("{}\n---\n{}", content1, content2);
 
+    let (rtk, exit_code) = render_file_diff(file1, file2, &content1, &content2);
+
+    let shown = never_worse(&raw, &rtk);
+    print!("{}", shown);
+    timer.track(
+        &format!("diff {} {}", file1.display(), file2.display()),
+        "rtk diff",
+        &raw,
+        shown,
+    );
+    Ok(exit_code)
+}
+
+/// Renders the condensed file comparison and returns it with the
+/// diff-convention exit code (0 = identical, 1 = differences found).
+fn render_file_diff(file1: &Path, file2: &Path, content1: &str, content2: &str) -> (String, i32) {
     let lines1: Vec<&str> = content1.lines().collect();
     let lines2: Vec<&str> = content2.lines().collect();
     let diff = compute_diff(&lines1, &lines2);
-    let mut rtk = String::new();
 
-    if diff.added == 0 && diff.removed == 0 {
-        rtk.push_str("[ok] Files are identical");
-        println!("{}", rtk);
-        timer.track(
-            &format!("diff {} {}", file1.display(), file2.display()),
-            "rtk diff",
-            &raw,
-            &rtk,
-        );
-        return Ok(());
+    if diff.changes.is_empty() {
+        return ("[ok] Files are identical\n".to_string(), 0);
     }
 
+    let mut rtk = String::new();
     rtk.push_str(&format!("{} → {}\n", file1.display(), file2.display()));
     rtk.push_str(&format!(
         "   +{} added, -{} removed, ~{} modified\n\n",
         diff.added, diff.removed, diff.modified
     ));
-
     rtk.push_str(&format_diff_changes(&diff));
-
-    print!("{}", rtk);
-    timer.track(
-        &format!("diff {} {}", file1.display(), file2.display()),
-        "rtk diff",
-        &raw,
-        &rtk,
-    );
-    Ok(())
+    (rtk, 1)
 }
 
 /// Run diff from stdin (piped command output)
@@ -62,9 +63,10 @@ pub fn run_stdin(_verbose: u8) -> Result<()> {
 
     // Parse unified diff format
     let condensed = condense_unified_diff(&input);
-    println!("{}", condensed);
+    let shown = never_worse(&input, &condensed);
+    println!("{}", shown);
 
-    timer.track("diff (stdin)", "rtk diff (stdin)", &input, &condensed);
+    timer.track("diff (stdin)", "rtk diff (stdin)", &input, shown);
 
     Ok(())
 }
@@ -305,6 +307,64 @@ mod tests {
         assert_eq!(result.added, 0);
         assert_eq!(result.removed, 0);
         assert!(result.changes.is_empty());
+    }
+
+    // --- render_file_diff (issue #2364 regression) ---
+
+    #[test]
+    fn test_render_modified_only_yaml_not_identical() {
+        // "a: 1" vs "a: 2" is classified as modified (similarity > 0.5);
+        // the identical check must not ignore modified-only diffs.
+        let (out, code) = render_file_diff(
+            Path::new("one.yaml"),
+            Path::new("two.yaml"),
+            "a: 1\n",
+            "a: 2\n",
+        );
+        assert!(
+            !out.contains("identical"),
+            "modified-only diff reported as identical:\n{}",
+            out
+        );
+        assert!(out.contains("~1 modified"));
+        assert!(out.contains("a: 1"));
+        assert!(out.contains("a: 2"));
+        assert_eq!(code, 1, "differing files must exit 1 (diff convention)");
+    }
+
+    #[test]
+    fn test_render_modified_only_json_not_identical() {
+        let (out, code) = render_file_diff(
+            Path::new("j1.json"),
+            Path::new("j2.json"),
+            "{\"a\": 1}\n",
+            "{\"a\": 2}\n",
+        );
+        assert!(
+            !out.contains("identical"),
+            "modified-only diff reported as identical:\n{}",
+            out
+        );
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn test_render_identical_files_exit_zero() {
+        let (out, code) = render_file_diff(
+            Path::new("a.yaml"),
+            Path::new("b.yaml"),
+            "a: 1\nb: 2\n",
+            "a: 1\nb: 2\n",
+        );
+        assert!(out.contains("[ok] Files are identical"));
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn test_render_added_removed_exit_one() {
+        let (out, code) = render_file_diff(Path::new("t1.txt"), Path::new("t2.txt"), "x\n", "y\n");
+        assert!(out.contains("+1 added, -1 removed"));
+        assert_eq!(code, 1);
     }
 
     // --- condense_unified_diff ---

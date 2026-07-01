@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::io::Read;
 
+use crate::core::guard::never_worse;
 use crate::core::stream::RAW_CAP;
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 
@@ -238,7 +239,8 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
     };
 
     let output = apply_filter(filter_fn, &buf);
-    print!("{}", output);
+    let shown = never_worse(&buf, &output);
+    print!("{}", shown);
     Ok(())
 }
 

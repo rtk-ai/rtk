@@ -93,9 +93,14 @@ fn canonical_key(filter_path: &Path) -> Result<String> {
 ///
 /// Priority: env var > hash match > untrusted.
 /// All errors are soft — if anything fails, returns Untrusted (fail-secure).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn check_trust(filter_path: &Path) -> Result<TrustStatus> {
-    // Fast path: env var override for CI pipelines only.
-    // Requires a known CI env var to be set to prevent .envrc injection attacks.
+    check_trust_with_content(filter_path).map(|(status, _)| status)
+}
+
+/// Reads the file once, hashes those bytes, and returns the trust status with
+/// the verified content. Content is `Some` only for `Trusted` / `EnvOverride`.
+pub fn check_trust_with_content(filter_path: &Path) -> Result<(TrustStatus, Option<String>)> {
     if std::env::var("RTK_TRUST_PROJECT_FILTERS").as_deref() == Ok("1") {
         let in_ci = std::env::var("CI").is_ok()
             || std::env::var("GITHUB_ACTIONS").is_ok()
@@ -103,12 +108,19 @@ pub fn check_trust(filter_path: &Path) -> Result<TrustStatus> {
             || std::env::var("JENKINS_URL").is_ok()
             || std::env::var("BUILDKITE").is_ok();
         if in_ci {
-            return Ok(TrustStatus::EnvOverride);
+            let content = std::fs::read_to_string(filter_path)
+                .with_context(|| format!("Failed to read filter: {}", filter_path.display()))?;
+            return Ok((TrustStatus::EnvOverride, Some(content)));
         }
         eprintln!(
             "[rtk] WARNING: RTK_TRUST_PROJECT_FILTERS=1 ignored (CI environment not detected)"
         );
     }
+
+    let bytes = match std::fs::read(filter_path) {
+        Ok(b) => b,
+        Err(_) => return Ok((TrustStatus::Untrusted, None)),
+    };
 
     let key = canonical_key(filter_path)?;
     let store = match read_store() {
@@ -124,19 +136,30 @@ pub fn check_trust(filter_path: &Path) -> Result<TrustStatus> {
 
     let entry = match store.trusted.get(&key) {
         Some(e) => e,
-        None => return Ok(TrustStatus::Untrusted),
+        None => return Ok((TrustStatus::Untrusted, None)),
     };
 
-    let actual_hash = integrity::compute_hash(filter_path)
-        .with_context(|| format!("Failed to hash: {}", filter_path.display()))?;
+    let actual_hash = integrity::compute_hash_bytes(&bytes);
 
     if actual_hash == entry.sha256 {
-        Ok(TrustStatus::Trusted)
+        match String::from_utf8(bytes) {
+            Ok(content) => Ok((TrustStatus::Trusted, Some(content))),
+            Err(_) => {
+                eprintln!(
+                    "[rtk] WARNING: trusted filter {} is not valid UTF-8 — treating as untrusted",
+                    filter_path.display()
+                );
+                Ok((TrustStatus::Untrusted, None))
+            }
+        }
     } else {
-        Ok(TrustStatus::ContentChanged {
-            expected: entry.sha256.clone(),
-            actual: actual_hash,
-        })
+        Ok((
+            TrustStatus::ContentChanged {
+                expected: entry.sha256.clone(),
+                actual: actual_hash,
+            },
+            None,
+        ))
     }
 }
 

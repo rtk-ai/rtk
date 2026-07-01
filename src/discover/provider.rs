@@ -1,6 +1,6 @@
 //! Reads Claude Code session logs from disk and streams their command history.
 
-use crate::hooks::constants::CLAUDE_DIR;
+use crate::hooks::init::resolve_claude_dir;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
@@ -44,12 +44,8 @@ pub struct ClaudeProvider;
 impl ClaudeProvider {
     /// Get the base directory for Claude Code projects.
     fn projects_dir() -> Result<PathBuf> {
-        let home = dirs::home_dir().context("could not determine home directory")?;
-        Ok(Self::projects_dir_for_home(&home))
-    }
-
-    fn projects_dir_for_home(home: &Path) -> PathBuf {
-        home.join(CLAUDE_DIR).join("projects")
+        let claude_dir = resolve_claude_dir().context("could not determine claude directory")?;
+        Ok(claude_dir.join("projects"))
     }
 
     fn discover_sessions_in_projects_dir(
@@ -435,7 +431,10 @@ mod tests {
     #[test]
     fn test_discover_sessions_missing_projects_dir_returns_empty() {
         let temp_home = tempfile::tempdir().unwrap();
-        let missing_projects_dir = temp_home.path().join(CLAUDE_DIR).join("projects");
+        let missing_projects_dir = temp_home
+            .path()
+            .join(crate::hooks::constants::CLAUDE_DIR)
+            .join("projects");
 
         let sessions = ClaudeProvider::discover_sessions_in_projects_dir(
             &missing_projects_dir,

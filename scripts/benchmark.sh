@@ -207,10 +207,19 @@ bench "git show" "git show HEAD --stat 2>/dev/null || true" "$RTK git show HEAD 
 # grep
 # ===================
 section "grep"
-bench "grep fn" "grep -rn 'fn ' src/ || true" "$RTK grep 'fn ' src/"
-bench "grep struct" "grep -rn 'struct ' src/ || true" "$RTK grep 'struct ' src/"
-bench "grep -l 40" "grep -rn 'fn ' src/ || true" "$RTK grep 'fn ' src/ -l 40"
-bench "grep -c" "grep -ron 'fn ' src/ || true" "$RTK grep 'fn ' src/ -c"
+bench "grep fn" "grep -rn 'fn ' src/ || true" "$RTK grep -rn 'fn ' src/"
+bench "grep struct" "grep -rn 'struct ' src/ || true" "$RTK grep -rn 'struct ' src/"
+bench "grep -l 40" "grep -rn 'fn ' src/ || true" "$RTK grep -rn 'fn ' src/ -l 40"
+bench "grep -c" "grep -ron 'fn ' src/ || true" "$RTK grep -rc 'fn ' src/"
+
+# ===================
+# rg (native ripgrep, recursive by default, same output filter)
+# ===================
+section "rg"
+bench "rg fn" "rg -n 'fn ' src/ || true" "$RTK rg 'fn ' src/"
+bench "rg struct" "rg -n 'struct ' src/ || true" "$RTK rg 'struct ' src/"
+bench "rg -l files" "rg -l 'fn ' src/ || true" "$RTK rg -l 'fn ' src/"
+bench "rg -c count" "rg -c 'fn ' src/ || true" "$RTK rg -c 'fn ' src/"
 
 # ===================
 # json
@@ -248,7 +257,6 @@ bench "deps" "cat Cargo.toml" "$RTK deps"
 section "env"
 bench "env" "env" "$RTK env"
 bench "env -f PATH" "env | grep PATH" "$RTK env -f PATH"
-bench "env --show-all" "env" "$RTK env --show-all"
 
 # ===================
 # err

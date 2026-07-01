@@ -471,8 +471,9 @@ fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> {
 /// being run, only *how* it's run — e.g. `docker exec mycontainer`,
 /// `direnv exec .`, `poetry run`, or `bundle exec`. Stripping it lets the inner
 /// command match a filter; the prefix is then re-prepended to the rewrite. The
-/// built-in [`SHELL_PREFIX_BUILTINS`] (`noglob`, `command`, `builtin`, `exec`,
-/// `nocorrect`) are always applied in addition to user-configured prefixes.
+/// built-in [`BUILTIN_TRANSPARENT_PREFIXES`] (`uv run`, `noglob`, `command`,
+/// `builtin`, `exec`, `nocorrect`) are always applied in addition to
+/// user-configured prefixes.
 ///
 /// Matching is strict: a configured prefix `"foo bar"` matches a command that
 /// starts with `"foo bar "` (or strictly equals `"foo bar"`), not anything
@@ -650,9 +651,16 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
     None
 }
 
-/// Shell prefix builtins that modify how the shell runs a command
-/// but don't change which command runs. Strip before routing, re-prepend after.
-const SHELL_PREFIX_BUILTINS: &[&str] = &["noglob", "command", "builtin", "exec", "nocorrect"];
+/// Built-in transparent wrappers that use the same strip/recurse/re-prepend
+/// contract as user-configured `transparent_prefixes`.
+const BUILTIN_TRANSPARENT_PREFIXES: &[&str] = &[
+    "uv run",
+    "noglob",
+    "command",
+    "builtin",
+    "exec",
+    "nocorrect",
+];
 
 const MAX_PREFIX_DEPTH: usize = 10;
 
@@ -752,7 +760,7 @@ fn rewrite_segment_inner(
         return Some(format!("{}{}", env_prefix, rewritten));
     }
 
-    for &prefix in SHELL_PREFIX_BUILTINS {
+    for &prefix in BUILTIN_TRANSPARENT_PREFIXES {
         if let Some(rest) = strip_word_prefix(trimmed, prefix) {
             if rest.is_empty() {
                 return None;
@@ -1417,7 +1425,7 @@ mod tests {
     fn test_rewrite_rg_pattern() {
         assert_eq!(
             rewrite_command_no_prefixes("rg \"fn main\"", &[]),
-            Some("rtk grep \"fn main\"".into())
+            Some("rtk rg \"fn main\"".into())
         );
     }
 
@@ -2327,6 +2335,54 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_uv_run_pytest() {
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run pytest tests/", &[]),
+            Some("uv run rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_uv_run_pytest() {
+        assert_eq!(
+            rewrite_command_no_prefixes("PYTHONPATH=. uv run pytest tests/", &[]),
+            Some("PYTHONPATH=. uv run rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_python_m_pytest() {
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run python -m pytest -q", &[]),
+            Some("uv run rtk pytest -q".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_supported_inner_command() {
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run ruff check .", &[]),
+            Some("uv run rtk ruff check .".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_options_are_not_parsed() {
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run --unknown pytest tests/", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run -m pytest -q", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run --module pytest -q", &[]),
+            None
+        );
+    }
+
+    #[test]
     fn test_rewrite_pip_list() {
         assert_eq!(
             rewrite_command_no_prefixes("pip list", &[]),
@@ -2348,6 +2404,49 @@ mod tests {
             rewrite_command_no_prefixes("uv pip list", &[]),
             Some("rtk pip list".into())
         );
+    }
+
+    #[test]
+    fn test_classify_uv_run() {
+        let commands = vec![
+            "uv run python script.py",
+            "uv run pytest",
+            "uv run ruff check",
+            "uv run --project backend --extra dev python script.py",
+        ];
+
+        for command in commands {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk uv",
+                        ..
+                    }
+                ),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_uv_run() {
+        let commands = vec![
+            "uv run python script.py",
+            "uv run pytest",
+            "uv run ruff check",
+            "uv run --project backend --extra dev python script.py",
+        ];
+
+        for command in commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(format!("rtk {command}")),
+                "Failed for command: {}",
+                command
+            );
+        }
     }
 
     // --- Go tooling ---
