@@ -425,7 +425,6 @@ jobs:
         run: choco pack packaging/chocolatey/rtk.nuspec --version=${{ steps.version.outputs.version }}
 
       - name: Push to Chocolatey Community
-        if: ${{ secrets.CHOCOLATEY_API_KEY }}
         env:
           CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
         run: choco push rtk.${{ steps.version.outputs.version }}.nupkg --source https://push.chocolatey.org/ --api-key "$env:CHOCOLATEY_API_KEY"
