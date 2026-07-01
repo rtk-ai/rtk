@@ -16,11 +16,12 @@ use cmds::js::{
     vitest_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
+use cmds::powershell;
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
+    deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, search,
     summary, tree, wc_cmd,
 };
 
@@ -398,6 +399,50 @@ enum Commands {
     /// Word/line/byte count with compact output (strips paths and padding)
     Wc {
         /// Arguments passed to wc (files, flags like -l, -w, -c)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// PowerShell Get-ChildItem with compact output (routes to ls filter)
+    #[command(
+        name = "Get-ChildItem",
+        aliases = ["get-childitem", "gci"]
+    )]
+    GetChildItem {
+        /// PowerShell-style arguments (e.g. -Force, -Recurse, -Path)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// PowerShell Get-Content with compact output (routes to read filter)
+    #[command(
+        name = "Get-Content",
+        aliases = ["get-content", "gc"]
+    )]
+    GetContent {
+        /// PowerShell-style arguments (e.g. -Tail, -TotalCount, -Path)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// PowerShell Select-String with compact output (routes to grep filter)
+    #[command(
+        name = "Select-String",
+        aliases = ["select-string", "sls"]
+    )]
+    SelectString {
+        /// PowerShell-style arguments (e.g. -Pattern, -Path, -SimpleMatch)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// PowerShell Measure-Object with compact output (routes to wc filter)
+    #[command(
+        name = "Measure-Object",
+        aliases = ["measure-object", "mo"]
+    )]
+    MeasureObject {
+        /// PowerShell-style arguments (e.g. -Line, -Word, -Character)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1496,6 +1541,7 @@ fn run_cli() -> Result<i32> {
 
     let code = match cli.command {
         Commands::Ls { args } => ls::run(&args, cli.verbose)?,
+        Commands::GetChildItem { args } => powershell::run_get_child_item(&args, cli.verbose)?,
 
         Commands::Tree { args } => tree::run(&args, cli.verbose)?,
 
@@ -1506,38 +1552,16 @@ fn run_cli() -> Result<i32> {
             max_lines,
             tail_lines,
             line_numbers,
-        } => {
-            let mut had_error = false;
-            let mut stdin_seen = false;
-            for file in &files {
-                let result = if file == Path::new("-") {
-                    if stdin_seen {
-                        eprintln!("rtk: warning: stdin specified more than once");
-                        continue;
-                    }
-                    stdin_seen = true;
-                    read::run_stdin(level, max_lines, tail_lines, line_numbers, cli.verbose)
-                } else {
-                    read::run(
-                        file,
-                        level,
-                        max_lines,
-                        tail_lines,
-                        line_numbers,
-                        cli.verbose,
-                    )
-                };
-                if let Err(e) = result {
-                    eprintln!("cat: {}: {}", file.display(), e.root_cause());
-                    had_error = true;
-                }
-            }
-            if had_error {
-                1
-            } else {
-                0
-            }
-        }
+        } => powershell::run_read_command(
+            &files,
+            level,
+            max_lines,
+            tail_lines,
+            line_numbers,
+            cli.verbose,
+        )?,
+
+        Commands::GetContent { args } => powershell::run_get_content(&args, cli.verbose)?,
 
         Commands::Smart {
             file,
@@ -1877,6 +1901,7 @@ fn run_cli() -> Result<i32> {
         Commands::Rg { extra_args } => {
             search::run(search::Engine::Rg, 80, 200, false, &extra_args, cli.verbose)?
         }
+        Commands::SelectString { args } => powershell::run_select_string(&args, cli.verbose)?,
 
         Commands::Init {
             global,
@@ -1993,6 +2018,7 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
+        Commands::MeasureObject { args } => powershell::run_measure_object(&args, cli.verbose)?,
 
         Commands::Gain {
             project, // added
@@ -2558,8 +2584,10 @@ fn is_operational_command(cmd: &Commands) -> bool {
     matches!(
         cmd,
         Commands::Ls { .. }
+            | Commands::GetChildItem { .. }
             | Commands::Tree { .. }
             | Commands::Read { .. }
+            | Commands::GetContent { .. }
             | Commands::Smart { .. }
             | Commands::Git { .. }
             | Commands::Gh { .. }
@@ -2579,6 +2607,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Oc { .. }
             | Commands::Summary { .. }
             | Commands::Grep { .. }
+            | Commands::SelectString { .. }
             | Commands::Rg { .. }
             | Commands::Wget { .. }
             | Commands::Vitest { .. }
@@ -2601,6 +2630,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
+            | Commands::MeasureObject { .. }
     )
 }
 
@@ -3188,6 +3218,47 @@ mod tests {
                 }
                 _ => panic!("expected Rewrite command"),
             }
+        }
+    }
+
+    #[test]
+    fn test_powershell_alias_get_child_item() {
+        let cli = Cli::try_parse_from(["rtk", "get-childitem", "-Force", "C:\\src"]).unwrap();
+        match cli.command {
+            Commands::GetChildItem { args } => assert_eq!(args, vec!["-Force", "C:\\src"]),
+            other => panic!("expected GetChildItem command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_powershell_alias_get_content() {
+        let cli = Cli::try_parse_from(["rtk", "get-content", "README.md"]).unwrap();
+        match cli.command {
+            Commands::GetContent { args } => {
+                assert_eq!(args, vec!["README.md"]);
+            }
+            other => panic!("expected GetContent command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_powershell_alias_select_string() {
+        let cli = Cli::try_parse_from(["rtk", "select-string", "-Pattern", "TODO", "src/main.rs"])
+            .unwrap();
+        match cli.command {
+            Commands::SelectString { args } => {
+                assert_eq!(args, vec!["-Pattern", "TODO", "src/main.rs"]);
+            }
+            other => panic!("expected SelectString command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_powershell_alias_measure_object() {
+        let cli = Cli::try_parse_from(["rtk", "measure-object", "-Line"]).unwrap();
+        match cli.command {
+            Commands::MeasureObject { args } => assert_eq!(args, vec!["-Line"]),
+            other => panic!("expected MeasureObject command, got {other:?}"),
         }
     }
 

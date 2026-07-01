@@ -354,6 +354,11 @@ rtk cargo test
 rtk git status
 ```
 
+Common PowerShell inspection commands can use RTK's existing filters through
+PowerShell-style aliases, including `Get-ChildItem`/`get-childitem`,
+`Get-Content`/`get-content`, `Select-String`/`select-string`, and
+`Measure-Object`/`measure-object`.
+
 **Important**: Do not double-click `rtk.exe` — it is a CLI tool that prints usage and exits immediately. Always run it from a terminal (Command Prompt, PowerShell, or Windows Terminal).
 
 | Feature | WSL | Native Windows |
