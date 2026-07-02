@@ -86,11 +86,23 @@ const NPM_SUBCOMMANDS: &[&str] = &[
     "sbom",
     "shrinkwrap",
     "unstar",
+    // Short aliases (npm help <alias> confirms these)
+    "add",
+    "x",
+    "ln",
+    "un",
+    "r",
+    "s",
+    "se",
+    "rb",
+    "ddp",
+    "it",
+    "cit",
 ];
 
-pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
-    // Determine if this is "npm run <script>" or another npm subcommand (install, list, etc.)
-    // Only inject "run" when args look like a script name, not a known npm subcommand.
+/// Build the effective npm args, injecting "run" when the first arg looks
+/// like a script name rather than a known npm subcommand or flag.
+fn build_effective_npm_args(args: &[String]) -> Vec<String> {
     let first_arg = args.first().map(|s| s.as_str());
     let is_run_explicit = first_arg == Some("run");
     let is_npm_subcommand = first_arg
@@ -101,11 +113,14 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
     if is_run_explicit || is_npm_subcommand {
         effective_args.extend_from_slice(args);
     } else {
-        // "rtk npm build" → "npm run build" (assume script name)
         effective_args.push("run".to_string());
         effective_args.extend_from_slice(args);
     }
+    effective_args
+}
 
+pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
+    let effective_args = build_effective_npm_args(args);
     run_filtered("npm", &effective_args, verbose, skip_env)
 }
 
@@ -205,63 +220,50 @@ npm notice
         assert!(result.contains("Build completed"));
     }
 
-    #[test]
-    fn test_npm_subcommand_routing() {
-        // Uses the shared NPM_SUBCOMMANDS constant — no drift between prod and test
-        fn needs_run_injection(args: &[&str]) -> bool {
-            let first = args.first().copied();
-            let is_run_explicit = first == Some("run");
-            let is_subcommand = first
-                .map(|a| NPM_SUBCOMMANDS.contains(&a) || a.starts_with('-'))
-                .unwrap_or(false);
-            !is_run_explicit && !is_subcommand
-        }
-
-        // Known subcommands should NOT get "run" injected
-        for subcmd in NPM_SUBCOMMANDS {
-            assert!(
-                !needs_run_injection(&[subcmd]),
-                "'npm {}' should NOT inject 'run'",
-                subcmd
-            );
-        }
-
-        // Script names SHOULD get "run" injected
-        for script in &["build", "dev", "lint", "typecheck", "deploy"] {
-            assert!(
-                needs_run_injection(&[script]),
-                "'npm {}' SHOULD inject 'run'",
-                script
-            );
-        }
-
-        // Flags should NOT get "run" injected
-        assert!(!needs_run_injection(&["--version"]));
-        assert!(!needs_run_injection(&["-h"]));
-
-        // Explicit "run" should NOT inject another "run"
-        assert!(!needs_run_injection(&["run", "build"]));
+    fn args(strs: &[&str]) -> Vec<String> {
+        strs.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
-    fn test_hyphenated_subcommands_no_run_injection() {
-        fn needs_run_injection(arg: &str) -> bool {
-            let is_run_explicit = arg == "run";
-            let is_subcommand = NPM_SUBCOMMANDS.contains(&arg) || arg.starts_with('-');
-            !is_run_explicit && !is_subcommand
+    fn test_npm_subcommand_routing() {
+        for subcmd in NPM_SUBCOMMANDS {
+            let result = build_effective_npm_args(&args(&[subcmd]));
+            assert_eq!(
+                result[0], *subcmd,
+                "'npm {subcmd}' should NOT inject 'run'"
+            );
         }
 
-        for subcmd in &[
-            "find-dupes",
-            "help-search",
-            "install-ci-test",
-            "install-test",
-            "run-script",
-            "dist-tag",
-        ] {
-            assert!(
-                !needs_run_injection(subcmd),
-                "'npm {subcmd}' incorrectly got 'run' injected"
+        for script in &["build", "dev", "lint", "typecheck", "deploy"] {
+            let result = build_effective_npm_args(&args(&[script]));
+            assert_eq!(
+                result[0], "run",
+                "'npm {script}' SHOULD inject 'run'"
+            );
+            assert_eq!(result[1], *script);
+        }
+
+        // Flags should NOT get "run" injected
+        assert_eq!(build_effective_npm_args(&args(&["--version"]))[0], "--version");
+        assert_eq!(build_effective_npm_args(&args(&["-h"]))[0], "-h");
+    }
+
+    #[test]
+    fn test_npm_run_no_double_injection() {
+        let result = build_effective_npm_args(&args(&["run", "build"]));
+        assert_eq!(result, vec!["run", "build"]);
+
+        let result = build_effective_npm_args(&args(&["run"]));
+        assert_eq!(result, vec!["run"]);
+    }
+
+    #[test]
+    fn test_npm_aliases_no_run_injection() {
+        for alias in &["add", "x", "ln", "un", "r", "s", "se", "rb", "ddp", "it", "cit"] {
+            let result = build_effective_npm_args(&args(&[alias]));
+            assert_eq!(
+                result[0], *alias,
+                "'npm {alias}' incorrectly got 'run' injected"
             );
         }
     }
