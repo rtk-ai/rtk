@@ -76,16 +76,14 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let is_tty = std::io::stdout().is_terminal();
     let filtered = filter_curl_output(&raw, is_tty);
 
-    println!("{}", filtered.content);
-    if let Some(hint) = &filtered.tee_hint {
-        println!("{}", hint);
-    }
+    let shown =
+        crate::core::runner::emit_guarded(&filtered.content, filtered.tee_hint.as_deref(), &raw);
 
     timer.track(
         &format!("curl {}", args.join(" ")),
         &format!("rtk curl {}", args.join(" ")),
         &raw,
-        &filtered.content,
+        &shown,
     );
 
     Ok(exit_code)

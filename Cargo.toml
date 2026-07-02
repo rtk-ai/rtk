@@ -12,6 +12,13 @@ readme = "README.md"
 keywords = ["cli", "llm", "token", "filter", "productivity"]
 categories = ["command-line-utilities", "development-tools"]
 
+# Binary is named `rtk` (not the package name `rtkx`) so it shadows the brew
+# `rtk` the Claude Code hook invokes, and so upstream tests using
+# CARGO_BIN_EXE_rtk keep resolving after the rtkx rebrand.
+[[bin]]
+name = "rtk"
+path = "src/main.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 anyhow = "1.0"

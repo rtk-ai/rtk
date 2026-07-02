@@ -7,8 +7,11 @@
 
 use anyhow::{Context, Result};
 use regex::Regex;
+use serde_json::Value;
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
 
 /// Truncates a string to `max_len` characters, appending `...` if needed.
 ///
@@ -355,6 +358,62 @@ pub fn resolved_command(name: &str) -> Command {
     }
 }
 
+/// Return Composer bin directories in precedence order.
+///
+/// Composer allows overriding the default `vendor/bin` via `COMPOSER_BIN_DIR`
+/// or `composer.json` `config.bin-dir`. Keep the default as a fallback so we
+/// continue recognizing the common layout even when the repo is not configured.
+pub fn composer_bin_dirs() -> Vec<PathBuf> {
+    // Resolution depends only on the process's env + cwd composer.json, both
+    // constant for a single rtk invocation. The rewrite hot path queries this
+    // several times per command segment, so read the file once and cache.
+    static CACHE: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let env_bin_dir = std::env::var("COMPOSER_BIN_DIR").ok();
+            let composer_json = fs::read_to_string("composer.json").ok();
+            composer_bin_dirs_from(env_bin_dir.as_deref(), composer_json.as_deref())
+        })
+        .clone()
+}
+
+pub fn composer_tool_paths(tool: &str) -> Vec<PathBuf> {
+    composer_bin_dirs()
+        .into_iter()
+        .map(|dir| dir.join(tool))
+        .collect()
+}
+
+fn composer_bin_dirs_from(env_bin_dir: Option<&str>, composer_json: Option<&str>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Some(dir) = env_bin_dir
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| composer_json.and_then(read_composer_bin_dir))
+    {
+        dirs.push(dir);
+    }
+
+    let default_dir = PathBuf::from("vendor/bin");
+    if !dirs.iter().any(|dir| dir == &default_dir) {
+        dirs.push(default_dir);
+    }
+
+    dirs
+}
+
+fn read_composer_bin_dir(composer_json: &str) -> Option<PathBuf> {
+    let parsed: Value = serde_json::from_str(composer_json).ok()?;
+    let bin_dir = parsed.get("config")?.get("bin-dir")?.as_str()?.trim();
+    if bin_dir.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(bin_dir))
+    }
+}
+
 /// Check if a tool exists on PATH (PATHEXT-aware on Windows).
 ///
 /// Replaces manual `Command::new("which").arg(tool)` checks that fail on Windows.
@@ -426,6 +485,32 @@ mod tests {
         assert_eq!(truncate("abc", 3), "abc");
         // When string is longer and max_len is exactly 3, return "..."
         assert_eq!(truncate("hello world", 3), "...");
+    }
+
+    #[test]
+    fn test_composer_bin_dirs_use_default_when_unconfigured() {
+        assert_eq!(
+            composer_bin_dirs_from(None, None),
+            vec![PathBuf::from("vendor/bin")]
+        );
+    }
+
+    #[test]
+    fn test_composer_bin_dirs_prefer_env_override() {
+        let composer_json = r#"{"config":{"bin-dir":"tools/bin"}}"#;
+        assert_eq!(
+            composer_bin_dirs_from(Some("custom/bin"), Some(composer_json)),
+            vec![PathBuf::from("custom/bin"), PathBuf::from("vendor/bin")]
+        );
+    }
+
+    #[test]
+    fn test_composer_bin_dirs_read_composer_config() {
+        let composer_json = r#"{"config":{"bin-dir":"tools/bin"}}"#;
+        assert_eq!(
+            composer_bin_dirs_from(None, Some(composer_json)),
+            vec![PathBuf::from("tools/bin"), PathBuf::from("vendor/bin")]
+        );
     }
 
     #[test]

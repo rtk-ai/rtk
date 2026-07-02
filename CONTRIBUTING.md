@@ -46,6 +46,8 @@ The LLM doesn't know RTK is involved for which commands, hooks rewrite commands 
 
 Don't invent new output formats. Don't add RTK-specific headers or markers in the default output. The filtered output should be indistinguishable from "a shorter version of the real command."
 
+Enforce it with `guard::never_worse(raw, filtered)` — print and track the value it returns (use `runner::emit_guarded(filtered, hint, raw)` when appending a tee hint). It guarantees RTK never emits more tokens than the raw command, down to emitting nothing when the command produced nothing.
+
 ### Never Block
 
 If a filter fails, fall back to raw output. RTK should never prevent a command from executing or producing output. Better to pass through unfiltered than to error out. Same for hooks: exit 0 on all error paths so the agent's command runs unmodified.

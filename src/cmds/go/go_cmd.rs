@@ -1,5 +1,6 @@
 //! Filters Go command output — test results, build errors, vet warnings.
 
+use crate::core::guard::never_worse;
 use crate::core::runner;
 use crate::core::tracking;
 use crate::core::truncate::CAP_ERRORS;
@@ -280,7 +281,8 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
     };
 
     let filtered = golangci_cmd::filter_golangci_json(json_output, version);
-    println!("{}", filtered);
+    let shown = never_worse(&raw, &filtered);
+    println!("{}", shown);
 
     if !stderr.trim().is_empty() && verbose > 0 {
         eprintln!("{}", stderr.trim());
@@ -290,7 +292,7 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
         "go tool golangci-lint",
         "rtk go tool golangci-lint",
         &raw,
-        &filtered,
+        shown,
     );
 
     let exit_code = exit_code_from_output(&output, "go tool golangci-lint");

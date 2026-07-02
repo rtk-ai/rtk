@@ -541,6 +541,17 @@ pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
     })
 }
 
+/// Like [`exec_capture`] but inherits stdin so a wrapped engine can read a piped stdin.
+pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
+    cmd.stdin(Stdio::inherit());
+    let output = cmd.output().context("Failed to execute command")?;
+    Ok(CaptureResult {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: status_to_exit_code(output.status),
+    })
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
