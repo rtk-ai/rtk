@@ -1,11 +1,11 @@
 [filters.systemctl-status]
-description = "Compact systemctl status output — strip blank lines, limit to 20 lines"
-match_command = "^systemctl\\s+status\\b"
+description = "Compact systemctl output — strip blank lines, cap verbose unit output"
+match_command = "^systemctl\\b"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",
 ]
-max_lines = 20
+max_lines = 40
 
 [[tests.systemctl-status]]
 name = "verbose unit status stripped of blank lines"
