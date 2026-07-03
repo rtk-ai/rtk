@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Example Article Page</title>
+    <meta name="description" content="A fixture page shaped like a typical blog/docs article, used to pin the #1426 token-savings floor for `rtk web`.">
+    <style>
+        :root { --bg: #ffffff; --fg: #111111; --accent: #3366cc; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: var(--fg); background: var(--bg); }
+        header.site-header { display: flex; justify-content: space-between; align-items: center; padding: 1rem 2rem; border-bottom: 1px solid #eee; }
+        nav.main-nav ul { display: flex; list-style: none; gap: 1.5rem; }
+        nav.main-nav a { text-decoration: none; color: var(--fg); font-weight: 600; }
+        main { max-width: 720px; margin: 0 auto; padding: 2rem; }
+        article h1 { font-size: 2rem; margin-bottom: 1rem; }
+        article p { line-height: 1.6; margin-bottom: 1rem; }
+        aside.sidebar { float: right; width: 240px; padding: 1rem; background: #f7f7f7; }
+        footer.site-footer { padding: 2rem; border-top: 1px solid #eee; color: #666; font-size: 0.85rem; }
+        .cta-button { display: inline-block; padding: 0.5rem 1rem; background: var(--accent); color: #fff; border-radius: 4px; }
+    </style>
+    <script>
+        window.analyticsQueue = window.analyticsQueue || [];
+        function trackEvent(category, action, label) {
+            window.analyticsQueue.push({ category: category, action: action, label: label, ts: Date.now() });
+            if (window.analyticsQueue.length > 50) {
+                fetch('/collect', { method: 'POST', body: JSON.stringify(window.analyticsQueue) });
+                window.analyticsQueue = [];
+            }
+        }
+        document.addEventListener('DOMContentLoaded', function () {
+            document.querySelectorAll('a').forEach(function (link) {
+                link.addEventListener('click', function () {
+                    trackEvent('outbound', 'click', link.getAttribute('href'));
+                });
+            });
+            var lazyImages = document.querySelectorAll('img[data-src]');
+            lazyImages.forEach(function (img) {
+                img.setAttribute('src', img.getAttribute('data-src'));
+                img.removeAttribute('data-src');
+            });
+        });
+    </script>
+    <script async src="https://cdn.example.com/vendor/tracker.min.js"></script>
+    <noscript>You need JavaScript enabled to see some features of this site.</noscript>
+</head>
+<body>
+    <header class="site-header">
+        <div class="logo">Example Docs</div>
+        <nav class="main-nav">
+            <ul>
+                <li><a href="/home">Home</a></li>
+                <li><a href="/docs">Docs</a></li>
+                <li><a href="/blog">Blog</a></li>
+                <li><a href="/pricing">Pricing</a></li>
+                <li><a href="/about">About</a></li>
+                <li><a href="/contact">Contact</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <article>
+            <h1>Article Heading</h1>
+            <p>This is the first paragraph of the real article content. It explains the topic in plain language so a reader (or a language model) can understand the point of the page without wading through markup.</p>
+            <p>Here is a second paragraph with a link to more information: <a href="https://example.com/docs/reference/very/long/canonical/path/that/repeats/below">read the reference docs</a>. The same link appears again later in the article.</p>
+            <h2>A Subsection</h2>
+            <p>Some supporting detail goes here, including a repeated reference to <a href="https://example.com/docs/reference/very/long/canonical/path/that/repeats/below">the same reference docs</a> so the link-deduplication path is exercised too.</p>
+            <ul>
+                <li>First supporting point</li>
+                <li>Second supporting point</li>
+                <li>Third supporting point</li>
+            </ul>
+            <pre><code>fn example() -&gt; i32 {
+    42
+}</code></pre>
+            <p>A closing paragraph wraps up the article and invites the reader to take an action.</p>
+            <a class="cta-button" href="/signup">Get started</a>
+        </article>
+    </main>
+
+    <aside class="sidebar">
+        <h3>Related links</h3>
+        <ul>
+            <li><a href="/related/one">Related article one</a></li>
+            <li><a href="/related/two">Related article two</a></li>
+            <li><a href="/related/three">Related article three</a></li>
+        </ul>
+    </aside>
+
+    <footer class="site-footer">
+        <p>Copyright 2026 Example Docs. All rights reserved.</p>
+        <nav>
+            <ul>
+                <li><a href="/privacy">Privacy Policy</a></li>
+                <li><a href="/terms">Terms of Service</a></li>
+                <li><a href="/security">Security</a></li>
+                <li><a href="/sitemap.xml">Sitemap</a></li>
+            </ul>
+        </nav>
+    </footer>
+    <script>
+        trackEvent('page', 'view', window.location.pathname);
+    </script>
+</body>
+</html>

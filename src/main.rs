@@ -7,7 +7,7 @@ mod learn;
 mod parser;
 
 // Re-export command modules for routing
-use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, web_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
@@ -557,6 +557,13 @@ enum Commands {
     /// Curl with auto-JSON detection and schema output
     Curl {
         /// Curl arguments (URL + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Fetch a URL and convert HTML responses to compact Markdown (#1426)
+    Web {
+        /// URL to fetch (plus optional curl-compatible flags)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2180,6 +2187,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Curl { args } => curl_cmd::run(&args, cli.verbose)?,
 
+        Commands::Web { args } => web_cmd::run(&args, cli.verbose)?,
+
         Commands::Discover {
             project,
             limit,
@@ -2665,6 +2674,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Npm { .. }
             | Commands::Npx { .. }
             | Commands::Curl { .. }
+            | Commands::Web { .. }
             | Commands::Ruff { .. }
             | Commands::Pytest { .. }
             | Commands::Php { .. }
@@ -3047,6 +3057,7 @@ mod tests {
             "npm",
             "npx",
             "curl",
+            "web",
             "ruff",
             "pytest",
             "mypy",
