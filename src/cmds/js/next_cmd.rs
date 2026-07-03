@@ -20,7 +20,16 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     cmd.arg("build");
 
-    for arg in args {
+    // Strip a leading "build" from args so that `rtk next build` doesn't
+    // become `next build build` (the second "build" is treated as a
+    // directory by Next.js and causes a spurious exit 1).
+    let filtered_args = if args.first().map(|a| a.as_str()) == Some("build") {
+        &args[1..]
+    } else {
+        args
+    };
+
+    for arg in filtered_args {
         cmd.arg(arg);
     }
 
@@ -32,7 +41,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "next build",
-        &args.join(" "),
+        &filtered_args.join(" "),
         filter_next_build,
         runner::RunOptions::default(),
     )
