@@ -16,6 +16,7 @@ use crate::core::runner;
 use crate::core::tracking;
 use crate::core::utils::{exit_code_from_output, resolved_command};
 use anyhow::{Context, Result};
+use encoding_rs::{Encoding, UTF_8, WINDOWS_1252};
 use scraper::{ElementRef, Html, Node, Selector};
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -64,26 +65,45 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         return Ok(exit_code);
     }
 
-    // Binary detection first: from_utf8_lossy would corrupt any non-UTF-8
-    // payload (images, archives, ...) by replacing invalid bytes with U+FFFD.
-    if is_binary(&output.stdout) {
-        std::io::stdout()
-            .write_all(&output.stdout)
-            .context("Failed to write response to stdout")?;
-        timer.track_passthrough(&format!("curl {}", url), &format!("rtk web {}", url));
+    let headers = std::fs::read_to_string(header_file.path()).unwrap_or_default();
+
+    // HTML detection must happen BEFORE the binary check: a legacy-charset
+    // page (windows-1250/1252, shift_jis, ...) contains non-UTF-8 bytes and
+    // would otherwise be misclassified as binary and dumped raw — silently
+    // producing zero savings on exactly the pages this command exists for.
+    // The sniff prefix is lossy-decoded, which is safe because every signal
+    // it looks for (doctype, `<html`, `charset=`) is pure ASCII and legacy
+    // encodings are ASCII-compatible.
+    let sniff_prefix = String::from_utf8_lossy(&output.stdout[..output.stdout.len().min(1024)]);
+
+    if !looks_like_html(&headers, &sniff_prefix) {
+        // Non-goal for v1 (#1426): only HTML is transformed. JSON, XML, plain
+        // text and binary all pass through byte-for-byte. Binary must bypass
+        // the lossy conversion that would corrupt it with U+FFFD.
+        if is_binary(&output.stdout) {
+            std::io::stdout()
+                .write_all(&output.stdout)
+                .context("Failed to write response to stdout")?;
+            timer.track_passthrough(&format!("curl {}", url), &format!("rtk web {}", url));
+            return Ok(exit_code);
+        }
+        let raw = String::from_utf8_lossy(&output.stdout).into_owned();
+        let shown = runner::emit_guarded(&raw, None, &raw);
+        timer.track(
+            &format!("curl {}", url),
+            &format!("rtk web {}", url),
+            &raw,
+            &shown,
+        );
         return Ok(exit_code);
     }
 
-    let raw = String::from_utf8_lossy(&output.stdout).into_owned();
-    let headers = std::fs::read_to_string(header_file.path()).unwrap_or_default();
-
-    // Non-goal for v1 (#1426): only HTML is transformed. JSON, XML, plain
-    // text and anything else passes through byte-for-byte.
-    let content = if looks_like_html(&headers, &raw) {
-        html_to_markdown(&raw)
-    } else {
-        raw.clone()
-    };
+    let encoding = detect_encoding(&headers, &output.stdout);
+    // decode() never fails — undecodable byte sequences become U+FFFD — and
+    // handles a BOM (which overrides the detected label, per the standard).
+    let (decoded, _, _) = encoding.decode(&output.stdout);
+    let raw = decoded.into_owned();
+    let content = html_to_markdown(&raw);
 
     // `emit_guarded` applies the same never-worse safety net `curl_cmd` uses
     // (see `core::guard::never_worse`): if the Markdown conversion ever came
@@ -151,6 +171,51 @@ fn last_header_value(headers: &str, name: &str) -> Option<String> {
             .starts_with(&prefix)
             .then(|| line[prefix.len()..].trim().to_string())
     })
+}
+
+/// Resolves the encoding to decode an HTML body with, in standard priority
+/// order: `charset=` in the Content-Type header, then a `<meta charset>` /
+/// `http-equiv` declaration in the first 1024 bytes (a simplified version of
+/// the WHATWG prescan), then UTF-8 if the body validates as it, and finally
+/// windows-1252 — the Encoding Standard's fallback for undeclared legacy
+/// content, matching what browsers do.
+fn detect_encoding(headers: &str, body: &[u8]) -> &'static Encoding {
+    let header_charset = last_header_value(headers, "content-type")
+        .and_then(|ct| extract_charset(&ct))
+        .and_then(|label| Encoding::for_label(label.as_bytes()));
+    if let Some(enc) = header_charset {
+        return enc;
+    }
+
+    // Legacy encodings are ASCII-compatible, so a lossy prefix is safe for
+    // locating the (pure-ASCII) meta declaration.
+    let prefix = String::from_utf8_lossy(&body[..body.len().min(1024)]);
+    if let Some(enc) = extract_charset(&prefix).and_then(|label| Encoding::for_label(label.as_bytes()))
+    {
+        return enc;
+    }
+
+    if std::str::from_utf8(body).is_ok() {
+        UTF_8
+    } else {
+        WINDOWS_1252
+    }
+}
+
+/// Pulls the value of the first `charset=` occurrence out of `text` (a
+/// Content-Type header value or an HTML prefix), tolerating optional quotes
+/// and whitespace. Returns `None` when no declaration is present.
+fn extract_charset(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let start = lower.find("charset")? + "charset".len();
+    let rest = lower[start..].trim_start();
+    let rest = rest.strip_prefix('=')?.trim_start();
+    let rest = rest.trim_start_matches(['"', '\'']);
+    let end = rest
+        .find(|c: char| c == '"' || c == '\'' || c == ';' || c == '>' || c.is_whitespace())
+        .unwrap_or(rest.len());
+    let label = rest[..end].trim();
+    (!label.is_empty()).then(|| label.to_string())
 }
 
 /// Tags whose entire subtree carries no reader-facing content.
@@ -467,6 +532,72 @@ mod tests {
     fn test_is_binary_matches_curl_cmd_semantics() {
         assert!(is_binary(&[0x1f, 0x8b, 0x08, 0x00]));
         assert!(!is_binary(b"<html></html>"));
+    }
+
+    #[test]
+    fn test_extract_charset_variants() {
+        assert_eq!(
+            extract_charset("text/html; charset=utf-8").as_deref(),
+            Some("utf-8")
+        );
+        assert_eq!(
+            extract_charset("text/html; charset=\"windows-1250\"").as_deref(),
+            Some("windows-1250")
+        );
+        assert_eq!(
+            extract_charset("<meta charset='iso-8859-2'>").as_deref(),
+            Some("iso-8859-2")
+        );
+        assert_eq!(extract_charset("text/html"), None);
+    }
+
+    #[test]
+    fn test_detect_encoding_header_charset_wins_over_meta() {
+        let headers = "HTTP/1.1 200 OK\nContent-Type: text/html; charset=windows-1250\n\n";
+        let body = b"<meta charset=\"utf-8\"><p>x</p>";
+        assert_eq!(detect_encoding(headers, body).name(), "windows-1250");
+    }
+
+    #[test]
+    fn test_detect_encoding_meta_fallback_when_header_has_no_charset() {
+        let headers = "HTTP/1.1 200 OK\nContent-Type: text/html\n\n";
+        let body =
+            b"<!DOCTYPE html><meta http-equiv=\"Content-Type\" content=\"text/html; charset=windows-1250\">";
+        assert_eq!(detect_encoding(headers, body).name(), "windows-1250");
+    }
+
+    #[test]
+    fn test_detect_encoding_utf8_then_1252_fallback() {
+        let headers = "HTTP/1.1 200 OK\nContent-Type: text/html\n\n";
+        assert_eq!(
+            detect_encoding(headers, b"<html>plain ascii</html>").name(),
+            "UTF-8"
+        );
+        // 0xE9 = 'e-acute' in windows-1252 — an invalid byte sequence as UTF-8.
+        assert_eq!(
+            detect_encoding(headers, b"<html>caf\xE9</html>").name(),
+            "windows-1252"
+        );
+    }
+
+    /// The regression this phase exists for: a windows-1250 page contains
+    /// non-UTF-8 bytes, so the old order (binary check before HTML detection)
+    /// dumped it raw with zero savings. Decoding must produce correct Czech
+    /// diacritics, not U+FFFD.
+    #[test]
+    fn test_windows_1250_page_converts_instead_of_passthrough() {
+        let html = "<html><body><main><p>Příliš žluťoučký kůň úpěl ďábelské ódy</p></main></body></html>";
+        let (bytes, _, _) = encoding_rs::WINDOWS_1250.encode(html);
+        assert!(
+            is_binary(&bytes),
+            "fixture must be non-UTF-8 or it proves nothing"
+        );
+        let headers = "HTTP/1.1 200 OK\nContent-Type: text/html; charset=windows-1250\n\n";
+        let sniff = String::from_utf8_lossy(&bytes[..bytes.len().min(1024)]);
+        assert!(looks_like_html(headers, &sniff));
+        let (decoded, _, _) = detect_encoding(headers, &bytes).decode(&bytes);
+        let md = html_to_markdown(&decoded);
+        assert_eq!(md, "Příliš žluťoučký kůň úpěl ďábelské ódy");
     }
 
     /// A page-shaped fixture — nav/header/footer chrome, inline scripts and

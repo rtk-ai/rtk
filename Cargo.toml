@@ -36,6 +36,7 @@ which = "8"
 automod = "1"
 scraper = "0.27.0"
 ego-tree = "0.11"
+encoding_rs = "0.8"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
