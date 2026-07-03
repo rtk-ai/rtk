@@ -403,6 +403,27 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Process list with compact output (TOML-filtered proxy to native ps)
+    Ps {
+        /// Arguments passed to ps (supports all native ps flags like -aux, -ef)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Disk usage with compact output (TOML-filtered proxy to native du)
+    Du {
+        /// Arguments passed to du (supports all native du flags like -sh, -h)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Build automation with compact output (TOML-filtered proxy to native make)
+    Make {
+        /// Arguments passed to make (supports all native make flags and targets)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Show token savings summary and history
     Gain {
         /// Filter statistics to current project (current working directory) // added
@@ -1338,7 +1359,8 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                     &combined_raw,
                     &shown,
                 );
-                core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+                // Don't record as parse failure — the TOML filter handled it successfully.
+                // Parse failures are only meaningful when the command actually failed.
 
                 Ok(exit_code)
             }
@@ -2051,6 +2073,12 @@ fn run_cli() -> Result<i32> {
 
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
 
+        Commands::Ps { args } => core::toml_filter::run_with_toml_filter("ps", &args, cli.verbose)?,
+        Commands::Du { args } => core::toml_filter::run_with_toml_filter("du", &args, cli.verbose)?,
+        Commands::Make { args } => {
+            core::toml_filter::run_with_toml_filter("make", &args, cli.verbose)?
+        }
+
         Commands::Gain {
             project, // added
             graph,
@@ -2682,6 +2710,10 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
+            | Commands::Wc { .. }
+            | Commands::Ps { .. }
+            | Commands::Du { .. }
+            | Commands::Make { .. }
     )
 }
 

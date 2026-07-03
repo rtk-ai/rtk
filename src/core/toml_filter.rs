@@ -23,6 +23,9 @@
 ///   7. max_lines            — absolute line cap
 ///   8. on_empty             — message if result is empty
 use super::constants::{FILTERS_TOML, RTK_DATA_DIR};
+use crate::core::runner::{self, RunOptions};
+use crate::core::utils::resolved_command;
+use anyhow::Context;
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 use serde::Deserialize;
@@ -683,6 +686,55 @@ pub fn find_matching_filter(command: &str) -> Option<&'static CompiledFilter> {
         }
     }
     result
+}
+
+// ---------------------------------------------------------------------------
+// TOML proxy — for commands with TOML filters but no custom Rust filter
+// ---------------------------------------------------------------------------
+
+/// Run a native command with its TOML filter applied.
+///
+/// Used by commands that have a TOML filter (`src/filters/<cmd>.toml`) but no
+/// custom Rust filter implementation.  This avoids the `run_fallback` path
+/// which wastes a Clap parse cycle and records a spurious parse failure.
+///
+/// Returns `Ok(exit_code)` or propagates execution errors.
+pub fn run_with_toml_filter(command: &str, args: &[String], verbose: u8) -> anyhow::Result<i32> {
+    let args_display = args.join(" ");
+
+    // Look up the TOML filter for this command
+    let lookup_cmd = std::iter::once(command)
+        .chain(args.iter().map(|s| s.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let filter = find_matching_filter(&lookup_cmd).with_context(|| {
+        format!(
+            "No TOML filter found for '{}' — this command should not use run_with_toml_filter",
+            command
+        )
+    })?;
+
+    if verbose > 0 {
+        eprintln!(
+            "Running: {} {} (toml filter: {})",
+            command, args_display, filter.name
+        );
+    }
+
+    // Build and execute the native command
+    let mut cmd = resolved_command(command);
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    runner::run_filtered(
+        cmd,
+        command,
+        &args_display,
+        move |stdout| apply_filter(filter, stdout),
+        RunOptions::stdout_only(),
+    )
 }
 
 // ---------------------------------------------------------------------------
