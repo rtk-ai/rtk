@@ -12,8 +12,9 @@
 //! text, binary) and any content that fails to look like HTML is passed
 //! through unchanged.
 
+use crate::core::runner;
 use crate::core::tracking;
-use crate::core::utils::resolved_command;
+use crate::core::utils::{exit_code_from_output, resolved_command};
 use anyhow::{Context, Result};
 use scraper::{ElementRef, Html, Node, Selector};
 use std::collections::HashMap;
@@ -41,7 +42,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     }
 
     let output = cmd.output().context("Failed to run curl")?;
-    let exit_code = output.status.code().unwrap_or(1);
+    // Uses the shared signal-aware helper rather than `.code().unwrap_or(1)` —
+    // the latter silently reports 1 for a signal-killed curl (e.g. timeout
+    // SIGTERM) instead of the conventional 128+signal, the same class of bug
+    // fixed for `rtk run` in #2681. `curl_cmd` still has the old pattern; not
+    // touching it here since that's a pre-existing, separately-scoped issue.
+    let exit_code = exit_code_from_output(&output, "web");
 
     // Skip filtering on failure: curl can return an HTML error body that
     // would be misleading to summarize, and we want the real exit code
@@ -73,21 +79,23 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     // Non-goal for v1 (#1426): only HTML is transformed. JSON, XML, plain
     // text and anything else passes through byte-for-byte.
-    if !looks_like_html(&headers, &raw) {
-        print!("{raw}");
-        std::io::stdout().flush().ok();
-        timer.track_passthrough(&format!("curl {}", url), &format!("rtk web {}", url));
-        return Ok(exit_code);
-    }
+    let content = if looks_like_html(&headers, &raw) {
+        html_to_markdown(&raw)
+    } else {
+        raw.clone()
+    };
 
-    let markdown = html_to_markdown(&raw);
-    print!("{markdown}");
-    std::io::stdout().flush().ok();
+    // `emit_guarded` applies the same never-worse safety net `curl_cmd` uses
+    // (see `core::guard::never_worse`): if the Markdown conversion ever came
+    // out larger than the raw response — pathological/adversarial HTML — the
+    // raw body is shown instead, so `rtk web` can never regress to costing
+    // more tokens than plain `curl` would have.
+    let shown = runner::emit_guarded(&content, None, &raw);
     timer.track(
         &format!("curl {}", url),
         &format!("rtk web {}", url),
         &raw,
-        &markdown,
+        &shown,
     );
 
     Ok(exit_code)
