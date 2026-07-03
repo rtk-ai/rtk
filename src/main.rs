@@ -71,9 +71,19 @@ struct Cli {
     #[arg(long, global = true)]
     ultra_compact: bool,
 
+    /// Alias for --ultra-compact before the subcommand
+    #[arg(short = 'u')]
+    ultra_compact_short: bool,
+
     /// Set SKIP_ENV_VALIDATION=1 for child processes (Next.js, tsc, lint, prisma)
     #[arg(long = "skip-env", global = true)]
     skip_env: bool,
+}
+
+impl Cli {
+    fn ultra_compact_enabled(&self) -> bool {
+        self.ultra_compact || self.ultra_compact_short
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -1251,17 +1261,25 @@ const RTK_META_COMMANDS: &[&str] = &[
     "json",
 ];
 
+#[derive(Debug, PartialEq, Eq)]
+enum FallbackDecision {
+    ShowParseError,
+    RunRaw,
+}
+
+fn fallback_decision(args: &[String]) -> FallbackDecision {
+    if args.is_empty() || args[0].starts_with('-') || RTK_META_COMMANDS.contains(&args[0].as_str())
+    {
+        FallbackDecision::ShowParseError
+    } else {
+        FallbackDecision::RunRaw
+    }
+}
+
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    // No args → show Clap's error (user ran just "rtk" with bad syntax)
-    if args.is_empty() {
-        parse_error.exit();
-    }
-
-    // RTK meta-commands should never fall back to raw execution.
-    // e.g. `rtk gain --badtypo` should show Clap's error, not try to run `gain` from $PATH.
-    if RTK_META_COMMANDS.contains(&args[0].as_str()) {
+    if fallback_decision(&args) == FallbackDecision::ShowParseError {
         parse_error.exit();
     }
 
@@ -1551,6 +1569,8 @@ fn run_cli() -> Result<i32> {
         hooks::integrity::runtime_check()?;
     }
 
+    let ultra_compact = cli.ultra_compact_enabled();
+
     let code = match cli.command {
         Commands::Ls { args } => ls::run(&args, cli.verbose)?,
 
@@ -1729,7 +1749,7 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Gh { subcommand, args } => {
-            gh_cmd::run(&subcommand, &args, cli.verbose, cli.ultra_compact)?
+            gh_cmd::run(&subcommand, &args, cli.verbose, ultra_compact)?
         }
 
         Commands::Glab {
@@ -1748,7 +1768,7 @@ fn run_cli() -> Result<i32> {
                 args.push("-g".to_string());
                 args.push(g);
             }
-            glab_cmd::run(&subcommand, &args, cli.verbose, cli.ultra_compact)?
+            glab_cmd::run(&subcommand, &args, cli.verbose, ultra_compact)?
         }
 
         Commands::Aws { subcommand, args } => aws_cmd::run(&subcommand, &args, cli.verbose)?,
@@ -3352,7 +3372,7 @@ mod tests {
     fn test_git_push_u_flag_passes_through() {
         let cli = Cli::try_parse_from(["rtk", "git", "push", "-u", "origin", "my-branch"]).unwrap();
         assert!(
-            !cli.ultra_compact,
+            !cli.ultra_compact_enabled(),
             "-u on git push must NOT be consumed as --ultra-compact"
         );
         match cli.command {
@@ -3471,9 +3491,30 @@ mod tests {
     fn test_ultra_compact_long_form_still_works() {
         let cli = Cli::try_parse_from(["rtk", "--ultra-compact", "git", "status"]).unwrap();
         assert!(
-            cli.ultra_compact,
+            cli.ultra_compact_enabled(),
             "--ultra-compact long form must still enable ultra-compact mode"
         );
+    }
+
+    #[test]
+    fn test_ultra_compact_short_form_before_subcommand() {
+        let cli = Cli::try_parse_from(["rtk", "-u", "git", "status"]).unwrap();
+        assert!(
+            cli.ultra_compact_enabled(),
+            "-u before the subcommand must enable ultra-compact mode"
+        );
+    }
+
+    #[test]
+    fn test_unknown_leading_flag_is_parse_error_not_raw_fallback() {
+        let args = vec!["-z".to_string(), "grep".to_string()];
+        assert_eq!(fallback_decision(&args), FallbackDecision::ShowParseError);
+    }
+
+    #[test]
+    fn test_non_flag_external_command_still_uses_raw_fallback() {
+        let args = vec!["make".to_string(), "test".to_string()];
+        assert_eq!(fallback_decision(&args), FallbackDecision::RunRaw);
     }
 
     #[test]
