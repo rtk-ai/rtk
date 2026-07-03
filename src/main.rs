@@ -435,6 +435,9 @@ enum Commands {
         /// Output format: text, json, csv
         #[arg(short, long, default_value = "text")]
         format: String,
+        /// Show per-session token savings; optionally filter to a specific session ID prefix
+        #[arg(short = 'S', long, value_name = "SESSION_ID", num_args = 0..=1, default_missing_value = "")]
+        session: Option<String>,
         /// Show parse failure log (commands that fell back to raw execution)
         #[arg(short = 'F', long)]
         failures: bool,
@@ -2052,9 +2055,10 @@ fn run_cli() -> Result<i32> {
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
 
         Commands::Gain {
-            project, // added
+            project,
             graph,
             history,
+            session,
             quota,
             tier,
             daily,
@@ -2067,9 +2071,10 @@ fn run_cli() -> Result<i32> {
             yes,
         } => {
             analytics::gain::run(
-                project, // added: pass project flag
+                project,
                 graph,
                 history,
+                session.as_deref(),
                 quota,
                 &tier,
                 daily,
