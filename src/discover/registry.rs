@@ -44,6 +44,8 @@ pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
         "GitHub" => 200,
         "GitLab" => 200,
         "PackageManager" => 150,
+        "Flutter" => 220,
+        "Dart" => 180,
         _ => 150,
     }
 }
@@ -1226,6 +1228,16 @@ mod tests {
             match classify_command(&cmd) {
                 Classification::Supported { .. } => {}
                 other => panic!("git {subcmd} should be Supported, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_registry_covers_flutter_and_dart_commands() {
+        for cmd in ["flutter analyze", "flutter pub get", "flutter test", "dart analyze"] {
+            match classify_command(cmd) {
+                Classification::Supported { .. } => {}
+                other => panic!("{cmd} should be Supported, got {other:?}"),
             }
         }
     }

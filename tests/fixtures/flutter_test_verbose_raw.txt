@@ -1,0 +1,81 @@
+00:00 +0: loading /home/carlosfiori/projects/rtk_flutter/test/widget_test.dart
+00:00 +0: /home/carlosfiori/projects/rtk_flutter/test/widget_test.dart: Counter widget shows initial count of 0
+00:00 +1: /home/carlosfiori/projects/rtk_flutter/test/widget_test.dart: Counter widget shows initial count of 0
+00:00 +2: /home/carlosfiori/projects/rtk_flutter/test/widget_test.dart: Counter widget shows initial count of 0
+00:00 +3: /home/carlosfiori/projects/rtk_flutter/test/widget_test.dart: Counter widget shows initial count of 0
+00:00 +4: /home/carlosfiori/projects/rtk_flutter/test/widget_test.dart: Counter widget shows initial count of 0
+00:00 +5: /home/carlosfiori/projects/rtk_flutter/test/widget_test.dart: Counter widget shows initial count of 0
+00:00 +5 -1: /home/carlosfiori/projects/rtk_flutter/test/widget_test.dart: Counter widget shows initial count of 0
+00:00 +5 -1: /home/carlosfiori/projects/rtk_flutter/test/unit/user_test.dart: User model age validation fails for negative age [E]
+  Expected: a value greater than <0>
+    Actual: <-1>
+     Which: is not a value greater than <0>
+  Age should be positive but was -1
+
+  package:matcher                                     expect
+  package:flutter_test/src/widget_tester.dart 473:18  expect
+  test/unit/user_test.dart 37:7                       main.<fn>.<fn>
+
+00:00 +6 -1: /home/carlosfiori/projects/rtk_flutter/test/widget_test.dart: Counter widget shows initial count of 0
+00:00 +7 -1: /home/carlosfiori/projects/rtk_flutter/test/widget_test.dart: Counter widget shows initial count of 0
+00:00 +7 -2: /home/carlosfiori/projects/rtk_flutter/test/widget_test.dart: Counter widget shows initial count of 0
+00:00 +7 -2: /home/carlosfiori/projects/rtk_flutter/test/unit/user_test.dart: AdminUser strict permission check fails for regular admin [E]
+  Expected: true
+    Actual: <false>
+  Expected admin to have strict permission but got false
+
+  package:matcher                                     expect
+  package:flutter_test/src/widget_tester.dart 473:18  expect
+  test/unit/user_test.dart 56:7                       main.<fn>.<fn>
+
+00:00 +7 -2: /home/carlosfiori/projects/rtk_flutter/test/widget_test.dart: Counter widget shows initial count of 0
+Fetching user from https://jsonplaceholder.typicode.com/users/1
+Error: 400
+00:00 +8 -2: /home/carlosfiori/projects/rtk_flutter/test/widget_test.dart: Counter widget increments counter on FAB tap
+Fetching user from https://jsonplaceholder.typicode.com/users/1
+Error: 400
+Counter incremented to 1
+00:00 +9 -2: /home/carlosfiori/projects/rtk_flutter/test/widget_test.dart: Counter widget reset button returns counter to 0
+Fetching user from https://jsonplaceholder.typicode.com/users/1
+Error: 400
+Counter incremented to 1
+Counter incremented to 2
+Reset from 2 to 0
+00:00 +10 -2: /home/carlosfiori/projects/rtk_flutter/test/widget_test.dart: Counter widget shows title in app bar
+Fetching user from https://jsonplaceholder.typicode.com/users/1
+Error: 400
+00:00 +11 -2: /home/carlosfiori/projects/rtk_flutter/test/widget_test.dart: Counter widget counter starts at 5 - intentional failure
+Fetching user from https://jsonplaceholder.typicode.com/users/1
+Error: 400
+══╡ EXCEPTION CAUGHT BY FLUTTER TEST FRAMEWORK ╞════════════════════════════════════════════════════
+The following TestFailure was thrown running a test:
+Expected: exactly one matching candidate
+  Actual: _TextWidgetFinder:<Found 0 widgets with text "5": []>
+   Which: means none were found but one was expected
+Expected counter to start at 5, but it starts at 0
+
+When the exception was thrown, this was the stack:
+#4      main.<anonymous closure>.<anonymous closure> (file:///home/carlosfiori/projects/rtk_flutter/test/widget_test.dart:57:7)
+<asynchronous suspension>
+#5      testWidgets.<anonymous closure>.<anonymous closure> (package:flutter_test/src/widget_tester.dart:192:15)
+<asynchronous suspension>
+#6      TestWidgetsFlutterBinding._runTestBody (package:flutter_test/src/binding.dart:1952:5)
+<asynchronous suspension>
+<asynchronous suspension>
+(elided one frame from package:stack_trace)
+
+This was caught by the test expectation on the following line:
+  file:///home/carlosfiori/projects/rtk_flutter/test/widget_test.dart line 57
+The test description was:
+  counter starts at 5 - intentional failure
+════════════════════════════════════════════════════════════════════════════════════════════════════
+00:00 +11 -3: /home/carlosfiori/projects/rtk_flutter/test/widget_test.dart: Counter widget counter starts at 5 - intentional failure [E]
+  Test failed. See exception logs above.
+  The test description was: counter starts at 5 - intentional failure
+
+00:01 +11 -3: Some tests failed.
+
+Failing tests:
+  /home/carlosfiori/projects/rtk_flutter/test/unit/user_test.dart: AdminUser strict permission check fails for regular admin
+  /home/carlosfiori/projects/rtk_flutter/test/unit/user_test.dart: User model age validation fails for negative age
+  /home/carlosfiori/projects/rtk_flutter/test/widget_test.dart: Counter widget counter starts at 5 - intentional failure
