@@ -1,0 +1,64 @@
+[project]
+name = "example-project"
+description = "An example project for poe task resolution"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31.0",
+    "click>=8.1.0",
+]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+# -----------------------------------------------------------------------
+#                                   TASKS
+# -----------------------------------------------------------------------
+
+[tool.poe.tasks.lint]
+help = "Run linters"
+sequence = ["ruff-check", "mypy-check"]
+
+[tool.poe.tasks.ruff-check]
+help = "Check with ruff"
+cmd = "ruff check src tests"
+
+[tool.poe.tasks.ruff-format]
+help = "Format check with ruff"
+cmd = "ruff format --check src tests"
+
+[tool.poe.tasks.mypy-check]
+help = "Run type checks"
+cmd = "mypy src"
+
+[tool.poe.tasks.test]
+help = "Run tests"
+cmd = "pytest tests -v"
+
+[tool.poe.tasks.test-cov]
+help = "Run tests with coverage"
+cmd = "pytest tests --cov=src --cov-report=term-missing"
+
+[tool.poe.tasks.build]
+help = "Build package"
+cmd = "python -m build"
+
+[tool.poe.tasks.clean]
+help = "Clean build artifacts"
+cmd = "rm -rf dist/ build/ *.egg-info"
+
+[tool.poe.tasks.docs]
+help = "Build documentation"
+cmd = "mkdocs build"
+
+[tool.poe.tasks.all]
+help = "Run full CI pipeline"
+sequence = ["lint", "test", "build"]
+
+[tool.poe.tasks.format]
+help = "Format code"
+cmd = "ruff format src tests"
+
+[tool.poe.tasks.typecheck]
+help = "Type check all"
+sequence = ["mypy-check"]

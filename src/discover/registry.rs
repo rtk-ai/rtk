@@ -2543,6 +2543,71 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_rewrite_poetry_run_supported_inner_command() {
+        assert_eq!(
+            rewrite_command_no_prefixes("poetry run pytest tests/", &[]),
+            Some("rtk poetry run pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_poetry_run() {
+        assert_eq!(
+            rewrite_command_no_prefixes("VIRTUAL_ENV=.venv poetry run pytest", &[]),
+            Some("VIRTUAL_ENV=.venv rtk poetry run pytest".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_poetry_run_python_m_pytest() {
+        assert_eq!(
+            rewrite_command_no_prefixes("poetry run python -m pytest -q", &[]),
+            Some("rtk poetry run python -m pytest -q".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_poetry_run() {
+        let commands = vec![
+            "poetry run pytest",
+            "poetry run ruff check",
+            "poetry run python script.py",
+        ];
+
+        for command in commands {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk poetry",
+                        ..
+                    }
+                ),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_poetry_run() {
+        let commands = vec![
+            "poetry run python script.py",
+            "poetry run pytest",
+            "poetry run ruff check",
+        ];
+
+        for command in commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(format!("rtk {command}")),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
     // --- Go tooling ---
 
     #[test]

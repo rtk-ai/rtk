@@ -17,7 +17,7 @@ use cmds::js::{
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpunit_cmd, pint_cmd};
-use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
+use cmds::python::{mypy_cmd, pip_cmd, poe_cmd, poetry_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
@@ -683,6 +683,20 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Poe task runner — resolves tasks from pyproject.toml and filters each sub-command
+    Poe {
+        /// Poe arguments (task name + optional args)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// poetry run with compact output
+    Poetry {
+        /// poetry arguments (e.g., run pytest, run python script.py)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// PHP command runner with compact output for artisan and syntax checks
     Php {
         /// PHP arguments (e.g., artisan about, -l app/Http/Controller.php)
@@ -1249,6 +1263,7 @@ const RTK_META_COMMANDS: &[&str] = &[
     "smart",
     "deps",
     "json",
+    "poe",
 ];
 
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
@@ -2285,6 +2300,10 @@ fn run_cli() -> Result<i32> {
 
         Commands::Mypy { args } => mypy_cmd::run(&args, cli.verbose)?,
 
+        Commands::Poe { args } => poe_cmd::run(&args, cli.verbose)?,
+
+        Commands::Poetry { args } => poetry_cmd::run(&args, cli.verbose)?,
+
         Commands::Php { args } => php_cmd::run(&args, cli.verbose)?,
 
         Commands::Phpunit { args } => phpunit_cmd::run(&args, cli.verbose)?,
@@ -2679,6 +2698,8 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Rspec { .. }
             | Commands::Pip { .. }
             | Commands::Uv { .. }
+            | Commands::Poetry { .. }
+            | Commands::Poe { .. }
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
@@ -2990,7 +3011,7 @@ mod tests {
         // RTK meta-commands should produce parse errors (not fall through to raw execution).
         // Skip "proxy" because it uses trailing_var_arg (accepts any args by design).
         for cmd in RTK_META_COMMANDS {
-            if matches!(*cmd, "proxy" | "run" | "rewrite" | "session") {
+            if matches!(*cmd, "proxy" | "run" | "rewrite" | "session" | "poe") {
                 continue; // these use trailing_var_arg (accept any args by design)
             }
             let result = Cli::try_parse_from(["rtk", cmd, "--nonexistent-flag-xyz"]);
@@ -3067,6 +3088,7 @@ mod tests {
             "ecs",
             "pint",
             "uv",
+            "poetry",
         ];
 
         let unclassified: Vec<String> = Cli::command()
