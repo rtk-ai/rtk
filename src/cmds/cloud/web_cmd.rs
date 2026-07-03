@@ -323,6 +323,9 @@ struct MarkdownContext {
     links: Vec<String>,
     link_index: HashMap<String, usize>,
     in_pre: usize,
+    /// One entry per open list: `Some(count)` for `<ol>` (next item number),
+    /// `None` for `<ul>`. Depth drives nested-list indentation.
+    list_stack: Vec<Option<usize>>,
 }
 
 impl MarkdownContext {
@@ -409,12 +412,45 @@ fn walk(node: ego_tree::NodeRef<'_, Node>, ctx: &mut MarkdownContext) {
                 }
                 "li" => {
                     ctx.open_block();
-                    ctx.out.push_str("- ");
+                    let depth = ctx.list_stack.len().saturating_sub(1);
+                    ctx.out.push_str(&"  ".repeat(depth));
+                    match ctx.list_stack.last_mut() {
+                        Some(Some(n)) => {
+                            *n += 1;
+                            let marker = format!("{}. ", n);
+                            ctx.out.push_str(&marker);
+                        }
+                        _ => ctx.out.push_str("- "),
+                    }
                     walk_children(node, ctx);
                     return;
                 }
-                "ul" | "ol" => {
+                "ul" => {
                     ctx.open_block();
+                    ctx.list_stack.push(None);
+                    walk_children(node, ctx);
+                    ctx.list_stack.pop();
+                    return;
+                }
+                "ol" => {
+                    ctx.open_block();
+                    ctx.list_stack.push(Some(0));
+                    walk_children(node, ctx);
+                    ctx.list_stack.pop();
+                    return;
+                }
+                "table" | "tr" => {
+                    ctx.open_block();
+                    walk_children(node, ctx);
+                    return;
+                }
+                "td" | "th" => {
+                    // Pipe-separated cells on one row per `tr` — plain rows,
+                    // no alignment header; enough to stop adjacent cell text
+                    // fusing into one word.
+                    if !ctx.out.is_empty() && !ctx.out.ends_with('\n') {
+                        ctx.out.push_str(" | ");
+                    }
                     walk_children(node, ctx);
                     return;
                 }
@@ -583,6 +619,31 @@ mod tests {
     fn test_is_binary_matches_curl_cmd_semantics() {
         assert!(is_binary(&[0x1f, 0x8b, 0x08, 0x00]));
         assert!(!is_binary(b"<html></html>"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_ordered_lists_numbered() {
+        let html = "<html><body><main><ol><li>Alpha</li><li>Beta</li></ol><ul><li>Dash</li></ul></main></body></html>";
+        let md = html_to_markdown(html);
+        assert!(md.contains("1. Alpha"));
+        assert!(md.contains("2. Beta"));
+        assert!(md.contains("- Dash"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_nested_lists_indented() {
+        let html = "<html><body><main><ul><li>Outer<ul><li>Inner</li></ul></li></ul></main></body></html>";
+        let md = html_to_markdown(html);
+        assert!(md.contains("- Outer"));
+        assert!(md.contains("  - Inner"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_table_cells_separated() {
+        let html = "<html><body><main><table><tr><th>Name</th><th>Age</th></tr><tr><td>Ada</td><td>36</td></tr></table></main></body></html>";
+        let md = html_to_markdown(html);
+        assert!(md.contains("Name | Age"), "th cells must not fuse: {md}");
+        assert!(md.contains("Ada | 36"), "td cells must not fuse: {md}");
     }
 
     #[test]
