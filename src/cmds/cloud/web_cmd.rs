@@ -234,6 +234,57 @@ const SKIP_SUBTREE: &[&str] = &[
     "aside",
 ];
 
+/// ARIA landmark roles that mark a subtree as page chrome rather than
+/// content — the attribute-level equivalent of the `nav`/`footer`/`aside`
+/// entries in [`SKIP_SUBTREE`], for sites that use `<div role="navigation">`
+/// instead of semantic tags.
+const SKIP_ROLES: &[&str] = &[
+    "navigation",
+    "banner",
+    "complementary",
+    "contentinfo",
+    "search",
+];
+
+/// id/class tokens that mark an element as page chrome (what readability
+/// implementations score down). Matched against whole tokens after splitting
+/// on whitespace, `-` and `_`, so `mw-footer` and `vector-menu` are skipped
+/// while `navy-blue` (token `navy`) survives.
+const SKIP_CLASS_TOKENS: &[&str] = &[
+    "nav",
+    "navbar",
+    "navigation",
+    "menu",
+    "dropdown",
+    "sidebar",
+    "breadcrumb",
+    "breadcrumbs",
+    "banner",
+    "cookie",
+    "cookies",
+    "footer",
+    "toc",
+];
+
+/// Returns `true` when an element's attributes identify it as page chrome
+/// (navigation, banners, cookie bars, ...) that should be pruned wholesale.
+fn is_chrome_element(el: &scraper::node::Element) -> bool {
+    if let Some(role) = el.attr("role") {
+        let role = role.to_ascii_lowercase();
+        if SKIP_ROLES.contains(&role.as_str()) {
+            return true;
+        }
+    }
+    ["id", "class"].iter().any(|attr| {
+        el.attr(attr).is_some_and(|value| {
+            let lower = value.to_ascii_lowercase();
+            lower
+                .split(|c: char| c.is_whitespace() || c == '-' || c == '_')
+                .any(|token| SKIP_CLASS_TOKENS.contains(&token))
+        })
+    })
+}
+
 /// Converts an HTML document into compact Markdown: strips non-content
 /// subtrees, extracts the main content container, preserves headings /
 /// lists / code blocks / emphasis, and de-duplicates links into numbered
@@ -338,7 +389,7 @@ fn walk(node: ego_tree::NodeRef<'_, Node>, ctx: &mut MarkdownContext) {
         Node::Text(text) => ctx.push_inline(text),
         Node::Element(el) => {
             let tag = el.name();
-            if SKIP_SUBTREE.contains(&tag) {
+            if SKIP_SUBTREE.contains(&tag) || is_chrome_element(el) {
                 return;
             }
 
@@ -532,6 +583,24 @@ mod tests {
     fn test_is_binary_matches_curl_cmd_semantics() {
         assert!(is_binary(&[0x1f, 0x8b, 0x08, 0x00]));
         assert!(!is_binary(b"<html></html>"));
+    }
+
+    #[test]
+    fn test_html_to_markdown_skips_chrome_by_class_id_and_role() {
+        let html = r#"<html><body><main>
+            <div class="vector-menu mw-portlet">Language switcher junk</div>
+            <div id="site-footer-inner">Footer junk</div>
+            <div role="navigation">More nav junk</div>
+            <div class="navy-blue">Navy blue is fine</div>
+            <p>Article text</p>
+        </main></body></html>"#;
+        let md = html_to_markdown(html);
+        assert!(md.contains("Article text"));
+        assert!(
+            md.contains("Navy blue is fine"),
+            "token matching must not fire on substrings like navy"
+        );
+        assert!(!md.contains("junk"));
     }
 
     #[test]
