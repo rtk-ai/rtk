@@ -33,6 +33,10 @@ pub enum GitCommand {
 /// prepended before any subcommand arguments.
 fn git_cmd(global_args: &[String]) -> Command {
     let mut cmd = resolved_command("git");
+    // Render non-ASCII (CJK, etc.) filenames as UTF-8 instead of git's default
+    // octal escapes (\nnn). Must be injected with -c before the subcommand;
+    // global_args and the subcommand are appended after.
+    cmd.arg("-c").arg("core.quotepath=false");
     for arg in global_args {
         cmd.arg(arg);
     }

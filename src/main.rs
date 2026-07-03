@@ -2573,8 +2573,8 @@ fn run_cli() -> Result<i32> {
                 .join()
                 .map_err(|_| anyhow::anyhow!("stderr streaming thread panicked"))??;
 
-            let stdout = String::from_utf8_lossy(&stdout_bytes);
-            let stderr = String::from_utf8_lossy(&stderr_bytes);
+            let stdout = decode_captured(&stdout_bytes);
+            let stderr = decode_captured(&stderr_bytes);
             let full_output = format!("{}{}", stdout, stderr);
 
             // Track usage (input = output since no filtering)
@@ -2615,6 +2615,22 @@ fn run_cli() -> Result<i32> {
     };
 
     Ok(code)
+}
+
+/// Decode captured streaming bytes into a string. `captured` is truncated at a
+/// 1 MiB cap, so its tail may stop in the middle of a multibyte UTF-8 sequence;
+/// in that case decode only up to the valid boundary to avoid emitting a
+/// spurious trailing replacement char (U+FFFD). Genuinely invalid mid-stream
+/// bytes (e.g. binary output) keep the lossy behavior.
+fn decode_captured(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => std::borrow::Cow::Borrowed(s),
+        // error_len() == None means the error is an unexpected end of input (an
+        // incomplete trailing sequence cut off by the cap), so take the valid
+        // prefix only; Some(_) means an invalid byte mid-stream, so stay lossy.
+        Err(e) if e.error_len().is_none() => String::from_utf8_lossy(&bytes[..e.valid_up_to()]),
+        Err(_) => String::from_utf8_lossy(bytes),
+    }
 }
 
 /// Returns true for commands that are invoked via the hook pipeline

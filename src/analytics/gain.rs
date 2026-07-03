@@ -246,11 +246,9 @@ pub fn run(
                 println!("──────────────────────────────────────────────────────────");
                 for rec in recent {
                     let time = rec.timestamp.with_timezone(&Local).format("%m-%d %H:%M");
-                    let cmd_short = if rec.rtk_cmd.len() > 25 {
-                        format!("{}...", &rec.rtk_cmd[..22])
-                    } else {
-                        rec.rtk_cmd.clone()
-                    };
+                    // char-safe truncation: commands may contain multibyte UTF-8,
+                    // and slicing on a byte boundary would panic
+                    let cmd_short = crate::core::utils::truncate(&rec.rtk_cmd, 25);
                     // added: tier indicators by savings level
                     let sign = if rec.savings_pct >= 70.0 {
                         "▲"
@@ -707,11 +705,8 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
         println!("{}", styled("Top Commands (by frequency)", true));
         println!("{}", "─".repeat(60));
         for (cmd, count) in &summary.top_commands {
-            let cmd_display = if cmd.len() > 50 {
-                format!("{}...", &cmd[..47])
-            } else {
-                cmd.clone()
-            };
+            // char-safe truncation: avoid panicking when a command contains multibyte UTF-8
+            let cmd_display = crate::core::utils::truncate(cmd, 50);
             println!("  {:>4}x  {}", count, cmd_display);
         }
         println!();
@@ -727,11 +722,8 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
                 &rec.timestamp
             };
             let status = if rec.fallback_succeeded { "ok" } else { "FAIL" };
-            let cmd_display = if rec.raw_command.len() > 40 {
-                format!("{}...", &rec.raw_command[..37])
-            } else {
-                rec.raw_command.clone()
-            };
+            // char-safe truncation: avoid panicking when a command contains multibyte UTF-8
+            let cmd_display = crate::core::utils::truncate(&rec.raw_command, 40);
             println!("  {} [{}] {}", ts_short, status, cmd_display);
         }
         println!();
