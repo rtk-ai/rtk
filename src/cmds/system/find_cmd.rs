@@ -133,7 +133,14 @@ fn parse_native_find_args(args: &[String]) -> Result<FindArgs> {
                 }
             }
             flag if flag.starts_with('-') => {
-                eprintln!("rtk find: unknown flag '{}', ignored", flag);
+                // Fail closed: dropping an unknown predicate and continuing would
+                // silently run a BROADER query (e.g. a `-newermt` filter lost while
+                // still exiting 0), which scripted and agent callers consume as the
+                // real answer. Unknown flags get the same treatment as -not/-exec.
+                anyhow::bail!(
+                    "rtk find does not support flag '{}'. Use `find` directly.",
+                    flag
+                );
             }
             _ => {}
         }
@@ -506,6 +513,23 @@ mod tests {
     #[test]
     fn parse_native_find_rejects_exec() {
         let result = parse_find_args(&args(&[".", "-name", "*.tmp", "-exec", "rm", "{}", ";"]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_native_find_rejects_unknown_flag_newermt() {
+        // Previously warned "unknown flag '-newermt', ignored" and ran a BROADER
+        // query (time filter dropped, exit 0). Unknown predicates must fail closed.
+        let result = parse_find_args(&args(&[".", "-newermt", "2025-01-01", "-name", "*.txt"]));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("-newermt"));
+        assert!(msg.contains("Use `find` directly"));
+    }
+
+    #[test]
+    fn parse_native_find_rejects_unknown_flag_anewer() {
+        let result = parse_find_args(&args(&[".", "-anewer", "ref.txt", "-name", "*.rs"]));
         assert!(result.is_err());
     }
 
