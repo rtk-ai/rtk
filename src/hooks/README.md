@@ -29,7 +29,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Windsurf | `rtk init -g --agent windsurf` | `.windsurfrules` | -- |
 | Cline | `rtk init --agent cline` | `.clinerules` | -- |
 | Codex | `rtk init --codex` | RTK.md in `$CODEX_HOME` or `~/.codex` | AGENTS.md |
-| Reasonix | `rtk init --reasonix` | RTK.md in XDG config dir/reasonix (e.g. `~/.config/reasonix`) | AGENTS.md |
+| Reasonix | `rtk init --reasonix` | RTK.md in `$REASONIX_HOME` or `~/.reasonix` (Windows: `%APPDATA%/reasonix`) | AGENTS.md |
 | Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
 | Pi | `rtk init --agent pi` | `.pi/extensions/rtk.ts` | -- |
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |

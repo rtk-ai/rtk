@@ -166,7 +166,7 @@ mod tests {
                 .join(HOOKS_SUBDIR)
                 .join(REWRITE_HOOK_FILE),
             home.join(CODEX_DIR).join("AGENTS.md"),
-            home.join(REASONIX_DIR).join("AGENTS.md"),
+            home.join(format!(".{REASONIX_DIR}")).join("AGENTS.md"),
             home.join(GEMINI_DIR)
                 .join(HOOKS_SUBDIR)
                 .join(GEMINI_HOOK_FILE),
@@ -257,7 +257,10 @@ mod tests {
     #[test]
     fn test_other_integration_reasonix() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join(REASONIX_DIR).join("AGENTS.md");
+        let path = tmp
+            .path()
+            .join(format!(".{REASONIX_DIR}"))
+            .join("AGENTS.md");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"agents").unwrap();
         assert!(other_integration_installed(tmp.path()));

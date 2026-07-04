@@ -3682,13 +3682,45 @@ fn reasonix_rtk_md_ref(reasonix_dir: &Path) -> String {
 }
 
 fn resolve_reasonix_dir() -> Result<PathBuf> {
-    resolve_reasonix_dir_from(dirs::config_dir())
-}
+    // Priority 1: REASONIX_HOME env var override (all platforms)
+    if let Some(dir) = std::env::var_os("REASONIX_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+    {
+        return Ok(dir);
+    }
 
-fn resolve_reasonix_dir_from(config_dir: Option<PathBuf>) -> Result<PathBuf> {
-    config_dir
-        .map(|d| d.join(REASONIX_DIR))
-        .context("Cannot determine Reasonix config directory (XDG_CONFIG_HOME or HOME not set)")
+    #[cfg(target_os = "windows")]
+    {
+        // Priority 2: %APPDATA%/reasonix
+        if let Some(dir) = dirs::config_dir() {
+            return Ok(dir.join(REASONIX_DIR));
+        }
+        // Priority 3: %USERPROFILE%/AppData/Roaming/reasonix
+        if let Some(home) = dirs::home_dir() {
+            return Ok(home.join("AppData").join("Roaming").join(REASONIX_DIR));
+        }
+        anyhow::bail!(
+            "Cannot determine Reasonix config directory. \
+             Set REASONIX_HOME or ensure %APPDATA% is set."
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Priority 2 (macOS/Linux): $HOME/.reasonix
+        if let Some(home) = dirs::home_dir() {
+            return Ok(home.join(format!(".{REASONIX_DIR}")));
+        }
+        // Priority 3: UserConfigDir/reasonix (last-resort fallback)
+        if let Some(dir) = dirs::config_dir() {
+            return Ok(dir.join(REASONIX_DIR));
+        }
+        anyhow::bail!(
+            "Cannot determine Reasonix config directory. \
+             Set REASONIX_HOME or ensure $HOME is set."
+        );
+    }
 }
 
 pub fn uninstall_reasonix(global: bool, ctx: InitContext) -> Result<()> {
@@ -3823,7 +3855,7 @@ fn show_reasonix_config() -> Result<()> {
 
     println!("\nUsage:");
     println!("  rtk init --reasonix              # Configure local AGENTS.md + RTK.md");
-    println!("  rtk init -g --reasonix           # Configure XDG config dir/reasonix/ (e.g. ~/.config/reasonix/)");
+    println!("  rtk init -g --reasonix           # Configure $REASONIX_HOME or ~/.reasonix/");
     println!("  rtk init -g --reasonix --uninstall  # Remove global Reasonix RTK artifacts");
 
     Ok(())
@@ -5518,18 +5550,23 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_reasonix_dir_uses_config_dir() {
-        let config_dir = PathBuf::from("/tmp/custom-config");
-        let result = resolve_reasonix_dir_from(Some(config_dir.clone())).unwrap();
-        assert_eq!(result, config_dir.join("reasonix"));
+    fn test_resolve_reasonix_dir_prefers_reasonix_home() {
+        let tmp = TempDir::new().unwrap();
+        std::env::set_var("REASONIX_HOME", tmp.path().as_os_str());
+        let result = resolve_reasonix_dir().unwrap();
+        assert_eq!(result, tmp.path());
+        std::env::remove_var("REASONIX_HOME");
     }
 
     #[test]
-    fn test_resolve_reasonix_dir_errors_without_config_dir() {
-        let err = resolve_reasonix_dir_from(None).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Cannot determine Reasonix config directory"));
+    fn test_resolve_reasonix_dir_uses_home_fallback() {
+        // With REASONIX_HOME unset, should return $HOME/.reasonix on non-Windows
+        std::env::remove_var("REASONIX_HOME");
+        if !cfg!(target_os = "windows") {
+            let result = resolve_reasonix_dir().unwrap();
+            assert!(result.to_string_lossy().contains(".reasonix"));
+            assert!(!result.to_string_lossy().contains("Application Support"));
+        }
     }
 
     #[test]
