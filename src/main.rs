@@ -3583,6 +3583,34 @@ mod tests {
     }
 
     #[test]
+    fn test_ultra_compact_grep_parses_correctly() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "--ultra-compact",
+            "grep",
+            "-r",
+            "permissions",
+            "/tmp/dir",
+        ])
+        .unwrap();
+        assert!(
+            cli.ultra_compact,
+            "--ultra-compact must be parsed as a global flag, not consumed by grep"
+        );
+        match cli.command {
+            Commands::Grep { extra_args, .. } => {
+                assert!(
+                    !extra_args.contains(&"--ultra-compact".to_string()),
+                    "--ultra-compact must not leak into grep extra_args: {:?}",
+                    extra_args
+                );
+                assert_eq!(extra_args, vec!["-r", "permissions", "/tmp/dir"]);
+            }
+            _ => panic!("Expected Commands::Grep"),
+        }
+    }
+
+    #[test]
     fn test_npx_unknown_tool_passthrough() {
         // The bug (rtk-ai/rtk#815) was that unknown tools under `rtk npx`
         // were dispatched to `npm` instead of `npx`. At the parse level, the
