@@ -1,7 +1,7 @@
 //! Filters find results by grouping files by directory.
 
 use crate::core::guard::never_worse;
-use crate::core::tracking;
+use crate::core::{secrets, tracking};
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::collections::HashMap;
@@ -35,6 +35,7 @@ struct FindArgs {
     max_depth: Option<usize>,
     file_type: String,
     case_insensitive: bool,
+    include_secrets: bool,
 }
 
 impl Default for FindArgs {
@@ -46,6 +47,7 @@ impl Default for FindArgs {
             max_depth: None,
             file_type: "f".to_string(),
             case_insensitive: false,
+            include_secrets: false,
         }
     }
 }
@@ -132,6 +134,7 @@ fn parse_native_find_args(args: &[String]) -> Result<FindArgs> {
                     parsed.max_depth = Some(val.parse().context("invalid -maxdepth value")?);
                 }
             }
+            secrets::INCLUDE_SECRETS_FLAG => parsed.include_secrets = true,
             flag if flag.starts_with('-') => {
                 eprintln!("rtk find: unknown flag '{}', ignored", flag);
             }
@@ -169,6 +172,7 @@ fn parse_rtk_find_args(args: &[String]) -> Result<FindArgs> {
                     parsed.file_type = val;
                 }
             }
+            secrets::INCLUDE_SECRETS_FLAG => parsed.include_secrets = true,
             _ => {}
         }
         i += 1;
@@ -187,10 +191,12 @@ pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
         parsed.max_depth,
         &parsed.file_type,
         parsed.case_insensitive,
+        parsed.include_secrets,
         verbose,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     pattern: &str,
     path: &str,
@@ -198,6 +204,7 @@ pub fn run(
     max_depth: Option<usize>,
     file_type: &str,
     case_insensitive: bool,
+    include_secrets: bool,
     verbose: u8,
 ) -> Result<()> {
     let timer = tracking::TimedExecution::start();
@@ -221,6 +228,14 @@ pub fn run(
         .git_ignore(true) // respect .gitignore
         .git_global(true)
         .git_exclude(true);
+    if !include_secrets {
+        // #2817: hard-exclude credential files (and prune credential dirs),
+        // independent of .gitignore. `--include-secrets` lifts this.
+        builder.filter_entry(|entry| {
+            let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
+            !secrets::is_secret_entry(entry.path(), is_dir)
+        });
+    }
     if let Some(depth) = max_depth {
         builder.max_depth(Some(depth));
     }
@@ -569,14 +584,14 @@ mod tests {
     #[test]
     fn find_dotfile_pattern_includes_hidden() {
         // .gitignore exists at the repo root — must be found when using a dotfile pattern
-        let result = run(".gitignore", ".", 50, Some(1), "f", false, 0);
+        let result = run(".gitignore", ".", 50, Some(1), "f", false, false, 0);
         assert!(result.is_ok(), "run with dotfile pattern should not error");
     }
 
     #[test]
     fn find_regular_pattern_skips_hidden() {
         // Non-dot pattern should not error (hidden dirs remain skipped)
-        let result = run("*.rs", "src", 5, None, "f", false, 0);
+        let result = run("*.rs", "src", 5, None, "f", false, false, 0);
         assert!(result.is_ok());
     }
 
@@ -585,34 +600,34 @@ mod tests {
     #[test]
     fn find_rs_files_in_src() {
         // Should find .rs files without error
-        let result = run("*.rs", "src", 100, None, "f", false, 0);
+        let result = run("*.rs", "src", 100, None, "f", false, false, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_dot_pattern_works() {
         // "." pattern should not error (was broken before)
-        let result = run(".", "src", 10, None, "f", false, 0);
+        let result = run(".", "src", 10, None, "f", false, false, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_no_matches() {
-        let result = run("*.xyz_nonexistent", "src", 50, None, "f", false, 0);
+        let result = run("*.xyz_nonexistent", "src", 50, None, "f", false, false, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_respects_max() {
         // With max=2, should not error
-        let result = run("*.rs", "src", 2, None, "f", false, 0);
+        let result = run("*.rs", "src", 2, None, "f", false, false, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_gitignored_excluded() {
         // target/ is in .gitignore — files inside should not appear
-        let result = run("*", ".", 1000, None, "f", false, 0);
+        let result = run("*", ".", 1000, None, "f", false, false, 0);
         assert!(result.is_ok());
         // We can't easily capture stdout in unit tests, but at least
         // verify it runs without error. The smoke tests verify content.

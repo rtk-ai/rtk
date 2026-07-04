@@ -109,6 +109,9 @@ enum Commands {
         /// Show line numbers
         #[arg(short = 'n', long)]
         line_numbers: bool,
+        /// Also read credential/secret files (.env, keys, …) excluded by default
+        #[arg(long)]
+        include_secrets: bool,
     },
 
     /// Generate 2-line technical summary (heuristic-based)
@@ -1566,6 +1569,7 @@ fn run_cli() -> Result<i32> {
             max_lines,
             tail_lines,
             line_numbers,
+            include_secrets,
         } => {
             let mut had_error = false;
             let mut stdin_seen = false;
@@ -1584,6 +1588,7 @@ fn run_cli() -> Result<i32> {
                         max_lines,
                         tail_lines,
                         line_numbers,
+                        include_secrets,
                         cli.verbose,
                     )
                 };
