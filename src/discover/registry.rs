@@ -73,6 +73,10 @@ lazy_static! {
     // `==> name <==` banners that `rtk read --max-lines` cannot reproduce.
     static ref HEAD_N: Regex = Regex::new(r"^head\s+-(\d+)\s+(\S+)$").unwrap();
     static ref HEAD_LINES: Regex = Regex::new(r"^head\s+--lines=(\d+)\s+(\S+)$").unwrap();
+    // Bare `head <file>` (single non-flag argument): head's default is the FIRST
+    // 10 LINES, so the faithful rewrite carries `--max-lines 10` — a plain
+    // `rtk read <file>` would print the whole file.
+    static ref HEAD_BARE: Regex = Regex::new(r"^head\s+([^-\s]\S*)$").unwrap();
     static ref TAIL_N: Regex = Regex::new(r"^tail\s+-(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_N_SPACE: Regex = Regex::new(r"^tail\s+-n\s+(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_LINES_EQ: Regex = Regex::new(r"^tail\s+--lines=(\d+)\s+(\S+)$").unwrap();
@@ -712,6 +716,10 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
             return Some(format!("rtk read {} --max-lines {}", file, n));
         }
     }
+    if let Some(caps) = HEAD_BARE.captures(cmd) {
+        let file = caps.get(1)?.as_str();
+        return Some(format!("rtk read {} --max-lines 10", file));
+    }
     if cmd.starts_with("head -") {
         return None;
     }
@@ -864,7 +872,17 @@ fn rewrite_segment_inner(
         return Some(trimmed.to_string());
     }
 
-    if cmd_part.starts_with("head -") || cmd_part.starts_with("tail ") {
+    // Line-range fast path. `head ` (not `head -`) so that bare `head <file>` is
+    // also handled by rewrite_line_range (→ `--max-lines 10`, head's default)
+    // instead of falling to the generic prefix-strip below, which rewrote it to
+    // `rtk read <file>` — the whole file. Multi-file forms match no pattern and
+    // pass through natively (#1362 banners). Exclusions are the user saying
+    // "hands off this command": honor them here exactly like the classification
+    // arms below do.
+    if cmd_part.starts_with("head ") || cmd_part.starts_with("tail ") {
+        if is_excluded(cmd_part, excluded) {
+            return None;
+        }
         return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
     }
 
@@ -1973,10 +1991,21 @@ mod tests {
 
     #[test]
     fn test_rewrite_head_no_flag_still_rewrites() {
-        // plain `head file` → `rtk read file` (no numeric flag)
+        // plain `head file` = FIRST 10 LINES (head's default); the rewrite must
+        // carry --max-lines 10 — a bare `rtk read file` prints the whole file.
         assert_eq!(
             rewrite_command_no_prefixes("head src/main.rs", &[]),
-            Some("rtk read src/main.rs".into())
+            Some("rtk read src/main.rs --max-lines 10".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bare_head_multi_file_passes_through() {
+        // Issue #1362 semantics extend to the bare form: multi-file head needs
+        // native `==> name <==` banners, so it must not be rewritten.
+        assert_eq!(
+            rewrite_command_no_prefixes("head a.txt b.txt", &[]),
+            None
         );
     }
 
@@ -3642,6 +3671,43 @@ mod tests {
         let excluded = vec!["curl".to_string()];
         assert_eq!(
             rewrite_command_no_prefixes("curl https://api.example.com/health", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_excludes_head_line_range_fast_path() {
+        // The head/tail line-range fast path used to return before the exclusion
+        // check, so `exclude_commands = ["head"]` was silently ignored.
+        let excluded = vec!["head".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("head -20 src/main.rs", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_excludes_tail_line_range_fast_path() {
+        let excluded = vec!["tail".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -50 build.log", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_line_range_still_rewrites_when_not_excluded() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head -20 src/main.rs", &[]),
+            Some("rtk read src/main.rs --max-lines 20".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_excludes_bare_head() {
+        let excluded = vec!["head".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("head src/main.rs", &excluded),
             None
         );
     }
