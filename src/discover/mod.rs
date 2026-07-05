@@ -54,7 +54,8 @@ pub fn run(
     let project_filter = if all {
         None
     } else if let Some(p) = project {
-        Some(p.to_string())
+        let encoded = ClaudeProvider::encode_project_path(p);
+        Some(encoded)
     } else {
         // Default: current working directory
         let cwd = std::env::current_dir()?;
