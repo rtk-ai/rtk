@@ -9,13 +9,16 @@
 # NOTE: the name must sort alphabetically before "rsync" — filters are
 # matched in BTreeMap (name) order, first match wins.
 description = "Pass rsync --dry-run/-n output through — never claim 'synced' for a dry run"
-match_command = "^rsync\\b.*(--dry-run\\b|\\s-[a-zA-Z]*n[a-zA-Z]*(\\s|$))"
+# --dry[-a-z]* : rsync accepts getopt_long prefix abbreviation (--dry ==
+# --dry-run), so match any unambiguous prefix, not just the full spelling.
+match_command = "^rsync\\b.*(--dry[-a-z]*|\\s-[a-zA-Z]*n[a-zA-Z]*(\\s|$))"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",
   "^sending incremental file list",
 ]
 max_lines = 60
+on_empty = "(dry run produced no output — add -v to list pending changes)"
 
 [[tests.dry-run-rsync]]
 name = "openrsync-style dry run with pending changes passes through"
