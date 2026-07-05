@@ -407,7 +407,7 @@ pub fn run(
 
     // Re-insert `--` when clap's trailing_var_arg consumed it
     let args = args_utils::restore_double_dash(args);
-    // #2817: credential files are excluded by default; the flag lifts it.
+    // credential files are excluded by default; the flag lifts it.
     let (args, include_secrets) = secrets::strip_include_secrets(&args);
     let real_cmd = format!("{} {}", engine.label(), args.join(" "));
     let rtk_label = format!("rtk {}", engine.label());
@@ -477,7 +477,7 @@ pub fn run(
             .push((line_num, is_match, cleaned));
     }
 
-    // #2817: drop matches from credential files. Done on the parsed results —
+    // drop matches from credential files. Done on the parsed results —
     // not via engine flags — so it works identically for grep and rg, matches
     // case-insensitively, and sees through innocuously-named symlinks.
     let mut excluded_files = 0usize;
@@ -515,8 +515,8 @@ pub fn run(
             .any(|f| f == "--with-filename" || f == "--recursive");
     // Always surface the line number (the openable position) unless the agent
     // explicitly turned it off; the filename is the only conditional part.
-    let show_line = !has_short_flag(&extra_args, 'N')
-        && !extra_args.iter().any(|f| f == "--no-line-number");
+    let show_line =
+        !has_short_flag(&extra_args, 'N') && !extra_args.iter().any(|f| f == "--no-line-number");
 
     // Faithful baseline: exactly what the real command prints, full content.
     // Files excluded above are absent from `by_file` and must not leak back

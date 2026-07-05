@@ -218,7 +218,7 @@ fn run(args: &FindArgs, verbose: u8) -> Result<()> {
         .git_global(true)
         .git_exclude(true);
     if !include_secrets {
-        // #2817: hard-exclude credential files (and prune credential dirs),
+        // hard-exclude credential files (and prune credential dirs),
         // independent of .gitignore. `--include-secrets` lifts this.
         builder.filter_entry(|entry| {
             let is_dir = entry.file_type().is_some_and(|t| t.is_dir());

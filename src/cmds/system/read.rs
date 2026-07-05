@@ -16,7 +16,7 @@ pub fn run(
     include_secrets: bool,
     verbose: u8,
 ) -> Result<()> {
-    // #2817: refuse to print credential files into the transcript by default.
+    // refuse to print credential files into the transcript by default.
     if !include_secrets && secrets::is_secret_path(file) {
         anyhow::bail!(
             "looks like a credential/secret file; refusing to print it (rerun with {} to override)",
