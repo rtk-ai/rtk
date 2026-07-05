@@ -53,6 +53,7 @@ struct DailyResponse {
 
 #[derive(Debug, Deserialize)]
 struct DailyEntry {
+    #[serde(alias = "period")]
     date: String,
     #[serde(flatten)]
     metrics: CcusageMetrics,
@@ -65,6 +66,7 @@ struct WeeklyResponse {
 
 #[derive(Debug, Deserialize)]
 struct WeeklyEntry {
+    #[serde(alias = "period")]
     week: String, // ISO week start (Monday)
     #[serde(flatten)]
     metrics: CcusageMetrics,
@@ -77,6 +79,7 @@ struct MonthlyResponse {
 
 #[derive(Debug, Deserialize)]
 struct MonthlyEntry {
+    #[serde(alias = "period")]
     month: String,
     #[serde(flatten)]
     metrics: CcusageMetrics,
