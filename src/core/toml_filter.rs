@@ -1336,6 +1336,23 @@ strip_ansi = true
         assert_eq!(found.unwrap().name, "terraform-plan");
     }
 
+    /// Pin the load-bearing ordering invariant of the rsync dry-run fix:
+    /// "dry-run-rsync" must sort (and therefore match) before "rsync" so a
+    /// dry run is never collapsed to "ok (synced)". If a rename ever breaks
+    /// the alphabetical precedence, this fails instead of silently
+    /// reintroducing fabricated sync success.
+    #[test]
+    fn test_dry_run_rsync_preempts_rsync_builtin() {
+        let filters = make_filters(BUILTIN_TOML);
+        let dry = find_filter_in("rsync -avn src/ dst/", &filters).expect("dry-run should match");
+        assert_eq!(dry.name, "dry-run-rsync");
+        let abbrev =
+            find_filter_in("rsync --dry -av src/ dst/", &filters).expect("--dry should match");
+        assert_eq!(abbrev.name, "dry-run-rsync");
+        let real = find_filter_in("rsync -av src/ dst/", &filters).expect("real sync should match");
+        assert_eq!(real.name, "rsync");
+    }
+
     #[test]
     fn test_find_filter_no_match_returns_none() {
         let filters = make_filters(
