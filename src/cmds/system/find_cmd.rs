@@ -184,29 +184,18 @@ fn parse_rtk_find_args(args: &[String]) -> Result<FindArgs> {
 /// Entry point from main.rs — parses raw args then delegates to run().
 pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
     let parsed = parse_find_args(args)?;
-    run(
-        &parsed.pattern,
-        &parsed.path,
-        parsed.max_results,
-        parsed.max_depth,
-        &parsed.file_type,
-        parsed.case_insensitive,
-        parsed.include_secrets,
-        verbose,
-    )
+    run(&parsed, verbose)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn run(
-    pattern: &str,
-    path: &str,
-    max_results: usize,
-    max_depth: Option<usize>,
-    file_type: &str,
-    case_insensitive: bool,
-    include_secrets: bool,
-    verbose: u8,
-) -> Result<()> {
+fn run(args: &FindArgs, verbose: u8) -> Result<()> {
+    let pattern = args.pattern.as_str();
+    let path = args.path.as_str();
+    let max_results = args.max_results;
+    let max_depth = args.max_depth;
+    let file_type = args.file_type.as_str();
+    let case_insensitive = args.case_insensitive;
+    let include_secrets = args.include_secrets;
+
     let timer = tracking::TimedExecution::start();
 
     // Treat "." as match-all
@@ -579,19 +568,39 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// `run` with the common test shape: type "f", case-sensitive, secrets
+    /// excluded, quiet.
+    fn run_with(
+        pattern: &str,
+        path: &str,
+        max_results: usize,
+        max_depth: Option<usize>,
+    ) -> Result<()> {
+        run(
+            &FindArgs {
+                pattern: pattern.to_string(),
+                path: path.to_string(),
+                max_results,
+                max_depth,
+                ..FindArgs::default()
+            },
+            0,
+        )
+    }
+
     // --- #1101: dotfile pattern should not skip hidden files ---
 
     #[test]
     fn find_dotfile_pattern_includes_hidden() {
         // .gitignore exists at the repo root — must be found when using a dotfile pattern
-        let result = run(".gitignore", ".", 50, Some(1), "f", false, false, 0);
+        let result = run_with(".gitignore", ".", 50, Some(1));
         assert!(result.is_ok(), "run with dotfile pattern should not error");
     }
 
     #[test]
     fn find_regular_pattern_skips_hidden() {
         // Non-dot pattern should not error (hidden dirs remain skipped)
-        let result = run("*.rs", "src", 5, None, "f", false, false, 0);
+        let result = run_with("*.rs", "src", 5, None);
         assert!(result.is_ok());
     }
 
@@ -600,34 +609,34 @@ mod tests {
     #[test]
     fn find_rs_files_in_src() {
         // Should find .rs files without error
-        let result = run("*.rs", "src", 100, None, "f", false, false, 0);
+        let result = run_with("*.rs", "src", 100, None);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_dot_pattern_works() {
         // "." pattern should not error (was broken before)
-        let result = run(".", "src", 10, None, "f", false, false, 0);
+        let result = run_with(".", "src", 10, None);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_no_matches() {
-        let result = run("*.xyz_nonexistent", "src", 50, None, "f", false, false, 0);
+        let result = run_with("*.xyz_nonexistent", "src", 50, None);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_respects_max() {
         // With max=2, should not error
-        let result = run("*.rs", "src", 2, None, "f", false, false, 0);
+        let result = run_with("*.rs", "src", 2, None);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_gitignored_excluded() {
         // target/ is in .gitignore — files inside should not appear
-        let result = run("*", ".", 1000, None, "f", false, false, 0);
+        let result = run_with("*", ".", 1000, None);
         assert!(result.is_ok());
         // We can't easily capture stdout in unit tests, but at least
         // verify it runs without error. The smoke tests verify content.

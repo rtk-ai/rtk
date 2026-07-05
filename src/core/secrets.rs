@@ -37,8 +37,11 @@ const NAME_PREFIXES: &[&str] = &[
 /// containing credentials.
 const NAME_SUFFIXES: &[&str] = &[".pem", ".key", ".p12", ".kdbx", ".tfstate", ".tfvars"];
 
-/// Directory components whose entire subtree is credential-bearing.
-const SECRET_DIRS: &[&str] = &[".aws", ".azure", ".kube", ".docker", "secrets"];
+/// Directory components whose entire subtree is credential-bearing. Only
+/// unambiguous dotted config dirs belong here — a generic name like `secrets`
+/// would hide legitimate source modules (e.g. `src/secrets/`); credential
+/// *files* inside such dirs are still caught by the name rules.
+const SECRET_DIRS: &[&str] = &[".aws", ".azure", ".kube", ".docker"];
 
 /// Adjacent (parent, child) directory pairs — precise enough to avoid
 /// excluding e.g. a source directory that merely happens to be named `gcloud`.
@@ -83,7 +86,7 @@ fn literal_is_secret(path: &Path) -> bool {
 }
 
 /// True when `name` matches a deny-listed directory name. Used by walkers to
-/// prune descent into e.g. `.aws/` or `secrets/`.
+/// prune descent into e.g. `.aws/` or `.kube/`.
 pub fn is_secret_dir_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     SECRET_DIRS.contains(&name.as_str())
@@ -232,12 +235,13 @@ mod tests {
         assert!(secret("/home/u/.aws/credentials"));
         assert!(secret("/home/u/.aws/config"));
         assert!(secret(".kube/config"));
-        assert!(secret("deploy/secrets/token.txt"));
         assert!(secret("/home/u/.config/gcloud/access_tokens.db"));
         assert!(secret("/home/u/.docker/config.json"));
-        // A *file* named "secrets" is not a directory rule hit…
-        assert!(!secret("src/secrets"));
-        // …and unrelated dirs stay searchable.
+        // Generic `secrets` dirs are NOT excluded (would hide source modules);
+        // credential files inside them are still caught by name rules.
+        assert!(!secret("deploy/secrets/notes.txt"));
+        assert!(secret("deploy/secrets/token.pem"));
+        // Unrelated dirs stay searchable.
         assert!(!secret("src/config/mod.rs"));
         assert!(!secret("gcloud/main.rs"));
     }

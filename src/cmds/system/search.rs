@@ -314,14 +314,43 @@ fn engine_capture<T: AsRef<str>>(
 /// flags and pattern-less modes (`--files`, `--type-list`). Unless the agent
 /// passed `--include-secrets`, engine-native exclusions keep credential files
 /// out of the output (#2817); prepended so a trailing `--` cannot demote them
-/// to positionals.
+/// to positionals. Explicitly-named credential files (`paths`) are dropped
+/// with a stderr note instead of relying on the engine's name-glob exclusion,
+/// which would both stay silent — a plausible-but-wrong "no match" — and miss
+/// innocuously-named symlinks.
 fn passthrough<T: AsRef<str>>(
     timer: &tracking::TimedExecution,
     engine: Engine,
     args: &[T],
+    paths: &[String],
     real_cmd: &str,
     include_secrets: bool,
 ) -> Result<i32> {
+    let mut args: Vec<&str> = args.iter().map(|a| a.as_ref()).collect();
+    if !include_secrets {
+        let mut kept_paths = paths.len();
+        for p in paths {
+            if secrets::is_secret_path(std::path::Path::new(p)) {
+                eprintln!(
+                    "rtk: {}: credential file hidden (rerun with {} to search it)",
+                    p,
+                    secrets::INCLUDE_SECRETS_FLAG
+                );
+                if let Some(pos) = args.iter().position(|a| a == p) {
+                    args.remove(pos);
+                }
+                kept_paths -= 1;
+            }
+        }
+        // Every named file was a credential file: nothing left to search.
+        // Don't run the engine — with no file operands it would read stdin.
+        // Mirror the engine's "no lines selected" exit code.
+        if kept_paths == 0 && !paths.is_empty() {
+            timer.track_passthrough(real_cmd, &format!("rtk {} (passthrough)", real_cmd));
+            return Ok(1);
+        }
+    }
+
     let mut cmd = resolved_command(engine.bin());
     if !include_secrets {
         cmd.args(match engine {
@@ -330,7 +359,7 @@ fn passthrough<T: AsRef<str>>(
         });
     }
     for a in args {
-        cmd.arg(a.as_ref());
+        cmd.arg(a);
     }
     let result = exec_capture_stdin(&mut cmd).context("search failed")?;
 
@@ -386,7 +415,7 @@ pub fn run(
     let (patterns, paths, extra_args) = extract_pattern_path(&args);
 
     if patterns.is_empty() {
-        return passthrough(&timer, engine, &args, &real_cmd, include_secrets);
+        return passthrough(&timer, engine, &args, &paths, &real_cmd, include_secrets);
     }
 
     let pattern_display = if patterns.len() == 1 {
@@ -403,7 +432,7 @@ pub fn run(
 
     // format/shape flags (-c/-l/-o/...): already-minimal native output, passthrough.
     if has_format_flag(&extra_args) {
-        return passthrough(&timer, engine, &args, &real_cmd, include_secrets);
+        return passthrough(&timer, engine, &args, &paths, &real_cmd, include_secrets);
     }
 
     let result = engine_capture(engine, &extra_args, &patterns, &paths)?;
@@ -414,7 +443,7 @@ pub fn run(
     // Unparseable shape re-runs verbatim below (with its own stderr), so handle it
     // before surfacing this run's stderr (#2333).
     if unparsed_signal(&raw_output) > 0 {
-        return passthrough(&timer, engine, &args, &real_cmd, include_secrets);
+        return passthrough(&timer, engine, &args, &paths, &real_cmd, include_secrets);
     }
 
     if !result.stderr.is_empty() {

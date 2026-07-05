@@ -7,7 +7,6 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 
-#[allow(clippy::too_many_arguments)]
 pub fn run(
     file: &Path,
     level: FilterLevel,
