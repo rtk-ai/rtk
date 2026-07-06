@@ -54,7 +54,7 @@ fn git_cmd_c_locale(global_args: &[String]) -> Command {
     cmd
 }
 
-fn uses_compact_status_path(args: &[String]) -> bool {
+pub(crate) fn uses_compact_status_path(args: &[String]) -> bool {
     if args.is_empty() {
         return true;
     }
@@ -742,7 +742,7 @@ fn detect_status_state(line: &str) -> Option<GitStatusState> {
 /// This helper walks the plain-status output we already capture for tracking
 /// and emits a compact, RTK-style summary rather than dumping git's full prose.
 /// Returns `None` when no state is in progress.
-fn extract_state_header(raw: &str) -> Option<String> {
+pub(crate) fn extract_state_header(raw: &str) -> Option<String> {
     // Headers of the file-change blocks — everything relevant to state appears
     // above these in git's output, so they double as a terminator.
     const STOPPERS: &[&str] = &[
@@ -777,7 +777,7 @@ fn extract_state_header(raw: &str) -> Option<String> {
 /// which an agent (or a distracted human) can misread as a branch literally
 /// named `HEAD`. The plain-status output keeps the explicit SHA/ref, so we
 /// surface that instead. Returns `None` when HEAD is on a branch.
-fn extract_detached_head(raw: &str) -> Option<String> {
+pub(crate) fn extract_detached_head(raw: &str) -> Option<String> {
     raw.lines()
         .map(str::trim)
         .find(|l| l.starts_with("HEAD detached "))
@@ -785,7 +785,7 @@ fn extract_detached_head(raw: &str) -> Option<String> {
 }
 
 /// Minimal filtering for git status with user-provided args
-fn filter_status_with_args(output: &str) -> String {
+pub(crate) fn filter_status_with_args(output: &str) -> String {
     let mut result = Vec::new();
 
     for line in output.lines() {

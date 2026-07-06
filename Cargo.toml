@@ -12,6 +12,18 @@ readme = "README.md"
 keywords = ["cli", "llm", "token", "filter", "productivity"]
 categories = ["command-line-utilities", "development-tools"]
 
+[lib]
+name = "rtk"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rtk"
+path = "src/main.rs"
+
+[[bin]]
+name = "rtk-shell"
+path = "src/bin/rtk_shell.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 anyhow = "1.0"

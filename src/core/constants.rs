@@ -15,6 +15,7 @@ pub const RTK_META_COMMANDS: &[&str] = &[
     "config",
     "proxy",
     "run",
+    "shell",
     "hook",
     "hook-audit",
     "pipe",

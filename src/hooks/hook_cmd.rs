@@ -231,7 +231,7 @@ fn heal_legacy_hook_file(path: &std::path::Path) -> bool {
         .is_ok()
 }
 
-fn get_rewritten(cmd: &str) -> Option<String> {
+pub(crate) fn get_rewritten(cmd: &str) -> Option<String> {
     if has_heredoc(cmd) {
         return None;
     }

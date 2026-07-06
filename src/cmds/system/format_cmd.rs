@@ -1,12 +1,12 @@
 //! Runs code formatters (Prettier, Ruff) and shows only files that changed.
 
+use crate::cmds::js::prettier_cmd;
+use crate::cmds::python::ruff_cmd;
 use crate::core::guard::never_worse;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{package_manager_exec, resolved_command};
-use crate::prettier_cmd;
-use crate::ruff_cmd;
 use anyhow::{Context, Result};
 use std::path::Path;
 

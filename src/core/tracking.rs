@@ -13,7 +13,7 @@
 //! # Quick Start
 //!
 //! ```no_run
-//! use rtk::tracking::{TimedExecution, Tracker};
+//! use rtk::core::tracking::{TimedExecution, Tracker};
 //!
 //! // Track a command execution
 //! let timer = TimedExecution::start();
@@ -79,7 +79,7 @@ use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB, RTK_DATA_DIR};
 /// # Examples
 ///
 /// ```no_run
-/// use rtk::tracking::Tracker;
+/// use rtk::core::tracking::Tracker;
 ///
 /// let tracker = Tracker::new()?;
 /// tracker.record("ls -la", "rtk ls", 1000, 200, 50)?;
@@ -241,13 +241,22 @@ impl Tracker {
     /// # Examples
     ///
     /// ```no_run
-    /// use rtk::tracking::Tracker;
+    /// use rtk::core::tracking::Tracker;
     ///
     /// let tracker = Tracker::new()?;
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn new() -> Result<Self> {
         let db_path = get_db_path()?;
+        Self::open_at(&db_path)
+    }
+
+    /// Open (or create) a tracker at an explicit database path, running the
+    /// same schema creation and migrations as [`new`](Self::new). // added
+    ///
+    /// Exposed as `pub(crate)` so tests can exercise migrations against an
+    /// isolated path without mutating the process-wide `RTK_DB_PATH` env var.
+    pub(crate) fn open_at(db_path: &std::path::Path) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
             crate::core::utils::create_private_dir(parent)?;
         }
@@ -320,6 +329,8 @@ impl Tracker {
             "CREATE INDEX IF NOT EXISTS idx_project_path_timestamp ON commands(project_path, timestamp)",
             [],
         );
+        // Migration: add optional session_id column for rtk-shell session correlation // added
+        let _ = conn.execute("ALTER TABLE commands ADD COLUMN session_id TEXT", []);
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS parse_failures (
@@ -363,7 +374,8 @@ impl Tracker {
                 saved_tokens INTEGER NOT NULL,
                 savings_pct REAL NOT NULL,
                 exec_time_ms INTEGER DEFAULT 0,
-                project_path TEXT DEFAULT ''
+                project_path TEXT DEFAULT '',
+                session_id TEXT
             )",
             [],
         )?;
@@ -408,7 +420,7 @@ impl Tracker {
     /// # Examples
     ///
     /// ```no_run
-    /// use rtk::tracking::Tracker;
+    /// use rtk::core::tracking::Tracker;
     ///
     /// let tracker = Tracker::new()?;
     /// tracker.record("ls -la", "rtk ls", 1000, 200, 50)?;
@@ -422,6 +434,31 @@ impl Tracker {
         output_tokens: usize,
         exec_time_ms: u64,
     ) -> Result<()> {
+        self.record_with_session(
+            original_cmd,
+            rtk_cmd,
+            input_tokens,
+            output_tokens,
+            exec_time_ms,
+            None,
+        ) // delegate to session-aware variant
+    }
+
+    /// Record a command execution, optionally tagged with an rtk-shell session id. // added
+    ///
+    /// Identical to [`record`](Self::record) but also accepts an optional
+    /// `session_id` used to correlate commands run within the same rtk-shell
+    /// session. Passing `None` keeps one-shot `rtk` invocations working exactly
+    /// as before (`session_id` stored as SQL NULL).
+    pub fn record_with_session(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        input_tokens: usize,
+        output_tokens: usize,
+        exec_time_ms: u64,
+        session_id: Option<&str>,
+    ) -> Result<()> {
         let saved = input_tokens.saturating_sub(output_tokens);
         let pct = if input_tokens > 0 {
             (saved as f64 / input_tokens as f64) * 100.0
@@ -432,8 +469,8 @@ impl Tracker {
         let project_path = current_project_path_string(); // added: record cwd
 
         self.conn.execute(
-            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", // added: project_path
+            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms, session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)", // added: session_id
             params![
                 Utc::now().to_rfc3339(),
                 original_cmd,
@@ -443,7 +480,8 @@ impl Tracker {
                 output_tokens as i64,
                 saved as i64,
                 pct,
-                exec_time_ms as i64
+                exec_time_ms as i64,
+                session_id, // added: optional, stored as NULL when None
             ],
         )?;
 
@@ -567,7 +605,7 @@ impl Tracker {
     /// # Examples
     ///
     /// ```no_run
-    /// use rtk::tracking::Tracker;
+    /// use rtk::core::tracking::Tracker;
     ///
     /// let tracker = Tracker::new()?;
     /// let summary = tracker.get_summary()?;
@@ -705,7 +743,7 @@ impl Tracker {
     /// # Examples
     ///
     /// ```no_run
-    /// use rtk::tracking::Tracker;
+    /// use rtk::core::tracking::Tracker;
     ///
     /// let tracker = Tracker::new()?;
     /// let days = tracker.get_all_days()?;
@@ -778,7 +816,7 @@ impl Tracker {
     /// # Examples
     ///
     /// ```no_run
-    /// use rtk::tracking::Tracker;
+    /// use rtk::core::tracking::Tracker;
     ///
     /// let tracker = Tracker::new()?;
     /// let weeks = tracker.get_by_week()?;
@@ -853,7 +891,7 @@ impl Tracker {
     /// # Examples
     ///
     /// ```no_run
-    /// use rtk::tracking::Tracker;
+    /// use rtk::core::tracking::Tracker;
     ///
     /// let tracker = Tracker::new()?;
     /// let months = tracker.get_by_month()?;
@@ -929,7 +967,7 @@ impl Tracker {
     /// # Examples
     ///
     /// ```no_run
-    /// use rtk::tracking::Tracker;
+    /// use rtk::core::tracking::Tracker;
     ///
     /// let tracker = Tracker::new()?;
     /// let recent = tracker.get_recent(10)?;
@@ -1310,7 +1348,7 @@ pub fn record_parse_failure_silent(raw_command: &str, error_message: &str, succe
 /// # Examples
 ///
 /// ```
-/// use rtk::tracking::estimate_tokens;
+/// use rtk::core::tracking::estimate_tokens;
 ///
 /// assert_eq!(estimate_tokens(""), 0);
 /// assert_eq!(estimate_tokens("abcd"), 1);  // 4 chars = 1 token
@@ -1330,8 +1368,8 @@ pub fn estimate_tokens(text: &str) -> usize {
 ///
 /// # Examples
 ///
-/// ```no_run
-/// use rtk::tracking::TimedExecution;
+/// ```ignore
+/// use rtk::core::tracking::TimedExecution;
 ///
 /// let timer = TimedExecution::start();
 /// let input = execute_standard_command()?;
@@ -1353,7 +1391,7 @@ impl TimedExecution {
     /// # Examples
     ///
     /// ```no_run
-    /// use rtk::tracking::TimedExecution;
+    /// use rtk::core::tracking::TimedExecution;
     ///
     /// let timer = TimedExecution::start();
     /// // ... execute command ...
@@ -1382,7 +1420,7 @@ impl TimedExecution {
     /// # Examples
     ///
     /// ```no_run
-    /// use rtk::tracking::TimedExecution;
+    /// use rtk::core::tracking::TimedExecution;
     ///
     /// let timer = TimedExecution::start();
     /// let input = "long output...";
@@ -1390,17 +1428,35 @@ impl TimedExecution {
     /// timer.track("ls -la", "rtk ls", input, output);
     /// ```
     pub fn track(&self, original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
+        self.track_with_session(original_cmd, rtk_cmd, input, output, None) // delegate, no session
+    }
+
+    /// Track the command with elapsed time, token counts, and an optional
+    /// rtk-shell session id. // added
+    ///
+    /// Identical to [`track`](Self::track) but threads an optional `session_id`
+    /// through to [`Tracker::record_with_session`]. Passing `None` keeps
+    /// existing one-shot `rtk` invocations unchanged.
+    pub fn track_with_session(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        input: &str,
+        output: &str,
+        session_id: Option<&str>,
+    ) {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
         let input_tokens = estimate_tokens(input);
         let output_tokens = estimate_tokens(output);
 
         if let Ok(tracker) = Tracker::new() {
-            let _ = tracker.record(
+            let _ = tracker.record_with_session(
                 original_cmd,
                 rtk_cmd,
                 input_tokens,
                 output_tokens,
                 elapsed_ms,
+                session_id,
             );
         }
     }
@@ -1419,17 +1475,32 @@ impl TimedExecution {
     /// # Examples
     ///
     /// ```no_run
-    /// use rtk::tracking::TimedExecution;
+    /// use rtk::core::tracking::TimedExecution;
     ///
     /// let timer = TimedExecution::start();
     /// // ... execute streaming command ...
     /// timer.track_passthrough("git tag", "rtk git tag");
     /// ```
     pub fn track_passthrough(&self, original_cmd: &str, rtk_cmd: &str) {
+        self.track_passthrough_with_session(original_cmd, rtk_cmd, None) // delegate, no session
+    }
+
+    /// Track passthrough commands with an optional rtk-shell session id. // added
+    ///
+    /// Identical to [`track_passthrough`](Self::track_passthrough) but threads
+    /// an optional `session_id` through to [`Tracker::record_with_session`].
+    /// Passing `None` keeps existing one-shot `rtk` invocations unchanged.
+    pub fn track_passthrough_with_session(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        session_id: Option<&str>,
+    ) {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
         // input_tokens=0, output_tokens=0 won't dilute savings statistics
         if let Ok(tracker) = Tracker::new() {
-            let _ = tracker.record(original_cmd, rtk_cmd, 0, 0, elapsed_ms);
+            let _ =
+                tracker.record_with_session(original_cmd, rtk_cmd, 0, 0, elapsed_ms, session_id);
         }
     }
 }
@@ -1443,7 +1514,7 @@ impl TimedExecution {
 ///
 /// ```
 /// use std::ffi::OsString;
-/// use rtk::tracking::args_display;
+/// use rtk::core::tracking::args_display;
 ///
 /// let args = vec![OsString::from("status"), OsString::from("--short")];
 /// assert_eq!(args_display(&args), "status --short");
@@ -1458,6 +1529,10 @@ pub fn args_display(args: &[OsString]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Shared lock guarding tests that mutate the process-wide RTK_DB_PATH env
+    // var, to avoid races when tests run in parallel. // added
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
@@ -1586,8 +1661,6 @@ mod tests {
     #[test]
     fn test_db_path_env_and_default() {
         use std::env;
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap();
 
         let custom_path = env::temp_dir().join("rtk_test_custom.db");
@@ -1756,5 +1829,121 @@ mod tests {
             let mode = std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "expected 0600 on {}", p.display());
         }
+    }
+
+    // 14. Fresh database gets the session_id column, and record_with_session
+    // round-trips a session id correctly. // added
+    #[test]
+    fn test_fresh_database_has_session_id_column() {
+        let db_path =
+            std::env::temp_dir().join(format!("rtk_test_fresh_session_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db_path);
+
+        // open_at() runs the exact same CREATE TABLE + migration steps as new(),
+        // so a brand-new database must end up with the session_id column too.
+        let tracker = Tracker::open_at(&db_path).expect("Failed to open tracker on fresh db");
+
+        // Column must exist and accept a value via record_with_session.
+        let test_cmd = format!("rtk shell test_fresh_{}", std::process::id());
+        tracker
+            .record_with_session("echo hi", &test_cmd, 10, 2, 5, Some("session-abc"))
+            .expect("record_with_session should succeed on fresh db");
+
+        let session_id: Option<String> = tracker
+            .conn
+            .query_row(
+                "SELECT session_id FROM commands WHERE rtk_cmd = ?1",
+                params![test_cmd],
+                |row| row.get(0),
+            )
+            .expect("session_id column should be queryable");
+        assert_eq!(session_id.as_deref(), Some("session-abc"));
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    // 15. Existing database missing session_id gets migrated cleanly on next open. // added
+    #[test]
+    fn test_existing_database_migrates_session_id_column() {
+        let db_path = std::env::temp_dir().join(format!(
+            "rtk_test_migrate_session_{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&db_path);
+
+        // Simulate an old database predating the session_id column (and even
+        // predating exec_time_ms/project_path, mirroring a truly legacy schema).
+        {
+            let conn = Connection::open(&db_path).expect("open legacy db");
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS commands (
+                    id INTEGER PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    original_cmd TEXT NOT NULL,
+                    rtk_cmd TEXT NOT NULL,
+                    input_tokens INTEGER NOT NULL,
+                    output_tokens INTEGER NOT NULL,
+                    saved_tokens INTEGER NOT NULL,
+                    savings_pct REAL NOT NULL
+                )",
+                [],
+            )
+            .expect("create legacy table");
+
+            // Insert a pre-migration row to make sure migration doesn't lose data.
+            // Timestamp must be recent (within the 90-day retention window) so
+            // `cleanup_old()` doesn't purge it on the next `record` call.
+            let recent_ts = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens, saved_tokens, savings_pct)
+                 VALUES (?1, 'ls', 'rtk ls', 100, 20, 80, 80.0)",
+                params![recent_ts],
+            )
+            .expect("insert legacy row");
+        }
+
+        // Opening via Tracker::open_at() must run the ALTER TABLE migration cleanly.
+        let tracker = Tracker::open_at(&db_path).expect("Failed to migrate legacy db on open");
+
+        // Pre-existing row should now have a NULL session_id (not an error).
+        let session_id: Option<String> = tracker
+            .conn
+            .query_row(
+                "SELECT session_id FROM commands WHERE rtk_cmd = 'rtk ls'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("session_id column should exist after migration");
+        assert!(session_id.is_none());
+
+        // New writes with a session id should also work post-migration.
+        let test_cmd = format!("rtk shell test_migrate_{}", std::process::id());
+        tracker
+            .record_with_session("git status", &test_cmd, 50, 10, 3, Some("session-xyz"))
+            .expect("record_with_session should succeed after migration");
+
+        let new_session_id: Option<String> = tracker
+            .conn
+            .query_row(
+                "SELECT session_id FROM commands WHERE rtk_cmd = ?1",
+                params![test_cmd],
+                |row| row.get(0),
+            )
+            .expect("session_id column should be queryable for new rows");
+        assert_eq!(new_session_id.as_deref(), Some("session-xyz"));
+
+        // Re-opening a second time (double migration) must remain a no-op and not error.
+        let tracker2 = Tracker::open_at(&db_path).expect("Failed to re-open already-migrated db");
+        let recheck: Option<String> = tracker2
+            .conn
+            .query_row(
+                "SELECT session_id FROM commands WHERE rtk_cmd = 'rtk ls'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("session_id column should still exist after re-open");
+        assert!(recheck.is_none());
+
+        let _ = std::fs::remove_file(&db_path);
     }
 }

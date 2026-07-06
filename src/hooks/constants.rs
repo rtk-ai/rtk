@@ -67,3 +67,46 @@ pub const VIBE_PROMPTS_SUBDIR: &str = "prompts";
 pub const VIBE_PROMPT_FILE: &str = "rtk.md";
 pub const VIBE_HOOK_NAME: &str = "rtk-rewrite";
 pub const VIBE_BASH_MATCH: &str = "bash";
+
+// ─── rtk-shell RC-file auto-swap (Mode 3) ─────────────────────────────────
+
+/// Set (to any non-empty value) inside an active rtk-shell session, so the
+/// guarded RC-file block below can refuse to re-exec into a nested rtk-shell
+/// (would otherwise recurse forever every time the child shell re-sources
+/// its own startup files).
+pub const RTK_IN_SHELL_ENV: &str = "RTK_IN_SHELL";
+
+/// Explicit opt-in: if set (to any non-empty value) in the environment, the
+/// guarded RC-file block always swaps to `rtk-shell`, regardless of harness
+/// detection or TTY state. This is the first half of the dual-signal gate.
+pub const RTK_ENABLE_SHELL_SWAP_ENV: &str = "RTK_ENABLE_SHELL_SWAP";
+
+/// Environment variables that identify a known AI-coding-harness process as
+/// the parent of the shell being started. Presence of *any* of these,
+/// combined with a non-tty stdin, forms the second half of the dual-signal
+/// gate (see `docs` on the generated block for the full condition).
+///
+/// - `CLAUDECODE`: set by Claude Code for all subprocesses it spawns.
+/// - `CURSOR_TRACE_ID`: set by Cursor's agent/terminal integration.
+/// - `OPENCODE_SESSION_ID` **(placeholder — unconfirmed)**: the real
+///   opencode harness env var is not yet known; this name is a best-guess
+///   placeholder pending confirmation. Update once the actual variable is
+///   verified against opencode's source/docs.
+pub const KNOWN_HARNESS_ENV_VARS: &[&str] =
+    &["CLAUDECODE", "CURSOR_TRACE_ID", "OPENCODE_SESSION_ID"];
+
+/// Interactive-only bash startup file (sourced by login and non-login
+/// interactive bash shells launched from a terminal).
+pub const BASHRC_FILE: &str = ".bashrc";
+/// Interactive-only zsh startup file (sourced by every interactive zsh
+/// shell; `ZDOTDIR` is honoured by callers before falling back to `$HOME`).
+pub const ZSHRC_FILE: &str = ".zshrc";
+/// Dedicated rtk-shell fragment sourced from the end of `.bashrc`/`.zshrc`
+/// (interactive shells) and pointed to by `BASH_ENV` (non-interactive bash,
+/// which never reads `.bashrc` at all).
+pub const RTK_SHELL_SWAP_FILE: &str = ".rtk-shell-swap.sh";
+/// Non-interactive bash reads this file at startup (if set), unlike
+/// `.bashrc`. Pointing it at [`RTK_SHELL_SWAP_FILE`] is the only way to
+/// reach non-interactive/non-login bash invocations (e.g. `bash -c`, CI
+/// steps, subshells spawned by tools) with the same guarded swap logic.
+pub const BASH_ENV_VAR: &str = "BASH_ENV";

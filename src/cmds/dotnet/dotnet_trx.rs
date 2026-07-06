@@ -1,6 +1,6 @@
 //! Parses .trx test result files (Visual Studio XML format) into compact summaries.
 
-use crate::binlog::{FailedTest, TestSummary};
+use super::binlog::{FailedTest, TestSummary};
 use chrono::{DateTime, FixedOffset};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;

@@ -3,10 +3,10 @@
 //! Provides token-optimized alternatives to verbose `gh` commands.
 //! Focuses on extracting essential information from JSON outputs.
 
+use super::git;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::{ok_confirmation, resolved_command, truncate};
-use crate::git;
 use anyhow::Result;
 use regex::Regex;
 use serde_json::Value;

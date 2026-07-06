@@ -11,7 +11,7 @@ use crate::core::utils::{
     exit_code_from_output, exit_code_from_status, human_bytes, join_with_overflow,
     resolved_command, shorten_arn, truncate_iso_date,
 };
-use crate::json_cmd;
+use crate::cmds::system::json_cmd;
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde_json::Value;
