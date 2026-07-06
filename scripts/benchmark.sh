@@ -342,21 +342,35 @@ section "wc"
 bench "wc" "wc Cargo.toml src/main.rs" "$RTK wc Cargo.toml src/main.rs"
 
 # ===================
-# curl
+# curl (local fixtures — live HTTP endpoints caused non-deterministic failures, see #2842)
 # ===================
 section "curl"
 if command -v curl &> /dev/null; then
-  bench "curl json" "curl -s https://mockhttp.org/json/1" "$RTK curl https://mockhttp.org/json/1"
-  bench "curl text" "curl -s https://mockhttp.org/robots.txt" "$RTK curl https://mockhttp.org/robots.txt"
+  CURL_JSON="/tmp/rtk_bench_curl.json"
+  CURL_TEXT="/tmp/rtk_bench_curl.txt"
+  cat > "$CURL_JSON" << 'CURLEOF'
+{"slideshow":{"author":"Yours Truly","date":"date of publication","slides":[{"title":"Wake up to WonderWidgets!","type":"all"},{"items":["Why <em>WonderWidgets</em> are great","Who <em>buys</em> WonderWidgets"],"title":"Overview","type":"all"}],"title":"Sample Slide Show"}}
+CURLEOF
+  cat > "$CURL_TEXT" << 'CURLEOF'
+User-agent: *
+Disallow: /deny
+CURLEOF
+  bench "curl json" "curl -s file://$CURL_JSON" "$RTK curl file://$CURL_JSON"
+  bench "curl text" "curl -s file://$CURL_TEXT" "$RTK curl file://$CURL_TEXT"
+  rm -f "$CURL_JSON" "$CURL_TEXT"
 fi
 
 # ===================
-# wget
+# wget (local fixture — same fix as curl above, see #2842)
 # ===================
 if command -v wget &> /dev/null; then
   section "wget"
-  bench "wget" "wget -qO- https://mockhttp.org/json/1" "$RTK wget https://mockhttp.org/json/1"
-  rm -f 1 2>/dev/null
+  WGET_JSON="/tmp/rtk_bench_wget.json"
+  cat > "$WGET_JSON" << 'CURLEOF'
+{"slideshow":{"author":"Yours Truly","date":"date of publication","slides":[{"title":"Wake up to WonderWidgets!","type":"all"},{"items":["Why <em>WonderWidgets</em> are great","Who <em>buys</em> WonderWidgets"],"title":"Overview","type":"all"}],"title":"Sample Slide Show"}}
+CURLEOF
+  bench "wget" "cat $WGET_JSON" "$RTK wget file://$WGET_JSON"
+  rm -f "$WGET_JSON"
 fi
 
 # ===================
