@@ -287,6 +287,15 @@ impl Engine {
             Engine::Rg => &["-n", "--with-filename", "--null"],
         }
     }
+
+    /// Context for a spawn failure (binary missing): name the engine and the
+    /// sibling to retry with, so the agent can self-correct in one step.
+    fn spawn_failure_hint(self) -> &'static str {
+        match self {
+            Engine::Grep => "could not run 'grep' — install it or retry with 'rtk rg'",
+            Engine::Rg => "could not run 'rg' — install ripgrep or retry with 'rtk grep'",
+        }
+    }
 }
 
 /// Runs the agent's exact engine + flags for the grouping path, appending only the
@@ -307,7 +316,7 @@ fn engine_capture<T: AsRef<str>>(
     }
     cmd.arg("--");
     cmd.args(paths);
-    exec_capture_stdin(&mut cmd).context("search failed")
+    exec_capture_stdin(&mut cmd).context(engine.spawn_failure_hint())
 }
 
 /// Runs the agent's command verbatim for forms RTK does not group: format/shape
@@ -322,7 +331,7 @@ fn passthrough<T: AsRef<str>>(
     for a in args {
         cmd.arg(a.as_ref());
     }
-    let result = exec_capture_stdin(&mut cmd).context("search failed")?;
+    let result = exec_capture_stdin(&mut cmd).context(engine.spawn_failure_hint())?;
 
     print!("{}", strip_ansi(&result.stdout));
     if !result.stderr.is_empty() {
@@ -372,7 +381,7 @@ pub fn run(
     {
         let mut cmd = resolved_command(engine.bin());
         cmd.args(args);
-        let result = exec_capture(&mut cmd).context("search failed")?;
+        let result = exec_capture(&mut cmd).context(engine.spawn_failure_hint())?;
         print!("{}", result.stdout);
         if !result.stderr.is_empty() {
             eprint!("{}", result.stderr);

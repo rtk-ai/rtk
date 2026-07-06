@@ -105,6 +105,26 @@ fn no_match_stays_exit_1_and_empty() {
 }
 
 #[test]
+fn missing_engine_error_is_actionable() {
+    let (_d, f) = write_temp("fn alpha\n");
+    let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["grep", "fn", &f])
+        .env("PATH", "/nonexistent")
+        .output()
+        .expect("rtk");
+    assert!(!out.status.success(), "a missing engine must not exit 0");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("could not run '"),
+        "the error must name the missing engine:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("retry with"),
+        "the error must give a next step:\n{stderr}"
+    );
+}
+
+#[test]
 fn rg_bad_regex_surfaces_error_exit_2() {
     if !rg_available() {
         return;

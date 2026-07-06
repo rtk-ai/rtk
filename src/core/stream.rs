@@ -533,7 +533,12 @@ impl CaptureResult {
 
 pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
     cmd.stdin(Stdio::null());
-    let output = cmd.output().context("Failed to execute command")?;
+    let output = cmd.output().with_context(|| {
+        format!(
+            "failed to execute '{}'",
+            cmd.get_program().to_string_lossy()
+        )
+    })?;
     Ok(CaptureResult {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -544,7 +549,12 @@ pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
 /// Like [`exec_capture`] but inherits stdin so a wrapped engine can read a piped stdin.
 pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
     cmd.stdin(Stdio::inherit());
-    let output = cmd.output().context("Failed to execute command")?;
+    let output = cmd.output().with_context(|| {
+        format!(
+            "failed to execute '{}'",
+            cmd.get_program().to_string_lossy()
+        )
+    })?;
     Ok(CaptureResult {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -556,6 +566,18 @@ pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
 pub(crate) mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn exec_capture_missing_binary_names_it_in_error() {
+        let mut cmd = Command::new("rtk-test-no-such-binary");
+        let Err(err) = exec_capture(&mut cmd) else {
+            panic!("spawn must fail");
+        };
+        assert!(
+            format!("{err:#}").contains("rtk-test-no-such-binary"),
+            "error must name the binary: {err:#}"
+        );
+    }
 
     struct LineFilter<F: FnMut(&str) -> Option<String>> {
         f: F,
