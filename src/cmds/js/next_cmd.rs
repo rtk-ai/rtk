@@ -6,9 +6,29 @@ use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
 use regex::Regex;
 
+/// This filter only understands `next build` output. Any other subcommand
+/// (dev, start, lint, ...) must run unfiltered instead of being silently
+/// turned into a build (see rtk-ai/rtk#2840).
+///
+/// Returns whether the build filter applies, plus the exact argv (after
+/// "next"/"npx next") that will be executed - this is the part that must be
+/// tested, since the bug was in what actually got run, not just a boolean.
+fn plan_next_invocation(args: &[String]) -> (bool, Vec<String>) {
+    let is_build = matches!(args.first().map(String::as_str), None | Some("build"));
+    if !is_build {
+        return (false, args.to_vec());
+    }
+    // Args may already contain "build" as the subcommand name; don't duplicate it.
+    let final_args = std::iter::once("build".to_string())
+        .chain(args.iter().filter(|a| a.as_str() != "build").cloned())
+        .collect();
+    (true, final_args)
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     // Try next directly first, fallback to npx if not found
     let next_exists = tool_exists("next");
+    let tool = if next_exists { "next" } else { "npx next" };
 
     let mut cmd = if next_exists {
         resolved_command("next")
@@ -18,15 +38,26 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         c
     };
 
-    cmd.arg("build");
-
-    for arg in args {
+    let (is_build, final_args) = plan_next_invocation(args);
+    for arg in &final_args {
         cmd.arg(arg);
     }
 
+    if !is_build {
+        if verbose > 0 {
+            eprintln!("Running: {} {} (passthrough)", tool, final_args.join(" "));
+        }
+        return runner::run(
+            cmd,
+            tool,
+            &final_args.join(" "),
+            runner::RunMode::Passthrough,
+            runner::RunOptions::default(),
+        );
+    }
+
     if verbose > 0 {
-        let tool = if next_exists { "next" } else { "npx next" };
-        eprintln!("Running: {} build", tool);
+        eprintln!("Running: {} {}", tool, final_args.join(" "));
     }
 
     runner::run_filtered(
@@ -185,6 +216,46 @@ fn extract_time(line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strs(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_plan_next_invocation_regression_2840() {
+        // rtk-ai/rtk#2840: `rtk npx next dev` executed `next build dev`
+        // instead of `next dev`. Assert on the exact argv that gets run.
+        assert_eq!(
+            plan_next_invocation(&strs(&["dev"])),
+            (false, strs(&["dev"]))
+        );
+        assert_eq!(
+            plan_next_invocation(&strs(&["start"])),
+            (false, strs(&["start"]))
+        );
+        assert_eq!(
+            plan_next_invocation(&strs(&["lint"])),
+            (false, strs(&["lint"]))
+        );
+        assert_eq!(
+            plan_next_invocation(&strs(&["dev", "--port", "3001"])),
+            (false, strs(&["dev", "--port", "3001"]))
+        );
+    }
+
+    #[test]
+    fn test_plan_next_invocation_still_builds() {
+        assert_eq!(plan_next_invocation(&[]), (true, strs(&["build"])));
+        assert_eq!(
+            plan_next_invocation(&strs(&["build"])),
+            (true, strs(&["build"]))
+        );
+        // Must not duplicate "build" into `next build build`.
+        assert_eq!(
+            plan_next_invocation(&strs(&["build", "--debug"])),
+            (true, strs(&["build", "--debug"]))
+        );
+    }
 
     #[test]
     fn test_filter_next_build() {
