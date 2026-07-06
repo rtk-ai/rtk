@@ -120,12 +120,10 @@ fn build_effective_npm_args(args: &[String]) -> Vec<String> {
         .unwrap_or(false);
 
     let mut effective_args: Vec<String> = Vec::with_capacity(args.len() + 1);
-    if is_run_explicit || is_npm_subcommand {
-        effective_args.extend_from_slice(args);
-    } else {
+    if !(is_run_explicit || is_npm_subcommand) {
         effective_args.push("run".to_string());
-        effective_args.extend_from_slice(args);
     }
+    effective_args.extend_from_slice(args);
     effective_args
 }
 
@@ -231,7 +229,7 @@ npm notice
     }
 
     fn args(strs: &[&str]) -> Vec<String> {
-        strs.iter().map(|s| s.to_string()).collect()
+        strs.iter().copied().map(String::from).collect()
     }
 
     #[test]
