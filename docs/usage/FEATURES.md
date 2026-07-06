@@ -1335,11 +1335,13 @@ max_width = 120             # Largeur maximale de sortie
 ignore_dirs = [".git", "node_modules", "target", "__pycache__", ".venv", "vendor"]
 ignore_files = ["*.lock", "*.min.js", "*.min.css"]
 
-[tee]
-enabled = true              # Activer la sauvegarde de sortie brute
-mode = "failures"           # "failures" (defaut), "always", ou "never"
-max_files = 20              # Rotation : garder les N derniers fichiers
-# directory = "/custom/tee/path"  # Chemin personnalise (optionnel)
+[retriever]
+mode = "sqlite"             # sqlite (defaut) | tee (fichiers legacy) | disabled
+max_entries = 200           # Nombre max d'entrees dans la base recall
+retention_days = 30         # Retention des entrees
+# database_path = "/custom/recall.db"  # Chemin personnalise (optionnel)
+# Une ancienne section [tee] reste reconnue : mappee vers mode = "tee",
+# ou "disabled" si enabled = false
 
 [telemetry]
 enabled = false             # Telemetrie anonyme (1 ping/jour, requiert consentement)
@@ -1354,40 +1356,56 @@ exclude_commands = []       # Commandes a exclure de la recriture automatique
 
 | Variable | Description |
 |----------|-------------|
-| `RTK_TEE_DIR` | Surcharge le repertoire tee |
+| `RTK_RECALL=0` | Desactiver la sauvegarde recall |
+| `RTK_TEE_DIR` | Surcharge le repertoire tee (mode "tee") |
 | `RTK_TELEMETRY_DISABLED=1` | Desactiver la telemetrie |
 | `RTK_HOOK_AUDIT=1` | Activer l'audit du hook |
 | `SKIP_ENV_VALIDATION=1` | Desactiver la validation d'env (Next.js, etc.) |
 
 ---
 
-## Systeme Tee
+## Systeme Recall
 
 ### Recuperation de sortie brute
 
-Quand une commande echoue, RTK sauvegarde automatiquement la sortie brute complete dans un fichier log. Cela permet au LLM de lire la sortie sans re-executer la commande.
+Quand une commande echoue (ou qu'un filtre tronque une liste), RTK sauvegarde la sortie brute complete dans une base SQLite locale, adressee par hash de contenu. Cela permet au LLM de recuperer la sortie sans re-executer la commande.
 
 **Fonctionnement :**
-1. La commande echoue (exit code != 0)
-2. RTK sauvegarde la sortie brute dans `~/.local/share/rtk/tee/`
-3. Le chemin du fichier est affiche dans la sortie filtree
-4. Le LLM peut lire le fichier si besoin de plus de details
+1. La commande echoue (exit code != 0) ou la sortie est tronquee
+2. RTK stocke la sortie brute (gzip) dans `~/.local/share/rtk/recall.db`
+3. Un hint avec le hash est affiche : `[full output: rtk recall <hash>]` ou `[+N hidden: rtk recall <hash>]`
+4. `rtk recall <hash>` restitue la partie manquante (delta), `--full` la sortie complete
 
-**Sortie :**
+**Commandes :**
+```bash
+rtk recall <hash>            # Partie non montree (delta)
+rtk recall <hash> --full     # Sortie complete
+rtk recall <hash> --grep RE  # Filtrer par regex
+rtk recall --list            # Lister les entrees
+rtk gain --recalls           # Taux de consultation par filtre (calibration des caps)
+rtk config recall <mode>     # Changer de mode sans editer la config (sqlite|tee|disabled)
 ```
-FAILED: 2/15 tests
-[full output: ~/.local/share/rtk/tee/1707753600_cargo_test.log]
-```
+
+`rtk gain --recalls` separe strictement les donnees par mode : taux exact en sqlite
+(la lecture passe par `rtk recall`), borne inferieure (`≥`) en tee (seules les lectures
+bash sont detectables via le hook, pas l'outil Read). Un taux eleve signale un filtre
+qui cache des sorties que l'agent revient chercher.
 
 **Configuration :**
 
 | Parametre | Defaut | Description |
 |-----------|--------|-------------|
-| `tee.enabled` | `true` | Activer/desactiver |
-| `tee.mode` | `"failures"` | `"failures"`, `"always"`, `"never"` |
-| `tee.max_files` | `20` | Rotation : garder les N derniers |
-| Taille min | 500 octets | Les sorties trop courtes ne sont pas sauvegardees |
-| Taille max fichier | 1 Mo | Troncature au-dela |
+| `retriever.mode` | `"sqlite"` | `"sqlite"`, `"tee"` (fichiers legacy), `"disabled"` |
+| `retriever.max_entries` | `200` | Eviction FIFO au-dela |
+| `retriever.retention_days` | `30` | Purge des entrees anciennes |
+| `retriever.max_entry_bytes` | `10 Mo` | Troncature au-dela (a la derniere ligne complete) |
+| Taille min | 500 octets | Les echecs trop courts ne sont pas sauvegardes |
+
+Le mode `"tee"` conserve l'ancien comportement (fichiers `.log` dans `~/.local/share/rtk/tee/`, rotation `tee_max_files`). Une ancienne section `[tee]` en config est automatiquement mappee (voir plus haut).
+
+Le mode se change avec `rtk config recall <sqlite|tee|disabled>` (edition chirurgicale de
+config.toml, commentaires preserves, champs `[tee]` legacy migres) — le champ equivalent
+en edition manuelle est `[retriever] mode`.
 
 ---
 

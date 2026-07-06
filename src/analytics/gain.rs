@@ -24,10 +24,14 @@ pub fn run(
     all: bool,
     format: &str,
     failures: bool,
+    recalls: bool,
     reset: bool,
     yes: bool,
     _verbose: u8,
 ) -> Result<()> {
+    if recalls {
+        return show_recall_stats();
+    }
     let tracker = Tracker::new().context("Failed to initialize tracking database")?;
     let project_scope = resolve_project_scope(project)?; // added: resolve project path
 
@@ -75,6 +79,14 @@ pub fn run(
     let summary = tracker
         .get_summary_filtered(project_scope.as_deref()) // changed: use filtered variant
         .context("Failed to load token savings summary from database")?;
+
+    if crate::core::tee_file::legacy_tee_migration_pending() {
+        eprintln!(
+            "{}",
+            format!("[rtk] {}", crate::core::tee_file::LEGACY_TEE_NOTICE).yellow()
+        );
+        eprintln!();
+    }
 
     if summary.total_commands == 0 {
         println!("No tracking data yet.");
@@ -420,6 +432,94 @@ fn print_efficiency_meter(pct: f64) {
 }
 
 /// Resolve project scope from --project flag. // added
+fn colorize_recall_rate(pct: i64, padded: &str) -> String {
+    if !std::io::stdout().is_terminal() {
+        return padded.to_string();
+    }
+    if pct >= 30 {
+        padded.red().bold().to_string()
+    } else if pct >= 10 {
+        padded.yellow().bold().to_string()
+    } else {
+        padded.green().bold().to_string()
+    }
+}
+
+fn show_recall_stats() -> Result<()> {
+    use crate::core::retriever::RecoveryMode;
+
+    let mode = crate::core::config::Config::load()
+        .unwrap_or_default()
+        .retriever
+        .mode;
+    let mode_label = match mode {
+        RecoveryMode::Sqlite => "sqlite",
+        RecoveryMode::Tee => "tee",
+        RecoveryMode::Disabled => "disabled",
+    };
+    let stats = crate::core::retriever::stats_snapshot()?;
+
+    println!("{}", styled("RTK Recall Efficiency", true));
+    println!("{}", "═".repeat(60));
+    println!("Mode: {mode_label}");
+    println!();
+
+    if stats.is_empty() {
+        println!("No recall activity recorded yet.");
+        println!("Stats appear once filters elide output (failures, trimmed lists).");
+        return Ok(());
+    }
+
+    let slug_width = stats
+        .iter()
+        .map(|s| s.slug.chars().count())
+        .max()
+        .unwrap_or(6)
+        .clamp(6, 24);
+    let table_width = slug_width + 2 + 8 + 2 + 8 + 2 + 6;
+
+    let render = |title: &str, mode_key: &str, prefix: &str| {
+        let rows: Vec<_> = stats.iter().filter(|s| s.mode == mode_key).collect();
+        if rows.is_empty() {
+            return;
+        }
+        println!("{}", styled(title, true));
+        println!("{}", "─".repeat(table_width));
+        println!(
+            "{:<slug_width$}  {:>8}  {:>8}  {:>6}",
+            "Filter", "Elisions", "Recalled", "Rate"
+        );
+        println!("{}", "─".repeat(table_width));
+        for s in rows {
+            let (pct, rate) = if s.elisions > 0 {
+                let pct = s.recalls * 100 / s.elisions;
+                (pct, format!("{prefix}{pct}%"))
+            } else {
+                (0, "-".to_string())
+            };
+            println!(
+                "{}  {:>8}  {:>8}  {}",
+                truncate_for_column(&s.slug, slug_width),
+                s.elisions,
+                s.recalls,
+                colorize_recall_rate(pct, &format!("{rate:>6}"))
+            );
+        }
+        println!();
+    };
+
+    render("Sqlite (exact — reads go through rtk recall)", "sqlite", "");
+    render(
+        "Tee (lower bound — bash reads only, Read tool invisible)",
+        "tee",
+        "≥",
+    );
+
+    println!("A high rate means the filter hides output the agent goes back for:");
+    println!("consider raising that filter's cap.");
+    Ok(())
+}
+
 fn resolve_project_scope(project: bool) -> Result<Option<String>> {
     if !project {
         return Ok(None);

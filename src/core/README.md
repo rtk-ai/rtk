@@ -71,12 +71,16 @@ colors = true
 emoji = true
 max_width = 120
 
-[tee]
-enabled = true
-mode = "failures"  # failures | always | never
-max_files = 20
-max_file_size = 1048576
-directory = "/custom/tee/dir"
+[retriever]
+mode = "sqlite"             # sqlite (default) | tee (legacy files) | disabled
+max_entry_bytes = 10485760  # sqlite: 10 MiB per entry
+max_entries = 200           # sqlite: FIFO cap
+retention_days = 30         # sqlite: 0 disables age eviction
+compression = true          # sqlite: gzip blobs (lossless)
+# database_path = "/custom/recall.db"
+tee_max_files = 20          # tee mode: rotation
+tee_max_file_size = 1048576 # tee mode: per-file cap
+# tee_directory = "/custom/tee/dir"
 
 [telemetry]
 enabled = true
@@ -115,13 +119,13 @@ Core provides infrastructure that `cmds/` and other components consume. These co
 
 Consumers must call `timer.track()` on **all** code paths — success, failure, and fallback. Calling `std::process::exit()` before `track()` loses metrics. The raw string passed to `track()` should include both stdout and stderr to produce accurate savings percentages.
 
-### Tee (`tee_and_hint`)
+### Output recovery (`tee_and_hint` + recall store)
 
-Consumers that parse structured output (JSON, NDJSON, state machines) should call `tee::tee_and_hint()` to save raw output for LLM recovery on failure. Tee must be called before `std::process::exit()`.
+Consumers that parse structured output (JSON, NDJSON, state machines) should call `tee::tee_and_hint()` to persist raw output for LLM recovery on failure. It must be called before `std::process::exit()`.
 
-For truncation recovery on **success** (e.g., list truncated at 20 items), use `tee::force_tee_hint()` which bypasses the tee mode check and writes regardless of exit code. This ensures LLMs always have a `[full output: ...]` recovery path instead of burning tokens working around missing data.
+For truncation recovery on **success** (e.g. a list capped at 20 items), use `tee::force_tee_hint()` (multi-line blocks) or `tee::force_tee_tail_hint(content, slug, offset)` (flat lists). All three persist the full output to the content-addressed recall store ([`retriever.rs`](retriever.rs)) and emit a runnable hint — `[full output: rtk recall <hash>]` or `[+N hidden: rtk recall <hash>]` — instead of burning tokens working around missing data.
 
-When the truncated output is a **flat list** and the hidden items start at a predictable line, prefer `tee::force_tee_tail_hint(content, slug, offset)`. It writes the same tee file but emits a directly runnable hint — `[see remaining: tail -n +{offset} ~/path]` — so the agent jumps to exactly the first hidden item without scanning the whole file. The offset is `header_lines + MAX_CAP + 1`. Use `force_tee_hint` instead when the output has multiple sections (e.g. running + stopped containers) and no single offset cleanly covers the gap.
+The agent runs `rtk recall <hash>` to get back exactly what was elided. For `force_tee_tail_hint`, `offset` is the 1-based first hidden line (`header_lines + MAX_CAP + 1`); it is stored so the default recall returns only the hidden tail. Storage is byte-faithful (`BLOB` + lossless gzip); tune limits via the `[retriever]` config section.
 
 ### Truncation Caps (`truncate`)
 

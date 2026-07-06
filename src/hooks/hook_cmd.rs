@@ -257,6 +257,7 @@ enum HookDecision {
 }
 
 fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
+    crate::hooks::rewrite_cmd::track_tee_read(cmd);
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
     }
