@@ -48,36 +48,23 @@ pub enum Granularity {
 
 #[derive(Debug, Deserialize)]
 struct DailyResponse {
-    daily: Vec<DailyEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DailyEntry {
-    date: String,
-    #[serde(flatten)]
-    metrics: CcusageMetrics,
+    daily: Vec<PeriodEntry>,
 }
 
 #[derive(Debug, Deserialize)]
 struct WeeklyResponse {
-    weekly: Vec<WeeklyEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WeeklyEntry {
-    week: String, // ISO week start (Monday)
-    #[serde(flatten)]
-    metrics: CcusageMetrics,
+    weekly: Vec<PeriodEntry>,
 }
 
 #[derive(Debug, Deserialize)]
 struct MonthlyResponse {
-    monthly: Vec<MonthlyEntry>,
+    monthly: Vec<PeriodEntry>,
 }
 
 #[derive(Debug, Deserialize)]
-struct MonthlyEntry {
-    month: String,
+struct PeriodEntry {
+    #[serde(rename = "period", alias = "date", alias = "week", alias = "month")]
+    period: String,
     #[serde(flatten)]
     metrics: CcusageMetrics,
 }
@@ -138,7 +125,7 @@ pub fn fetch(granularity: Granularity) -> Result<Option<Vec<CcusagePeriod>>> {
     cmd.arg(subcommand)
         .arg("--json")
         .arg("--since")
-        .arg("20250101"); // 90 days back approx
+        .arg("20250101");
 
     let result = match exec_capture(&mut cmd) {
         Err(e) => {
@@ -174,7 +161,7 @@ fn parse_json(json: &str, granularity: Granularity) -> Result<Vec<CcusagePeriod>
                 .daily
                 .into_iter()
                 .map(|e| CcusagePeriod {
-                    key: e.date,
+                    key: e.period,
                     metrics: e.metrics,
                 })
                 .collect())
@@ -186,7 +173,7 @@ fn parse_json(json: &str, granularity: Granularity) -> Result<Vec<CcusagePeriod>
                 .weekly
                 .into_iter()
                 .map(|e| CcusagePeriod {
-                    key: e.week,
+                    key: e.period,
                     metrics: e.metrics,
                 })
                 .collect())
@@ -198,7 +185,7 @@ fn parse_json(json: &str, granularity: Granularity) -> Result<Vec<CcusagePeriod>
                 .monthly
                 .into_iter()
                 .map(|e| CcusagePeriod {
-                    key: e.month,
+                    key: e.period,
                     metrics: e.metrics,
                 })
                 .collect())
@@ -279,6 +266,39 @@ mod tests {
         let periods = result.unwrap();
         assert_eq!(periods.len(), 1);
         assert_eq!(periods[0].key, "2026-01-20");
+    }
+
+    #[test]
+    fn test_parse_current_ccusage_period_field() {
+        let cases = [
+            (Granularity::Daily, "daily", "2026-01-30"),
+            (Granularity::Weekly, "weekly", "2026-01-26"),
+            (Granularity::Monthly, "monthly", "2026-01"),
+        ];
+
+        for (granularity, bucket, period) in cases {
+            let json = format!(
+                r#"{{
+                    "{bucket}": [
+                        {{
+                            "period": "{period}",
+                            "inputTokens": 100,
+                            "outputTokens": 50,
+                            "cacheCreationTokens": 10,
+                            "cacheReadTokens": 20,
+                            "totalTokens": 180,
+                            "totalCost": 1.23
+                        }}
+                    ]
+                }}"#
+            );
+
+            let periods = parse_json(&json, granularity).expect("period field must parse");
+            assert_eq!(periods.len(), 1);
+            assert_eq!(periods[0].key, period);
+            assert_eq!(periods[0].metrics.total_tokens, 180);
+            assert_eq!(periods[0].metrics.total_cost, 1.23);
+        }
     }
 
     #[test]
