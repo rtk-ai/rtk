@@ -4,7 +4,7 @@ use crate::core::args_utils;
 use crate::core::runner;
 use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
 use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
-use crate::core::utils::{resolved_command, truncate};
+use crate::core::utils::{resolved_command, strip_ansi, truncate};
 use anyhow::Result;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -19,6 +19,7 @@ pub enum CargoCommand {
     Check,
     Install,
     Nextest,
+    Task,
 }
 
 pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<i32> {
@@ -29,6 +30,7 @@ pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<i32> {
         CargoCommand::Check => run_check(args, verbose),
         CargoCommand::Install => run_install(args, verbose),
         CargoCommand::Nextest => run_nextest(args, verbose),
+        CargoCommand::Task => run_task(args, verbose),
     }
 }
 
@@ -335,6 +337,10 @@ fn run_install(args: &[String], verbose: u8) -> Result<i32> {
 
 fn run_nextest(args: &[String], verbose: u8) -> Result<i32> {
     run_cargo_filtered("nextest", args, verbose, filter_cargo_nextest)
+}
+
+fn run_task(args: &[String], verbose: u8) -> Result<i32> {
+    run_cargo_filtered("task", args, verbose, filter_cargo_task)
 }
 
 /// Format crate name + version into a display string
@@ -755,6 +761,138 @@ fn filter_cargo_nextest(output: &str) -> String {
 
     // Empty or unrecognized
     String::new()
+}
+
+/// Parse a cargo-task log line of the form `[ct:LEVEL] message` or
+/// `[ct:LEVEL:taskname] message`. Returns `(level, message)` on a match.
+fn parse_ct_log(line: &str) -> Option<(&str, &str)> {
+    let rest = line.strip_prefix("[ct:")?;
+    let close = rest.find(']')?;
+    let inside = &rest[..close];
+    let level = inside.split(':').next().unwrap_or(inside);
+    let msg = rest[close + 1..].trim_start();
+    Some((level, msg))
+}
+
+/// Filter cargo-task (`cargo task`) output — strip cargo-task's own preamble
+/// (`[ct:INFO]` running/order lines) and cargo build noise, surface task
+/// errors/warnings, and summarize the tasks run plus final status.
+fn filter_cargo_task(output: &str) -> String {
+    let clean = strip_ansi(output);
+
+    let mut tasks: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut body: Vec<String> = Vec::new();
+    let mut completed = false;
+    let mut saw_ct_line = false;
+
+    for line in clean.lines() {
+        let trimmed = line.trim();
+
+        // cargo-task's own log lines: [ct:INFO]/[ct:WARN]/[ct:FATAL] ...
+        if let Some((level, msg)) = parse_ct_log(trimmed) {
+            saw_ct_line = true;
+            match level {
+                "FATAL" | "ERROR" => errors.push(msg.to_string()),
+                "WARN" => warnings.push(msg.to_string()),
+                _ => {
+                    // INFO preamble — keep only task names + completion status,
+                    // drop "cargo-task running...", "task order: ...", etc.
+                    if let Some(name) =
+                        msg.strip_prefix("run task:").map(|s| s.trim().trim_matches('\''))
+                    {
+                        if !name.is_empty() {
+                            tasks.push(name.to_string());
+                        }
+                    } else if msg.starts_with("cargo-task complete") {
+                        completed = true;
+                    }
+                }
+            }
+            continue;
+        }
+
+        let lstart = line.trim_start();
+
+        // Strip cargo build noise emitted by crate-type tasks
+        if lstart.starts_with("Compiling")
+            || lstart.starts_with("Checking")
+            || lstart.starts_with("Downloading")
+            || lstart.starts_with("Downloaded")
+            || lstart.starts_with("Updating")
+            || lstart.starts_with("Finished")
+            || lstart.starts_with("Blocking waiting for file lock")
+        {
+            continue;
+        }
+
+        // Surface compile errors from the task's own cargo invocation
+        if lstart.starts_with("error[") || lstart.starts_with("error:") {
+            if lstart.contains("aborting due to") || lstart.contains("could not compile") {
+                continue;
+            }
+            errors.push(trimmed.to_string());
+            continue;
+        }
+
+        // Drop blank lines and cargo's "generated N warnings" summary noise
+        if trimmed.is_empty() {
+            continue;
+        }
+        if lstart.starts_with("warning:")
+            && lstart.contains("generated")
+            && lstart.contains("warning")
+        {
+            continue;
+        }
+
+        body.push(line.to_string());
+    }
+
+    let task_summary = if tasks.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", tasks.join(", "))
+    };
+
+    let mut result = String::new();
+
+    if !errors.is_empty() {
+        result.push_str(&format!(
+            "cargo task: {} error{}{}\n",
+            errors.len(),
+            if errors.len() == 1 { "" } else { "s" },
+            task_summary
+        ));
+        for err in errors.iter().take(CAP_ERRORS) {
+            result.push_str(&format!("{}\n", truncate(err, 200)));
+        }
+        if errors.len() > CAP_ERRORS {
+            result.push_str(&format!("… +{} more errors\n", errors.len() - CAP_ERRORS));
+        }
+    } else if saw_ct_line {
+        let status = if completed { "complete" } else { "ran" };
+        result.push_str(&format!("cargo task: {}{}\n", status, task_summary));
+    }
+
+    for warn in warnings.iter().take(CAP_WARNINGS) {
+        result.push_str(&format!("warning: {}\n", truncate(warn, 200)));
+    }
+
+    for line in body.iter().take(CAP_LIST) {
+        result.push_str(&format!("{}\n", line));
+    }
+    if body.len() > CAP_LIST {
+        result.push_str(&format!("… +{} more lines\n", body.len() - CAP_LIST));
+    }
+
+    let trimmed_result = result.trim();
+    if trimmed_result.is_empty() {
+        // Fallback: nothing recognized — return cleaned input unchanged
+        return clean.trim().to_string();
+    }
+    trimmed_result.to_string()
 }
 
 fn filter_cargo_build(output: &str) -> String {
@@ -1235,6 +1373,10 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
 mod tests {
     use super::*;
     use crate::core::args_utils::restore_double_dash_with_raw;
+
+    fn count_tokens(text: &str) -> usize {
+        text.split_whitespace().count()
+    }
 
     #[test]
     fn test_restore_double_dash_with_separator() {
@@ -2212,5 +2354,106 @@ error: could not compile `rtk` (test "repro_compile_fail") due to 1 previous err
         let result = run_block_filter(&mut f, input, 1);
         assert!(result.contains("cargo test:"), "got: {}", result);
         assert!(result.contains("1 errors"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_parse_ct_log_variants() {
+        assert_eq!(
+            parse_ct_log("[ct:INFO] cargo-task running..."),
+            Some(("INFO", "cargo-task running..."))
+        );
+        // Task name appended after the level: [ct:INFO:taskname]
+        assert_eq!(
+            parse_ct_log("[ct:INFO:build] run task: 'build'"),
+            Some(("INFO", "run task: 'build'"))
+        );
+        assert_eq!(
+            parse_ct_log("[ct:FATAL] task 'build' exited nonzero"),
+            Some(("FATAL", "task 'build' exited nonzero"))
+        );
+        assert_eq!(parse_ct_log("plain line"), None);
+    }
+
+    #[test]
+    fn test_filter_cargo_task_success() {
+        let output = r#"[ct:INFO] cargo-task running...
+[ct:INFO] task order: ["build"]
+[ct:INFO] run task: 'build'
+   Compiling libc v0.2.153
+   Compiling rtk v0.40.0
+    Finished dev [unoptimized + debuginfo] target(s) in 12.34s
+[ct:INFO] cargo-task complete : )
+"#;
+        let result = filter_cargo_task(output);
+        assert!(
+            result.contains("cargo task: complete (build)"),
+            "got: {}",
+            result
+        );
+        // Preamble and build noise must be stripped
+        assert!(!result.contains("cargo-task running"), "got: {}", result);
+        assert!(!result.contains("task order"), "got: {}", result);
+        assert!(!result.contains("Compiling"), "got: {}", result);
+        assert!(!result.contains("Finished"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_cargo_task_errors() {
+        let output = r#"[ct:INFO] cargo-task running...
+[ct:INFO] task order: ["build"]
+[ct:INFO] run task: 'build'
+   Compiling rtk v0.40.0
+error[E0425]: cannot find value `missing_symbol` in this scope
+error: could not compile `rtk` due to 1 previous error
+[ct:FATAL] task 'build' exited with code 101
+"#;
+        let result = filter_cargo_task(output);
+        assert!(result.contains("cargo task:"), "got: {}", result);
+        assert!(result.contains("error"), "got: {}", result);
+        assert!(result.contains("E0425"), "got: {}", result);
+        assert!(
+            result.contains("task 'build' exited with code 101"),
+            "got: {}",
+            result
+        );
+        assert!(!result.contains("Compiling"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_cargo_task_strips_ansi_preamble() {
+        // cargo-task colorizes its log prefixes with ANSI escapes
+        let output =
+            "\x1b[92m[ct:INFO]\x1b[0m cargo-task running...\n\x1b[92m[ct:INFO]\x1b[0m cargo-task complete : )\n";
+        let result = filter_cargo_task(output);
+        assert!(result.contains("cargo task: complete"), "got: {}", result);
+        assert!(!result.contains("cargo-task running"), "got: {}", result);
+        assert!(!result.contains("\x1b["), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_cargo_task_savings() {
+        let output = r#"[ct:INFO] cargo-task running...
+[ct:INFO] loading cargo-task config
+[ct:INFO] task order: ["build", "lint"]
+[ct:INFO] run task: 'build'
+   Compiling libc v0.2.153
+   Compiling cfg-if v1.0.0
+   Compiling memchr v2.7.1
+   Compiling rtk v0.40.0
+    Finished dev [unoptimized + debuginfo] target(s) in 18.42s
+[ct:INFO] run task: 'lint'
+   Compiling rtk v0.40.0
+    Finished dev [unoptimized + debuginfo] target(s) in 2.11s
+[ct:INFO] cargo-task complete : )
+"#;
+        let result = filter_cargo_task(output);
+        let savings =
+            100.0 - (count_tokens(&result) as f64 / count_tokens(output) as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "Expected ≥60% savings, got {:.1}%\noutput: {}",
+            savings,
+            result
+        );
     }
 }

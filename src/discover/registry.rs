@@ -1404,6 +1404,14 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_cargo_task() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo task build", &[]),
+            Some("rtk cargo task build".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_compound_and() {
         assert_eq!(
             rewrite_command_no_prefixes("git add . && cargo test", &[]),

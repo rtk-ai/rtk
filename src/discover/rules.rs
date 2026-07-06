@@ -44,7 +44,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^cargo\s+(build|test|clippy|check|fmt|install)",
+        pattern: r"^cargo\s+(build|test|clippy|check|fmt|install|task)",
         rtk_cmd: "rtk cargo",
         rewrite_prefixes: &["cargo"],
         category: "Cargo",
