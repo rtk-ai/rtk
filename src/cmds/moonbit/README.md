@@ -6,7 +6,7 @@
 
 | Module | Tool | Subcommands |
 |--------|------|-------------|
-| `moon_cmd.rs` | `moon` (MoonBit CLI) | build, test, check, run |
+| `moonbit_cmd.rs` | `moon` (MoonBit CLI) | build, test, check |
 
 ## Strategy
 
@@ -16,7 +16,7 @@ The filter injects this flag automatically for `build`, `test`, and `check`, the
 1. **NDJSON parsing**: each diagnostic JSON line is parsed and reformatted as compact
    one-liners in Rust-compiler style: `path:line:col: {level} [{code}]: {message}`
 2. **Passthrough**: non-JSON lines (warning headers, summary) pass through unchanged
-3. **No filtering for**: `run` (app-specific output), other subcommands like `new`/`clean`/`doc`/`fmt`
+3. **No filtering for**: other subcommands (`run`, `new`, `clean`, `fmt`...) — passed through raw
 
 ## Compact output (post-filter)
 

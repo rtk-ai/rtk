@@ -5,17 +5,16 @@ use serde::Deserialize;
 use std::ffi::OsString;
 
 #[derive(Debug, PartialEq)]
-enum MoonSubcommand {
+enum MoonbitSubcommand {
     Build,
     Test,
     Check,
-    Run,
     Other,
 }
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
-struct MoonDiagnostic {
+struct MoonbitDiagnostic {
     #[serde(rename = "$message_type")]
     message_type: String,
     level: String,
@@ -25,17 +24,16 @@ struct MoonDiagnostic {
     message: String,
 }
 
-fn detect_subcommand(args: &[String]) -> MoonSubcommand {
+fn detect_subcommand(args: &[String]) -> MoonbitSubcommand {
     for a in args.iter().filter(|a| !a.starts_with('-')) {
         match a.as_str() {
-            "build" => return MoonSubcommand::Build,
-            "test" => return MoonSubcommand::Test,
-            "check" => return MoonSubcommand::Check,
-            "run" => return MoonSubcommand::Run,
+            "build" => return MoonbitSubcommand::Build,
+            "test" => return MoonbitSubcommand::Test,
+            "check" => return MoonbitSubcommand::Check,
             _ => continue,
         }
     }
-    MoonSubcommand::Other
+    MoonbitSubcommand::Other
 }
 
 fn inject_json(args: &[String]) -> Vec<String> {
@@ -66,7 +64,7 @@ fn strip_message_prefix(msg: &str) -> &str {
     msg
 }
 
-fn filter_moon_output(output: &str) -> String {
+fn filter_moonbit_output(output: &str) -> String {
     let cwd = std::env::current_dir()
         .ok()
         .and_then(|p| p.to_str().map(|s| s.to_string()));
@@ -84,7 +82,7 @@ fn filter_moon_output(output: &str) -> String {
         }
 
         if trimmed.starts_with('{') {
-            if let Ok(diag) = serde_json::from_str::<MoonDiagnostic>(trimmed) {
+            if let Ok(diag) = serde_json::from_str::<MoonbitDiagnostic>(trimmed) {
                 if diag.message_type == "diagnostic" {
                     let rel_path = cwd
                         .as_deref()
@@ -128,17 +126,17 @@ fn run_with_json(args: &[String], verbose: u8) -> Result<i32> {
         cmd,
         "moon",
         &display,
-        filter_moon_output,
+        filter_moonbit_output,
         RunOptions::stdout_only().tee("moon"),
     )
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     match detect_subcommand(args) {
-        MoonSubcommand::Build | MoonSubcommand::Test | MoonSubcommand::Check => {
+        MoonbitSubcommand::Build | MoonbitSubcommand::Test | MoonbitSubcommand::Check => {
             run_with_json(args, verbose)
         }
-        MoonSubcommand::Run | MoonSubcommand::Other => {
+        MoonbitSubcommand::Other => {
             let osargs: Vec<OsString> = args.iter().map(OsString::from).collect();
             runner::run_passthrough("moon", &osargs, verbose)
         }
@@ -153,7 +151,7 @@ mod tests {
     fn test_detect_build() {
         assert_eq!(
             detect_subcommand(&["build".to_string()]),
-            MoonSubcommand::Build
+            MoonbitSubcommand::Build
         );
     }
 
@@ -161,7 +159,7 @@ mod tests {
     fn test_detect_test() {
         assert_eq!(
             detect_subcommand(&["test".to_string()]),
-            MoonSubcommand::Test
+            MoonbitSubcommand::Test
         );
     }
 
@@ -169,30 +167,30 @@ mod tests {
     fn test_detect_check() {
         assert_eq!(
             detect_subcommand(&["check".to_string()]),
-            MoonSubcommand::Check
+            MoonbitSubcommand::Check
         );
     }
 
     #[test]
-    fn test_detect_run() {
+    fn test_detect_run_is_other() {
         assert_eq!(
             detect_subcommand(&["run".to_string(), "main".to_string()]),
-            MoonSubcommand::Run
+            MoonbitSubcommand::Other
         );
     }
 
     #[test]
     fn test_detect_other() {
-        assert_eq!(detect_subcommand(&["fmt".to_string()]), MoonSubcommand::Other);
+        assert_eq!(detect_subcommand(&["fmt".to_string()]), MoonbitSubcommand::Other);
         assert_eq!(
             detect_subcommand(&["new".to_string(), "myapp".to_string()]),
-            MoonSubcommand::Other
+            MoonbitSubcommand::Other
         );
     }
 
     #[test]
     fn test_detect_empty_is_other() {
-        assert_eq!(detect_subcommand(&[]), MoonSubcommand::Other);
+        assert_eq!(detect_subcommand(&[]), MoonbitSubcommand::Other);
     }
 
     #[test]
@@ -231,13 +229,13 @@ mod tests {
     #[test]
     fn test_detect_after_flags() {
         let args = vec!["--target".to_string(), "native".to_string(), "build".to_string()];
-        assert_eq!(detect_subcommand(&args), MoonSubcommand::Build);
+        assert_eq!(detect_subcommand(&args), MoonbitSubcommand::Build);
     }
 
     #[test]
     fn test_detect_unknown_value_skipped() {
         let args = vec!["--target".to_string(), "native".to_string(), "check".to_string()];
-        assert_eq!(detect_subcommand(&args), MoonSubcommand::Check);
+        assert_eq!(detect_subcommand(&args), MoonbitSubcommand::Check);
     }
 
     #[test]
@@ -265,13 +263,13 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_moon_output_ndjson() {
+    fn test_filter_moonbit_output_ndjson() {
         let input = r#"Warning: Package `x` does not declare `supported_targets`
 {"$message_type":"diagnostic","level":"warning","error_code":29,"path":"/project/src/main.mbt","loc":"10:3-10:22","message":"Warning (unused_package): Unused package 'moonbitlang/async'"}
 {"$message_type":"diagnostic","level":"warning","error_code":2,"path":"/project/src/utils.mbt","loc":"52:44-52:45","message":"Warning (unused_value): Unused variable 'e'"}
 Finished. moon: ran 5 tasks, now up to date (2 warnings, 0 errors)"#;
 
-        let filtered = filter_moon_output(input);
+        let filtered = filter_moonbit_output(input);
         assert!(filtered.contains("Warning: Package `x`"), "plain text warnings pass through");
         assert!(filtered.contains("/project/src/main.mbt:10:3: warning [29]: Unused package 'moonbitlang/async'"),
             "diagnostic reformatted: got:\n{}", filtered);
@@ -281,18 +279,18 @@ Finished. moon: ran 5 tasks, now up to date (2 warnings, 0 errors)"#;
     }
 
     #[test]
-    fn test_filter_moon_output_test_summary() {
+    fn test_filter_moonbit_output_test_summary() {
         let input = r#"Warning: Package `x` does not declare `supported_targets`
 Total tests: 45, passed: 45, failed: 0."#;
-        let filtered = filter_moon_output(input);
+        let filtered = filter_moonbit_output(input);
         assert!(filtered.contains("Warning: Package `x`"));
         assert!(filtered.contains("Total tests: 45, passed: 45, failed: 0."));
     }
 
     #[test]
-    fn test_filter_moon_output_strips_empty_lines() {
+    fn test_filter_moonbit_output_strips_empty_lines() {
         let input = "\n\n{\"$message_type\":\"diagnostic\",\"level\":\"warning\",\"error_code\":29,\"path\":\"/p/main.mbt\",\"loc\":\"5:1-5:5\",\"message\":\"test\"}\n\n\n";
-        let filtered = filter_moon_output(input);
+        let filtered = filter_moonbit_output(input);
         assert!(!filtered.starts_with('\n'), "Leading blank lines should be stripped");
         assert!(!filtered.ends_with('\n'), "Trailing blank lines should be stripped");
         assert!(filtered.contains("/p/main.mbt:5:1: warning [29]: test"));
@@ -300,17 +298,17 @@ Total tests: 45, passed: 45, failed: 0."#;
     }
 
     #[test]
-    fn test_filter_moon_output_strips_bracket_progress() {
+    fn test_filter_moonbit_output_strips_bracket_progress() {
         let input = "[*] 1/5 tasks\n[*] 2/5 tasks\n{\"$message_type\":\"diagnostic\",\"level\":\"error\",\"error_code\":1,\"path\":\"/p/main.mbt\",\"loc\":\"5:1-5:5\",\"message\":\"Error (E001): compile error\"}\n[*] 5/5 tasks\nFinished\n";
-        let filtered = filter_moon_output(input);
+        let filtered = filter_moonbit_output(input);
         assert!(!filtered.contains("[*]"), "Progress lines should be stripped");
         assert!(filtered.contains("compile error"));
     }
 
     #[test]
-    fn test_filter_moon_output_preserves_non_json_lines() {
+    fn test_filter_moonbit_output_preserves_non_json_lines() {
         let input = "Some random text\nMore text\n{\"$message_type\":\"other\",\"foo\":\"bar\"}\nend";
-        let filtered = filter_moon_output(input);
+        let filtered = filter_moonbit_output(input);
         assert!(filtered.contains("Some random text"));
         assert!(filtered.contains("More text"));
         assert!(filtered.contains("end"));
@@ -319,14 +317,14 @@ Total tests: 45, passed: 45, failed: 0."#;
     }
 
     #[test]
-    fn test_filter_moon_output_empty() {
-        assert_eq!(filter_moon_output(""), "");
+    fn test_filter_moonbit_output_empty() {
+        assert_eq!(filter_moonbit_output(""), "");
     }
 
     #[test]
     fn test_filter_check_fixture() {
         let input = include_str!("../../../tests/fixtures/moon_check_with_outjson.txt");
-        let filtered = filter_moon_output(input);
+        let filtered = filter_moonbit_output(input);
 
         // NDJSON diagnostics should be reformatted to compact one-liners
         assert!(
@@ -356,7 +354,7 @@ Total tests: 45, passed: 45, failed: 0."#;
     #[test]
     fn test_filter_test_fixture() {
         let input = include_str!("../../../tests/fixtures/moon_test_with_outjson.txt");
-        let filtered = filter_moon_output(input);
+        let filtered = filter_moonbit_output(input);
         assert!(filtered.contains("Total tests: 45, passed: 45, failed: 0."));
         assert!(filtered.contains("does not declare `supported_targets`"));
     }
