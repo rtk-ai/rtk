@@ -87,7 +87,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "ls",
         &format!("-la {}", target_display),
         |raw| {
-            let (entries, summary, parsed_count) = compact_ls(raw, show_all, show_long);
+            let (entries, summary, parsed_count) = compact_ls(raw, show_all, show_long, paths.len() > 1);
 
             // If no lines were parsed (e.g., unrecognized locale), fall back to raw output.
             // This is safer than returning "(empty)" for a non-empty directory.
@@ -238,11 +238,17 @@ fn perms_to_octal(perms: &str) -> Option<String> {
 /// Returns (entries, summary, parsed_count) so caller can suppress summary when piped.
 /// parsed_count tracks how many non-header lines were successfully parsed.
 /// If parsed_count == 0 but raw had content, caller should fall back to raw output.
-fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, usize) {
+fn compact_ls(raw: &str, show_all: bool, show_long: bool, multi_dir: bool) -> (String, String, usize) {
     use std::collections::HashMap;
 
-    let mut dirs: Vec<(String, Option<String>)> = Vec::new(); // (name, octal_perms)
-    let mut files: Vec<(String, String, Option<String>)> = Vec::new(); // (name, size, octal_perms)
+    // Group entries by directory index for multi-directory output.
+    // For single-directory mode, everything goes into group 0.
+    enum Entry {
+        Dir(String, Option<String>),
+        File(String, String, Option<String>),
+    }
+    let mut entry_groups: Vec<Vec<Entry>> = vec![Vec::new()];
+    let mut dir_headers: Vec<String> = Vec::new();
     let mut by_ext: HashMap<String, usize> = HashMap::new();
     let mut lines_seen: usize = 0;
     let mut parsed_count: usize = 0;
@@ -252,6 +258,28 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
         if line.starts_with("total ") || line.is_empty() {
             continue;
         }
+
+        // Detect directory headers from multi-dir `ls` output (e.g. "dirA:")
+        // These are non-parseable lines that end with ':', aren't dotdirs,
+        // and don't look like ls entries.
+        if multi_dir && line.ends_with(':') && !is_dotdir(line) {
+            let trimmed = line.trim();
+            if !trimmed.is_empty()
+                && !trimmed.starts_with('-')
+                && !trimmed.starts_with('d')
+                && !trimmed.starts_with('l')
+                && !trimmed.starts_with('c')
+                && !trimmed.starts_with('b')
+                && !trimmed.starts_with('p')
+                && !trimmed.starts_with('s')
+                && !trimmed.starts_with("total")
+            {
+                dir_headers.push(line.to_string());
+                entry_groups.push(Vec::new());
+                continue;
+            }
+        }
+
         lines_seen += 1;
 
         let Some((file_type, perms, size, name)) = parse_ls_line(line) else {
@@ -276,7 +304,7 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
         };
 
         if file_type == 'd' {
-            dirs.push((name, octal));
+            entry_groups.last_mut().unwrap().push(Entry::Dir(name, octal));
         } else {
             // Regular files, symlinks, character/block devices, pipes, sockets
             let ext = if let Some(pos) = name.rfind('.') {
@@ -285,48 +313,68 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
                 "no ext".to_string()
             };
             *by_ext.entry(ext).or_insert(0) += 1;
-            files.push((name, human_size(size), octal));
+            let size_str = human_size(size);
+            entry_groups.last_mut().unwrap().push(Entry::File(name, size_str, octal));
         }
     }
 
-    if dirs.is_empty() && files.is_empty() {
+    let total_entries: usize = entry_groups.iter().map(|g| g.len()).sum();
+    if total_entries == 0 {
         if lines_seen > 0 && parsed_count == 0 {
             if dotdirs == lines_seen {
-                // Only . and .. entries (empty directory)
                 return ("(empty)\n".to_string(), String::new(), 0);
             }
-            // Real content that couldn't be parsed (e.g., non-English locale)
             return (String::new(), String::new(), 0);
         }
         return ("(empty)\n".to_string(), String::new(), 0);
     }
 
+    // Format entries, emitting directory headers when multiple dirs are present
     let mut entries = String::new();
+    let mut header_iter = dir_headers.iter();
 
-    // Dirs first, compact
-    for (name, octal) in &dirs {
-        if let Some(octal) = octal {
-            entries.push_str(octal);
-            entries.push_str("  ");
+    for group in &entry_groups {
+        // Emit directory header if this group has one
+        if multi_dir {
+            if let Some(header) = header_iter.next() {
+                entries.push_str(header);
+                entries.push('\n');
+            }
         }
-        entries.push_str(name);
-        entries.push_str("/\n");
-    }
 
-    // Files with size
-    for (name, size, octal) in &files {
-        if let Some(octal) = octal {
-            entries.push_str(octal);
-            entries.push_str("  ");
+        // Dirs first, then files — within each group
+        for entry in group {
+            match entry {
+                Entry::Dir(name, octal) => {
+                    if let Some(octal) = octal {
+                        entries.push_str(octal);
+                        entries.push_str("  ");
+                    }
+                    entries.push_str(name);
+                    entries.push_str("/\n");
+                }
+                Entry::File(name, size, octal) => {
+                    if let Some(octal) = octal {
+                        entries.push_str(octal);
+                        entries.push_str("  ");
+                    }
+                    entries.push_str(name);
+                    entries.push_str("  ");
+                    entries.push_str(size);
+                    entries.push('\n');
+                }
+            }
         }
-        entries.push_str(name);
-        entries.push_str("  ");
-        entries.push_str(size);
-        entries.push('\n');
     }
 
     // Summary line (separate so caller can suppress when piped)
-    let mut summary = format!("\nSummary: {} files, {} dirs", files.len(), dirs.len());
+    let (file_count, dir_count) = entry_groups.iter().fold((0usize, 0usize), |(fc, dc), group| {
+        group.iter().fold((fc, dc), |(fc, dc), entry| match entry {
+            Entry::Dir(..) => (fc, dc + 1),
+            Entry::File(..) => (fc + 1, dc),
+        })
+    });
+    let mut summary = format!("\nSummary: {} files, {} dirs", file_count, dir_count);
     if !by_ext.is_empty() {
         // inline single-line summary — fewer entries to avoid wrapping.
         const MAX_EXT_SUMMARY: usize = reduced(CAP_WARNINGS, 5);
@@ -361,7 +409,7 @@ mod tests {
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n\
                      -rw-r--r--  1 user  staff  5678 Jan  1 12:00 README.md\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false, false);
         assert!(entries.contains("src/"));
         assert!(entries.contains("Cargo.toml"));
         assert!(entries.contains("README.md"));
@@ -382,7 +430,7 @@ mod tests {
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 target\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  100 Jan  1 12:00 main.rs\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false, false);
         assert!(!entries.contains("node_modules"));
         assert!(!entries.contains(".git"));
         assert!(!entries.contains("target"));
@@ -395,7 +443,7 @@ mod tests {
         let input = "total 8\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .git\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n";
-        let (entries, _summary, _parsed) = compact_ls(input, true, false);
+        let (entries, _summary, _parsed) = compact_ls(input, true, false, false);
         assert!(entries.contains(".git/"));
         assert!(entries.contains("src/"));
     }
@@ -403,7 +451,7 @@ mod tests {
     #[test]
     fn test_compact_empty() {
         let input = "total 0\n";
-        let (entries, summary, _parsed) = compact_ls(input, false, false);
+        let (entries, summary, _parsed) = compact_ls(input, false, false, false);
         assert_eq!(entries, "(empty)\n");
         assert!(summary.is_empty());
     }
@@ -413,7 +461,7 @@ mod tests {
         let input = "total 8\n\
                      drwxr-xr-x  2 user user  4096  1月  1 12:00 .\n\
                      drwxr-xr-x 16 user user 20480  1月  1 12:00 ..\n";
-        let (entries, summary, parsed_count) = compact_ls(input, false, false);
+        let (entries, summary, parsed_count) = compact_ls(input, false, false, false);
         assert_eq!(parsed_count, 0);
         assert_eq!(entries, "(empty)\n");
         assert!(summary.is_empty());
@@ -424,7 +472,7 @@ mod tests {
         let input = "total 0\n\
                      drwxr-xr-x  2 lumin  wheel  64 Apr 23 00:37 .\n\
                      drwxr-xr-x 16 root  wheel 164576 Apr 23 00:37 ..\n";
-        let (entries, summary, parsed_count) = compact_ls(input, false, false);
+        let (entries, summary, parsed_count) = compact_ls(input, false, false, false);
         assert_eq!(parsed_count, 0);
         assert_eq!(entries, "(empty)\n");
         assert!(summary.is_empty());
@@ -437,7 +485,7 @@ mod tests {
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n\
                      -rw-r--r--  1 user  staff  5678 Jan  1 12:00 lib.rs\n\
                      -rw-r--r--  1 user  staff   100 Jan  1 12:00 Cargo.toml\n";
-        let (_entries, summary, _parsed) = compact_ls(input, false, false);
+        let (_entries, summary, _parsed) = compact_ls(input, false, false, false);
         assert!(summary.contains("Summary: 3 files, 1 dirs"));
         assert!(summary.contains(".rs"));
         assert!(summary.contains(".toml"));
@@ -457,7 +505,7 @@ mod tests {
     fn test_compact_handles_filenames_with_spaces() {
         let input = "total 8\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 my file.txt\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false, false);
         assert!(entries.contains("my file.txt"));
     }
 
@@ -465,7 +513,7 @@ mod tests {
     fn test_compact_symlinks() {
         let input = "total 8\n\
                      lrwxr-xr-x  1 user  staff  10 Jan  1 12:00 link -> target\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false, false);
         assert!(entries.contains("link -> target"));
     }
 
@@ -475,7 +523,7 @@ mod tests {
         let input = "total 48\n\
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n";
-        let (entries, summary, _parsed) = compact_ls(input, false, false);
+        let (entries, summary, _parsed) = compact_ls(input, false, false, false);
         assert!(
             !entries.contains("Summary:"),
             "entries must not contain summary"
@@ -494,7 +542,7 @@ mod tests {
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n\
                      -rw-r--r--  1 user  staff  5678 Jan  1 12:00 lib.rs\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false, false);
         let line_count = entries.lines().count();
         assert_eq!(
             line_count, 3,
@@ -509,7 +557,7 @@ mod tests {
         let input = "total 8\n\
                      -rw-r--r--  1 fjeanne utilisa. du domaine    0 Mar 31 16:18 empty.txt\n\
                      -rw-r--r--  1 fjeanne utilisa. du domaine 1234 Mar 31 16:18 data.json\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false, false);
         assert!(
             entries.contains("empty.txt"),
             "should contain 'empty.txt', got: {entries}"
@@ -537,7 +585,7 @@ mod tests {
         // Some systems show year instead of time for old files
         let input = "total 8\n\
                      -rw-r--r--  1 user staff  5678 Dec 25  2024 archive.tar\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false, false);
         assert!(
             entries.contains("archive.tar"),
             "should contain filename, got: {entries}"
@@ -592,7 +640,7 @@ mod tests {
         // Regression test for #844: `rtk ls /dev/ttyACM*` returned "(empty)"
         // because character devices (type 'c') were not handled by compact_ls.
         let input = "crw-rw----  1 root  dialout  166, 0 Apr 22 09:46 /dev/ttyACM0\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false, false);
         assert!(
             entries.contains("/dev/ttyACM0"),
             "should contain device file, got: {entries}"
@@ -604,7 +652,7 @@ mod tests {
     fn test_compact_device_files_macos_hex_size() {
         // macOS shows device major/minor as hex (e.g. 0x2000000)
         let input = "crw-rw-rw-  1 root  wheel  0x2000000 Mar 31 19:25 /dev/tty\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false, false);
         assert!(
             entries.contains("/dev/tty"),
             "should contain device file, got: {entries}"
@@ -614,7 +662,7 @@ mod tests {
     #[test]
     fn test_compact_block_device() {
         let input = "brw-rw----  1 root  disk  8, 0 Apr 22 09:46 /dev/sda\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false, false);
         assert!(
             entries.contains("/dev/sda"),
             "should contain block device, got: {entries}"
@@ -673,7 +721,7 @@ mod tests {
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n\
                      -rwxr-xr-x  1 user  staff   500 Jan  1 12:00 build.sh\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, true);
+        let (entries, _summary, _parsed) = compact_ls(input, false, true, false);
         assert!(
             entries.contains("755  src/"),
             "dir should be prefixed with octal perms, got: {entries}"
@@ -694,7 +742,7 @@ mod tests {
         // under the hood.
         let input = "total 48\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _summary, _parsed) = compact_ls(input, false, false, false);
         assert!(
             !entries.contains("644"),
             "short format must not include octal perms, got: {entries}"
@@ -707,9 +755,51 @@ mod tests {
         let input = "total 8\n\
                       drwxr-xr-x  2 user staff  64  1月  1 12:00 src\n\
                       -rw-r--r--  1 user staff 1234  1月  1 12:00 main.rs\n";
-        let (entries, summary, parsed_count) = compact_ls(input, false, false);
+        let (entries, summary, parsed_count) = compact_ls(input, false, false, false);
         assert_eq!(parsed_count, 0);
         assert!(entries.is_empty());
         assert!(summary.is_empty());
+    }
+
+    #[test]
+    fn test_compact_multi_dir_headers() {
+        // Simulates: rtk ls dirA dirB
+        // ls outputs "dirA:" and "dirB:" headers before each directory's listing.
+        let input = "dirA:\n\
+                     total 8\n\
+                     drwxr-xr-x  2 user staff  64 Jan  1 12:00 .\n\
+                     drwxr-xr-x  2 user staff  64 Jan  1 12:00 ..\n\
+                     -rw-r--r--  1 user staff 1234 Jan  1 12:00 file_a.txt\n\
+                     \n\
+                     dirB:\n\
+                     total 8\n\
+                     drwxr-xr-x  2 user staff  64 Jan  1 12:00 .\n\
+                     drwxr-xr-x  2 user staff  64 Jan  1 12:00 ..\n\
+                     -rw-r--r--  1 user staff 5678 Jan  1 12:00 file_b.txt\n";
+        let (entries, _summary, _parsed) = compact_ls(input, false, false, true);
+        assert!(entries.contains("dirA:"), "should contain dirA header, got: {entries}");
+        assert!(entries.contains("dirB:"), "should contain dirB header, got: {entries}");
+        assert!(entries.contains("file_a.txt"), "should contain file_a.txt, got: {entries}");
+        assert!(entries.contains("file_b.txt"), "should contain file_b.txt, got: {entries}");
+        // Headers should come before their respective entries
+        let dir_a_pos = entries.find("dirA:").unwrap();
+        let file_a_pos = entries.find("file_a.txt").unwrap();
+        let dir_b_pos = entries.find("dirB:").unwrap();
+        let file_b_pos = entries.find("file_b.txt").unwrap();
+        assert!(dir_a_pos < file_a_pos, "dirA header should come before file_a.txt");
+        assert!(file_a_pos < dir_b_pos, "file_a.txt should come before dirB header");
+        assert!(dir_b_pos < file_b_pos, "dirB header should come before file_b.txt");
+    }
+
+    #[test]
+    fn test_compact_single_dir_no_headers() {
+        // Single directory should NOT emit headers
+        let input = "total 8\n\
+                     drwxr-xr-x  2 user staff  64 Jan  1 12:00 .\n\
+                     drwxr-xr-x  2 user staff  64 Jan  1 12:00 ..\n\
+                     -rw-r--r--  1 user staff 1234 Jan  1 12:00 file.txt\n";
+        let (entries, _summary, _parsed) = compact_ls(input, false, false, false);
+        assert!(!entries.contains(':'), "single dir should not have headers, got: {entries}");
+        assert!(entries.contains("file.txt"));
     }
 }
