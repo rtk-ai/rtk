@@ -29,6 +29,7 @@ pub enum GitCommand {
     Fetch,
     Stash { subcommand: Option<String> },
     Worktree,
+    SparseCheckout { subcommand: Option<String> },
 }
 
 /// Create a git Command with global options (e.g. -C, -c, --git-dir, --work-tree)
@@ -103,6 +104,9 @@ pub fn run(
             run_stash(subcommand.as_deref(), args, verbose, global_args)
         }
         GitCommand::Worktree => run_worktree(args, verbose, global_args),
+        GitCommand::SparseCheckout { subcommand } => {
+            run_sparse_checkout(subcommand.as_deref(), args, verbose, global_args)
+        }
     }
 }
 
@@ -1865,6 +1869,174 @@ fn filter_worktree_list(output: &str) -> String {
     result.join("\n")
 }
 
+/// Maximum number of sparse-checkout patterns to print before truncating to a
+/// `... +N more` summary. Same order of magnitude as the configurable
+/// thresholds used by `format_status_output` (`status_max_files`,
+/// `status_max_untracked`, defaults 15/10) but intentionally fixed here —
+/// typical project configs never truncate, while a 200+ pattern monorepo cone
+/// list compresses meaningfully without blowing up the LLM context.
+const SPARSE_CHECKOUT_LIST_MAX_LINES: usize = 50;
+
+/// Subcommands of `git sparse-checkout` that mutate state.
+///
+/// On success they typically produce only progress noise (`Updating files: ...`)
+/// which we collapse to a short `ok` line. Unknown subcommands fall through to
+/// passthrough so we never block a future git release.
+const SPARSE_CHECKOUT_ACTION_SUBCOMMANDS: &[&str] = &[
+    "init", "set", "add", "disable", "reapply",
+];
+
+/// Returns true when `args` contains git's `--stdin` flag, which makes
+/// `set`/`add` read patterns line-by-line from stdin until EOF.
+///
+/// `exec_capture` unconditionally nulls stdin, so action subcommands invoked
+/// with `--stdin` would otherwise see immediate EOF and silently apply an
+/// empty pattern set — effectively wiping the user's sparse-checkout config
+/// while still reporting success.
+fn sparse_checkout_uses_stdin(sub: &str, args: &[String]) -> bool {
+    matches!(sub, "set" | "add") && args.iter().any(|a| a == "--stdin")
+}
+
+/// Build the args slice that `run_passthrough` expects from a sparse-checkout
+/// invocation: `["sparse-checkout", <sub>?, ...args]` as `OsString`s.
+fn sparse_checkout_passthrough_args(sub: Option<&str>, args: &[String]) -> Vec<OsString> {
+    let mut out: Vec<OsString> = Vec::with_capacity(args.len() + 2);
+    out.push(OsString::from("sparse-checkout"));
+    if let Some(sub) = sub {
+        out.push(OsString::from(sub));
+    }
+    for arg in args {
+        out.push(OsString::from(arg));
+    }
+    out
+}
+
+fn run_sparse_checkout(
+    subcommand: Option<&str>,
+    args: &[String],
+    verbose: u8,
+    global_args: &[String],
+) -> Result<i32> {
+    if verbose > 0 {
+        eprintln!("git sparse-checkout {:?}", subcommand);
+    }
+
+    match subcommand {
+        Some("list") => {
+            let timer = tracking::TimedExecution::start();
+            let mut cmd = git_cmd(global_args);
+            cmd.args(["sparse-checkout", "list"]);
+            for arg in args {
+                cmd.arg(arg);
+            }
+            let result = exec_capture(&mut cmd)
+                .context("Failed to run git sparse-checkout list")?;
+
+            if !result.success() {
+                eprintln!("FAILED: git sparse-checkout list");
+                if !result.stderr.trim().is_empty() {
+                    eprintln!("{}", result.stderr);
+                }
+                return Ok(result.exit_code);
+            }
+
+            let filtered = if result.stdout.trim().is_empty() {
+                "No sparse-checkout patterns (sparse-checkout disabled or empty)".to_string()
+            } else {
+                filter_sparse_checkout_list(&result.stdout, SPARSE_CHECKOUT_LIST_MAX_LINES)
+            };
+            println!("{}", filtered);
+            timer.track(
+                "git sparse-checkout list",
+                "rtk git sparse-checkout list",
+                &result.stdout,
+                &filtered,
+            );
+            Ok(0)
+        }
+        Some(sub)
+            if SPARSE_CHECKOUT_ACTION_SUBCOMMANDS.contains(&sub)
+                && !sparse_checkout_uses_stdin(sub, args) =>
+        {
+            let timer = tracking::TimedExecution::start();
+            let mut cmd = git_cmd(global_args);
+            cmd.args(["sparse-checkout", sub]);
+            for arg in args {
+                cmd.arg(arg);
+            }
+            let result = exec_capture(&mut cmd)
+                .context("Failed to run git sparse-checkout")?;
+            let combined = result.combined();
+
+            let msg = if result.success() {
+                let msg = format!("ok sparse-checkout {}", sub);
+                println!("{}", msg);
+                msg
+            } else {
+                eprintln!("FAILED: git sparse-checkout {}", sub);
+                if !result.stderr.trim().is_empty() {
+                    eprintln!("{}", result.stderr);
+                }
+                combined.clone()
+            };
+
+            timer.track(
+                &format!("git sparse-checkout {}", sub),
+                &format!("rtk git sparse-checkout {}", sub),
+                &combined,
+                &msg,
+            );
+
+            if !result.success() {
+                return Ok(result.exit_code);
+            }
+            Ok(0)
+        }
+        Some(sub) => {
+            // Falls through to passthrough for three cases, all of which need
+            // an inherited stdin or unfiltered output:
+            //   1. `set --stdin` / `add --stdin`  — read patterns from stdin
+            //   2. `check-rules`                  — reads paths from stdin
+            //   3. unknown / future subcommands   — don't break valid git usage
+            //
+            // `run_passthrough` uses `.status()` which inherits the parent
+            // stdin/stdout/stderr, and tracks its own timing.
+            let passthrough_args = sparse_checkout_passthrough_args(Some(sub), args);
+            run_passthrough(&passthrough_args, global_args, verbose)
+        }
+        None => {
+            // `git sparse-checkout` with no subcommand prints usage to stderr
+            // and exits non-zero. Pass through so the user sees the real help.
+            let passthrough_args = sparse_checkout_passthrough_args(None, args);
+            run_passthrough(&passthrough_args, global_args, verbose)
+        }
+    }
+}
+
+/// Compress `git sparse-checkout list` output: trim, drop blank lines, and cap
+/// at `max_lines` patterns followed by a `... +N more` summary. Each pattern is
+/// preserved verbatim — sparse-checkout patterns are semantically meaningful
+/// (they decide which paths exist on disk), so we never reorder or merge them.
+fn filter_sparse_checkout_list(output: &str, max_lines: usize) -> String {
+    let patterns: Vec<&str> = output
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    if patterns.len() <= max_lines {
+        return patterns.join("\n");
+    }
+
+    let mut out: Vec<String> = patterns
+        .iter()
+        .take(max_lines)
+        .map(|s| (*s).to_string())
+        .collect();
+    out.push(format!("... +{} more", patterns.len() - max_lines));
+    out.join("\n")
+}
+
 /// Runs an unsupported git subcommand by passing it through directly
 pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
@@ -2293,6 +2465,113 @@ mod tests {
         assert!(result.contains("abc1234"));
         assert!(result.contains("[main]"));
         assert!(result.contains("[feature]"));
+    }
+
+    // ----- sparse-checkout -----
+
+    #[test]
+    fn test_filter_sparse_checkout_list_short() {
+        let output = "src/\ndocs/\nREADME.md\n";
+        let result = filter_sparse_checkout_list(output, 50);
+        assert_eq!(result, "src/\ndocs/\nREADME.md");
+    }
+
+    #[test]
+    fn test_filter_sparse_checkout_list_drops_blank_and_trailing_whitespace() {
+        // Real git output occasionally has trailing spaces (cone mode) and
+        // blank lines from CRLF round-trips on Windows checkouts.
+        let output = "src/   \n\ndocs/\n\n  \nREADME.md\n";
+        let result = filter_sparse_checkout_list(output, 50);
+        assert_eq!(result, "src/\ndocs/\nREADME.md");
+    }
+
+    #[test]
+    fn test_filter_sparse_checkout_list_truncates_when_over_limit() {
+        let mut output = String::new();
+        for i in 0..120 {
+            output.push_str(&format!("path/dir{}/\n", i));
+        }
+        let result = filter_sparse_checkout_list(&output, 50);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 51, "50 patterns + summary line");
+        assert_eq!(lines[0], "path/dir0/");
+        assert_eq!(lines[49], "path/dir49/");
+        assert_eq!(lines[50], "... +70 more");
+    }
+
+    #[test]
+    fn test_filter_sparse_checkout_list_at_exact_limit() {
+        // Boundary: exactly max_lines must not get a `+0 more` suffix.
+        let mut output = String::new();
+        for i in 0..50 {
+            output.push_str(&format!("d{}/\n", i));
+        }
+        let result = filter_sparse_checkout_list(&output, 50);
+        assert_eq!(result.lines().count(), 50);
+        assert!(!result.contains("... +"));
+    }
+
+    #[test]
+    fn test_filter_sparse_checkout_list_preserves_negation_patterns() {
+        // Non-cone mode uses gitignore-style patterns including `!` negation.
+        // We must preserve them verbatim — reordering or stripping changes
+        // which paths exist on disk.
+        let output = "/*\n!/docs/\n!/src/lib/\n";
+        let result = filter_sparse_checkout_list(output, 50);
+        assert_eq!(result, "/*\n!/docs/\n!/src/lib/");
+    }
+
+    #[test]
+    fn test_sparse_checkout_action_subcommands_are_recognized() {
+        // Equality (not membership) so accidental removals, additions, typos,
+        // or reordering all surface here — this slice drives dispatch.
+        assert_eq!(
+            SPARSE_CHECKOUT_ACTION_SUBCOMMANDS,
+            &["init", "set", "add", "disable", "reapply"]
+        );
+    }
+
+    #[test]
+    fn test_sparse_checkout_uses_stdin_only_for_set_and_add() {
+        // Carve-out predicate for the `--stdin` regression: only `set` and
+        // `add` accept `--stdin` per git-sparse-checkout(1).
+        assert!(sparse_checkout_uses_stdin(
+            "set",
+            &["--stdin".to_string()]
+        ));
+        assert!(sparse_checkout_uses_stdin(
+            "add",
+            &["--stdin".to_string()]
+        ));
+        // No `--stdin` token → false even for set/add.
+        assert!(!sparse_checkout_uses_stdin(
+            "set",
+            &["src".to_string(), "docs".to_string()]
+        ));
+        // Other action subcommands never read stdin.
+        for sub in ["init", "disable", "reapply"] {
+            assert!(!sparse_checkout_uses_stdin(
+                sub,
+                &["--stdin".to_string()]
+            ));
+        }
+    }
+
+    #[test]
+    fn test_sparse_checkout_passthrough_args_with_subcommand() {
+        let out = sparse_checkout_passthrough_args(
+            Some("check-rules"),
+            &["-z".to_string(), "src/foo.rs".to_string()],
+        );
+        let strs: Vec<&str> = out.iter().map(|s| s.to_str().unwrap()).collect();
+        assert_eq!(strs, vec!["sparse-checkout", "check-rules", "-z", "src/foo.rs"]);
+    }
+
+    #[test]
+    fn test_sparse_checkout_passthrough_args_without_subcommand() {
+        let out = sparse_checkout_passthrough_args(None, &[]);
+        let strs: Vec<&str> = out.iter().map(|s| s.to_str().unwrap()).collect();
+        assert_eq!(strs, vec!["sparse-checkout"]);
     }
 
     #[test]

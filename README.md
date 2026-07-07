@@ -162,6 +162,8 @@ rtk git add                     # -> "ok"
 rtk git commit -m "msg"         # -> "ok abc1234"
 rtk git push                    # -> "ok main"
 rtk git pull                    # -> "ok 3 files +10 -2"
+rtk git sparse-checkout list    # Compact pattern list (truncated >50)
+rtk git sparse-checkout set ... # -> "ok sparse-checkout set"
 ```
 
 ### GitHub CLI
