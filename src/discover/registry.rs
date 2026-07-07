@@ -3837,16 +3837,12 @@ mod tests {
             "npm exec eslint",
             "npm rum biome",
             "npm rum eslint",
-            "npm rum lint",
             "npm run biome",
             "npm run eslint",
-            "npm run lint",
             "npm run-script biome",
             "npm run-script eslint",
-            "npm run-script lint",
             "npm urn biome",
             "npm urn eslint",
-            "npm urn lint",
             "npm x biome",
             "npm x eslint",
             "pnpm dlx biome",
@@ -3855,25 +3851,18 @@ mod tests {
             "pnpm exec eslint",
             "pnpm run biome",
             "pnpm run eslint",
-            "pnpm run lint",
             "pnpm run-script biome",
             "pnpm run-script eslint",
-            "pnpm run-script lint",
             "npm biome",
             "npm eslint",
-            "npm lint",
             "npx biome",
             "npx eslint",
-            "npx lint",
             "pnpm biome",
             "pnpm eslint",
-            "pnpm lint",
             "pnpx biome",
             "pnpx eslint",
-            "pnpx lint",
             "biome",
             "eslint",
-            "lint",
         ];
         for command in commands {
             assert!(
@@ -3891,22 +3880,48 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_lint_scripts_not_rewritten() {
+        let script_commands = vec![
+            "lint",
+            "npm lint",
+            "npm run lint",
+            "npm rum lint",
+            "npm urn lint",
+            "npm run-script lint",
+            "npx lint",
+            "pnpm lint",
+            "pnpm run lint",
+            "pnpm run-script lint",
+            "pnpx lint",
+        ];
+        for command in script_commands {
+            assert!(
+                !matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk lint",
+                        ..
+                    }
+                ),
+                "'{}' should NOT classify as rtk lint (it's a script, not a linter binary)",
+                command
+            );
+        }
+    }
+
+    #[test]
     fn test_rewrite_lint() {
         let commands = vec![
             "npm exec biome",
             "npm exec eslint",
             "npm rum biome",
             "npm rum eslint",
-            "npm rum lint",
             "npm run biome",
             "npm run eslint",
-            "npm run lint",
             "npm run-script biome",
             "npm run-script eslint",
-            "npm run-script lint",
             "npm urn biome",
             "npm urn eslint",
-            "npm urn lint",
             "npm x biome",
             "npm x eslint",
             "pnpm dlx biome",
@@ -3915,25 +3930,18 @@ mod tests {
             "pnpm exec eslint",
             "pnpm run biome",
             "pnpm run eslint",
-            "pnpm run lint",
             "pnpm run-script biome",
             "pnpm run-script eslint",
-            "pnpm run-script lint",
             "npm biome",
             "npm eslint",
-            "npm lint",
             "npx biome",
             "npx eslint",
-            "npx lint",
             "pnpm biome",
             "pnpm eslint",
-            "pnpm lint",
             "pnpx biome",
             "pnpx eslint",
-            "pnpx lint",
             "biome",
             "eslint",
-            "lint",
         ];
         for command in commands {
             assert_eq!(
@@ -3941,6 +3949,29 @@ mod tests {
                 Some("rtk lint".into()),
                 "Failed for command: {}",
                 command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_lint_scripts_not_rewritten_to_rtk_lint() {
+        let script_commands = vec![
+            "lint",
+            "npm lint",
+            "npm run lint",
+            "pnpm lint",
+            "pnpm run lint",
+            "npx lint",
+            "pnpx lint",
+        ];
+        for command in script_commands {
+            let result = rewrite_command_no_prefixes(command, &[]);
+            assert_ne!(
+                result,
+                Some("rtk lint".into()),
+                "'{}' should NOT be rewritten to rtk lint (got {:?})",
+                command,
+                result
             );
         }
     }

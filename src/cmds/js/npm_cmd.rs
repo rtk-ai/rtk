@@ -1,97 +1,11 @@
-//! Filters npm output and auto-injects the "run" subcommand when appropriate.
+//! Filters npm output — strips boilerplate, progress bars, and warnings.
 
 use crate::core::runner;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
 
-/// Known npm subcommands that should NOT get "run" injected.
-/// Shared between production code and tests to avoid drift.
-const NPM_SUBCOMMANDS: &[&str] = &[
-    "install",
-    "i",
-    "ci",
-    "uninstall",
-    "remove",
-    "rm",
-    "update",
-    "up",
-    "list",
-    "ls",
-    "outdated",
-    "init",
-    "create",
-    "publish",
-    "pack",
-    "link",
-    "audit",
-    "fund",
-    "exec",
-    "explain",
-    "why",
-    "search",
-    "view",
-    "info",
-    "show",
-    "config",
-    "set",
-    "get",
-    "cache",
-    "prune",
-    "dedupe",
-    "doctor",
-    "help",
-    "version",
-    "prefix",
-    "root",
-    "bin",
-    "bugs",
-    "docs",
-    "home",
-    "repo",
-    "ping",
-    "whoami",
-    "token",
-    "profile",
-    "team",
-    "access",
-    "owner",
-    "deprecate",
-    "dist-tag",
-    "star",
-    "stars",
-    "login",
-    "logout",
-    "adduser",
-    "unpublish",
-    "pkg",
-    "diff",
-    "rebuild",
-    "test",
-    "t",
-    "start",
-    "stop",
-    "restart",
-];
-
 pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
-    // Determine if this is "npm run <script>" or another npm subcommand (install, list, etc.)
-    // Only inject "run" when args look like a script name, not a known npm subcommand.
-    let first_arg = args.first().map(|s| s.as_str());
-    let is_run_explicit = first_arg == Some("run");
-    let is_npm_subcommand = first_arg
-        .map(|a| NPM_SUBCOMMANDS.contains(&a) || a.starts_with('-'))
-        .unwrap_or(false);
-
-    let mut effective_args: Vec<String> = Vec::with_capacity(args.len() + 1);
-    if is_run_explicit || is_npm_subcommand {
-        effective_args.extend_from_slice(args);
-    } else {
-        // "rtk npm build" → "npm run build" (assume script name)
-        effective_args.push("run".to_string());
-        effective_args.extend_from_slice(args);
-    }
-
-    run_filtered("npm", &effective_args, verbose, skip_env)
+    run_filtered("npm", args, verbose, skip_env)
 }
 
 /// Run an npx tool through the same filtered pipeline as `npm`.
@@ -188,44 +102,6 @@ npm notice
         assert!(!result.contains("npm notice"));
         assert!(!result.contains("> project@"));
         assert!(result.contains("Build completed"));
-    }
-
-    #[test]
-    fn test_npm_subcommand_routing() {
-        // Uses the shared NPM_SUBCOMMANDS constant — no drift between prod and test
-        fn needs_run_injection(args: &[&str]) -> bool {
-            let first = args.first().copied();
-            let is_run_explicit = first == Some("run");
-            let is_subcommand = first
-                .map(|a| NPM_SUBCOMMANDS.contains(&a) || a.starts_with('-'))
-                .unwrap_or(false);
-            !is_run_explicit && !is_subcommand
-        }
-
-        // Known subcommands should NOT get "run" injected
-        for subcmd in NPM_SUBCOMMANDS {
-            assert!(
-                !needs_run_injection(&[subcmd]),
-                "'npm {}' should NOT inject 'run'",
-                subcmd
-            );
-        }
-
-        // Script names SHOULD get "run" injected
-        for script in &["build", "dev", "lint", "typecheck", "deploy"] {
-            assert!(
-                needs_run_injection(&[script]),
-                "'npm {}' SHOULD inject 'run'",
-                script
-            );
-        }
-
-        // Flags should NOT get "run" injected
-        assert!(!needs_run_injection(&["--version"]));
-        assert!(!needs_run_injection(&["-h"]));
-
-        // Explicit "run" should NOT inject another "run"
-        assert!(!needs_run_injection(&["run", "build"]));
     }
 
     #[test]
