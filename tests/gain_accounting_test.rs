@@ -52,6 +52,56 @@ fn read_tail_window_reports_no_savings_against_tail_baseline() {
 }
 
 #[test]
+fn read_max_window_reports_savings_against_head_baseline_when_shorter() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("tracking.db");
+    let file = dir.path().join("large.log");
+    let content: String = (0..12)
+        .map(|i| format!("line-{i} {}\n", "x".repeat(120)))
+        .collect();
+    std::fs::write(&file, content).expect("write fixture");
+
+    let output = rtk()
+        .env("RTK_DB_PATH", &db_path)
+        .args(["read", "--max-lines", "4", file.to_str().unwrap()])
+        .output()
+        .expect("rtk read");
+    assert!(
+        output.status.success(),
+        "rtk read failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("more lines"));
+
+    assert!(
+        gain_total_saved(&db_path) > 0,
+        "shortened --max-lines output should record real savings"
+    );
+}
+
+#[test]
+fn read_head_window_guard_falls_back_to_head_baseline() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("tracking.db");
+    let file = dir.path().join("tiny.txt");
+    std::fs::write(&file, "a\nb\n").expect("write fixture");
+
+    let output = rtk()
+        .env("RTK_DB_PATH", &db_path)
+        .args(["read", "--max-lines", "1", file.to_str().unwrap()])
+        .output()
+        .expect("rtk read");
+    assert!(
+        output.status.success(),
+        "rtk read failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "a\n");
+
+    assert_eq!(gain_total_saved(&db_path), 0);
+}
+
+#[test]
 fn uncapped_grep_reports_no_savings_against_faithful_baseline() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("tracking.db");
