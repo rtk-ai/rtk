@@ -6,8 +6,10 @@ use crate::core::stream::{
     self, exec_capture, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode,
 };
 use crate::core::tracking;
-use crate::core::truncate::CAP_WARNINGS;
-use crate::core::utils::{exit_code_from_output, exit_code_from_status, resolved_command};
+use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
+use crate::core::utils::{
+    exit_code_from_output, exit_code_from_status, join_with_overflow, resolved_command, strip_ansi,
+};
 use anyhow::{Context, Result};
 use std::ffi::OsString;
 use std::process::Command;
@@ -1563,8 +1565,10 @@ fn run_stash(
             );
         }
         Some("show") => {
+            let patch_mode = args.iter().any(|a| a == "-p" || a == "--patch");
+
             let mut cmd = git_cmd(global_args);
-            cmd.args(["stash", "show", "-p"]);
+            cmd.args(["stash", "show"]);
             for arg in args {
                 cmd.arg(arg);
             }
@@ -1578,15 +1582,13 @@ fn run_stash(
                 return Ok(result.exit_code);
             }
 
-            let compacted = compact_diff(&result.stdout, 100);
-            let compacted = never_worse(&result.stdout, &compacted).to_string();
-            println!("{}", compacted);
-            timer.track(
-                "git stash show",
-                "rtk git stash show",
-                &result.stdout,
-                &compacted,
-            );
+            let filtered = if patch_mode {
+                compact_diff(&result.stdout, 100)
+            } else {
+                compact_stash_stat(&result.stdout)
+            };
+            let shown = crate::core::runner::emit_guarded(&filtered, None, &result.stdout);
+            timer.track("git stash show", "rtk git stash show", &result.stdout, &shown);
         }
         Some("apply") | Some("branch") | Some("clear") | Some("create") | Some("drop")
         | Some("export") | Some("import") | Some("pop") | Some("store") => {
@@ -1688,6 +1690,79 @@ fn filter_stash_list(output: &str) -> String {
         }
     }
     result.join("\n")
+}
+
+fn compact_stash_stat(raw: &str) -> String {
+    let (files, summary) = parse_stash_stat(raw);
+    if files.is_empty() {
+        return raw.trim_end().to_string();
+    }
+    let total = files.len();
+    let mut out = join_with_overflow(&files[..total.min(CAP_LIST)], total, CAP_LIST, "files");
+    if total > CAP_LIST {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&files.join("\n"), "git-stash-show", CAP_LIST + 1)
+        {
+            out.push(' ');
+            out.push_str(&hint);
+        }
+    }
+    if !summary.is_empty() {
+        out.push('\n');
+        out.push_str(&compress_stat_summary(&summary));
+    }
+    out
+}
+
+fn compress_stat_summary(summary: &str) -> String {
+    summary
+        .replace("insertions(+)", "+")
+        .replace("insertion(+)", "+")
+        .replace("deletions(-)", "-")
+        .replace("deletion(-)", "-")
+        .replace("files changed", "changed")
+        .replace("file changed", "changed")
+		.replace(",", "")
+}
+
+fn parse_stash_stat(stat: &str) -> (Vec<String>, String) {
+    let stat = strip_ansi(stat);
+    let mut files = Vec::new();
+    let mut summary = String::new();
+
+    for line in stat.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match diffstat_row(line) {
+            Some(row) => files.push(row),
+            None => summary = line.to_string(),
+        }
+    }
+
+    (files, summary)
+}
+
+fn diffstat_row(line: &str) -> Option<String> {
+    let bar = line.rfind('|')?;
+    let path = line[..bar].trim();
+    let rhs = line[bar + 1..].trim();
+    let is_diffstat_row = rhs.starts_with("Bin") || rhs.starts_with(|c: char| c.is_ascii_digit());
+    if path.is_empty() || !is_diffstat_row {
+        return None;
+    }
+    if rhs.starts_with("Bin") {
+        return Some(format!("{} (binary)", path));
+    }
+    let count = rhs.split_whitespace().next().unwrap_or("");
+    let sign = match (rhs.contains('+'), rhs.contains('-')) {
+        (true, true) => " +-",
+        (true, false) => " +",
+        (false, true) => " -",
+        (false, false) => "",
+    };
+    Some(format!("{} {}{}", path, count, sign))
 }
 
 fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
@@ -2094,6 +2169,104 @@ mod tests {
         let result = filter_stash_list(output);
         assert!(result.contains("stash@{0}: abc1234 fix login"));
         assert!(result.contains("stash@{1}: def5678 wip"));
+    }
+
+    #[test]
+    fn test_parse_stash_stat_strips_decorations() {
+        let raw = " del.md   |   2 --\n keep.md  |   5 ++++-\n logo.bin | Bin 0 -> 1024 bytes\n \
+                   new.rs   |  40 ++++++++\n 4 files changed, 44 insertions(+), 3 deletions(-)\n";
+        let (files, summary) = parse_stash_stat(raw);
+        assert_eq!(
+            files,
+            vec!["del.md 2 -", "keep.md 5 +-", "logo.bin (binary)", "new.rs 40 +"]
+        );
+        assert_eq!(summary, "4 files changed, 44 insertions(+), 3 deletions(-)");
+    }
+
+    #[test]
+    fn test_parse_stash_stat_collapsed_bar() {
+        let (files, _) = parse_stash_stat(" .claude/CLAUDE.md | 234 +-\n");
+        assert_eq!(files, vec![".claude/CLAUDE.md 234 +-"]);
+    }
+
+    #[test]
+    fn test_compact_stash_stat_passthrough_numstat() {
+        let raw = "0\t1\tdel.md\n3\t2\tkeep.md\n1\t0\tn1.rs\n";
+        assert_eq!(compact_stash_stat(raw), "0\t1\tdel.md\n3\t2\tkeep.md\n1\t0\tn1.rs");
+    }
+
+    #[test]
+    fn test_compact_stash_stat_passthrough_name_only() {
+        let raw = "del.md\nkeep.md\nn1.rs\n";
+        assert_eq!(compact_stash_stat(raw), "del.md\nkeep.md\nn1.rs");
+    }
+
+    #[test]
+    fn test_compress_stat_summary_variants() {
+        assert_eq!(
+            compress_stat_summary("4 files changed, 60 insertions(+), 313 deletions(-)"),
+            "4 changed 60 + 313 -"
+        );
+        assert_eq!(
+            compress_stat_summary("1 file changed, 1 insertion(+)"),
+            "1 changed 1 +"
+        );
+        assert_eq!(
+            compress_stat_summary("1 file changed, 1 deletion(-)"),
+            "1 changed 1 -"
+        );
+        assert_eq!(
+            compress_stat_summary("2 files changed, 4 insertions(+), 1 deletion(-)"),
+            "2 changed 4 + 1 -"
+        );
+    }
+
+    #[test]
+    fn test_compact_stash_stat_compresses_summary() {
+        let raw = " a.txt | 2 ++\n 1 file changed, 2 insertions(+)\n";
+        assert_eq!(compact_stash_stat(raw), "a.txt 2 +\n1 changed 2 +");
+    }
+
+    #[test]
+    fn test_parse_stash_stat_last_pipe_is_separator() {
+        let (files, _) = parse_stash_stat(" weird|name.txt | 3 +++\n");
+        assert_eq!(files, vec!["weird|name.txt 3 +"]);
+    }
+
+    #[test]
+    fn test_parse_stash_stat_strips_ansi() {
+        let (files, _) = parse_stash_stat(" a.txt | 2 \x1b[32m++\x1b[m\n");
+        assert_eq!(files, vec!["a.txt 2 +"]);
+    }
+
+    #[test]
+    fn test_parse_stash_stat_empty() {
+        let (files, summary) = parse_stash_stat("");
+        assert!(files.is_empty());
+        assert!(summary.is_empty());
+    }
+
+    #[test]
+    fn test_parse_stash_stat_unicode_and_malformed_never_panic() {
+        let _ = parse_stash_stat("not a diffstat at all");
+        let _ = parse_stash_stat("| | |");
+        let (files, _) = parse_stash_stat(" 日本語.md | 5 +++--\n");
+        assert_eq!(files, vec!["日本語.md 5 +-"]);
+    }
+
+    #[test]
+    fn test_parse_stash_stat_savings() {
+        use crate::core::tracking::estimate_tokens;
+        let raw = " CONTRIBUTING.md | 305 \
+                   ----------------------------------------------------------\n \
+                   README.md       |  28 ++++--\n logo.bin        | Bin 0 -> 2048 bytes\n \
+                   newfeature.rs   |  40 ++++++++\n \
+                   4 files changed, 60 insertions(+), 313 deletions(-)\n";
+        let (files, summary) = parse_stash_stat(raw);
+        let compact = format!("{}\n{}", files.join("\n"), summary);
+        let savings =
+            100.0 - (estimate_tokens(&compact) as f64 / estimate_tokens(raw) as f64 * 100.0);
+        assert!(savings >= 40.0, "expected >=40% savings, got {:.1}%", savings);
     }
 
     #[test]
