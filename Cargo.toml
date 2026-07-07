@@ -31,7 +31,7 @@ sha2 = "0.10"
 ureq = "2"
 getrandom = "0.4"
 flate2 = "1.0"
-quick-xml = "0.37"
+quick-xml = "0.41"
 which = "8"
 automod = "1"
 
