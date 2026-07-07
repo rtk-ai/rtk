@@ -7,6 +7,7 @@ mod learn;
 mod parser;
 
 // Re-export command modules for routing
+use cmds::build::bazel_cmd;
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
@@ -774,6 +775,20 @@ enum Commands {
     /// uv run with compact output while preserving uv-managed environment semantics
     Uv {
         /// uv arguments (e.g., run pytest, run --project backend python script.py)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Bazel commands with compact validation output
+    Bazel {
+        /// Bazel arguments, including startup flags and subcommand
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Bazelisk commands with compact validation output
+    Bazelisk {
+        /// Bazelisk arguments, including startup flags and subcommand
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2322,6 +2337,10 @@ fn run_cli() -> Result<i32> {
 
         Commands::Uv { args } => uv_cmd::run(&args, cli.verbose)?,
 
+        Commands::Bazel { args } => bazel_cmd::run("bazel", &args, cli.verbose)?,
+
+        Commands::Bazelisk { args } => bazel_cmd::run("bazelisk", &args, cli.verbose)?,
+
         Commands::Go { command } => match command {
             GoCommands::Test { args } => go_cmd::run_test(&args, cli.verbose)?,
             GoCommands::Build { args } => go_cmd::run_build(&args, cli.verbose)?,
@@ -2692,6 +2711,8 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Rspec { .. }
             | Commands::Pip { .. }
             | Commands::Uv { .. }
+            | Commands::Bazel { .. }
+            | Commands::Bazelisk { .. }
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
@@ -3056,6 +3077,8 @@ mod tests {
             "prettier",
             "format",
             "playwright",
+            "bazel",
+            "bazelisk",
             "cargo",
             "npm",
             "npx",

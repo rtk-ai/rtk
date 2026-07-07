@@ -640,7 +640,8 @@ fn rewrite_compound(
                 let is_pipe_incompatible = seg.starts_with("find ")
                     || seg == "find"
                     || seg.starts_with("fd ")
-                    || seg == "fd";
+                    || seg == "fd"
+                    || is_bazel_query_segment(seg);
                 let rewritten = if is_pipe_incompatible {
                     seg.to_string()
                 } else {
@@ -802,6 +803,63 @@ fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
     })
 }
 
+fn is_bazel_query_segment(seg: &str) -> bool {
+    bazel_segment_subcommand(seg) == Some("query")
+}
+
+fn bazel_segment_subcommand(seg: &str) -> Option<&str> {
+    let (_, rest_after_env) = strip_disabled_prefix(seg);
+    let mut parts = rest_after_env.split_whitespace();
+    let tool = parts.next()?;
+    if tool != "bazel" && tool != "bazelisk" {
+        return None;
+    }
+
+    let mut skip_next = false;
+    for part in parts {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if part.starts_with("--") {
+            let flag_name = part.split_once('=').map(|(name, _)| name).unwrap_or(part);
+            if !part.contains('=') && bazel_startup_option_takes_value(flag_name) {
+                skip_next = true;
+            }
+            continue;
+        }
+        if part.starts_with('-') {
+            continue;
+        }
+        return Some(part);
+    }
+    None
+}
+
+fn bazel_startup_option_takes_value(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--bazelrc"
+            | "--batch_cpu_scheduling"
+            | "--command_port"
+            | "--connect_timeout_secs"
+            | "--digest_function"
+            | "--failure_detail_out"
+            | "--host_platform"
+            | "--host_jvm_args"
+            | "--host_jvm_profile"
+            | "--host_jvm_startup_time"
+            | "--install_base"
+            | "--invocation_policy"
+            | "--io_nice_level"
+            | "--local_startup_timeout_secs"
+            | "--max_idle_secs"
+            | "--output_base"
+            | "--output_user_root"
+            | "--server_javabase"
+    )
+}
+
 fn rewrite_segment_inner(
     seg: &str,
     excluded: &[ExcludePattern],
@@ -858,6 +916,9 @@ fn rewrite_segment_inner(
     // Strip trailing stderr/stdout redirects before matching (#530)
     // e.g. "git status 2>&1" → match "git status", re-append " 2>&1"
     let (cmd_part, redirect_suffix) = strip_trailing_redirects(trimmed);
+    if !redirect_suffix.is_empty() && is_bazel_query_segment(cmd_part) {
+        return None;
+    }
 
     // Already RTK — pass through unchanged
     if cmd_part.starts_with("rtk ") || cmd_part == "rtk" {
@@ -1066,6 +1127,72 @@ mod tests {
                 estimated_savings_pct: 90.0,
                 status: RtkStatus::Existing,
             }
+        );
+    }
+
+    #[test]
+    fn test_classify_bazel_test() {
+        assert_eq!(
+            classify_command("bazel test --test_output=errors //..."),
+            Classification::Supported {
+                rtk_equivalent: "rtk bazel",
+                category: "Build",
+                estimated_savings_pct: 75.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_bazel_query_passthrough_status() {
+        assert_eq!(
+            classify_command("bazel query //..."),
+            Classification::Supported {
+                rtk_equivalent: "rtk bazel",
+                category: "Build",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bazel_test() {
+        assert_eq!(
+            rewrite_command_no_prefixes("bazel test --test_output=errors //...", &[]),
+            Some("rtk bazel test --test_output=errors //...".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bazelisk_test_preserves_alias() {
+        assert_eq!(
+            rewrite_command_no_prefixes("bazelisk test //...", &[]),
+            Some("rtk bazelisk test //...".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bazel_query_pipeline_passthrough() {
+        assert_eq!(
+            rewrite_command_no_prefixes("bazel query //... | xargs -L1 bazel run", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bazel_query_redirect_passthrough() {
+        assert_eq!(
+            rewrite_command_no_prefixes("bazel query //... > targets.txt", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bazel_startup_options() {
+        assert_eq!(
+            rewrite_command_no_prefixes("bazel --output_base /tmp/bazel-output test //...", &[]),
+            Some("rtk bazel --output_base /tmp/bazel-output test //...".to_string())
         );
     }
 

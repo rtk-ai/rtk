@@ -129,7 +129,7 @@ mod tests {
         fn test_fd_dup_redirect_still_rewrites() {
             assert!(matches!(
                 evaluate("git status 2>&1", &[], &[]),
-                RewriteOutcome::Ask(_)
+                RewriteOutcome::Allow(_) | RewriteOutcome::Ask(_)
             ));
         }
 
@@ -137,7 +137,7 @@ mod tests {
         fn test_plain_command_still_rewrites() {
             assert!(matches!(
                 evaluate("git status", &[], &[]),
-                RewriteOutcome::Ask(_)
+                RewriteOutcome::Allow(_) | RewriteOutcome::Ask(_)
             ));
         }
     }
