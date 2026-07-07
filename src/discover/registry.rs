@@ -1353,6 +1353,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_rewrite_git_ls_files() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git ls-files", &[]),
+            Some("rtk git ls-files".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_ls_files_with_args() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git ls-files --others --exclude-standard", &[]),
+            Some("rtk git ls-files --others --exclude-standard".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_rm() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git rm src/foo.rs", &[]),
+            Some("rtk git rm src/foo.rs".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_tag() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git tag", &[]),
+            Some("rtk git tag".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_cherry_pick() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git cherry-pick abc1234", &[]),
+            Some("rtk git cherry-pick abc1234".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_rebase() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git rebase main", &[]),
+            Some("rtk git rebase main".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_merge() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git merge feature/auth", &[]),
+            Some("rtk git merge feature/auth".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_checkout() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git checkout main", &[]),
+            Some("rtk git checkout main".into())
+        );
+    }
+
     // --- git -C <path> support (#555) ---
 
     #[test]
