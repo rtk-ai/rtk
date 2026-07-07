@@ -541,9 +541,11 @@ pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
     })
 }
 
-/// Like [`exec_capture`] but inherits stdin so a wrapped engine can read a piped stdin.
+/// Like [`exec_capture`] but explicitly nulls stdin so search subprocesses
+/// (rg, grep) never block waiting for input from a parent pipe that will
+/// never send EOF (e.g. when RTK is invoked by an agent hook).
 pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
-    cmd.stdin(Stdio::inherit());
+    cmd.stdin(Stdio::null());
     let output = cmd.output().context("Failed to execute command")?;
     Ok(CaptureResult {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
