@@ -82,3 +82,36 @@ fn uncapped_grep_reports_no_savings_against_faithful_baseline() {
 
     assert_eq!(gain_total_saved(&db_path), 0);
 }
+
+#[test]
+fn capped_grep_reports_savings_against_faithful_baseline() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("tracking.db");
+    let file = dir.path().join("sample.txt");
+    let filler = "x".repeat(160);
+    let content: String = (0..40)
+        .map(|i| format!("foo line {i} {filler}\n"))
+        .collect();
+    std::fs::write(&file, content).expect("write fixture");
+
+    let probe = Command::new("grep")
+        .args(["--null", "-n", "-H", "foo", file.to_str().unwrap()])
+        .output();
+    if !probe.map(|o| o.status.success()).unwrap_or(false) {
+        return;
+    }
+
+    let output = rtk()
+        .env("RTK_DB_PATH", &db_path)
+        .args(["grep", "--max", "5", "foo", file.to_str().unwrap()])
+        .output()
+        .expect("rtk grep");
+    assert!(
+        output.status.success(),
+        "rtk grep failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let saved = gain_total_saved(&db_path);
+    assert!(saved > 0, "capped grep should record real savings");
+}
