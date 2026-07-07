@@ -141,6 +141,23 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
         }
     ));
 
+    // Issue #1973 / #1929: transcripts record pre-hook commands. When the
+    // PreToolUse hook is installed, what actually executes may differ from
+    // what this report shows. Tell the user so the "0% adoption" headline
+    // doesn't look catastrophic when the hook is in fact doing its job.
+    if matches!(
+        crate::hooks::hook_check::status(),
+        crate::hooks::hook_check::HookStatus::Ok
+    ) {
+        out.push_str(
+            "Note: RTK PreToolUse hook detected; transcripts capture the\n      \
+             pre-hook (assistant-proposed) command. Hook-rewritten commands\n      \
+             execute as `rtk …` but appear in this report as the original\n      \
+             form. Cross-reference `rtk gain --history` for what RTK\n      \
+             actually handled.\n",
+        );
+    }
+
     if report.supported.is_empty() && report.unsupported.is_empty() {
         out.push_str("\nNo missed savings found. RTK usage looks good!\n");
         append_agent_notes(&mut out, report.agent_status);
