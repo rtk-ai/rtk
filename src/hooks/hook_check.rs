@@ -153,7 +153,7 @@ mod tests {
     use crate::hooks::constants::{
         CODEX_DIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HERMES_DIR,
         HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
-        OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+        OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR, QODER_DIR, QODER_SETTINGS_JSON,
     };
 
     fn other_integration_installed(home: &std::path::Path) -> bool {
@@ -173,6 +173,7 @@ mod tests {
                 .join(HERMES_PLUGINS_SUBDIR)
                 .join(HERMES_PLUGIN_NAME)
                 .join(HERMES_PLUGIN_MANIFEST_FILE),
+            home.join(QODER_DIR).join(QODER_SETTINGS_JSON),
         ];
         paths.iter().any(|p| p.exists())
     }
@@ -277,6 +278,15 @@ mod tests {
             .join(HERMES_PLUGIN_MANIFEST_FILE);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"plugin").unwrap();
+        assert!(other_integration_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_qoder() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join(QODER_DIR).join(QODER_SETTINGS_JSON);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"settings").unwrap();
         assert!(other_integration_installed(tmp.path()));
     }
 
