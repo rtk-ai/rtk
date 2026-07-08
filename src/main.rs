@@ -44,6 +44,8 @@ pub enum AgentTarget {
     Cline,
     /// Kilo Code
     Kilocode,
+    /// Trae.ai IDE
+    Trae,
     /// Google Antigravity
     Antigravity,
     /// Pi coding agent
@@ -2012,6 +2014,11 @@ fn run_cli() -> Result<i32> {
                     anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");
                 }
                 hooks::init::run_kilocode_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Trae) {
+                if global {
+                    anyhow::bail!("Trae.ai is project-scoped. Use: rtk init --agent trae");
+                }
+                hooks::init::run_trae_mode(ctx)?;
             } else if agent == Some(AgentTarget::Antigravity) {
                 if global {
                     anyhow::bail!(
@@ -2856,6 +2863,17 @@ mod tests {
         match cli.command {
             Commands::Init { agent, .. } => {
                 assert_eq!(agent, Some(AgentTarget::Hermes));
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_init_agent_trae() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "trae"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Trae));
             }
             _ => panic!("Expected Init command"),
         }

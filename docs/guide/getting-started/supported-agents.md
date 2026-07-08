@@ -166,6 +166,14 @@ rtk init --agent kilocode    # creates .kilocode/rules/rtk-rules.md in current p
 
 Kilo Code reads `.kilocode/rules/` as custom instructions. RTK adds guidance telling Kilo Code to prefer `rtk <cmd>` over raw commands.
 
+### Trae.ai
+
+```bash
+rtk init --agent trae    # creates .trae/rules/rtk-rules.md in current project
+```
+
+Trae.ai reads `.trae/rules/` as project-scoped rules. RTK adds guidance telling Trae.ai to prefer `rtk <cmd>` over raw commands.
+
 ### Google Antigravity
 
 ```bash
@@ -186,7 +194,7 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Trae.ai, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
 
 ## Windows support
 
