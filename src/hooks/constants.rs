@@ -39,3 +39,7 @@ pub const HERMES_PLUGINS_SUBDIR: &str = "plugins";
 pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";
 pub const HERMES_PLUGIN_INIT_FILE: &str = "__init__.py";
 pub const HERMES_PLUGIN_MANIFEST_FILE: &str = "plugin.yaml";
+
+pub const MIMOCODE_SUBDIR: &str = "mimocode";
+pub const MIMOCODE_PLUGIN_FILE: &str = "rtk.ts";
+pub const MIMOCODE_HOME_ENV: &str = "MIMOCODE_HOME";
