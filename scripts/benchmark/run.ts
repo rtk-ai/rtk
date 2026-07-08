@@ -12,9 +12,13 @@
  */
 
 import { $ } from "bun";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { vmEnsureReady, vmBuildRtk, vmExec, RTK_BIN } from "./lib/vm";
 import { testCmd, testSavings, testRewrite, skipTest, getCounts } from "./lib/test";
 import { saveReport } from "./lib/report";
+
+const PROJECT_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
 const args = process.argv.slice(2);
 const quick = args.includes("--quick");
@@ -28,9 +32,7 @@ if (args.includes("--phase") && phaseOnly === null) {
 }
 const reportPath = args.includes("--report")
   ? args[args.indexOf("--report") + 1]
-  : `${new URL("../../", import.meta.url).pathname.replace(/\/$/, "")}/benchmark-report.txt`;
-
-const PROJECT_ROOT = new URL("../../", import.meta.url).pathname.replace(/\/$/, "");
+  : resolve(PROJECT_ROOT, "benchmark-report.txt");
 const RTK = RTK_BIN;
 
 function shouldRun(phase: number): boolean {
