@@ -89,13 +89,13 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 | Cursor (rtk hook cursor) | Ready | `permission: "ask",` — users will be prompted when Cursor enforces the permission; in the meantime, allow |
 | Gemini CLI (rtk hook gemini) | No (allow/deny only) | allow (limitation — no ask mode in Gemini) |
 | Copilot CLI (rtk hook copilot) | No updatedInput | deny-with-suggestion (unchanged) |
-| Codex | ask parsed but no-op | allow (limitation — fails open) |
+| Codex CLI (rtk hook codex) | No (updatedInput requires allow) | allow (limitation — Codex rejects ask with updatedInput) |
 
 ### Implementation
 
 - `permissions.rs` — loads deny/ask/allow rules, evaluates precedence, returns `PermissionVerdict`
 - `rewrite_cmd.rs` — maps verdict to exit code (consumed by shell hook)
-- `hook_cmd.rs` — maps verdict to JSON `permissionDecision` field (Copilot/Gemini)
+- `hook_cmd.rs` — maps verdict to JSON `permissionDecision` field (Copilot/Gemini/Codex)
 
 ## Exit Code Contract
 

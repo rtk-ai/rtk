@@ -438,6 +438,93 @@ fn run_claude_inner(input: &str) -> Option<String> {
     }
 }
 
+// ── Codex CLI native hook ──────────────────────────────────────
+
+fn process_codex_payload(v: &Value) -> PayloadAction {
+    let cmd = match v
+        .pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+    {
+        Some(c) => c,
+        None => return PayloadAction::Ignore,
+    };
+
+    if permissions::check_command(cmd) == PermissionVerdict::Deny {
+        return PayloadAction::Skip {
+            reason: "skip:deny_rule",
+            cmd: cmd.to_string(),
+        };
+    }
+
+    let rewritten = match get_rewritten(cmd) {
+        Some(r) => r,
+        None => {
+            return PayloadAction::Skip {
+                reason: "skip:no_match",
+                cmd: cmd.to_string(),
+            };
+        }
+    };
+
+    PayloadAction::Rewrite {
+        cmd: cmd.to_string(),
+        rewritten: rewritten.clone(),
+        output: json!({
+            "hookSpecificOutput": {
+                "hookEventName": PRE_TOOL_USE_KEY,
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "RTK auto-rewrite",
+                "updatedInput": { "command": rewritten }
+            }
+        }),
+    }
+}
+
+/// Run the Codex CLI PreToolUse hook natively.
+pub fn run_codex() -> Result<()> {
+    let input = read_stdin_limited()?;
+
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    match process_codex_payload(&v) {
+        PayloadAction::Rewrite {
+            cmd,
+            rewritten,
+            output,
+        } => {
+            audit_log("rewrite", &cmd, &rewritten);
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        PayloadAction::Skip { reason, cmd } => {
+            audit_log(reason, &cmd, "");
+        }
+        PayloadAction::Ignore => {}
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_codex_inner(input: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    match process_codex_payload(&v) {
+        PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        _ => None,
+    }
+}
+
 // ── Cursor native hook ─────────────────────────────────────────
 
 /// Cursor on Windows ships hook payloads with one or more leading
@@ -1030,6 +1117,56 @@ mod tests {
     fn test_claude_no_tool_input_passthrough() {
         let input = json!({ "tool_name": "Bash" }).to_string();
         assert!(run_claude_inner(&input).is_none());
+    }
+
+    // --- Codex handler ---
+
+    fn codex_input(cmd: &str) -> String {
+        json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": { "command": cmd },
+            "tool_use_id": "call_123",
+            "session_id": "session_123",
+            "turn_id": "turn_123",
+            "cwd": "/tmp",
+            "transcript_path": null,
+            "model": "gpt-5.1-codex",
+            "permission_mode": "default"
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_codex_rewrite_git_status() {
+        let result = run_codex_inner(&codex_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(hook["permissionDecision"], "allow");
+        assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
+        assert_eq!(hook["updatedInput"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_codex_rewrite_preserves_allowed_shape_only() {
+        let result = run_codex_inner(&codex_input("GIT_PAGER=cat git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert_eq!(hook["permissionDecision"], "allow");
+        assert_eq!(
+            hook["updatedInput"],
+            json!({ "command": "GIT_PAGER=cat rtk git status" })
+        );
+    }
+
+    #[test]
+    fn test_codex_passthrough_no_output() {
+        assert!(run_codex_inner(&codex_input("htop")).is_none());
+        assert!(run_codex_inner(&codex_input("rtk git status")).is_none());
+        assert!(run_codex_inner("not valid json {{{").is_none());
     }
 
     // --- Cursor handler ---
