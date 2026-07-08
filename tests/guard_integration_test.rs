@@ -187,9 +187,10 @@ fn find_one_valid_one_invalid_path_subprocess() {
 }
 
 #[test]
-fn find_duplicate_paths_shows_duplicate_matches() {
-    // Native `find a a -name "*.txt"` prints the match twice (no dedup across
-    // repeated path args); rtk find should match that behavior.
+fn find_duplicate_paths_dedups_to_a_single_match() {
+    // Unlike native find (which prints the match once per repeated path arg),
+    // rtk find dedups identical paths: searching the same root twice wastes a
+    // walk and would produce misleading duplicate results.
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(dir.path().join("folder1")).expect("mkdir folder1");
     std::fs::write(dir.path().join("folder1/foo.txt"), "x").expect("write foo");
@@ -200,8 +201,8 @@ fn find_duplicate_paths_shows_duplicate_matches() {
     );
     let occurrences = out.matches("foo.txt").count();
     assert_eq!(
-        occurrences, 2,
-        "expected foo.txt to appear twice for a duplicated path arg, got {occurrences}: {out:?}"
+        occurrences, 1,
+        "expected foo.txt to appear once after deduping a repeated path arg, got {occurrences}: {out:?}"
     );
 }
 

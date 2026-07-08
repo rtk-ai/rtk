@@ -212,6 +212,16 @@ pub fn run(
 ) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
+    // Duplicate roots would be walked and reported twice for no benefit; dedup
+    // keeps the search and the output no larger than the set of distinct roots.
+    let mut deduped_paths: Vec<String> = Vec::with_capacity(paths.len());
+    for p in paths {
+        if !deduped_paths.contains(p) {
+            deduped_paths.push(p.clone());
+        }
+    }
+    let paths: &[String] = &deduped_paths;
+
     // paths is guaranteed non-empty by both parse_native_find_args and
     // parse_rtk_find_args (they default to ["."] via FindArgs::default()).
     let single_root = paths.len() == 1;
