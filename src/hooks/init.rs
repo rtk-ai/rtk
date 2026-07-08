@@ -17,7 +17,7 @@ use super::constants::{
     GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
     HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
     PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
-    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    PRE_TOOL_USE_KEY, REASONIX_DIR, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -30,6 +30,7 @@ const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
 const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
+const RTK_SLIM_REASONIX: &str = include_str!("../../hooks/reasonix/rtk-awareness.md");
 
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
@@ -267,6 +268,7 @@ pub fn run(
     claude_md: bool,
     hook_only: bool,
     codex: bool,
+    reasonix: bool,
     patch_mode: PatchMode,
     ctx: InitContext,
 ) -> Result<()> {
@@ -289,6 +291,23 @@ pub fn run(
             anyhow::bail!("--codex cannot be combined with --no-patch");
         }
         run_codex_mode(global, ctx)?;
+    } else if reasonix {
+        if install_opencode {
+            anyhow::bail!("--reasonix cannot be combined with --opencode");
+        }
+        if claude_md {
+            anyhow::bail!("--reasonix cannot be combined with --claude-md");
+        }
+        if hook_only {
+            anyhow::bail!("--reasonix cannot be combined with --hook-only");
+        }
+        if matches!(patch_mode, PatchMode::Auto) {
+            anyhow::bail!("--reasonix cannot be combined with --auto-patch");
+        }
+        if matches!(patch_mode, PatchMode::Skip) {
+            anyhow::bail!("--reasonix cannot be combined with --no-patch");
+        }
+        run_reasonix_mode(global, ctx)?;
     } else {
         // Validation: Global-only features
         if install_opencode && !global {
@@ -630,6 +649,7 @@ pub fn uninstall(
     global: bool,
     gemini: bool,
     codex: bool,
+    reasonix: bool,
     cursor: bool,
     pi: bool,
     ctx: InitContext,
@@ -637,6 +657,14 @@ pub fn uninstall(
     let InitContext { verbose, dry_run } = ctx;
     if codex {
         uninstall_codex(global, ctx)?;
+        if dry_run {
+            print_dry_run_footer();
+        }
+        return Ok(());
+    }
+
+    if reasonix {
+        uninstall_reasonix(global, ctx)?;
         if dry_run {
             print_dry_run_footer();
         }
@@ -3355,9 +3383,12 @@ fn remove_cursor_hook_from_json(root: &mut serde_json::Value) -> bool {
 }
 
 /// Show current rtk configuration
-pub fn show_config(codex: bool) -> Result<()> {
+pub fn show_config(codex: bool, reasonix: bool) -> Result<()> {
     if codex {
         return show_codex_config();
+    }
+    if reasonix {
+        return show_reasonix_config();
     }
 
     show_claude_config()
@@ -3646,6 +3677,252 @@ fn show_codex_config() -> Result<()> {
     println!("  rtk init --codex              # Configure local AGENTS.md + RTK.md");
     println!("  rtk init -g --codex           # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
     println!("  rtk init -g --codex --uninstall  # Remove global Codex RTK artifacts");
+
+    Ok(())
+}
+
+// ─── Reasonix support ─────────────────────────────────────────
+
+fn run_reasonix_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let (agents_md_path, rtk_md_path) = if global {
+        let reasonix_dir = resolve_reasonix_dir()?;
+        (reasonix_dir.join(AGENTS_MD), reasonix_dir.join(RTK_MD))
+    } else {
+        (PathBuf::from(AGENTS_MD), PathBuf::from(RTK_MD))
+    };
+
+    run_reasonix_mode_with_paths(agents_md_path, rtk_md_path, global, ctx)
+}
+
+fn run_reasonix_mode_with_paths(
+    agents_md_path: PathBuf,
+    rtk_md_path: PathBuf,
+    global: bool,
+    ctx: InitContext,
+) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    if global && !dry_run {
+        if let Some(parent) = agents_md_path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create Reasonix config directory: {}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+
+    let rtk_md_ref = if global {
+        reasonix_rtk_md_ref(
+            rtk_md_path
+                .parent()
+                .context("RTK.md path missing parent directory")?,
+        )
+    } else {
+        RTK_MD_REF.to_string()
+    };
+
+    write_if_changed(&rtk_md_path, RTK_SLIM_REASONIX, RTK_MD, ctx)?;
+    let added_ref = patch_agents_md(&agents_md_path, &rtk_md_ref, ctx)?;
+
+    if !dry_run {
+        println!("\nRTK configured for Reasonix.\n");
+        println!("  RTK.md:    {}", rtk_md_path.display());
+        if added_ref {
+            println!("  AGENTS.md: {} reference added", rtk_md_ref);
+        } else {
+            println!("  AGENTS.md: {} reference already present", rtk_md_ref);
+        }
+        let scope = if global { "global" } else { "project" };
+        println!(
+            "\n  Reasonix {scope} instructions path: {}",
+            agents_md_path.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn reasonix_rtk_md_ref(reasonix_dir: &Path) -> String {
+    format!("@{}", reasonix_dir.join(RTK_MD).display())
+}
+
+fn resolve_reasonix_dir() -> Result<PathBuf> {
+    // Priority 1: REASONIX_HOME env var override (all platforms)
+    if let Some(dir) = std::env::var_os("REASONIX_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+    {
+        return Ok(dir);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Priority 2: %APPDATA%/reasonix
+        if let Some(dir) = dirs::config_dir() {
+            return Ok(dir.join(REASONIX_DIR));
+        }
+        // Priority 3: %USERPROFILE%/AppData/Roaming/reasonix
+        if let Some(home) = dirs::home_dir() {
+            return Ok(home.join("AppData").join("Roaming").join(REASONIX_DIR));
+        }
+        anyhow::bail!(
+            "Cannot determine Reasonix config directory. \
+             Set REASONIX_HOME or ensure %APPDATA% is set."
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Priority 2 (macOS/Linux): $HOME/.reasonix
+        if let Some(home) = dirs::home_dir() {
+            return Ok(home.join(format!(".{REASONIX_DIR}")));
+        }
+        // Priority 3: UserConfigDir/reasonix (last-resort fallback)
+        if let Some(dir) = dirs::config_dir() {
+            return Ok(dir.join(REASONIX_DIR));
+        }
+        anyhow::bail!(
+            "Cannot determine Reasonix config directory. \
+             Set REASONIX_HOME or ensure $HOME is set."
+        );
+    }
+}
+
+pub fn uninstall_reasonix(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    if !global {
+        anyhow::bail!(
+            "Uninstall only works with --global flag. For local projects, manually remove RTK from AGENTS.md"
+        );
+    }
+
+    let reasonix_dir = resolve_reasonix_dir()?;
+    let removed = uninstall_reasonix_at(&reasonix_dir, ctx)?;
+
+    if removed.is_empty() {
+        println!("RTK was not installed for Reasonix (nothing to remove)");
+    } else {
+        let header = if dry_run {
+            "[dry-run] would uninstall RTK for Reasonix:"
+        } else {
+            "RTK uninstalled for Reasonix:"
+        };
+        println!("{}", header);
+        for item in removed {
+            println!("  - {}", item);
+        }
+    }
+
+    Ok(())
+}
+
+fn uninstall_reasonix_at(reasonix_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    let InitContext { verbose, dry_run } = ctx;
+    let mut removed = Vec::new();
+    let absolute_rtk_md_ref = reasonix_rtk_md_ref(reasonix_dir);
+
+    let rtk_md_path = reasonix_dir.join(RTK_MD);
+    if rtk_md_path.exists() {
+        if dry_run {
+            println!("[dry-run] would remove RTK.md: {}", rtk_md_path.display());
+        } else {
+            fs::remove_file(&rtk_md_path)
+                .with_context(|| format!("Failed to remove RTK.md: {}", rtk_md_path.display()))?;
+            if verbose > 0 {
+                eprintln!("Removed RTK.md: {}", rtk_md_path.display());
+            }
+        }
+        removed.push(format!("RTK.md: {}", rtk_md_path.display()));
+    }
+
+    let agents_md_path = reasonix_dir.join(AGENTS_MD);
+    if agents_md_path.exists() {
+        let content = fs::read_to_string(&agents_md_path)
+            .with_context(|| format!("Failed to read AGENTS.md: {}", agents_md_path.display()))?;
+
+        let mut working_content = content.clone();
+        let mut agents_changed = false;
+
+        if working_content.contains(RTK_BLOCK_START) {
+            let (cleaned, did_remove) = remove_rtk_block(&working_content);
+            if did_remove {
+                working_content = cleaned;
+                agents_changed = true;
+                removed.push("AGENTS.md: removed rtk-instructions block".to_string());
+            }
+        }
+
+        if agents_changed {
+            atomic_write(&agents_md_path, &working_content).with_context(|| {
+                format!("Failed to write AGENTS.md: {}", agents_md_path.display())
+            })?;
+        }
+    }
+
+    if remove_rtk_reference_from_agents(
+        &agents_md_path,
+        &[RTK_MD_REF, absolute_rtk_md_ref.as_str()],
+        ctx,
+    )? {
+        removed.push("AGENTS.md: removed @RTK.md reference".to_string());
+    }
+
+    Ok(removed)
+}
+
+fn show_reasonix_config() -> Result<()> {
+    let reasonix_dir = resolve_reasonix_dir()?;
+    let global_agents_md = reasonix_dir.join(AGENTS_MD);
+    let global_rtk_md = reasonix_dir.join(RTK_MD);
+    let global_rtk_md_ref = reasonix_rtk_md_ref(&reasonix_dir);
+    let local_agents_md = PathBuf::from(AGENTS_MD);
+    let local_rtk_md = PathBuf::from(RTK_MD);
+
+    println!("rtk Configuration (Reasonix):\n");
+
+    if global_rtk_md.exists() {
+        println!("[ok] Global RTK.md: {}", global_rtk_md.display());
+    } else {
+        println!("[--] Global RTK.md: not found");
+    }
+
+    if global_agents_md.exists() {
+        let content = fs::read_to_string(&global_agents_md)?;
+        if has_rtk_reference(&content, &[RTK_MD_REF, global_rtk_md_ref.as_str()]) {
+            println!("[ok] Global AGENTS.md: RTK.md reference");
+        } else if content.contains(RTK_BLOCK_START) {
+            println!("[!!] Global AGENTS.md: old inline RTK block");
+        } else {
+            println!("[--] Global AGENTS.md: exists but rtk not configured");
+        }
+    } else {
+        println!("[--] Global AGENTS.md: not found");
+    }
+
+    if local_rtk_md.exists() {
+        println!("[ok] Local RTK.md: {}", local_rtk_md.display());
+    } else {
+        println!("[--] Local RTK.md: not found");
+    }
+
+    if local_agents_md.exists() {
+        let content = fs::read_to_string(&local_agents_md)?;
+        if has_rtk_reference(&content, &[RTK_MD_REF]) {
+            println!("[ok] Local AGENTS.md: @RTK.md reference");
+        } else if content.contains(RTK_BLOCK_START) {
+            println!("[!!] Local AGENTS.md: old inline RTK block");
+        } else {
+            println!("[--] Local AGENTS.md: exists but rtk not configured");
+        }
+    } else {
+        println!("[--] Local AGENTS.md: not found");
+    }
+
+    println!("\nUsage:");
+    println!("  rtk init --reasonix              # Configure local AGENTS.md + RTK.md");
+    println!("  rtk init -g --reasonix           # Configure $REASONIX_HOME or ~/.reasonix/");
+    println!("  rtk init -g --reasonix --uninstall  # Remove global Reasonix RTK artifacts");
 
     Ok(())
 }
@@ -4452,6 +4729,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             PatchMode::Auto,
             InitContext::default(),
         )
@@ -4474,6 +4752,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             PatchMode::Skip,
             InitContext::default(),
         )
@@ -5313,6 +5592,192 @@ mod tests {
         assert!(content.contains(RTK_BLOCK_START));
     }
 
+    // ─── Reasonix tests ────────────────────────────────────────
+
+    #[test]
+    fn test_run_reasonix_mode_global_writes_absolute_reference() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        let rtk_md = temp.path().join("RTK.md");
+
+        run_reasonix_mode_with_paths(
+            agents_md.clone(),
+            rtk_md.clone(),
+            true,
+            InitContext::default(),
+        )
+        .unwrap();
+
+        assert!(rtk_md.exists());
+        assert_eq!(fs::read_to_string(&rtk_md).unwrap(), RTK_SLIM_REASONIX);
+        assert_eq!(
+            fs::read_to_string(&agents_md).unwrap(),
+            format!("@{}\n", rtk_md.display())
+        );
+    }
+
+    #[test]
+    fn test_resolve_reasonix_dir_prefers_reasonix_home() {
+        let tmp = TempDir::new().unwrap();
+        std::env::set_var("REASONIX_HOME", tmp.path().as_os_str());
+        let result = resolve_reasonix_dir().unwrap();
+        assert_eq!(result, tmp.path());
+        std::env::remove_var("REASONIX_HOME");
+    }
+
+    #[test]
+    fn test_resolve_reasonix_dir_uses_home_fallback() {
+        // With REASONIX_HOME unset, should return $HOME/.reasonix on non-Windows
+        std::env::remove_var("REASONIX_HOME");
+        if !cfg!(target_os = "windows") {
+            let result = resolve_reasonix_dir().unwrap();
+            assert!(result.to_string_lossy().contains(".reasonix"));
+            assert!(!result.to_string_lossy().contains("Application Support"));
+        }
+    }
+
+    #[test]
+    fn test_uninstall_reasonix_at_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let reasonix_dir = temp.path();
+        let agents_md = reasonix_dir.join("AGENTS.md");
+        let rtk_md = reasonix_dir.join("RTK.md");
+
+        fs::write(&agents_md, "# Team rules\n\n@RTK.md\n").unwrap();
+        fs::write(&rtk_md, "reasonix config").unwrap();
+
+        let removed_first = uninstall_reasonix_at(reasonix_dir, InitContext::default()).unwrap();
+        let removed_second = uninstall_reasonix_at(reasonix_dir, InitContext::default()).unwrap();
+
+        assert_eq!(removed_first.len(), 2);
+        assert!(removed_second.is_empty());
+        assert!(!rtk_md.exists());
+
+        let content = fs::read_to_string(&agents_md).unwrap();
+        assert!(!content.contains("@RTK.md"));
+        assert!(content.contains("# Team rules"));
+    }
+
+    #[test]
+    fn test_uninstall_reasonix_at_removes_absolute_reference() {
+        let temp = TempDir::new().unwrap();
+        let reasonix_dir = temp.path();
+        let agents_md = reasonix_dir.join("AGENTS.md");
+        let rtk_md = reasonix_dir.join("RTK.md");
+        let absolute_ref = reasonix_rtk_md_ref(reasonix_dir);
+
+        fs::write(&agents_md, format!("# Team rules\n\n{}\n", absolute_ref)).unwrap();
+        fs::write(&rtk_md, "reasonix config").unwrap();
+
+        let removed = uninstall_reasonix_at(reasonix_dir, InitContext::default()).unwrap();
+
+        assert_eq!(removed.len(), 2);
+        let content = fs::read_to_string(&agents_md).unwrap();
+        assert!(!content.contains(&absolute_ref));
+        assert!(content.contains("# Team rules"));
+    }
+
+    #[test]
+    fn test_run_reasonix_mode_dry_run_writes_nothing() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        let rtk_md = temp.path().join("RTK.md");
+
+        run_reasonix_mode_with_paths(
+            agents_md.clone(),
+            rtk_md.clone(),
+            true,
+            InitContext {
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            !rtk_md.exists(),
+            "dry-run must not create RTK.md: {}",
+            rtk_md.display()
+        );
+        assert!(
+            !agents_md.exists(),
+            "dry-run must not create AGENTS.md: {}",
+            agents_md.display()
+        );
+    }
+
+    #[test]
+    fn test_uninstall_reasonix_at_removes_rtk_instructions_block() {
+        let temp = TempDir::new().unwrap();
+        let reasonix_dir = temp.path();
+        let agents_md = reasonix_dir.join("AGENTS.md");
+        let rtk_md = reasonix_dir.join("RTK.md");
+
+        fs::write(
+            &agents_md,
+            format!(
+                "# Team rules\n\n{} v2 -->\nOLD RTK STUFF\n{}\n\nMore content",
+                RTK_BLOCK_START, RTK_BLOCK_END
+            ),
+        )
+        .unwrap();
+        fs::write(&rtk_md, "reasonix config").unwrap();
+
+        let removed = uninstall_reasonix_at(reasonix_dir, InitContext::default()).unwrap();
+
+        let content = fs::read_to_string(&agents_md).unwrap();
+        assert!(!content.contains("OLD RTK STUFF"));
+        assert!(content.contains("# Team rules"));
+        assert!(content.contains("More content"));
+        assert!(removed.iter().any(|r| r.contains("rtk-instructions block")));
+    }
+
+    #[test]
+    fn test_reasonix_mode_rejects_auto_patch() {
+        let err = run(
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            PatchMode::Auto,
+            InitContext::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "--reasonix cannot be combined with --auto-patch"
+        );
+    }
+
+    #[test]
+    fn test_reasonix_mode_rejects_no_patch() {
+        let err = run(
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            PatchMode::Skip,
+            InitContext::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "--reasonix cannot be combined with --no-patch"
+        );
+    }
+
     // Tests for hook_already_present()
     #[test]
     fn test_hook_already_present_exact_match() {
@@ -5991,7 +6456,16 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
-            uninstall(true, false, false, false, false, InitContext::default()).unwrap();
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                InitContext::default(),
+            )
+            .unwrap();
 
             assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
             let settings_content =
@@ -6119,7 +6593,7 @@ mod tests {
                 dry_run: true,
                 ..Default::default()
             };
-            uninstall(true, false, false, false, false, dry).unwrap();
+            uninstall(true, false, false, false, false, false, dry).unwrap();
 
             // Files must still exist with identical content
             assert!(
@@ -6345,7 +6819,16 @@ mod tests {
             let plugin = pi_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
             assert!(plugin.exists());
 
-            uninstall(true, false, false, false, true, InitContext::default()).unwrap();
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                InitContext::default(),
+            )
+            .unwrap();
 
             assert!(!plugin.exists(), "plugin must be removed");
         });
@@ -6359,7 +6842,15 @@ mod tests {
         std::env::set_current_dir(tmp.path()).unwrap();
 
         run_pi_mode(false, InitContext::default()).unwrap();
-        let result = uninstall(false, false, false, false, true, InitContext::default());
+        let result = uninstall(
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            InitContext::default(),
+        );
         std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
@@ -6457,6 +6948,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 true,
                 InitContext {
                     verbose: 0,
@@ -6491,6 +6983,7 @@ mod tests {
         );
 
         let result = uninstall(
+            false,
             false,
             false,
             false,

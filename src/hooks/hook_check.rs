@@ -153,7 +153,7 @@ mod tests {
     use crate::hooks::constants::{
         CODEX_DIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HERMES_DIR,
         HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
-        OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+        OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR, REASONIX_DIR,
     };
 
     fn other_integration_installed(home: &std::path::Path) -> bool {
@@ -166,6 +166,7 @@ mod tests {
                 .join(HOOKS_SUBDIR)
                 .join(REWRITE_HOOK_FILE),
             home.join(CODEX_DIR).join("AGENTS.md"),
+            home.join(format!(".{REASONIX_DIR}")).join("AGENTS.md"),
             home.join(GEMINI_DIR)
                 .join(HOOKS_SUBDIR)
                 .join(GEMINI_HOOK_FILE),
@@ -248,6 +249,18 @@ mod tests {
     fn test_other_integration_codex() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join(CODEX_DIR).join("AGENTS.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"agents").unwrap();
+        assert!(other_integration_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_reasonix() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp
+            .path()
+            .join(format!(".{REASONIX_DIR}"))
+            .join("AGENTS.md");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"agents").unwrap();
         assert!(other_integration_installed(tmp.path()));
