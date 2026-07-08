@@ -382,6 +382,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+* **init:** add Swival agent support — `rtk init --agent swival` installs a Python `command_middleware` adapter that proxies shell commands through `rtk rewrite` for token savings and deny rules
 * **aws:** expand CLI filters from 8 to 25 subcommands — CloudWatch Logs, CloudFormation events, Lambda, IAM, DynamoDB (with type unwrapping), ECS tasks, EC2 security groups, S3API objects, S3 sync/cp, EKS, SQS, Secrets Manager ([#885](https://github.com/rtk-ai/rtk/pull/885))
 * **aws:** add shared runner `run_aws_filtered()` eliminating per-handler boilerplate
 * **tee:** add `force_tee_hint()` — truncated output saves full data to file with recovery hint
