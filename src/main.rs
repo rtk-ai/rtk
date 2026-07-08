@@ -847,6 +847,8 @@ enum Commands {
 enum HookCommands {
     /// Process Claude Code PreToolUse hook (reads JSON from stdin)
     Claude,
+    /// Process Codex CLI PreToolUse hook (reads JSON from stdin)
+    Codex,
     /// Process Cursor Agent hook (reads JSON from stdin)
     Cursor,
     /// Process Gemini CLI BeforeTool hook (reads JSON from stdin)
@@ -1534,9 +1536,6 @@ where
 }
 
 fn run_cli() -> Result<i32> {
-    // Fire-and-forget telemetry ping (1/day, non-blocking)
-    core::telemetry::maybe_ping();
-
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
@@ -1547,9 +1546,17 @@ fn run_cli() -> Result<i32> {
         }
     };
 
+    // Hook subcommands run inside agent hook pipelines and must stay quiet/fast.
+    let is_hook_subcommand = matches!(cli.command, Commands::Hook { .. });
+
+    // Fire-and-forget telemetry ping (1/day, non-blocking)
+    if !is_hook_subcommand {
+        core::telemetry::maybe_ping();
+    }
+
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
     // Skip for Gain — it shows its own inline hook warning.
-    if !matches!(cli.command, Commands::Gain { .. }) {
+    if !matches!(cli.command, Commands::Gain { .. }) && !is_hook_subcommand {
         hooks::hook_check::maybe_warn();
     }
 
@@ -2368,6 +2375,10 @@ fn run_cli() -> Result<i32> {
                 hooks::hook_cmd::run_claude()?;
                 0
             }
+            HookCommands::Codex => {
+                hooks::hook_cmd::run_codex()?;
+                0
+            }
             HookCommands::Cursor => {
                 hooks::hook_cmd::run_cursor()?;
                 0
@@ -3143,6 +3154,17 @@ mod tests {
             cli.command,
             Commands::Hook {
                 command: HookCommands::Claude
+            }
+        ));
+    }
+
+    #[test]
+    fn test_hook_codex_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "codex"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::Codex
             }
         ));
     }
