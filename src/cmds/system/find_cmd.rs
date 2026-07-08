@@ -424,6 +424,7 @@ pub fn run(
 mod tests {
     use super::*;
 
+    /// Convert string slices to Vec<String> for test convenience.
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|s| s.to_string()).collect()
     }
