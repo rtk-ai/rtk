@@ -26,6 +26,23 @@ fn glob_match_inner(pat: &[u8], name: &[u8]) -> bool {
     }
 }
 
+/// Shorten a directory path for display, keeping the trailing ~47 bytes
+/// prefixed with "...". Byte-index truncation can land inside a
+/// multi-byte UTF-8 character (e.g. an accented letter), so this walks
+/// forward from the target byte offset to the next valid char boundary
+/// instead of slicing blindly -- the loop always terminates at
+/// `dir.len()`, which is always a boundary.
+fn truncate_dir_display(dir: &str) -> String {
+    if dir.len() <= 50 {
+        return dir.to_string();
+    }
+    let target = dir.len() - 47;
+    let start = (target..=dir.len())
+        .find(|&i| dir.is_char_boundary(i))
+        .unwrap_or(dir.len());
+    format!("...{}", &dir[start..])
+}
+
 /// Parsed arguments from either native find or RTK find syntax.
 #[derive(Debug)]
 struct FindArgs {
@@ -322,11 +339,7 @@ pub fn run(
         }
 
         let files_in_dir = &by_dir[dir];
-        let dir_display = if dir.len() > 50 {
-            format!("...{}", &dir[dir.len() - 47..])
-        } else {
-            dir.clone()
-        };
+        let dir_display = truncate_dir_display(dir);
 
         let remaining_budget = max_results - displayed;
         if files_in_dir.len() <= remaining_budget {
@@ -391,6 +404,33 @@ mod tests {
     /// Convert string slices to Vec<String> for test convenience.
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|s| s.to_string()).collect()
+    }
+
+    // --- truncate_dir_display unit tests ---
+
+    #[test]
+    fn truncate_dir_display_does_not_panic_on_multibyte_boundary() {
+        // Exact reproduction from the reported panic: a directory name
+        // whose 47-bytes-from-the-end cut point lands inside 'é'.
+        let dir = "Les Plongées de Juliette/5-Pipeline/Versions-imprimables";
+        assert!(dir.len() > 50);
+        // Must not panic, and must not lose or corrupt UTF-8 data.
+        let result = truncate_dir_display(dir);
+        assert!(result.starts_with("..."));
+        assert!(result.is_char_boundary(0));
+    }
+
+    #[test]
+    fn truncate_dir_display_passes_through_short_paths() {
+        assert_eq!(truncate_dir_display("src/cmds"), "src/cmds");
+    }
+
+    #[test]
+    fn truncate_dir_display_truncates_long_ascii_paths() {
+        let dir = "a/".repeat(30); // 60 bytes, all ASCII
+        let result = truncate_dir_display(&dir);
+        assert!(result.starts_with("..."));
+        assert!(result.len() <= dir.len());
     }
 
     // --- glob_match unit tests ---
