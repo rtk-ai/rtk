@@ -1103,9 +1103,11 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result
     Ok(())
 }
 
-/// Check if RTK hook is already present in settings.json
-/// Matches on legacy rtk-rewrite.sh path OR new `rtk hook claude` command
+/// Check if the requested RTK hook is already present in settings.json.
+/// Legacy script entries do not satisfy the native `rtk hook claude` command;
+/// they must be migrated instead of blocking the new hook registration.
 fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
+    let installing_legacy_hook = hook_command.contains(REWRITE_HOOK_FILE);
     let pre_tool_use_array = match root
         .get("hooks")
         .and_then(|h| h.get(PRE_TOOL_USE_KEY))
@@ -1121,7 +1123,9 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
         .any(|cmd| {
-            cmd == hook_command || cmd == CLAUDE_HOOK_COMMAND || cmd.contains(REWRITE_HOOK_FILE)
+            cmd == hook_command
+                || (installing_legacy_hook
+                    && (cmd == CLAUDE_HOOK_COMMAND || cmd.contains(REWRITE_HOOK_FILE)))
         })
 }
 
@@ -1236,18 +1240,18 @@ fn migrate_old_hook_script(ctx: InitContext) {
                 if verbose > 0 {
                     eprintln!("  [warn] Failed to remove old hook script: {e}");
                 }
-            } else {
-                if verbose > 0 {
-                    eprintln!("  [ok] Removed old hook script: {}", old_hook.display());
-                }
-                // Clean up the stale settings.json entry that pointed to the deleted script
-                if let Err(e) = remove_legacy_settings_entries(ctx) {
-                    if verbose > 0 {
-                        eprintln!("  [warn] Failed to clean legacy settings.json entry: {e}");
-                    }
-                }
+            } else if verbose > 0 {
+                eprintln!("  [ok] Removed old hook script: {}", old_hook.display());
             }
         }
+        // Clean up stale settings.json entries even if the legacy script file
+        // has already been deleted.
+        if let Err(e) = remove_legacy_settings_entries(ctx) {
+            if verbose > 0 {
+                eprintln!("  [warn] Failed to clean legacy settings.json entry: {e}");
+            }
+        }
+
         // Remove legacy hash file
         let hash_file = home
             .join(CLAUDE_DIR)
@@ -5376,6 +5380,23 @@ mod tests {
     }
 
     #[test]
+    fn test_hook_already_present_legacy_does_not_satisfy_native_command() {
+        let json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/Users/test/.claude/hooks/rtk-rewrite.sh"
+                    }]
+                }]
+            }
+        });
+
+        assert!(!hook_already_present(&json_content, CLAUDE_HOOK_COMMAND));
+    }
+
+    #[test]
     fn test_hook_not_present_other_hooks() {
         let json_content = serde_json::json!({
             "hooks": {
@@ -6013,6 +6034,42 @@ mod tests {
             let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
             let count = settings.matches(CLAUDE_HOOK_COMMAND).count();
             assert_eq!(count, 1, "hook command must appear exactly once");
+        });
+    }
+
+    #[test]
+    fn test_global_default_mode_replaces_missing_legacy_hook_registration() {
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let settings = claude_dir.join(SETTINGS_JSON);
+            fs::write(
+                &settings,
+                serde_json::json!({
+                    "hooks": {
+                        "PreToolUse": [{
+                            "matcher": "Bash",
+                            "hooks": [{
+                                "type": "command",
+                                "command": "/tmp/missing/rtk-rewrite.sh"
+                            }]
+                        }]
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+
+            let settings_content = fs::read_to_string(settings).unwrap();
+            assert!(
+                settings_content.contains(CLAUDE_HOOK_COMMAND),
+                "missing legacy hook registration must be replaced with native command"
+            );
+            assert!(
+                !settings_content.contains(REWRITE_HOOK_FILE),
+                "stale legacy hook registration must be removed"
+            );
         });
     }
 
