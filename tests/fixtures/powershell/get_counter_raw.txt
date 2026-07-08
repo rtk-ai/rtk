@@ -1,0 +1,454 @@
+# rtk fixture note: structure captured from real PowerShell 5.1 output (Get-Counter), values anonymized (hostname replaced with generic placeholder). Each sample is authentically TWO physical lines (counter path, then an indented value line) -- this is what the wrap-aware row grouping must handle correctly.
+
+Timestamp                  CounterSamples
+---------                  --------------
+4/20/2026 10:01:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           7.1234567
+
+4/20/2026 10:02:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           14.1234567
+
+4/20/2026 10:03:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           21.1234567
+
+4/20/2026 10:04:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           28.1234567
+
+4/20/2026 10:05:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           35.1234567
+
+4/20/2026 10:06:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           42.1234567
+
+4/20/2026 10:07:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           49.1234567
+
+4/20/2026 10:08:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           56.1234567
+
+4/20/2026 10:09:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           63.1234567
+
+4/20/2026 10:10:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           70.1234567
+
+4/20/2026 10:11:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           77.1234567
+
+4/20/2026 10:12:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           84.1234567
+
+4/20/2026 10:13:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           91.1234567
+
+4/20/2026 10:14:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           98.1234567
+
+4/20/2026 10:15:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           5.1234567
+
+4/20/2026 10:16:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           12.1234567
+
+4/20/2026 10:17:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           19.1234567
+
+4/20/2026 10:18:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           26.1234567
+
+4/20/2026 10:19:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           33.1234567
+
+4/20/2026 10:20:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           40.1234567
+
+4/20/2026 10:21:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           47.1234567
+
+4/20/2026 10:22:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           54.1234567
+
+4/20/2026 10:23:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           61.1234567
+
+4/20/2026 10:24:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           68.1234567
+
+4/20/2026 10:25:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           75.1234567
+
+4/20/2026 10:26:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           82.1234567
+
+4/20/2026 10:27:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           89.1234567
+
+4/20/2026 10:28:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           96.1234567
+
+4/20/2026 10:29:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           3.1234567
+
+4/20/2026 10:30:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           10.1234567
+
+4/20/2026 10:31:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           17.1234567
+
+4/20/2026 10:32:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           24.1234567
+
+4/20/2026 10:33:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           31.1234567
+
+4/20/2026 10:34:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           38.1234567
+
+4/20/2026 10:35:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           45.1234567
+
+4/20/2026 10:36:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           52.1234567
+
+4/20/2026 10:37:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           59.1234567
+
+4/20/2026 10:38:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           66.1234567
+
+4/20/2026 10:39:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           73.1234567
+
+4/20/2026 10:40:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           80.1234567
+
+4/20/2026 10:41:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           87.1234567
+
+4/20/2026 10:42:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           94.1234567
+
+4/20/2026 10:43:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           1.1234567
+
+4/20/2026 10:44:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           8.1234567
+
+4/20/2026 10:45:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           15.1234567
+
+4/20/2026 10:46:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           22.1234567
+
+4/20/2026 10:47:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           29.1234567
+
+4/20/2026 10:48:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           36.1234567
+
+4/20/2026 10:49:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           43.1234567
+
+4/20/2026 10:50:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           50.1234567
+
+4/20/2026 10:51:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           57.1234567
+
+4/20/2026 10:52:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           64.1234567
+
+4/20/2026 10:53:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           71.1234567
+
+4/20/2026 10:54:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           78.1234567
+
+4/20/2026 10:55:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           85.1234567
+
+4/20/2026 10:56:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           92.1234567
+
+4/20/2026 10:57:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           99.1234567
+
+4/20/2026 10:58:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           6.1234567
+
+4/20/2026 10:59:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           13.1234567
+
+4/20/2026 10:00:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           20.1234567
+
+4/20/2026 10:01:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           27.1234567
+
+4/20/2026 10:02:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           34.1234567
+
+4/20/2026 10:03:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           41.1234567
+
+4/20/2026 10:04:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           48.1234567
+
+4/20/2026 10:05:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           55.1234567
+
+4/20/2026 10:06:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           62.1234567
+
+4/20/2026 10:07:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           69.1234567
+
+4/20/2026 10:08:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           76.1234567
+
+4/20/2026 10:09:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           83.1234567
+
+4/20/2026 10:10:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           90.1234567
+
+4/20/2026 10:11:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           97.1234567
+
+4/20/2026 10:12:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           4.1234567
+
+4/20/2026 10:13:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           11.1234567
+
+4/20/2026 10:14:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           18.1234567
+
+4/20/2026 10:15:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           25.1234567
+
+4/20/2026 10:16:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           32.1234567
+
+4/20/2026 10:17:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           39.1234567
+
+4/20/2026 10:18:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           46.1234567
+
+4/20/2026 10:19:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           53.1234567
+
+4/20/2026 10:20:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           60.1234567
+
+4/20/2026 10:21:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           67.1234567
+
+4/20/2026 10:22:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           74.1234567
+
+4/20/2026 10:23:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           81.1234567
+
+4/20/2026 10:24:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           88.1234567
+
+4/20/2026 10:25:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           95.1234567
+
+4/20/2026 10:26:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           2.1234567
+
+4/20/2026 10:27:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           9.1234567
+
+4/20/2026 10:28:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           16.1234567
+
+4/20/2026 10:29:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           23.1234567
+
+4/20/2026 10:30:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           30.1234567
+
+4/20/2026 10:31:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           37.1234567
+
+4/20/2026 10:32:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           44.1234567
+
+4/20/2026 10:33:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           51.1234567
+
+4/20/2026 10:34:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           58.1234567
+
+4/20/2026 10:35:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           65.1234567
+
+4/20/2026 10:36:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           72.1234567
+
+4/20/2026 10:37:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           79.1234567
+
+4/20/2026 10:38:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           86.1234567
+
+4/20/2026 10:39:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           93.1234567
+
+4/20/2026 10:40:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           0.1234567
+
+4/20/2026 10:41:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           7.1234567
+
+4/20/2026 10:42:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           14.1234567
+
+4/20/2026 10:43:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           21.1234567
+
+4/20/2026 10:44:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           28.1234567
+
+4/20/2026 10:45:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           35.1234567
+
+4/20/2026 10:46:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           42.1234567
+
+4/20/2026 10:47:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           49.1234567
+
+4/20/2026 10:48:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           56.1234567
+
+4/20/2026 10:49:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           63.1234567
+
+4/20/2026 10:50:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           70.1234567
+
+4/20/2026 10:51:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           77.1234567
+
+4/20/2026 10:52:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           84.1234567
+
+4/20/2026 10:53:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           91.1234567
+
+4/20/2026 10:54:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           98.1234567
+
+4/20/2026 10:55:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           5.1234567
+
+4/20/2026 10:56:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           12.1234567
+
+4/20/2026 10:57:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           19.1234567
+
+4/20/2026 10:58:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           26.1234567
+
+4/20/2026 10:59:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           33.1234567
+
+4/20/2026 10:00:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           40.1234567
+
+4/20/2026 10:01:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           47.1234567
+
+4/20/2026 10:02:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           54.1234567
+
+4/20/2026 10:03:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           61.1234567
+
+4/20/2026 10:04:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           68.1234567
+
+4/20/2026 10:05:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           75.1234567
+
+4/20/2026 10:06:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           82.1234567
+
+4/20/2026 10:07:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           89.1234567
+
+4/20/2026 10:08:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           96.1234567
+
+4/20/2026 10:09:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           3.1234567
+
+4/20/2026 10:10:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           10.1234567
+
+4/20/2026 10:11:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           17.1234567
+
+4/20/2026 10:12:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           24.1234567
+
+4/20/2026 10:13:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           31.1234567
+
+4/20/2026 10:14:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           38.1234567
+
+4/20/2026 10:15:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           45.1234567
+
+4/20/2026 10:16:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           52.1234567
+
+4/20/2026 10:17:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           59.1234567
+
+4/20/2026 10:18:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           66.1234567
+
+4/20/2026 10:19:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           73.1234567
+
+4/20/2026 10:20:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           80.1234567
+
+4/20/2026 10:21:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           87.1234567
+
+4/20/2026 10:22:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           94.1234567
+
+4/20/2026 10:23:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           1.1234567
+
+4/20/2026 10:24:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           8.1234567
+
+4/20/2026 10:25:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           15.1234567
+
+4/20/2026 10:26:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           22.1234567
+
+4/20/2026 10:27:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           29.1234567
+
+4/20/2026 10:28:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           36.1234567
+
+4/20/2026 10:29:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           43.1234567
+
+4/20/2026 10:30:00 AM        \\EXAMPLE-PC\processor(_total)\% processor time :
+                           50.1234567
+

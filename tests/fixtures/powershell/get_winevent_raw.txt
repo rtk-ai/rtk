@@ -1,0 +1,336 @@
+# rtk fixture note: structure captured from real PowerShell 5.1 output (Get-WinEvent with -Wrap), values anonymized (provider/message text replaced with generic placeholders). Continuation-line indentation below is authentic -- this is what a wrapped multi-line record looks like.
+
+TimeCreated            Id LevelDisplayName ProviderName                   Message
+-----------            -- ---------------- ------------                   -------
+4/20/2026 10:01:00 AM 16001 Warning          Example-Provider-Placeholder   Sample event message 1
+4/20/2026 10:02:00 AM 16002 Error            Example-Provider-Placeholder   Sample event message 2
+4/20/2026 10:03:00 AM 16003 Information      Example-Provider-Placeholder   Sample event message 3
+                                                                     continuation line one for event 3
+                                                                     continuation line two for event 3
+4/20/2026 10:04:00 AM 16004 Verbose          Example-Provider-Placeholder   Sample event message 4
+4/20/2026 10:05:00 AM 16005 Information      Example-Provider-Placeholder   Sample event message 5
+4/20/2026 10:06:00 AM 16006 Warning          Example-Provider-Placeholder   Sample event message 6
+                                                                     continuation line one for event 6
+                                                                     continuation line two for event 6
+4/20/2026 10:07:00 AM 16007 Error            Example-Provider-Placeholder   Sample event message 7
+4/20/2026 10:08:00 AM 16008 Information      Example-Provider-Placeholder   Sample event message 8
+4/20/2026 10:09:00 AM 16009 Verbose          Example-Provider-Placeholder   Sample event message 9
+                                                                     continuation line one for event 9
+                                                                     continuation line two for event 9
+4/20/2026 10:10:00 AM 16010 Information      Example-Provider-Placeholder   Sample event message 10
+4/20/2026 10:11:00 AM 16011 Warning          Example-Provider-Placeholder   Sample event message 11
+4/20/2026 10:12:00 AM 16012 Error            Example-Provider-Placeholder   Sample event message 12
+                                                                     continuation line one for event 12
+                                                                     continuation line two for event 12
+4/20/2026 10:13:00 AM 16013 Information      Example-Provider-Placeholder   Sample event message 13
+4/20/2026 10:14:00 AM 16014 Verbose          Example-Provider-Placeholder   Sample event message 14
+4/20/2026 10:15:00 AM 16015 Information      Example-Provider-Placeholder   Sample event message 15
+                                                                     continuation line one for event 15
+                                                                     continuation line two for event 15
+4/20/2026 10:16:00 AM 16016 Warning          Example-Provider-Placeholder   Sample event message 16
+4/20/2026 10:17:00 AM 16017 Error            Example-Provider-Placeholder   Sample event message 17
+4/20/2026 10:18:00 AM 16018 Information      Example-Provider-Placeholder   Sample event message 18
+                                                                     continuation line one for event 18
+                                                                     continuation line two for event 18
+4/20/2026 10:19:00 AM 16019 Verbose          Example-Provider-Placeholder   Sample event message 19
+4/20/2026 10:20:00 AM 16020 Information      Example-Provider-Placeholder   Sample event message 20
+4/20/2026 10:21:00 AM 16021 Warning          Example-Provider-Placeholder   Sample event message 21
+                                                                     continuation line one for event 21
+                                                                     continuation line two for event 21
+4/20/2026 10:22:00 AM 16022 Error            Example-Provider-Placeholder   Sample event message 22
+4/20/2026 10:23:00 AM 16023 Information      Example-Provider-Placeholder   Sample event message 23
+4/20/2026 10:24:00 AM 16024 Verbose          Example-Provider-Placeholder   Sample event message 24
+                                                                     continuation line one for event 24
+                                                                     continuation line two for event 24
+4/20/2026 10:25:00 AM 16025 Information      Example-Provider-Placeholder   Sample event message 25
+4/20/2026 10:26:00 AM 16026 Warning          Example-Provider-Placeholder   Sample event message 26
+4/20/2026 10:27:00 AM 16027 Error            Example-Provider-Placeholder   Sample event message 27
+                                                                     continuation line one for event 27
+                                                                     continuation line two for event 27
+4/20/2026 10:28:00 AM 16028 Information      Example-Provider-Placeholder   Sample event message 28
+4/20/2026 10:29:00 AM 16029 Verbose          Example-Provider-Placeholder   Sample event message 29
+4/20/2026 10:30:00 AM 16030 Information      Example-Provider-Placeholder   Sample event message 30
+                                                                     continuation line one for event 30
+                                                                     continuation line two for event 30
+4/20/2026 10:31:00 AM 16031 Warning          Example-Provider-Placeholder   Sample event message 31
+4/20/2026 10:32:00 AM 16032 Error            Example-Provider-Placeholder   Sample event message 32
+4/20/2026 10:33:00 AM 16033 Information      Example-Provider-Placeholder   Sample event message 33
+                                                                     continuation line one for event 33
+                                                                     continuation line two for event 33
+4/20/2026 10:34:00 AM 16034 Verbose          Example-Provider-Placeholder   Sample event message 34
+4/20/2026 10:35:00 AM 16035 Information      Example-Provider-Placeholder   Sample event message 35
+4/20/2026 10:36:00 AM 16036 Warning          Example-Provider-Placeholder   Sample event message 36
+                                                                     continuation line one for event 36
+                                                                     continuation line two for event 36
+4/20/2026 10:37:00 AM 16037 Error            Example-Provider-Placeholder   Sample event message 37
+4/20/2026 10:38:00 AM 16038 Information      Example-Provider-Placeholder   Sample event message 38
+4/20/2026 10:39:00 AM 16039 Verbose          Example-Provider-Placeholder   Sample event message 39
+                                                                     continuation line one for event 39
+                                                                     continuation line two for event 39
+4/20/2026 10:40:00 AM 16040 Information      Example-Provider-Placeholder   Sample event message 40
+4/20/2026 10:41:00 AM 16041 Warning          Example-Provider-Placeholder   Sample event message 41
+4/20/2026 10:42:00 AM 16042 Error            Example-Provider-Placeholder   Sample event message 42
+                                                                     continuation line one for event 42
+                                                                     continuation line two for event 42
+4/20/2026 10:43:00 AM 16043 Information      Example-Provider-Placeholder   Sample event message 43
+4/20/2026 10:44:00 AM 16044 Verbose          Example-Provider-Placeholder   Sample event message 44
+4/20/2026 10:45:00 AM 16045 Information      Example-Provider-Placeholder   Sample event message 45
+                                                                     continuation line one for event 45
+                                                                     continuation line two for event 45
+4/20/2026 10:46:00 AM 16046 Warning          Example-Provider-Placeholder   Sample event message 46
+4/20/2026 10:47:00 AM 16047 Error            Example-Provider-Placeholder   Sample event message 47
+4/20/2026 10:48:00 AM 16048 Information      Example-Provider-Placeholder   Sample event message 48
+                                                                     continuation line one for event 48
+                                                                     continuation line two for event 48
+4/20/2026 10:49:00 AM 16049 Verbose          Example-Provider-Placeholder   Sample event message 49
+4/20/2026 10:50:00 AM 16050 Information      Example-Provider-Placeholder   Sample event message 50
+4/20/2026 10:51:00 AM 16051 Warning          Example-Provider-Placeholder   Sample event message 51
+                                                                     continuation line one for event 51
+                                                                     continuation line two for event 51
+4/20/2026 10:52:00 AM 16052 Error            Example-Provider-Placeholder   Sample event message 52
+4/20/2026 10:53:00 AM 16053 Information      Example-Provider-Placeholder   Sample event message 53
+4/20/2026 10:54:00 AM 16054 Verbose          Example-Provider-Placeholder   Sample event message 54
+                                                                     continuation line one for event 54
+                                                                     continuation line two for event 54
+4/20/2026 10:55:00 AM 16055 Information      Example-Provider-Placeholder   Sample event message 55
+4/20/2026 10:56:00 AM 16056 Warning          Example-Provider-Placeholder   Sample event message 56
+4/20/2026 10:57:00 AM 16057 Error            Example-Provider-Placeholder   Sample event message 57
+                                                                     continuation line one for event 57
+                                                                     continuation line two for event 57
+4/20/2026 10:58:00 AM 16058 Information      Example-Provider-Placeholder   Sample event message 58
+4/20/2026 10:59:00 AM 16059 Verbose          Example-Provider-Placeholder   Sample event message 59
+4/20/2026 10:00:00 AM 16060 Information      Example-Provider-Placeholder   Sample event message 60
+                                                                     continuation line one for event 60
+                                                                     continuation line two for event 60
+4/20/2026 10:01:00 AM 16061 Warning          Example-Provider-Placeholder   Sample event message 61
+4/20/2026 10:02:00 AM 16062 Error            Example-Provider-Placeholder   Sample event message 62
+4/20/2026 10:03:00 AM 16063 Information      Example-Provider-Placeholder   Sample event message 63
+                                                                     continuation line one for event 63
+                                                                     continuation line two for event 63
+4/20/2026 10:04:00 AM 16064 Verbose          Example-Provider-Placeholder   Sample event message 64
+4/20/2026 10:05:00 AM 16065 Information      Example-Provider-Placeholder   Sample event message 65
+4/20/2026 10:06:00 AM 16066 Warning          Example-Provider-Placeholder   Sample event message 66
+                                                                     continuation line one for event 66
+                                                                     continuation line two for event 66
+4/20/2026 10:07:00 AM 16067 Error            Example-Provider-Placeholder   Sample event message 67
+4/20/2026 10:08:00 AM 16068 Information      Example-Provider-Placeholder   Sample event message 68
+4/20/2026 10:09:00 AM 16069 Verbose          Example-Provider-Placeholder   Sample event message 69
+                                                                     continuation line one for event 69
+                                                                     continuation line two for event 69
+4/20/2026 10:10:00 AM 16070 Information      Example-Provider-Placeholder   Sample event message 70
+4/20/2026 10:11:00 AM 16071 Warning          Example-Provider-Placeholder   Sample event message 71
+4/20/2026 10:12:00 AM 16072 Error            Example-Provider-Placeholder   Sample event message 72
+                                                                     continuation line one for event 72
+                                                                     continuation line two for event 72
+4/20/2026 10:13:00 AM 16073 Information      Example-Provider-Placeholder   Sample event message 73
+4/20/2026 10:14:00 AM 16074 Verbose          Example-Provider-Placeholder   Sample event message 74
+4/20/2026 10:15:00 AM 16075 Information      Example-Provider-Placeholder   Sample event message 75
+                                                                     continuation line one for event 75
+                                                                     continuation line two for event 75
+4/20/2026 10:16:00 AM 16076 Warning          Example-Provider-Placeholder   Sample event message 76
+4/20/2026 10:17:00 AM 16077 Error            Example-Provider-Placeholder   Sample event message 77
+4/20/2026 10:18:00 AM 16078 Information      Example-Provider-Placeholder   Sample event message 78
+                                                                     continuation line one for event 78
+                                                                     continuation line two for event 78
+4/20/2026 10:19:00 AM 16079 Verbose          Example-Provider-Placeholder   Sample event message 79
+4/20/2026 10:20:00 AM 16080 Information      Example-Provider-Placeholder   Sample event message 80
+4/20/2026 10:21:00 AM 16081 Warning          Example-Provider-Placeholder   Sample event message 81
+                                                                     continuation line one for event 81
+                                                                     continuation line two for event 81
+4/20/2026 10:22:00 AM 16082 Error            Example-Provider-Placeholder   Sample event message 82
+4/20/2026 10:23:00 AM 16083 Information      Example-Provider-Placeholder   Sample event message 83
+4/20/2026 10:24:00 AM 16084 Verbose          Example-Provider-Placeholder   Sample event message 84
+                                                                     continuation line one for event 84
+                                                                     continuation line two for event 84
+4/20/2026 10:25:00 AM 16085 Information      Example-Provider-Placeholder   Sample event message 85
+4/20/2026 10:26:00 AM 16086 Warning          Example-Provider-Placeholder   Sample event message 86
+4/20/2026 10:27:00 AM 16087 Error            Example-Provider-Placeholder   Sample event message 87
+                                                                     continuation line one for event 87
+                                                                     continuation line two for event 87
+4/20/2026 10:28:00 AM 16088 Information      Example-Provider-Placeholder   Sample event message 88
+4/20/2026 10:29:00 AM 16089 Verbose          Example-Provider-Placeholder   Sample event message 89
+4/20/2026 10:30:00 AM 16090 Information      Example-Provider-Placeholder   Sample event message 90
+                                                                     continuation line one for event 90
+                                                                     continuation line two for event 90
+4/20/2026 10:31:00 AM 16091 Warning          Example-Provider-Placeholder   Sample event message 91
+4/20/2026 10:32:00 AM 16092 Error            Example-Provider-Placeholder   Sample event message 92
+4/20/2026 10:33:00 AM 16093 Information      Example-Provider-Placeholder   Sample event message 93
+                                                                     continuation line one for event 93
+                                                                     continuation line two for event 93
+4/20/2026 10:34:00 AM 16094 Verbose          Example-Provider-Placeholder   Sample event message 94
+4/20/2026 10:35:00 AM 16095 Information      Example-Provider-Placeholder   Sample event message 95
+4/20/2026 10:36:00 AM 16096 Warning          Example-Provider-Placeholder   Sample event message 96
+                                                                     continuation line one for event 96
+                                                                     continuation line two for event 96
+4/20/2026 10:37:00 AM 16097 Error            Example-Provider-Placeholder   Sample event message 97
+4/20/2026 10:38:00 AM 16098 Information      Example-Provider-Placeholder   Sample event message 98
+4/20/2026 10:39:00 AM 16099 Verbose          Example-Provider-Placeholder   Sample event message 99
+                                                                     continuation line one for event 99
+                                                                     continuation line two for event 99
+4/20/2026 10:40:00 AM 16100 Information      Example-Provider-Placeholder   Sample event message 100
+4/20/2026 10:41:00 AM 16101 Warning          Example-Provider-Placeholder   Sample event message 101
+4/20/2026 10:42:00 AM 16102 Error            Example-Provider-Placeholder   Sample event message 102
+                                                                     continuation line one for event 102
+                                                                     continuation line two for event 102
+4/20/2026 10:43:00 AM 16103 Information      Example-Provider-Placeholder   Sample event message 103
+4/20/2026 10:44:00 AM 16104 Verbose          Example-Provider-Placeholder   Sample event message 104
+4/20/2026 10:45:00 AM 16105 Information      Example-Provider-Placeholder   Sample event message 105
+                                                                     continuation line one for event 105
+                                                                     continuation line two for event 105
+4/20/2026 10:46:00 AM 16106 Warning          Example-Provider-Placeholder   Sample event message 106
+4/20/2026 10:47:00 AM 16107 Error            Example-Provider-Placeholder   Sample event message 107
+4/20/2026 10:48:00 AM 16108 Information      Example-Provider-Placeholder   Sample event message 108
+                                                                     continuation line one for event 108
+                                                                     continuation line two for event 108
+4/20/2026 10:49:00 AM 16109 Verbose          Example-Provider-Placeholder   Sample event message 109
+4/20/2026 10:50:00 AM 16110 Information      Example-Provider-Placeholder   Sample event message 110
+4/20/2026 10:51:00 AM 16111 Warning          Example-Provider-Placeholder   Sample event message 111
+                                                                     continuation line one for event 111
+                                                                     continuation line two for event 111
+4/20/2026 10:52:00 AM 16112 Error            Example-Provider-Placeholder   Sample event message 112
+4/20/2026 10:53:00 AM 16113 Information      Example-Provider-Placeholder   Sample event message 113
+4/20/2026 10:54:00 AM 16114 Verbose          Example-Provider-Placeholder   Sample event message 114
+                                                                     continuation line one for event 114
+                                                                     continuation line two for event 114
+4/20/2026 10:55:00 AM 16115 Information      Example-Provider-Placeholder   Sample event message 115
+4/20/2026 10:56:00 AM 16116 Warning          Example-Provider-Placeholder   Sample event message 116
+4/20/2026 10:57:00 AM 16117 Error            Example-Provider-Placeholder   Sample event message 117
+                                                                     continuation line one for event 117
+                                                                     continuation line two for event 117
+4/20/2026 10:58:00 AM 16118 Information      Example-Provider-Placeholder   Sample event message 118
+4/20/2026 10:59:00 AM 16119 Verbose          Example-Provider-Placeholder   Sample event message 119
+4/20/2026 10:00:00 AM 16120 Information      Example-Provider-Placeholder   Sample event message 120
+                                                                     continuation line one for event 120
+                                                                     continuation line two for event 120
+4/20/2026 10:01:00 AM 16121 Warning          Example-Provider-Placeholder   Sample event message 121
+4/20/2026 10:02:00 AM 16122 Error            Example-Provider-Placeholder   Sample event message 122
+4/20/2026 10:03:00 AM 16123 Information      Example-Provider-Placeholder   Sample event message 123
+                                                                     continuation line one for event 123
+                                                                     continuation line two for event 123
+4/20/2026 10:04:00 AM 16124 Verbose          Example-Provider-Placeholder   Sample event message 124
+4/20/2026 10:05:00 AM 16125 Information      Example-Provider-Placeholder   Sample event message 125
+4/20/2026 10:06:00 AM 16126 Warning          Example-Provider-Placeholder   Sample event message 126
+                                                                     continuation line one for event 126
+                                                                     continuation line two for event 126
+4/20/2026 10:07:00 AM 16127 Error            Example-Provider-Placeholder   Sample event message 127
+4/20/2026 10:08:00 AM 16128 Information      Example-Provider-Placeholder   Sample event message 128
+4/20/2026 10:09:00 AM 16129 Verbose          Example-Provider-Placeholder   Sample event message 129
+                                                                     continuation line one for event 129
+                                                                     continuation line two for event 129
+4/20/2026 10:10:00 AM 16130 Information      Example-Provider-Placeholder   Sample event message 130
+4/20/2026 10:11:00 AM 16131 Warning          Example-Provider-Placeholder   Sample event message 131
+4/20/2026 10:12:00 AM 16132 Error            Example-Provider-Placeholder   Sample event message 132
+                                                                     continuation line one for event 132
+                                                                     continuation line two for event 132
+4/20/2026 10:13:00 AM 16133 Information      Example-Provider-Placeholder   Sample event message 133
+4/20/2026 10:14:00 AM 16134 Verbose          Example-Provider-Placeholder   Sample event message 134
+4/20/2026 10:15:00 AM 16135 Information      Example-Provider-Placeholder   Sample event message 135
+                                                                     continuation line one for event 135
+                                                                     continuation line two for event 135
+4/20/2026 10:16:00 AM 16136 Warning          Example-Provider-Placeholder   Sample event message 136
+4/20/2026 10:17:00 AM 16137 Error            Example-Provider-Placeholder   Sample event message 137
+4/20/2026 10:18:00 AM 16138 Information      Example-Provider-Placeholder   Sample event message 138
+                                                                     continuation line one for event 138
+                                                                     continuation line two for event 138
+4/20/2026 10:19:00 AM 16139 Verbose          Example-Provider-Placeholder   Sample event message 139
+4/20/2026 10:20:00 AM 16140 Information      Example-Provider-Placeholder   Sample event message 140
+4/20/2026 10:21:00 AM 16141 Warning          Example-Provider-Placeholder   Sample event message 141
+                                                                     continuation line one for event 141
+                                                                     continuation line two for event 141
+4/20/2026 10:22:00 AM 16142 Error            Example-Provider-Placeholder   Sample event message 142
+4/20/2026 10:23:00 AM 16143 Information      Example-Provider-Placeholder   Sample event message 143
+4/20/2026 10:24:00 AM 16144 Verbose          Example-Provider-Placeholder   Sample event message 144
+                                                                     continuation line one for event 144
+                                                                     continuation line two for event 144
+4/20/2026 10:25:00 AM 16145 Information      Example-Provider-Placeholder   Sample event message 145
+4/20/2026 10:26:00 AM 16146 Warning          Example-Provider-Placeholder   Sample event message 146
+4/20/2026 10:27:00 AM 16147 Error            Example-Provider-Placeholder   Sample event message 147
+                                                                     continuation line one for event 147
+                                                                     continuation line two for event 147
+4/20/2026 10:28:00 AM 16148 Information      Example-Provider-Placeholder   Sample event message 148
+4/20/2026 10:29:00 AM 16149 Verbose          Example-Provider-Placeholder   Sample event message 149
+4/20/2026 10:30:00 AM 16150 Information      Example-Provider-Placeholder   Sample event message 150
+                                                                     continuation line one for event 150
+                                                                     continuation line two for event 150
+4/20/2026 10:31:00 AM 16151 Warning          Example-Provider-Placeholder   Sample event message 151
+4/20/2026 10:32:00 AM 16152 Error            Example-Provider-Placeholder   Sample event message 152
+4/20/2026 10:33:00 AM 16153 Information      Example-Provider-Placeholder   Sample event message 153
+                                                                     continuation line one for event 153
+                                                                     continuation line two for event 153
+4/20/2026 10:34:00 AM 16154 Verbose          Example-Provider-Placeholder   Sample event message 154
+4/20/2026 10:35:00 AM 16155 Information      Example-Provider-Placeholder   Sample event message 155
+4/20/2026 10:36:00 AM 16156 Warning          Example-Provider-Placeholder   Sample event message 156
+                                                                     continuation line one for event 156
+                                                                     continuation line two for event 156
+4/20/2026 10:37:00 AM 16157 Error            Example-Provider-Placeholder   Sample event message 157
+4/20/2026 10:38:00 AM 16158 Information      Example-Provider-Placeholder   Sample event message 158
+4/20/2026 10:39:00 AM 16159 Verbose          Example-Provider-Placeholder   Sample event message 159
+                                                                     continuation line one for event 159
+                                                                     continuation line two for event 159
+4/20/2026 10:40:00 AM 16160 Information      Example-Provider-Placeholder   Sample event message 160
+4/20/2026 10:41:00 AM 16161 Warning          Example-Provider-Placeholder   Sample event message 161
+4/20/2026 10:42:00 AM 16162 Error            Example-Provider-Placeholder   Sample event message 162
+                                                                     continuation line one for event 162
+                                                                     continuation line two for event 162
+4/20/2026 10:43:00 AM 16163 Information      Example-Provider-Placeholder   Sample event message 163
+4/20/2026 10:44:00 AM 16164 Verbose          Example-Provider-Placeholder   Sample event message 164
+4/20/2026 10:45:00 AM 16165 Information      Example-Provider-Placeholder   Sample event message 165
+                                                                     continuation line one for event 165
+                                                                     continuation line two for event 165
+4/20/2026 10:46:00 AM 16166 Warning          Example-Provider-Placeholder   Sample event message 166
+4/20/2026 10:47:00 AM 16167 Error            Example-Provider-Placeholder   Sample event message 167
+4/20/2026 10:48:00 AM 16168 Information      Example-Provider-Placeholder   Sample event message 168
+                                                                     continuation line one for event 168
+                                                                     continuation line two for event 168
+4/20/2026 10:49:00 AM 16169 Verbose          Example-Provider-Placeholder   Sample event message 169
+4/20/2026 10:50:00 AM 16170 Information      Example-Provider-Placeholder   Sample event message 170
+4/20/2026 10:51:00 AM 16171 Warning          Example-Provider-Placeholder   Sample event message 171
+                                                                     continuation line one for event 171
+                                                                     continuation line two for event 171
+4/20/2026 10:52:00 AM 16172 Error            Example-Provider-Placeholder   Sample event message 172
+4/20/2026 10:53:00 AM 16173 Information      Example-Provider-Placeholder   Sample event message 173
+4/20/2026 10:54:00 AM 16174 Verbose          Example-Provider-Placeholder   Sample event message 174
+                                                                     continuation line one for event 174
+                                                                     continuation line two for event 174
+4/20/2026 10:55:00 AM 16175 Information      Example-Provider-Placeholder   Sample event message 175
+4/20/2026 10:56:00 AM 16176 Warning          Example-Provider-Placeholder   Sample event message 176
+4/20/2026 10:57:00 AM 16177 Error            Example-Provider-Placeholder   Sample event message 177
+                                                                     continuation line one for event 177
+                                                                     continuation line two for event 177
+4/20/2026 10:58:00 AM 16178 Information      Example-Provider-Placeholder   Sample event message 178
+4/20/2026 10:59:00 AM 16179 Verbose          Example-Provider-Placeholder   Sample event message 179
+4/20/2026 10:00:00 AM 16180 Information      Example-Provider-Placeholder   Sample event message 180
+                                                                     continuation line one for event 180
+                                                                     continuation line two for event 180
+4/20/2026 10:01:00 AM 16181 Warning          Example-Provider-Placeholder   Sample event message 181
+4/20/2026 10:02:00 AM 16182 Error            Example-Provider-Placeholder   Sample event message 182
+4/20/2026 10:03:00 AM 16183 Information      Example-Provider-Placeholder   Sample event message 183
+                                                                     continuation line one for event 183
+                                                                     continuation line two for event 183
+4/20/2026 10:04:00 AM 16184 Verbose          Example-Provider-Placeholder   Sample event message 184
+4/20/2026 10:05:00 AM 16185 Information      Example-Provider-Placeholder   Sample event message 185
+4/20/2026 10:06:00 AM 16186 Warning          Example-Provider-Placeholder   Sample event message 186
+                                                                     continuation line one for event 186
+                                                                     continuation line two for event 186
+4/20/2026 10:07:00 AM 16187 Error            Example-Provider-Placeholder   Sample event message 187
+4/20/2026 10:08:00 AM 16188 Information      Example-Provider-Placeholder   Sample event message 188
+4/20/2026 10:09:00 AM 16189 Verbose          Example-Provider-Placeholder   Sample event message 189
+                                                                     continuation line one for event 189
+                                                                     continuation line two for event 189
+4/20/2026 10:10:00 AM 16190 Information      Example-Provider-Placeholder   Sample event message 190
+4/20/2026 10:11:00 AM 16191 Warning          Example-Provider-Placeholder   Sample event message 191
+4/20/2026 10:12:00 AM 16192 Error            Example-Provider-Placeholder   Sample event message 192
+                                                                     continuation line one for event 192
+                                                                     continuation line two for event 192
+4/20/2026 10:13:00 AM 16193 Information      Example-Provider-Placeholder   Sample event message 193
+4/20/2026 10:14:00 AM 16194 Verbose          Example-Provider-Placeholder   Sample event message 194
+4/20/2026 10:15:00 AM 16195 Information      Example-Provider-Placeholder   Sample event message 195
+                                                                     continuation line one for event 195
+                                                                     continuation line two for event 195
+4/20/2026 10:16:00 AM 16196 Warning          Example-Provider-Placeholder   Sample event message 196
+4/20/2026 10:17:00 AM 16197 Error            Example-Provider-Placeholder   Sample event message 197
+4/20/2026 10:18:00 AM 16198 Information      Example-Provider-Placeholder   Sample event message 198
+                                                                     continuation line one for event 198
+                                                                     continuation line two for event 198
+4/20/2026 10:19:00 AM 16199 Verbose          Example-Provider-Placeholder   Sample event message 199
+4/20/2026 10:20:00 AM 16200 Information      Example-Provider-Placeholder   Sample event message 200

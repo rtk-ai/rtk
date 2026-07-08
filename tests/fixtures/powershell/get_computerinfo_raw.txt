@@ -1,0 +1,56 @@
+# rtk fixture note: structure captured from real PowerShell 5.1 output (Get-ComputerInfo | Format-List), values anonymized (hostname/domain/vendor names replaced with generic placeholders). Key column is colon-aligned to the longest key, matching real Format-List behavior.
+
+ExampleSetting1  : 3
+ExampleSetting2  : 6
+ExampleSetting3  : 9
+ExampleSetting4  : 12
+ExampleSetting5  : 15
+ExampleSetting6  : 18
+ExampleSetting7  : 21
+ExampleSetting8  : 24
+ExampleSetting9  : 27
+ExampleSetting10 : 30
+ExampleSetting11 : 33
+ExampleSetting12 : 36
+ExampleSetting13 : 39
+ExampleSetting14 : 42
+ExampleSetting15 : 45
+ExampleSetting16 : 48
+ExampleSetting17 : 51
+ExampleSetting18 : 54
+ExampleSetting19 : 57
+ExampleSetting20 : 60
+ExampleSetting21 : 63
+ExampleSetting22 : 66
+ExampleSetting23 : 69
+ExampleSetting24 : 72
+ExampleSetting25 : 75
+ExampleSetting26 : 78
+ExampleSetting27 : 81
+ExampleSetting28 : 84
+ExampleSetting29 : 87
+ExampleSetting30 : 90
+ExampleSetting31 : 93
+ExampleSetting32 : 96
+ExampleSetting33 : 99
+ExampleSetting34 : 102
+ExampleSetting35 : 105
+ExampleSetting36 : 108
+ExampleSetting37 : 111
+ExampleSetting38 : 114
+ExampleSetting39 : 117
+ExampleSetting40 : 120
+ExampleSetting41 : 123
+ExampleSetting42 : 126
+ExampleSetting43 : 129
+ExampleSetting44 : 132
+ExampleSetting45 : 135
+CsName           : CONTOSO-PC01
+CsDomain         : WORKGROUP
+CsManufacturer   : Example Hardware Co., Ltd.
+CsModel          : Example Desktop Model X1
+OsName           : Microsoft Windows 11 Enterprise
+OsVersion        : 10.0.26100
+OsArchitecture   : 64-bit
+BiosManufacturer : Example BIOS Vendor
+BiosVersion      : EXMP 1.0
