@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, and Antigravity
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, and Antigravity, and Kiro
 sidebar:
   order: 3
 ---
@@ -26,23 +26,24 @@ Agent runs "cargo test"
 
 ## Supported agents
 
-| Agent | Integration tier | Can rewrite transparently? |
-|-------|-----------------|---------------------------|
-| Claude Code | Shell hook (`PreToolUse`) | Yes |
+| Agent                | Integration tier | Can rewrite transparently? |
+|----------------------|-----------------|---------------------------|
+| Claude Code          | Shell hook (`PreToolUse`) | Yes |
 | VS Code Copilot Chat | Shell hook (`PreToolUse`) | Yes |
-| GitHub Copilot CLI | Shell hook (`preToolUse` `modifiedArgs`) | Yes |
-| Cursor | Shell hook (`preToolUse`) | Yes |
-| Gemini CLI | Rust binary (`BeforeTool`) | Yes |
-| OpenCode | TypeScript plugin (`tool.execute.before`) | Yes |
-| OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
-| Pi | TypeScript extension (`tool_call` event) | Yes |
-| Hermes | Python plugin (`terminal` command mutation) | Yes |
-| Cline / Roo Code | Rules file (prompt-level) | N/A |
-| Windsurf | Rules file (prompt-level) | N/A |
-| Codex CLI | AGENTS.md instructions | N/A |
-| Kilo Code | Rules file (prompt-level) | N/A |
-| Google Antigravity | Rules file (prompt-level) | N/A |
-| Mistral Vibe | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Pending upstream |
+| GitHub Copilot CLI   | Shell hook (`preToolUse` `modifiedArgs`) | Yes |
+| Cursor               | Shell hook (`preToolUse`) | Yes |
+| Gemini CLI           | Rust binary (`BeforeTool`) | Yes |
+| OpenCode             | TypeScript plugin (`tool.execute.before`) | Yes |
+| OpenClaw             | TypeScript plugin (`before_tool_call`) | Yes |
+| Pi                   | TypeScript extension (`tool_call` event) | Yes |
+| Hermes               | Python plugin (`terminal` command mutation) | Yes |
+| Cline / Roo Code     | Rules file (prompt-level) | N/A |
+| Windsurf             | Rules file (prompt-level) | N/A |
+| Codex CLI            | AGENTS.md instructions | N/A |
+| Kilo Code            | Rules file (prompt-level) | N/A |
+| Google Antigravity   | Rules file (prompt-level) | N/A |
+| Kiro                 | Rules file (prompt-level) | N/A |
+| Mistral Vibe         | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Pending upstream |
 
 ## Installation by agent
 
@@ -174,6 +175,14 @@ rtk init --agent antigravity    # creates .agents/rules/antigravity-rtk-rules.md
 
 Antigravity reads `.agents/rules/` as custom instructions. RTK adds guidance telling Antigravity to prefer `rtk <cmd>` over raw commands.
 
+### Kiro
+
+```bash
+rtk init --agent kiro    # creates .kiro/steering/rtk-rules.md in current project
+```
+
+Kiro reads `.kiro/steering/` as steering files (project context). RTK adds guidance telling Kiro to prefer `rtk <cmd>` over raw commands.
+
 ### Mistral Vibe (planned)
 
 Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://github.com/mistralai/mistral-vibe/issues/531)). Tracked in [#800](https://github.com/rtk-ai/rtk/issues/800).
@@ -186,7 +195,7 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity, Kiro) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
 
 ## Windows support
 
