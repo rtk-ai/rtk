@@ -2,7 +2,7 @@
 
 ## Scope
 
-**Deployed hook artifacts** — the actual files installed on user machines by `rtk init`. These are shell scripts, TypeScript plugins, and rules files that run outside the Rust binary. They are **thin delegates**: parse agent-specific JSON, call `rtk rewrite` as a subprocess, format agent-specific response. Zero filtering logic lives here.
+**Deployed hook artifacts** — the actual files installed on user machines by `rtk init`. These are shell scripts, Codex plugin files, TypeScript plugins, and rules files that run outside the Rust binary. They are **thin delegates**: parse agent-specific JSON, call the native RTK processor or `rtk rewrite`, and format agent-specific responses. Zero filtering logic lives here.
 
 Owns: per-agent hook scripts and configuration files for 9 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi).
 
@@ -38,7 +38,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`cursor/`](cursor/README.md)** — Shell hook, Cursor JSON format, empty `{}` response requirement
 - **[`cline/`](cline/README.md)** — Rules file (prompt-level), `.clinerules` project-local installation
 - **[`windsurf/`](windsurf/README.md)** — Rules file (prompt-level), `.windsurfrules` workspace-scoped
-- **[`codex/`](codex/README.md)** — Awareness document, `AGENTS.md` integration, `$CODEX_HOME` or `~/.codex/` location
+- **[`codex/`](codex/README.md)** — Codex plugin package, bundled RTK skill, native `PreToolUse` hook command, local marketplace registration
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
 - **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, `isToolCallEventType` guard, in-place mutation, `~/.pi/agent/extensions/`
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
@@ -54,7 +54,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | Gemini CLI | Rust binary (`rtk hook gemini`) | Transparent rewrite | Yes (`hookSpecificOutput`) |
 | Cline / Roo Code | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |
-| Codex CLI | AGENTS.md / instructions | Prompt-level guidance | N/A |
+| Codex CLI | Codex plugin (`PreToolUse`) | Transparent rewrite | Yes (`updatedInput`) |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | In-place mutation | Yes |
 | Pi | TypeScript extension (`tool_call` event) | In-place mutation | Yes |
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
@@ -131,7 +131,34 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 }
 ```
 
-**Output**: Same as Claude Code format (with `updatedInput`).
+### Codex CLI (Plugin Hook)
+
+The plugin hook matcher is `Bash`, because Codex exposes shell tool calls under that tool name. The hook command itself is native: `rtk hook codex` on Linux/macOS and `rtk.exe hook codex` through `commandWindows` on native Windows.
+
+**Input** (stdin):
+
+```json
+{
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": { "command": "git status", "timeout": 30000 }
+}
+```
+
+**Output** (stdout, when rewritten):
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "allow",
+    "permissionDecisionReason": "RTK auto-rewrite",
+    "updatedInput": { "command": "rtk git status", "timeout": 30000 }
+  }
+}
+```
+
+Codex currently requires `permissionDecision: "allow"` when returning `updatedInput`; `permissionDecision: "ask"` with rewritten input is not supported. RTK preserves the rest of Codex's original `tool_input` and replaces only `command`.
 
 ### Gemini CLI (Rust Binary)
 

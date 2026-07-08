@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "rtk hook codex",
+            "commandWindows": "rtk.exe hook codex",
+            "statusMessage": "RTK is rewriting a Bash command for token-optimized output",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

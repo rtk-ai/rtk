@@ -1,0 +1,42 @@
+{
+  "name": "rtk-codex",
+  "version": "0.1.0",
+  "description": "RTK command rewriting and token-optimized command output for Codex developer workflows.",
+  "author": {
+    "name": "RTK AI Labs",
+    "email": "contact@rtk-ai.app",
+    "url": "https://www.rtk-ai.app"
+  },
+  "homepage": "https://github.com/rtk-ai/rtk",
+  "repository": "https://github.com/rtk-ai/rtk",
+  "license": "MIT",
+  "keywords": [
+    "rtk",
+    "codex",
+    "hooks",
+    "token-optimization",
+    "developer-tools",
+    "command-rewrite"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "RTK",
+    "shortDescription": "Rewrite Codex Bash commands through RTK for compact output.",
+    "longDescription": "Adds RTK skills and a Codex PreToolUse hook that rewrites supported Bash commands to token-optimized RTK equivalents.",
+    "developerName": "RTK AI Labs",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/rtk-ai/rtk",
+    "privacyPolicyURL": "https://github.com/rtk-ai/rtk/blob/develop/docs/TELEMETRY.md",
+    "termsOfServiceURL": "https://github.com/rtk-ai/rtk/blob/develop/LICENSE",
+    "defaultPrompt": [
+      "Use RTK when running shell commands so Codex receives compact command output.",
+      "Use $rtk to review RTK command rewriting and opt-out behavior."
+    ],
+    "brandColor": "#10A37F"
+  }
+}
