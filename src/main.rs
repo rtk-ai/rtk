@@ -50,6 +50,8 @@ pub enum AgentTarget {
     Pi,
     /// Hermes CLI
     Hermes,
+    /// CodeBuddy (Tencent Cloud AI code editor)
+    Codebuddy,
 }
 
 #[derive(Parser)]
@@ -853,6 +855,8 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process CodeBuddy PreToolUse hook (reads JSON from stdin, dual Claude/CodeBuddy format)
+    Codebuddy,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1981,15 +1985,19 @@ fn run_cli() -> Result<i32> {
                     hooks::init::uninstall_copilot(ctx)?;
                 }
             } else if uninstall {
-                uninstall_init_dispatch(
-                    agent,
-                    global,
-                    gemini,
-                    codex,
-                    ctx,
-                    hooks::init::uninstall_hermes,
-                    hooks::init::uninstall,
-                )?;
+                if agent == Some(AgentTarget::Codebuddy) {
+                    hooks::init::uninstall_codebuddy(ctx)?;
+                } else {
+                    uninstall_init_dispatch(
+                        agent,
+                        global,
+                        gemini,
+                        codex,
+                        ctx,
+                        hooks::init::uninstall_hermes,
+                        hooks::init::uninstall,
+                    )?;
+                }
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -2021,6 +2029,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_antigravity_mode(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Codebuddy) {
+                hooks::init::run_codebuddy_mode(ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2378,6 +2388,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::Codebuddy => {
+                hooks::hook_cmd::run_codebuddy()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {
