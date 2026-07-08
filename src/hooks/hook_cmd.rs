@@ -284,6 +284,94 @@ fn print_gemini(decision: &str, rewrite: Option<&str>) {
     let _ = writeln!(io::stdout(), "{}", gemini_json(decision, rewrite));
 }
 
+// ── Codex CLI hook ────────────────────────────────────────────
+
+/// Run the Codex CLI PreToolUse hook.
+pub fn run_codex() -> Result<()> {
+    let input = match read_stdin_limited() {
+        Ok(input) => input,
+        Err(_) => return Ok(()),
+    };
+    let output = run_codex_inner(&input);
+    if !output.is_empty() {
+        let _ = writeln!(io::stdout(), "{output}");
+    }
+    Ok(())
+}
+
+fn codex_response_from_decision(tool_input: &Value, decision: HookDecision, cmd: &str) -> String {
+    match decision {
+        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => {
+            audit_log("rewrite", cmd, &rewritten);
+            let mut updated_input = tool_input.clone();
+            if let Some(obj) = updated_input.as_object_mut() {
+                obj.insert("command".into(), Value::String(rewritten));
+            }
+            codex_allow(updated_input)
+        }
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            codex_deny("Blocked by RTK permission rule")
+        }
+        HookDecision::Defer => String::new(),
+    }
+}
+
+fn codex_allow(updated_input: Value) -> String {
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": PRE_TOOL_USE_KEY,
+            "permissionDecision": "allow",
+            "permissionDecisionReason": "RTK auto-rewrite",
+            "updatedInput": updated_input
+        }
+    })
+    .to_string()
+}
+
+fn codex_deny(reason: &str) -> String {
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": PRE_TOOL_USE_KEY,
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason
+        }
+    })
+    .to_string()
+}
+
+fn run_codex_inner(input: &str) -> String {
+    let input = strip_leading_bom(input).trim();
+    if input.is_empty() {
+        return String::new();
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+
+    if v.get("tool_name").and_then(|t| t.as_str()) != Some("Bash") {
+        return String::new();
+    }
+
+    let tool_input = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+    let cmd = match tool_input
+        .get("command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+    {
+        Some(c) => c.to_string(),
+        None => return String::new(),
+    };
+
+    codex_response_from_decision(
+        &tool_input,
+        decide_hook_action(&cmd, permissions::Host::Codex),
+        &cmd,
+    )
+}
+
 // ── Audit logging ─────────────────────────────────────────────
 
 /// Best-effort audit log when RTK_HOOK_AUDIT=1.
@@ -1167,6 +1255,45 @@ mod tests {
         assert_eq!(v["continue"], true);
         assert_eq!(v["permission"], "allow");
         assert_eq!(v["updated_input"]["command"], "rtk git status");
+    }
+
+    // --- Codex handler ---
+
+    fn codex_input(tool: &str, cmd: &str) -> String {
+        json!({
+            "tool_name": tool,
+            "tool_input": {
+                "command": cmd,
+                "description": "check status"
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_codex_default_verdict_allows_rewrite() {
+        let result = run_codex_inner(&codex_input("Bash", "git status"));
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(hook["permissionDecision"], "allow");
+        assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
+        assert_eq!(hook["updatedInput"]["command"], "rtk git status");
+        assert_eq!(hook["updatedInput"]["description"], "check status");
+    }
+
+    #[test]
+    fn test_codex_non_bash_passthrough() {
+        assert_eq!(run_codex_inner(&codex_input("Read", "git status")), "");
+    }
+
+    #[test]
+    fn test_codex_heredoc_passthrough() {
+        assert_eq!(
+            run_codex_inner(&codex_input("Bash", "cat <<EOF\nhello\nEOF")),
+            ""
+        );
     }
 
     #[test]

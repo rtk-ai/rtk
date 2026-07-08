@@ -31,6 +31,7 @@ pub fn check_command(cmd: &str) -> PermissionVerdict {
 pub enum Host {
     Claude,
     Cursor,
+    Codex,
     Gemini,
 }
 
@@ -38,6 +39,7 @@ pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
     let (deny_rules, ask_rules, allow_rules) = match host {
         Host::Claude => load_permission_rules(),
         Host::Cursor => load_cursor_rules(),
+        Host::Codex => load_codex_rules(),
         Host::Gemini => load_gemini_rules(),
     };
     check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
@@ -234,6 +236,13 @@ fn load_cursor_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
         append_wrapped_rules(perms.get("allow"), &["Shell("], &mut allow);
     }
     (deny, Vec::new(), allow)
+}
+
+/// Codex's approval model lives in `config.toml` (`approval_policy` and
+/// `sandbox_mode`), not in RTK-readable Bash allow/deny lists. RTK defers
+/// permission gating to Codex, so every command resolves to Default.
+fn load_codex_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
+    (Vec::new(), Vec::new(), Vec::new())
 }
 
 // Gemini honors project `.gemini/settings.json` when the folder is trusted.
