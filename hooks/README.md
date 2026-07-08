@@ -50,7 +50,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | Claude Code | Shell hook (`PreToolUse`) | Transparent rewrite | Yes (`updatedInput`) |
 | VS Code Copilot Chat | Rust binary (`rtk hook copilot`) | Transparent rewrite | Yes (`updatedInput`) |
 | GitHub Copilot CLI | Rust binary (`rtk hook copilot`) | Deny-with-suggestion | No (agent retries) |
-| Cursor | Shell hook (`preToolUse`) | Transparent rewrite | Yes (`updated_input`) |
+| Cursor | Rust binary | Transparent rewrite | Yes (`updated_input`) |
 | Gemini CLI | Rust binary (`rtk hook gemini`) | Transparent rewrite | Yes (`hookSpecificOutput`) |
 | Cline / Roo Code | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |

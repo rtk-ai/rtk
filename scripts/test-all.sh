@@ -230,8 +230,8 @@ assert_help    "rtk cargo"                    rtk cargo
 
 section "Curl (new)"
 
-assert_contains "rtk curl JSON detect" "string" rtk curl https://httpbin.org/json
-assert_ok       "rtk curl plain text"          rtk curl https://httpbin.org/robots.txt
+assert_contains "rtk curl JSON detect" "string" rtk curl https://mockhttp.org/json
+assert_ok       "rtk curl plain text"          rtk curl https://mockhttp.org/robots.txt
 assert_help     "rtk curl"                     rtk curl
 
 # ── 8. Npm / Npx ────────────────────────────────────
@@ -351,7 +351,7 @@ assert_ok      "rtk init --show"              rtk init --show
 section "Wget"
 
 if command -v wget >/dev/null 2>&1; then
-    assert_ok  "rtk wget stdout"              rtk wget https://httpbin.org/robots.txt -O
+    assert_ok  "rtk wget stdout"              rtk wget https://mockhttp.org/robots.txt -O
 else
     skip_test "rtk wget" "wget not installed"
 fi

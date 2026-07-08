@@ -126,23 +126,40 @@ fn get_rewritten(cmd: &str) -> Option<String> {
     Some(rewritten)
 }
 
-fn handle_vscode(cmd: &str) -> Result<()> {
-    let verdict = permissions::check_command(cmd);
+enum HookDecision {
+    AllowRewrite(String),
+    AskRewrite(String),
+    Defer,
+    Deny,
+}
+
+fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
-        audit_log("deny", cmd, "");
-        return Ok(());
+        return HookDecision::Deny;
     }
+    if crate::discover::lexer::contains_unattestable_construct(cmd) {
+        return HookDecision::Defer;
+    }
+    match get_rewritten(cmd) {
+        Some(r) if verdict == PermissionVerdict::Allow => HookDecision::AllowRewrite(r),
+        Some(r) => HookDecision::AskRewrite(r),
+        None => HookDecision::Defer,
+    }
+}
 
-    let rewritten = match get_rewritten(cmd) {
-        Some(r) => r,
-        None => return Ok(()),
-    };
+fn decide_hook_action(cmd: &str, host: permissions::Host) -> HookDecision {
+    decide_from_verdict(cmd, permissions::check_command_for(cmd, host))
+}
 
-    // Allow (explicit rule matched): auto-allow the rewritten command.
-    // Ask/Default (no allow rule matched): rewrite but let the host tool prompt.
-    let decision = match verdict {
-        PermissionVerdict::Allow => "allow",
-        _ => "ask",
+fn handle_vscode(cmd: &str) -> Result<()> {
+    let (decision, rewritten) = match decide_hook_action(cmd, permissions::Host::Claude) {
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            return Ok(());
+        }
+        HookDecision::Defer => return Ok(()),
+        HookDecision::AllowRewrite(r) => ("allow", r),
+        HookDecision::AskRewrite(r) => ("ask", r),
     };
 
     audit_log("rewrite", cmd, &rewritten);
@@ -167,7 +184,11 @@ fn handle_copilot_cli(cmd: &str, args: &Value) -> Result<()> {
 }
 
 fn copilot_cli_response(cmd: &str, args: &Value) -> Option<Value> {
-    copilot_cli_response_for_verdict(cmd, args, permissions::check_command(cmd))
+    copilot_cli_response_from_decision(
+        args,
+        decide_hook_action(cmd, permissions::Host::Claude),
+        cmd,
+    )
 }
 
 fn copilot_cli_response_for_verdict(
@@ -175,11 +196,24 @@ fn copilot_cli_response_for_verdict(
     args: &Value,
     verdict: PermissionVerdict,
 ) -> Option<Value> {
-    if verdict == PermissionVerdict::Deny {
-        audit_log("deny", cmd, "");
-        return None;
-    }
-    let rewritten = get_rewritten(cmd)?;
+    copilot_cli_response_from_decision(args, decide_from_verdict(cmd, verdict), cmd)
+}
+
+fn copilot_cli_response_from_decision(
+    args: &Value,
+    decision: HookDecision,
+    cmd: &str,
+) -> Option<Value> {
+    let (rewritten, allow) = match decision {
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            return None;
+        }
+        HookDecision::Defer => return None,
+        HookDecision::AllowRewrite(r) => (r, true),
+        HookDecision::AskRewrite(r) => (r, false),
+    };
+
     audit_log("rewrite", cmd, &rewritten);
 
     let mut modified = args.clone();
@@ -187,15 +221,11 @@ fn copilot_cli_response_for_verdict(
         obj.insert("command".into(), Value::String(rewritten));
     }
 
-    // Copilot CLI v1.0.54 only applies `modifiedArgs` when permissionDecision is
-    // either "allow" or absent. Omitting permissionDecision lets Copilot's normal
-    // permission flow run on the rewritten command — `rtk *` is not on its
-    // auto-allow list, so the user sees a prompt for the rewritten command.
     let mut response = json!({
         "permissionDecisionReason": "RTK auto-rewrite",
         "modifiedArgs": modified,
     });
-    if verdict == PermissionVerdict::Allow {
+    if allow {
         response["permissionDecision"] = json!("allow");
     }
     Some(response)
@@ -598,40 +628,42 @@ pub fn run_cursor() -> Result<()> {
         }
     };
 
-    let verdict = permissions::check_command(&cmd);
-    if verdict == PermissionVerdict::Deny {
-        audit_log("deny", &cmd, "");
-        let _ = writeln!(io::stdout(), "{{}}");
-        return Ok(());
-    }
-
-    let rewritten = match get_rewritten(&cmd) {
-        Some(r) => r,
-        None => {
-            let _ = writeln!(io::stdout(), "{{}}");
-            return Ok(());
+    let output = match decide_hook_action(&cmd, permissions::Host::Cursor) {
+        HookDecision::AllowRewrite(rewritten) => {
+            audit_log("rewrite", &cmd, &rewritten);
+            cursor_allow(&rewritten)
+        }
+        HookDecision::AskRewrite(rewritten) => {
+            audit_log("ask", &cmd, &rewritten);
+            cursor_ask(&rewritten)
+        }
+        other => {
+            if matches!(other, HookDecision::Deny) {
+                audit_log("deny", &cmd, "");
+            }
+            "{}".to_string()
         }
     };
-
-    // Cursor preToolUse currently enforces allow/deny only and can ignore
-    // updated_input when permission is "ask". Use "allow" for rewritten
-    // commands unless the command is explicitly denied above.
-    let decision = "allow";
-
-    audit_log("rewrite", &cmd, &rewritten);
-
-    // `continue: true` mirrors the shape of every other Cursor hook
-    // (afterShellExecution, beforeSubmitPrompt, stop, ...). Cursor's
-    // preToolUse panel renders the JSON it received; without this field
-    // the panel collapses to `Output: {}` even though the rewrite ran,
-    // which makes the hook look broken to users.
-    let output = json!({
-        "continue": true,
-        "permission": decision,
-        "updated_input": { "command": rewritten }
-    });
     let _ = writeln!(io::stdout(), "{output}");
     Ok(())
+}
+
+fn cursor_allow(rewritten: &str) -> String {
+    json!({
+        "continue": true,
+        "permission": "allow",
+        "updated_input": { "command": rewritten }
+    })
+    .to_string()
+}
+
+fn cursor_ask(rewritten: &str) -> String {
+    json!({
+        "continue": true,
+        "permission": "ask",
+        "updated_input": { "command": rewritten }
+    })
+    .to_string()
 }
 
 #[cfg(test)]
@@ -662,21 +694,10 @@ fn run_cursor_inner_with_rules(
     };
 
     let verdict = permissions::check_command_with_rules(&cmd, deny_rules, ask_rules, allow_rules);
-    if verdict == PermissionVerdict::Deny {
-        return "{}".to_string();
-    }
-
-    match get_rewritten(&cmd) {
-        Some(rewritten) => {
-            let decision = "allow";
-            let output = json!({
-                "continue": true,
-                "permission": decision,
-                "updated_input": { "command": rewritten }
-            });
-            output.to_string()
-        }
-        None => "{}".to_string(),
+    match decide_from_verdict(&cmd, verdict) {
+        HookDecision::AllowRewrite(rewritten) => cursor_allow(&rewritten),
+        HookDecision::AskRewrite(rewritten) => cursor_ask(&rewritten),
+        _ => "{}".to_string(),
     }
 }
 
@@ -1155,17 +1176,55 @@ mod tests {
         .to_string()
     }
 
+    fn run_cursor_allowed(input: &str) -> String {
+        run_cursor_inner_with_rules(input, &[], &[], &["*".to_string()])
+    }
+
     #[test]
     fn test_cursor_rewrite_flat_format() {
-        let result = run_cursor_inner(&cursor_input("git status"));
+        let result = run_cursor_allowed(&cursor_input("git status"));
         let v: Value = serde_json::from_str(&result).unwrap();
-        // Cursor preToolUse expects allow/deny for rewrite application.
         assert_eq!(v["permission"], "allow");
         assert_eq!(v["updated_input"]["command"], "rtk git status");
         assert!(v.get("hookSpecificOutput").is_none());
         // `continue: true` keeps the Cursor preToolUse panel from collapsing
         // to `Output: {}`; without it the rewrite is invisible to users.
         assert_eq!(v["continue"], true);
+    }
+
+    #[test]
+    fn test_cursor_default_verdict_rewrites() {
+        let result = run_cursor_inner(&cursor_input("git status"));
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["permission"], "ask");
+        assert_eq!(v["updated_input"]["command"], "rtk git status");
+        // `continue: true` keeps the Cursor preToolUse panel from collapsing
+        // to `Output: {}`; without it the rewrite is invisible to users.
+        assert_eq!(v["continue"], true);
+    }
+
+    #[test]
+    fn test_cursor_substitution_defers_even_when_allowed() {
+        assert_eq!(
+            run_cursor_allowed(&cursor_input("git status `rm -rf /tmp/x`")),
+            "{}"
+        );
+        assert_eq!(
+            run_cursor_allowed(&cursor_input("git status $(rm -rf /tmp/x)")),
+            "{}"
+        );
+    }
+
+    #[test]
+    fn test_cursor_unallowed_segment_asks() {
+        let out = run_cursor_inner_with_rules(
+            &cursor_input("git status && rm -rf /tmp/x"),
+            &[],
+            &[],
+            &["git *".to_string()],
+        );
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["permission"], "ask");
     }
 
     #[test]
@@ -1194,7 +1253,7 @@ mod tests {
 
     #[test]
     fn test_cursor_no_hook_specific_output() {
-        let result = run_cursor_inner(&cursor_input("cargo test"));
+        let result = run_cursor_allowed(&cursor_input("cargo test"));
         let v: Value = serde_json::from_str(&result).unwrap();
         assert!(v.get("hookSpecificOutput").is_none());
         assert_eq!(v["permission"], "allow");
@@ -1204,7 +1263,7 @@ mod tests {
     #[test]
     fn test_cursor_compound_rewrite_includes_continue() {
         let cmd = "cd \"/tmp/proj\" && git status";
-        let result = run_cursor_inner(&cursor_input(cmd));
+        let result = run_cursor_allowed(&cursor_input(cmd));
         let v: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["continue"], true);
         assert_eq!(v["permission"], "allow");
@@ -1221,7 +1280,7 @@ mod tests {
         // the hook returned `{}` and the rewrite became a silent no-op.
         let payload = cursor_input("git status");
         let with_single_bom = format!("\u{feff}{}", payload);
-        let result = run_cursor_inner(&with_single_bom);
+        let result = run_cursor_allowed(&with_single_bom);
         let v: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["continue"], true);
         assert_eq!(v["permission"], "allow");
@@ -1236,7 +1295,7 @@ mod tests {
         // the real-world payload shape the loop needs to survive.
         let payload = cursor_input("git status");
         let with_double_bom = format!("\u{feff}\u{feff}{}", payload);
-        let result = run_cursor_inner(&with_double_bom);
+        let result = run_cursor_allowed(&with_double_bom);
         let v: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["continue"], true);
         assert_eq!(v["permission"], "allow");

@@ -79,7 +79,15 @@ pub enum PatchMode {
     Skip, // --no-patch: manual instructions
 }
 
-/// Result of Claude settings patching operation
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum FilterTrust {
+    #[default]
+    Ask,
+    Trust,
+    Skip,
+}
+
+/// Result of settings.json patching operation
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PatchResult {
     Patched,        // Hook was added successfully
@@ -183,6 +191,7 @@ rtk pnpm install        # Compact install output (90%)
 rtk npm run <script>    # Compact npm script output
 rtk npx <cmd>           # Compact npx command output
 rtk prisma              # Prisma without ASCII art (88%)
+rtk uv run <cmd>        # Compact uv project command output
 ```
 
 ### Files & Search (60-75% savings)
@@ -1672,6 +1681,63 @@ fn generate_global_filters_template(ctx: InitContext) -> Result<()> {
         "  filters:   {} (template, edit to add user-global filters)",
         path.display()
     );
+    Ok(())
+}
+
+pub fn finalize_filter_trust(global: bool, dry_run: bool, trust: FilterTrust) -> Result<()> {
+    let paths = crate::hooks::trust::gated_filter_paths();
+    let path = match if global { paths.get(1) } else { paths.first() } {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let status = crate::hooks::trust::check_trust(path)
+        .unwrap_or(crate::hooks::trust::TrustStatus::Untrusted);
+    if matches!(
+        status,
+        crate::hooks::trust::TrustStatus::Trusted | crate::hooks::trust::TrustStatus::EnvOverride
+    ) {
+        return Ok(());
+    }
+
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(_) => return Ok(()),
+    };
+    let content = String::from_utf8_lossy(&bytes);
+    let filters = crate::core::toml_filter::active_filter_summaries(&content);
+    if filters.is_empty() {
+        return Ok(());
+    }
+
+    if dry_run {
+        println!(
+            "[dry-run] {} untrusted custom filter(s) in {}",
+            filters.len(),
+            path.display()
+        );
+        return Ok(());
+    }
+
+    let scope = if global { "global" } else { "project" };
+    crate::hooks::trust::print_filter_notice(path, scope, &filters);
+
+    let enable = match trust {
+        FilterTrust::Trust => true,
+        FilterTrust::Skip => false,
+        FilterTrust::Ask => crate::hooks::trust::confirm_enable_at_tty()?,
+    };
+
+    if enable {
+        let hash = crate::hooks::integrity::compute_hash_bytes(&bytes);
+        crate::hooks::trust::trust_filter_with_hash(path, &hash)?;
+        eprintln!("Enabled. Revoke with `rtk untrust`.");
+    } else {
+        eprintln!("\x1b[33m  Not enabled — run `rtk trust` to review and enable.\x1b[0m");
+    }
     Ok(())
 }
 
@@ -4612,6 +4678,7 @@ mod tests {
             "rtk prisma",
             "rtk pnpm",
             "rtk npm",
+            "rtk uv",
             "rtk curl",
             "rtk git",
             "rtk docker",

@@ -329,7 +329,7 @@ RTK supports the following LLM agents through hook integrations:
 | Claude Code | Shell hook | `PreToolUse` in `settings.json` | Yes (`updatedInput`) |
 | GitHub Copilot (VS Code) | Rust binary | `rtk hook copilot` reads JSON | Yes (`updatedInput`) |
 | GitHub Copilot CLI | Rust binary | `rtk hook copilot` reads JSON | No (deny + suggestion) |
-| Cursor | Shell hook | `preToolUse` hook | Yes (`updated_input`) |
+| Cursor | Rust binary | `rtk hook cursor` reads JSON | Yes (`updated_input`) |
 | Gemini CLI | Rust binary | `rtk hook gemini` reads JSON | Yes (`hookSpecificOutput`) |
 | Cline/Roo Code | Rules file | Prompt-level guidance | N/A (prompt) |
 | Windsurf | Rules file | Prompt-level guidance | N/A (prompt) |

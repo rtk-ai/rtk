@@ -88,7 +88,7 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 - Linux: `rtk-x86_64-unknown-linux-musl.tar.gz` / `rtk-aarch64-unknown-linux-gnu.tar.gz`
 - Windows: `rtk-x86_64-pc-windows-msvc.zip`
 
-> **Windows users**: Extract the zip and place `rtk.exe` somewhere in your PATH (e.g. `C:\Users\<you>\.local\bin`). Run RTK from **Command Prompt**, **PowerShell**, or **Windows Terminal** — do not double-click the `.exe` (it will flash and close). Claude Code and Codex can use native `rtk hook ...` auto-rewrite on Windows; WSL remains supported but is not required for those hooks. See [Windows setup](#windows) below for details.
+> **Windows users**: Extract the zip and place `rtk.exe` somewhere in your PATH (e.g. `C:\Users\<you>\.local\bin`). Run RTK from **Command Prompt**, **PowerShell**, or **Windows Terminal** — do not double-click the `.exe` (it will flash and close). The hook system works natively on Windows, including Claude Code (`rtk hook claude`) and Codex (`rtk hook codex`); WSL remains supported but is not required for those hooks. See [Windows setup](#windows) below for details.
 
 ### Verify Installation
 
@@ -203,6 +203,7 @@ rtk rubocop                     # Ruby linting (JSON, -60%+)
 ### Package Managers
 ```bash
 rtk pnpm list                   # Compact dependency tree
+rtk uv run pytest               # Preserve uv env, errors only
 rtk pip list                    # Python packages (auto-detect uv)
 rtk pip outdated                # Outdated packages
 rtk bundle install              # Ruby gems (strip Using lines)
@@ -328,39 +329,45 @@ After install, **restart Claude Code**.
 
 ## Windows
 
-RTK supports native Windows filters and native hook auto-rewrite for Claude Code and Codex. The installed hook command is the Rust binary (`rtk hook claude` or `rtk hook codex`), with Bash, Shell, and PowerShell matchers.
+RTK works fully on native Windows. Since **v0.37.2** the auto-rewrite hook runs as a **native binary command** — no Unix shell, bash, or jq required. Claude Code uses `rtk hook claude`, Codex uses `rtk hook codex`, and both install Bash, Shell, and PowerShell matchers so commands can be rewritten transparently from Command Prompt, PowerShell, and Windows Terminal.
 
 ### Native Windows
 
 ```powershell
 # 1. Download and extract rtk-x86_64-pc-windows-msvc.zip from releases
-# 2. Add rtk.exe to your PATH
-# 3. Initialize hooks
+# 2. Add rtk.exe to your PATH (e.g. C:\Users\<you>\.local\bin)
+# 3. Initialize Claude Code hooks
 rtk init -g
+# 4. Initialize Codex hooks when you use Codex
 rtk init -g --codex
-# 4. Verify hooks
+# 5. Verify installed hooks
 rtk init -g --show
 rtk init -g --codex --show
 ```
 
-**Important**: Do not double-click `rtk.exe` — it is a CLI tool that prints usage and exits immediately. Always run it from a terminal (Command Prompt, PowerShell, or Windows Terminal).
+**Upgrading from an older install?** If you set RTK up before v0.37.2 you may still have the legacy `rtk-rewrite.sh` shell hook (which does need a Unix shell). Re-run `rtk init -g` to migrate to the native binary hook.
 
-| Feature | WSL | Native Windows |
-|---------|-----|----------------|
-| Filters (cargo, git, etc.) | Full | Full |
-| Auto-rewrite hook | Yes | Yes (Claude/Codex native binary hook) |
-| `rtk init -g` | Hook mode | Claude native hook mode |
-| `rtk init -g --codex` | Codex hook mode | Codex native hook mode |
-| `rtk gain` / analytics | Full | Full |
+**Prerequisites**: some filters shell out to [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`). Install it and keep it on your PATH (e.g. `winget install BurntSushi.ripgrep.MSVC`) to avoid `Binary 'rg' not found on PATH` warnings.
+
+**Important**: Do not double-click `rtk.exe` — it is a CLI tool that prints usage and exits immediately. Always run it from a terminal (Command Prompt, PowerShell, or Windows Terminal).
 
 ### WSL
 
-WSL remains supported. Inside WSL, RTK works like Linux:
+[WSL](https://learn.microsoft.com/en-us/windows/wsl/install) also works and behaves exactly like Linux:
 
 ```bash
+# Inside WSL
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
 rtk init -g
 ```
+
+| Feature | Native Windows | WSL |
+|---------|----------------|-----|
+| Filters (cargo, git, etc.) | Full | Full |
+| Auto-rewrite hook | Yes (Claude/Codex native binary hook) | Yes |
+| `rtk init -g` | Claude native hook mode | Hook mode |
+| `rtk init -g --codex` | Codex native hook mode | Codex hook mode |
+| `rtk gain` / analytics | Full | Full |
 
 ## Supported AI Tools
 
@@ -488,6 +495,8 @@ export RTK_TELEMETRY_DISABLED=1   # Blocks telemetry regardless of consent
   [GitHub](https://github.com/FlorianBruniaux) · [LinkedIn](https://www.linkedin.com/in/florian-bruniaux-43408b83/)
 - **Adrien Eppling** — Core contributor
   [GitHub](https://github.com/aeppling) · [LinkedIn](https://www.linkedin.com/in/adrien-eppling/)
+- **Nicolas Le Cam** — Core contributor
+  [Github](https://github.com/kush) · [LinkedIn](https://www.linkedin.com/in/nicolas-le-cam-386387160/)
 
 ## Contributing
 

@@ -2,7 +2,7 @@
 
 use crate::core::display_helpers::{format_duration, print_period_table};
 use crate::core::tracking::{CommandRecord, DayStats, MonthStats, Tracker, WeekStats};
-use crate::core::utils::format_tokens;
+use crate::core::utils::{format_tokens, truncate};
 use crate::hooks::hook_check;
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -144,6 +144,18 @@ pub fn run(
         // Lightweight RTK_DISABLED bypass check (best-effort, silent on failure)
         if let Some(warning) = check_rtk_disabled_bypass() {
             eprintln!("{}", warning.yellow());
+            eprintln!();
+        }
+
+        let untrusted_filters = crate::hooks::trust::untrusted_active_filter_count();
+        if untrusted_filters > 0 {
+            eprintln!(
+                "{}",
+                format!(
+                    "[rtk] {untrusted_filters} untrusted custom filter(s) not applied — run `rtk trust`"
+                )
+                .yellow()
+            );
             eprintln!();
         }
 
@@ -711,11 +723,7 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
         println!("{}", styled("Top Commands (by frequency)", true));
         println!("{}", "─".repeat(60));
         for (cmd, count) in &summary.top_commands {
-            let cmd_display = if cmd.len() > 50 {
-                format!("{}...", &cmd[..47])
-            } else {
-                cmd.clone()
-            };
+            let cmd_display = truncate(cmd, 50);
             println!("  {:>4}x  {}", count, cmd_display);
         }
         println!();
@@ -725,17 +733,11 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
         println!("{}", styled("Recent Failures (last 10)", true));
         println!("{}", "─".repeat(60));
         for rec in &summary.recent {
-            let ts_short = if rec.timestamp.len() >= 16 {
-                &rec.timestamp[..16]
-            } else {
-                &rec.timestamp
-            };
+            // ISSUE #2787: floor to the previous char boundary so the prefix
+            // never exceeds 16 bytes and never lands mid-character
+            let ts_short = &rec.timestamp[..rec.timestamp.floor_char_boundary(16)];
             let status = if rec.fallback_succeeded { "ok" } else { "FAIL" };
-            let cmd_display = if rec.raw_command.len() > 40 {
-                format!("{}...", &rec.raw_command[..37])
-            } else {
-                rec.raw_command.clone()
-            };
+            let cmd_display = truncate(&rec.raw_command, 40);
             println!("  {} [{}] {}", ts_short, status, cmd_display);
         }
         println!();
