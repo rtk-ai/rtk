@@ -865,6 +865,11 @@ fn rewrite_segment_inner(
     }
 
     if cmd_part.starts_with("head -") || cmd_part.starts_with("tail ") {
+        let stripped = ENV_PREFIX.replace(cmd_part, "");
+        let cmd_clean = stripped.trim();
+        if is_excluded(cmd_clean, excluded) {
+            return None;
+        }
         return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
     }
 
@@ -3695,6 +3700,30 @@ mod tests {
             rewrite_command_no_prefixes("git push origin main", &excluded),
             None
         );
+    }
+
+    #[test]
+    fn test_exclude_tail_line_range_fast_path() {
+        let excluded = vec!["tail".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -5 sample.txt", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_exclude_head_line_range_fast_path() {
+        let excluded = vec!["head".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("head -5 sample.txt", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_head_line_range_fast_path_still_rewrites_when_not_excluded() {
+        let excluded: Vec<String> = vec![];
+        assert!(rewrite_command_no_prefixes("head -5 sample.txt", &excluded).is_some());
     }
 
     #[test]
