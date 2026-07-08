@@ -555,6 +555,96 @@ fn run_cursor_inner_with_rules(
     }
 }
 
+// ── Crush native hook ─────────────────────────────────────────
+
+/// Run the Crush PreToolUse hook natively.
+pub fn run_crush() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let env_cmd = std::env::var("CRUSH_TOOL_INPUT_COMMAND").ok();
+
+    if let Some(output) = run_crush_inner_with_env(&input, env_cmd.as_deref()) {
+        let _ = writeln!(io::stdout(), "{output}");
+    }
+    Ok(())
+}
+
+fn crush_command_from_input(input: &str, env_cmd: Option<&str>) -> Option<String> {
+    let input = strip_leading_bom(input).trim();
+    if !input.is_empty() {
+        if let Ok(v) = serde_json::from_str::<Value>(input) {
+            let is_bash = match v.get("tool_name").and_then(|t| t.as_str()) {
+                Some(tool) => tool == "bash" || tool == "Bash",
+                None => true,
+            };
+            if !is_bash {
+                return None;
+            }
+            if let Some(cmd) = v
+                .pointer("/tool_input/command")
+                .and_then(|c| c.as_str())
+                .filter(|c| !c.is_empty())
+            {
+                return Some(cmd.to_string());
+            }
+        }
+    }
+
+    env_cmd.filter(|cmd| !cmd.is_empty()).map(str::to_string)
+}
+
+fn crush_response_from_decision(decision: HookDecision, cmd: &str) -> Option<String> {
+    match decision {
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            Some(
+                json!({
+                    "decision": "deny",
+                    "reason": "Blocked by RTK permission rule"
+                })
+                .to_string(),
+            )
+        }
+        HookDecision::AllowRewrite(rewritten) => {
+            audit_log("rewrite", cmd, &rewritten);
+            Some(
+                json!({
+                    "decision": "allow",
+                    "updated_input": { "command": rewritten }
+                })
+                .to_string(),
+            )
+        }
+        HookDecision::AskRewrite(rewritten) => {
+            audit_log("ask", cmd, &rewritten);
+            Some(
+                json!({
+                    "updated_input": { "command": rewritten }
+                })
+                .to_string(),
+            )
+        }
+        HookDecision::Defer => None,
+    }
+}
+
+fn run_crush_inner_with_env(input: &str, env_cmd: Option<&str>) -> Option<String> {
+    let cmd = crush_command_from_input(input, env_cmd)?;
+    crush_response_from_decision(decide_hook_action(&cmd, permissions::Host::Crush), &cmd)
+}
+
+#[cfg(test)]
+fn run_crush_inner_with_rules(
+    input: &str,
+    env_cmd: Option<&str>,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+) -> Option<String> {
+    let cmd = crush_command_from_input(input, env_cmd)?;
+    let verdict = permissions::check_command_with_rules(&cmd, deny_rules, ask_rules, allow_rules);
+    crush_response_from_decision(decide_from_verdict(&cmd, verdict), &cmd)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1180,6 +1270,88 @@ mod tests {
         assert_eq!(strip_leading_bom("\u{feff}\u{feff}\u{feff}hello"), "hello");
         // BOM in the middle is preserved (not "leading").
         assert_eq!(strip_leading_bom("a\u{feff}b"), "a\u{feff}b");
+    }
+
+    // --- Crush handler ---
+
+    fn crush_input(tool: &str, cmd: &str) -> String {
+        json!({
+            "event": PRE_TOOL_USE_KEY,
+            "tool_name": tool,
+            "tool_input": { "command": cmd }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_crush_default_verdict_rewrites_without_allowing() {
+        let result =
+            run_crush_inner_with_rules(&crush_input("bash", "git status"), None, &[], &[], &[])
+                .unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert!(v.get("decision").is_none());
+        assert_eq!(v["updated_input"]["command"], "rtk git status");
+        assert!(v["updated_input"].is_object());
+    }
+
+    #[test]
+    fn test_crush_allow_rewrite_preapproves_only_for_allow_rule() {
+        let result = run_crush_inner_with_rules(
+            &crush_input("bash", "git status"),
+            None,
+            &[],
+            &[],
+            &["git status".to_string()],
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["updated_input"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_crush_ask_rewrite_does_not_preapprove() {
+        let result = run_crush_inner_with_rules(
+            &crush_input("bash", "git status"),
+            None,
+            &[],
+            &["git status".to_string()],
+            &[],
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert!(v.get("decision").is_none());
+        assert_eq!(v["updated_input"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_crush_deny_emits_explicit_deny() {
+        let result = run_crush_inner_with_rules(
+            &crush_input("bash", "git status"),
+            None,
+            &["git status".to_string()],
+            &[],
+            &[],
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["decision"], "deny");
+        assert_eq!(v["reason"], "Blocked by RTK permission rule");
+        assert!(v.get("updated_input").is_none());
+    }
+
+    #[test]
+    fn test_crush_env_command_fallback() {
+        let result = run_crush_inner_with_rules("", Some("git status"), &[], &[], &[]).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["updated_input"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_crush_non_bash_passthrough() {
+        let result =
+            run_crush_inner_with_rules(&crush_input("edit", "git status"), None, &[], &[], &[]);
+        assert!(result.is_none());
     }
 
     // --- Audit logging ---
