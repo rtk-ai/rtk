@@ -429,6 +429,15 @@ pub fn run_claude() -> Result<()> {
     Ok(())
 }
 
+/// Run the Devin for Terminal PreToolUse hook.
+///
+/// Devin uses the same JSON protocol as Claude Code, so this delegates to
+/// `process_claude_payload`. The separate entry point exists so that Devin
+/// invocations are distinguishable from Claude Code in logs and analytics.
+pub fn run_devin() -> Result<()> {
+    run_claude()
+}
+
 #[cfg(test)]
 fn run_claude_inner(input: &str) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;

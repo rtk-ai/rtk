@@ -50,6 +50,8 @@ pub enum AgentTarget {
     Pi,
     /// Hermes CLI
     Hermes,
+    /// Devin for Terminal
+    Devin,
 }
 
 #[derive(Parser)]
@@ -853,6 +855,8 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process Devin for Terminal PreToolUse hook (Claude-compatible JSON from stdin)
+    Devin,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1526,6 +1530,8 @@ where
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
+    } else if agent == Some(AgentTarget::Devin) {
+        hooks::init::uninstall_devin(ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -2021,6 +2027,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_antigravity_mode(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Devin) {
+                hooks::init::run_devin_mode(ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2378,6 +2386,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::Devin => {
+                hooks::hook_cmd::run_devin()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {

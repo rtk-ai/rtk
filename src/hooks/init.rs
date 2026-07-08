@@ -13,11 +13,11 @@ use crate::hooks::constants::{
 };
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
-    GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
-    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
-    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
-    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, DEVIN_DIR,
+    DEVIN_HOOK_COMMAND, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
+    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
+    HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
+    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -427,6 +427,38 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
         )
     })?;
 
+    Ok(())
+}
+
+/// Read a JSON file, returning an empty `{}` object if the file is missing
+/// or empty. Used for config files that share the Claude Code settings.json
+/// structure (e.g. Devin's ~/.config/devin/config.json).
+fn read_json_or_empty(path: &Path) -> Result<serde_json::Value> {
+    if !path.exists() {
+        return Ok(serde_json::json!({}));
+    }
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    if content.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {} as JSON", path.display()))
+}
+
+/// Serialize `root` to pretty JSON, back up the existing file (if any), and
+/// atomically write the new content.
+fn backup_and_write(path: &Path, root: &serde_json::Value) -> Result<()> {
+    let serialized =
+        serde_json::to_string_pretty(root).context("Failed to serialize JSON config")?;
+
+    if path.exists() {
+        let backup_path = path.with_extension("json.bak");
+        fs::copy(path, &backup_path)
+            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+    }
+
+    atomic_write(path, &serialized)?;
     Ok(())
 }
 
@@ -3040,6 +3072,137 @@ fn remove_opencode_plugin(ctx: InitContext) -> Result<Vec<PathBuf>> {
     }
 
     Ok(removed)
+}
+
+// ─── Devin for Terminal support ───────────────────────────────────────
+//
+// Devin for Terminal uses the same PreToolUse JSON protocol as Claude Code,
+// so installation only needs to patch ~/.config/devin/config.json with a
+// `rtk hook devin` entry (the binary hook handles all JSON I/O). No shell
+// script is involved.
+
+fn resolve_devin_dir() -> Result<PathBuf> {
+    resolve_home_subdir(DEVIN_DIR)
+}
+
+/// Entry point for `rtk init --agent devin`.
+/// Patches ~/.config/devin/config.json with the RTK PreToolUse hook.
+pub fn run_devin_mode(ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, verbose } = ctx;
+    let devin_dir = resolve_devin_dir()?;
+    let config_path = devin_dir.join("config.json");
+
+    if !dry_run {
+        fs::create_dir_all(&devin_dir).with_context(|| {
+            format!("Failed to create Devin directory: {}", devin_dir.display())
+        })?;
+    }
+
+    // Read or create config.json (same structure as Claude Code settings.json)
+    let mut root = read_json_or_empty(&config_path)?;
+
+    if hook_already_present(&root, DEVIN_HOOK_COMMAND) {
+        if verbose > 0 {
+            eprintln!("  Devin hook already present in config.json");
+        }
+        if dry_run {
+            print_dry_run_footer();
+        } else {
+            println!(
+                "\nRTK for Devin: hook already present in {}\n",
+                config_path.display()
+            );
+        }
+        return Ok(());
+    }
+
+    insert_hook_entry(&mut root, DEVIN_HOOK_COMMAND)?;
+
+    if dry_run {
+        println!(
+            "[dry-run] would patch Devin config: {}",
+            config_path.display()
+        );
+        if verbose > 0 {
+            let serialized =
+                serde_json::to_string_pretty(&root).context("Failed to serialize config.json")?;
+            println!("[dry-run] content:\n{}", serialized);
+        }
+        print_dry_run_footer();
+        return Ok(());
+    }
+
+    backup_and_write(&config_path, &root)?;
+    println!("\nRTK configured for Devin for Terminal.\n");
+    println!("  config.json: hook registered ({})", DEVIN_HOOK_COMMAND);
+    println!("  Restart Devin. Test with: git status\n");
+    Ok(())
+}
+
+/// Uninstall the RTK hook from ~/.config/devin/config.json.
+pub fn uninstall_devin(ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, verbose } = ctx;
+    let config_path = resolve_devin_dir()?.join("config.json");
+
+    if !config_path.exists() {
+        println!("RTK Devin support was not installed (nothing to remove)");
+        return Ok(());
+    }
+
+    let mut root = read_json_or_empty(&config_path)?;
+    if !remove_devin_hook_from_json(&mut root) {
+        println!("RTK Devin support was not installed (nothing to remove)");
+        return Ok(());
+    }
+
+    if dry_run {
+        println!(
+            "[dry-run] would remove RTK hook from {}",
+            config_path.display()
+        );
+        print_dry_run_footer();
+        return Ok(());
+    }
+
+    backup_and_write(&config_path, &root)?;
+    if verbose > 0 {
+        eprintln!("Removed RTK hook from {}", config_path.display());
+    }
+    println!("RTK uninstalled for Devin:");
+    println!("  - config.json: removed RTK hook");
+    Ok(())
+}
+
+/// Remove RTK hook entries from a Devin config.json root.
+/// Matches `rtk hook devin`, `rtk hook claude`, and legacy `rtk-rewrite.sh`.
+fn remove_devin_hook_from_json(root: &mut serde_json::Value) -> bool {
+    let pre_tool_use = match root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array_mut())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    let original_len = pre_tool_use.len();
+    pre_tool_use.retain(|entry| {
+        if let Some(hooks_array) = entry.get("hooks").and_then(|h| h.as_array()) {
+            for hook in hooks_array {
+                if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
+                    if cmd == DEVIN_HOOK_COMMAND
+                        || cmd == CLAUDE_HOOK_COMMAND
+                        || cmd.contains(REWRITE_HOOK_FILE)
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    });
+
+    pre_tool_use.len() < original_len
 }
 
 // ─── Cursor Agent support ─────────────────────────────────────────────
