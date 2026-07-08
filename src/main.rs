@@ -50,6 +50,8 @@ pub enum AgentTarget {
     Pi,
     /// Hermes CLI
     Hermes,
+    /// Devin for Terminal
+    Devin,
 }
 
 #[derive(Parser)]
@@ -1526,6 +1528,8 @@ where
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
+    } else if agent == Some(AgentTarget::Devin) {
+        hooks::init::uninstall_devin(ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -2021,6 +2025,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_antigravity_mode(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Devin) {
+                hooks::init::run_devin_mode(ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;

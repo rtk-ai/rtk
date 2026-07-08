@@ -42,6 +42,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
 - **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, `isToolCallEventType` guard, in-place mutation, `~/.pi/agent/extensions/`
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
+- **[`devin/`](devin/README.md)** — Shell hook, `PreToolUse` JSON format (Claude-compatible), uses `rtk hook claude` command
 
 ## Supported Agents
 
@@ -58,6 +59,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | OpenCode | TypeScript plugin (`tool.execute.before`) | In-place mutation | Yes |
 | Pi | TypeScript extension (`tool_call` event) | In-place mutation | Yes |
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
+| Devin for Terminal | Shell hook (`PreToolUse`) | Transparent rewrite | Yes (`updatedInput`) |
 
 ## JSON Formats by Agent
 
@@ -84,6 +86,14 @@ Each agent subdirectory has its own README with hook-specific details:
   }
 }
 ```
+
+### Devin for Terminal (Shell Hook)
+
+**Input**: Same as Claude Code.
+
+**Output**: Same as Claude Code format (with `updatedInput`).
+
+Devin hooks are fully compatible with Claude Code hooks and use the same JSON format.
 
 ### Cursor (Shell Hook)
 
