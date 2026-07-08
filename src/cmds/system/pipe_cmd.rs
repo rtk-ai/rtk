@@ -34,6 +34,7 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
         "ecs" => Some(crate::cmds::php::ecs_cmd::filter_ecs_output),
         "phpstan" => Some(phpstan_wrapper),
         "pint" => Some(pint_wrapper),
+        "toon" => Some(toon_wrapper),
         _ => None,
     }
 }
@@ -70,6 +71,10 @@ fn pint_wrapper(input: &str) -> String {
     } else {
         crate::core::utils::fallback_tail(input, "pint", 60)
     }
+}
+
+fn toon_wrapper(input: &str) -> String {
+    crate::core::toon::json_str_to_toon(input).unwrap_or_else(|_| input.to_string())
 }
 
 fn vitest_wrapper(input: &str) -> String {

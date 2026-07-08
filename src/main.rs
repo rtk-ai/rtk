@@ -22,7 +22,7 @@ use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
     deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
-    summary, tree, wc_cmd,
+    summary, toon_cmd, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -236,6 +236,12 @@ enum Commands {
         /// Show keys only (strip all values, show structure)
         #[arg(long)]
         keys_only: bool,
+    },
+
+    /// Convert JSON to TOON format (token-optimized notation for LLMs)
+    Toon {
+        /// JSON file (use "-" for stdin)
+        file: PathBuf,
     },
 
     /// Summarize project dependencies
@@ -1823,6 +1829,15 @@ fn run_cli() -> Result<i32> {
             0
         }
 
+        Commands::Toon { file } => {
+            if file == Path::new("-") {
+                toon_cmd::run_stdin(cli.verbose)?;
+            } else {
+                toon_cmd::run(&file, cli.verbose)?;
+            }
+            0
+        }
+
         Commands::Deps { path } => {
             deps::run(&path, cli.verbose)?;
             0
@@ -2667,6 +2682,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Err { .. }
             | Commands::Test { .. }
             | Commands::Json { .. }
+            | Commands::Toon { .. }
             | Commands::Deps { .. }
             | Commands::Env { .. }
             | Commands::Find { .. }
