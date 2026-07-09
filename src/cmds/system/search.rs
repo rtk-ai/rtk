@@ -137,6 +137,36 @@ fn match_block(path: &str, entries: &[(usize, bool, String)]) -> String {
 /// terminates the cluster — everything after it is its inline value, not a
 /// separate flag. Long value-taking flags consume the next token. `--` marks
 /// everything after it as positional.
+
+/// Strip bare GNU-grep -E / cluster E (extended regex) before forwarding to rg.
+/// ripgrep treats -E as --encoding, so a bare flag must not be forwarded.
+fn strip_gnu_grep_E(flags: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(flags.len());
+    let mut i = 0;
+    while i < flags.len() {
+        let f = &flags[i];
+        if f == "-E" {
+            // bare -E: drop (no value)
+            i += 1;
+            continue;
+        }
+        if let Some(rest) = f.strip_prefix('-') {
+            if !rest.starts_with('-') && rest.contains('E') {
+                // short cluster containing E (e.g. -nE, -Ei) — drop E only
+                let cleaned: String = rest.chars().filter(|&ch| ch != 'E').collect();
+                if !cleaned.is_empty() {
+                    out.push(format!("-{}", cleaned));
+                }
+                i += 1;
+                continue;
+            }
+        }
+        out.push(f.clone());
+        i += 1;
+    }
+    out
+}
+
 fn extract_pattern_path<T: AsRef<str>>(args: &[T]) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut e_patterns: Vec<String> = Vec::new();
     let mut positionals: Vec<String> = Vec::new();
@@ -244,7 +274,7 @@ fn extract_pattern_path<T: AsRef<str>>(args: &[T]) -> (Vec<String>, Vec<String>,
         (patterns, paths)
     };
 
-    (patterns, paths, flags)
+    (patterns, paths, strip_gnu_grep_E(flags))
 }
 
 fn unparsed_signal(stdout: &str) -> usize {
@@ -1427,5 +1457,22 @@ mod tests {
         assert!(f(&["--before-context=2"]));
         assert!(f(&["--context=1"]));
         assert!(!f(&["--color", "auto"]));
+    }
+
+    #[test]
+    fn extract_strips_bare_E_flag() {
+        let (patterns, paths, flags) = extract_pattern_path(&["-E", "to-prd|to-issues", "file.md"]);
+        assert_eq!(patterns, vec!["to-prd|to-issues"]);
+        assert_eq!(paths, vec!["file.md"]);
+        assert!(!flags.iter().any(|f| f.contains('E')));
+    }
+
+    #[test]
+    fn extract_strips_E_from_cluster() {
+        let (patterns, paths, flags) = extract_pattern_path(&["-nE", "foo|bar", "src"]);
+        assert_eq!(patterns, vec!["foo|bar"]);
+        assert_eq!(paths, vec!["src"]);
+        assert!(flags.iter().any(|f| f == "-n"));
+        assert!(!flags.iter().any(|f| f.contains('E')));
     }
 }
