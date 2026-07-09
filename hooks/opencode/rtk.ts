@@ -61,50 +61,28 @@ function logDebug(message: string): void {
 
 type Strategy = "truncate-middle" | "truncate-tail" | "json-compact" | "rtk-minimal"
 
-// Every tool whose output can blow up context, mapped to how we shrink it:
+// Per-tool overrides for OpenCode's built-in tools, mapped to how we shrink
+// their output:
 //   truncate-middle — keep head + tail, drop the middle (structured dumps)
 //   truncate-tail   — keep head, drop tail (docs/logs: first lines matter most)
 //   json-compact    — prune deep nesting + long arrays/strings (JSON payloads)
 //   rtk-minimal     — strip comments, keep `N:` line prefixes (source files)
-// Any tool not listed here falls back to DEFAULT_STRATEGY.
+//
+// Only the built-ins get a hand-picked strategy — they ship with every
+// OpenCode install, so tuning them benefits everyone. Any other tool (MCP
+// servers, third-party plugins) isn't listed and falls back to
+// DEFAULT_STRATEGY, which handles arbitrary output safely.
 const HEAVY_TOOLS: Record<string, Strategy> = {
-  // OpenCode built-ins (these bypass the command-rewrite hook entirely).
   read: "rtk-minimal", // #1 token consumer; strip comments, keep the file
   grep: "truncate-tail", // first matches are the relevant ones
   glob: "truncate-tail", // first matches + structure matter most
   task: "truncate-middle", // sub-agent results can be whole conversations
   webfetch: "truncate-tail", // raw HTML/markdown page dumps
-
-  // MCP: Codegraph — full source of relevant symbols across files.
-  codegraph_codegraph_explore: "truncate-middle",
-
-  // MCP: Context7 — library documentation chunks.
-  "context7_query-docs": "truncate-tail",
-
-  // Plugin: Graphify — knowledge-graph queries. Registered by opencode with a
-  // single "graphify_" prefix (native plugin, not MCP). See registry.ts.
-  graphify_query: "truncate-middle",
-  graphify_explain: "truncate-tail",
-  graphify_path: "truncate-middle",
-  graphify_affected: "truncate-middle",
-
-  // MCP: Chrome DevTools — snapshots and network logs can be massive.
-  "chrome-devtools-mcp_take_snapshot": "json-compact",
-  "chrome-devtools-mcp_list_network_requests": "json-compact",
-  "chrome-devtools-mcp_list_console_messages": "truncate-tail",
-  "chrome-devtools-mcp_performance_analyze_insight": "truncate-tail",
-  "chrome-devtools-mcp_take_heapsnapshot": "json-compact",
-
-  // MCP: Notebooks — cell outputs can hold large data frames.
-  notebooks_get_cell_outputs: "truncate-tail",
-  notebooks_get_cell_range: "truncate-middle",
-
-  // MCP: Engram — memory search/context can return many observations.
-  engram_mem_search: "truncate-tail",
-  engram_mem_context: "truncate-tail",
-  engram_mem_get_observation: "truncate-tail",
 }
 
+// Fallback for every tool not in HEAVY_TOOLS (MCP servers, plugins, unknown
+// tools). truncate-middle keeps both ends, which is the safest default when we
+// don't know the output's shape.
 const DEFAULT_STRATEGY: Strategy = "truncate-middle"
 
 // ─── Token accounting + truncation markers ──────────────────────────────────────

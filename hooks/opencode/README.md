@@ -21,16 +21,21 @@ The plugin has two independent responsibilities:
 
 ### 2. Output compression — `tool.execute.after`
 
-Compresses heavy tool outputs that never pass through `rtk rewrite` — OpenCode
-built-in tools (`read`, `grep`, `glob`, `task`, `webfetch`) and MCP tools
-(codegraph, context7, engram, graphify, chrome-devtools, notebooks). These reach
+Compresses heavy tool outputs that never pass through `rtk rewrite`. These reach
 the LLM directly, so the plugin trims them client-side.
 
-- A per-tool registry (`HEAVY_TOOLS`) maps each known tool to a strategy;
-  any unlisted tool falls back to `DEFAULT_STRATEGY` (`truncate-middle`).
+- `HEAVY_TOOLS` holds hand-picked strategies for OpenCode's **built-in** tools
+  (`read`, `grep`, `glob`, `task`, `webfetch`) — they ship with every install,
+  so tuning them benefits everyone.
+- **Every other tool** (MCP servers, third-party plugins, unknown tools) is not
+  listed and falls back to `DEFAULT_STRATEGY` (`truncate-middle`), which keeps
+  both ends and is safe when the output's shape is unknown. This keeps the
+  plugin generic — no assumptions about which MCP servers you happen to run.
 - Strategies: `truncate-middle` (keep head+tail), `truncate-tail` (keep head),
   `json-compact` (prune deep nesting / long arrays), `rtk-minimal` (strip
   comments, preserving OpenCode's `N:` line prefixes — mirrors `rtk read --level minimal`).
+  Built-ins currently use every strategy except `json-compact`, which stays
+  available for anyone who adds a JSON-heavy tool to `HEAVY_TOOLS`.
 - Two guards keep it conservative: it only compresses when the output exceeds the
   threshold **and** only applies the result when it saves >10% of tokens. This is
   the plugin-side analogue of the `never_worse` guard in the Rust core.
@@ -60,4 +65,5 @@ The hook mutates whichever field the tool populated:
 
 > Note: OpenCode already truncates `bash` output with its own `Truncate` service
 > **before** the hook runs, so shell command output is generally handled upstream;
-> the plugin's compression adds value mainly on built-in and MCP tool outputs.
+> the plugin's compression adds value mainly on built-in tool outputs (and any MCP
+> or plugin tool that bypasses that path).
