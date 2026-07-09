@@ -1685,6 +1685,14 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_git_checkout() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git checkout main", &[]),
+            Some("rtk git checkout main".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_git_log() {
         assert_eq!(
             rewrite_command_no_prefixes("git log -10", &[]),

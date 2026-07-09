@@ -207,7 +207,7 @@ Documentation updates are required for new filters, new features, and changes th
 
 ### Contributor License Agreement (CLA)
 
-All contributions require signing our [Contributor License Agreement (CLA)](CLA.md) before being merged.
+All contributions require signing our **Contributor License Agreement (CLA)** before being merged.
 
 By signing, you certify that:
 - You have authored 100% of the contribution, or have the necessary rights to submit it.
@@ -247,8 +247,8 @@ For how to write tests (fixtures, snapshots, token savings verification), see [d
 | Type | Where | Run With |
 |------|-------|----------|
 | **Unit tests** | `#[cfg(test)] mod tests` in each module | `cargo test` |
-| **Snapshot tests** | `assert_snapshot!()` via `insta` crate | `cargo test` + `cargo insta review` |
-| **Smoke tests** | `scripts/test-all.sh` (69 assertions) | `bash scripts/test-all.sh` |
+| **Snapshot tests** | `#[cfg(test)]` create snapshots for filters modules | `cargo test` |
+| **Smoke tests** | `scripts/test-all.sh` | `bash scripts/test-all.sh` |
 | **Integration tests** | `#[ignore]` tests requiring installed binary | `cargo test --ignored` |
 
 ### Pre-Commit Gate (mandatory)
@@ -262,7 +262,7 @@ cargo fmt --all --check && cargo clippy --all-targets && cargo test
 ### PR Testing Checklist
 
 - [ ] Unit tests added/updated for changed code
-- [ ] Snapshot tests reviewed (`cargo insta review`)
+- [ ] Snapshot tests for filters
 - [ ] Token savings >=60% verified
 - [ ] Any truncated list has a recovery hint (`force_tee_tail_hint` or `force_tee_hint`) and uses a `CAP_*` from `src/core/truncate.rs`
 - [ ] Edge cases covered
