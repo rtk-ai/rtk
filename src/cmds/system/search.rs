@@ -137,6 +137,36 @@ fn match_block(path: &str, entries: &[(usize, bool, String)]) -> String {
 /// terminates the cluster — everything after it is its inline value, not a
 /// separate flag. Long value-taking flags consume the next token. `--` marks
 /// everything after it as positional.
+
+/// Strip bare GNU-grep ``-E`` / cluster ``E`` (extended regex) before forwarding to rg.
+/// ripgrep treats ``-E`` as ``--encoding``, so a bare flag must not be forwarded.
+fn strip_gnu_grep_E(flags: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(flags.len());
+    let mut i = 0;
+    while i < flags.len() {
+        let f = &flags[i];
+        if f == "-E" {
+            // bare -E: drop (no value)
+            i += 1;
+            continue;
+        }
+        if let Some(rest) = f.strip_prefix('-') {
+            if !rest.starts_with('-') && rest.contains('E') {
+                // short cluster containing E (e.g. -nE, -Ei) — drop E only
+                let cleaned: String = rest.chars().filter(|&ch| ch != 'E').collect();
+                if !cleaned.is_empty() {
+                    out.push(format!("-{}", cleaned));
+                }
+                i += 1;
+                continue;
+            }
+        }
+        // If previous was --encoding we keep value; bare -E already handled
+        out.push(f.clone());
+        i += 1;
+    }
+    out
+}
 fn extract_pattern_path<T: AsRef<str>>(args: &[T]) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut e_patterns: Vec<String> = Vec::new();
     let mut positionals: Vec<String> = Vec::new();
