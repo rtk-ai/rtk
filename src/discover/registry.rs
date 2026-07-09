@@ -325,8 +325,10 @@ fn normalize_php_tool_path(path: &str) -> String {
 /// Git global options that take a separate value token: -C <path>, -c <key=val>,
 /// --git-dir <dir>, --work-tree <dir>.
 const GIT_GLOBAL_OPT_WITH_VALUE: &[&str] = &["-C", "-c", "--git-dir", "--work-tree"];
+
 /// Git global options that also accept `--flag=value` form.
 const GIT_GLOBAL_OPT_EQ: &[&str] = &["--git-dir", "--work-tree"];
+
 /// Git global flag-only options that take no value.
 const GIT_GLOBAL_OPT_FLAG: &[&str] = &[
     "--no-pager",
