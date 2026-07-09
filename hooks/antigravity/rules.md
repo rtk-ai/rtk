@@ -1,4 +1,8 @@
+---
+trigger: always_on
+---
 # RTK - Rust Token Killer (Google Antigravity)
+
 
 **Usage**: Token-optimized CLI proxy for shell commands.
 
