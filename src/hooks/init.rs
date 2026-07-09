@@ -20,6 +20,7 @@ use super::constants::{
     HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
     PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
+use super::hook_check::claude_hook_command_matches;
 use super::integrity;
 
 // Embedded OpenCode plugin (auto-rewrite)
@@ -1121,9 +1122,7 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .filter_map(|entry| entry.get("hooks")?.as_array())
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
-        .any(|cmd| {
-            cmd == hook_command || cmd == CLAUDE_HOOK_COMMAND || cmd.contains(REWRITE_HOOK_FILE)
-        })
+        .any(|cmd| cmd == hook_command || claude_hook_command_matches(cmd))
 }
 
 /// Default mode: hook + slim RTK.md + @RTK.md reference

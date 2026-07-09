@@ -58,6 +58,23 @@ pub fn status() -> HookStatus {
     }
 }
 
+/// Returns true when `cmd` registers the Claude Code RTK hook, including
+/// absolute-path invocations like `/opt/homebrew/bin/rtk hook claude`.
+pub fn claude_hook_command_matches(cmd: &str) -> bool {
+    if cmd == CLAUDE_HOOK_COMMAND || cmd.contains(REWRITE_HOOK_FILE) {
+        return true;
+    }
+    let normalized = cmd.replace('\\', "/");
+    if normalized.ends_with(CLAUDE_HOOK_COMMAND)
+        || normalized.contains(&format!("/{CLAUDE_HOOK_COMMAND}"))
+    {
+        return true;
+    }
+    // Windows: `...\rtk.exe hook claude`
+    normalized.ends_with("rtk.exe hook claude")
+        || normalized.contains("/rtk.exe hook claude")
+}
+
 /// Check if the native binary command is registered in settings.json
 fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
     let settings_path = claude_dir.join(SETTINGS_JSON);
@@ -82,7 +99,7 @@ fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
         .filter_map(|entry| entry.get("hooks")?.as_array())
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
-        .any(|cmd| cmd == CLAUDE_HOOK_COMMAND)
+        .any(claude_hook_command_matches)
 }
 
 /// Check if the installed hook is missing or outdated, warn once per day.
@@ -175,6 +192,19 @@ mod tests {
                 .join(HERMES_PLUGIN_MANIFEST_FILE),
         ];
         paths.iter().any(|p| p.exists())
+    }
+
+    #[test]
+    fn test_claude_hook_command_matches_absolute_path() {
+        assert!(claude_hook_command_matches(
+            "/opt/homebrew/bin/rtk hook claude"
+        ));
+        assert!(claude_hook_command_matches(
+            r"C:\Program Files\rtk\rtk.exe hook claude"
+        ));
+        assert!(claude_hook_command_matches(CLAUDE_HOOK_COMMAND));
+        assert!(!claude_hook_command_matches("rtk hook gemini"));
+        assert!(!claude_hook_command_matches("/usr/bin/grep foo"));
     }
 
     #[test]
