@@ -20,6 +20,16 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     cmd.arg("build");
 
+    // 
+tk next already injects uild. Drop a redundant leading uild so
+    // 
+tk next build does not become 
+ext build build (fails as directory).
+    let args = match args {
+        [first, rest @ ..] if first == "build" => rest,
+        other => other,
+    };
+
     for arg in args {
         cmd.arg(arg);
     }
