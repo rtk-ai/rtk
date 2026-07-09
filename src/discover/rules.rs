@@ -12,7 +12,11 @@ pub struct RtkRule {
 
 pub const RULES: &[RtkRule] = &[
     RtkRule {
-        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|checkout|push|pull|branch|fetch|stash|worktree)",
+        // -C/-c/--git-dir/--work-tree are already stripped by
+        // strip_git_global_opts() in registry.rs before this pattern is matched,
+        // so this pattern doesn't need to (and can't reliably, without duplicating
+        // the tokenizer) account for them here.
+        pattern: r"^(?:git|yadm)\s+(status|log|diff|show|add|commit|checkout|push|pull|branch|fetch|stash|worktree)",
         rtk_cmd: "rtk git",
         rewrite_prefixes: &["git", "yadm"],
         category: "Git",
