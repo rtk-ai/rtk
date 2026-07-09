@@ -52,6 +52,8 @@ pub enum AgentTarget {
     Hermes,
     /// Factory Droid CLI
     Droid,
+    /// Kimi Code CLI (Moonshot AI)
+    Kimi,
 }
 
 #[derive(Parser)]
@@ -1532,6 +1534,8 @@ where
         uninstall_hermes(ctx)
     } else if agent == Some(AgentTarget::Droid) {
         hooks::init::uninstall_droid(global, ctx)
+    } else if agent == Some(AgentTarget::Kimi) {
+        hooks::init::uninstall_kimi(ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -2029,6 +2033,13 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_hermes_mode(ctx)?;
             } else if agent == Some(AgentTarget::Droid) {
                 hooks::init::run_droid_mode(global, ctx)?;
+            } else if agent == Some(AgentTarget::Kimi) {
+                if !global {
+                    anyhow::bail!(
+                        "Kimi Code CLI support is global-only. Use: rtk init -g --agent kimi"
+                    );
+                }
+                hooks::init::run_kimi_mode(ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
