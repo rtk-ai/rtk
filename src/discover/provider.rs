@@ -481,10 +481,7 @@ mod tests {
         );
     }
 
-    // The project filter passed here mirrors what discover::mod.rs::run() derives
-    // from the cwd: encode_project_path() output used as a substring match against
-    // the on-disk directory name. If the encoding doesn't sanitize a character the
-    // same way Claude Code does, the filter silently matches nothing.
+    // Mirrors discover::mod.rs::run(): encode_project_path() output used as a substring match against the on-disk directory name.
     #[test]
     fn test_discover_sessions_applies_project_filter_with_parens() {
         let projects_dir = tempfile::tempdir().unwrap();
