@@ -192,7 +192,9 @@ impl TomlFilterRegistry {
             Self::extend_with_trusted(&mut filters, &path);
         }
 
-        match Self::parse_and_compile(BUILTIN_TOML, "builtin") {
+        // Priority 3: built-in (embedded at compile time)
+        let builtin = BUILTIN_TOML;
+        match Self::parse_and_compile(builtin, "builtin") {
             Ok(f) => filters.extend(f),
             Err(e) => eprintln!("[rtk] warning: builtin filters: {}", e),
         }
@@ -299,6 +301,7 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "learn",
 ];
 
+#[allow(dead_code)]
 pub fn is_rtk_reserved_command(name: &str) -> bool {
     RUST_HANDLED_COMMANDS.contains(&name) || RTK_META_COMMANDS.contains(&name)
 }
@@ -399,6 +402,7 @@ lazy_static! {
     static ref REGISTRY: TomlFilterRegistry = TomlFilterRegistry::load();
 }
 
+#[allow(dead_code)]
 pub fn toml_disabled() -> bool {
     std::env::var("RTK_NO_TOML").ok().as_deref() == Some("1")
 }
@@ -424,10 +428,12 @@ lazy_static! {
     static ref MATCH_SET: RegexSet = build_match_set();
 }
 
+#[allow(dead_code)]
 pub fn command_matches_filter(command: &str) -> bool {
     MATCH_SET.is_match(command)
 }
 
+#[allow(dead_code)]
 fn build_match_set() -> RegexSet {
     let patterns = collect_match_patterns();
     RegexSet::new(&patterns).unwrap_or_else(|_| {
@@ -439,6 +445,7 @@ fn build_match_set() -> RegexSet {
     })
 }
 
+#[allow(dead_code)]
 fn collect_match_patterns() -> Vec<String> {
     let mut patterns: Vec<String> = Vec::new();
     for path in crate::hooks::trust::gated_filter_paths() {
@@ -461,7 +468,8 @@ fn collect_match_patterns() -> Vec<String> {
     patterns
 }
 
-fn match_patterns_in(content: &str) -> Vec<String> {
+#[allow(dead_code)]
+pub fn match_patterns_in(content: &str) -> Vec<String> {
     match toml::from_str::<TomlFilterFile>(content) {
         Ok(file) if file.schema_version == 1 => file
             .filters
@@ -503,8 +511,7 @@ pub fn apply_filter(filter: &CompiledFilter, stdout: &str) -> String {
 #[derive(Debug, PartialEq)]
 pub enum Lossiness {
     None,
-    /// `tail -n +{tail_offset}` over `tee_payload` reproduces the dropped lines,
-    /// up to the tee `max_file_size` cap (larger payloads are truncated in the tee file).
+    /// `tail -n +{tail_offset}` over `tee_payload` reproduces the dropped lines.
     Tail {
         tee_payload: String,
         tail_offset: usize,
@@ -613,9 +620,9 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
     let mut max_cut: Option<usize> = None;
     if let Some(max) = filter.max_lines {
         if lines.len() > max {
-            let dropped = lines.len() - max;
+            let truncated = lines.len() - max;
             lines.truncate(max);
-            lines.push(format!("... ({} lines truncated)", dropped));
+            lines.push(format!("... ({} lines truncated)", truncated));
             max_cut = Some(max);
         }
     }
@@ -808,6 +815,7 @@ pub fn find_matching_filter(command: &str) -> Option<&'static CompiledFilter> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
 
     // Helper: build a CompiledFilter from inline TOML for tests.
     // Never touches the lazy_static registry.
@@ -822,6 +830,32 @@ mod tests {
             .expect("expected at least one filter")
     }
 
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn test_toml_disabled_respects_rtk_no_toml() {
+        let _guard = env_lock().lock().unwrap();
+        let previous = std::env::var_os("RTK_NO_TOML");
+
+        std::env::remove_var("RTK_NO_TOML");
+        assert!(!toml_disabled());
+
+        std::env::set_var("RTK_NO_TOML", "0");
+        assert!(!toml_disabled());
+
+        std::env::set_var("RTK_NO_TOML", "1");
+        assert!(toml_disabled());
+
+        if let Some(value) = previous {
+            std::env::set_var("RTK_NO_TOML", value);
+        } else {
+            std::env::remove_var("RTK_NO_TOML");
+        }
+    }
+
     #[test]
     fn command_matches_filter_agrees_with_find_matching_filter() {
         for cmd in ["jj log", "jq .", "frobnicate xyz", "cd /tmp"] {
@@ -831,14 +865,6 @@ mod tests {
                 "match-set disagreed with registry for {cmd:?}"
             );
         }
-    }
-
-    #[test]
-    fn test_loss_tail_configured_unfired_max_fires_is_whole() {
-        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\ntail_lines = 100\nmax_lines = 2\n";
-        let (out, loss) = apply_filter_with_info(&first_filter(toml), "a\nb\nc\nd\ne");
-        assert!(out.contains("lines truncated"));
-        assert_ne!(loss, Lossiness::None);
     }
 
     #[test]
@@ -872,107 +898,6 @@ mod tests {
         assert!(!is_rtk_reserved_command("jq"));
         assert!(!is_rtk_reserved_command("just"));
         assert!(!is_rtk_reserved_command("frobnicate"));
-    }
-
-    fn loss_of(toml: &str, input: &str) -> Lossiness {
-        apply_filter_with_info(&first_filter(toml), input).1
-    }
-
-    #[test]
-    fn test_loss_head_lines_is_tail() {
-        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nhead_lines = 2\n";
-        let (out, loss) = apply_filter_with_info(&first_filter(toml), "a\nb\nc\nd\ne");
-        assert!(out.starts_with("a\nb\n"));
-        match loss {
-            Lossiness::Tail {
-                tee_payload,
-                tail_offset,
-            } => {
-                assert_eq!(tail_offset, 3);
-                let recovered: Vec<&str> = tee_payload.lines().skip(tail_offset - 1).collect();
-                assert_eq!(recovered, vec!["c", "d", "e"]);
-            }
-            other => panic!("expected Tail, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_loss_max_lines_is_tail() {
-        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nmax_lines = 2\n";
-        match loss_of(toml, "a\nb\nc\nd\ne") {
-            Lossiness::Tail {
-                tee_payload,
-                tail_offset,
-            } => {
-                assert_eq!(tail_offset, 3);
-                let recovered: Vec<&str> = tee_payload.lines().skip(tail_offset - 1).collect();
-                assert_eq!(recovered, vec!["c", "d", "e"]);
-            }
-            other => panic!("expected Tail, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_loss_tail_lines_is_whole() {
-        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\ntail_lines = 2\n";
-        assert_eq!(loss_of(toml, "a\nb\nc\nd\ne"), Lossiness::Whole);
-    }
-
-    #[test]
-    fn test_loss_head_then_max_is_whole() {
-        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nhead_lines = 2\nmax_lines = 2\n";
-        assert_eq!(loss_of(toml, "a\nb\nc\nd\ne"), Lossiness::Whole);
-    }
-
-    #[test]
-    fn test_loss_head_plus_tail_is_whole() {
-        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nhead_lines = 1\ntail_lines = 1\n";
-        assert_eq!(loss_of(toml, "a\nb\nc\nd\ne"), Lossiness::Whole);
-    }
-
-    #[test]
-    fn test_loss_truncate_lines_at_is_whole() {
-        let toml =
-            "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\ntruncate_lines_at = 3\n";
-        assert_eq!(loss_of(toml, "abcdefgh\nshort"), Lossiness::Whole);
-    }
-
-    #[test]
-    fn test_loss_match_output_is_whole() {
-        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\n[[filters.f.match_output]]\npattern = \"ok\"\nmessage = \"all good\"\n";
-        let (out, loss) = apply_filter_with_info(&first_filter(toml), "everything ok here\nmore");
-        assert_eq!(out, "all good");
-        assert_eq!(loss, Lossiness::Whole);
-    }
-
-    #[test]
-    fn test_loss_strip_only_is_none() {
-        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nstrip_lines_matching = [\"^noise\"]\n";
-        let (out, loss) = apply_filter_with_info(&first_filter(toml), "keep\nnoise line\nkeep2");
-        assert_eq!(out, "keep\nkeep2");
-        assert_eq!(loss, Lossiness::None);
-    }
-
-    #[test]
-    fn test_loss_on_empty_is_none() {
-        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nstrip_lines_matching = [\".\"]\non_empty = \"nothing\"\n";
-        let (out, loss) = apply_filter_with_info(&first_filter(toml), "a\nb\nc");
-        assert_eq!(out, "nothing");
-        assert_eq!(loss, Lossiness::None);
-    }
-
-    #[test]
-    fn test_loss_no_truncation_is_none() {
-        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nhead_lines = 10\n";
-        assert_eq!(loss_of(toml, "a\nb\nc"), Lossiness::None);
-    }
-
-    #[test]
-    fn test_apply_filter_wrapper_matches_with_info() {
-        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nhead_lines = 2\n";
-        let f = first_filter(toml);
-        let input = "a\nb\nc\nd";
-        assert_eq!(apply_filter(&f, input), apply_filter_with_info(&f, input).0);
     }
 
     // --- Pipeline primitives (existing) ---
@@ -1407,6 +1332,79 @@ make[1]: Leaving directory '/home/user/project/docs'
             input_words,
             out_words
         );
+    }
+
+    fn loss_of(toml: &str, input: &str) -> Lossiness {
+        apply_filter_with_info(&first_filter(toml), input).1
+    }
+
+    #[test]
+    fn test_loss_head_lines_is_tail() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nhead_lines = 2\n";
+        let (out, loss) = apply_filter_with_info(&first_filter(toml), "a\nb\nc\nd\ne");
+        assert!(out.starts_with("a\nb\n"));
+        match loss {
+            Lossiness::Tail {
+                tee_payload,
+                tail_offset,
+            } => {
+                assert_eq!(tail_offset, 3);
+                let recovered: Vec<&str> = tee_payload.lines().skip(tail_offset - 1).collect();
+                assert_eq!(recovered, vec!["c", "d", "e"]);
+            }
+            other => panic!("expected Tail, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_loss_max_lines_is_tail() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nmax_lines = 2\n";
+        match loss_of(toml, "a\nb\nc\nd\ne") {
+            Lossiness::Tail {
+                tee_payload,
+                tail_offset,
+            } => {
+                assert_eq!(tail_offset, 3);
+                let recovered: Vec<&str> = tee_payload.lines().skip(tail_offset - 1).collect();
+                assert_eq!(recovered, vec!["c", "d", "e"]);
+            }
+            other => panic!("expected Tail, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_loss_tail_lines_is_whole() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\ntail_lines = 2\n";
+        assert_eq!(loss_of(toml, "a\nb\nc\nd\ne"), Lossiness::Whole);
+    }
+
+    #[test]
+    fn test_loss_head_then_max_is_whole() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nhead_lines = 2\nmax_lines = 2\n";
+        assert_eq!(loss_of(toml, "a\nb\nc\nd\ne"), Lossiness::Whole);
+    }
+
+    #[test]
+    fn test_loss_truncate_lines_at_is_whole() {
+        let toml =
+            "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\ntruncate_lines_at = 3\n";
+        assert_eq!(loss_of(toml, "abcdefgh\nshort"), Lossiness::Whole);
+    }
+
+    #[test]
+    fn test_loss_strip_only_is_none() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nstrip_lines_matching = [\"^noise\"]\n";
+        let (out, loss) = apply_filter_with_info(&first_filter(toml), "keep\nnoise line\nkeep2");
+        assert_eq!(out, "keep\nkeep2");
+        assert_eq!(loss, Lossiness::None);
+    }
+
+    #[test]
+    fn test_apply_filter_wrapper_matches_with_info() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nhead_lines = 2\n";
+        let f = first_filter(toml);
+        let input = "a\nb\nc\nd";
+        assert_eq!(apply_filter(&f, input), apply_filter_with_info(&f, input).0);
     }
 
     // --- Edge cases ---

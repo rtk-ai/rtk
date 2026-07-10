@@ -104,8 +104,10 @@ impl StreamFilter for ErrorStreamFilter {
 
 fn build_shell_command(command: &str) -> Command {
     if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd");
-        c.args(["/C", command]);
+        // Use PowerShell instead of cmd /C so that PowerShell cmdlets,
+        // aliases, $PROFILE functions, and pipeline syntax all work.
+        let mut c = Command::new("powershell");
+        c.args(["-Command", command]);
         c
     } else {
         let mut c = Command::new("sh");

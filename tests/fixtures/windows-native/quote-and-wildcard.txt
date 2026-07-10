@@ -1,0 +1,5 @@
+alpha one
+beta "quoted value" and spaces
+gamma literal [brackets] star * question ?
+delta pipe | ampersand & semicolon ;
+epsilon apostrophe can't stop argv

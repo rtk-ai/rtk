@@ -6,6 +6,7 @@ pub mod constants;
 pub mod display_helpers;
 pub mod filter;
 pub mod guard;
+pub mod line_window;
 pub mod runner;
 pub mod stream;
 pub mod tee;
@@ -15,3 +16,5 @@ pub mod toml_filter;
 pub mod tracking;
 pub mod truncate;
 pub mod utils;
+#[cfg(windows)]
+pub mod windows_shell;

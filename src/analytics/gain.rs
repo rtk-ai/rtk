@@ -152,7 +152,7 @@ pub fn run(
             eprintln!(
                 "{}",
                 format!(
-                    "[rtk] {untrusted_filters} untrusted custom filter(s) not applied — run `rtk trust`"
+                    "[rtk] {untrusted_filters} untrusted custom filter(s) not applied - run `rtk trust`"
                 )
                 .yellow()
             );
@@ -663,8 +663,8 @@ fn check_rtk_disabled_bypass() -> Option<String> {
     let mut total_bash: usize = 0;
     let mut bypassed: usize = 0;
 
-    for session_path in &sessions {
-        let extracted = match provider.extract_commands(session_path) {
+    for session in &sessions {
+        let extracted = match provider.extract_commands(session) {
             Ok(cmds) => cmds,
             Err(_) => continue,
         };
@@ -725,8 +725,6 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
         println!("{}", styled("Recent Failures (last 10)", true));
         println!("{}", "─".repeat(60));
         for rec in &summary.recent {
-            // ISSUE #2787: floor to the previous char boundary so the prefix
-            // never exceeds 16 bytes and never lands mid-character
             let ts_short = &rec.timestamp[..rec.timestamp.floor_char_boundary(16)];
             let status = if rec.fallback_succeeded { "ok" } else { "FAIL" };
             let cmd_display = truncate(&rec.raw_command, 40);

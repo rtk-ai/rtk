@@ -1,7 +1,9 @@
 //! Scans AI coding sessions to find commands that could benefit from RTK filtering.
 
 pub mod lexer;
+pub mod powershell_lexer;
 pub mod provider;
+pub mod ps_classify;
 pub mod registry;
 mod report;
 pub mod rules;
@@ -9,7 +11,7 @@ pub mod rules;
 use anyhow::Result;
 use std::collections::HashMap;
 
-use provider::{ClaudeProvider, SessionProvider};
+use provider::{ClaudeProvider, CodexProvider, ProviderKind, SessionProvider};
 use registry::{
     category_avg_tokens, classify_command, split_command_chain, strip_disabled_prefix,
     Classification,
@@ -46,9 +48,31 @@ pub fn run(
     since_days: u64,
     limit: usize,
     format: &str,
+    provider_name: &str,
+    codex_path: Option<std::path::PathBuf>,
+    check_provider: bool,
     verbose: u8,
 ) -> Result<()> {
-    let provider = ClaudeProvider;
+    if check_provider {
+        match provider_name {
+            "codex" => {
+                let provider = CodexProvider::new(codex_path);
+                print!("{}", provider.check_provider()?);
+                return Ok(());
+            }
+            "claude" => {
+                println!("Claude provider check: JSONL provider selected");
+                return Ok(());
+            }
+            "all" => {
+                println!("Claude provider check: JSONL provider selected");
+                let provider = CodexProvider::new(codex_path);
+                print!("{}", provider.check_provider()?);
+                return Ok(());
+            }
+            other => anyhow::bail!("unsupported provider for --check-provider: {other}"),
+        }
+    }
 
     // Determine project filter
     let project_filter = if all {
@@ -63,12 +87,40 @@ pub fn run(
         Some(encoded)
     };
 
-    let sessions = provider.discover_sessions(project_filter.as_deref(), Some(since_days))?;
+    let include_codex = all || project_filter.is_none();
+    let sessions = match provider_name {
+        "claude" => {
+            let provider = ClaudeProvider;
+            provider.discover_sessions(project_filter.as_deref(), Some(since_days))?
+        }
+        "codex" => {
+            if project.is_some() && !all {
+                anyhow::bail!("Codex provider does not support --project yet");
+            }
+            let provider = CodexProvider::new(codex_path.clone());
+            provider.discover_sessions(None, Some(since_days))?
+        }
+        "all" => {
+            let claude = ClaudeProvider;
+            let mut sessions =
+                claude.discover_sessions(project_filter.as_deref(), Some(since_days))?;
+            if include_codex {
+                let codex = CodexProvider::new(codex_path.clone());
+                sessions.extend(codex.discover_sessions(None, Some(since_days))?);
+            } else {
+                eprintln!(
+                    "Skipping Codex provider because project filtering is not supported yet; use --all to include unfiltered Codex sessions."
+                );
+            }
+            sessions
+        }
+        other => anyhow::bail!("unsupported provider: {other}"),
+    };
 
     if verbose > 0 {
-        eprintln!("Scanning {} session files...", sessions.len());
+        eprintln!("Scanning {} {provider_name} session(s)...", sessions.len());
         for s in &sessions {
-            eprintln!("  {}", s.display());
+            eprintln!("  {}", s.display_source());
         }
     }
 
@@ -80,12 +132,16 @@ pub fn run(
     let mut supported_map: HashMap<&'static str, SupportedBucket> = HashMap::new();
     let mut unsupported_map: HashMap<String, UnsupportedBucket> = HashMap::new();
 
-    for session_path in &sessions {
-        let extracted = match provider.extract_commands(session_path) {
+    for session in &sessions {
+        let extracted = match session.provider {
+            ProviderKind::Claude => ClaudeProvider.extract_commands(session),
+            ProviderKind::Codex => CodexProvider::new(codex_path.clone()).extract_commands(session),
+        };
+        let extracted = match extracted {
             Ok(cmds) => cmds,
             Err(e) => {
                 if verbose > 0 {
-                    eprintln!("Warning: skipping {}: {}", session_path.display(), e);
+                    eprintln!("Warning: skipping {}: {}", session.display_source(), e);
                 }
                 parse_errors += 1;
                 continue;
@@ -254,6 +310,7 @@ pub fn run(
     };
 
     let report = DiscoverReport {
+        provider_name: provider_name.to_string(),
         sessions_scanned: sessions.len(),
         total_commands,
         already_rtk,

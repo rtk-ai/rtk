@@ -1,7 +1,7 @@
 //! Compares RTK-routed vs raw commands in a coding session.
 
 use crate::core::utils::format_tokens;
-use crate::discover::provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
+use crate::discover::provider::{ClaudeProvider, CodexProvider, ExtractedCommand, SessionProvider};
 use crate::discover::registry::{classify_command, split_command_chain, Classification};
 use anyhow::{Context, Result};
 use std::fs;
@@ -56,7 +56,27 @@ fn progress_bar(pct: f64, width: usize) -> String {
     format!("{}{}", "@".repeat(filled), ".".repeat(empty))
 }
 
-pub fn run(_verbose: u8) -> Result<()> {
+fn short_session_id(id: &str) -> &str {
+    &id[..id.floor_char_boundary(8)]
+}
+
+pub fn run(provider_name: &str, codex_path: Option<PathBuf>, _verbose: u8) -> Result<()> {
+    if provider_name == "codex" {
+        return run_codex_session(codex_path);
+    }
+    if provider_name == "all" {
+        run_claude_session()?;
+        println!();
+        return run_codex_session(codex_path);
+    }
+    if provider_name != "claude" {
+        anyhow::bail!("unsupported provider: {provider_name}");
+    }
+
+    run_claude_session()
+}
+
+fn run_claude_session() -> Result<()> {
     let provider = ClaudeProvider;
     let sessions = provider
         .discover_sessions(None, Some(30))
@@ -71,9 +91,14 @@ pub fn run(_verbose: u8) -> Result<()> {
     // Group JSONL files by parent session (ignore subagent files)
     let mut session_files: Vec<PathBuf> = sessions
         .into_iter()
-        .filter(|p| {
+        .filter_map(|session| {
+            let path = session.claude_path()?.to_path_buf();
             // Skip subagent files — only top-level session JSONL
-            !p.to_string_lossy().contains("subagents")
+            if path.to_string_lossy().contains("subagents") {
+                None
+            } else {
+                Some(path)
+            }
         })
         .collect();
 
@@ -94,7 +119,7 @@ pub fn run(_verbose: u8) -> Result<()> {
     let mut summaries: Vec<SessionSummary> = Vec::new();
 
     for path in &session_files {
-        let cmds = match provider.extract_commands(path) {
+        let cmds = match provider.extract_commands_from_path(path) {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -110,7 +135,7 @@ pub fn run(_verbose: u8) -> Result<()> {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
-        let short_id = &id[..id.floor_char_boundary(8)];
+        let short_id = short_session_id(id);
 
         // Extract date from mtime
         let date = fs::metadata(path)
@@ -188,6 +213,113 @@ pub fn run(_verbose: u8) -> Result<()> {
     Ok(())
 }
 
+fn run_codex_session(codex_path: Option<PathBuf>) -> Result<()> {
+    let provider = CodexProvider::new(codex_path);
+    let mut sessions = provider
+        .discover_sessions(None, Some(30))
+        .context("Failed to discover Codex sessions")?;
+
+    if sessions.is_empty() {
+        println!("No codex sessions found in the last 30 days.");
+        return Ok(());
+    }
+
+    sessions.truncate(10);
+    let mut summaries = Vec::new();
+
+    for session in &sessions {
+        let cmds = match provider.extract_commands(session) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if cmds.is_empty() {
+            continue;
+        }
+
+        let (total_cmds, rtk_cmds, output_tokens) = count_rtk_commands(&cmds);
+        let date = cmds
+            .iter()
+            .filter_map(|cmd| cmd.occurred_at_unix)
+            .max()
+            .map(relative_unix_date)
+            .unwrap_or_else(|| "?".to_string());
+        let id = short_session_id(&session.id);
+
+        summaries.push(SessionSummary {
+            id: id.to_string(),
+            date,
+            total_cmds,
+            rtk_cmds,
+            output_tokens,
+        });
+    }
+
+    if summaries.is_empty() {
+        println!("No sessions with shell_command calls found.");
+        return Ok(());
+    }
+
+    print_session_table(&summaries);
+    Ok(())
+}
+
+fn print_session_table(summaries: &[SessionSummary]) {
+    let header = "RTK Session Overview (last 10)";
+    println!("{}", header);
+    println!("{}", "-".repeat(70));
+    println!(
+        "{:<12} {:<12} {:>5} {:>5} {:>9} {:<7} {:>8}",
+        "Session", "Date", "Cmds", "RTK", "Adoption", "", "Output"
+    );
+    println!("{}", "-".repeat(70));
+
+    let mut total_cmds = 0;
+    let mut total_rtk = 0;
+
+    for s in summaries {
+        let pct = s.adoption_pct();
+        let bar = progress_bar(pct, 5);
+        total_cmds += s.total_cmds;
+        total_rtk += s.rtk_cmds;
+
+        println!(
+            "{:<12} {:<12} {:>5} {:>5} {:>8.0}% {:<7} {:>8}",
+            s.id,
+            s.date,
+            s.total_cmds,
+            s.rtk_cmds,
+            pct,
+            bar,
+            format_tokens(s.output_tokens),
+        );
+    }
+
+    println!("{}", "-".repeat(70));
+
+    let avg_adoption = if total_cmds > 0 {
+        total_rtk as f64 / total_cmds as f64 * 100.0
+    } else {
+        0.0
+    };
+    println!("Average adoption: {:.0}%", avg_adoption);
+    println!("Tip: Run `rtk discover` to find missed RTK opportunities");
+}
+
+fn relative_unix_date(ts: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let days = now.saturating_sub(ts) as u64 / 86_400;
+    if days == 0 {
+        "Today".to_string()
+    } else if days == 1 {
+        "Yesterday".to_string()
+    } else {
+        format!("{}d ago", days)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,10 +335,26 @@ mod tests {
             output_content: None,
             is_error: false,
             sequence_index: 0,
+            occurred_at_unix: None,
         }
     }
 
     // --- Progress bar ---
+
+    #[test]
+    fn test_short_session_id_ascii() {
+        assert_eq!(short_session_id("abcdef123456"), "abcdef12");
+        assert_eq!(short_session_id("abc"), "abc");
+    }
+
+    #[test]
+    fn test_short_session_id_prefix_is_unicode_safe() {
+        let id = "会话编号abcdef";
+        let short = short_session_id(id);
+        assert!(id.starts_with(short));
+        assert!(short.is_char_boundary(short.len()));
+        assert!(short.len() <= 8);
+    }
 
     #[test]
     fn test_progress_bar_boundaries() {
@@ -365,7 +513,9 @@ mod tests {
         }
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(tmp.path()).expect("parse JSONL");
+        let cmds = provider
+            .extract_commands_from_path(tmp.path())
+            .expect("parse JSONL");
 
         let (total, rtk, _output) = count_rtk_commands(&cmds);
         assert_eq!(total, 3, "should find 3 Bash commands");
@@ -389,7 +539,9 @@ mod tests {
         }
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(tmp.path()).expect("parse JSONL");
+        let cmds = provider
+            .extract_commands_from_path(tmp.path())
+            .expect("parse JSONL");
 
         let (total, rtk, _) = count_rtk_commands(&cmds);
         assert_eq!(total, 1, "only Bash tool should be counted");
@@ -410,7 +562,9 @@ mod tests {
         }
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(tmp.path()).expect("parse JSONL");
+        let cmds = provider
+            .extract_commands_from_path(tmp.path())
+            .expect("parse JSONL");
 
         assert!(cmds.is_empty(), "no Bash commands = empty");
     }
@@ -430,7 +584,9 @@ mod tests {
         }
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(tmp.path()).expect("parse JSONL");
+        let cmds = provider
+            .extract_commands_from_path(tmp.path())
+            .expect("parse JSONL");
 
         assert_eq!(cmds.len(), 1, "one Bash tool call");
         let (total, rtk, _) = count_rtk_commands(&cmds);

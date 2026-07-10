@@ -1,0 +1,39 @@
+```mermaid
+flowchart TD
+    A["Codex / 用户执行命令"] --> B["命令前缀：rtk ..."]
+
+    B --> C{"RTK 入口解析<br/>Clap / Commands"}
+
+    C -->|已知 RTK 子命令| D["RTK 原生命令 / 包装命令"]
+    D --> D1["rtk git / rtk rg / rtk read / rtk cargo ..."]
+    D1 --> Z["输出压缩 / tracking / exit code"]
+
+    C -->|未知命令 Commands::Other| E["Windows fallback runner"]
+
+    E --> F{"第一个 token 是 shell host？<br/>powershell / pwsh / cmd"}
+    F -->|是| G["直接 argv exec<br/>不再 args.join"]
+    G --> G1["Command::new(shell).args(rest)"]
+    G1 --> Z
+
+    F -->|否| H{"像 PowerShell cmdlet / alias？<br/>Get-Content / Get-ChildItem / Select-String ..."}
+    H -->|是| I{"是否有 RTK 语义等价？"}
+
+    I -->|安全白名单形态| J["走 RTK 原生命令"]
+    J --> J1["Get-Content file -> rtk read file<br/>Select-String -> rtk grep<br/>Get-ChildItem -> rtk ls/find"]
+    J1 --> Z
+
+    I -->|无安全等价或复杂语义| K["PowerShell safe runner"]
+    K --> K1{"脚本是否复杂？<br/>多行 / scriptblock / $ / $_ / 管道"}
+    K1 -->|简单| L["powershell -NoProfile<br/>-EncodedCommand UTF-16LE base64"]
+    K1 -->|复杂| M["写临时 .ps1<br/>powershell -File temp.ps1"]
+    L --> Z
+    M --> Z
+
+    H -->|否| N{"像外部 exe / PATH 命令？"}
+    N -->|是| O["直接 argv exec 外部程序"]
+    O --> Z
+
+    N -->|否| P["最后兜底"]
+    P --> P1["可继续旧 fallback<br/>或提示使用 rtk proxy"]
+    P1 --> Z
+```

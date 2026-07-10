@@ -6,11 +6,30 @@
 /// - `wc -w file.py`  → `96`
 /// - `wc -c file.py`  → `978`
 /// - `wc -l *.py`     → table with common path prefix stripped
-use crate::core::runner::{self, RunOptions};
-use crate::core::utils::resolved_command;
+#[cfg(any(target_os = "windows", test))]
+use anyhow::anyhow;
 use anyhow::Result;
+#[cfg(not(target_os = "windows"))]
+use crate::core::runner::{self, RunOptions};
+#[cfg(not(target_os = "windows"))]
+use crate::core::utils::resolved_command;
+#[cfg(target_os = "windows")]
+use std::io::Read;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    #[cfg(target_os = "windows")]
+    {
+        run_native(args, verbose)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        run_external(args, verbose)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn run_external(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("wc");
     for arg in args {
         cmd.arg(arg);
@@ -38,6 +57,91 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         |stdout| filter_wc_output(stdout, &mode),
         opts,
     )
+}
+
+#[cfg(target_os = "windows")]
+fn run_native(args: &[String], verbose: u8) -> Result<i32> {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_native_help();
+        return Ok(0);
+    }
+    if args.iter().any(|a| a == "--version") {
+        println!("rtk wc {}", env!("CARGO_PKG_VERSION"));
+        return Ok(0);
+    }
+
+    if verbose > 0 {
+        eprintln!("Running native wc {}", args.join(" "));
+    }
+
+    let mode = detect_mode(args);
+    let operands = match file_operands(args) {
+        Ok(operands) => operands,
+        Err(err) => {
+            eprintln!("rtk wc: {err}");
+            return Ok(2);
+        }
+    };
+    let columns = requested_columns(args);
+    let needs_chars = columns.contains(&WcColumn::Chars);
+
+    let raw = match build_native_output(&operands, &mode, &columns, needs_chars) {
+        Ok(raw) => raw,
+        Err(err) => {
+            eprintln!("rtk wc: {err}");
+            return Ok(2);
+        }
+    };
+
+    let filtered = filter_wc_output(&raw, &mode);
+    if !filtered.is_empty() {
+        println!("{filtered}");
+    }
+    Ok(0)
+}
+
+#[cfg(target_os = "windows")]
+fn build_native_output(
+    operands: &[String],
+    mode: &WcMode,
+    columns: &[WcColumn],
+    needs_chars: bool,
+) -> Result<String> {
+    if operands.is_empty() {
+        let mut bytes = Vec::new();
+        std::io::stdin().read_to_end(&mut bytes)?;
+        let stats = count_bytes(&bytes);
+        format_native_line(&stats, None, mode, columns)
+    } else {
+        let mut lines = Vec::new();
+        let mut total = WcTotals::default();
+
+        for path in operands {
+            let bytes = std::fs::read(path).map_err(|err| anyhow!("{}: {}", path, err))?;
+            let stats = count_bytes(&bytes);
+            total.add(&stats, needs_chars)?;
+            lines.push(format_native_line(&stats, Some(path), mode, columns)?);
+        }
+
+        if operands.len() > 1 {
+            lines.push(format_native_line(
+                &total.into_stats(),
+                Some("total"),
+                mode,
+                columns,
+            )?);
+        }
+        Ok(lines.join("\n"))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn print_native_help() {
+    println!(
+        "Word/line/byte count with compact output (native Windows)\n\n\
+Usage: rtk wc [OPTIONS] [FILES]...\n\n\
+Options:\n  -l        count lines\n  -w        count words\n  -c        count bytes\n  -m        count UTF-8 characters\n  -h, --help     Print help\n      --version  Print version"
+    );
 }
 
 /// Which columns the user requested
@@ -116,6 +220,194 @@ fn detect_mode(args: &[String]) -> WcMode {
         WcMode::Chars
     } else {
         WcMode::Full
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, PartialEq)]
+struct WcStats {
+    lines: usize,
+    words: usize,
+    bytes: usize,
+    chars: std::result::Result<usize, String>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum WcColumn {
+    Lines,
+    Words,
+    Bytes,
+    Chars,
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Default)]
+struct WcTotals {
+    lines: usize,
+    words: usize,
+    bytes: usize,
+    chars: usize,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl WcTotals {
+    fn add(&mut self, stats: &WcStats, needs_chars: bool) -> Result<()> {
+        self.lines += stats.lines;
+        self.words += stats.words;
+        self.bytes += stats.bytes;
+        if needs_chars {
+            self.chars += stats.chars.as_ref().map_err(|err| anyhow!(err.clone()))?;
+        }
+        Ok(())
+    }
+
+    fn into_stats(self) -> WcStats {
+        WcStats {
+            lines: self.lines,
+            words: self.words,
+            bytes: self.bytes,
+            chars: Ok(self.chars),
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn count_bytes(bytes: &[u8]) -> WcStats {
+    let lines = bytes.iter().filter(|b| **b == b'\n').count();
+    let words = match std::str::from_utf8(bytes) {
+        Ok(text) => text.split_whitespace().count(),
+        Err(_) => bytes
+            .split(|b| b.is_ascii_whitespace())
+            .filter(|part| !part.is_empty())
+            .count(),
+    };
+    let chars = std::str::from_utf8(bytes)
+        .map(|text| text.chars().count())
+        .map_err(|err| format!("invalid UTF-8 for -m: {err}"));
+
+    WcStats {
+        lines,
+        words,
+        bytes: bytes.len(),
+        chars,
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn file_operands(args: &[String]) -> Result<Vec<String>> {
+    let mut operands = Vec::new();
+    for arg in args {
+        if arg.starts_with('-') {
+            validate_native_flag(arg)?;
+        } else {
+            operands.push(arg.clone());
+        }
+    }
+    Ok(operands)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn validate_native_flag(flag: &str) -> Result<()> {
+    if flag == "--" {
+        return Ok(());
+    }
+    if !flag.starts_with('-') || flag == "-" {
+        return Ok(());
+    }
+    if flag.starts_with("--") {
+        return Err(anyhow!(
+            "unsupported wc flag '{flag}' on Windows native path; use rtk proxy wc ..."
+        ));
+    }
+    if flag.chars().skip(1).all(|ch| matches!(ch, 'l' | 'w' | 'c' | 'm')) {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "unsupported wc flag '{flag}' on Windows native path; use rtk proxy wc ..."
+        ))
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn format_native_line(
+    stats: &WcStats,
+    path: Option<&str>,
+    mode: &WcMode,
+    columns: &[WcColumn],
+) -> Result<String> {
+    let mut fields: Vec<String> = match mode {
+        WcMode::Lines => vec![stats.lines.to_string()],
+        WcMode::Words => vec![stats.words.to_string()],
+        WcMode::Bytes => vec![stats.bytes.to_string()],
+        WcMode::Chars => vec![stats
+            .chars
+            .as_ref()
+            .map_err(|err| anyhow!(err.clone()))?
+            .to_string()],
+        WcMode::Full => vec![
+            stats.lines.to_string(),
+            stats.words.to_string(),
+            stats.bytes.to_string(),
+        ],
+        WcMode::Mixed => columns
+            .iter()
+            .map(|column| match column {
+                WcColumn::Lines => Ok(stats.lines.to_string()),
+                WcColumn::Words => Ok(stats.words.to_string()),
+                WcColumn::Bytes => Ok(stats.bytes.to_string()),
+                WcColumn::Chars => Ok(stats
+                    .chars
+                    .as_ref()
+                    .map_err(|err| anyhow!(err.clone()))?
+                    .to_string()),
+            })
+            .collect::<Result<Vec<_>>>()?,
+    };
+    if let Some(path) = path {
+        fields.push(path.to_string());
+    }
+    Ok(fields.join(" "))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn requested_columns(args: &[String]) -> Vec<WcColumn> {
+    let mut has_lines = false;
+    let mut has_words = false;
+    let mut has_bytes = false;
+    let mut has_chars = false;
+    for arg in args
+        .iter()
+        .filter(|arg| arg.starts_with('-') && !arg.starts_with("--"))
+    {
+        for ch in arg.chars().skip(1) {
+            match ch {
+                'l' => has_lines = true,
+                'w' => has_words = true,
+                'c' => has_bytes = true,
+                'm' => has_chars = true,
+                _ => {}
+            }
+        }
+    }
+
+    let mut columns = Vec::new();
+    if has_lines {
+        columns.push(WcColumn::Lines);
+    }
+    if has_words {
+        columns.push(WcColumn::Words);
+    }
+    if has_chars {
+        columns.push(WcColumn::Chars);
+    }
+    if has_bytes {
+        columns.push(WcColumn::Bytes);
+    }
+    if columns.is_empty() {
+        vec![WcColumn::Lines, WcColumn::Words, WcColumn::Bytes]
+    } else {
+        columns
     }
 }
 
@@ -318,6 +610,48 @@ mod tests {
         let raw = "      30\n";
         let result = filter_wc_output(raw, &WcMode::Lines);
         assert_eq!(result, "30");
+    }
+
+    #[test]
+    fn test_native_count_full_uses_byte_count() {
+        let stats = count_bytes(b"hello world\nsecond line\n");
+        assert_eq!(stats.lines, 2);
+        assert_eq!(stats.words, 4);
+        assert_eq!(stats.bytes, 24);
+        assert_eq!(stats.chars, Ok(24));
+    }
+
+    #[test]
+    fn test_native_count_words_invalid_utf8_uses_ascii_whitespace() {
+        let stats = count_bytes(b"alpha\xff beta\tgamma\n");
+        assert_eq!(stats.words, 3);
+        assert_eq!(stats.bytes, 18);
+    }
+
+    #[test]
+    fn test_native_count_chars_invalid_utf8_errors() {
+        let err = count_bytes(b"alpha\xff beta").chars.unwrap_err();
+        assert!(err.to_string().contains("invalid UTF-8"));
+    }
+
+    #[test]
+    fn test_native_wc_rejects_unknown_flags_with_exit_two() {
+        let code = run_native(&["-z".to_string()], 0).unwrap();
+        assert_eq!(code, 2);
+    }
+
+    #[test]
+    fn test_native_mixed_output_respects_requested_columns() {
+        let args = vec!["-cw".to_string(), "file.txt".to_string()];
+        let stats = count_bytes(b"one two\n");
+        let line = format_native_line(
+            &stats,
+            Some("file.txt"),
+            &WcMode::Mixed,
+            &requested_columns(&args),
+        )
+        .unwrap();
+        assert_eq!(line, "2 8 file.txt");
     }
 
     #[test]

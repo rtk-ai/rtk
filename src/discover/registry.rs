@@ -1,14 +1,10 @@
 //! Matches shell commands against known RTK rewrite rules to decide how to handle them.
 
-use crate::core::utils::composer_bin_dirs;
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
-use std::path::Path;
 
 use super::lexer::{split_on_operators, tokenize, TokenKind};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
-
-const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
 
 /// Result of classifying a command.
 #[derive(Debug, PartialEq)]
@@ -73,10 +69,14 @@ lazy_static! {
     // `==> name <==` banners that `rtk read --max-lines` cannot reproduce.
     static ref HEAD_N: Regex = Regex::new(r"^head\s+-(\d+)\s+(\S+)$").unwrap();
     static ref HEAD_LINES: Regex = Regex::new(r"^head\s+--lines=(\d+)\s+(\S+)$").unwrap();
+    static ref HEAD_N_SPACE: Regex = Regex::new(r"^head\s+-n\s+(\d+)\s+(\S+)$").unwrap();
+    static ref HEAD_LINES_SPACE: Regex = Regex::new(r"^head\s+--lines\s+(\d+)\s+(\S+)$").unwrap();
+    static ref HEAD_DEFAULT: Regex = Regex::new(r"^head\s+(\S+)$").unwrap();
     static ref TAIL_N: Regex = Regex::new(r"^tail\s+-(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_N_SPACE: Regex = Regex::new(r"^tail\s+-n\s+(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_LINES_EQ: Regex = Regex::new(r"^tail\s+--lines=(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_LINES_SPACE: Regex = Regex::new(r"^tail\s+--lines\s+(\d+)\s+(\S+)$").unwrap();
+    static ref TAIL_DEFAULT: Regex = Regex::new(r"^tail\s+(\S+)$").unwrap();
 }
 
 const GOLANGCI_GLOBAL_OPT_WITH_VALUE: &[&str] = &[
@@ -124,9 +124,6 @@ pub fn classify_command(cmd: &str) -> Classification {
     let cmd_normalized = strip_absolute_path(cmd_clean);
     // Strip git global options: git -C /tmp status → git status (#163)
     let cmd_normalized = strip_git_global_opts(&cmd_normalized);
-    // Normalize PHP tool paths: vendor/bin/phpunit, bin/phpunit, or composer
-    // custom bin-dir → phpunit (so one rule matches every Composer layout).
-    let cmd_normalized = normalize_php_tool_command(&cmd_normalized);
     // Strip golangci-lint global options before `run` so classify/rewrite stays
     // aligned with the runtime wrapper behavior.
     let cmd_normalized = strip_golangci_global_opts(&cmd_normalized);
@@ -252,78 +249,6 @@ pub fn split_command_chain(cmd: &str) -> Vec<&str> {
     }
 
     split_on_operators(trimmed, true)
-}
-
-fn normalize_php_tool_command(cmd: &str) -> String {
-    normalize_php_tool_command_with_dirs(cmd, &composer_bin_dirs())
-}
-
-/// Peel a leading `php` interpreter wrapper off a Composer-tool invocation
-/// (`php vendor/bin/phpunit …` → `vendor/bin/phpunit …`) so the tool path
-/// normalizes to its bare name. Only meaningful for the resolved tools, where
-/// a `php` prefix is always the interpreter (never `php artisan`/`run-tests.php`).
-fn strip_php_wrapper(cmd: &str) -> &str {
-    cmd.strip_prefix("php ").map_or(cmd, str::trim_start)
-}
-
-fn normalize_php_tool_command_with_dirs(cmd: &str, bin_dirs: &[std::path::PathBuf]) -> String {
-    let first_space = cmd.find(char::is_whitespace);
-    let first_word = match first_space {
-        Some(pos) => &cmd[..pos],
-        None => cmd,
-    };
-
-    let Some(tool) = normalize_php_tool_word(first_word, bin_dirs) else {
-        return cmd.to_string();
-    };
-
-    match first_space {
-        Some(pos) => format!("{}{}", tool, &cmd[pos..]),
-        None => tool.to_string(),
-    }
-}
-
-fn normalize_php_tool_word<'a>(word: &str, bin_dirs: &'a [std::path::PathBuf]) -> Option<&'a str> {
-    let normalized_word = normalize_php_tool_path(word);
-
-    for tool in PHP_TOOL_NAMES {
-        if normalized_word == tool {
-            return Some(tool);
-        }
-
-        if bin_dirs
-            .iter()
-            .any(|bin_dir| matches_php_tool_path(&normalized_word, bin_dir, tool))
-        {
-            return Some(tool);
-        }
-    }
-
-    None
-}
-
-fn matches_php_tool_path(word: &str, bin_dir: &Path, tool: &str) -> bool {
-    let normalized_dir = normalize_php_tool_path(&bin_dir.to_string_lossy());
-    let candidate = format!("{normalized_dir}/{tool}");
-    word == candidate || word.ends_with(&format!("/{candidate}"))
-}
-
-fn normalize_php_tool_path(path: &str) -> String {
-    let mut normalized = path.trim().replace('\\', "/");
-    while let Some(stripped) = normalized.strip_prefix("./") {
-        normalized = stripped.to_string();
-    }
-
-    if let Some((stem, ext)) = normalized.rsplit_once('.') {
-        if ["bat", "cmd", "exe", "ps1"]
-            .iter()
-            .any(|candidate| ext.eq_ignore_ascii_case(candidate))
-        {
-            normalized = stem.to_string();
-        }
-    }
-
-    normalized
 }
 
 /// Strip git global options before the subcommand (#163).
@@ -550,7 +475,7 @@ fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> {
 /// being run, only *how* it's run — e.g. `docker exec mycontainer`,
 /// `direnv exec .`, `poetry run`, or `bundle exec`. Stripping it lets the inner
 /// command match a filter; the prefix is then re-prepended to the rewrite. The
-/// built-in [`BUILTIN_TRANSPARENT_PREFIXES`] (`noglob`, `command`,
+/// built-in [`BUILTIN_TRANSPARENT_PREFIXES`] (`uv run`, `noglob`, `command`,
 /// `builtin`, `exec`, `nocorrect`) are always applied in addition to
 /// user-configured prefixes.
 ///
@@ -575,6 +500,22 @@ pub fn rewrite_command(
 
     if has_heredoc(trimmed) || trimmed.contains("$((") {
         return None;
+    }
+
+    if let Some(rewritten) = super::ps_classify::rewrite_get_content_raw(trimmed) {
+        return Some(rewritten);
+    }
+    if let Some(rewritten) = super::ps_classify::rewrite_select_string_raw(trimmed) {
+        return Some(rewritten);
+    }
+    if let Some(rewritten) = super::ps_classify::rewrite_get_child_item_raw(trimmed) {
+        return Some(rewritten);
+    }
+    if let Some(rewritten) = super::ps_classify::rewrite_get_command_raw(trimmed) {
+        return Some(rewritten);
+    }
+    if let Some(rewritten) = super::ps_classify::rewrite_which_raw(trimmed) {
+        return Some(rewritten);
     }
 
     let compiled = compile_exclude_patterns(excluded);
@@ -705,12 +646,16 @@ fn rewrite_compound(
 }
 
 fn rewrite_line_range(cmd: &str) -> Option<String> {
-    for re in [&*HEAD_N, &*HEAD_LINES] {
+    for re in [&*HEAD_N, &*HEAD_N_SPACE, &*HEAD_LINES, &*HEAD_LINES_SPACE] {
         if let Some(caps) = re.captures(cmd) {
             let n = caps.get(1)?.as_str();
             let file = caps.get(2)?.as_str();
-            return Some(format!("rtk read {} --max-lines {}", file, n));
+            return Some(format!("rtk head -n {} {}", n, file));
         }
+    }
+    if let Some(caps) = HEAD_DEFAULT.captures(cmd) {
+        let file = caps.get(1)?.as_str();
+        return Some(format!("rtk head {}", file));
     }
     if cmd.starts_with("head -") {
         return None;
@@ -724,16 +669,26 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
         if let Some(caps) = re.captures(cmd) {
             let n = caps.get(1)?.as_str();
             let file = caps.get(2)?.as_str();
-            return Some(format!("rtk read {} --tail-lines {}", file, n));
+            return Some(format!("rtk tail -n {} {}", n, file));
         }
+    }
+    if let Some(caps) = TAIL_DEFAULT.captures(cmd) {
+        let file = caps.get(1)?.as_str();
+        return Some(format!("rtk tail {}", file));
     }
     None
 }
 
 /// Built-in transparent wrappers that use the same strip/recurse/re-prepend
 /// contract as user-configured `transparent_prefixes`.
-const BUILTIN_TRANSPARENT_PREFIXES: &[&str] =
-    &["noglob", "command", "builtin", "exec", "nocorrect"];
+const BUILTIN_TRANSPARENT_PREFIXES: &[&str] = &[
+    "uv run",
+    "noglob",
+    "command",
+    "builtin",
+    "exec",
+    "nocorrect",
+];
 
 const MAX_PREFIX_DEPTH: usize = 10;
 
@@ -838,8 +793,18 @@ fn rewrite_segment_inner(
             if rest.is_empty() {
                 return None;
             }
-            return rewrite_segment_inner(rest, excluded, transparent_prefixes, depth + 1)
-                .map(|rewritten| format!("{} {}", prefix, rewritten));
+            if prefix == "uv run" && should_force_uv_run_whole(rest) {
+                return Some(format!("rtk {trimmed}"));
+            }
+            if let Some(rewritten) =
+                rewrite_segment_inner(rest, excluded, transparent_prefixes, depth + 1)
+            {
+                return Some(format!("{} {}", prefix, rewritten));
+            }
+            if prefix == "uv run" && should_rewrite_uv_run_whole(rest) {
+                return Some(format!("rtk {trimmed}"));
+            }
+            return None;
         }
     }
 
@@ -888,25 +853,7 @@ fn rewrite_segment_inner(
             }
             rtk_equivalent
         }
-        // TOML-only commands: consult the registry so the hook filters them too (#2179).
-        Classification::Unsupported { .. } => {
-            if crate::core::toml_filter::toml_disabled() {
-                return None;
-            }
-            let normalized = strip_absolute_path(cmd_part.trim());
-            if is_excluded(&normalized, excluded) {
-                return None;
-            }
-            let base = normalized.split_whitespace().next().unwrap_or("");
-            if crate::core::toml_filter::is_rtk_reserved_command(base) {
-                return None;
-            }
-            if crate::core::toml_filter::command_matches_filter(&normalized) {
-                return Some(format!("rtk {}{}", cmd_part, redirect_suffix));
-            }
-            return None;
-        }
-        Classification::Ignored => return None,
+        _ => return None,
     };
 
     // Find the matching rule (rtk_cmd values are unique across all rules)
@@ -936,30 +883,9 @@ fn rewrite_segment_inner(
         }
     }
 
-    // For the Composer-resolved php tools, normalize the leading invocation
-    // (php wrapper + ini flags, ./, vendor/bin, composer bin-dir) exactly as
-    // classify_command does, so a small canonical prefix list matches every
-    // invocation form instead of enumerating each literal spelling.
-    let php_normalized;
-    let strip_target: &str = if rule
-        .rtk_cmd
-        .strip_prefix("rtk ")
-        .is_some_and(|t| PHP_TOOL_NAMES.contains(&t))
-    {
-        // Peel `php ` then a leading `./` (normalize_php_tool_command only
-        // strips `./` for paths that resolve to a Composer tool, so a plain
-        // `./bin/<tool>` would otherwise survive and miss the prefix match).
-        let unwrapped = strip_php_wrapper(cmd_part);
-        let unwrapped = unwrapped.strip_prefix("./").unwrap_or(unwrapped);
-        php_normalized = normalize_php_tool_command(unwrapped);
-        &php_normalized
-    } else {
-        cmd_part
-    };
-
     // Try each rewrite prefix (longest first) with word-boundary check
     for &prefix in rule.rewrite_prefixes {
-        if let Some(rest) = strip_word_prefix(strip_target, prefix) {
+        if let Some(rest) = strip_word_prefix(cmd_part, prefix) {
             let rewritten = if rest.is_empty() {
                 format!("{}{}", rule.rtk_cmd, redirect_suffix)
             } else {
@@ -985,6 +911,43 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
     } else {
         None
     }
+}
+
+fn should_rewrite_uv_run_whole(rest: &str) -> bool {
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    if parts.is_empty() {
+        return false;
+    }
+
+    let mut i = 0;
+    while i < parts.len() {
+        let token = parts[i];
+        if !token.starts_with('-') {
+            return true;
+        }
+
+        if matches!(token, "-m" | "--module" | "--unknown") {
+            return false;
+        }
+
+        if matches!(token, "--project" | "--extra") {
+            i += 2;
+            continue;
+        }
+
+        if token.starts_with("--project=") || token.starts_with("--extra=") {
+            i += 1;
+            continue;
+        }
+
+        return false;
+    }
+
+    false
+}
+
+fn should_force_uv_run_whole(rest: &str) -> bool {
+    matches!(rest.trim(), "pytest" | "ruff check")
 }
 
 #[cfg(test)]
@@ -1346,18 +1309,68 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_git_checkout() {
-        assert_eq!(
-            rewrite_command_no_prefixes("git checkout main", &[]),
-            Some("rtk git checkout main".into())
-        );
-    }
-
-    #[test]
     fn test_rewrite_git_log() {
         assert_eq!(
             rewrite_command_no_prefixes("git log -10", &[]),
             Some("rtk git log -10".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pwd_exact() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pwd", &[]),
+            Some("rtk pwd".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pwd_with_args_passthrough() {
+        assert_eq!(rewrite_command_no_prefixes("pwd -P", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_touch_static_path_passthrough() {
+        assert_eq!(
+            rewrite_command_no_prefixes("touch target/rtk-touch-smoke.txt", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_touch_flag_passthrough() {
+        assert_eq!(
+            rewrite_command_no_prefixes("touch -m target/rtk-touch-smoke.txt", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_mkdir_p_static_path_passthrough() {
+        assert_eq!(
+            rewrite_command_no_prefixes("mkdir -p target/rtk-mkdir-smoke", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_mkdir_without_p_passthrough() {
+        assert_eq!(
+            rewrite_command_no_prefixes("mkdir target/rtk-mkdir-smoke", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_classify_pwd_supported() {
+        assert_eq!(
+            classify_command("pwd"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pwd",
+                category: "System",
+                estimated_savings_pct: 40.0,
+                status: RtkStatus::Existing,
+            }
         );
     }
 
@@ -1471,90 +1484,6 @@ mod tests {
     #[test]
     fn test_rewrite_ignored_cd() {
         assert_eq!(rewrite_command_no_prefixes("cd /tmp", &[]), None);
-    }
-
-    #[test]
-    fn test_rewrite_toml_orphan_jj() {
-        assert_eq!(
-            rewrite_command_no_prefixes("jj log", &[]),
-            Some("rtk jj log".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_toml_orphan_jq() {
-        assert_eq!(
-            rewrite_command_no_prefixes("jq .", &[]),
-            Some("rtk jq .".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_toml_orphan_just() {
-        assert_eq!(
-            rewrite_command_no_prefixes("just build", &[]),
-            Some("rtk just build".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_toml_absolute_path() {
-        assert_eq!(
-            rewrite_command_no_prefixes("/usr/bin/jj log", &[]),
-            Some("rtk /usr/bin/jj log".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_toml_redirect_suffix_preserved() {
-        assert_eq!(
-            rewrite_command_no_prefixes("jj log 2>&1", &[]),
-            Some("rtk jj log 2>&1".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_toml_in_pipe_left_only() {
-        assert_eq!(
-            rewrite_command_no_prefixes("jj log | head", &[]),
-            Some("rtk jj log | head".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_toml_compound() {
-        assert_eq!(
-            rewrite_command_no_prefixes("jj diff && jq .", &[]),
-            Some("rtk jj diff && rtk jq .".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_toml_env_prefix() {
-        assert_eq!(
-            rewrite_command_no_prefixes("FOO=bar jj log", &[]),
-            Some("FOO=bar rtk jj log".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_toml_respects_exclude() {
-        let excluded = vec!["jj".to_string()];
-        assert_eq!(rewrite_command_no_prefixes("jj log", &excluded), None);
-    }
-
-    #[test]
-    fn test_rewrite_toml_exclude_matches_absolute_path() {
-        let excluded = vec!["jj".to_string()];
-        assert_eq!(
-            rewrite_command_no_prefixes("/usr/bin/jj log", &excluded),
-            None
-        );
-    }
-
-    #[test]
-    fn test_rewrite_toml_unknown_command_still_none() {
-        assert_eq!(rewrite_command_no_prefixes("frobnicate xyz", &[]), None);
     }
 
     #[test]
@@ -1967,7 +1896,15 @@ mod tests {
         // head -20 file → rtk read file --max-lines 20 (not rtk read -20 file)
         assert_eq!(
             rewrite_command_no_prefixes("head -20 src/main.rs", &[]),
-            Some("rtk read src/main.rs --max-lines 20".into())
+            Some("rtk head -n 20 src/main.rs".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_n_space_flag() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head -n 20 src/main.rs", &[]),
+            Some("rtk head -n 20 src/main.rs".into())
         );
     }
 
@@ -1975,7 +1912,7 @@ mod tests {
     fn test_rewrite_head_lines_long_flag() {
         assert_eq!(
             rewrite_command_no_prefixes("head --lines=50 src/lib.rs", &[]),
-            Some("rtk read src/lib.rs --max-lines 50".into())
+            Some("rtk head -n 50 src/lib.rs".into())
         );
     }
 
@@ -1984,7 +1921,7 @@ mod tests {
         // plain `head file` → `rtk read file` (no numeric flag)
         assert_eq!(
             rewrite_command_no_prefixes("head src/main.rs", &[]),
-            Some("rtk read src/main.rs".into())
+            Some("rtk head src/main.rs".into())
         );
     }
 
@@ -2001,7 +1938,7 @@ mod tests {
     fn test_rewrite_tail_numeric_flag() {
         assert_eq!(
             rewrite_command_no_prefixes("tail -20 src/main.rs", &[]),
-            Some("rtk read src/main.rs --tail-lines 20".into())
+            Some("rtk tail -n 20 src/main.rs".into())
         );
     }
 
@@ -2009,7 +1946,7 @@ mod tests {
     fn test_rewrite_tail_n_space_flag() {
         assert_eq!(
             rewrite_command_no_prefixes("tail -n 12 src/lib.rs", &[]),
-            Some("rtk read src/lib.rs --tail-lines 12".into())
+            Some("rtk tail -n 12 src/lib.rs".into())
         );
     }
 
@@ -2017,7 +1954,7 @@ mod tests {
     fn test_rewrite_tail_lines_long_flag() {
         assert_eq!(
             rewrite_command_no_prefixes("tail --lines=7 src/lib.rs", &[]),
-            Some("rtk read src/lib.rs --tail-lines 7".into())
+            Some("rtk tail -n 7 src/lib.rs".into())
         );
     }
 
@@ -2025,7 +1962,7 @@ mod tests {
     fn test_rewrite_tail_lines_space_flag() {
         assert_eq!(
             rewrite_command_no_prefixes("tail --lines 7 src/lib.rs", &[]),
-            Some("rtk read src/lib.rs --tail-lines 7".into())
+            Some("rtk tail -n 7 src/lib.rs".into())
         );
     }
 
@@ -2038,8 +1975,11 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_tail_plain_file_skipped() {
-        assert_eq!(rewrite_command_no_prefixes("tail src/main.rs", &[]), None);
+    fn test_rewrite_tail_plain_file() {
+        assert_eq!(
+            rewrite_command_no_prefixes("tail src/main.rs", &[]),
+            Some("rtk tail src/main.rs".into())
+        );
     }
 
     // --- Issue #1362: head/tail with multiple files falls back to native command ---
@@ -2542,7 +2482,7 @@ mod tests {
     fn test_rewrite_uv_run_pytest() {
         assert_eq!(
             rewrite_command_no_prefixes("uv run pytest tests/", &[]),
-            Some("rtk uv run pytest tests/".into())
+            Some("uv run rtk pytest tests/".into())
         );
     }
 
@@ -2550,7 +2490,7 @@ mod tests {
     fn test_rewrite_env_uv_run_pytest() {
         assert_eq!(
             rewrite_command_no_prefixes("PYTHONPATH=. uv run pytest tests/", &[]),
-            Some("PYTHONPATH=. rtk uv run pytest tests/".into())
+            Some("PYTHONPATH=. uv run rtk pytest tests/".into())
         );
     }
 
@@ -2558,7 +2498,7 @@ mod tests {
     fn test_rewrite_uv_run_python_m_pytest() {
         assert_eq!(
             rewrite_command_no_prefixes("uv run python -m pytest -q", &[]),
-            Some("rtk uv run python -m pytest -q".into())
+            Some("uv run rtk pytest -q".into())
         );
     }
 
@@ -2566,23 +2506,23 @@ mod tests {
     fn test_rewrite_uv_run_supported_inner_command() {
         assert_eq!(
             rewrite_command_no_prefixes("uv run ruff check .", &[]),
-            Some("rtk uv run ruff check .".into())
+            Some("uv run rtk ruff check .".into())
         );
     }
 
     #[test]
-    fn test_rewrite_uv_run_options_are_passed_through() {
+    fn test_rewrite_uv_run_options_are_not_parsed() {
         assert_eq!(
             rewrite_command_no_prefixes("uv run --unknown pytest tests/", &[]),
-            Some("rtk uv run --unknown pytest tests/".into())
+            None
         );
         assert_eq!(
             rewrite_command_no_prefixes("uv run -m pytest -q", &[]),
-            Some("rtk uv run -m pytest -q".into())
+            None
         );
         assert_eq!(
             rewrite_command_no_prefixes("uv run --module pytest -q", &[]),
-            Some("rtk uv run --module pytest -q".into())
+            None
         );
     }
 
@@ -4341,7 +4281,7 @@ mod tests {
         );
     }
 
-    // --- line-continuation handling (issue #1564) ---
+    // --- line-continuation handling (issue #1564) -------------------
 
     #[test]
     fn test_rewrite_leading_backslash_newline() {
@@ -4404,214 +4344,31 @@ mod tests {
             std::borrow::Cow::<str>::Borrowed("git diff HEAD~1"),
         );
     }
+}
 
-    // --- PHP tooling ---
+#[cfg(test)]
+mod checkout_rule_tests {
+    use super::super::report::RtkStatus;
+    use super::*;
 
     #[test]
-    fn test_classify_phpunit() {
-        assert!(matches!(
-            classify_command("phpunit tests/"),
+    fn git_checkout_rewrite_is_supported() {
+        assert_eq!(
+            rewrite_command("git checkout main", &[], &[]),
+            Some("rtk git checkout main".to_string())
+        );
+    }
+
+    #[test]
+    fn git_checkout_classifies_as_git() {
+        assert_eq!(
+            classify_command("git checkout main"),
             Classification::Supported {
-                rtk_equivalent: "rtk phpunit",
-                ..
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing
             }
-        ));
-    }
-
-    #[test]
-    fn test_classify_vendor_bin_phpunit() {
-        assert!(matches!(
-            classify_command("vendor/bin/phpunit --filter EmailTest"),
-            Classification::Supported {
-                rtk_equivalent: "rtk phpunit",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_php_vendor_bin_phpunit() {
-        assert!(matches!(
-            classify_command("php vendor/bin/phpunit tests/"),
-            Classification::Supported {
-                rtk_equivalent: "rtk phpunit",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_rewrite_phpunit() {
-        assert_eq!(
-            rewrite_command_no_prefixes("phpunit tests/", &[]),
-            Some("rtk phpunit tests/".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_vendor_bin_phpunit() {
-        assert_eq!(
-            rewrite_command_no_prefixes("vendor/bin/phpunit --filter EmailTest", &[]),
-            Some("rtk phpunit --filter EmailTest".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_dotslash_vendor_bin() {
-        // `./vendor/bin/<tool>` is the common Laravel invocation form. classify
-        // normalizes the leading `./`, but the rewrite strips literal prefixes,
-        // so the `./vendor/bin/<tool>` prefix must be present or rewrite no-ops.
-        assert_eq!(
-            rewrite_command_no_prefixes("./vendor/bin/pint --test", &[]),
-            Some("rtk pint --test".into())
-        );
-        assert_eq!(
-            rewrite_command_no_prefixes("./vendor/bin/pest tests/", &[]),
-            Some("rtk pest tests/".into())
-        );
-        assert_eq!(
-            rewrite_command_no_prefixes("./vendor/bin/paratest", &[]),
-            Some("rtk paratest".into())
-        );
-        assert_eq!(
-            rewrite_command_no_prefixes("./vendor/bin/ecs check", &[]),
-            Some("rtk ecs check".into())
-        );
-        assert_eq!(
-            rewrite_command_no_prefixes("./vendor/bin/phpunit --filter EmailTest", &[]),
-            Some("rtk phpunit --filter EmailTest".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_php_tool_invocation_forms() {
-        // phpunit carries the full matrix: php wrapper, ./, plain bin/, vendor/bin.
-        // rewrite_segment_inner normalizes each to the same canonical rewrite.
-        for cmd in [
-            "phpunit tests/",
-            "vendor/bin/phpunit tests/",
-            "./vendor/bin/phpunit tests/",
-            "bin/phpunit tests/",
-            "./bin/phpunit tests/",
-            "php vendor/bin/phpunit tests/",
-            "php phpunit tests/",
-        ] {
-            assert_eq!(
-                rewrite_command_no_prefixes(cmd, &[]),
-                Some("rtk phpunit tests/".into()),
-                "form: {cmd}"
-            );
-        }
-
-        // pest/pint/ecs/paratest use the simpler variant: ./ and vendor/bin only.
-        for cmd in ["pint", "vendor/bin/pint", "./vendor/bin/pint", "./pint"] {
-            assert_eq!(
-                rewrite_command_no_prefixes(cmd, &[]),
-                Some("rtk pint".into()),
-                "form: {cmd}"
-            );
-        }
-        // Forms the simpler variant intentionally does not accept (no php
-        // wrapper, no plain bin/) — must not rewrite rather than misfire.
-        assert_eq!(
-            rewrite_command_no_prefixes("php vendor/bin/pint", &[]),
-            None
-        );
-        assert_eq!(rewrite_command_no_prefixes("bin/pint", &[]), None);
-    }
-
-    #[test]
-    fn test_classify_phpstan() {
-        assert!(matches!(
-            classify_command("vendor/bin/phpstan analyse src/"),
-            Classification::Supported {
-                rtk_equivalent: "rtk phpstan",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_phpstan_direct() {
-        assert!(matches!(
-            classify_command("phpstan analyse --level=9"),
-            Classification::Supported {
-                rtk_equivalent: "rtk phpstan",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_rewrite_phpstan_vendor_bin() {
-        assert_eq!(
-            rewrite_command_no_prefixes("vendor/bin/phpstan analyse src/", &[]),
-            Some("rtk phpstan analyse src/".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_phpstan_php_prefix() {
-        assert_eq!(
-            rewrite_command_no_prefixes("php vendor/bin/phpstan analyse", &[]),
-            Some("rtk phpstan analyse".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_phpstan_version_not_rewritten() {
-        assert_eq!(rewrite_command_no_prefixes("phpstan --version", &[]), None);
-        assert_eq!(rewrite_command_no_prefixes("phpstan list", &[]), None);
-        assert_eq!(
-            rewrite_command_no_prefixes("phpstan clear-result-cache", &[]),
-            None
-        );
-    }
-
-    #[test]
-    fn test_classify_pest() {
-        assert!(matches!(
-            classify_command("vendor/bin/pest tests/"),
-            Classification::Supported {
-                rtk_equivalent: "rtk pest",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_pint() {
-        assert!(matches!(
-            classify_command("vendor/bin/pint --test"),
-            Classification::Supported {
-                rtk_equivalent: "rtk pint",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_php_artisan_rewrites() {
-        assert!(matches!(
-            classify_command("php artisan migrate"),
-            Classification::Supported {
-                rtk_equivalent: "rtk php",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_normalize_php_tool_command_custom_bin_dir() {
-        use std::path::PathBuf;
-        let dirs = vec![PathBuf::from("tools/bin"), PathBuf::from("vendor/bin")];
-        assert_eq!(
-            normalize_php_tool_command_with_dirs("tools/bin/phpunit tests/", &dirs),
-            "phpunit tests/"
-        );
-        assert_eq!(
-            normalize_php_tool_command_with_dirs("./tools/bin/pest", &dirs),
-            "pest"
         );
     }
 }

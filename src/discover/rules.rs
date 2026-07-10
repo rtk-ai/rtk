@@ -12,7 +12,7 @@ pub struct RtkRule {
 
 pub const RULES: &[RtkRule] = &[
     RtkRule {
-        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|checkout|push|pull|branch|fetch|stash|worktree)",
+        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|checkout|stash|worktree)",
         rtk_cmd: "rtk git",
         rewrite_prefixes: &["git", "yadm"],
         category: "Git",
@@ -80,9 +80,27 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^(cat|head|tail)\s+",
+        pattern: r"^cat\s+",
         rtk_cmd: "rtk read",
-        rewrite_prefixes: &["cat", "head", "tail"],
+        rewrite_prefixes: &["cat"],
+        category: "Files",
+        savings_pct: 60.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^head\s+",
+        rtk_cmd: "rtk head",
+        rewrite_prefixes: &["head"],
+        category: "Files",
+        savings_pct: 60.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^tail\s+",
+        rtk_cmd: "rtk tail",
+        rewrite_prefixes: &["tail"],
         category: "Files",
         savings_pct: 60.0,
         subcmd_savings: &[],
@@ -548,83 +566,6 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    // PHP tooling
-    RtkRule {
-        pattern: r"^php\s+artisan(?:\s|$)",
-        rtk_cmd: "rtk php",
-        rewrite_prefixes: &["php"],
-        category: "Build",
-        savings_pct: 70.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
-    },
-    RtkRule {
-        pattern: r"^php\s+-l(?:\s|$)",
-        rtk_cmd: "rtk php",
-        rewrite_prefixes: &["php"],
-        category: "Build",
-        savings_pct: 60.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
-    },
-    RtkRule {
-        pattern: r"^(?:php\s+)?(?:\./)?(?:(?:vendor/)?bin/)?phpunit(?:\s|$)",
-        rtk_cmd: "rtk phpunit",
-        // rewrite_segment_inner normalizes the php wrapper, `./`, vendor/bin and
-        // composer bin-dir before matching, so only the residual forms remain:
-        // a plain `bin/` (not a Composer dir, so it survives normalization) and
-        // the bare tool name.
-        rewrite_prefixes: &["bin/phpunit", "phpunit"],
-        category: "Tests",
-        savings_pct: 75.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
-    },
-    RtkRule {
-        pattern: r"^(?:php\s+)?(?:\./)?(?:(?:vendor/)?bin/)?phpstan\s+analy[sz]e\b",
-        rtk_cmd: "rtk phpstan",
-        rewrite_prefixes: &["bin/phpstan", "phpstan"],
-        category: "Build",
-        savings_pct: 65.0,
-        subcmd_savings: &[("analyse", 65.0), ("analyze", 65.0)],
-        subcmd_status: &[],
-    },
-    RtkRule {
-        pattern: r"^(?:\./)?(?:vendor/bin/)?pest(?:\s|$)",
-        rtk_cmd: "rtk pest",
-        rewrite_prefixes: &["pest"],
-        category: "Tests",
-        savings_pct: 80.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
-    },
-    RtkRule {
-        pattern: r"^(?:\./)?(?:vendor/bin/)?paratest(?:\s|$)",
-        rtk_cmd: "rtk paratest",
-        rewrite_prefixes: &["paratest"],
-        category: "Tests",
-        savings_pct: 80.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
-    },
-    RtkRule {
-        pattern: r"^(?:\./)?(?:vendor/bin/)?ecs(?:\s|$)",
-        rtk_cmd: "rtk ecs",
-        rewrite_prefixes: &["ecs"],
-        category: "Build",
-        savings_pct: 70.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
-    },
-    RtkRule {
-        pattern: r"^(?:\./)?(?:vendor/bin/)?pint(?:\s|$)",
-        rtk_cmd: "rtk pint",
-        rewrite_prefixes: &["pint"],
-        category: "Build",
-        savings_pct: 70.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
-    },
     RtkRule {
         pattern: r"^aws\s+",
         rtk_cmd: "rtk aws",
@@ -997,6 +938,24 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
+    RtkRule {
+        pattern: r"^which\s+\S+$",
+        rtk_cmd: "rtk which",
+        rewrite_prefixes: &["which"],
+        category: "System",
+        savings_pct: 40.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^pwd$",
+        rtk_cmd: "rtk pwd",
+        rewrite_prefixes: &["pwd"],
+        category: "System",
+        savings_pct: 40.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
 ];
 
 pub const IGNORED_PREFIXES: &[&str] = &[
@@ -1013,7 +972,6 @@ pub const IGNORED_PREFIXES: &[&str] = &[
     "chmod ",
     "chown ",
     "touch ",
-    "which ",
     "type ",
     "test ",
     "true",
@@ -1034,7 +992,6 @@ pub const IGNORED_PREFIXES: &[&str] = &[
     "node -e",
     "ruby -e",
     "rtk ",
-    "pwd",
     "bash ",
     "sh ",
     "then\n",
@@ -1050,5 +1007,5 @@ pub const IGNORED_PREFIXES: &[&str] = &[
 ];
 
 pub const IGNORED_EXACT: &[&str] = &[
-    "cd", "echo", "true", "false", "wait", "pwd", "bash", "sh", "fi", "done",
+    "cd", "echo", "true", "false", "wait", "bash", "sh", "fi", "done",
 ];

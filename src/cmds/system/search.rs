@@ -8,11 +8,13 @@
 
 use crate::core::stream::{exec_capture, exec_capture_stdin, CaptureResult};
 use crate::core::tracking;
-use crate::core::utils::{resolved_command, strip_ansi};
+use crate::core::utils::{resolved_command, strip_ansi, tool_exists};
 use crate::core::{args_utils, config};
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 /// Short single-char flags that consume one following token (or inline remainder)
 /// as their value. `-e` is handled separately — its value goes to `patterns`.
@@ -333,6 +335,334 @@ fn passthrough<T: AsRef<str>>(
     Ok(result.exit_code)
 }
 
+fn native_grep_active(engine: Engine) -> bool {
+    matches!(engine, Engine::Grep) && cfg!(target_os = "windows") && !tool_exists("grep")
+}
+
+fn print_native_grep_help() {
+    println!(
+        "Compact grep with Windows Rust fallback\n\n\
+Usage: rtk grep [OPTIONS] PATTERN [PATHS]...\n\n\
+Fallback supports basic Rust regex search, -e/--regexp, -E, -i, -n, -H, -r/-R/--recursive.\n\
+Unsupported without grep.exe: -P, -F, shape flags such as -c/-l/-o/-Z, and full GNU grep dialects.\n\
+Use `rtk proxy grep ...` when a full grep installation is available."
+    );
+}
+
+fn native_unsupported(message: impl AsRef<str>) -> CaptureResult {
+    CaptureResult {
+        stdout: String::new(),
+        stderr: format!("rtk grep: {}\n", message.as_ref()),
+        exit_code: 2,
+    }
+}
+
+#[derive(Default)]
+struct NativeGrepOptions {
+    ignore_case: bool,
+    recursive: bool,
+    before_context: usize,
+    after_context: usize,
+}
+
+fn parse_native_context_value(value: Option<&str>, flag: &str) -> Result<usize, String> {
+    let Some(value) = value else {
+        return Err(format!("{flag} requires a non-negative line count"));
+    };
+    value
+        .parse::<usize>()
+        .map_err(|_| format!("{flag} requires a non-negative line count"))
+}
+
+fn parse_native_grep_options(extra_args: &[String]) -> Result<NativeGrepOptions, String> {
+    let mut options = NativeGrepOptions::default();
+    let mut unsupported = Vec::new();
+    let mut i = 0;
+
+    while i < extra_args.len() {
+        let flag = extra_args[i].as_str();
+        match flag {
+            "-E" | "--extended-regexp" | "-n" | "-H" => {
+                i += 1;
+            }
+            "-i" | "--ignore-case" => {
+                options.ignore_case = true;
+                i += 1;
+            }
+            "-r" | "-R" | "--recursive" => {
+                options.recursive = true;
+                i += 1;
+            }
+            "-P" | "--perl-regexp" | "-F" | "--fixed-strings" => {
+                unsupported.push(flag.to_string());
+                i += 1;
+            }
+            "-A" | "--after-context" => {
+                let value = parse_native_context_value(extra_args.get(i + 1).map(String::as_str), flag)?;
+                options.after_context = value;
+                i += 2;
+            }
+            "-B" | "--before-context" => {
+                let value = parse_native_context_value(extra_args.get(i + 1).map(String::as_str), flag)?;
+                options.before_context = value;
+                i += 2;
+            }
+            "-C" | "--context" => {
+                let value = parse_native_context_value(extra_args.get(i + 1).map(String::as_str), flag)?;
+                options.before_context = value;
+                options.after_context = value;
+                i += 2;
+            }
+            _ if flag.starts_with("--after-context=") => {
+                options.after_context =
+                    parse_native_context_value(flag.split_once('=').map(|(_, v)| v), "--after-context")?;
+                i += 1;
+            }
+            _ if flag.starts_with("--before-context=") => {
+                options.before_context =
+                    parse_native_context_value(flag.split_once('=').map(|(_, v)| v), "--before-context")?;
+                i += 1;
+            }
+            _ if flag.starts_with("--context=") => {
+                let value = parse_native_context_value(flag.split_once('=').map(|(_, v)| v), "--context")?;
+                options.before_context = value;
+                options.after_context = value;
+                i += 1;
+            }
+            _ if flag.starts_with("--") => {
+                unsupported.push(flag.to_string());
+                i += 1;
+            }
+            _ if flag.starts_with('-') => {
+                let cluster = &flag[1..];
+                if let Some(rest) = cluster.strip_prefix('A') {
+                    options.after_context =
+                        parse_native_context_value((!rest.is_empty()).then_some(rest), "-A")?;
+                } else if let Some(rest) = cluster.strip_prefix('B') {
+                    options.before_context =
+                        parse_native_context_value((!rest.is_empty()).then_some(rest), "-B")?;
+                } else if let Some(rest) = cluster.strip_prefix('C') {
+                    let value = parse_native_context_value((!rest.is_empty()).then_some(rest), "-C")?;
+                    options.before_context = value;
+                    options.after_context = value;
+                } else {
+                    for ch in cluster.chars() {
+                        match ch {
+                            'E' | 'n' | 'H' => {}
+                            'i' => options.ignore_case = true,
+                            'r' | 'R' => options.recursive = true,
+                            'P' | 'F' => unsupported.push(format!("-{ch}")),
+                            other => unsupported.push(format!("-{other}")),
+                        }
+                    }
+                }
+                i += 1;
+            }
+            _ => {
+                unsupported.push(flag.to_string());
+                i += 1;
+            }
+        }
+    }
+
+    if unsupported.is_empty() {
+        Ok(options)
+    } else {
+        Err(format!(
+            "unsupported flag(s) in Windows Rust fallback: {}",
+            unsupported.join(", ")
+        ))
+    }
+}
+
+fn native_grep_capture(
+    patterns: &[String],
+    paths: &[String],
+    extra_args: &[String],
+) -> Result<CaptureResult> {
+    if patterns.is_empty() {
+        return Ok(native_unsupported("missing pattern"));
+    }
+    if has_format_flag(extra_args) {
+        return Ok(native_unsupported(
+            "shape flags are unsupported in Windows Rust fallback",
+        ));
+    }
+
+    let options = match parse_native_grep_options(extra_args) {
+        Ok(options) => options,
+        Err(err) => return Ok(native_unsupported(err)),
+    };
+
+    let mut builder = regex::RegexBuilder::new(&patterns.join("|"));
+    builder.case_insensitive(options.ignore_case);
+    let regex = match builder.build() {
+        Ok(regex) => regex,
+        Err(err) => return Ok(native_unsupported(format!("invalid regex: {err}"))),
+    };
+
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut read_error = false;
+    let mut matched = false;
+
+    if paths.is_empty() && !options.recursive {
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input)?;
+        scan_text(
+            "(stdin)",
+            &input,
+            &regex,
+            &mut stdout,
+            &mut matched,
+            options.before_context,
+            options.after_context,
+        );
+    } else {
+        let search_paths: Vec<PathBuf> = if paths.is_empty() {
+            vec![PathBuf::from(".")]
+        } else {
+            paths.iter().map(PathBuf::from).collect()
+        };
+
+        for path in search_paths {
+            if path.is_dir() {
+                if options.recursive {
+                    for entry in walkdir::WalkDir::new(&path).follow_links(false) {
+                        let entry = match entry {
+                            Ok(entry) => entry,
+                            Err(err) => {
+                                stderr.push_str(&format!("rtk grep: {err}\n"));
+                                read_error = true;
+                                continue;
+                            }
+                        };
+                        if entry.file_type().is_file()
+                            && !scan_file(
+                                entry.path(),
+                                &regex,
+                                &mut stdout,
+                                &mut stderr,
+                                &mut matched,
+                                options.before_context,
+                                options.after_context,
+                            )
+                        {
+                            read_error = true;
+                        }
+                    }
+                } else {
+                    stderr.push_str(&format!(
+                        "rtk grep: {}: is a directory; use -r for recursion\n",
+                        path.display()
+                    ));
+                    read_error = true;
+                }
+            } else {
+                if !scan_file(
+                    &path,
+                    &regex,
+                    &mut stdout,
+                    &mut stderr,
+                    &mut matched,
+                    options.before_context,
+                    options.after_context,
+                ) {
+                    read_error = true;
+                }
+            }
+        }
+    }
+
+    let exit_code = if read_error { 2 } else if matched { 0 } else { 1 };
+    Ok(CaptureResult {
+        stdout,
+        stderr,
+        exit_code,
+    })
+}
+
+fn scan_file(
+    path: &Path,
+    regex: &Regex,
+    stdout: &mut String,
+    stderr: &mut String,
+    matched: &mut bool,
+    before_context: usize,
+    after_context: usize,
+) -> bool {
+    match std::fs::read(path) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => {
+                scan_text(
+                    &path.display().to_string(),
+                    &text,
+                    regex,
+                    stdout,
+                    matched,
+                    before_context,
+                    after_context,
+                );
+                true
+            }
+            Err(_) => true,
+        },
+        Err(err) => {
+            stderr.push_str(&format!("rtk grep: {}: {}\n", path.display(), err));
+            false
+        }
+    }
+}
+
+fn scan_text(
+    path: &str,
+    text: &str,
+    regex: &Regex,
+    stdout: &mut String,
+    matched: &mut bool,
+    before_context: usize,
+    after_context: usize,
+) {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.is_empty() {
+        return;
+    }
+
+    let mut include = vec![false; lines.len()];
+    let mut match_line = vec![false; lines.len()];
+    for (idx, line) in lines.iter().enumerate() {
+        if regex.is_match(line) {
+            *matched = true;
+            match_line[idx] = true;
+            let start = idx.saturating_sub(before_context);
+            let end = (idx + after_context).min(lines.len() - 1);
+            for include_line in include.iter_mut().take(end + 1).skip(start) {
+                *include_line = true;
+            }
+        }
+    }
+
+    let mut previous: Option<usize> = None;
+    let has_context = before_context > 0 || after_context > 0;
+    for (idx, line) in lines.iter().enumerate() {
+        if !include[idx] {
+            continue;
+        }
+        if let Some(prev) = previous {
+            if has_context && idx > prev + 1 {
+                stdout.push_str("--\n");
+            }
+        }
+        previous = Some(idx);
+        stdout.push_str(path);
+        stdout.push('\0');
+        stdout.push_str(&(idx + 1).to_string());
+        stdout.push(if match_line[idx] { ':' } else { '-' });
+        stdout.push_str(line);
+        stdout.push('\n');
+    }
+}
+
 fn has_short_flag(flags: &[String], ch: char) -> bool {
     flags
         .iter()
@@ -370,6 +700,14 @@ pub fn run(
         .iter()
         .any(|a| a == "--version" || a == "--help" || a == "-h")
     {
+        if native_grep_active(engine) {
+            if args.iter().any(|a| a == "--version") {
+                println!("rtk grep fallback {}", env!("CARGO_PKG_VERSION"));
+            } else {
+                print_native_grep_help();
+            }
+            return Ok(0);
+        }
         let mut cmd = resolved_command(engine.bin());
         cmd.args(args);
         let result = exec_capture(&mut cmd).context("search failed")?;
@@ -388,6 +726,10 @@ pub fn run(
     let (patterns, paths, extra_args) = extract_pattern_path(&args);
 
     if patterns.is_empty() {
+        if native_grep_active(engine) {
+            eprintln!("rtk grep: missing pattern");
+            return Ok(2);
+        }
         return passthrough(&timer, engine, &args, &real_cmd);
     }
 
@@ -405,10 +747,18 @@ pub fn run(
 
     // format/shape flags (-c/-l/-o/...): already-minimal native output, passthrough.
     if has_format_flag(&extra_args) {
+        if native_grep_active(engine) {
+            eprintln!("rtk grep: shape flags are unsupported in Windows Rust fallback");
+            return Ok(2);
+        }
         return passthrough(&timer, engine, &args, &real_cmd);
     }
 
-    let result = engine_capture(engine, &extra_args, &patterns, &paths)?;
+    let result = if native_grep_active(engine) {
+        native_grep_capture(&patterns, &paths, &extra_args)?
+    } else {
+        engine_capture(engine, &extra_args, &patterns, &paths)?
+    };
 
     let exit_code = result.exit_code;
     let raw_output = result.stdout.clone();
@@ -724,6 +1074,73 @@ mod tests {
         let cleaned = clean_line(line, 50, None, "result");
         assert!(!cleaned.starts_with(' '));
         assert!(cleaned.len() <= 50);
+    }
+
+    #[test]
+    fn test_native_grep_capture_searches_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sample.txt");
+        std::fs::write(&path, "alpha\nbeta\nalphabet\n").unwrap();
+        let path = path.to_string_lossy().to_string();
+
+        let result = native_grep_capture(
+            &["alpha".to_string()],
+            std::slice::from_ref(&path),
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains(&format!("{path}\0{}:alpha", 1)));
+        assert!(result.stdout.contains(&format!("{path}\0{}:alphabet", 3)));
+    }
+
+    #[test]
+    fn test_native_grep_capture_returns_one_for_no_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sample.txt");
+        std::fs::write(&path, "alpha\nbeta\n").unwrap();
+
+        let result = native_grep_capture(
+            &["gamma".to_string()],
+            &[path.to_string_lossy().to_string()],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 1);
+        assert!(result.stdout.is_empty());
+    }
+
+    #[test]
+    fn test_native_grep_capture_returns_two_for_read_errors() {
+        let result = native_grep_capture(
+            &["alpha".to_string()],
+            &["definitely-missing-file.txt".to_string()],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 2);
+        assert!(result.stderr.contains("definitely-missing-file.txt"));
+    }
+
+    #[test]
+    fn test_native_grep_recursive_skips_invalid_utf8_files_without_failing() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("match.txt"), "inside\n").unwrap();
+        std::fs::write(tmp.path().join("invalid.bin"), [0x61, 0x20, 0xFF]).unwrap();
+
+        let result = native_grep_capture(
+            &["inside".to_string()],
+            &[tmp.path().to_string_lossy().to_string()],
+            &["-r".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("inside"));
+        assert!(result.stderr.is_empty());
     }
 
     #[test]
@@ -1401,7 +1818,59 @@ mod tests {
         assert_eq!(unparsed_signal(stdout), 0);
     }
 
-    // --- has_context_flag ---
+    #[test]
+    fn test_native_grep_context_separator_between_non_adjacent_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sep.txt");
+        std::fs::write(
+            &file,
+            "alpha match here\nfiller 1\nfiller 2\nfiller 3\nfiller 4\nfiller 5\nbeta match here\n",
+        )
+        .unwrap();
+
+        let result = native_grep_capture(
+            &["match".to_string()],
+            &[file.to_string_lossy().to_string()],
+            &["-A".to_string(), "1".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert!(
+            result.stdout.contains("--\n"),
+            "missing raw context separator:\n{:?}",
+            result.stdout
+        );
+        assert!(result.stdout.contains("alpha match here"));
+        assert!(result.stdout.contains("beta match here"));
+    }
+
+    #[test]
+    fn test_native_grep_no_separator_without_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("nosep.txt");
+        std::fs::write(
+            &file,
+            "match line 1\nfiller\nfiller\nfiller\nmatch line 2\n",
+        )
+        .unwrap();
+
+        let result = native_grep_capture(
+            &["match".to_string()],
+            &[file.to_string_lossy().to_string()],
+            &["-n".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert!(
+            !result.stdout.contains("--"),
+            "plain native grep must not synthesize separators:\n{:?}",
+            result.stdout
+        );
+        assert!(result.stdout.contains("match line 1"));
+        assert!(result.stdout.contains("match line 2"));
+    }
 
     #[test]
     fn test_has_context_flag_short() {

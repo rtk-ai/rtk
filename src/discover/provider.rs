@@ -1,12 +1,13 @@
 //! Reads Claude Code session logs from disk and streams their command history.
 
 use crate::hooks::init::resolve_claude_dir;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use rusqlite::{params, Connection, OpenFlags};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use walkdir::WalkDir;
 
 /// A command extracted from a session file.
@@ -23,6 +24,45 @@ pub struct ExtractedCommand {
     /// Chronological sequence index within the session
     #[allow(dead_code)]
     pub sequence_index: usize,
+    #[allow(dead_code)]
+    pub occurred_at_unix: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderKind {
+    Claude,
+    Codex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionSource {
+    ClaudeFile(PathBuf),
+    CodexThread { db_path: PathBuf, thread_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRef {
+    pub provider: ProviderKind,
+    pub id: String,
+    pub source: SessionSource,
+}
+
+impl SessionRef {
+    pub fn display_source(&self) -> String {
+        match &self.source {
+            SessionSource::ClaudeFile(path) => path.display().to_string(),
+            SessionSource::CodexThread { db_path, thread_id } => {
+                format!("{}#{thread_id}", db_path.display())
+            }
+        }
+    }
+
+    pub fn claude_path(&self) -> Option<&Path> {
+        match &self.source {
+            SessionSource::ClaudeFile(path) => Some(path.as_path()),
+            _ => None,
+        }
+    }
 }
 
 /// Trait for session providers (Claude Code, OpenCode, etc.).
@@ -35,8 +75,8 @@ pub trait SessionProvider {
         &self,
         project_filter: Option<&str>,
         since_days: Option<u64>,
-    ) -> Result<Vec<PathBuf>>;
-    fn extract_commands(&self, path: &Path) -> Result<Vec<ExtractedCommand>>;
+    ) -> Result<Vec<SessionRef>>;
+    fn extract_commands(&self, session: &SessionRef) -> Result<Vec<ExtractedCommand>>;
 }
 
 pub struct ClaudeProvider;
@@ -144,12 +184,36 @@ impl SessionProvider for ClaudeProvider {
         &self,
         project_filter: Option<&str>,
         since_days: Option<u64>,
-    ) -> Result<Vec<PathBuf>> {
+    ) -> Result<Vec<SessionRef>> {
         let projects_dir = Self::projects_dir()?;
-        Self::discover_sessions_in_projects_dir(&projects_dir, project_filter, since_days)
+        let paths =
+            Self::discover_sessions_in_projects_dir(&projects_dir, project_filter, since_days)?;
+        Ok(paths.into_iter().map(Self::session_ref_from_path).collect())
     }
 
-    fn extract_commands(&self, path: &Path) -> Result<Vec<ExtractedCommand>> {
+    fn extract_commands(&self, session: &SessionRef) -> Result<Vec<ExtractedCommand>> {
+        let path = session
+            .claude_path()
+            .ok_or_else(|| anyhow!("expected Claude file session"))?;
+        self.extract_commands_from_path(path)
+    }
+}
+
+impl ClaudeProvider {
+    fn session_ref_from_path(path: PathBuf) -> SessionRef {
+        let id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        SessionRef {
+            provider: ProviderKind::Claude,
+            id,
+            source: SessionSource::ClaudeFile(path),
+        }
+    }
+
+    pub fn extract_commands_from_path(&self, path: &Path) -> Result<Vec<ExtractedCommand>> {
         let file =
             fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
         let reader = BufReader::new(file);
@@ -260,6 +324,7 @@ impl SessionProvider for ClaudeProvider {
                 output_content,
                 is_error,
                 sequence_index,
+                occurred_at_unix: None,
             });
         }
 
@@ -267,9 +332,351 @@ impl SessionProvider for ClaudeProvider {
     }
 }
 
+pub struct CodexProvider {
+    db_path_override: Option<PathBuf>,
+}
+
+struct CodexScanDiagnostics {
+    elapsed: Duration,
+    selected_rows: usize,
+    extracted_commands: usize,
+    db_size_bytes: u64,
+}
+
+impl CodexProvider {
+    pub fn new(db_path_override: Option<PathBuf>) -> Self {
+        Self { db_path_override }
+    }
+
+    pub fn candidate_db_paths(override_path: Option<PathBuf>) -> Vec<PathBuf> {
+        if let Some(path) = override_path {
+            return vec![path];
+        }
+
+        home_dir()
+            .map(|home| vec![home.join(".codex").join("logs_2.sqlite")])
+            .unwrap_or_default()
+    }
+
+    fn selected_db_path(&self) -> Option<PathBuf> {
+        Self::candidate_db_paths(self.db_path_override.clone())
+            .into_iter()
+            .find(|path| path.is_file())
+    }
+
+    fn open_readonly(path: &Path) -> Result<Connection> {
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .with_context(|| {
+                format!(
+                    "failed to open Codex database read-only: {}",
+                    path.display()
+                )
+            })?;
+        conn.busy_timeout(Duration::from_secs(2))?;
+        Ok(conn)
+    }
+
+    fn validate_schema(conn: &Connection) -> Result<()> {
+        let mut stmt = conn.prepare("PRAGMA table_info(logs)")?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if columns.is_empty() {
+            anyhow::bail!("Codex database is missing required logs table");
+        }
+
+        for required in ["id", "ts", "ts_nanos", "thread_id", "feedback_log_body"] {
+            if !columns.iter().any(|col| col == required) {
+                anyhow::bail!("Codex database logs table is missing required column {required}");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn check_provider(&self) -> Result<String> {
+        let candidates = Self::candidate_db_paths(self.db_path_override.clone());
+        let mut out = String::new();
+        out.push_str("Codex provider check\n");
+        out.push_str("Candidates:\n");
+        for path in &candidates {
+            out.push_str(&format!("  {}\n", path.display()));
+        }
+
+        let Some(path) = self.selected_db_path() else {
+            out.push_str("Selected: none\n");
+            return Ok(out);
+        };
+
+        out.push_str(&format!("Selected: {}\n", path.display()));
+        let conn = Self::open_readonly(&path)?;
+        let mut stmt = conn.prepare("PRAGMA table_info(logs)")?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        out.push_str(&format!("logs columns: {}\n", columns.join(", ")));
+        Self::validate_schema(&conn)?;
+        out.push_str("schema: compatible\n");
+        let diagnostics = Self::scan_diagnostics_in_db(&path, None)?;
+        out.push_str(&Self::format_scan_diagnostics(&diagnostics));
+        Ok(out)
+    }
+
+    fn scan_diagnostics_in_db(
+        path: &Path,
+        since_days: Option<u64>,
+    ) -> Result<CodexScanDiagnostics> {
+        let started = Instant::now();
+        let db_size_bytes = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let conn = Self::open_readonly(path)?;
+        Self::validate_schema(&conn)
+            .with_context(|| format!("unsupported Codex database schema: {}", path.display()))?;
+        let cutoff = Self::cutoff_unix(since_days);
+        let mut stmt = conn
+            .prepare(
+                "SELECT feedback_log_body FROM logs \
+             WHERE ts >= ?1 AND feedback_log_body LIKE '%ToolCall: shell_command%'",
+            )
+            .with_context(|| {
+                format!("failed to query Codex diagnostic rows: {}", path.display())
+            })?;
+        let rows = stmt
+            .query_map(params![cutoff], |row| row.get::<_, String>(0))
+            .with_context(|| format!("failed to read Codex diagnostic rows: {}", path.display()))?;
+
+        let mut selected_rows = 0;
+        let mut extracted_commands = 0;
+        for row in rows {
+            let body = row.with_context(|| {
+                format!("failed to read Codex diagnostic row: {}", path.display())
+            })?;
+            selected_rows += 1;
+            if extract_codex_shell_command(&body).is_some() {
+                extracted_commands += 1;
+            }
+        }
+
+        Ok(CodexScanDiagnostics {
+            elapsed: started.elapsed(),
+            selected_rows,
+            extracted_commands,
+            db_size_bytes,
+        })
+    }
+
+    fn format_scan_diagnostics(diagnostics: &CodexScanDiagnostics) -> String {
+        let elapsed_ms = diagnostics.elapsed.as_millis();
+        let mut out = String::new();
+        out.push_str(&format!(
+            "database size: {} bytes\n",
+            diagnostics.db_size_bytes
+        ));
+        out.push_str(&format!("selected rows: {}\n", diagnostics.selected_rows));
+        out.push_str(&format!(
+            "extracted commands: {}\n",
+            diagnostics.extracted_commands
+        ));
+        out.push_str(&format!("elapsed: {elapsed_ms} ms\n"));
+        if diagnostics.elapsed > Duration::from_secs(5) {
+            out.push_str("warning: Codex scan exceeded 5 seconds; results remain valid\n");
+        }
+        out
+    }
+
+    fn cutoff_unix(since_days: Option<u64>) -> i64 {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        since_days
+            .map(|days| now.saturating_sub((days * 86_400) as i64))
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn discover_sessions_in_db(
+        path: &Path,
+        since_days: Option<u64>,
+    ) -> Result<Vec<SessionRef>> {
+        let conn = Self::open_readonly(path)?;
+        Self::validate_schema(&conn)
+            .with_context(|| format!("unsupported Codex database schema: {}", path.display()))?;
+        let cutoff = Self::cutoff_unix(since_days);
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT thread_id FROM logs \
+             WHERE thread_id IS NOT NULL AND ts >= ?1 ORDER BY thread_id",
+            )
+            .with_context(|| format!("failed to query Codex sessions: {}", path.display()))?;
+        let rows = stmt
+            .query_map(params![cutoff], |row| row.get::<_, String>(0))
+            .with_context(|| format!("failed to read Codex sessions: {}", path.display()))?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            let thread_id = row
+                .with_context(|| format!("failed to read Codex session row: {}", path.display()))?;
+            sessions.push(SessionRef {
+                provider: ProviderKind::Codex,
+                id: thread_id.clone(),
+                source: SessionSource::CodexThread {
+                    db_path: path.to_path_buf(),
+                    thread_id,
+                },
+            });
+        }
+        Ok(sessions)
+    }
+
+    fn extract_commands_from_thread(
+        db_path: &Path,
+        thread_id: &str,
+        since_days: Option<u64>,
+    ) -> Result<Vec<ExtractedCommand>> {
+        let conn = Self::open_readonly(db_path)?;
+        Self::validate_schema(&conn).with_context(|| {
+            format!(
+                "unsupported Codex database schema while reading thread {thread_id}: {}",
+                db_path.display()
+            )
+        })?;
+        let cutoff = Self::cutoff_unix(since_days);
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, ts, ts_nanos, feedback_log_body FROM logs \
+             WHERE thread_id = ?1 AND ts >= ?2 \
+               AND feedback_log_body LIKE '%ToolCall: shell_command%' \
+             ORDER BY ts, ts_nanos, id",
+            )
+            .with_context(|| {
+                format!(
+                    "failed to query Codex commands for thread {thread_id}: {}",
+                    db_path.display()
+                )
+            })?;
+        let rows = stmt
+            .query_map(params![thread_id, cutoff], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .with_context(|| {
+                format!(
+                    "failed to read Codex commands for thread {thread_id}: {}",
+                    db_path.display()
+                )
+            })?;
+
+        let mut commands = Vec::new();
+        for row in rows {
+            let (_id, ts, _ts_nanos, body) = row.with_context(|| {
+                format!(
+                    "failed to read Codex command row for thread {thread_id}: {}",
+                    db_path.display()
+                )
+            })?;
+            let Some(command) = extract_codex_shell_command(&body) else {
+                continue;
+            };
+            let sequence_index = commands.len();
+            commands.push(ExtractedCommand {
+                command,
+                output_len: None,
+                session_id: thread_id.to_string(),
+                output_content: None,
+                is_error: false,
+                sequence_index,
+                occurred_at_unix: Some(ts),
+            });
+        }
+        Ok(commands)
+    }
+}
+
+impl SessionProvider for CodexProvider {
+    fn discover_sessions(
+        &self,
+        project_filter: Option<&str>,
+        since_days: Option<u64>,
+    ) -> Result<Vec<SessionRef>> {
+        if project_filter.is_some() {
+            anyhow::bail!("Codex provider does not support --project yet");
+        }
+        let Some(path) = self.selected_db_path() else {
+            return Ok(Vec::new());
+        };
+        Self::discover_sessions_in_db(&path, since_days)
+    }
+
+    fn extract_commands(&self, session: &SessionRef) -> Result<Vec<ExtractedCommand>> {
+        let SessionSource::CodexThread { db_path, thread_id } = &session.source else {
+            anyhow::bail!("expected Codex thread session");
+        };
+        Self::extract_commands_from_thread(db_path, thread_id, None)
+    }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE").map(PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
+fn extract_codex_shell_command(body: &str) -> Option<String> {
+    let marker = "ToolCall: shell_command";
+    let after_marker = body.split_once(marker)?.1;
+    let json_start = after_marker.find('{')?;
+    let json_text = balanced_json_object(&after_marker[json_start..])?;
+    let value: serde_json::Value = serde_json::from_str(json_text).ok()?;
+    value
+        .get("command")
+        .and_then(|v| v.as_str())
+        .or_else(|| value.pointer("/arguments/command").and_then(|v| v.as_str()))
+        .or_else(|| value.pointer("/input/command").and_then(|v| v.as_str()))
+        .map(str::to_string)
+}
+
+fn balanced_json_object(input: &str) -> Option<&str> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (idx, ch) in input.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(&input[..idx + ch.len_utf8()]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::params;
     use std::io::Write;
 
     fn make_jsonl(lines: &[&str]) -> tempfile::NamedTempFile {
@@ -281,6 +688,35 @@ mod tests {
         f
     }
 
+    fn create_codex_db() -> tempfile::NamedTempFile {
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let conn = Connection::open(db.path()).unwrap();
+        conn.execute(
+            "CREATE TABLE logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                ts_nanos INTEGER NOT NULL,
+                feedback_log_body TEXT,
+                thread_id TEXT,
+                process_uuid TEXT
+            )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        db
+    }
+
+    fn insert_codex_log(db: &Path, ts: i64, ts_nanos: i64, thread_id: &str, body: &str) {
+        let conn = Connection::open(db).unwrap();
+        conn.execute(
+            "INSERT INTO logs (ts, ts_nanos, feedback_log_body, thread_id, process_uuid)
+             VALUES (?1, ?2, ?3, ?4, 'proc')",
+            params![ts, ts_nanos, body, thread_id],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn test_extract_assistant_bash() {
         let jsonl = make_jsonl(&[
@@ -289,7 +725,7 @@ mod tests {
         ]);
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        let cmds = provider.extract_commands_from_path(jsonl.path()).unwrap();
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0].command, "git status");
         assert!(cmds[0].output_len.is_some());
@@ -306,7 +742,7 @@ mod tests {
         ]);
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        let cmds = provider.extract_commands_from_path(jsonl.path()).unwrap();
         assert_eq!(cmds.len(), 0);
     }
 
@@ -316,7 +752,7 @@ mod tests {
             make_jsonl(&[r#"{"type":"file-history-snapshot","messageId":"abc","snapshot":{}}"#]);
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        let cmds = provider.extract_commands_from_path(jsonl.path()).unwrap();
         assert_eq!(cmds.len(), 0);
     }
 
@@ -327,7 +763,7 @@ mod tests {
         ]);
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        let cmds = provider.extract_commands_from_path(jsonl.path()).unwrap();
         assert_eq!(cmds.len(), 2);
         assert_eq!(cmds[0].command, "git status");
         assert_eq!(cmds[1].command, "git diff");
@@ -341,7 +777,7 @@ mod tests {
         ]);
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        let cmds = provider.extract_commands_from_path(jsonl.path()).unwrap();
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0].command, "ls");
     }
@@ -489,7 +925,7 @@ mod tests {
         ]);
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        let cmds = provider.extract_commands_from_path(jsonl.path()).unwrap();
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0].command, "git commit --ammend");
         assert!(cmds[0].is_error);
@@ -508,7 +944,7 @@ mod tests {
         ]);
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        let cmds = provider.extract_commands_from_path(jsonl.path()).unwrap();
         assert_eq!(cmds.len(), 2);
         assert!(!cmds[0].is_error);
         assert!(cmds[1].is_error);
@@ -521,7 +957,7 @@ mod tests {
         ]);
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        let cmds = provider.extract_commands_from_path(jsonl.path()).unwrap();
         assert_eq!(cmds.len(), 3);
         assert_eq!(cmds[0].sequence_index, 0);
         assert_eq!(cmds[1].sequence_index, 1);
@@ -529,5 +965,273 @@ mod tests {
         assert_eq!(cmds[0].command, "first");
         assert_eq!(cmds[1].command, "second");
         assert_eq!(cmds[2].command, "third");
+    }
+
+    #[test]
+    fn codex_missing_db_returns_empty_sessions() {
+        let missing = tempfile::tempdir().unwrap().path().join("missing.sqlite");
+        let provider = CodexProvider::new(Some(missing));
+        let sessions = provider.discover_sessions(None, Some(30)).unwrap();
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn codex_extracts_shell_command_payload() {
+        let db = create_codex_db();
+        insert_codex_log(
+            db.path(),
+            CodexProvider::cutoff_unix(None) + 1,
+            0,
+            "thread-a",
+            r#"ToolCall: shell_command {"command":"rtk ls"}"#,
+        );
+
+        let sessions = CodexProvider::discover_sessions_in_db(db.path(), None).unwrap();
+        assert_eq!(sessions.len(), 1);
+        let cmds = CodexProvider::new(Some(db.path().to_path_buf()))
+            .extract_commands(&sessions[0])
+            .unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].command, "rtk ls");
+        assert_eq!(cmds[0].session_id, "thread-a");
+    }
+
+    #[test]
+    fn codex_skips_malformed_payload() {
+        let db = create_codex_db();
+        insert_codex_log(
+            db.path(),
+            CodexProvider::cutoff_unix(None) + 1,
+            0,
+            "thread-a",
+            r#"ToolCall: shell_command {"command":"rtk ls"}"#,
+        );
+        insert_codex_log(
+            db.path(),
+            CodexProvider::cutoff_unix(None) + 2,
+            0,
+            "thread-a",
+            "ToolCall: shell_command {bad json",
+        );
+
+        let sessions = CodexProvider::discover_sessions_in_db(db.path(), None).unwrap();
+        let cmds = CodexProvider::new(Some(db.path().to_path_buf()))
+            .extract_commands(&sessions[0])
+            .unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].command, "rtk ls");
+    }
+
+    #[test]
+    fn codex_since_filter_excludes_old_rows_in_recent_db() {
+        let db = create_codex_db();
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        insert_codex_log(
+            db.path(),
+            now - 90 * 86_400,
+            0,
+            "old-thread",
+            r#"ToolCall: shell_command {"command":"old"}"#,
+        );
+        insert_codex_log(
+            db.path(),
+            now,
+            0,
+            "new-thread",
+            r#"ToolCall: shell_command {"command":"new"}"#,
+        );
+
+        let sessions = CodexProvider::discover_sessions_in_db(db.path(), Some(30)).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "new-thread");
+    }
+
+    #[test]
+    fn codex_groups_rows_by_thread_id() {
+        let db = create_codex_db();
+        let now = CodexProvider::cutoff_unix(None) + 1;
+        insert_codex_log(
+            db.path(),
+            now,
+            0,
+            "thread-a",
+            r#"ToolCall: shell_command {"command":"a1"}"#,
+        );
+        insert_codex_log(
+            db.path(),
+            now,
+            1,
+            "thread-a",
+            r#"ToolCall: shell_command {"command":"a2"}"#,
+        );
+        insert_codex_log(
+            db.path(),
+            now,
+            0,
+            "thread-b",
+            r#"ToolCall: shell_command {"command":"b1"}"#,
+        );
+
+        let sessions = CodexProvider::discover_sessions_in_db(db.path(), None).unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].id, "thread-a");
+        assert_eq!(sessions[1].id, "thread-b");
+    }
+
+    #[test]
+    fn codex_orders_rows_by_timestamp_nanos_and_id() {
+        let db = create_codex_db();
+        let now = CodexProvider::cutoff_unix(None) + 1;
+        insert_codex_log(
+            db.path(),
+            now,
+            20,
+            "thread-a",
+            r#"ToolCall: shell_command {"command":"third"}"#,
+        );
+        insert_codex_log(
+            db.path(),
+            now,
+            10,
+            "thread-a",
+            r#"ToolCall: shell_command {"command":"first"}"#,
+        );
+        insert_codex_log(
+            db.path(),
+            now,
+            10,
+            "thread-a",
+            r#"ToolCall: shell_command {"command":"second"}"#,
+        );
+
+        let sessions = CodexProvider::discover_sessions_in_db(db.path(), None).unwrap();
+        let cmds = CodexProvider::new(Some(db.path().to_path_buf()))
+            .extract_commands(&sessions[0])
+            .unwrap();
+        let commands: Vec<_> = cmds.iter().map(|cmd| cmd.command.as_str()).collect();
+        assert_eq!(commands, vec!["first", "second", "third"]);
+        assert_eq!(cmds[0].sequence_index, 0);
+        assert_eq!(cmds[1].sequence_index, 1);
+        assert_eq!(cmds[2].sequence_index, 2);
+    }
+
+    #[test]
+    fn codex_unknown_schema_reports_diagnostic() {
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let conn = Connection::open(db.path()).unwrap();
+        conn.execute("CREATE TABLE unrelated (body TEXT)", [])
+            .unwrap();
+        drop(conn);
+
+        let err = CodexProvider::discover_sessions_in_db(db.path(), None).unwrap_err();
+        let message = format!("{err:#}");
+
+        assert!(message.contains("unsupported Codex database schema"));
+        assert!(message.contains(&db.path().display().to_string()));
+        assert!(message.contains("required logs table"));
+    }
+
+    #[test]
+    fn codex_check_provider_reports_schema() {
+        let db = create_codex_db();
+        insert_codex_log(
+            db.path(),
+            CodexProvider::cutoff_unix(None) + 1,
+            0,
+            "thread-a",
+            r#"ToolCall: shell_command {"command":"rtk ls"}"#,
+        );
+        insert_codex_log(
+            db.path(),
+            CodexProvider::cutoff_unix(None) + 2,
+            0,
+            "thread-a",
+            "ToolCall: shell_command {bad json",
+        );
+        let provider = CodexProvider::new(Some(db.path().to_path_buf()));
+
+        let output = provider.check_provider().unwrap();
+
+        assert!(output.contains("Codex provider check"));
+        assert!(output.contains(&db.path().display().to_string()));
+        assert!(output.contains("logs columns:"));
+        assert!(output.contains("feedback_log_body"));
+        assert!(output.contains("schema: compatible"));
+        assert!(output.contains("database size:"));
+        assert!(output.contains("selected rows: 2"));
+        assert!(output.contains("extracted commands: 1"));
+        assert!(output.contains("elapsed:"));
+    }
+
+    #[test]
+    fn codex_scan_diagnostics_warns_after_five_seconds() {
+        let output = CodexProvider::format_scan_diagnostics(&CodexScanDiagnostics {
+            elapsed: Duration::from_secs(6),
+            selected_rows: 3,
+            extracted_commands: 2,
+            db_size_bytes: 4096,
+        });
+
+        assert!(output.contains("database size: 4096 bytes"));
+        assert!(output.contains("selected rows: 3"));
+        assert!(output.contains("extracted commands: 2"));
+        assert!(output.contains("elapsed: 6000 ms"));
+        assert!(output.contains("warning: Codex scan exceeded 5 seconds"));
+    }
+
+    #[test]
+    fn codex_wal_writer_and_reader_coexist() {
+        let db = create_codex_db();
+        {
+            let conn = Connection::open(db.path()).unwrap();
+            conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+            insert_codex_log(
+                db.path(),
+                CodexProvider::cutoff_unix(None) + 1,
+                0,
+                "thread-a",
+                r#"ToolCall: shell_command {"command":"first"}"#,
+            );
+
+            let tx = conn.unchecked_transaction().unwrap();
+            tx.execute(
+                "INSERT INTO logs (ts, ts_nanos, feedback_log_body, thread_id, process_uuid)
+                 VALUES (?1, ?2, ?3, ?4, 'proc')",
+                params![
+                    CodexProvider::cutoff_unix(None) + 2,
+                    0,
+                    r#"ToolCall: shell_command {"command":"uncommitted"}"#,
+                    "thread-a"
+                ],
+            )
+            .unwrap();
+
+            let sessions = CodexProvider::discover_sessions_in_db(db.path(), None).unwrap();
+            assert_eq!(sessions.len(), 1);
+            let cmds = CodexProvider::new(Some(db.path().to_path_buf()))
+                .extract_commands(&sessions[0])
+                .unwrap();
+            assert_eq!(cmds.len(), 1);
+            assert_eq!(cmds[0].command, "first");
+        }
+    }
+
+    #[test]
+    fn codex_locked_database_is_not_zero_sessions() {
+        let db = create_codex_db();
+        let locker = Connection::open(db.path()).unwrap();
+        locker.execute("BEGIN EXCLUSIVE", []).unwrap();
+
+        let err = CodexProvider::discover_sessions_in_db(db.path(), None).unwrap_err();
+        let message = format!("{err:#}");
+
+        assert!(message.contains(&db.path().display().to_string()));
+        assert!(
+            message.contains("locked") || message.contains("busy"),
+            "expected lock diagnostic, got: {message}"
+        );
     }
 }

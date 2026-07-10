@@ -1,13 +1,20 @@
 //! Filters directory listings into a compact tree format.
 
 use super::constants::NOISE_DIRS;
+#[cfg(any(target_os = "windows", test))]
+use anyhow::anyhow;
+#[cfg(not(target_os = "windows"))]
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::{reduced, CAP_WARNINGS};
+#[cfg(not(target_os = "windows"))]
 use crate::core::utils::resolved_command;
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
+#[cfg(not(target_os = "windows"))]
 use std::io::IsTerminal;
+#[cfg(any(target_os = "windows", test))]
+use std::path::{Path, PathBuf};
 
 lazy_static! {
     /// Matches the date+time portion in `ls -la` output, which serves as a
@@ -20,6 +27,19 @@ lazy_static! {
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    #[cfg(target_os = "windows")]
+    {
+        run_native(args, verbose)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        run_external(args, verbose)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn run_external(args: &[String], verbose: u8) -> Result<i32> {
     let show_all = args
         .iter()
         .any(|a| (a.starts_with('-') && !a.starts_with("--") && a.contains('a')) || a == "--all");
@@ -126,6 +146,157 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
+#[cfg(target_os = "windows")]
+fn run_native(args: &[String], verbose: u8) -> Result<i32> {
+    let options = match parse_native_args(args) {
+        Ok(options) => options,
+        Err(err) => {
+            eprintln!("rtk ls: {err}");
+            return Ok(2);
+        }
+    };
+
+    if verbose > 0 {
+        eprintln!("Running native ls {}", args.join(" "));
+    }
+
+    match native_ls_output(&options) {
+        Ok(output) => {
+            print!("{output}");
+            Ok(0)
+        }
+        Err(err) => {
+            eprintln!("rtk ls: {err}");
+            Ok(2)
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Default)]
+struct LsOptions {
+    show_all: bool,
+    show_long: bool,
+    paths: Vec<PathBuf>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_native_args(args: &[String]) -> Result<LsOptions> {
+    let mut options = LsOptions::default();
+
+    for arg in args {
+        match arg.as_str() {
+            "--all" => options.show_all = true,
+            "--color=auto" => {}
+            "-R" | "--recursive" => {
+                return Err(anyhow!(
+                    "recursive ls is unsupported on Windows native path; use rtk tree"
+                ));
+            }
+            _ if arg.starts_with("--") => {
+                return Err(anyhow!(
+                    "unsupported ls flag '{arg}' on Windows native path; use rtk proxy ls ..."
+                ));
+            }
+            _ if arg.starts_with('-') && arg != "-" => {
+                for flag in arg.trim_start_matches('-').chars() {
+                    match flag {
+                        'a' => options.show_all = true,
+                        'l' => options.show_long = true,
+                        'h' => {}
+                        'R' => {
+                            return Err(anyhow!(
+                                "recursive ls is unsupported on Windows native path; use rtk tree"
+                            ));
+                        }
+                        other => {
+                            return Err(anyhow!(
+                                "unsupported ls flag '-{other}' on Windows native path; use rtk proxy ls ..."
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => options.paths.push(PathBuf::from(arg)),
+        }
+    }
+
+    if options.paths.is_empty() {
+        options.paths.push(PathBuf::from("."));
+    }
+
+    Ok(options)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn native_ls_output(options: &LsOptions) -> Result<String> {
+    let mut output = String::new();
+    let multi_path = options.paths.len() > 1;
+
+    for (idx, path) in options.paths.iter().enumerate() {
+        if multi_path {
+            if idx > 0 {
+                output.push('\n');
+            }
+            output.push_str(&format!("{}:\n", path.display()));
+        }
+
+        let entries = entries_for_path(path)?;
+        output.push_str(&format_ls_entries(
+            &entries,
+            options.show_all,
+            options.show_long,
+        ));
+    }
+
+    Ok(output)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn entries_for_path(path: &Path) -> Result<Vec<LsEntry>> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir() {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+        return Ok(vec![LsEntry {
+            name,
+            size: metadata.len(),
+            is_dir: false,
+            hidden: false,
+            octal: windows_octal(&metadata),
+        }]);
+    }
+
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let metadata = entry.path().symlink_metadata()?;
+        entries.push(LsEntry {
+            hidden: is_hidden_name_or_metadata(&name, &metadata),
+            name,
+            size: metadata.len(),
+            is_dir: metadata.is_dir(),
+            octal: windows_octal(&metadata),
+        });
+    }
+    entries.sort_by_key(|entry| (!entry.is_dir, entry.name.to_lowercase()));
+    Ok(entries)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_octal(metadata: &std::fs::Metadata) -> Option<String> {
+    if metadata.is_dir() {
+        Some("755".to_string())
+    } else if metadata.permissions().readonly() {
+        Some("444".to_string())
+    } else {
+        Some("644".to_string())
+    }
+}
+
 /// Format bytes into human-readable size
 fn human_size(bytes: u64) -> String {
     if bytes >= 1_048_576 {
@@ -135,6 +306,139 @@ fn human_size(bytes: u64) -> String {
     } else {
         format!("{}B", bytes)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LsEntry {
+    name: String,
+    size: u64,
+    is_dir: bool,
+    hidden: bool,
+    octal: Option<String>,
+}
+
+impl LsEntry {
+    #[cfg(test)]
+    fn dir(name: &str, octal: Option<String>) -> Self {
+        Self {
+            name: name.to_string(),
+            size: 0,
+            is_dir: true,
+            hidden: false,
+            octal,
+        }
+    }
+
+    #[cfg(test)]
+    fn file(name: &str, size: u64, octal: Option<String>) -> Self {
+        Self {
+            name: name.to_string(),
+            size,
+            is_dir: false,
+            hidden: false,
+            octal,
+        }
+    }
+
+    #[cfg(test)]
+    fn hidden_file(name: &str, size: u64, octal: Option<String>) -> Self {
+        Self {
+            name: name.to_string(),
+            size,
+            is_dir: false,
+            hidden: true,
+            octal,
+        }
+    }
+}
+
+fn format_ls_entries(entries: &[LsEntry], show_all: bool, show_long: bool) -> String {
+    let mut output = String::new();
+
+    for entry in entries {
+        if should_skip_ls_entry(entry, show_all) {
+            continue;
+        }
+
+        if show_long {
+            if let Some(octal) = &entry.octal {
+                output.push_str(octal);
+                output.push_str("  ");
+            }
+        }
+
+        output.push_str(&entry.name);
+        if entry.is_dir {
+            output.push_str("/\n");
+        } else {
+            output.push_str("  ");
+            output.push_str(&human_size(entry.size));
+            output.push('\n');
+        }
+    }
+
+    if output.is_empty() {
+        output.push_str("(empty)\n");
+    }
+
+    output
+}
+
+fn should_skip_ls_entry(entry: &LsEntry, show_all: bool) -> bool {
+    !show_all && (entry.hidden || NOISE_DIRS.iter().any(|noise| matches_pattern(&entry.name, noise)))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn is_hidden_name_or_metadata(name: &str, metadata: &std::fs::Metadata) -> bool {
+    name.starts_with('.') || metadata_is_hidden(metadata)
+}
+
+#[cfg(target_os = "windows")]
+fn metadata_is_hidden(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0
+}
+
+#[cfg(not(target_os = "windows"))]
+fn metadata_is_hidden(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
+fn matches_pattern(name: &str, pattern: &str) -> bool {
+    wildcard_match(&name.to_lowercase(), &pattern.to_lowercase())
+}
+
+fn wildcard_match(name: &str, pattern: &str) -> bool {
+    let name = name.as_bytes();
+    let pattern = pattern.as_bytes();
+    let (mut ni, mut pi) = (0, 0);
+    let mut star = None;
+    let mut star_match = 0;
+
+    while ni < name.len() {
+        if pi < pattern.len() && (pattern[pi] == b'?' || pattern[pi] == name[ni]) {
+            ni += 1;
+            pi += 1;
+        } else if pi < pattern.len() && pattern[pi] == b'*' {
+            star = Some(pi);
+            star_match = ni;
+            pi += 1;
+        } else if let Some(star_idx) = star {
+            pi = star_idx + 1;
+            star_match += 1;
+            ni = star_match;
+        } else {
+            return false;
+        }
+    }
+
+    while pi < pattern.len() && pattern[pi] == b'*' {
+        pi += 1;
+    }
+
+    pi == pattern.len()
 }
 
 /// Parse a single `ls -la` line, returning `(file_type_char, perms, size, name)`.
@@ -147,6 +451,7 @@ fn human_size(bytes: u64) -> String {
 /// with a regex, then extract size (rightmost number before the date) and
 /// filename (everything after the date). This handles owner/group names that
 /// contain spaces, which break the old fixed-column approach.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn parse_ls_line(line: &str) -> Option<(char, String, u64, String)> {
     // Skip . and .. entries before date parsing (works for non-English locales too)
     if is_dotdir(line) {
@@ -185,6 +490,7 @@ fn parse_ls_line(line: &str) -> Option<(char, String, u64, String)> {
 /// entries for "." (the directory itself) and ".." (its parent). These entries
 /// always appear in `ls -la` output and are skipped during parsing since they
 /// carry no meaningful content for token reduction.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn is_dotdir(line: &str) -> bool {
     line.trim().ends_with('.') || line.trim().ends_with("..")
 }
@@ -195,6 +501,7 @@ fn is_dotdir(line: &str) -> bool {
 /// Returns `None` if the input does not look like a permission field.
 /// Special bits (setuid/setgid/sticky) are encoded as a leading 4th digit when
 /// any are set; otherwise we emit a 3-digit value to stay compact.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn perms_to_octal(perms: &str) -> Option<String> {
     if perms.len() < 10 || !perms.is_ascii() {
         return None;
@@ -238,11 +545,13 @@ fn perms_to_octal(perms: &str) -> Option<String> {
 /// Returns (entries, summary, parsed_count) so caller can suppress summary when piped.
 /// parsed_count tracks how many non-header lines were successfully parsed.
 /// If parsed_count == 0 but raw had content, caller should fall back to raw output.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, usize) {
     use std::collections::HashMap;
 
-    let mut dirs: Vec<(String, Option<String>)> = Vec::new(); // (name, octal_perms)
-    let mut files: Vec<(String, String, Option<String>)> = Vec::new(); // (name, size, octal_perms)
+    let mut entries: Vec<LsEntry> = Vec::new();
+    let mut dir_count: usize = 0;
+    let mut file_count: usize = 0;
     let mut by_ext: HashMap<String, usize> = HashMap::new();
     let mut lines_seen: usize = 0;
     let mut parsed_count: usize = 0;
@@ -262,11 +571,6 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
         };
         parsed_count += 1;
 
-        // Filter noise dirs unless -a
-        if !show_all && NOISE_DIRS.iter().any(|noise| name == *noise) {
-            continue;
-        }
-
         // Only parse perms when the user actually wants the long listing —
         // skip the work otherwise.
         let octal = if show_long {
@@ -276,20 +580,42 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
         };
 
         if file_type == 'd' {
-            dirs.push((name, octal));
+            let entry = LsEntry {
+                hidden: name.starts_with('.'),
+                name,
+                size,
+                is_dir: true,
+                octal,
+            };
+            if should_skip_ls_entry(&entry, show_all) {
+                continue;
+            }
+            dir_count += 1;
+            entries.push(entry);
         } else {
+            let entry = LsEntry {
+                hidden: name.starts_with('.'),
+                name,
+                size,
+                is_dir: false,
+                octal,
+            };
+            if should_skip_ls_entry(&entry, show_all) {
+                continue;
+            }
             // Regular files, symlinks, character/block devices, pipes, sockets
-            let ext = if let Some(pos) = name.rfind('.') {
-                name[pos..].to_string()
+            let ext = if let Some(pos) = entry.name.rfind('.') {
+                entry.name[pos..].to_string()
             } else {
                 "no ext".to_string()
             };
             *by_ext.entry(ext).or_insert(0) += 1;
-            files.push((name, human_size(size), octal));
+            file_count += 1;
+            entries.push(entry);
         }
     }
 
-    if dirs.is_empty() && files.is_empty() {
+    if entries.is_empty() {
         if lines_seen > 0 && parsed_count == 0 {
             if dotdirs == lines_seen {
                 // Only . and .. entries (empty directory)
@@ -301,32 +627,10 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
         return ("(empty)\n".to_string(), String::new(), 0);
     }
 
-    let mut entries = String::new();
-
-    // Dirs first, compact
-    for (name, octal) in &dirs {
-        if let Some(octal) = octal {
-            entries.push_str(octal);
-            entries.push_str("  ");
-        }
-        entries.push_str(name);
-        entries.push_str("/\n");
-    }
-
-    // Files with size
-    for (name, size, octal) in &files {
-        if let Some(octal) = octal {
-            entries.push_str(octal);
-            entries.push_str("  ");
-        }
-        entries.push_str(name);
-        entries.push_str("  ");
-        entries.push_str(size);
-        entries.push('\n');
-    }
+    let entries_text = format_ls_entries(&entries, true, show_long);
 
     // Summary line (separate so caller can suppress when piped)
-    let mut summary = format!("\nSummary: {} files, {} dirs", files.len(), dirs.len());
+    let mut summary = format!("\nSummary: {} files, {} dirs", file_count, dir_count);
     if !by_ext.is_empty() {
         // inline single-line summary — fewer entries to avoid wrapping.
         const MAX_EXT_SUMMARY: usize = reduced(CAP_WARNINGS, 5);
@@ -346,12 +650,63 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
     }
     summary.push('\n');
 
-    (entries, summary, parsed_count)
+    (entries_text, summary, parsed_count)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_format_ls_entries_renders_compact_contract() {
+        let entries = vec![
+            LsEntry::dir("src", Some("755".to_string())),
+            LsEntry::file("Cargo.toml", 1234, Some("644".to_string())),
+        ];
+
+        assert_eq!(
+            format_ls_entries(&entries, false, false),
+            "src/\nCargo.toml  1.2K\n"
+        );
+        assert_eq!(
+            format_ls_entries(&entries, false, true),
+            "755  src/\n644  Cargo.toml  1.2K\n"
+        );
+    }
+
+    #[test]
+    fn test_format_ls_entries_empty_and_noise_filter() {
+        let entries = vec![
+            LsEntry::dir("node_modules", Some("755".to_string())),
+            LsEntry::dir(".git", Some("755".to_string())),
+            LsEntry::dir("pkg.egg-info", Some("755".to_string())),
+        ];
+
+        assert_eq!(format_ls_entries(&[], false, false), "(empty)\n");
+        assert_eq!(format_ls_entries(&entries, false, false), "(empty)\n");
+        assert_eq!(
+            format_ls_entries(&entries, true, false),
+            "node_modules/\n.git/\npkg.egg-info/\n"
+        );
+    }
+
+    #[test]
+    fn test_format_ls_entries_hides_marked_hidden_by_default() {
+        let entries = vec![
+            LsEntry::hidden_file(".secret", 8, Some("644".to_string())),
+            LsEntry::hidden_file("hidden_attr.txt", 8, Some("644".to_string())),
+            LsEntry::file("visible.txt", 8, Some("644".to_string())),
+        ];
+
+        assert_eq!(
+            format_ls_entries(&entries, false, false),
+            "visible.txt  8B\n"
+        );
+        assert_eq!(
+            format_ls_entries(&entries, true, false),
+            ".secret  8B\nhidden_attr.txt  8B\nvisible.txt  8B\n"
+        );
+    }
 
     #[test]
     fn test_compact_basic() {

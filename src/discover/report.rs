@@ -95,6 +95,7 @@ impl AgentIntegrationStatus {
 /// Full discover report.
 #[derive(Debug, Serialize)]
 pub struct DiscoverReport {
+    pub provider_name: String,
     pub sessions_scanned: usize,
     pub total_commands: usize,
     pub already_rtk: usize,
@@ -128,8 +129,8 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
     out.push_str(&"=".repeat(52));
     out.push('\n');
     out.push_str(&format!(
-        "Scanned: {} sessions (last {} days), {} Bash commands\n",
-        report.sessions_scanned, report.since_days, report.total_commands
+        "Provider: {}\nScanned: {} sessions (last {} days), {} shell commands\n",
+        report.provider_name, report.sessions_scanned, report.since_days, report.total_commands
     ));
     out.push_str(&format!(
         "Already using RTK: {} commands ({:.1}%)\n",
@@ -143,7 +144,7 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
 
     if report.supported.is_empty() && report.unsupported.is_empty() {
         out.push_str("\nNo missed savings found. RTK usage looks good!\n");
-        append_agent_notes(&mut out, report.agent_status);
+        append_agent_notes(&mut out, report);
         return out;
     }
 
@@ -218,7 +219,7 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
 
     out.push_str("\n~estimated from tool_result output sizes\n");
 
-    append_agent_notes(&mut out, report.agent_status);
+    append_agent_notes(&mut out, report);
 
     if verbose && report.parse_errors > 0 {
         out.push_str(&format!("Parse errors skipped: {}\n", report.parse_errors));
@@ -227,7 +228,11 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
     out
 }
 
-fn append_agent_notes(out: &mut String, status: AgentIntegrationStatus) {
+fn append_agent_notes(out: &mut String, report: &DiscoverReport) {
+    if report.provider_name != "claude" {
+        return;
+    }
+    let status = report.agent_status;
     if status.cursor_hook_installed {
         out.push_str("\nNote: Cursor sessions are tracked via `rtk gain` (discover scans Claude Code only)\n");
     }
@@ -276,6 +281,7 @@ mod tests {
 
     fn make_report(total_commands: usize, already_rtk: usize) -> DiscoverReport {
         DiscoverReport {
+            provider_name: "claude".to_string(),
             sessions_scanned: 1,
             total_commands,
             already_rtk,

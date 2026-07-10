@@ -1,0 +1,12 @@
+```mermaid
+flowchart LR
+    A["RTK rewrite / 原生命令"] -->|解决| B["命令语义压缩<br/>Get-Content -> read<br/>Select-String -> grep"]
+
+    C["RTK Windows fallback runner"] -->|解决| D["传输兼容<br/>双引号 / $ / 反引号 / scriptblock / 编码"]
+
+    E["rtk proxy"] -->|解决| F["用户明确要求原生命令语义<br/>不压缩、不改写"]
+
+    B --> G["统一 tracking / gain / exit code"]
+    D --> G
+    F --> G
+```

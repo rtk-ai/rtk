@@ -6,6 +6,7 @@ pub const TRUSTED_FILTERS_JSON: &str = "trusted_filters.json";
 pub const DEFAULT_HISTORY_DAYS: i64 = 90;
 
 /// RTK-only subcommands that should never fall back to raw execution.
+/// If Clap fails to parse these, show the Clap error directly.
 /// When adding a new RTK-only subcommand to `Commands`, add its clap name here.
 pub const RTK_META_COMMANDS: &[&str] = &[
     "gain",
@@ -28,4 +29,10 @@ pub const RTK_META_COMMANDS: &[&str] = &[
     "smart",
     "deps",
     "json",
+    "which",
+    "pwd",
+    "head",
+    "tail",
+    "touch",
+    "mkdir",
 ];
