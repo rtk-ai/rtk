@@ -13,10 +13,11 @@
 //! Reference: SA-2025-RTK-001 (Finding F-01)
 
 use super::constants::{
-    CLAUDE_DIR, CLAUDE_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
-    SETTINGS_JSON, SETTINGS_LOCAL_JSON,
+    CLAUDE_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    SETTINGS_LOCAL_JSON,
 };
 use super::init::resolve_claude_dir;
+use super::is_claude_hook_command;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -200,12 +201,23 @@ pub fn resolve_hook_path() -> Result<PathBuf> {
     resolve_claude_dir().map(|dir| dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE))
 }
 
-fn native_binary_hook_paths(home: &Path) -> Vec<PathBuf> {
-    let claude_dir = home.join(CLAUDE_DIR);
+fn native_binary_hook_paths(claude_dir: &Path) -> Vec<PathBuf> {
     [SETTINGS_JSON, SETTINGS_LOCAL_JSON]
         .iter()
         .map(|file_name| claude_dir.join(file_name))
         .filter(|path| native_binary_hook_registered(path))
+        .collect()
+}
+
+fn native_binary_hook_present_paths(claude_dir: &Path) -> Vec<PathBuf> {
+    [SETTINGS_JSON, SETTINGS_LOCAL_JSON]
+        .iter()
+        .map(|file_name| claude_dir.join(file_name))
+        .filter(|path| {
+            fs::read_to_string(path)
+                .ok()
+                .is_some_and(|content| settings_has_claude_hook(&content))
+        })
         .collect()
 }
 
@@ -238,7 +250,7 @@ fn native_binary_hook_registered(path: &Path) -> bool {
                     .into_iter()
                     .flatten()
                     .filter_map(|hook| hook.get("command")?.as_str())
-                    .any(|cmd| cmd == CLAUDE_HOOK_COMMAND)
+                    .any(is_claude_hook_command)
         })
     })
 }
@@ -256,8 +268,9 @@ pub fn run_verify(verbose: u8) -> Result<()> {
     // If no legacy script exists, check for native binary command registration
     if !hook_path.exists() && !hash_file.exists() {
         // Check if the native binary command is registered in Claude settings.
-        let home = dirs::home_dir().context("Cannot determine home directory")?;
-        let native_paths = native_binary_hook_paths(&home);
+        let claude_dir =
+            resolve_claude_dir().context("Cannot determine Claude config directory")?;
+        let native_paths = native_binary_hook_paths(&claude_dir);
         if native_paths.len() == 2 {
             println!("PASS  native binary hook registered in Claude settings");
             println!("      command: {}", CLAUDE_HOOK_COMMAND);
@@ -268,9 +281,10 @@ pub fn run_verify(verbose: u8) -> Result<()> {
             println!("      (no script file — integrity check not applicable)");
             return Ok(());
         }
-        if !native_paths.is_empty() {
+        let present_paths = native_binary_hook_present_paths(&claude_dir);
+        if !present_paths.is_empty() {
             println!("WARN  native binary hook partially registered");
-            for path in native_paths {
+            for path in present_paths {
                 println!("      found: {}", path.display());
             }
             println!("      Run `rtk init -g --auto-patch` to cover settings.json and settings.local.json.");
@@ -376,9 +390,26 @@ pub fn runtime_check() -> Result<()> {
     Ok(())
 }
 
+fn settings_has_claude_hook(content: &str) -> bool {
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(content) else {
+        return false;
+    };
+
+    root.get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .filter_map(|hook| hook.get("command")?.as_str())
+        .any(is_claude_hook_command)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::constants::CLAUDE_DIR;
     use tempfile::TempDir;
 
     #[test]
@@ -419,6 +450,24 @@ mod tests {
 
         let status = verify_hook_at(&hook).unwrap();
         assert_eq!(status, IntegrityStatus::Verified);
+    }
+
+    #[test]
+    fn test_settings_has_claude_hook_accepts_absolute_rtk_path() {
+        let settings = r#"{
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/opt/homebrew/bin/rtk hook claude",
+                        "timeout": 5
+                    }]
+                }]
+            }
+        }"#;
+
+        assert!(settings_has_claude_hook(settings));
     }
 
     #[test]
@@ -500,16 +549,60 @@ mod tests {
         fs::write(&settings_local, content).unwrap();
 
         assert_eq!(
-            native_binary_hook_paths(temp.path()),
+            native_binary_hook_paths(&claude_dir),
             vec![settings_local.clone()]
         );
 
         fs::write(&settings_json, content).unwrap();
 
         assert_eq!(
-            native_binary_hook_paths(temp.path()),
+            native_binary_hook_paths(&claude_dir),
             vec![settings_json, settings_local]
         );
+    }
+
+    #[test]
+    fn test_native_binary_hook_paths_accept_absolute_windows_rtk_exe() {
+        let temp = TempDir::new().unwrap();
+        let claude_dir = temp.path().join(CLAUDE_DIR);
+        fs::create_dir_all(&claude_dir).unwrap();
+        let command = r#""C:\Program Files\RTK\rtk.exe" hook claude"#;
+        let content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": command}]},
+                    {"matcher": "Shell", "hooks": [{"type": "command", "command": command}]},
+                    {"matcher": "PowerShell", "hooks": [{"type": "command", "command": command}]}
+                ]
+            }
+        })
+        .to_string();
+
+        fs::write(claude_dir.join(SETTINGS_JSON), &content).unwrap();
+        fs::write(claude_dir.join(SETTINGS_LOCAL_JSON), &content).unwrap();
+
+        assert_eq!(native_binary_hook_paths(&claude_dir).len(), 2);
+    }
+
+    #[test]
+    fn test_native_binary_hook_paths_accept_resolved_claude_dir() {
+        let temp = TempDir::new().unwrap();
+        let claude_dir = temp.path().join("custom-claude-config");
+        fs::create_dir_all(&claude_dir).unwrap();
+        let content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": CLAUDE_HOOK_COMMAND}]},
+                    {"matcher": "Shell", "hooks": [{"type": "command", "command": CLAUDE_HOOK_COMMAND}]},
+                    {"matcher": "PowerShell", "hooks": [{"type": "command", "command": CLAUDE_HOOK_COMMAND}]}
+                ]
+            }
+        })
+        .to_string();
+        fs::write(claude_dir.join(SETTINGS_JSON), &content).unwrap();
+        fs::write(claude_dir.join(SETTINGS_LOCAL_JSON), &content).unwrap();
+
+        assert_eq!(native_binary_hook_paths(&claude_dir).len(), 2);
     }
 
     #[test]
@@ -517,8 +610,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let claude_dir = temp.path().join(CLAUDE_DIR);
         fs::create_dir_all(&claude_dir).unwrap();
+        let settings_local = claude_dir.join(SETTINGS_LOCAL_JSON);
         fs::write(
-            claude_dir.join(SETTINGS_LOCAL_JSON),
+            &settings_local,
             r#"{
               "hooks": {
                 "PreToolUse": [
@@ -529,7 +623,11 @@ mod tests {
         )
         .unwrap();
 
-        assert!(native_binary_hook_paths(temp.path()).is_empty());
+        assert!(native_binary_hook_paths(&claude_dir).is_empty());
+        assert_eq!(
+            native_binary_hook_present_paths(&claude_dir),
+            vec![settings_local]
+        );
     }
 
     #[test]

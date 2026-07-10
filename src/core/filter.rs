@@ -243,7 +243,7 @@ pub fn compactify_indent(content: String) -> String {
     let lines: Vec<&str> = content.lines().collect();
     let indented_lines: usize = lines
         .iter()
-        .filter(|l| !l.trim().is_empty() && l.chars().next().map_or(false, |c| c.is_whitespace()))
+        .filter(|l| !l.trim().is_empty() && l.chars().next().is_some_and(|c| c.is_whitespace()))
         .count();
 
     // Only compactify if there are indented lines (structured data)

@@ -6,8 +6,10 @@ use std::process::Command;
 use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
 use crate::core::tracking;
 
+type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
+
 struct PanicHookGuard {
-    original: Option<Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>>,
+    original: Option<PanicHook>,
 }
 
 impl PanicHookGuard {

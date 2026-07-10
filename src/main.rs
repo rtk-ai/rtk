@@ -51,6 +51,8 @@ pub enum AgentTarget {
     Pi,
     /// Hermes CLI
     Hermes,
+    /// Factory Droid CLI
+    Droid,
 }
 
 #[derive(Parser)]
@@ -338,15 +340,15 @@ enum Commands {
         global: bool,
 
         /// Install OpenCode plugin (in addition to Claude Code)
-        #[arg(long)]
+        #[arg(long, group = "integration_target")]
         opencode: bool,
 
         /// Initialize for Gemini CLI instead of Claude Code
-        #[arg(long)]
+        #[arg(long, group = "integration_target")]
         gemini: bool,
 
         /// Target agent to install hooks for (default: claude)
-        #[arg(long, value_enum)]
+        #[arg(long, value_enum, group = "integration_target")]
         agent: Option<AgentTarget>,
 
         /// Show current configuration
@@ -382,11 +384,11 @@ enum Commands {
         uninstall: bool,
 
         /// Target Codex CLI (uses AGENTS.md + RTK.md, no Claude hook patching)
-        #[arg(long)]
+        #[arg(long, group = "integration_target")]
         codex: bool,
 
         /// Install GitHub Copilot integration (VS Code + CLI)
-        #[arg(long)]
+        #[arg(long, group = "integration_target")]
         copilot: bool,
         /// Preview changes without writing any files (combine with -v to show content)
         #[arg(long = "dry-run", conflicts_with = "show")]
@@ -860,6 +862,8 @@ enum HookCommands {
     Copilot,
     /// Process Codex CLI PreToolUse hook (reads JSON from stdin)
     Codex,
+    /// Process Factory Droid PreToolUse hook (reads JSON from stdin)
+    Droid,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -906,6 +910,12 @@ enum GitCommands {
     /// Commit → "ok \<hash\>"
     Commit {
         /// Git commit arguments (supports -a, -m, --amend, --allow-empty, etc)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Checkout branch or restore paths → "ok"
+    Checkout {
+        /// Git checkout arguments (supports -b, branch names, refs, -- paths)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1527,6 +1537,8 @@ where
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
+    } else if agent == Some(AgentTarget::Droid) {
+        hooks::init::uninstall_droid(global, ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -1687,6 +1699,13 @@ fn run_cli() -> Result<i32> {
                 }
                 GitCommands::Commit { args } => git::run(
                     git::GitCommand::Commit,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Checkout { args } => git::run(
+                    git::GitCommand::Checkout,
                     &args,
                     None,
                     cli.verbose,
@@ -2015,6 +2034,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_antigravity_mode(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Droid) {
+                hooks::init::run_droid_mode(global, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2378,6 +2399,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Codex => {
                 hooks::hook_cmd::run_codex()?;
+                0
+            }
+            HookCommands::Droid => {
+                hooks::hook_cmd::run_droid()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {
@@ -2858,6 +2883,22 @@ mod tests {
                 assert_eq!(agent, Some(AgentTarget::Hermes));
             }
             _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_init_rejects_multiple_integration_targets() {
+        for args in [
+            vec!["rtk", "init", "--agent", "droid", "--codex"],
+            vec!["rtk", "init", "--agent", "droid", "--gemini"],
+            vec!["rtk", "init", "--agent", "droid", "--copilot"],
+            vec!["rtk", "init", "--agent", "droid", "--opencode"],
+            vec!["rtk", "init", "--gemini", "--codex"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&args).is_err(),
+                "ambiguous integration targets must be rejected: {args:?}"
+            );
         }
     }
 

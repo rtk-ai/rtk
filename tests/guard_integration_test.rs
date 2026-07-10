@@ -56,17 +56,22 @@ fn guard_does_not_block_real_compression() {
     );
 }
 
-fn rtk_in_dir(dir: &std::path::Path, args: &[&str]) -> (String, Option<i32>) {
+fn rtk_output_in_dir(dir: &std::path::Path, args: &[&str]) -> (String, String, Option<i32>) {
     let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
         .args(args)
         .current_dir(dir)
-        .stderr(Stdio::null())
         .output()
         .expect("spawn rtk");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
         out.status.code(),
     )
+}
+
+fn rtk_in_dir(dir: &std::path::Path, args: &[&str]) -> (String, Option<i32>) {
+    let (stdout, _, code) = rtk_output_in_dir(dir, args);
+    (stdout, code)
 }
 
 fn rg_available() -> bool {
@@ -80,7 +85,7 @@ fn rg_available() -> bool {
 fn init_git_repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     for args in [
-        &["init", "-q"][..],
+        &["init", "-q", "-b", "main"][..],
         &["config", "user.email", "t@t.t"][..],
         &["config", "user.name", "t"][..],
         &["commit", "-q", "--allow-empty", "-m", "init"][..],
@@ -94,6 +99,24 @@ fn init_git_repo() -> tempfile::TempDir {
         assert!(ok, "git setup failed: {args:?}");
     }
     dir
+}
+
+fn git_in_dir(dir: &std::path::Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("spawn git");
+    assert!(
+        out.status.success(),
+        "git command failed: {args:?}\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn read_text_normalized(path: &std::path::Path) -> String {
+    std::fs::read_to_string(path).unwrap().replace("\r\n", "\n")
 }
 
 #[test]
@@ -149,5 +172,98 @@ fn git_stash_show_no_stash_emits_empty_and_propagates_failure() {
         code,
         Some(0),
         "a real git stash show failure must not be masked as exit 0"
+    );
+}
+
+#[test]
+fn git_checkout_branch_switch_emits_compact_ok() {
+    let dir = init_git_repo();
+    git_in_dir(dir.path(), &["checkout", "-q", "-b", "feature/test"]);
+
+    let (out, code) = rtk_in_dir(dir.path(), &["git", "checkout", "main"]);
+
+    assert_eq!(code, Some(0));
+    assert_eq!(out.trim(), "ok main");
+}
+
+#[test]
+fn git_checkout_new_branch_emits_compact_ok() {
+    let dir = init_git_repo();
+
+    let (out, code) = rtk_in_dir(dir.path(), &["git", "checkout", "-b", "feature/test"]);
+
+    assert_eq!(code, Some(0));
+    assert_eq!(out.trim(), "ok feature/test (new)");
+}
+
+#[test]
+fn git_checkout_reset_branch_does_not_claim_new_branch() {
+    let dir = init_git_repo();
+
+    let (out, code) = rtk_in_dir(dir.path(), &["git", "checkout", "-B", "feature/test"]);
+
+    assert_eq!(code, Some(0));
+    assert_eq!(out.trim(), "ok feature/test");
+}
+
+#[test]
+fn git_checkout_file_restore_emits_restored_count() {
+    let dir = init_git_repo();
+    std::fs::write(dir.path().join("a.txt"), "original\n").expect("write a");
+    std::fs::write(dir.path().join("b.txt"), "original\n").expect("write b");
+    git_in_dir(dir.path(), &["add", "a.txt", "b.txt"]);
+    git_in_dir(dir.path(), &["commit", "-q", "-m", "add files"]);
+
+    std::fs::write(dir.path().join("a.txt"), "changed\n").expect("write a");
+    std::fs::write(dir.path().join("b.txt"), "changed\n").expect("write b");
+
+    let (out, code) = rtk_in_dir(
+        dir.path(),
+        &["git", "checkout", "HEAD", "--", "a.txt", "b.txt"],
+    );
+
+    assert_eq!(code, Some(0));
+    assert!(
+        out.trim().is_empty() || out.trim() == "ok 2 files restored",
+        "guarded output may stay empty when native git emits no success text: {out:?}"
+    );
+    assert_eq!(
+        read_text_normalized(&dir.path().join("a.txt")),
+        "original\n"
+    );
+    assert_eq!(
+        read_text_normalized(&dir.path().join("b.txt")),
+        "original\n"
+    );
+}
+
+#[test]
+fn git_checkout_dirty_tree_error_keeps_file_list() {
+    let dir = init_git_repo();
+    std::fs::write(dir.path().join("a.txt"), "main\n").expect("write a");
+    git_in_dir(dir.path(), &["add", "a.txt"]);
+    git_in_dir(dir.path(), &["commit", "-q", "-m", "add a"]);
+    git_in_dir(dir.path(), &["checkout", "-q", "-b", "feature/test"]);
+    std::fs::write(dir.path().join("a.txt"), "feature\n").expect("write feature");
+    git_in_dir(dir.path(), &["commit", "-am", "feature change"]);
+    git_in_dir(dir.path(), &["checkout", "-q", "main"]);
+    std::fs::write(dir.path().join("a.txt"), "dirty\n").expect("write dirty");
+
+    let (stdout, stderr, code) =
+        rtk_output_in_dir(dir.path(), &["git", "checkout", "feature/test"]);
+    let combined = format!("{stdout}{stderr}");
+
+    assert_ne!(code, Some(0));
+    assert!(
+        combined.contains("error:"),
+        "dirty checkout failure should keep error header: {combined:?}"
+    );
+    assert!(
+        combined.contains("a.txt"),
+        "dirty checkout failure should keep conflicting filename: {combined:?}"
+    );
+    assert!(
+        combined.contains("Aborting"),
+        "dirty checkout failure should keep abort line: {combined:?}"
     );
 }

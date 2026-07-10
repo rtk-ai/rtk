@@ -4,6 +4,7 @@ use super::constants::{
     CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CODEX_HOOK_COMMAND, HOOKS_JSON, HOOKS_SUBDIR,
     PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, SETTINGS_LOCAL_JSON,
 };
+use super::init::resolve_claude_dir;
 use crate::core::constants::RTK_DATA_DIR;
 use std::path::{Path, PathBuf};
 
@@ -24,22 +25,26 @@ pub enum HookStatus {
 /// Return the current hook status without printing anything.
 /// Returns `Ok` if no Claude Code is detected (not applicable).
 pub fn status() -> HookStatus {
-    let Some(home) = dirs::home_dir() else {
+    let Ok(claude_dir) = resolve_claude_dir() else {
         return HookStatus::Ok;
     };
 
-    status_for_home(&home)
+    status_for_claude_dir(&claude_dir)
 }
 
 fn status_for_home(home: &Path) -> HookStatus {
     let claude_dir = home.join(CLAUDE_DIR);
+    status_for_claude_dir(&claude_dir)
+}
+
+fn status_for_claude_dir(claude_dir: &Path) -> HookStatus {
     if !claude_dir.exists() {
         return HookStatus::Ok;
     }
 
     // Check for new binary command in Claude settings first. A Codex hook
     // must not hide missing Claude hook coverage when Claude is installed.
-    if binary_hook_registered(&claude_dir) {
+    if binary_hook_registered(claude_dir) {
         // If old script file still exists alongside new command, report Outdated
         // (migration not complete — user should run `rtk init -g` to clean up)
         let old_hook = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
@@ -48,14 +53,15 @@ fn status_for_home(home: &Path) -> HookStatus {
         }
         return HookStatus::Ok;
     }
-    if binary_hook_partially_registered(&claude_dir) {
+    if binary_hook_partially_registered(claude_dir) {
         return HookStatus::Outdated;
     }
 
     // Fall back to legacy script file check
-    let Some(hook_path) = hook_installed_path_for_home(home) else {
+    let hook_path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+    if !hook_path.exists() {
         return HookStatus::Missing;
-    };
+    }
     let Ok(content) = std::fs::read_to_string(&hook_path) else {
         return HookStatus::Outdated; // exists but unreadable — treat as needs-update
     };
@@ -83,7 +89,7 @@ fn binary_hook_partially_registered(claude_dir: &std::path::Path) -> bool {
     [SETTINGS_JSON, SETTINGS_LOCAL_JSON]
         .iter()
         .any(|file_name| {
-            hook_command_registered_in_json(&claude_dir.join(file_name), CLAUDE_HOOK_COMMAND)
+            hook_command_present_in_json(&claude_dir.join(file_name), CLAUDE_HOOK_COMMAND)
         })
 }
 
@@ -180,6 +186,26 @@ fn hook_command_registered_in_json(path: &Path, command: &str) -> bool {
     })
 }
 
+fn hook_command_present_in_json(path: &Path, command: &str) -> bool {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) if !content.trim().is_empty() => content,
+        _ => return false,
+    };
+    let root: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(root) => root,
+        Err(_) => return false,
+    };
+    root.get("hooks")
+        .and_then(|hooks| hooks.get(PRE_TOOL_USE_KEY))
+        .and_then(|pre_tool_use| pre_tool_use.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .filter_map(|hook| hook.get("command")?.as_str())
+        .any(|actual| hook_command_equivalent(actual, command))
+}
+
 /// Check if the installed hook is missing or outdated, warn once per day.
 pub fn maybe_warn() {
     // Don't block startup — fail silently on any error
@@ -225,23 +251,6 @@ pub fn parse_hook_version(content: &str) -> u8 {
         }
     }
     0 // No version tag = version 0 (outdated)
-}
-
-fn hook_installed_path() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    hook_installed_path_for_home(&home)
-}
-
-fn hook_installed_path_for_home(home: &Path) -> Option<PathBuf> {
-    let path = home
-        .join(CLAUDE_DIR)
-        .join(HOOKS_SUBDIR)
-        .join(REWRITE_HOOK_FILE);
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
 }
 
 fn warn_marker_path() -> Option<PathBuf> {
@@ -311,6 +320,17 @@ mod tests {
         // Clone works
         let s = HookStatus::Missing;
         assert_eq!(s.clone(), HookStatus::Missing);
+    }
+
+    #[test]
+    fn test_binary_hook_registered_accepts_absolute_rtk_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let content = complete_hook_json("/opt/homebrew/bin/rtk hook claude");
+        std::fs::write(tmp.path().join(SETTINGS_JSON), &content).expect("write settings");
+        std::fs::write(tmp.path().join(SETTINGS_LOCAL_JSON), &content)
+            .expect("write local settings");
+
+        assert!(binary_hook_registered(tmp.path()));
     }
 
     #[test]
@@ -482,6 +502,7 @@ mod tests {
         .unwrap();
 
         assert!(!binary_hook_registered(&claude_dir));
+        assert!(binary_hook_partially_registered(&claude_dir));
     }
 
     #[test]
@@ -513,6 +534,18 @@ mod tests {
         .unwrap();
 
         assert_eq!(status_for_home(tmp.path()), HookStatus::Outdated);
+    }
+
+    #[test]
+    fn test_status_for_claude_dir_accepts_resolved_override() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path().join("custom-claude-config");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let content = complete_hook_json(CLAUDE_HOOK_COMMAND);
+        std::fs::write(claude_dir.join(SETTINGS_JSON), &content).unwrap();
+        std::fs::write(claude_dir.join(SETTINGS_LOCAL_JSON), &content).unwrap();
+
+        assert_eq!(status_for_claude_dir(&claude_dir), HookStatus::Ok);
     }
 
     #[test]

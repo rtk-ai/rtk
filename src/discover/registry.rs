@@ -793,7 +793,7 @@ fn cat_reads_agent_instruction_file(cmd_part: &str) -> bool {
 fn is_agent_instruction_file_token(token: &str) -> bool {
     let trimmed = token.trim_matches(|c| c == '"' || c == '\'');
     let name = trimmed
-        .rsplit(|c| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(trimmed)
         .to_ascii_lowercase();
@@ -810,7 +810,7 @@ fn is_database_client_command(cmd_part: &str) -> bool {
     };
     let unquoted = first.trim_matches(|c| c == '"' || c == '\'');
     let basename = unquoted
-        .rsplit(|c| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(unquoted)
         .to_ascii_lowercase();
@@ -1751,6 +1751,14 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("git status", &[]),
             Some("rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_checkout() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git checkout main", &[]),
+            Some("rtk git checkout main".into())
         );
     }
 
