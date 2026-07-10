@@ -1,12 +1,54 @@
 # RTK Local Repository Notes / RTK 本仓库说明
 
-This repository is a Windows-native compatibility fork/worktree of RTK. For the baseline project description, installation, general usage, and original command coverage, read the main repository README first:
+This repository is a Windows-native compatibility fork/worktree of RTK. For the baseline project description, general usage, and original command coverage, read the original repository README first:
 
-本仓库是 RTK 的 Windows native 兼容增强工作区/分支。基础项目介绍、安装方式、通用用法和原始命令覆盖范围，请先阅读主仓库 README：
+本仓库是 RTK 的 Windows native 兼容增强工作区/分支。基础项目介绍、通用用法和原始命令覆盖范围，请先阅读原始仓库 README：
 
-- Main README / 主仓库 README: https://github.com/fuxkCH/rtk#readme
+- Original README / 原始仓库 README: https://github.com/rtk-ai/rtk#readme
 - Local acceptance test / 本地验收测试: [`tests/windows_native_acceptance.ps1`](tests/windows_native_acceptance.ps1)
 - Windows-native fixtures / Windows native 测试夹具: [`tests/fixtures/windows-native/`](tests/fixtures/windows-native/)
+
+## Install This Windows Build / 安装本仓库 Windows 版本
+
+Download the Windows executable from this fork's release assets, place it in a
+stable directory, and add that directory to `PATH`:
+
+从本 fork 的 release assets 下载 Windows 可执行文件，放到一个固定目录，并把该目录加入 `PATH`：
+
+```powershell
+$InstallDir = "$env:LOCALAPPDATA\Programs\rtk"
+New-Item -ItemType Directory -Force -Path $InstallDir
+Invoke-WebRequest -Uri "https://github.com/fuxkCH/rtk/releases/download/v0.43.1/rtk.exe" -OutFile "$InstallDir\rtk.exe"
+[Environment]::SetEnvironmentVariable(
+    "Path",
+    [Environment]::GetEnvironmentVariable("Path", "User") + ";$InstallDir",
+    "User"
+)
+```
+
+Open a new terminal after updating `PATH`, then verify the installed binary:
+
+更新 `PATH` 后打开一个新的终端，然后验证安装结果：
+
+```powershell
+rtk --version
+rtk which rtk
+rtk gain
+```
+
+Expected version for this release:
+
+当前 release 的预期版本：
+
+```text
+rtk 0.43.1
+```
+
+If an older `rtk.exe` already appears earlier on `PATH`, replace that existing
+file or move this install directory before it in `PATH`.
+
+如果 `PATH` 中更靠前的位置已经有旧版 `rtk.exe`，请替换那个旧文件，或把本安装目录移动到
+`PATH` 中更靠前的位置。
 
 ## Feature Delta / 相对主仓库的功能变化
 
