@@ -18,7 +18,9 @@ src/
 ├── main.rs                    ← Commands enum + routing (start here for any command)
 ├── core/                      ← Shared infrastructure
 │   ├── config.rs              ← ~/.config/rtk/config.toml
-│   ├── tracking.rs            ← SQLite token metrics
+│   ├── tracking.rs            ← SQLite token metrics + dedup ledger
+│   ├── dedup.rs               ← Session output dedup (maybe_suppress)
+│   ├── session.rs             ← Session id (--session / RTK_SESSION_ID)
 │   ├── tee.rs                 ← Raw output recovery on failure
 │   ├── utils.rs               ← strip_ansi, truncate, execute_command
 │   ├── filter.rs              ← Language-aware code filtering engine

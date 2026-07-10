@@ -734,6 +734,24 @@ Flow:
 
 Single-threaded execution with `Mutex<Option<Tracker>>` for future-proofing. No multi-threading currently, but safe concurrent access is possible if needed.
 
+### Session Output Dedup (`src/core/dedup.rs`)
+
+Filtering compresses a *single* command's output. Dedup attacks a different sink: an agent re-reading the same file or re-running the same command re-emits identical output into context every turn. `dedup::maybe_suppress` suppresses a **byte-identical re-emission within one Claude Code session** to a one-line stub, so the repeated bytes aren't paid for twice.
+
+**Session plumbing.** RTK learns its session from the Claude Code hook: `hooks::hook_cmd::process_claude_payload` reads `session_id` from the PreToolUse payload and splices `--session <id>` into the rewritten command (`hook injects` → `rtk --session <id> git status`). `core::session` resolves it (flag → `RTK_SESSION_ID` env → none) into a process-global `OnceLock`. No session (all manual invocations) ⇒ dedup no-ops and output is byte-for-byte unchanged.
+
+**Two-key safety model.** Correctness rests on two independent keys:
+- **`content_hash`** — SHA-256 of the *raw, pre-filter* bytes — is the guarantee. Different content can never share a hash, so a changed file/command is never suppressed. The hash *is* the freshness check.
+- **`identity`** (normalized command key) is cosmetic, used only in the stub message. Because the content hash is the real guard, identity collisions are harmless — at worst dedup is skipped (safe), never wrongly applied.
+
+**Guards** (each falls back to full output): dedup disabled, no session id, command exited non-zero (unless `suppress_on_error`), output below `min_tokens`, or any DB error. Suppression can therefore only ever *omit a repeat*, never hide new, changed, or failed output.
+
+**Ledger.** A `session_outputs` table in the tracking DB (keyed by `session_id` + `content_hash`) stores hashes and counters only — never content. Rows are pruned after 48h idle. `rtk gain` reports the saved tokens separately (`SUM(output_tokens * (emit_count - 1))`) so filtering and dedup never double-count.
+
+**Config / toggle.** `[dedup]` config section (`enabled = false` by default — opt-in, since suppression changes agent-visible output; `min_tokens`, `suppress_on_error`). `RTK_DEDUP=1` force-enables without a config file (mirrors `RTK_DB_PATH` / `RTK_HOOK_AUDIT`).
+
+**Seams.** Wired at `core::runner::run_captured_filter` (non-tee branch — covers git/gh/cargo and most ecosystems) and `cmds::system::read` (file + stdin). The tee and skip-filter-on-failure paths are left full (failure-heavy, low-value).
+
 ---
 
 ## Global Flags Architecture
