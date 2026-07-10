@@ -76,6 +76,11 @@ struct Cli {
     /// Set SKIP_ENV_VALIDATION=1 for child processes (Next.js, tsc, lint, prisma)
     #[arg(long = "skip-env", global = true)]
     skip_env: bool,
+
+    /// Claude Code session id (injected by the hook) — scopes session-only
+    /// features like output dedup. Absent for manual invocations.
+    #[arg(long = "session", global = true)]
+    session: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1552,6 +1557,11 @@ fn run_cli() -> Result<i32> {
             return run_fallback(e);
         }
     };
+
+    // Populate the process-global session context (from --session or
+    // RTK_SESSION_ID) before any command runs, so session-scoped features
+    // (output dedup) can key on it. Absent for manual invocations.
+    core::session::init(cli.session.clone());
 
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
     // Skip for Gain — it shows its own inline hook warning.
