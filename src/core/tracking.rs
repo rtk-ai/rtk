@@ -92,6 +92,18 @@ pub struct Tracker {
     conn: Connection,
 }
 
+/// A prior emission of identical content within a session — one row of the
+/// dedup ledger, returned by [`Tracker::dedup_lookup`]. Fields feed the
+/// suppression stub (Phase 5) and the `dedup_bump` call.
+#[allow(dead_code)] // fields consumed by core::dedup in Phase 5
+#[cfg_attr(test, derive(Debug, PartialEq))]
+pub struct DedupRow {
+    pub id: i64,
+    pub step_ordinal: i64,
+    pub output_tokens: i64,
+    pub line_count: i64,
+}
+
 /// Individual command record from tracking history.
 ///
 /// Contains timestamp, command name, and savings metrics for a single execution.
@@ -323,6 +335,29 @@ impl Tracker {
             [],
         )?;
 
+        // Session-level output dedup ledger. Keyed by (session_id, content_hash)
+        // so a byte-identical re-emission within one Claude Code session can be
+        // suppressed. Stores hashes + counters only — never content.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS session_outputs (
+                id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                identity TEXT NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                line_count INTEGER NOT NULL,
+                step_ordinal INTEGER NOT NULL,
+                emit_count INTEGER NOT NULL DEFAULT 1,
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dedup_lookup ON session_outputs(session_id, content_hash)",
+            [],
+        )?;
+
         Ok(Self { conn })
     }
 
@@ -372,6 +407,25 @@ impl Tracker {
         )?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pf_timestamp ON parse_failures(timestamp)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS session_outputs (
+                id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                identity TEXT NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                line_count INTEGER NOT NULL,
+                step_ordinal INTEGER NOT NULL,
+                emit_count INTEGER NOT NULL DEFAULT 1,
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dedup_lookup ON session_outputs(session_id, content_hash)",
             [],
         )?;
         Ok(())
@@ -446,7 +500,96 @@ impl Tracker {
             "DELETE FROM parse_failures WHERE timestamp < ?1",
             params![cutoff.to_rfc3339()],
         )?;
+        // Dedup ledger rows are session-scoped and short-lived; prune once a
+        // session has been idle beyond the TTL so the table stays tiny.
+        const DEDUP_SESSION_TTL_HOURS: i64 = 48;
+        let dedup_cutoff = Utc::now() - chrono::Duration::hours(DEDUP_SESSION_TTL_HOURS);
+        self.conn.execute(
+            "DELETE FROM session_outputs WHERE last_seen < ?1",
+            params![dedup_cutoff.to_rfc3339()],
+        )?;
         Ok(())
+    }
+
+    /// Look up a prior byte-identical emission in the same session.
+    /// Returns `None` on the first (or a novel) emission.
+    #[allow(dead_code)] // consumed by core::dedup in Phase 5
+    pub fn dedup_lookup(&self, session_id: &str, content_hash: &str) -> Result<Option<DedupRow>> {
+        match self.conn.query_row(
+            "SELECT id, step_ordinal, output_tokens, line_count
+             FROM session_outputs WHERE session_id = ?1 AND content_hash = ?2 LIMIT 1",
+            params![session_id, content_hash],
+            |r| {
+                Ok(DedupRow {
+                    id: r.get(0)?,
+                    step_ordinal: r.get(1)?,
+                    output_tokens: r.get(2)?,
+                    line_count: r.get(3)?,
+                })
+            },
+        ) {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e).context("dedup_lookup failed"),
+        }
+    }
+
+    /// Record a first emission of `content_hash` in `session_id`. Returns the
+    /// 1-based `step_ordinal` assigned within the session (its Nth tracked
+    /// emission), used for the suppression stub message.
+    #[allow(dead_code)] // consumed by core::dedup in Phase 5
+    pub fn dedup_insert(
+        &self,
+        session_id: &str,
+        content_hash: &str,
+        identity: &str,
+        output_tokens: usize,
+        line_count: usize,
+    ) -> Result<i64> {
+        let now = Utc::now().to_rfc3339();
+        let prior: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM session_outputs WHERE session_id = ?1",
+            params![session_id],
+            |r| r.get(0),
+        )?;
+        let step_ordinal = prior + 1;
+        self.conn.execute(
+            "INSERT INTO session_outputs
+             (session_id, content_hash, identity, output_tokens, line_count, step_ordinal, emit_count, first_seen, last_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?7)",
+            params![
+                session_id,
+                content_hash,
+                identity,
+                output_tokens as i64,
+                line_count as i64,
+                step_ordinal,
+                now
+            ],
+        )?;
+        Ok(step_ordinal)
+    }
+
+    /// Record that a ledger row's content was emitted again (suppressed): bump
+    /// `emit_count` and refresh `last_seen`.
+    #[allow(dead_code)] // consumed by core::dedup in Phase 5
+    pub fn dedup_bump(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE session_outputs SET emit_count = emit_count + 1, last_seen = ?2 WHERE id = ?1",
+            params![id, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn dedup_emit_count(&self, id: i64) -> i64 {
+        self.conn
+            .query_row(
+                "SELECT emit_count FROM session_outputs WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .expect("emit_count query")
     }
 
     /// Delete all tracked data (commands + parse_failures), resetting all stats to zero.
@@ -1422,6 +1565,50 @@ pub fn args_display(args: &[OsString]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Dedup ledger (Phase 3) ---
+
+    #[test]
+    fn dedup_miss_insert_hit() {
+        let t = Tracker::new_in_memory().expect("tracker");
+        assert!(t.dedup_lookup("s1", "h1").expect("lookup").is_none());
+        let ord = t
+            .dedup_insert("s1", "h1", "read:foo", 100, 20)
+            .expect("insert");
+        assert_eq!(ord, 1);
+        let row = t.dedup_lookup("s1", "h1").expect("lookup").expect("hit");
+        assert_eq!(row.step_ordinal, 1);
+        assert_eq!(row.output_tokens, 100);
+        assert_eq!(row.line_count, 20);
+    }
+
+    #[test]
+    fn dedup_cross_session_isolation() {
+        let t = Tracker::new_in_memory().expect("tracker");
+        t.dedup_insert("s1", "h1", "id", 10, 2).expect("insert");
+        assert!(t.dedup_lookup("s2", "h1").expect("lookup").is_none());
+        assert!(t.dedup_lookup("s1", "h1").expect("lookup").is_some());
+    }
+
+    #[test]
+    fn dedup_ordinal_monotonic_per_session() {
+        let t = Tracker::new_in_memory().expect("tracker");
+        assert_eq!(t.dedup_insert("s1", "h1", "a", 1, 1).expect("i"), 1);
+        assert_eq!(t.dedup_insert("s1", "h2", "b", 1, 1).expect("i"), 2);
+        // A different session restarts the ordinal.
+        assert_eq!(t.dedup_insert("s2", "h3", "c", 1, 1).expect("i"), 1);
+    }
+
+    #[test]
+    fn dedup_bump_increments_emit_count() {
+        let t = Tracker::new_in_memory().expect("tracker");
+        t.dedup_insert("s1", "h1", "id", 10, 2).expect("insert");
+        let row = t.dedup_lookup("s1", "h1").expect("lookup").expect("hit");
+        assert_eq!(t.dedup_emit_count(row.id), 1);
+        t.dedup_bump(row.id).expect("bump");
+        t.dedup_bump(row.id).expect("bump");
+        assert_eq!(t.dedup_emit_count(row.id), 3);
+    }
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
