@@ -507,3 +507,8 @@ Apache License 2.0 - see [LICENSE](LICENSE) for details.
 ## Disclaimer
 
 See [DISCLAIMER.md](DISCLAIMER.md).
+
+## Contributor FAQ
+
+See [docs/contributor-faq.md](docs/contributor-faq.md).
+
