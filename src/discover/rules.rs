@@ -53,7 +53,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[("fmt", RtkStatus::Passthrough)],
     },
     RtkRule {
-        pattern: r"^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script)",
+        pattern: r"^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script|test)(\s|$)",
         rtk_cmd: "rtk pnpm",
         rewrite_prefixes: &["pnpm"],
         category: "PackageManager",
@@ -62,7 +62,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^npm\s+(exec|run|run-script|rum|urn|x)(\s|$)",
+        pattern: r"^npm\s+(exec|run|run-script|rum|urn|x|test|t)(\s|$)",
         rtk_cmd: "rtk npm",
         rewrite_prefixes: &["npm"],
         category: "PackageManager",
