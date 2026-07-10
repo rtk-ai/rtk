@@ -119,6 +119,23 @@ pub fn run(
             ),
         );
         print_efficiency_meter(summary.avg_savings_pct);
+
+        // Session output dedup savings — reported separately from filtering so
+        // the two never double-count. Session-scoped (not project-scoped), so
+        // shown as a global figure regardless of the report scope.
+        if let Ok((dedup_tokens, dedup_hits)) = tracker.dedup_savings() {
+            if dedup_hits > 0 {
+                print_kpi(
+                    "Dedup suppressed",
+                    format!(
+                        "{} over {} repeat-emission{}",
+                        format_tokens(dedup_tokens as usize),
+                        dedup_hits,
+                        if dedup_hits == 1 { "" } else { "s" }
+                    ),
+                );
+            }
+        }
         println!();
 
         // Warn about hook issues that silently kill savings (stderr, not stdout)

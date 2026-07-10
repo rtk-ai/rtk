@@ -577,6 +577,21 @@ impl Tracker {
         Ok(())
     }
 
+    /// Total tokens saved by session dedup and the number of suppressed
+    /// re-emissions. For each ledger row, `output_tokens * (emit_count - 1)` is
+    /// the tokens saved by not re-emitting its repeats. Reported separately from
+    /// filtering savings so the two never double-count.
+    pub fn dedup_savings(&self) -> Result<(i64, i64)> {
+        let row = self.conn.query_row(
+            "SELECT COALESCE(SUM(output_tokens * (emit_count - 1)), 0),
+                    COALESCE(SUM(emit_count - 1), 0)
+             FROM session_outputs",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )?;
+        Ok(row)
+    }
+
     #[cfg(test)]
     fn dedup_emit_count(&self, id: i64) -> i64 {
         self.conn
@@ -1604,6 +1619,24 @@ mod tests {
         t.dedup_bump(row.id).expect("bump");
         t.dedup_bump(row.id).expect("bump");
         assert_eq!(t.dedup_emit_count(row.id), 3);
+    }
+
+    #[test]
+    fn dedup_savings_counts_suppressed_repeats_only() {
+        let t = Tracker::new_in_memory().expect("tracker");
+        // Fresh ledger: nothing suppressed yet.
+        assert_eq!(t.dedup_savings().expect("savings"), (0, 0));
+
+        // Row A: 100 tokens, emitted then suppressed twice -> saves 200 over 2.
+        t.dedup_insert("s1", "hA", "id", 100, 5).expect("insert");
+        let a = t.dedup_lookup("s1", "hA").expect("l").expect("hit");
+        t.dedup_bump(a.id).expect("bump");
+        t.dedup_bump(a.id).expect("bump");
+
+        // Row B: 50 tokens, inserted but never repeated -> saves 0.
+        t.dedup_insert("s1", "hB", "id", 50, 3).expect("insert");
+
+        assert_eq!(t.dedup_savings().expect("savings"), (200, 2));
     }
 
     // 1. estimate_tokens — verify ~4 chars/token ratio

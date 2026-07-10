@@ -311,6 +311,30 @@ enabled = true
     }
 
     #[test]
+    fn test_dedup_defaults_and_old_toml_parses() {
+        // Config predating [dedup] (here, a config with no [dedup] section at
+        // all) must still parse, with safe defaults.
+        let config: Config = toml::from_str("").expect("valid toml");
+        assert!(!config.dedup.enabled); // opt-in
+        assert_eq!(config.dedup.min_tokens, 200);
+        assert!(!config.dedup.suppress_on_error);
+    }
+
+    #[test]
+    fn test_dedup_config_roundtrip() {
+        let toml = r#"
+[dedup]
+enabled = true
+min_tokens = 500
+suppress_on_error = true
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(config.dedup.enabled);
+        assert_eq!(config.dedup.min_tokens, 500);
+        assert!(config.dedup.suppress_on_error);
+    }
+
+    #[test]
     fn test_telemetry_consent_roundtrip() {
         let toml = r#"
 [telemetry]
