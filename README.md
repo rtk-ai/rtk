@@ -8,6 +8,40 @@ This repository is a Windows-native compatibility fork/worktree of RTK. For the 
 - Local acceptance test / 本地验收测试: [`tests/windows_native_acceptance.ps1`](tests/windows_native_acceptance.ps1)
 - Windows-native fixtures / Windows native 测试夹具: [`tests/fixtures/windows-native/`](tests/fixtures/windows-native/)
 
+## Simple Usage / 简单用法
+
+Download or build `rtk.exe`, put it on `PATH`, then prefix shell commands with
+`rtk`:
+
+下载或编译 `rtk.exe`，放入 `PATH`，然后在 shell 命令前加上 `rtk`：
+
+```powershell
+rtk --version
+rtk git status
+rtk cargo test
+rtk rg "pattern"
+rtk pytest -q
+```
+
+Use native RTK commands by default so output can be compressed. Use
+`rtk proxy <cmd>` only when raw execution is needed, such as installers,
+authentication flows, or complex shell commands:
+
+默认使用 RTK native 命令，以便压缩输出。只有在需要原样执行时才使用
+`rtk proxy <cmd>`，例如安装器、认证流程或复杂 shell 命令：
+
+```powershell
+rtk proxy winget install --id GitHub.cli
+rtk proxy gh auth login
+rtk proxy powershell -NoProfile -ExecutionPolicy Bypass -File scripts\example.ps1
+```
+
+On Windows, avoid putting complex PowerShell variables or script blocks inside
+nested `powershell -Command "..."`; prefer `.ps1` files for those cases.
+
+在 Windows 上，避免把复杂 PowerShell 变量或 script block 塞进嵌套的
+`powershell -Command "..."`；这类场景优先使用 `.ps1` 文件。
+
 ## Feature Delta / 相对主仓库的功能变化
 
 | Area | English | 中文 |
