@@ -19,16 +19,16 @@ stable directory, and add that directory to `PATH`:
 $InstallDir = "$env:LOCALAPPDATA\Programs\rtk"
 New-Item -ItemType Directory -Force -Path $InstallDir
 Invoke-WebRequest -Uri "https://github.com/fuxkCH/rtk/releases/download/v0.43.1/rtk.exe" -OutFile "$InstallDir\rtk.exe"
-[Environment]::SetEnvironmentVariable(
-    "Path",
-    [Environment]::GetEnvironmentVariable("Path", "User") + ";$InstallDir",
-    "User"
-)
+$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if (($UserPath -split ';') -notcontains $InstallDir) {
+    [Environment]::SetEnvironmentVariable("Path", "$UserPath;$InstallDir", "User")
+}
 ```
 
-Open a new terminal after updating `PATH`, then verify the installed binary:
+Do not double-click `rtk.exe`. Open a new terminal after updating `PATH`, then
+verify the installed binary:
 
-更新 `PATH` 后打开一个新的终端，然后验证安装结果：
+不要双击 `rtk.exe`。更新 `PATH` 后打开一个新的终端，然后验证安装结果：
 
 ```powershell
 rtk --version
@@ -42,6 +42,14 @@ Expected version for this release:
 
 ```text
 rtk 0.43.1
+```
+
+Initialize Codex integration after verifying the binary:
+
+验证二进制可用后，初始化 Codex 集成：
+
+```powershell
+rtk init -g --codex
 ```
 
 If an older `rtk.exe` already appears earlier on `PATH`, replace that existing
