@@ -862,6 +862,8 @@ enum HookCommands {
     Copilot,
     /// Process Factory Droid PreToolUse hook (reads JSON from stdin)
     Droid,
+    /// Process Claude Code PostCompact hook — reset the session dedup ledger (reads JSON from stdin)
+    Compact,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -2400,6 +2402,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Droid => {
                 hooks::hook_cmd::run_droid()?;
+                0
+            }
+            HookCommands::Compact => {
+                hooks::hook_cmd::run_compact()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {

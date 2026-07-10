@@ -22,6 +22,7 @@ struct Params {
     enabled: bool,
     min_tokens: usize,
     suppress_on_error: bool,
+    recency_window: usize,
 }
 
 /// SHA-256 of the raw bytes, hex-encoded. Collision-resistant, so identity
@@ -76,6 +77,18 @@ fn suppress_with<'a>(
     let hash = content_hash(raw);
     match tracker.dedup_lookup(session_id, &hash) {
         Ok(Some(prev)) => {
+            // Recency backstop: if the prior emission is more than
+            // `recency_window` distinct emissions behind the latest, treat it
+            // as possibly-out-of-context (a reduction we didn't get a signal
+            // for) and re-emit full rather than suppress. 0 = unlimited.
+            if params.recency_window > 0 {
+                let max_ord = tracker
+                    .dedup_max_ordinal(session_id)
+                    .unwrap_or(prev.step_ordinal);
+                if (max_ord - prev.step_ordinal) as usize > params.recency_window {
+                    return Cow::Borrowed(shown);
+                }
+            }
             let _ = tracker.dedup_bump(prev.id);
             Cow::Owned(format_stub(&prev, identity))
         }
@@ -122,6 +135,7 @@ pub fn maybe_suppress<'a>(
         enabled,
         min_tokens: cfg.min_tokens,
         suppress_on_error: cfg.suppress_on_error,
+        recency_window: cfg.recency_window,
     };
     suppress_with(
         &tracker,
@@ -143,6 +157,7 @@ mod tests {
             enabled: true,
             min_tokens: 200,
             suppress_on_error: false,
+            recency_window: 0, // unlimited unless a test overrides it
         }
     }
 
@@ -300,5 +315,63 @@ mod tests {
         // Second identical failing emission is now suppressed.
         let second = suppress_with(&t, &params, Some("s1"), "id", &body, &body, false);
         assert!(matches!(second, Cow::Owned(_)));
+    }
+
+    /// Emit `n` distinct big bodies to advance the session's max ordinal.
+    fn advance_ordinal(t: &Tracker, params: &Params, session: &str, n: usize) {
+        let base = big_body();
+        for i in 0..n {
+            let b = format!("{base}variant {i}\n");
+            suppress_with(t, params, Some(session), "id", &b, &b, true);
+        }
+    }
+
+    #[test]
+    fn recency_window_reemits_stale_anchor() {
+        let t = Tracker::new_in_memory().expect("tracker");
+        let params = Params {
+            recency_window: 2,
+            ..enabled_params()
+        };
+        let body = big_body();
+        // Emit body -> ordinal 1.
+        suppress_with(&t, &params, Some("s1"), "id", &body, &body, true);
+        // Push the max ordinal to 4 with 3 distinct emissions (gap becomes 3).
+        advance_ordinal(&t, &params, "s1", 3);
+        // gap (4 - 1) = 3 > window 2 -> re-emit full instead of a stub.
+        let out = suppress_with(&t, &params, Some("s1"), "id", &body, &body, true);
+        assert!(
+            matches!(out, Cow::Borrowed(_)),
+            "stale anchor beyond recency_window must re-emit full"
+        );
+    }
+
+    #[test]
+    fn recency_window_suppresses_within_window() {
+        let t = Tracker::new_in_memory().expect("tracker");
+        let params = Params {
+            recency_window: 5,
+            ..enabled_params()
+        };
+        let body = big_body();
+        suppress_with(&t, &params, Some("s1"), "id", &body, &body, true); // ord 1
+        advance_ordinal(&t, &params, "s1", 2); // max -> 3, gap = 2
+        let out = suppress_with(&t, &params, Some("s1"), "id", &body, &body, true);
+        assert!(
+            matches!(out, Cow::Owned(_)),
+            "prior emission within recency_window must still suppress"
+        );
+    }
+
+    #[test]
+    fn recency_window_zero_is_unlimited() {
+        let t = Tracker::new_in_memory().expect("tracker");
+        let params = enabled_params(); // recency_window = 0
+        let body = big_body();
+        suppress_with(&t, &params, Some("s1"), "id", &body, &body, true); // ord 1
+        advance_ordinal(&t, &params, "s1", 20); // big gap
+                                                // window 0 = unlimited -> still suppresses despite the large gap.
+        let out = suppress_with(&t, &params, Some("s1"), "id", &body, &body, true);
+        assert!(matches!(out, Cow::Owned(_)));
     }
 }

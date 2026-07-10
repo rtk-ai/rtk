@@ -544,12 +544,13 @@ impl Tracker {
         line_count: usize,
     ) -> Result<i64> {
         let now = Utc::now().to_rfc3339();
-        let prior: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM session_outputs WHERE session_id = ?1",
+        // MAX-based (not COUNT) so ordinals stay monotonic even after prunes or
+        // a PostCompact reset deletes rows mid-session.
+        let step_ordinal: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(step_ordinal), 0) + 1 FROM session_outputs WHERE session_id = ?1",
             params![session_id],
             |r| r.get(0),
         )?;
-        let step_ordinal = prior + 1;
         self.conn.execute(
             "INSERT INTO session_outputs
              (session_id, content_hash, identity, output_tokens, line_count, step_ordinal, emit_count, first_seen, last_seen)
@@ -590,6 +591,28 @@ impl Tracker {
             |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
         )?;
         Ok(row)
+    }
+
+    /// Highest `step_ordinal` currently recorded for a session (0 if none).
+    /// Used by the recency backstop to measure how "old" a prior emission is.
+    pub fn dedup_max_ordinal(&self, session_id: &str) -> Result<i64> {
+        let max = self.conn.query_row(
+            "SELECT COALESCE(MAX(step_ordinal), 0) FROM session_outputs WHERE session_id = ?1",
+            params![session_id],
+            |r| r.get(0),
+        )?;
+        Ok(max)
+    }
+
+    /// Clear a session's dedup ledger. Called on PostCompact so suppression
+    /// never spans a context reduction — after compaction the earlier full
+    /// emission may be gone from context, so the next read must re-emit it.
+    pub fn dedup_reset_session(&self, session_id: &str) -> Result<usize> {
+        let n = self.conn.execute(
+            "DELETE FROM session_outputs WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(n)
     }
 
     #[cfg(test)]

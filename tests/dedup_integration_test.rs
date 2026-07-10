@@ -90,6 +90,49 @@ fn no_session_is_never_suppressed() {
     );
 }
 
+/// Fire the PostCompact hook (`rtk hook compact`) for a session.
+fn rtk_compact(db: &PathBuf, session: &str) {
+    let payload = format!("{{\"session_id\":\"{session}\",\"hook_event_name\":\"PostCompact\"}}");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["hook", "compact"])
+        .env("RTK_DB_PATH", db)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn rtk");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(payload.as_bytes())
+        .expect("write stdin");
+    assert!(child.wait().expect("wait rtk").success());
+}
+
+#[test]
+fn postcompact_reset_reemits_full() {
+    let db = fresh_db("compact_reset");
+    let input = big_input();
+
+    rtk_read(&db, Some("sess-C"), &input); // full (records)
+    let suppressed = rtk_read(&db, Some("sess-C"), &input);
+    assert!(
+        suppressed.contains("rtk-dedup:"),
+        "second read should suppress"
+    );
+
+    // Compaction clears the session ledger...
+    rtk_compact(&db, "sess-C");
+
+    // ...so the next read re-emits full (the earlier output may be gone from context).
+    let after = rtk_read(&db, Some("sess-C"), &input);
+    assert!(
+        !after.contains("rtk-dedup:"),
+        "read after PostCompact reset must re-emit full, got a stub: {after}"
+    );
+}
+
 #[test]
 fn sessions_are_isolated() {
     let db = fresh_db("isolated");

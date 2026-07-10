@@ -491,6 +491,39 @@ pub fn run_claude() -> Result<()> {
     Ok(())
 }
 
+/// Reset a session's dedup ledger from a PostCompact payload. Returns the
+/// number of ledger rows cleared. No `session_id` ⇒ no-op.
+fn compact_reset(v: &Value, tracker: &crate::core::tracking::Tracker) -> usize {
+    match v
+        .get("session_id")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        Some(sid) => tracker.dedup_reset_session(sid).unwrap_or(0),
+        None => 0,
+    }
+}
+
+/// Run the Claude Code PostCompact hook: clear this session's dedup ledger so
+/// output suppression never spans a context reduction (after compaction the
+/// earlier full emission may be gone, so the next read must re-emit it).
+/// Best-effort and silent — PostCompact is informational and always exits 0.
+pub fn run_compact() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(_) => return Ok(()), // malformed payload -> no-op
+    };
+    if let Ok(tracker) = crate::core::tracking::Tracker::new() {
+        let _ = compact_reset(&v, &tracker);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 fn run_claude_inner(input: &str) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;
@@ -796,6 +829,29 @@ mod tests {
     #[test]
     fn inject_noop_when_no_rtk_command() {
         assert_eq!(inject_session("git status", "sid1"), "git status");
+    }
+
+    // --- PostCompact ledger reset (Phase 8b) ---
+
+    #[test]
+    fn compact_reset_clears_only_the_named_session() {
+        let t = crate::core::tracking::Tracker::new_in_memory().expect("tracker");
+        t.dedup_insert("s1", "h1", "id", 100, 5).expect("insert");
+        t.dedup_insert("s2", "h2", "id", 100, 5).expect("insert");
+        let payload = json!({ "session_id": "s1", "hook_event_name": "PostCompact" });
+        assert_eq!(compact_reset(&payload, &t), 1);
+        assert!(t.dedup_lookup("s1", "h1").expect("lookup").is_none());
+        // Other sessions are untouched.
+        assert!(t.dedup_lookup("s2", "h2").expect("lookup").is_some());
+    }
+
+    #[test]
+    fn compact_reset_noop_without_session_id() {
+        let t = crate::core::tracking::Tracker::new_in_memory().expect("tracker");
+        t.dedup_insert("s1", "h1", "id", 100, 5).expect("insert");
+        let payload = json!({ "hook_event_name": "PostCompact" });
+        assert_eq!(compact_reset(&payload, &t), 0);
+        assert!(t.dedup_lookup("s1", "h1").expect("lookup").is_some());
     }
 
     // --- Copilot format detection ---

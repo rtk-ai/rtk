@@ -748,7 +748,11 @@ Filtering compresses a *single* command's output. Dedup attacks a different sink
 
 **Ledger.** A `session_outputs` table in the tracking DB (keyed by `session_id` + `content_hash`) stores hashes and counters only — never content. Rows are pruned after 48h idle. `rtk gain` reports the saved tokens separately (`SUM(output_tokens * (emit_count - 1))`) so filtering and dedup never double-count.
 
-**Config / toggle.** `[dedup]` config section (`enabled = false` by default — opt-in, since suppression changes agent-visible output; `min_tokens`, `suppress_on_error`). `RTK_DEDUP=1` force-enables without a config file (mirrors `RTK_DB_PATH` / `RTK_HOOK_AUDIT`).
+**Compaction protection.** Suppression is only safe while the earlier full emission is still in the agent's context — which context *compaction* can violate. Two layers guard this:
+- **PostCompact ledger reset (primary).** `rtk init` registers a `PostCompact` hook (`rtk hook compact`) that clears the session's ledger (`Tracker::dedup_reset_session`). After any compaction the ledger is empty, so the next read re-emits full. Dedup therefore only ever suppresses *within a single un-compacted context epoch*. (Existing installs pick this up on re-running `rtk init`.)
+- **Recency window (backstop).** `[dedup] recency_window` (default 100, 0 = unlimited) refuses to suppress if the prior emission is more than N distinct emissions behind the latest — catching any context reduction that fired no compaction signal (e.g. undocumented micro-summarization). Uses the `step_ordinal` already stored per row.
+
+**Config / toggle.** `[dedup]` config section (`enabled = false` by default — opt-in, since suppression changes agent-visible output; plus `min_tokens`, `suppress_on_error`, `recency_window`). All fields have serde defaults, so enabling is a one-liner (`[dedup]\nenabled = true`). `RTK_DEDUP=1` force-enables without a config file (mirrors `RTK_DB_PATH` / `RTK_HOOK_AUDIT`).
 
 **Seams.** Wired at `core::runner::run_captured_filter` (non-tee branch — covers git/gh/cargo and most ecosystems) and `cmds::system::read` (file + stdin). The tee and skip-filter-on-failure paths are left full (failure-heavy, low-value).
 
