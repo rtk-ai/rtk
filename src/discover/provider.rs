@@ -78,10 +78,12 @@ impl ClaudeProvider {
                 continue;
             }
 
-            // Apply project filter: substring match on directory name
+            // Apply project filter: substring match on directory name.
+            // Windows project slugs may differ only by drive-letter/path casing
+            // from the current working directory used to build the filter.
             if let Some(filter) = project_filter {
                 let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !dir_name.contains(filter) {
+                if !Self::project_dir_matches_filter(dir_name, filter) {
                     continue;
                 }
             }
@@ -123,9 +125,9 @@ impl ClaudeProvider {
     /// `/Users/foo/bar`          → `-Users-foo-bar`
     /// `/Users/first.last/bar`   → `-Users-first-last-bar`
     /// `/home/chris/2_project`   → `-home-chris-2-project`
-    /// `C:\Users\foo\bar`        → `C:-Users-foo-bar`
+    /// `C:\Users\foo\bar`        → `C--Users-foo-bar`
     pub fn encode_project_path(path: &str) -> String {
-        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\', ' ', '[', ']'];
+        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\', ':', ' ', '[', ']'];
 
         path.chars()
             .map(|c| {
@@ -136,6 +138,13 @@ impl ClaudeProvider {
                 }
             })
             .collect()
+    }
+
+    fn project_dir_matches_filter(dir_name: &str, filter: &str) -> bool {
+        dir_name.contains(filter)
+            || dir_name
+                .to_ascii_lowercase()
+                .contains(&filter.to_ascii_lowercase())
     }
 }
 
@@ -403,10 +412,36 @@ mod tests {
 
     #[test]
     fn test_encode_project_path_windows() {
-        // Windows backslashes are also replaced with '-'
+        // Windows drive separators and backslashes are replaced with '-'
+        // to match Claude Code project directory names.
         assert_eq!(
             ClaudeProvider::encode_project_path(r"C:\Users\foo\bar"),
-            "C:-Users-foo-bar"
+            "C--Users-foo-bar"
+        );
+    }
+
+    #[test]
+    fn test_discover_sessions_matches_windows_project_filter_case_insensitively() {
+        let projects_dir = tempfile::tempdir().unwrap();
+        let matching_project = projects_dir.path().join("e--PROJECT-XXX-XXX-xxxx");
+        let other_project = projects_dir.path().join("d--PROJECT-XXX-XXX-xxxx");
+        std::fs::create_dir_all(&matching_project).unwrap();
+        std::fs::create_dir_all(&other_project).unwrap();
+        std::fs::write(matching_project.join("matching.jsonl"), "").unwrap();
+        std::fs::write(other_project.join("other.jsonl"), "").unwrap();
+
+        let filter = ClaudeProvider::encode_project_path(r"E:\PROJECT\XXX\XXX-xxxx");
+        let sessions = ClaudeProvider::discover_sessions_in_projects_dir(
+            projects_dir.path(),
+            Some(&filter),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].file_name().and_then(|name| name.to_str()),
+            Some("matching.jsonl")
         );
     }
 
