@@ -175,7 +175,6 @@ pub fn limits() -> LimitsConfig {
 }
 
 /// Get dedup config. Falls back to defaults if config can't be loaded.
-#[allow(dead_code)] // consumed by core::dedup, wired into the print seams in Phase 5
 pub fn dedup() -> DedupConfig {
     Config::load().map(|c| c.dedup).unwrap_or_default()
 }

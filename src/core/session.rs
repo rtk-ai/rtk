@@ -12,13 +12,8 @@ use std::sync::OnceLock;
 static SESSION: OnceLock<SessionCtx> = OnceLock::new();
 
 /// Resolved session identity for the current process.
-//
-// `id`/`id()`/`current()` are the read side of this API, consumed by the dedup
-// subsystem (Phases 4–5). The `allow(dead_code)` markers below are transitional
-// and should be removed once that wiring lands.
 #[derive(Debug, Clone, Default)]
 pub struct SessionCtx {
-    #[allow(dead_code)]
     id: Option<String>,
 }
 
@@ -32,7 +27,6 @@ impl SessionCtx {
     }
 
     /// The session id, if known.
-    #[allow(dead_code)]
     pub fn id(&self) -> Option<&str> {
         self.id.as_deref()
     }
@@ -56,7 +50,6 @@ pub fn init(cli_flag: Option<String>) {
 
 /// The process-global session context. If `init` was never called (code paths
 /// that bypass `run_cli`), falls back to env-only resolution.
-#[allow(dead_code)]
 pub fn current() -> &'static SessionCtx {
     SESSION.get_or_init(|| SessionCtx::resolve(None))
 }

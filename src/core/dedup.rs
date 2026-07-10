@@ -8,10 +8,6 @@
 //! harmless. Every guard and every failure path (disabled, no session, command
 //! failure, tiny output, DB error) falls back to emitting the original output,
 //! so dedup can only ever *omit a repeat*, never hide new or changed output.
-//!
-//! Transitional: this module is wired into the print seams in Phase 5. The
-//! module-level `allow(dead_code)` below is removed once that lands.
-#![allow(dead_code)]
 
 use std::borrow::Cow;
 
@@ -97,27 +93,33 @@ fn suppress_with<'a>(
 /// is what would otherwise be printed. Any guard failure, missing session, or
 /// DB error emits `shown` unchanged.
 ///
-/// The disabled and no-session fast paths do zero DB work, so with dedup off
-/// (the default) this adds no measurable overhead.
+/// The no-session and disabled fast paths do no I/O — session is checked first
+/// (a cheap `OnceLock` read) so manual invocations never even read config, and
+/// with dedup off (the default) this adds no measurable overhead.
 pub fn maybe_suppress<'a>(
     identity: &str,
     raw: &str,
     shown: &'a str,
     exit_ok: bool,
 ) -> Cow<'a, str> {
-    let cfg = config::dedup();
-    if !cfg.enabled {
-        return Cow::Borrowed(shown);
-    }
+    // No session (all manual invocations, and the whole test suite) => no-op,
+    // before any config read or DB open.
     let Some(session_id) = session::current().id() else {
         return Cow::Borrowed(shown);
     };
+    let cfg = config::dedup();
+    // `RTK_DEDUP=1` force-enables regardless of config — a no-config toggle for
+    // users and hermetic integration tests (mirrors RTK_DB_PATH / RTK_HOOK_AUDIT).
+    let enabled = cfg.enabled || matches!(std::env::var("RTK_DEDUP").as_deref(), Ok("1"));
+    if !enabled {
+        return Cow::Borrowed(shown);
+    }
     let tracker = match Tracker::new() {
         Ok(t) => t,
         Err(_) => return Cow::Borrowed(shown),
     };
     let params = Params {
-        enabled: cfg.enabled,
+        enabled,
         min_tokens: cfg.min_tokens,
         suppress_on_error: cfg.suppress_on_error,
     };

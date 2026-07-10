@@ -94,8 +94,7 @@ pub struct Tracker {
 
 /// A prior emission of identical content within a session — one row of the
 /// dedup ledger, returned by [`Tracker::dedup_lookup`]. Fields feed the
-/// suppression stub (Phase 5) and the `dedup_bump` call.
-#[allow(dead_code)] // fields consumed by core::dedup in Phase 5
+/// suppression stub and the `dedup_bump` call.
 #[cfg_attr(test, derive(Debug, PartialEq))]
 pub struct DedupRow {
     pub id: i64,
@@ -513,7 +512,6 @@ impl Tracker {
 
     /// Look up a prior byte-identical emission in the same session.
     /// Returns `None` on the first (or a novel) emission.
-    #[allow(dead_code)] // consumed by core::dedup in Phase 5
     pub fn dedup_lookup(&self, session_id: &str, content_hash: &str) -> Result<Option<DedupRow>> {
         match self.conn.query_row(
             "SELECT id, step_ordinal, output_tokens, line_count
@@ -537,7 +535,6 @@ impl Tracker {
     /// Record a first emission of `content_hash` in `session_id`. Returns the
     /// 1-based `step_ordinal` assigned within the session (its Nth tracked
     /// emission), used for the suppression stub message.
-    #[allow(dead_code)] // consumed by core::dedup in Phase 5
     pub fn dedup_insert(
         &self,
         session_id: &str,
@@ -572,7 +569,6 @@ impl Tracker {
 
     /// Record that a ledger row's content was emitted again (suppressed): bump
     /// `emit_count` and refresh `last_seen`.
-    #[allow(dead_code)] // consumed by core::dedup in Phase 5
     pub fn dedup_bump(&self, id: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE session_outputs SET emit_count = emit_count + 1, last_seen = ?2 WHERE id = ?1",
