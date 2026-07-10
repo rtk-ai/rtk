@@ -21,6 +21,8 @@ pub struct Config {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub dedup: DedupConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -145,9 +147,37 @@ impl Default for LimitsConfig {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DedupConfig {
+    /// Suppress re-emitting byte-identical command output already seen this
+    /// Claude Code session. Opt-in: suppression changes agent-visible output.
+    pub enabled: bool,
+    /// Skip dedup for outputs smaller than this many estimated tokens.
+    pub min_tokens: usize,
+    /// Suppress even when the underlying command exited non-zero. Off by
+    /// default so command failures are always shown in full.
+    pub suppress_on_error: bool,
+}
+
+impl Default for DedupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_tokens: 200,
+            suppress_on_error: false,
+        }
+    }
+}
+
 /// Get limits config. Falls back to defaults if config can't be loaded.
 pub fn limits() -> LimitsConfig {
     Config::load().map(|c| c.limits).unwrap_or_default()
+}
+
+/// Get dedup config. Falls back to defaults if config can't be loaded.
+#[allow(dead_code)] // consumed by core::dedup, wired into the print seams in Phase 5
+pub fn dedup() -> DedupConfig {
+    Config::load().map(|c| c.dedup).unwrap_or_default()
 }
 
 impl Config {
