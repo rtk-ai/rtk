@@ -224,19 +224,14 @@ fn check_and_warn() -> Option<()> {
 
     // Rate limit: warn once per day
     let marker = warn_marker_path()?;
-    if let Ok(meta) = std::fs::metadata(&marker) {
-        if let Ok(modified) = meta.modified() {
-            if modified.elapsed().map(|e| e.as_secs()).unwrap_or(u64::MAX) < WARN_INTERVAL_SECS {
-                return Some(());
-            }
-        }
+    if warn_marker_is_fresh(&marker) {
+        return Some(());
     }
 
     eprintln!("{}", warning);
 
-    // Touch marker after warning is printed
-    let _ = std::fs::create_dir_all(marker.parent()?);
-    let _ = std::fs::write(&marker, b"");
+    // Write non-empty content so Windows reliably refreshes an existing marker's mtime.
+    let _ = refresh_warn_marker(&marker);
 
     Some(())
 }
@@ -256,6 +251,26 @@ pub fn parse_hook_version(content: &str) -> u8 {
 fn warn_marker_path() -> Option<PathBuf> {
     let data_dir = dirs::data_local_dir()?.join(RTK_DATA_DIR);
     Some(data_dir.join(".hook_warn_last"))
+}
+
+fn warn_marker_is_fresh(marker: &std::path::Path) -> bool {
+    std::fs::metadata(marker)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|elapsed| elapsed.as_secs() < WARN_INTERVAL_SECS)
+}
+
+fn refresh_warn_marker(marker: &std::path::Path) -> std::io::Result<()> {
+    if let Some(parent) = marker.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string();
+    std::fs::write(marker, timestamp)
 }
 
 #[cfg(test)]
@@ -546,6 +561,25 @@ mod tests {
         std::fs::write(claude_dir.join(SETTINGS_LOCAL_JSON), &content).unwrap();
 
         assert_eq!(status_for_claude_dir(&claude_dir), HookStatus::Ok);
+    }
+
+    #[test]
+    fn test_refresh_warn_marker_rewrites_existing_empty_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let marker = tmp.path().join(".hook_warn_last");
+        std::fs::write(&marker, b"").expect("seed empty marker");
+
+        refresh_warn_marker(&marker).expect("refresh marker");
+
+        let contents = std::fs::read_to_string(&marker).expect("read marker");
+        assert!(
+            !contents.trim().is_empty(),
+            "refresh must change an existing zero-byte file on Windows"
+        );
+        assert!(
+            warn_marker_is_fresh(&marker),
+            "a refreshed marker must suppress the next warning"
+        );
     }
 
     #[test]

@@ -59,16 +59,17 @@ fn uses_compact_status_path(args: &[String]) -> bool {
         return true;
     }
 
-    let mut saw_branch = false;
+    let mut saw_compact_flag = false;
     for arg in args {
         match arg.as_str() {
-            "-b" | "--branch" => saw_branch = true,
-            "-sb" | "-bs" | "-s" | "--short" => return true,
+            "-b" | "--branch" | "-sb" | "-bs" | "-s" | "--short" => {
+                saw_compact_flag = true;
+            }
             _ => return false,
         }
     }
 
-    saw_branch
+    saw_compact_flag
 }
 
 fn build_status_command(args: &[String], global_args: &[String]) -> Command {
@@ -83,13 +84,69 @@ fn build_status_command(args: &[String], global_args: &[String]) -> Command {
 }
 
 fn diff_passthrough_requested(args: &[String]) -> bool {
+    diff_requires_native_passthrough(args)
+        || args.iter().any(|arg| diff_human_summary_flag(arg))
+}
+
+fn diff_summary_requested(args: &[String]) -> bool {
+    let has_summary = args.iter().any(|arg| diff_human_summary_flag(arg));
+
+    has_summary && !diff_requires_native_passthrough(args)
+}
+
+fn diff_human_summary_flag(arg: &str) -> bool {
+    matches!(arg, "--stat" | "--shortstat") || arg.starts_with("--stat=")
+}
+
+fn diff_requires_native_passthrough(args: &[String]) -> bool {
     args.iter().any(|arg| {
-        arg == "--stat"
-            || arg == "--numstat"
-            || arg == "--shortstat"
-            || arg == "--check"
-            || arg == "--no-compact"
+        matches!(
+            arg.as_str(),
+            "--check"
+                | "--no-compact"
+                | "--quiet"
+                | "--exit-code"
+                | "--no-index"
+                | "--no-patch"
+                | "-s"
+                | "--name-only"
+                | "--name-status"
+                | "--raw"
+                | "--numstat"
+                | "-z"
+                | "--output"
+        ) || arg.starts_with("--output=")
     })
+}
+
+fn compact_diff_empty_message_requested(args: &[String]) -> bool {
+    if diff_requires_native_passthrough(args) {
+        return false;
+    }
+
+    let mut after_path_separator = false;
+
+    for arg in args {
+        if after_path_separator {
+            continue;
+        }
+        match arg.as_str() {
+            "--" => after_path_separator = true,
+            "--cached" | "--staged" => {}
+            value if !value.starts_with('-') => {}
+            _ => return false,
+        }
+    }
+
+    true
+}
+
+fn human_readable_success<'a>(raw: &'a str, formatted: &'a str) -> &'a str {
+    if raw.trim().is_empty() {
+        formatted
+    } else {
+        never_worse(raw, formatted)
+    }
 }
 
 fn print_capture_preserving_streams(result: &CaptureResult) {
@@ -139,9 +196,8 @@ fn run_diff(
     let args = &args_utils::restore_double_dash(args);
 
     if diff_passthrough_requested(args) {
-        // User wants stat/check output or explicitly no compacting - pass through directly.
-        // `git diff --check` often reports warnings on stderr even with exit 0, so
-        // stream preservation matters more than compaction on this path.
+        // Preserve native output and exit semantics for summary, validation,
+        // machine-readable, no-index, and explicit output-file modes.
         let mut cmd = git_cmd(global_args);
         cmd.arg("diff");
         for arg in args {
@@ -152,14 +208,26 @@ fn run_diff(
         }
 
         let result = exec_capture(&mut cmd).context("Failed to run git diff")?;
-        print_capture_preserving_streams(&result);
         let raw = result.combined();
+        let show_empty_summary =
+            result.success() && raw.trim().is_empty() && diff_summary_requested(args);
+        let shown = if show_empty_summary {
+            "No changes"
+        } else {
+            &raw
+        };
+
+        if show_empty_summary {
+            println!("{shown}");
+        } else {
+            print_capture_preserving_streams(&result);
+        }
 
         timer.track(
             &format!("git diff {}", args.join(" ")),
             &format!("rtk git diff {} (passthrough)", args.join(" ")),
             &raw,
-            &raw,
+            shown,
         );
 
         return Ok(result.exit_code);
@@ -238,8 +306,15 @@ fn run_diff(
         "{}{}{}{}",
         result.stdout, result.stderr, diff_result.stdout, diff_result.stderr
     );
-    let shown = never_worse(&raw, &printed);
-    println!("{}", shown);
+    let formatted = if printed.is_empty() && compact_diff_empty_message_requested(args) {
+        "No changes"
+    } else {
+        &printed
+    };
+    let shown = human_readable_success(&raw, formatted);
+    if !shown.is_empty() {
+        println!("{}", shown);
+    }
 
     timer.track(
         &format!("git diff {}", args.join(" ")),
@@ -939,6 +1014,9 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         let filtered = filter_status_with_args(&result.stdout);
         let filtered = never_worse(&result.stdout, &filtered).to_string();
         print!("{}", filtered);
+        if !filtered.is_empty() && !filtered.ends_with('\n') {
+            println!();
+        }
 
         timer.track(
             &format!("git status {}", args.join(" ")),
@@ -1001,8 +1079,11 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         None => formatted,
     };
 
-    let shown = never_worse(&raw_output, &final_output);
-    println!("{}", shown);
+    let shown = human_readable_success(&raw_output, &final_output);
+    print!("{}", shown);
+    if !shown.ends_with('\n') {
+        println!();
+    }
 
     let original_cmd = if args.is_empty() {
         "git status".to_string()
