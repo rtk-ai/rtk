@@ -473,6 +473,9 @@ enum Commands {
         /// Output format: text, json, csv
         #[arg(short, long, default_value = "text")]
         format: String,
+        /// Perform a precise session-log audit of prompt caching (slower)
+        #[arg(long)]
+        audit: bool,
     },
 
     /// Show or create configuration file
@@ -2125,8 +2128,9 @@ fn run_cli() -> Result<i32> {
             monthly,
             all,
             format,
+            audit,
         } => {
-            analytics::cc_economics::run(daily, weekly, monthly, all, &format, cli.verbose)?;
+            analytics::cc_economics::run(daily, weekly, monthly, all, &format, cli.verbose, audit)?;
             0
         }
 
