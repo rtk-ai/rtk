@@ -244,6 +244,21 @@ All module `run()` functions return `Result<i32>` where the `i32` is the underly
 
 **When doing manual execution**: use `exit_code_from_output()` or `exit_code_from_status()` and return `Ok(exit_code)`. Never call `process::exit()`, never use `.code().unwrap_or(1)` (loses signal info).
 
+### Agent-Facing Failure Diagnostics
+
+The following table is a contract for native handlers. Failure output must make
+the next agent action clear while preserving the command's meaningful output and
+exit status.
+
+| Situation | Required diagnostic and exit behavior |
+|---|---|
+| Useful output followed by a nonzero status | Print the useful stdout before returning the nonzero status; do not replace it with a generic success or failure summary. |
+| Unsupported native syntax | Print `rtk <command>: unsupported ...` with a concrete recovery command such as `rtk proxy <command> ...`; return exit 2. |
+| Filesystem access failure | Print `rtk <command>: cannot access ...: <underlying error>` and continue any safe remaining work. Deliberate `NotFound`-is-empty semantics must remain silent. |
+| Underlying command failure | Preserve the underlying stderr and exit status; do not collapse an engine error into an empty/no-match result. |
+| External command cannot spawn | Return an error with `Failed to run <command>` context, preserving the underlying OS error. Unknown fallback commands return 127 on Unix and a Windows exit-2 diagnostic that names the command. |
+| PowerShell file transport | Report the failed stage: create temporary `.ps1`, write UTF-8 BOM, write script body, flush, or spawn/execute. Keep the existing fallback exit semantics. |
+
 ### Filter Failure Passthrough
 
 When filtering fails, fall back to raw output and warn on stderr. Never block the user.

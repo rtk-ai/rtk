@@ -71,9 +71,10 @@ const UNSUPPORTED_FIND_FLAGS: &[&str] = &[
     "-regex", "-iregex",
 ];
 
-fn has_unsupported_find_flags(args: &[String]) -> bool {
+fn unsupported_find_flag(args: &[String]) -> Option<&str> {
     args.iter()
-        .any(|a| UNSUPPORTED_FIND_FLAGS.contains(&a.as_str()))
+        .map(String::as_str)
+        .find(|arg| UNSUPPORTED_FIND_FLAGS.contains(arg))
 }
 
 /// Parse arguments from raw args vec, supporting both native find and RTK syntax.
@@ -83,12 +84,6 @@ fn has_unsupported_find_flags(args: &[String]) -> bool {
 fn parse_find_args(args: &[String]) -> Result<FindArgs> {
     if args.is_empty() {
         return Ok(FindArgs::default());
-    }
-
-    if has_unsupported_find_flags(args) {
-        anyhow::bail!(
-            "rtk find does not support compound predicates or actions (e.g. -not, -exec). Use `find` directly."
-        );
     }
 
     if has_native_find_flags(args) {
@@ -178,7 +173,23 @@ fn parse_rtk_find_args(args: &[String]) -> Result<FindArgs> {
 }
 
 /// Entry point from main.rs — parses raw args then delegates to run().
-pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
+pub fn run_from_args(args: &[String], verbose: u8) -> Result<i32> {
+    if let Some(option) = unsupported_find_flag(args) {
+        let timer = tracking::TimedExecution::start();
+        let diagnostic = format!(
+            "rtk find: unsupported option '{option}'; use `rtk proxy find {}`",
+            args.join(" ")
+        );
+        eprintln!("{diagnostic}");
+        timer.track(
+            &format!("find {}", args.join(" ")),
+            "rtk find",
+            &diagnostic,
+            &diagnostic,
+        );
+        return Ok(2);
+    }
+
     let parsed = parse_find_args(args)?;
     run(
         &parsed.pattern,
@@ -199,7 +210,7 @@ pub fn run(
     file_type: &str,
     case_insensitive: bool,
     verbose: u8,
-) -> Result<()> {
+) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     // Treat "." as match-all
@@ -227,11 +238,17 @@ pub fn run(
     let walker = builder.build();
 
     let mut files: Vec<String> = Vec::new();
+    let mut access_diagnostics = Vec::new();
 
     for entry in walker {
         let entry = match entry {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(err) => {
+                let diagnostic = format!("rtk find: cannot access: {err}");
+                eprintln!("{diagnostic}");
+                access_diagnostics.push(diagnostic);
+                continue;
+            }
         };
 
         let ft = entry.file_type();
@@ -277,15 +294,28 @@ pub fn run(
     files.sort();
 
     let raw_output = files.join("\n");
+    let access_diagnostics = access_diagnostics.join("\n");
+    let tracked_raw_output = if access_diagnostics.is_empty() {
+        raw_output.clone()
+    } else if raw_output.is_empty() {
+        access_diagnostics.clone()
+    } else {
+        format!("{raw_output}\n{access_diagnostics}")
+    };
 
     if files.is_empty() {
+        let tracked_shown = if access_diagnostics.is_empty() {
+            String::new()
+        } else {
+            access_diagnostics.clone()
+        };
         timer.track(
             &format!("find {} -name '{}'", path, effective_pattern),
             "rtk find",
-            &raw_output,
-            "",
+            &tracked_raw_output,
+            &tracked_shown,
         );
-        return Ok(());
+        return Ok(i32::from(!access_diagnostics.is_empty()));
     }
 
     // Group by directory
@@ -374,14 +404,21 @@ pub fn run(
 
     let shown = never_worse(&raw_output, &body);
     print!("{}", shown);
+    let tracked_shown = if access_diagnostics.is_empty() {
+        shown.to_owned()
+    } else if shown.is_empty() {
+        access_diagnostics.clone()
+    } else {
+        format!("{shown}\n{access_diagnostics}")
+    };
     timer.track(
         &format!("find {} -name '{}'", path, effective_pattern),
         "rtk find",
-        &raw_output,
-        shown,
+        &tracked_raw_output,
+        &tracked_shown,
     );
 
-    Ok(())
+    Ok(i32::from(!access_diagnostics.is_empty()))
 }
 
 #[cfg(test)]
@@ -496,17 +533,17 @@ mod tests {
     // --- parse_find_args: unsupported flags ---
 
     #[test]
-    fn parse_native_find_rejects_not() {
-        let result = parse_find_args(&args(&[".", "-name", "*.rs", "-not", "-name", "*_test.rs"]));
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("compound predicates"));
+    fn unsupported_find_flag_identifies_not() {
+        let input = args(&[".", "-name", "*.rs", "-not", "-name", "*_test.rs"]);
+        let option = unsupported_find_flag(&input);
+        assert_eq!(option, Some("-not"));
     }
 
     #[test]
-    fn parse_native_find_rejects_exec() {
-        let result = parse_find_args(&args(&[".", "-name", "*.tmp", "-exec", "rm", "{}", ";"]));
-        assert!(result.is_err());
+    fn unsupported_find_flag_identifies_exec() {
+        let input = args(&[".", "-name", "*.tmp", "-exec", "rm", "{}", ";"]);
+        let option = unsupported_find_flag(&input);
+        assert_eq!(option, Some("-exec"));
     }
 
     // --- parse_find_args: RTK syntax ---
@@ -562,6 +599,20 @@ mod tests {
         // -iname should match case-insensitively
         let result = run_from_args(&args(&[".", "-iname", "cargo.toml"]), 0);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn walker_access_errors_are_reported_with_the_find_prefix() {
+        let production_source = include_str!("find_cmd.rs")
+            .split_once("#[cfg(test)]")
+            .expect("find command source must contain its test module")
+            .0;
+
+        assert!(
+            production_source.contains("rtk find: cannot access: {err}"),
+            "walk errors must not be silently discarded"
+        );
+        assert!(!production_source.contains("Err(_) => continue"));
     }
 
     // --- #1101: dotfile pattern should not skip hidden files ---

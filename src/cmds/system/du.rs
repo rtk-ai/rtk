@@ -2,6 +2,8 @@
 
 use anyhow::{anyhow, Result};
 #[cfg(not(target_os = "windows"))]
+use anyhow::Context;
+#[cfg(not(target_os = "windows"))]
 use crate::core::utils::{exit_code_from_status, resolved_command};
 #[cfg(any(target_os = "windows", test))]
 use std::io::Write;
@@ -26,7 +28,7 @@ fn run_external(args: &[String], verbose: u8) -> Result<i32> {
     if verbose > 0 {
         eprintln!("Running: du {}", args.join(" "));
     }
-    let status = resolved_command("du").args(args).status()?;
+    let status = resolved_command("du").args(args).status().context("Failed to run du")?;
     Ok(exit_code_from_status(&status, "du"))
 }
 
@@ -434,5 +436,12 @@ mod tests {
             String::from_utf8(errors).unwrap(),
             "rtk du: cannot access blocked: denied\n"
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn external_du_spawn_has_actionable_context() {
+        let source = include_str!("du.rs");
+        assert!(source.contains(".status().context(\"Failed to run du\")?"));
     }
 }

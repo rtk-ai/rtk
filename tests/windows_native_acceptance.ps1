@@ -240,7 +240,7 @@ Check -Name "Get-Command bare transports" -Argv @("Get-Command", "cargo") -Needl
 Check -Name "Get-Command syntax transports" -Argv @("Get-Command", "-Syntax", "cargo") -Needles @("cargo")
 Check -Name "which cargo" -Argv @("which", "cargo") -Needles @("cargo")
 Check -Name "which missing returns 1" -Argv @("which", "rtk-definitely-missing-command-for-acceptance") -ExpectedCode 1 -Needles @("not found")
-Check -Name "which path-like name is unsupported" -Argv @("which", ".\cargo") -ExpectedCode 1 -Needles @("path-like name '.\cargo' is unsupported; pass a command name from PATH")
+Check -Name "which path-like name is unsupported" -Argv @("which", ".\cargo") -ExpectedCode 1 -Needles @("rtk which:", "path-like name '.\cargo' is unsupported; pass a command name from PATH")
 
 Check -Name "head default 10 lines" -Argv @("head", $HeadTailFile) -Needles @("line 01", "line 10") -Absent @("line 11", "omitted")
 Check -Name "head -n 2" -Argv @("head", "-n", "2", $HeadTailFile) -Needles @("line 01", "line 02") -Absent @("line 03", "omitted")
@@ -308,6 +308,7 @@ Check -Name "ps1 argv probe spaces unicode quotes" -Argv @($Ps1Probe, "hello wor
 Check -Name "cmd argv probe safe spaces" -Argv @($CmdProbe, "hello world", "plain") -Needles @("arg0=hello world", "arg1=plain")
 Check -Name "cmd argv probe rejects metachar" -Argv @($CmdProbe, "bad&arg") -ExpectedCode 2 -Needles @("cmd")
 Check -Name "unknown scriptblock-like fails closed" -Argv @("Where-Object", "{ `$_.Name -match 'src' }") -ExpectedCode 2 -Needles @("ambiguous Windows command")
+Check -Name "missing fallback command names command and fails closed" -Argv @("rtk-definitely-missing-fallback-command") -ExpectedCode 2 -Needles @("rtk-definitely-missing-fallback-command", "ambiguous")
 
 CheckRewrite -Name "rewrite Get-Content basic" -Raw "Get-Content tests/fixtures/windows-native/quote-and-wildcard.txt" -Expected "rtk read"
 CheckRewrite -Name "rewrite Get-Content encoding suffix" -Raw "Get-Content tests/fixtures/windows-native/quote-and-wildcard.txt -Encoding utf8" -Expected "rtk read"

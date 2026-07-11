@@ -113,13 +113,13 @@ pub fn prepare_powershell_transport(
     let mut file = tempfile::Builder::new()
         .suffix(".ps1")
         .tempfile()
-        .context("rtk: PowerShell file transport: create")?;
+        .context("rtk: PowerShell file transport: failed to create temporary .ps1 file")?;
     file.write_all(&[0xEF, 0xBB, 0xBF])
-        .context("rtk: PowerShell file transport: BOM")?;
+        .context("rtk: PowerShell file transport: failed to write UTF-8 BOM")?;
     file.write_all(script.as_bytes())
-        .context("rtk: PowerShell file transport: body")?;
+        .context("rtk: PowerShell file transport: failed to write script body")?;
     file.flush()
-        .context("rtk: PowerShell file transport: flush")?;
+        .context("rtk: PowerShell file transport: failed to flush temporary .ps1 file")?;
     let temp_script = file.into_temp_path();
     let args = powershell_file_args(temp_script.as_ref(), &[], policy);
     Ok(PreparedPowerShellTransport {
@@ -304,9 +304,9 @@ where
         });
     }
 
-    reject(
-        "ambiguous Windows command; use `rtk powershell -NoProfile -Command ...`, `rtk run -c ...`, or an explicit executable path",
-    )
+    reject(format!(
+        "ambiguous Windows command '{command_text}'; use `rtk powershell -NoProfile -Command ...`, `rtk run -c ...`, or an explicit executable path"
+    ))
 }
 
 pub fn is_known_cmdlet(name: &str) -> bool {
@@ -618,7 +618,7 @@ fn spawn_prepared_powershell(
 
 fn format_powershell_file_transport_spawn_error(host: &OsStr, err: &std::io::Error) -> String {
     format!(
-        "rtk: PowerShell file transport: spawn {}: {}",
+        "rtk: PowerShell file transport: failed to spawn/execute {}: {}",
         host.to_string_lossy(),
         err
     )
@@ -758,7 +758,7 @@ mod tests {
             &std::io::Error::from(std::io::ErrorKind::NotFound),
         );
 
-        assert!(message.starts_with("rtk: PowerShell file transport: spawn"));
+        assert!(message.starts_with("rtk: PowerShell file transport: failed to spawn/execute"));
     }
 
     #[test]
@@ -948,10 +948,27 @@ mod tests {
             |_| resolved_path("C:\\bin\\tool.bat"),
             || resolved_path("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"),
         );
-        assert!(matches!(
-            decision.unwrap(),
-            WindowsFallbackDecision::RejectAmbiguous { .. }
-        ));
+        match decision.unwrap() {
+            WindowsFallbackDecision::RejectAmbiguous { message } => {
+                assert!(message.contains("cmd batch transport"));
+                assert!(message.contains("cannot safely represent this argv"));
+            }
+            other => panic!("unexpected decision: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_transport_errors_name_the_failed_stage() {
+        let source = include_str!("windows_shell.rs");
+        for stage in [
+            "PowerShell file transport: failed to create temporary .ps1 file",
+            "PowerShell file transport: failed to write UTF-8 BOM",
+            "PowerShell file transport: failed to write script body",
+            "PowerShell file transport: failed to flush temporary .ps1 file",
+            "PowerShell file transport: failed to spawn/execute",
+        ] {
+            assert!(source.contains(stage), "missing transport stage: {stage}");
+        }
     }
 
     #[test]
@@ -983,10 +1000,13 @@ mod tests {
         let decision = decide_with(&args, unresolved, || {
             resolved_path("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe")
         });
-        assert!(matches!(
-            decision.unwrap(),
-            WindowsFallbackDecision::RejectAmbiguous { .. }
-        ));
+        match decision.unwrap() {
+            WindowsFallbackDecision::RejectAmbiguous { message } => {
+                assert!(message.contains("Where-Object"));
+                assert!(message.contains("ambiguous Windows command"));
+            }
+            other => panic!("unexpected decision: {other:?}"),
+        }
     }
 
     #[test]

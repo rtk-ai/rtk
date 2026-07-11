@@ -2,6 +2,8 @@
 
 use anyhow::Result;
 #[cfg(not(target_os = "windows"))]
+use anyhow::Context;
+#[cfg(not(target_os = "windows"))]
 use crate::core::utils::{exit_code_from_status, resolved_command};
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
@@ -21,7 +23,7 @@ fn run_external(args: &[String], verbose: u8) -> Result<i32> {
     if verbose > 0 {
         eprintln!("Running: ps {}", args.join(" "));
     }
-    let status = resolved_command("ps").args(args).status()?;
+    let status = resolved_command("ps").args(args).status().context("Failed to run ps")?;
     Ok(exit_code_from_status(&status, "ps"))
 }
 
@@ -103,5 +105,12 @@ mod tests {
 
         assert!(source.contains("System::new();"));
         assert!(!source.contains(&forbidden_constructor));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn external_ps_spawn_has_actionable_context() {
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cmds/system/ps.rs"));
+        assert!(source.contains(".status().context(\"Failed to run ps\")?"));
     }
 }

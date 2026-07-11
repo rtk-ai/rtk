@@ -2,6 +2,8 @@
 
 use anyhow::Result;
 #[cfg(not(target_os = "windows"))]
+use anyhow::Context;
+#[cfg(not(target_os = "windows"))]
 use crate::core::utils::{exit_code_from_status, resolved_command};
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
@@ -21,7 +23,7 @@ fn run_external(args: &[String], verbose: u8) -> Result<i32> {
     if verbose > 0 {
         eprintln!("Running: df {}", args.join(" "));
     }
-    let status = resolved_command("df").args(args).status()?;
+    let status = resolved_command("df").args(args).status().context("Failed to run df")?;
     Ok(exit_code_from_status(&status, "df"))
 }
 
@@ -180,5 +182,12 @@ mod tests {
             output,
             "Filesystem Size Used Avail Use%\nC:\\ 1.0K 256B 768B 25%\nZ:\\ 0B 0B 0B -\n"
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn external_df_spawn_has_actionable_context() {
+        let source = include_str!("df.rs");
+        assert!(source.contains(".status().context(\"Failed to run df\")?"));
     }
 }
