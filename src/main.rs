@@ -52,6 +52,8 @@ pub enum AgentTarget {
     Pi,
     /// Hermes CLI
     Hermes,
+    /// Factory Droid CLI
+    Droid,
 }
 
 #[derive(Parser)]
@@ -927,6 +929,8 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process Factory Droid PreToolUse hook (reads JSON from stdin)
+    Droid,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1614,21 +1618,25 @@ fn main() {
     std::process::exit(code);
 }
 
-fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
+fn uninstall_init_dispatch<UninstallHermes, UninstallDroid, UninstallStandard>(
     agent: Option<AgentTarget>,
     global: bool,
     gemini: bool,
     codex: bool,
     ctx: hooks::init::InitContext,
     uninstall_hermes: UninstallHermes,
+    uninstall_droid: UninstallDroid,
     uninstall_standard: UninstallStandard,
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
+    UninstallDroid: FnOnce(bool, hooks::init::InitContext) -> Result<()>,
     UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
+    } else if agent == Some(AgentTarget::Droid) {
+        uninstall_droid(global, ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -2098,6 +2106,7 @@ fn run_cli() -> Result<i32> {
                     codex,
                     ctx,
                     hooks::init::uninstall_hermes,
+                    hooks::init::uninstall_droid,
                     hooks::init::uninstall,
                 )?;
             } else if gemini {
@@ -2131,6 +2140,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_antigravity_mode(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Droid) {
+                hooks::init::run_droid_mode(global, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2533,6 +2544,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::Droid => {
+                hooks::hook_cmd::run_droid()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {
@@ -3109,6 +3124,7 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
+            |_, _| Ok(()),
             |_, _, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
@@ -3117,6 +3133,43 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(hermes_called.get());
+        assert!(!standard_called.get());
+    }
+
+    #[test]
+    fn test_init_uninstall_droid_parses_and_routes_to_droid_cleanup() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--uninstall", "--agent", "droid"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Init {
+                uninstall: true,
+                agent: Some(AgentTarget::Droid),
+                ..
+            }
+        ));
+
+        let droid_called = Cell::new(false);
+        let standard_called = Cell::new(false);
+        let result = uninstall_init_dispatch(
+            Some(AgentTarget::Droid),
+            true,
+            false,
+            false,
+            hooks::init::InitContext::default(),
+            |_| Ok(()),
+            |global, _| {
+                droid_called.set(true);
+                assert!(global);
+                Ok(())
+            },
+            |_, _, _, _, _, _| {
+                standard_called.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(droid_called.get());
         assert!(!standard_called.get());
     }
 
@@ -3395,6 +3448,32 @@ mod tests {
                 command: HookCommands::Claude
             }
         ));
+    }
+
+    #[test]
+    fn test_hook_droid_parses_and_is_listed_in_help() {
+        use clap::CommandFactory;
+
+        let cli = Cli::try_parse_from(["rtk", "hook", "droid"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::Droid
+            }
+        ));
+
+        let command = Cli::command();
+        let hook = command
+            .find_subcommand("hook")
+            .expect("hook command must be registered");
+        let droid = hook
+            .find_subcommand("droid")
+            .expect("droid hook command must be registered");
+        assert!(droid
+            .get_about()
+            .expect("droid hook command must have help text")
+            .to_string()
+            .contains("Factory Droid PreToolUse"));
     }
 
     #[test]
@@ -3919,6 +3998,15 @@ mod tests {
                 assert_eq!(agent, Some(AgentTarget::Pi));
                 assert!(global);
             }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_init_agent_droid_parses() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "droid"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => assert_eq!(agent, Some(AgentTarget::Droid)),
             _ => panic!("Expected Init command"),
         }
     }

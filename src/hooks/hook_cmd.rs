@@ -555,6 +555,94 @@ fn run_cursor_inner_with_rules(
     }
 }
 
+// ── Factory Droid PreToolUse hook ──────────────────────────────
+
+fn process_droid_payload(v: &Value) -> Option<Value> {
+    let cmd = droid_execute_command(v)?;
+    droid_response_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::Droid))
+}
+
+/// Extract a command only from Droid's shell tool. The installed matcher is
+/// `Execute`; `Bash` remains accepted for Claude-shaped compatibility payloads.
+fn droid_execute_command(v: &Value) -> Option<&str> {
+    let tool_name = v.get("tool_name").and_then(Value::as_str)?;
+    if !matches!(tool_name, "Execute" | "Bash") {
+        return None;
+    }
+    v.pointer("/tool_input/command")
+        .and_then(Value::as_str)
+        .filter(|command| !command.is_empty())
+}
+
+/// Droid owns permission decisions. RTK only returns an updated input for a
+/// rewrite and stays silent for an explicit Droid deny or unsafe defer.
+fn droid_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) -> Option<Value> {
+    let rewritten = match decision {
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            return None;
+        }
+        HookDecision::Defer => return None,
+        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => rewritten,
+    };
+    audit_log("rewrite", cmd, &rewritten);
+
+    let mut updated_input = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+    if let Some(obj) = updated_input.as_object_mut() {
+        obj.insert("command".into(), Value::String(rewritten));
+    }
+    Some(json!({
+        "hookSpecificOutput": {
+            "hookEventName": PRE_TOOL_USE_KEY,
+            "permissionDecisionReason": "RTK auto-rewrite",
+            "updatedInput": updated_input,
+        }
+    }))
+}
+
+/// Run the Factory Droid PreToolUse hook natively.
+pub fn run_droid() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let input = strip_leading_bom(&input).trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+    let v: Value = match serde_json::from_str(input) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = writeln!(
+                io::stderr(),
+                "[rtk hook] Failed to parse JSON input: {error}"
+            );
+            return Ok(());
+        }
+    };
+    if let Some(output) = process_droid_payload(&v) {
+        let _ = writeln!(io::stdout(), "{output}");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_droid_inner(input: &str) -> Option<String> {
+    let (deny, ask, allow) = permissions::droid_rules_from_settings(&[]);
+    run_droid_inner_with_rules(input, &deny, &ask, &allow)
+}
+
+#[cfg(test)]
+fn run_droid_inner_with_rules(
+    input: &str,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+) -> Option<String> {
+    let value: Value = serde_json::from_str(input).ok()?;
+    let cmd = droid_execute_command(&value)?;
+    let verdict = permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
+    droid_response_from_decision(&value, cmd, decide_from_verdict(cmd, verdict))
+        .map(|output| output.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1411,5 +1499,87 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(v["decision"], "deny");
+    }
+
+    #[test]
+    fn test_droid_rewrites_execute_without_permission_decision() {
+        let output =
+            run_droid_inner(r#"{"tool_name":"Execute","tool_input":{"command":"git status"}}"#)
+                .expect("supported commands should be rewritten");
+        let response: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            response["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk git status"
+        );
+        assert!(response["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none());
+    }
+
+    #[test]
+    fn test_droid_deny_rule_defers_to_droid_without_rewrite() {
+        let deny = vec!["git push".to_string()];
+        assert!(run_droid_inner_with_rules(
+            r#"{"tool_name":"Execute","tool_input":{"command":"git push origin main"}}"#,
+            &deny,
+            &[],
+            &[],
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn test_droid_ignores_payloads_without_a_string_tool_name() {
+        for payload in [
+            r#"{"tool_input":{"command":"git status"}}"#,
+            r#"{"tool_name":null,"tool_input":{"command":"git status"}}"#,
+            r#"{"tool_name":42,"tool_input":{"command":"git status"}}"#,
+        ] {
+            assert!(
+                run_droid_inner(payload).is_none(),
+                "malformed payload must not be rewritten: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_droid_bash_and_permission_rewrites_follow_the_local_contract() {
+        let bash = run_droid_inner(r#"{"tool_name":"Bash","tool_input":{"command":"git status"}}"#)
+            .expect("Bash payloads remain supported");
+        assert!(bash.contains("rtk git status"));
+
+        let ask = run_droid_inner_with_rules(
+            r#"{"tool_name":"Execute","tool_input":{"command":"git status"}}"#,
+            &[],
+            &["git status".to_string()],
+            &[],
+        )
+        .expect("ask rules should still rewrite for Droid to decide");
+        assert!(ask.contains("rtk git status"));
+
+        let allow = run_droid_inner_with_rules(
+            r#"{"tool_name":"Execute","tool_input":{"command":"git status"}}"#,
+            &[],
+            &[],
+            &["git status".to_string()],
+        )
+        .expect("allow rules should rewrite");
+        assert!(allow.contains("rtk git status"));
+    }
+
+    #[test]
+    fn test_droid_ignores_unsafe_or_non_execute_payloads() {
+        for payload in [
+            r#"{"tool_name":"Read","tool_input":{"command":"git status"}}"#,
+            r#"{"tool_name":"Execute","tool_input":{"command":""}}"#,
+            r#"{"tool_name":"Execute","tool_input":{"command":"git status $(whoami)"}}"#,
+            r#"{"tool_name":"Execute","tool_input":{"command":"git status > out"}}"#,
+            "not json",
+        ] {
+            assert!(
+                run_droid_inner(payload).is_none(),
+                "payload must not be rewritten: {payload}"
+            );
+        }
     }
 }

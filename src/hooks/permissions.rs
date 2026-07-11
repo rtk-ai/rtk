@@ -1,4 +1,7 @@
-use super::constants::{CLAUDE_DIR, CURSOR_DIR, GEMINI_DIR, SETTINGS_JSON, SETTINGS_LOCAL_JSON};
+use super::constants::{
+    CLAUDE_DIR, CURSOR_DIR, DROID_DIR, DROID_HOME_ENV, DROID_SETTINGS_FILE, GEMINI_DIR,
+    SETTINGS_JSON, SETTINGS_LOCAL_JSON,
+};
 use crate::core::stream::exec_capture;
 use crate::discover::lexer::split_for_permissions;
 use serde_json::Value;
@@ -32,6 +35,7 @@ pub enum Host {
     Claude,
     Cursor,
     Gemini,
+    Droid,
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
@@ -39,6 +43,7 @@ pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
         Host::Claude => load_permission_rules(),
         Host::Cursor => load_cursor_rules(),
         Host::Gemini => load_gemini_rules(),
+        Host::Droid => load_droid_rules(),
     };
     check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
 }
@@ -269,6 +274,58 @@ fn load_gemini_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
         append_wrapped_rules(tools.get("confirmationRequired"), &shells, &mut ask);
     }
     (Vec::new(), ask, allow)
+}
+
+// Droid only exposes deny-shaped settings that RTK may safely mirror. RTK
+// deliberately does not consume allow/default rules: after a rewrite Droid
+// must retain ownership of the permission decision.
+fn droid_settings_scopes() -> Vec<Value> {
+    let mut dirs_to_read = Vec::new();
+    if let Some(home) = std::env::var_os(DROID_HOME_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+    {
+        dirs_to_read.push(home.join(DROID_DIR));
+    }
+    if let Some(root) = find_project_root() {
+        dirs_to_read.push(root.join(DROID_DIR));
+    }
+
+    let mut scopes = Vec::new();
+    for dir in dirs_to_read {
+        for file in [DROID_SETTINGS_FILE, SETTINGS_LOCAL_JSON] {
+            if let Some(v) = read_json(&dir.join(file)) {
+                scopes.push(v);
+            }
+        }
+    }
+    scopes
+}
+
+fn load_droid_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
+    droid_rules_from_settings(&droid_settings_scopes())
+}
+
+pub(crate) fn droid_rules_from_settings(
+    scopes: &[Value],
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut deny = Vec::new();
+    for settings in scopes {
+        for key in ["commandBlocklist", "commandDenylist"] {
+            let Some(arr) = settings.get(key).and_then(Value::as_array) else {
+                continue;
+            };
+            deny.extend(
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|rule| !rule.is_empty())
+                    .map(String::from),
+            );
+        }
+    }
+    (deny, Vec::new(), Vec::new())
 }
 
 /// Locate the project root by walking up from CWD looking for `.claude/`.
@@ -993,5 +1050,18 @@ mod tests {
             check_command_with_rules("rm -rf /", &[], &[], &allow),
             PermissionVerdict::Default
         );
+    }
+
+    #[test]
+    fn test_droid_only_uses_explicit_deny_lists() {
+        let settings = serde_json::json!({
+            "commandBlocklist": ["curl:*"],
+            "commandDenylist": ["git push"],
+            "commandAllowlist": ["git status"],
+        });
+        let (deny, ask, allow) = droid_rules_from_settings(std::slice::from_ref(&settings));
+        assert_eq!(deny, vec!["curl:*", "git push"]);
+        assert!(ask.is_empty());
+        assert!(allow.is_empty());
     }
 }

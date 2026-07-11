@@ -1,10 +1,10 @@
 //! Sets up RTK hooks so AI coding agents automatically route commands through RTK.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tempfile::NamedTempFile;
 
 use crate::hooks::constants::{
@@ -13,11 +13,12 @@ use crate::hooks::constants::{
 };
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
-    GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
-    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
-    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
-    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, DROID_DIR,
+    DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR,
+    DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
+    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
+    HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
+    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -2784,6 +2785,605 @@ fn codex_rtk_md_ref(codex_dir: &Path) -> String {
 
 fn resolve_opencode_dir() -> Result<PathBuf> {
     resolve_home_subdir(CONFIG_DIR).map(|p| p.join(OPENCODE_SUBDIR))
+}
+
+// ─── Factory Droid support ─────────────────────────────────────────────
+
+fn resolve_droid_dir() -> Result<PathBuf> {
+    resolve_droid_dir_from_env(dirs::home_dir(), std::env::var_os(DROID_HOME_ENV))
+}
+
+fn resolve_droid_dir_from_env(
+    home: Option<PathBuf>,
+    override_home: Option<OsString>,
+) -> Result<PathBuf> {
+    override_home
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or(home)
+        .map(|home| home.join(DROID_DIR))
+        .context("Cannot determine Droid config directory. Set $FACTORY_HOME_OVERRIDE or $HOME.")
+}
+
+/// Canonicalize a Droid config root without allowing its path to cross a link
+/// or Windows reparse point. This is deliberately stricter than `atomic_write`,
+/// whose normal behavior is to preserve and follow user-managed symlinks.
+///
+/// We do not attempt an ACL/world-writable check on Windows: Rust's portable
+/// metadata does not expose effective ACL ownership or inherited permissions
+/// reliably. Reparse-point rejection and containment are the supported Windows
+/// protection for Droid hook writes.
+fn canonical_droid_config_dir(dir: &Path) -> Result<PathBuf> {
+    if dir.file_name().is_none_or(|name| name != DROID_DIR) {
+        bail!(
+            "Refusing Droid config path outside a {DROID_DIR} directory: {}",
+            dir.display()
+        );
+    }
+
+    let absolute = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("Failed to read current directory while resolving Droid config")?
+            .join(dir)
+    };
+    let normalized = normalize_droid_path(&absolute)?;
+    reject_droid_reparse_components(&normalized)?;
+
+    if normalized.exists() {
+        fs::canonicalize(&normalized).with_context(|| {
+            format!(
+                "Failed to resolve Droid config directory: {}",
+                normalized.display()
+            )
+        })
+    } else {
+        let parent = normalized
+            .parent()
+            .context("Droid config directory has no parent")?;
+        let canonical_parent = fs::canonicalize(parent).with_context(|| {
+            format!(
+                "Failed to resolve Droid config parent directory: {}",
+                parent.display()
+            )
+        })?;
+        Ok(canonical_parent.join(DROID_DIR))
+    }
+}
+
+fn normalize_droid_path(path: &Path) -> Result<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    bail!(
+                        "Droid config path escapes its filesystem root: {}",
+                        path.display()
+                    );
+                }
+            }
+            Component::Normal(name) => normalized.push(name),
+        }
+    }
+    Ok(normalized)
+}
+
+fn reject_droid_reparse_components(path: &Path) -> Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::RootDir => current.push(component.as_os_str()),
+            Component::Normal(name) => {
+                current.push(name);
+                match fs::symlink_metadata(&current) {
+                    Ok(metadata) if droid_metadata_is_reparse_point(&metadata) => {
+                        bail!(
+                            "Refusing Droid config path through link or reparse point: {}",
+                            current.display()
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("Failed to inspect Droid config path: {}", current.display())
+                        });
+                    }
+                }
+            }
+            Component::CurDir | Component::ParentDir => unreachable!("path was normalized"),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn droid_metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn droid_metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+fn validate_droid_hook_path(config_dir: &Path, candidate: &Path) -> Result<()> {
+    let candidate = normalize_droid_path(candidate)?;
+    if !candidate.starts_with(config_dir) {
+        bail!(
+            "Refusing Droid hook path outside config directory: {}",
+            candidate.display()
+        );
+    }
+    reject_droid_reparse_components(&candidate)?;
+
+    let canonical_existing = canonical_droid_existing_ancestor(&candidate)?;
+    if canonical_existing.starts_with(config_dir) {
+        return Ok(());
+    }
+
+    // A first install (including dry-run) has no `.factory` directory yet.
+    // Its nearest existing ancestor is the canonical parent of that directory;
+    // the lexical containment and reparse checks above make this the one safe
+    // exception to the normal in-config canonical containment requirement.
+    let config_parent = config_dir
+        .parent()
+        .context("Droid config directory has no parent")?;
+    let canonical_config_parent = fs::canonicalize(config_parent).with_context(|| {
+        format!(
+            "Failed to resolve Droid config parent directory: {}",
+            config_parent.display()
+        )
+    })?;
+    if !config_dir.exists() && canonical_existing == canonical_config_parent {
+        return Ok(());
+    }
+
+    bail!(
+        "Refusing Droid hook path resolved outside config directory: {}",
+        canonical_existing.display()
+    );
+}
+
+fn validate_droid_json_shape(
+    path: &Path,
+    layout: DroidLayout,
+    json: &Option<serde_json::Value>,
+) -> Result<()> {
+    let Some(root) = json else {
+        return Ok(());
+    };
+    if !root.is_object() {
+        bail!(
+            "Droid hook configuration root is not a JSON object: {}",
+            path.display()
+        );
+    }
+    if layout == DroidLayout::Nested && root.get("hooks").is_some_and(|hooks| !hooks.is_object()) {
+        bail!(
+            "Droid settings hooks value is not a JSON object: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn canonical_droid_existing_ancestor(path: &Path) -> Result<PathBuf> {
+    let mut current = path;
+    loop {
+        match fs::canonicalize(current) {
+            Ok(canonical) => return Ok(canonical),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                current = current
+                    .parent()
+                    .context("Droid hook path has no existing ancestor")?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("Failed to resolve Droid hook path: {}", current.display())
+                });
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DroidLayout {
+    Root,
+    Nested,
+}
+
+struct DroidHookFile {
+    path: PathBuf,
+    layout: DroidLayout,
+}
+
+fn droid_hook_file_candidates(dir: &Path) -> [DroidHookFile; 3] {
+    [
+        DroidHookFile {
+            path: dir.join(DROID_HOOKS_FILE),
+            layout: DroidLayout::Root,
+        },
+        DroidHookFile {
+            path: dir.join(DROID_HOOKS_SUBDIR).join(DROID_HOOKS_FILE),
+            layout: DroidLayout::Root,
+        },
+        DroidHookFile {
+            path: dir.join(DROID_SETTINGS_FILE),
+            layout: DroidLayout::Nested,
+        },
+    ]
+}
+
+fn load_droid_hook_candidates(
+    dir: &Path,
+) -> Result<Vec<(DroidHookFile, Option<serde_json::Value>)>> {
+    let mut candidates = Vec::with_capacity(3);
+    for file in droid_hook_file_candidates(dir) {
+        validate_droid_hook_path(dir, &file.path)?;
+        let json = read_droid_json(&file.path)?;
+        validate_droid_json_shape(&file.path, file.layout, &json)?;
+        candidates.push((file, json));
+    }
+    Ok(candidates)
+}
+
+fn read_droid_json(path: &Path) -> Result<Option<serde_json::Value>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    serde_json::from_str(&content)
+        .map(Some)
+        .with_context(|| format!("Failed to parse {} as JSON", path.display()))
+}
+
+fn droid_events(root: &serde_json::Value, layout: DroidLayout) -> &serde_json::Value {
+    match layout {
+        DroidLayout::Root => root,
+        DroidLayout::Nested => root.get("hooks").unwrap_or(&serde_json::Value::Null),
+    }
+}
+
+fn droid_has_pre_tool_use(root: &serde_json::Value, layout: DroidLayout) -> bool {
+    droid_events(root, layout)
+        .get(PRE_TOOL_USE_KEY)
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| !a.is_empty())
+}
+
+/// Install into the config surface Droid will actually read, avoiding a new
+/// root hook that would shadow a user's live settings hook.
+fn resolve_droid_install_target(dir: &Path) -> Result<DroidHookFile> {
+    let candidates = load_droid_hook_candidates(dir)?;
+    let (root, root_json) = &candidates[0];
+    let (legacy, legacy_json) = &candidates[1];
+    let (settings, settings_json) = &candidates[2];
+
+    let live = if let Some(json) = root_json.as_ref() {
+        Some((root, json))
+    } else if let Some(json) = legacy_json.as_ref() {
+        Some((legacy, json))
+    } else {
+        None
+    };
+    if let Some((path, json)) = live {
+        if droid_has_pre_tool_use(&json, DroidLayout::Root) {
+            return Ok(DroidHookFile {
+                path: path.path.clone(),
+                layout: DroidLayout::Root,
+            });
+        }
+    }
+    if let Some(json) = settings_json.as_ref() {
+        if droid_has_pre_tool_use(&json, DroidLayout::Nested) {
+            return Ok(DroidHookFile {
+                path: settings.path.clone(),
+                layout: DroidLayout::Nested,
+            });
+        }
+    }
+    Ok(DroidHookFile {
+        path: live
+            .map(|(file, _)| file.path.clone())
+            .unwrap_or_else(|| root.path.clone()),
+        layout: DroidLayout::Root,
+    })
+}
+
+pub fn run_droid_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let dir = if global {
+        resolve_droid_dir()?
+    } else {
+        std::env::current_dir()
+            .context("Failed to read current directory")?
+            .join(DROID_DIR)
+    };
+    run_droid_mode_at(&dir, global, ctx)
+}
+
+fn run_droid_mode_at(dir: &Path, global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let dir = canonical_droid_config_dir(dir)?;
+    let target = resolve_droid_install_target(&dir)?;
+    if !dry_run {
+        let parent = target.path.parent().unwrap_or(&dir);
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create Droid config directory: {}",
+                parent.display()
+            )
+        })?;
+        validate_droid_hook_path(&dir, &target.path)?;
+    }
+    let patched = patch_droid_hook_file(&target, &dir, ctx)?;
+    // Migrate only exact RTK commands from shadowed locations.
+    for candidate in droid_hook_file_candidates(&dir) {
+        if candidate.path != target.path {
+            match remove_droid_hook_from_file(&candidate, &dir, ctx) {
+                Ok(true) => println!(
+                    "  Removed stale RTK entry from {}",
+                    candidate.path.display()
+                ),
+                Ok(false) => {}
+                Err(error) => eprintln!("rtk: warning: {error:#}"),
+            }
+        }
+    }
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        println!(
+            "\nFactory Droid hook registered ({}).\n",
+            if global { "global" } else { "project" }
+        );
+        println!("  Command:    {DROID_HOOK_COMMAND}");
+        println!("  Hooks file: {}", target.path.display());
+        println!(
+            "  RTK PreToolUse entry {}",
+            if patched { "added" } else { "already present" }
+        );
+        println!("  Restart Droid. Test with: git status\n");
+    }
+    Ok(())
+}
+
+fn patch_droid_hook_file(
+    file: &DroidHookFile,
+    config_dir: &Path,
+    ctx: InitContext,
+) -> Result<bool> {
+    let InitContext { verbose, dry_run } = ctx;
+    let path = &file.path;
+    validate_droid_hook_path(config_dir, path)?;
+    let mut root = read_droid_json(path)?.unwrap_or_else(|| serde_json::json!({}));
+    if droid_hook_already_present(&root, file.layout) {
+        if verbose > 0 {
+            eprintln!("{}: RTK hook already present", path.display());
+        }
+        return Ok(false);
+    }
+    insert_droid_hook_entry(&mut root, file.layout)?;
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize Droid hook file")?;
+    if dry_run {
+        println!("[dry-run] would patch Droid hook file: {}", path.display());
+        if verbose > 0 {
+            println!("[dry-run] content:\n{serialized}");
+        }
+        return Ok(true);
+    }
+    if path.exists() {
+        let backup = path.with_extension("json.bak");
+        validate_droid_hook_path(config_dir, &backup)?;
+        validate_droid_hook_path(config_dir, path)?;
+        fs::copy(path, &backup)
+            .with_context(|| format!("Failed to backup to {}", backup.display()))?;
+        if verbose > 0 {
+            eprintln!("Backup: {}", backup.display());
+        }
+    }
+    validate_droid_hook_path(config_dir, path)?;
+    atomic_write(path, &serialized)?;
+    Ok(true)
+}
+
+fn droid_hook_already_present(root: &serde_json::Value, layout: DroidLayout) -> bool {
+    droid_events(root, layout)
+        .get(PRE_TOOL_USE_KEY)
+        .and_then(|v| v.as_array())
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry.get("matcher").and_then(|v| v.as_str()) == Some(DROID_EXECUTE_MATCHER)
+                    && entry
+                        .get("hooks")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|hooks| {
+                            hooks.iter().any(|hook| {
+                                hook.get("command").and_then(|v| v.as_str())
+                                    == Some(DROID_HOOK_COMMAND)
+                            })
+                        })
+            })
+        })
+}
+
+fn insert_droid_hook_entry(root: &mut serde_json::Value, layout: DroidLayout) -> Result<()> {
+    let root = root
+        .as_object_mut()
+        .context("Droid hook configuration root is not a JSON object")?;
+    let events = match layout {
+        DroidLayout::Root => root,
+        DroidLayout::Nested => root
+            .entry("hooks")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .context("hooks value is not an object")?,
+    };
+    let entries = events
+        .entry(PRE_TOOL_USE_KEY)
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .context("PreToolUse value is not an array")?;
+    for entry in entries.iter_mut() {
+        if entry.get("matcher").and_then(|v| v.as_str()) == Some(DROID_EXECUTE_MATCHER) {
+            if let Some(hooks) = entry.get_mut("hooks").and_then(|v| v.as_array_mut()) {
+                hooks.push(serde_json::json!({"type":"command", "command": DROID_HOOK_COMMAND}));
+                return Ok(());
+            }
+        }
+    }
+    entries.push(serde_json::json!({"matcher": DROID_EXECUTE_MATCHER, "hooks":[{"type":"command", "command": DROID_HOOK_COMMAND}]}));
+    Ok(())
+}
+
+pub fn uninstall_droid(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let dir = if global {
+        resolve_droid_dir()?
+    } else {
+        std::env::current_dir()
+            .context("Failed to read current directory")?
+            .join(DROID_DIR)
+    };
+    let removed = uninstall_droid_at(&dir, ctx)?;
+    if removed.is_empty() {
+        println!("RTK Droid support was not installed (nothing to remove)");
+    } else {
+        println!(
+            "{}",
+            if dry_run {
+                "[dry-run] would uninstall RTK for Factory Droid:"
+            } else {
+                "RTK uninstalled for Factory Droid:"
+            }
+        );
+        for item in removed {
+            println!("  - {item}");
+        }
+    }
+    if dry_run {
+        print_dry_run_footer();
+    }
+    Ok(())
+}
+
+fn uninstall_droid_at(dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    let dir = canonical_droid_config_dir(dir)?;
+    // Validate and parse every candidate before allowing the first backup or
+    // write. This keeps a malformed later candidate from producing a partial
+    // uninstall in an earlier file.
+    let candidates = load_droid_hook_candidates(&dir)?;
+    let mut removed = Vec::new();
+    for (file, json) in candidates {
+        let Some(mut root) = json else {
+            continue;
+        };
+        if remove_droid_hook_from_loaded_json(&file, &dir, &mut root, ctx)? {
+            removed.push(format!("Droid hook file: {}", file.path.display()));
+        }
+    }
+    Ok(removed)
+}
+
+fn remove_droid_hook_from_file(
+    file: &DroidHookFile,
+    config_dir: &Path,
+    ctx: InitContext,
+) -> Result<bool> {
+    validate_droid_hook_path(config_dir, &file.path)?;
+    let Some(mut root) = read_droid_json(&file.path)? else {
+        return Ok(false);
+    };
+    validate_droid_json_shape(&file.path, file.layout, &Some(root.clone()))?;
+    remove_droid_hook_from_loaded_json(file, config_dir, &mut root, ctx)
+}
+
+fn remove_droid_hook_from_loaded_json(
+    file: &DroidHookFile,
+    config_dir: &Path,
+    root: &mut serde_json::Value,
+    ctx: InitContext,
+) -> Result<bool> {
+    let InitContext { verbose, dry_run } = ctx;
+    if !remove_droid_hook_from_json(root, file.layout) {
+        return Ok(false);
+    }
+    if dry_run {
+        println!(
+            "[dry-run] would remove RTK entry from Droid hook file: {}",
+            file.path.display()
+        );
+    } else {
+        let backup = file.path.with_extension("json.bak");
+        validate_droid_hook_path(config_dir, &backup)?;
+        validate_droid_hook_path(config_dir, &file.path)?;
+        fs::copy(&file.path, &backup)
+            .with_context(|| format!("Failed to backup to {}", backup.display()))?;
+        let serialized =
+            serde_json::to_string_pretty(&root).context("Failed to serialize Droid hook file")?;
+        validate_droid_hook_path(config_dir, &file.path)?;
+        atomic_write(&file.path, &serialized)?;
+        if verbose > 0 {
+            eprintln!("Removed RTK hook from {}", file.path.display());
+        }
+    }
+    Ok(true)
+}
+
+fn remove_droid_hook_from_json(root: &mut serde_json::Value, layout: DroidLayout) -> bool {
+    let events = match layout {
+        DroidLayout::Root => root.as_object_mut(),
+        DroidLayout::Nested => root.get_mut("hooks").and_then(|v| v.as_object_mut()),
+    };
+    let Some(events) = events else {
+        return false;
+    };
+    let Some(entries) = events
+        .get_mut(PRE_TOOL_USE_KEY)
+        .and_then(|v| v.as_array_mut())
+    else {
+        return false;
+    };
+    let mut modified = false;
+    entries.retain_mut(|entry| {
+        if let Some(hooks) = entry.get_mut("hooks").and_then(|v| v.as_array_mut()) {
+            let len = hooks.len();
+            hooks.retain(|hook| {
+                hook.get("command").and_then(|v| v.as_str()) != Some(DROID_HOOK_COMMAND)
+            });
+            if hooks.len() != len {
+                modified = true;
+                return !hooks.is_empty();
+            }
+        }
+        true
+    });
+    if entries.is_empty() {
+        events.remove(PRE_TOOL_USE_KEY);
+        modified = true;
+    }
+    if layout == DroidLayout::Nested
+        && root
+            .get("hooks")
+            .and_then(|v| v.as_object())
+            .is_some_and(|hooks| hooks.is_empty())
+    {
+        if let Some(root) = root.as_object_mut() {
+            root.remove("hooks");
+        }
+    }
+    modified
 }
 
 // ─── Pi coding agent support ──────────────────────────────────────────
@@ -6889,6 +7489,518 @@ mod tests {
             !hook_path.exists(),
             "Hook config must not be written when the upsert aborts: {}",
             hook_path.display()
+        );
+    }
+
+    #[test]
+    fn test_droid_install_only_removes_its_own_hook() {
+        let temp = TempDir::new().unwrap();
+        let droid_dir = temp.path().join(".factory");
+        fs::create_dir_all(&droid_dir).unwrap();
+        fs::write(
+            droid_dir.join("hooks.json"),
+            r#"{"PreToolUse":[{"matcher":"Execute","hooks":[{"type":"command","command":"echo user"}]}]}"#,
+        )
+        .unwrap();
+
+        run_droid_mode_at(&droid_dir, true, InitContext::default()).unwrap();
+        uninstall_droid_at(&droid_dir, InitContext::default()).unwrap();
+
+        let hooks: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(droid_dir.join("hooks.json")).unwrap())
+                .unwrap();
+        assert_eq!(hooks["PreToolUse"][0]["hooks"][0]["command"], "echo user");
+    }
+
+    #[test]
+    fn test_droid_fresh_install_creates_root_hooks_file() {
+        let temp = TempDir::new().unwrap();
+        let droid_dir = temp.path().join(DROID_DIR);
+        let hooks_path = droid_dir.join(DROID_HOOKS_FILE);
+
+        run_droid_mode_at(&droid_dir, true, InitContext::default()).unwrap();
+
+        assert!(hooks_path.exists(), "fresh install must create hooks.json");
+        let hooks: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(hooks_path).unwrap()).unwrap();
+        assert_eq!(
+            hooks[PRE_TOOL_USE_KEY][0]["hooks"][0]["command"],
+            DROID_HOOK_COMMAND
+        );
+    }
+
+    #[test]
+    fn test_droid_fresh_dry_run_does_not_create_config() {
+        let temp = TempDir::new().unwrap();
+        let droid_dir = temp.path().join(DROID_DIR);
+        let ctx = InitContext {
+            dry_run: true,
+            ..InitContext::default()
+        };
+
+        run_droid_mode_at(&droid_dir, true, ctx).unwrap();
+
+        assert!(
+            !droid_dir.exists(),
+            "fresh dry-run must report without creating .factory"
+        );
+    }
+
+    #[test]
+    fn test_droid_install_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let droid_dir = temp.path().join(DROID_DIR);
+        let hooks_path = droid_dir.join(DROID_HOOKS_FILE);
+
+        run_droid_mode_at(&droid_dir, true, InitContext::default()).unwrap();
+        let first = fs::read_to_string(&hooks_path).unwrap();
+        run_droid_mode_at(&droid_dir, true, InitContext::default()).unwrap();
+        let second = fs::read_to_string(&hooks_path).unwrap();
+
+        assert_eq!(first, second, "a second Droid install must be a no-op");
+        assert_eq!(second.matches(DROID_HOOK_COMMAND).count(), 1);
+    }
+
+    #[test]
+    fn test_droid_install_does_not_treat_non_execute_rtk_command_as_installed() {
+        let temp = TempDir::new().unwrap();
+        let droid_dir = temp.path().join(DROID_DIR);
+        fs::create_dir_all(&droid_dir).unwrap();
+        let root = droid_dir.join(DROID_HOOKS_FILE);
+        fs::write(
+            &root,
+            serde_json::json!({
+                PRE_TOOL_USE_KEY: [{
+                    "matcher": "Read",
+                    "hooks": [{"type": "command", "command": DROID_HOOK_COMMAND}]
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        run_droid_mode_at(&droid_dir, true, InitContext::default()).unwrap();
+
+        let hooks: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root).unwrap()).unwrap();
+        assert_eq!(hooks[PRE_TOOL_USE_KEY].as_array().unwrap().len(), 2);
+        assert_eq!(hooks[PRE_TOOL_USE_KEY][0]["matcher"], "Read");
+        assert_eq!(hooks[PRE_TOOL_USE_KEY][1]["matcher"], DROID_EXECUTE_MATCHER);
+        assert_eq!(
+            hooks[PRE_TOOL_USE_KEY][1]["hooks"][0]["command"],
+            DROID_HOOK_COMMAND
+        );
+    }
+
+    #[test]
+    fn test_droid_root_hooks_take_precedence_over_legacy_hooks() {
+        let temp = TempDir::new().unwrap();
+        let droid_dir = temp.path().join(DROID_DIR);
+        let root = droid_dir.join(DROID_HOOKS_FILE);
+        let legacy = droid_dir.join(DROID_HOOKS_SUBDIR).join(DROID_HOOKS_FILE);
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(
+            &root,
+            r#"{"PreToolUse":[{"matcher":"Execute","hooks":[{"type":"command","command":"echo root"}]}]}"#,
+        )
+        .unwrap();
+        let legacy_contents = r#"{"PreToolUse":[{"matcher":"Execute","hooks":[{"type":"command","command":"echo legacy"}]}]}"#;
+        fs::write(&legacy, legacy_contents).unwrap();
+
+        run_droid_mode_at(&droid_dir, true, InitContext::default()).unwrap();
+
+        assert!(fs::read_to_string(&root)
+            .unwrap()
+            .contains(DROID_HOOK_COMMAND));
+        assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_contents);
+    }
+
+    #[test]
+    fn test_droid_settings_hook_is_used_when_root_and_legacy_are_absent() {
+        let temp = TempDir::new().unwrap();
+        let droid_dir = temp.path().join(DROID_DIR);
+        fs::create_dir_all(&droid_dir).unwrap();
+        let settings = droid_dir.join(DROID_SETTINGS_FILE);
+        fs::write(
+            &settings,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Execute","hooks":[{"type":"command","command":"echo settings"}]}]}}"#,
+        )
+        .unwrap();
+
+        run_droid_mode_at(&droid_dir, true, InitContext::default()).unwrap();
+
+        assert!(!droid_dir.join(DROID_HOOKS_FILE).exists());
+        assert!(fs::read_to_string(settings)
+            .unwrap()
+            .contains(DROID_HOOK_COMMAND));
+    }
+
+    #[test]
+    fn test_droid_install_rejects_non_object_json_without_overwriting() {
+        for contents in ["[]", "null", r#""not an object""#] {
+            let temp = TempDir::new().unwrap();
+            let droid_dir = temp.path().join(".factory");
+            fs::create_dir_all(&droid_dir).unwrap();
+            let hooks_path = droid_dir.join(DROID_HOOKS_FILE);
+            fs::write(&hooks_path, contents).unwrap();
+
+            let error = run_droid_mode_at(&droid_dir, true, InitContext::default())
+                .expect_err("non-object JSON must be rejected");
+
+            assert!(error.to_string().contains("JSON object"));
+            assert_eq!(
+                fs::read_to_string(&hooks_path).unwrap(),
+                contents,
+                "invalid configuration must be left untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn test_droid_install_rejects_blank_existing_candidates_without_overwriting() {
+        let cases = [
+            (DROID_HOOKS_FILE, " \n\t", None, None),
+            (
+                DROID_HOOKS_SUBDIR,
+                " \n\t",
+                Some((DROID_HOOKS_FILE, "{}")),
+                None,
+            ),
+            (
+                DROID_SETTINGS_FILE,
+                " \n\t",
+                Some((DROID_HOOKS_FILE, "{}")),
+                Some((DROID_HOOKS_SUBDIR, "{}")),
+            ),
+        ];
+
+        for (candidate, blank, first_valid, second_valid) in cases {
+            let temp = TempDir::new().unwrap();
+            let droid_dir = temp.path().join(DROID_DIR);
+            fs::create_dir_all(&droid_dir).unwrap();
+            let candidate_path = if candidate == DROID_HOOKS_SUBDIR {
+                droid_dir.join(DROID_HOOKS_SUBDIR).join(DROID_HOOKS_FILE)
+            } else {
+                droid_dir.join(candidate)
+            };
+            fs::create_dir_all(candidate_path.parent().unwrap()).unwrap();
+            fs::write(&candidate_path, blank).unwrap();
+
+            for (path, contents) in [first_valid, second_valid].into_iter().flatten() {
+                let path = if path == DROID_HOOKS_SUBDIR {
+                    droid_dir.join(DROID_HOOKS_SUBDIR).join(DROID_HOOKS_FILE)
+                } else {
+                    droid_dir.join(path)
+                };
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, contents).unwrap();
+            }
+
+            assert!(run_droid_mode_at(&droid_dir, true, InitContext::default()).is_err());
+            assert_eq!(fs::read_to_string(&candidate_path).unwrap(), blank);
+        }
+    }
+
+    #[test]
+    fn test_droid_install_rejects_non_object_in_any_existing_candidate() {
+        let cases = [
+            (DROID_HOOKS_FILE, "[]", None, None),
+            (
+                DROID_HOOKS_SUBDIR,
+                "null",
+                Some((DROID_HOOKS_FILE, "{}")),
+                None,
+            ),
+            (
+                DROID_SETTINGS_FILE,
+                r#""not an object""#,
+                Some((DROID_HOOKS_FILE, "{}")),
+                Some((DROID_HOOKS_SUBDIR, "{}")),
+            ),
+        ];
+
+        for (candidate, invalid, first_valid, second_valid) in cases {
+            let temp = TempDir::new().unwrap();
+            let droid_dir = temp.path().join(DROID_DIR);
+            fs::create_dir_all(&droid_dir).unwrap();
+            let candidate_path = if candidate == DROID_HOOKS_SUBDIR {
+                droid_dir.join(DROID_HOOKS_SUBDIR).join(DROID_HOOKS_FILE)
+            } else {
+                droid_dir.join(candidate)
+            };
+            if let Some(parent) = candidate_path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(&candidate_path, invalid).unwrap();
+
+            for (path, contents) in [first_valid, second_valid].into_iter().flatten() {
+                let path = if path == DROID_HOOKS_SUBDIR {
+                    droid_dir.join(DROID_HOOKS_SUBDIR).join(DROID_HOOKS_FILE)
+                } else {
+                    droid_dir.join(path)
+                };
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).unwrap();
+                }
+                fs::write(path, contents).unwrap();
+            }
+
+            assert!(
+                run_droid_mode_at(&droid_dir, true, InitContext::default()).is_err(),
+                "non-object {candidate} must fail closed even when another candidate is valid"
+            );
+            assert_eq!(
+                fs::read_to_string(&candidate_path).unwrap(),
+                invalid,
+                "invalid {candidate} must not be overwritten"
+            );
+        }
+    }
+
+    #[test]
+    fn test_droid_install_rejects_non_object_settings_hooks_without_writing() {
+        for hooks in ["[]", "null", r#""not an object""#] {
+            let temp = TempDir::new().unwrap();
+            let droid_dir = temp.path().join(DROID_DIR);
+            fs::create_dir_all(&droid_dir).unwrap();
+            let root = droid_dir.join(DROID_HOOKS_FILE);
+            let settings = droid_dir.join(DROID_SETTINGS_FILE);
+            fs::write(&root, "{}").unwrap();
+            let settings_contents = format!(r#"{{"hooks":{hooks}}}"#);
+            fs::write(&settings, &settings_contents).unwrap();
+
+            assert!(run_droid_mode_at(&droid_dir, true, InitContext::default()).is_err());
+            assert_eq!(fs::read_to_string(&root).unwrap(), "{}");
+            assert_eq!(fs::read_to_string(&settings).unwrap(), settings_contents);
+        }
+    }
+
+    #[test]
+    fn test_droid_uninstall_validates_all_candidates_before_writing_root() {
+        let temp = TempDir::new().unwrap();
+        let droid_dir = temp.path().join(DROID_DIR);
+        let root = droid_dir.join(DROID_HOOKS_FILE);
+        let legacy = droid_dir.join(DROID_HOOKS_SUBDIR).join(DROID_HOOKS_FILE);
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let root_contents = format!(
+            r#"{{"PreToolUse":[{{"matcher":"Execute","hooks":[{{"type":"command","command":"{DROID_HOOK_COMMAND}"}}]}}]}}"#
+        );
+        fs::write(&root, &root_contents).unwrap();
+        fs::write(&legacy, "[]").unwrap();
+
+        assert!(uninstall_droid_at(&droid_dir, InitContext::default()).is_err());
+        assert_eq!(
+            fs::read_to_string(&root).unwrap(),
+            root_contents,
+            "a later malformed candidate must prevent all earlier writes"
+        );
+    }
+
+    #[test]
+    fn test_droid_uninstall_rejects_later_blank_candidate_without_writing_root() {
+        let temp = TempDir::new().unwrap();
+        let droid_dir = temp.path().join(DROID_DIR);
+        let root = droid_dir.join(DROID_HOOKS_FILE);
+        let legacy = droid_dir.join(DROID_HOOKS_SUBDIR).join(DROID_HOOKS_FILE);
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let root_contents = format!(
+            r#"{{"PreToolUse":[{{"matcher":"Execute","hooks":[{{"type":"command","command":"{DROID_HOOK_COMMAND}"}}]}}]}}"#
+        );
+        fs::write(&root, &root_contents).unwrap();
+        fs::write(&legacy, " \n\t").unwrap();
+
+        assert!(uninstall_droid_at(&droid_dir, InitContext::default()).is_err());
+        assert_eq!(fs::read_to_string(root).unwrap(), root_contents);
+    }
+
+    #[test]
+    fn test_droid_uninstall_rejects_non_object_settings_hooks_before_writing_root() {
+        let temp = TempDir::new().unwrap();
+        let droid_dir = temp.path().join(DROID_DIR);
+        fs::create_dir_all(&droid_dir).unwrap();
+        let root = droid_dir.join(DROID_HOOKS_FILE);
+        let root_contents = format!(
+            r#"{{"PreToolUse":[{{"matcher":"Execute","hooks":[{{"type":"command","command":"{DROID_HOOK_COMMAND}"}}]}}]}}"#
+        );
+        fs::write(&root, &root_contents).unwrap();
+        fs::write(droid_dir.join(DROID_SETTINGS_FILE), r#"{"hooks":[]}"#).unwrap();
+
+        assert!(uninstall_droid_at(&droid_dir, InitContext::default()).is_err());
+        assert_eq!(fs::read_to_string(root).unwrap(), root_contents);
+    }
+
+    #[test]
+    fn test_droid_fresh_uninstall_is_idempotent_and_does_not_create_config() {
+        let temp = TempDir::new().unwrap();
+        let droid_dir = temp.path().join(DROID_DIR);
+
+        assert!(uninstall_droid_at(&droid_dir, InitContext::default())
+            .unwrap()
+            .is_empty());
+        assert!(uninstall_droid_at(&droid_dir, InitContext::default())
+            .unwrap()
+            .is_empty());
+        assert!(!droid_dir.exists());
+    }
+
+    #[test]
+    fn test_droid_uninstall_preserves_preexisting_empty_root_entries() {
+        let temp = TempDir::new().unwrap();
+        let droid_dir = temp.path().join(DROID_DIR);
+        fs::create_dir_all(&droid_dir).unwrap();
+        let root = droid_dir.join(DROID_HOOKS_FILE);
+        fs::write(
+            &root,
+            serde_json::json!({
+                PRE_TOOL_USE_KEY: [
+                    {"matcher": "Read", "hooks": []},
+                    {"matcher": "Execute", "hooks": [{"type": "command", "command": DROID_HOOK_COMMAND}]},
+                    {"matcher": "Write", "hooks": []},
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        uninstall_droid_at(&droid_dir, InitContext::default()).unwrap();
+
+        let result: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root).unwrap()).unwrap();
+        assert_eq!(result[PRE_TOOL_USE_KEY].as_array().unwrap().len(), 2);
+        assert_eq!(result[PRE_TOOL_USE_KEY][0]["matcher"], "Read");
+        assert_eq!(result[PRE_TOOL_USE_KEY][1]["matcher"], "Write");
+    }
+
+    #[test]
+    fn test_droid_uninstall_preserves_preexisting_empty_settings_entries() {
+        let temp = TempDir::new().unwrap();
+        let droid_dir = temp.path().join(DROID_DIR);
+        fs::create_dir_all(&droid_dir).unwrap();
+        let settings = droid_dir.join(DROID_SETTINGS_FILE);
+        fs::write(
+            &settings,
+            serde_json::json!({
+                "hooks": {
+                    PRE_TOOL_USE_KEY: [
+                        {"matcher": "Read", "hooks": []},
+                        {"matcher": "Execute", "hooks": [{"type": "command", "command": DROID_HOOK_COMMAND}]},
+                    ]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        uninstall_droid_at(&droid_dir, InitContext::default()).unwrap();
+
+        let result: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(settings).unwrap()).unwrap();
+        assert_eq!(
+            result["hooks"][PRE_TOOL_USE_KEY].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(result["hooks"][PRE_TOOL_USE_KEY][0]["matcher"], "Read");
+    }
+
+    #[test]
+    fn test_droid_uninstall_stops_when_backup_cannot_be_created() {
+        let temp = TempDir::new().unwrap();
+        let droid_dir = temp.path().join(DROID_DIR);
+        fs::create_dir_all(&droid_dir).unwrap();
+        let root = droid_dir.join(DROID_HOOKS_FILE);
+        let root_contents = format!(
+            r#"{{"PreToolUse":[{{"matcher":"Execute","hooks":[{{"type":"command","command":"{DROID_HOOK_COMMAND}"}}]}}]}}"#
+        );
+        fs::write(&root, &root_contents).unwrap();
+        fs::create_dir(root.with_extension("json.bak")).unwrap();
+
+        assert!(uninstall_droid_at(&droid_dir, InitContext::default()).is_err());
+        assert_eq!(
+            fs::read_to_string(root).unwrap(),
+            root_contents,
+            "a failed backup must prevent the configuration write"
+        );
+    }
+
+    #[test]
+    fn test_droid_config_rejects_lexical_path_escape() {
+        let temp = TempDir::new().unwrap();
+        let escaped = temp.path().join(".factory").join("..").join("outside");
+
+        assert!(canonical_droid_config_dir(&escaped).is_err());
+        assert!(!temp.path().join("outside").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_droid_install_refuses_factory_directory_symlink() {
+        use std::os::windows::fs::symlink_dir;
+
+        let temp = TempDir::new().unwrap();
+        let factory_dir = temp.path().join(".factory");
+        let outside_dir = temp.path().join("outside");
+        fs::create_dir(&outside_dir).unwrap();
+        if symlink_dir(&outside_dir, &factory_dir).is_err() {
+            return;
+        }
+
+        assert!(run_droid_mode_at(&factory_dir, true, InitContext::default()).is_err());
+        assert!(
+            !outside_dir.join(DROID_HOOKS_FILE).exists(),
+            "a config-directory link must not receive Droid writes"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_droid_install_refuses_hook_file_symlink() {
+        use std::os::windows::fs::symlink_file;
+
+        let temp = TempDir::new().unwrap();
+        let factory_dir = temp.path().join(".factory");
+        let outside_dir = temp.path().join("outside");
+        fs::create_dir_all(&factory_dir).unwrap();
+        fs::create_dir(&outside_dir).unwrap();
+        let outside_file = outside_dir.join(DROID_HOOKS_FILE);
+        fs::write(&outside_file, "{}").unwrap();
+        let candidate = factory_dir.join(DROID_HOOKS_FILE);
+        if symlink_file(&outside_file, &candidate).is_err() {
+            return;
+        }
+
+        assert!(run_droid_mode_at(&factory_dir, true, InitContext::default()).is_err());
+        assert_eq!(
+            fs::read_to_string(&outside_file).unwrap(),
+            "{}",
+            "a hook-file link must not receive Droid writes"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_droid_uninstall_refuses_hook_file_symlink() {
+        use std::os::windows::fs::symlink_file;
+
+        let temp = TempDir::new().unwrap();
+        let factory_dir = temp.path().join(".factory");
+        let outside_dir = temp.path().join("outside");
+        fs::create_dir_all(&factory_dir).unwrap();
+        fs::create_dir(&outside_dir).unwrap();
+        let outside_file = outside_dir.join(DROID_HOOKS_FILE);
+        let contents = format!(
+            r#"{{"PreToolUse":[{{"matcher":"Execute","hooks":[{{"type":"command","command":"{DROID_HOOK_COMMAND}"}}]}}]}}"#
+        );
+        fs::write(&outside_file, &contents).unwrap();
+        let candidate = factory_dir.join(DROID_HOOKS_FILE);
+        if symlink_file(&outside_file, &candidate).is_err() {
+            return;
+        }
+
+        assert!(uninstall_droid_at(&factory_dir, InitContext::default()).is_err());
+        assert_eq!(
+            fs::read_to_string(&outside_file).unwrap(),
+            contents,
+            "a hook-file link must not receive Droid uninstall writes"
         );
     }
 }
