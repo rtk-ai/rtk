@@ -16,6 +16,7 @@ use cmds::js::{
     vitest_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
+use cmds::php::{ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpunit_cmd, pint_cmd};
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
@@ -708,9 +709,9 @@ enum Commands {
         args: Vec<OsString>,
     },
 
-    /// Read stdin, apply filter, print filtered output (Unix pipe mode)
+    /// Read stdin and apply a filter (phpunit, pest, paratest, php-test, ecs, phpstan, pint; Unix pipe mode)
     Pipe {
-        /// Filter name (cargo-test, pytest, grep, find, git-log, etc.)
+        /// Filter name (cargo-test, pytest, phpunit, pest, paratest, php-test, ecs, phpstan, pint, grep, find, git-log, etc.)
         #[arg(short, long)]
         filter: Option<String>,
 
@@ -759,6 +760,55 @@ enum Commands {
     /// Mypy type checker with grouped error output
     Mypy {
         /// Mypy arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// PHP command runner with compact output for artisan and syntax checks
+    Php {
+        /// PHP arguments (e.g., artisan about, -l app/Http/Controller.php)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// PHPUnit test runner with compact output
+    Phpunit {
+        /// PHPUnit arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// PHPStan analyzer with compact output
+    Phpstan {
+        /// PHPStan arguments (e.g., analyse src/)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Pest test runner with compact output
+    Pest {
+        /// Pest arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// ParaTest parallel test runner with compact output
+    Paratest {
+        /// ParaTest arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Easy Coding Standard code style checker with compact output
+    Ecs {
+        /// ECS arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Laravel Pint (PHP-CS-Fixer) code style fixer with compact output
+    Pint {
+        /// Pint arguments (e.g., --test, app/)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2385,6 +2435,20 @@ fn run_cli() -> Result<i32> {
 
         Commands::Mypy { args } => mypy_cmd::run(&args, cli.verbose)?,
 
+        Commands::Php { args } => php_cmd::run(&args, cli.verbose)?,
+
+        Commands::Phpunit { args } => phpunit_cmd::run(&args, cli.verbose)?,
+
+        Commands::Phpstan { args } => phpstan_cmd::run(&args, cli.verbose)?,
+
+        Commands::Pest { args } => pest_cmd::run(&args, cli.verbose)?,
+
+        Commands::Paratest { args } => paratest_cmd::run(&args, cli.verbose)?,
+
+        Commands::Ecs { args } => ecs_cmd::run(&args, cli.verbose)?,
+
+        Commands::Pint { args } => pint_cmd::run(&args, cli.verbose)?,
+
         Commands::Rake { args } => rake_cmd::run(&args, cli.verbose)?,
 
         Commands::Rubocop { args } => rubocop_cmd::run(&args, cli.verbose)?,
@@ -2805,6 +2869,13 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Curl { .. }
             | Commands::Ruff { .. }
             | Commands::Pytest { .. }
+            | Commands::Php { .. }
+            | Commands::Phpunit { .. }
+            | Commands::Phpstan { .. }
+            | Commands::Pest { .. }
+            | Commands::Paratest { .. }
+            | Commands::Ecs { .. }
+            | Commands::Pint { .. }
             | Commands::Rake { .. }
             | Commands::Rubocop { .. }
             | Commands::Rspec { .. }
@@ -3145,6 +3216,37 @@ mod tests {
     }
 
     #[test]
+    fn test_pipe_help_lists_all_php_filters() {
+        use clap::CommandFactory;
+
+        let command = Cli::command();
+        let pipe = command
+            .find_subcommand("pipe")
+            .expect("pipe subcommand must exist");
+        let help = pipe
+            .get_about()
+            .expect("pipe subcommand must have help text")
+            .to_string();
+        let filter_help = pipe
+            .get_arguments()
+            .find(|argument| argument.get_id().as_str() == "filter")
+            .expect("pipe filter argument must exist")
+            .get_help()
+            .expect("pipe filter argument must have help text")
+            .to_string();
+
+        for filter in [
+            "phpunit", "pest", "paratest", "php-test", "ecs", "phpstan", "pint",
+        ] {
+            assert!(help.contains(filter), "pipe help missing {filter}: {help}");
+            assert!(
+                filter_help.contains(filter),
+                "pipe filter help missing {filter}: {filter_help}"
+            );
+        }
+    }
+
+    #[test]
     fn test_meta_commands_reject_bad_flags() {
         // RTK meta-commands should produce parse errors (not fall through to raw execution).
         // Skip "proxy" because it uses trailing_var_arg (accepts any args by design).
@@ -3234,6 +3336,13 @@ mod tests {
             "golangci-lint",
             "gradlew",
             "mvn",
+            "php",
+            "phpunit",
+            "phpstan",
+            "pest",
+            "paratest",
+            "ecs",
+            "pint",
             "uv",
         ];
 
@@ -3362,6 +3471,120 @@ mod tests {
                 result.is_ok(),
                 "Meta-command {:?} should parse successfully",
                 args
+            );
+        }
+    }
+
+    #[test]
+    fn test_php_commands_registered_with_exact_variants_and_args() {
+        let cases: &[(&str, &[&str], &[&str])] = &[
+            // `--` ends RTK parsing; the hyphenated value after it belongs to PHP.
+            (
+                "php",
+                &["artisan", "about", "--", "--no-ansi"],
+                &["artisan", "about", "--", "--no-ansi"],
+            ),
+            (
+                "phpunit",
+                &["tests/Feature", "--filter=UserTest"],
+                &["tests/Feature", "--filter=UserTest"],
+            ),
+            (
+                "phpstan",
+                &["analyse", "--error-format=json", "src"],
+                &["analyse", "--error-format=json", "src"],
+            ),
+            (
+                "pest",
+                &["--group=api", "tests/Feature"],
+                &["--group=api", "tests/Feature"],
+            ),
+            (
+                "paratest",
+                &["--processes=4", "tests", "--filter=UserTest"],
+                &["--processes=4", "tests", "--filter=UserTest"],
+            ),
+            (
+                "ecs",
+                &["check", "src", "--no-progress-bar"],
+                &["check", "src", "--no-progress-bar"],
+            ),
+            (
+                "pint",
+                &["--test", "app", "--preset=laravel"],
+                &["--test", "app", "--preset=laravel"],
+            ),
+        ];
+
+        for &(command, input, expected_args) in cases {
+            let cli = Cli::try_parse_from(
+                std::iter::once("rtk")
+                    .chain(std::iter::once(command))
+                    .chain(input.iter().copied()),
+            )
+            .unwrap_or_else(|error| panic!("{command} must accept PHP command arguments: {error}"));
+
+            let actual_args = match (command, cli.command) {
+                ("php", Commands::Php { args })
+                | ("phpunit", Commands::Phpunit { args })
+                | ("phpstan", Commands::Phpstan { args })
+                | ("pest", Commands::Pest { args })
+                | ("paratest", Commands::Paratest { args })
+                | ("ecs", Commands::Ecs { args })
+                | ("pint", Commands::Pint { args }) => args,
+                (expected, actual) => panic!("Expected Commands::{expected}, got {actual:?}"),
+            };
+
+            let expected_args: Vec<_> = expected_args
+                .iter()
+                .map(|argument| (*argument).to_owned())
+                .collect();
+            assert_eq!(
+                actual_args, expected_args,
+                "{command} must preserve its arguments"
+            );
+        }
+    }
+
+    #[test]
+    fn test_php_command_help_describes_each_subcommand() {
+        let cases = [
+            (
+                "php",
+                "PHP command runner with compact output for artisan and syntax checks",
+            ),
+            ("phpunit", "PHPUnit test runner with compact output"),
+            ("phpstan", "PHPStan analyzer with compact output"),
+            ("pest", "Pest test runner with compact output"),
+            (
+                "paratest",
+                "ParaTest parallel test runner with compact output",
+            ),
+            (
+                "ecs",
+                "Easy Coding Standard code style checker with compact output",
+            ),
+            (
+                "pint",
+                "Laravel Pint (PHP-CS-Fixer) code style fixer with compact output",
+            ),
+        ];
+
+        for (command, about) in cases {
+            let error = match Cli::try_parse_from(["rtk", command, "--help"]) {
+                Err(error) => error,
+                Ok(_) => panic!("subcommand help must return a clap error"),
+            };
+            assert_eq!(
+                error.kind(),
+                ErrorKind::DisplayHelp,
+                "{command} must show help"
+            );
+
+            let help = error.render().to_string();
+            assert!(
+                help.contains(about),
+                "{command} help missing its description: {help}"
             );
         }
     }

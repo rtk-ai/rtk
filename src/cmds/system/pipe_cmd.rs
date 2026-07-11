@@ -27,6 +27,13 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
         "ruff-check" => Some(crate::cmds::python::ruff_cmd::filter_ruff_check_json),
         "ruff-format" => Some(crate::cmds::python::ruff_cmd::filter_ruff_format),
         "prettier" => Some(crate::cmds::js::prettier_cmd::filter_prettier_output),
+        "phpunit" => Some(crate::cmds::php::phpunit_cmd::filter_phpunit_output),
+        "pest" | "paratest" | "php-test" => {
+            Some(crate::cmds::php::test_output::filter_test_runner_output)
+        }
+        "ecs" => Some(crate::cmds::php::ecs_cmd::filter_ecs_output),
+        "phpstan" => Some(phpstan_wrapper),
+        "pint" => Some(pint_wrapper),
         _ => None,
     }
 }
@@ -45,6 +52,24 @@ fn git_log_wrapper(input: &str) -> String {
 
 fn git_diff_wrapper(input: &str) -> String {
     crate::cmds::git::git::compact_diff(input, 200)
+}
+
+fn phpstan_wrapper(input: &str) -> String {
+    // Runner forces --format=json; piped output may be either JSON or the
+    // default human table. Pick by content.
+    if input.trim_start().starts_with('{') {
+        crate::cmds::php::phpstan_cmd::filter_phpstan_json(input)
+    } else {
+        crate::cmds::php::phpstan_cmd::filter_phpstan_text(input)
+    }
+}
+
+fn pint_wrapper(input: &str) -> String {
+    if input.trim_start().starts_with('{') {
+        crate::cmds::php::pint_cmd::filter_pint_json(input)
+    } else {
+        crate::core::utils::fallback_tail(input, "pint", 60)
+    }
 }
 
 fn vitest_wrapper(input: &str) -> String {
@@ -155,6 +180,14 @@ pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
     }
 
     let first_trimmed = first_1k.trim_start();
+
+    // phpunit banner: "PHPUnit X.Y.Z by Sebastian Bergmann and contributors."
+    // Anchor to the leading "PHPUnit " token so a LICENSE/composer/`git log`
+    // that merely mentions the author isn't misrouted here.
+    if first_trimmed.starts_with("PHPUnit ") && first_1k.contains("by Sebastian Bergmann") {
+        return crate::cmds::php::phpunit_cmd::filter_phpunit_output;
+    }
+
     if first_trimmed.starts_with('{') && first_1k.contains("\"Action\"") {
         return go_test_wrapper;
     }
@@ -231,7 +264,8 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
             anyhow::anyhow!(
                 "Unknown filter '{}'. Available: cargo-test, pytest, go-test, go-build, \
                  tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
-                 log, mypy, ruff-check, ruff-format, prettier",
+                 log, mypy, ruff-check, ruff-format, prettier, phpunit, pest, \
+                 paratest, php-test, ecs, phpstan, pint",
                 name
             )
         })?,
@@ -481,6 +515,69 @@ mod tests {
     #[test]
     fn test_resolve_filter_prettier() {
         assert!(resolve_filter("prettier").is_some());
+    }
+
+    #[test]
+    fn test_php_filters_resolve_and_filter_without_php_installed() {
+        for name in ["phpunit", "pest", "paratest", "php-test", "ecs", "phpstan", "pint"] {
+            assert!(resolve_filter(name).is_some(), "{name} filter must exist");
+        }
+
+        let phpunit = resolve_filter("phpunit").unwrap();
+        let output = phpunit(
+            "PHPUnit 11.0.0 by Sebastian Bergmann and contributors.\n\nOK (3 tests, 5 assertions)\n",
+        );
+        assert_eq!(output, "PHPUnit: OK (3 tests, 5 assertions)");
+        assert!(resolve_filter("not-a-filter").is_none());
+    }
+
+    #[test]
+    fn test_phpstan_wrapper_uses_json_filter_for_json_output() {
+        let output = phpstan_wrapper(
+            r#"{"totals":{"errors":0,"file_errors":0},"files":{},"errors":[]}"#,
+        );
+
+        assert_eq!(output, "phpstan: ok");
+    }
+
+    #[test]
+    fn test_phpstan_wrapper_uses_text_error_filter_for_non_json_output() {
+        let output = phpstan_wrapper("phpstan: command not found\nInstall PHPStan first.\n");
+
+        assert_eq!(
+            output,
+            "PHPStan error:\nphpstan: command not found\nInstall PHPStan first."
+        );
+    }
+
+    #[test]
+    fn test_pint_wrapper_uses_json_filter_for_json_output() {
+        let output = pint_wrapper(
+            r#"  {"files":[{"name":"app/Foo.php","appliedFixers":["no_unused_imports"]}]}"#,
+        );
+
+        assert_eq!(
+            output,
+            "pint: 1 changes in 1 files\n\napp/Foo.php (1)\n  - no_unused_imports"
+        );
+    }
+
+    #[test]
+    fn test_pint_wrapper_uses_fallback_tail_for_non_json_output() {
+        let input = (1..=61)
+            .map(|line| format!("pint output line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let output = pint_wrapper(&input);
+
+        assert!(
+            output.lines().all(|line| line != "pint output line 1"),
+            "out={output}"
+        );
+        assert!(output.starts_with("pint output line 2"), "out={output}");
+        assert!(output.ends_with("pint output line 61"), "out={output}");
+        assert_eq!(output.lines().count(), 60, "out={output}");
     }
 
     #[test]
