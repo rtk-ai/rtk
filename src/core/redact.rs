@@ -706,6 +706,13 @@ mod tests {
         assert!(matches!(r.redact(input), Cow::Borrowed(_)));
     }
 
+    #[test]
+    fn test_fixture_mixed_pii_golden() {
+        let raw = include_str!("../../tests/fixtures/redact_mixed_pii_raw.txt");
+        let expected = include_str!("../../tests/fixtures/redact_mixed_pii_expected.txt");
+        assert_eq!(apply(raw), expected);
+    }
+
     // --- redacting_copy (proxy streaming path) ---
 
     /// Reader yielding fixed-size chunks — simulates PII split across reads.

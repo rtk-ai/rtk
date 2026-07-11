@@ -277,6 +277,7 @@ rtk session                     # Show RTK adoption across recent sessions
 ```bash
 -u, --ultra-compact    # ASCII icons, inline format (extra token savings)
 -v, --verbose          # Increase verbosity (-v, -vv, -vvv)
+    --no-redact        # Disable PII redaction for this invocation
 ```
 
 ## Examples
@@ -400,7 +401,15 @@ exclude_commands = ["curl", "playwright"]  # skip rewrite for these
 [tee]
 enabled = true          # save raw output on failure (default: true)
 mode = "failures"       # "failures", "always", or "never"
+
+[redaction]
+enabled = true          # mask PII/secrets in ALL output, incl. proxy (default: true)
 ```
+
+PII (emails, phone numbers, PAN, Aadhaar, card numbers, secrets) is redacted
+as `[REDACTED:<category>]` before output reaches the LLM — see
+[docs/redaction.md](docs/redaction.md) for categories, custom patterns,
+allowlist and known gaps.
 
 When a command fails, RTK saves the full unfiltered output so the LLM can read it without re-executing:
 
