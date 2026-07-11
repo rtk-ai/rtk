@@ -12,7 +12,8 @@ LLM — including `rtk proxy` raw passthrough. Redaction is **ON by default**.
 | `pan` | Indian PAN `ABCDE1234F` | `[REDACTED:pan]` |
 | `aadhaar` | 12-digit numbers that pass the **Verhoeff** checksum | `[REDACTED:aadhaar]` |
 | `card` | 13–19 digit numbers that pass the **Luhn** checksum (spaces/dashes allowed) | `[REDACTED:card]` |
-| `secrets` | AWS access keys (`AKIA…`), JWTs, `Bearer` tokens, PEM private-key blocks, `api_key=`/`password=`/`secret=` assignments | `[REDACTED:aws_key]`, `[REDACTED:jwt]`, `[REDACTED:token]`, `[REDACTED:private_key]`, `[REDACTED:secret]` |
+| `secrets` | AWS access keys (`AKIA…`/`ASIA…`), JWTs, `Bearer` tokens, PEM private-key blocks, `api_key=`/`password=`/`secret=` assignments | `[REDACTED:aws_key]`, `[REDACTED:jwt]`, `[REDACTED:token]`, `[REDACTED:private_key]`, `[REDACTED:secret]` |
+| `ip` | IPv4 addresses (loopback `127.*` and `0.0.0.0` stay visible) | `[REDACTED:ip]` |
 
 Checksum gating (Luhn/Verhoeff) prevents false positives on commit SHAs,
 epoch timestamps, UUIDs, job IDs and other long digit runs. The per-category
@@ -50,6 +51,7 @@ pan = true
 aadhaar = true
 card = true
 secrets = true
+ip = true
 
 # lines matching these regexes are never redacted (e.g. test fixtures)
 allowlist = ["EXAMPLE-DO-NOT-REDACT"]

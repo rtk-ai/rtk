@@ -5,5 +5,5 @@ Date: 2026-07-11T12:34:56Z
     customer phone [REDACTED:phone]
     PAN [REDACTED:pan] on file
     api_key=[REDACTED:secret] rotated
-    id d5efc3b9-7297-4e72-864e-7a1be53850c9 at 192.168.1.100:8080
+    id d5efc3b9-7297-4e72-864e-7a1be53850c9 at [REDACTED:ip]:8080
     job 1234567890123456 finished in 1.42.4

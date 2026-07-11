@@ -44,7 +44,14 @@ lazy_static! {
     // starting and ending on a digit. Luhn-gated in code.
     static ref CARD_RE: Regex = Regex::new(r"\b\d(?:[ \-]?\d){12,18}\b").unwrap();
 
-    static ref AWS_KEY_RE: Regex = Regex::new(r"\bAKIA[0-9A-Z]{16}\b").unwrap();
+    // AKIA = long-term access key, ASIA = temporary (STS) access key.
+    static ref AWS_KEY_RE: Regex = Regex::new(r"\bA(?:KIA|SIA)[0-9A-Z]{16}\b").unwrap();
+
+    // IPv4 candidate: 4 dotted octets, not embedded in a longer dotted run
+    // (so semver "1.2.3" never matches and "1.2.3.4.5" is left alone).
+    // Octet range + loopback/unspecified skips are validated in code.
+    static ref IPV4_RE: Regex =
+        Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").unwrap();
     static ref JWT_RE: Regex = Regex::new(
         r"\bey[A-Za-z0-9_-]{10,}\.ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"
     ).unwrap();
@@ -67,6 +74,7 @@ lazy_static! {
         AADHAAR_RE.as_str(),
         CARD_RE.as_str(),
         AWS_KEY_RE.as_str(),
+        IPV4_RE.as_str(),
         JWT_RE.as_str(),
         BEARER_RE.as_str(),
         r"-----BEGIN",
@@ -142,6 +150,7 @@ pub struct Redactor {
     aadhaar: bool,
     card: bool,
     secrets: bool,
+    ip: bool,
     custom: Vec<(String, Regex)>,
     allowlist: Vec<Regex>,
 }
@@ -196,6 +205,7 @@ impl Redactor {
             aadhaar: cfg.aadhaar,
             card: cfg.card,
             secrets: cfg.secrets,
+            ip: cfg.ip,
             custom: cfg
                 .custom
                 .iter()
@@ -277,6 +287,17 @@ impl Redactor {
         if self.phone {
             s = chain(s, &PHONE_IN_RE, "[REDACTED:phone]");
             s = chain(s, &PHONE_GENERIC_RE, "[REDACTED:phone]");
+        }
+        if self.ip {
+            s = chain_matched(s, &IPV4_RE, "[REDACTED:ip]", |m| {
+                // All octets 0-255, and skip loopback/unspecified — masking
+                // "listening on 127.0.0.1" hurts debugging with zero PII value.
+                let octets: Vec<Option<u8>> = m.split('.').map(|o| o.parse().ok()).collect();
+                octets.len() == 4
+                    && octets.iter().all(|o| o.is_some())
+                    && !m.starts_with("127.")
+                    && m != "0.0.0.0"
+            });
         }
         for (name, re) in &self.custom {
             let tag = format!("[REDACTED:{}]", name);
@@ -376,6 +397,31 @@ fn chain<'a>(s: Cow<'a, str>, re: &Regex, rep: &str) -> Cow<'a, str> {
     match re.replace_all(&s, rep) {
         Cow::Borrowed(_) => s,
         Cow::Owned(o) => Cow::Owned(o),
+    }
+}
+
+/// Like [`chain`] but the match is only replaced when the raw match text
+/// passes `valid` (octet range for IPs).
+fn chain_matched<'a>(
+    s: Cow<'a, str>,
+    re: &Regex,
+    tag: &str,
+    valid: impl Fn(&str) -> bool,
+) -> Cow<'a, str> {
+    let mut changed = false;
+    let replaced = re.replace_all(&s, |caps: &regex::Captures| {
+        let m = caps.get(0).map_or("", |m| m.as_str());
+        if valid(m) {
+            changed = true;
+            tag.to_string()
+        } else {
+            m.to_string()
+        }
+    });
+    if changed {
+        Cow::Owned(replaced.into_owned())
+    } else {
+        s
     }
 }
 
@@ -664,9 +710,46 @@ mod tests {
     }
 
     #[test]
-    fn test_ipv4_address_not_redacted() {
-        let input = "listening on 192.168.1.100:8080";
+    fn test_ipv4_address_redacted() {
+        let out = apply("connection from 10.17.63.85 accepted");
+        assert!(out.contains("[REDACTED:ip]"), "out={}", out);
+        assert!(!out.contains("10.17.63.85"), "out={}", out);
+    }
+
+    #[test]
+    fn test_ipv4_with_port_redacted_keeps_port() {
+        let out = apply("listening on 192.168.1.100:8080");
+        assert_eq!(out, "listening on [REDACTED:ip]:8080");
+    }
+
+    #[test]
+    fn test_loopback_and_unspecified_ip_not_redacted() {
+        let input = "dev server on 127.0.0.1:3000 bound to 0.0.0.0";
         assert_eq!(apply(input), input);
+    }
+
+    #[test]
+    fn test_invalid_octet_not_redacted_as_ip() {
+        let input = "weird id 300.400.500.600 here";
+        assert_eq!(apply(input), input);
+    }
+
+    #[test]
+    fn test_ip_category_toggle() {
+        let cfg = RedactionConfig {
+            ip: false,
+            ..RedactionConfig::default()
+        };
+        let r = Redactor::from_config(&cfg, false);
+        let input = "from 10.17.63.85";
+        assert_eq!(r.redact(input), input);
+    }
+
+    #[test]
+    fn test_redact_aws_temporary_sts_key() {
+        let out = apply("AccessKeyId ASIA5F4KDTECND7YZQPX used");
+        assert!(out.contains("[REDACTED:aws_key]"), "out={}", out);
+        assert!(!out.contains("ASIA5F4KDTECND7YZQPX"), "out={}", out);
     }
 
     #[test]

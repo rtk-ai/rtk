@@ -46,6 +46,9 @@ pub struct RedactionConfig {
     /// AWS keys, JWTs, bearer tokens, PEM private keys, api_key=/password= assignments.
     #[serde(default = "default_true")]
     pub secrets: bool,
+    /// IPv4 addresses (loopback and 0.0.0.0 are kept visible).
+    #[serde(default = "default_true")]
+    pub ip: bool,
     /// Extra user-defined patterns: [[redaction.custom]] name = "...", pattern = "..."
     #[serde(default)]
     pub custom: Vec<CustomPattern>,
@@ -70,6 +73,7 @@ impl Default for RedactionConfig {
             aadhaar: true,
             card: true,
             secrets: true,
+            ip: true,
             custom: Vec::new(),
             allowlist: Vec::new(),
         }
