@@ -76,6 +76,10 @@ struct Cli {
     /// Set SKIP_ENV_VALIDATION=1 for child processes (Next.js, tsc, lint, prisma)
     #[arg(long = "skip-env", global = true)]
     skip_env: bool,
+
+    /// Disable PII redaction for this invocation (overrides [redaction] enabled=true)
+    #[arg(long = "no-redact", global = true)]
+    no_redact: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1306,8 +1310,10 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         match result {
             Ok(output) => {
                 let exit_code = core::utils::exit_code_from_output(&output, &raw_command);
-                let stdout_raw = String::from_utf8_lossy(&output.stdout);
-                let stderr_raw = String::from_utf8_lossy(&output.stderr);
+                let stdout_raw =
+                    core::redact::redact(&String::from_utf8_lossy(&output.stdout)).into_owned();
+                let stderr_raw =
+                    core::redact::redact(&String::from_utf8_lossy(&output.stderr)).into_owned();
 
                 // Merge stderr into the text to filter when filter_stderr is enabled;
                 // otherwise emit stderr directly so it is always visible.
@@ -1552,6 +1558,9 @@ fn run_cli() -> Result<i32> {
             return run_fallback(e);
         }
     };
+
+    // Must run before any command dispatch so every output path sees the flag.
+    core::redact::init_from_cli(cli.no_redact);
 
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
     // Skip for Gain — it shows its own inline hook warning.
@@ -2447,7 +2456,6 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Proxy { args } => {
-            use std::io::{Read, Write};
             use std::process::Stdio;
             use std::sync::atomic::{AtomicU32, Ordering};
             use std::thread;
@@ -2553,48 +2561,16 @@ fn run_cli() -> Result<i32> {
 
             const CAP: usize = 1_048_576;
 
+            // Line-buffered redacting copy: PII (emails, cards, secrets…) is
+            // masked before it ever reaches the caller, even in proxy mode.
             let stdout_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
-                let mut reader = stdout_pipe;
-                let mut captured = Vec::new();
-                let mut buf = [0u8; 8192];
-
-                loop {
-                    let count = reader.read(&mut buf)?;
-                    if count == 0 {
-                        break;
-                    }
-                    if captured.len() < CAP {
-                        let take = count.min(CAP - captured.len());
-                        captured.extend_from_slice(&buf[..take]);
-                    }
-                    let mut out = std::io::stdout().lock();
-                    out.write_all(&buf[..count])?;
-                    out.flush()?;
-                }
-
-                Ok(captured)
+                let out = std::io::stdout();
+                core::redact::redacting_copy(stdout_pipe, out.lock(), CAP)
             });
 
             let stderr_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
-                let mut reader = stderr_pipe;
-                let mut captured = Vec::new();
-                let mut buf = [0u8; 8192];
-
-                loop {
-                    let count = reader.read(&mut buf)?;
-                    if count == 0 {
-                        break;
-                    }
-                    if captured.len() < CAP {
-                        let take = count.min(CAP - captured.len());
-                        captured.extend_from_slice(&buf[..take]);
-                    }
-                    let mut err = std::io::stderr().lock();
-                    err.write_all(&buf[..count])?;
-                    err.flush()?;
-                }
-
-                Ok(captured)
+                let err = std::io::stderr();
+                core::redact::redacting_copy(stderr_pipe, err.lock(), CAP)
             });
 
             let status = child

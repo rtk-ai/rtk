@@ -1,3 +1,4 @@
+use crate::core::redact;
 use anyhow::{Context, Result};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::process::{Command, Stdio};
@@ -341,7 +342,10 @@ pub fn run_streaming(
         let tx_out = tx.clone();
         let stdout_thread = std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if tx_out.send(StreamLine::Stdout(line)).is_err() {
+                if tx_out
+                    .send(StreamLine::Stdout(redact::redact_line(line)))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -349,7 +353,10 @@ pub fn run_streaming(
         let tx_err = tx;
         let stderr_thread = std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                if tx_err.send(StreamLine::Stderr(line)).is_err() {
+                if tx_err
+                    .send(StreamLine::Stderr(redact::redact_line(line)))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -417,7 +424,11 @@ pub fn run_streaming(
         let stderr_thread = std::thread::spawn(move || -> String {
             let mut raw_err = String::new();
             let mut capped = false;
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            for line in BufReader::new(stderr)
+                .lines()
+                .map_while(Result::ok)
+                .map(redact::redact_line)
+            {
                 if raw_err.len() + line.len() < RAW_CAP {
                     raw_err.push_str(&line);
                     raw_err.push('\n');
@@ -436,7 +447,11 @@ pub fn run_streaming(
                 FilterMode::Passthrough => unreachable!("handled by early-return above"),
                 FilterMode::Streaming(_) => unreachable!("handled by is_streaming branch"),
                 FilterMode::Buffered(filter_fn) => {
-                    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    for line in BufReader::new(stdout)
+                        .lines()
+                        .map_while(Result::ok)
+                        .map(redact::redact_line)
+                    {
                         if raw_stdout.len() + line.len() < RAW_CAP {
                             raw_stdout.push_str(&line);
                             raw_stdout.push('\n');
@@ -461,7 +476,11 @@ pub fn run_streaming(
                     }
                 }
                 FilterMode::CaptureOnly => {
-                    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    for line in BufReader::new(stdout)
+                        .lines()
+                        .map_while(Result::ok)
+                        .map(redact::redact_line)
+                    {
                         if raw_stdout.len() + line.len() < RAW_CAP {
                             raw_stdout.push_str(&line);
                             raw_stdout.push('\n');
@@ -535,8 +554,8 @@ pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
     cmd.stdin(Stdio::null());
     let output = cmd.output().context("Failed to execute command")?;
     Ok(CaptureResult {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        stdout: redact::redact(&String::from_utf8_lossy(&output.stdout)).into_owned(),
+        stderr: redact::redact(&String::from_utf8_lossy(&output.stderr)).into_owned(),
         exit_code: status_to_exit_code(output.status),
     })
 }
@@ -546,8 +565,8 @@ pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
     cmd.stdin(Stdio::inherit());
     let output = cmd.output().context("Failed to execute command")?;
     Ok(CaptureResult {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        stdout: redact::redact(&String::from_utf8_lossy(&output.stdout)).into_owned(),
+        stderr: redact::redact(&String::from_utf8_lossy(&output.stderr)).into_owned(),
         exit_code: status_to_exit_code(output.status),
     })
 }

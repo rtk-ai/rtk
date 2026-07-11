@@ -258,6 +258,7 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
     if buf.len() > RAW_CAP {
         anyhow::bail!("stdin exceeds {} byte limit", RAW_CAP);
     }
+    let buf = crate::core::redact::redact(&buf).into_owned();
 
     let filter_fn = match filter_name {
         Some(name) => resolve_filter(name).ok_or_else(|| {

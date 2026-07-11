@@ -21,6 +21,63 @@ pub struct Config {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub redaction: RedactionConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RedactionConfig {
+    /// Master switch. PII redaction is ON by default; `--no-redact` overrides per invocation.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub email: bool,
+    #[serde(default = "default_true")]
+    pub phone: bool,
+    /// Indian PAN card (ABCDE1234F).
+    #[serde(default = "default_true")]
+    pub pan: bool,
+    /// Aadhaar: 12-digit candidates are Verhoeff-validated before redaction.
+    #[serde(default = "default_true")]
+    pub aadhaar: bool,
+    /// Card numbers: 13-19 digit candidates are Luhn-validated before redaction.
+    #[serde(default = "default_true")]
+    pub card: bool,
+    /// AWS keys, JWTs, bearer tokens, PEM private keys, api_key=/password= assignments.
+    #[serde(default = "default_true")]
+    pub secrets: bool,
+    /// Extra user-defined patterns: [[redaction.custom]] name = "...", pattern = "..."
+    #[serde(default)]
+    pub custom: Vec<CustomPattern>,
+    /// Lines matching any of these regexes are never redacted.
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomPattern {
+    pub name: String,
+    pub pattern: String,
+}
+
+impl Default for RedactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            email: true,
+            phone: true,
+            pan: true,
+            aadhaar: true,
+            card: true,
+            secrets: true,
+            custom: Vec::new(),
+            allowlist: Vec::new(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -279,6 +336,75 @@ enabled = true
         let config = Config::default();
         assert!(!config.telemetry.enabled);
         assert!(config.telemetry.consent_given.is_none());
+    }
+
+    #[test]
+    fn test_redaction_config_default_enabled() {
+        let config = Config::default();
+        assert!(config.redaction.enabled);
+        assert!(config.redaction.email);
+        assert!(config.redaction.phone);
+        assert!(config.redaction.pan);
+        assert!(config.redaction.aadhaar);
+        assert!(config.redaction.card);
+        assert!(config.redaction.secrets);
+        assert!(config.redaction.custom.is_empty());
+        assert!(config.redaction.allowlist.is_empty());
+    }
+
+    #[test]
+    fn test_redaction_config_deserialize_disabled() {
+        let toml = r#"
+[redaction]
+enabled = false
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(!config.redaction.enabled);
+        // Category toggles keep their defaults when the section only sets `enabled`.
+        assert!(config.redaction.email);
+    }
+
+    #[test]
+    fn test_redaction_config_per_category_toggle() {
+        let toml = r#"
+[redaction]
+email = false
+card = false
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(config.redaction.enabled);
+        assert!(!config.redaction.email);
+        assert!(!config.redaction.card);
+        assert!(config.redaction.phone);
+    }
+
+    #[test]
+    fn test_redaction_config_custom_patterns_deserialize() {
+        let toml = r#"
+[redaction]
+allowlist = ["EXAMPLE-DO-NOT-REDACT"]
+
+[[redaction.custom]]
+name = "employee_id"
+pattern = "EMP-\\d{6}"
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.redaction.custom.len(), 1);
+        assert_eq!(config.redaction.custom[0].name, "employee_id");
+        assert_eq!(config.redaction.custom[0].pattern, "EMP-\\d{6}");
+        assert_eq!(config.redaction.allowlist, vec!["EXAMPLE-DO-NOT-REDACT"]);
+    }
+
+    #[test]
+    fn test_config_without_redaction_section_is_valid() {
+        // Older configs that predate [redaction] must still parse, with redaction ON.
+        let toml = r#"
+[tracking]
+enabled = true
+history_days = 90
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(config.redaction.enabled);
     }
 
     #[test]
