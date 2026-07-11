@@ -106,6 +106,10 @@ struct TomlFilterDef {
     /// Use for tools like liquibase that emit banners/logs to stderr.
     #[serde(default)]
     filter_stderr: bool,
+    /// When true, consecutive identical lines are collapsed into one line
+    /// annotated with ` [xN]`. Use for log-like output (ssh, journalctl).
+    #[serde(default)]
+    dedup_repeats: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +155,8 @@ pub struct CompiledFilter {
     on_empty: Option<String>,
     /// When true, the runner should capture stderr and merge it with stdout.
     pub filter_stderr: bool,
+    /// Collapse consecutive identical lines into ` [xN]`-annotated lines.
+    dedup_repeats: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -388,6 +394,7 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
         max_lines: def.max_lines,
         on_empty: def.on_empty,
         filter_stderr: def.filter_stderr,
+        dedup_repeats: def.dedup_repeats,
     })
 }
 
@@ -560,6 +567,36 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
         LineFilter::Strip(set) => lines.retain(|l| !set.is_match(l)),
         LineFilter::Keep(set) => lines.retain(|l| set.is_match(l)),
         LineFilter::None => {}
+    }
+
+    // 4.5. dedup_repeats — collapse consecutive identical lines into ` [xN]`.
+    //      Trailing whitespace is ignored for comparison. Not counted as lossy:
+    //      the repeat count preserves the information.
+    if filter.dedup_repeats {
+        let mut deduped: Vec<String> = Vec::with_capacity(lines.len());
+        let mut run_count: usize = 0;
+        for line in lines.iter() {
+            match deduped.last() {
+                Some(prev) if prev.trim_end() == line.trim_end() && !line.trim().is_empty() => {
+                    run_count += 1;
+                }
+                _ => {
+                    if run_count > 0 {
+                        if let Some(prev) = deduped.last_mut() {
+                            prev.push_str(&format!(" [x{}]", run_count + 1));
+                        }
+                    }
+                    run_count = 0;
+                    deduped.push(line.clone());
+                }
+            }
+        }
+        if run_count > 0 {
+            if let Some(prev) = deduped.last_mut() {
+                prev.push_str(&format!(" [x{}]", run_count + 1));
+            }
+        }
+        lines = deduped;
     }
 
     // 5. truncate_lines_at — uses utils::truncate (unicode-safe)
@@ -1896,8 +1933,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            63,
-            "Expected exactly 63 built-in filters, got {}. \
+            64,
+            "Expected exactly 64 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -1954,11 +1991,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 63 existing filters still present + 1 new = 64
+        // All 64 existing filters still present + 1 new = 65
         assert_eq!(
             filters.len(),
-            64,
-            "Expected 64 filters after concat (63 built-in + 1 new)"
+            65,
+            "Expected 65 filters after concat (64 built-in + 1 new)"
         );
 
         // New filter is discoverable
