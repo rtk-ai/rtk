@@ -18,7 +18,7 @@ stable directory, and add that directory to `PATH`:
 ```powershell
 $InstallDir = "$env:LOCALAPPDATA\Programs\rtk"
 New-Item -ItemType Directory -Force -Path $InstallDir
-Invoke-WebRequest -Uri "https://github.com/fuxkCH/rtk/releases/download/v0.43.1/rtk.exe" -OutFile "$InstallDir\rtk.exe"
+Invoke-WebRequest -Uri "https://github.com/fuxkCH/rtk/releases/download/v0.43.2/rtk.exe" -OutFile "$InstallDir\rtk.exe"
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if (($UserPath -split ';') -notcontains $InstallDir) {
     [Environment]::SetEnvironmentVariable("Path", "$UserPath;$InstallDir", "User")
@@ -41,7 +41,7 @@ Expected version for this release:
 当前 release 的预期版本：
 
 ```text
-rtk 0.43.1
+rtk 0.43.2
 ```
 
 Initialize Codex integration after verifying the binary:
@@ -58,21 +58,25 @@ file or move this install directory before it in `PATH`.
 如果 `PATH` 中更靠前的位置已经有旧版 `rtk.exe`，请替换那个旧文件，或把本安装目录移动到
 `PATH` 中更靠前的位置。
 
-## Feature Delta / 相对主仓库的功能变化
+## Feature Delta / 能力域对比表
 
-| Area | English | 中文 |
-|---|---|---|
-| Windows fallback transport | Adds a Windows fallback runner that preserves argv boundaries instead of rebuilding commands with unsafe string joins. Explicit shell hosts such as `powershell`, `pwsh`, and `cmd` run as direct argv calls. | 新增 Windows fallback runner，保留 argv 边界，避免用不安全的字符串拼接重构命令。`powershell`、`pwsh`、`cmd` 等显式 shell host 以直接 argv 方式执行。 |
-| PowerShell cmdlet compatibility | Adds narrow, validated compatibility for common PowerShell shapes: `Get-Content`, `Select-String`, `Get-ChildItem`, and `Get-Command -CommandType Application`. Unsupported semantic shapes either use safe transport or fail closed instead of being guessed. | 新增常见 PowerShell 形态的窄口径兼容：`Get-Content`、`Select-String`、`Get-ChildItem`、`Get-Command -CommandType Application`。不安全或不等价的语义形态走安全 transport 或 fail-closed，不猜测执行。 |
-| Windows native small commands | Adds or wires native RTK commands useful on Windows and for cross-platform agent habits: `which`, `pwd`, `head`, `tail`, `touch`, and `mkdir -p`. | 新增或接入 Windows 上常用、也符合跨平台 agent 习惯的小型 native 命令：`which`、`pwd`、`head`、`tail`、`touch`、`mkdir -p`。 |
-| Existing Windows native baseline | Preserves and verifies the local Windows-native implementations for `ls`, `tree`, `wc`, Rust grep fallback, `ps`, `df`, and `du`. | 保留并验证本地已有 Windows-native 实现：`ls`、`tree`、`wc`、Rust grep fallback、`ps`、`df`、`du`。 |
-| Grep fidelity | Ports separator-fidelity behavior into the Windows native grep fallback, including context group separators and no synthetic `--` when context is not requested. | 将 grep separator 保真逻辑应用到 Windows native grep fallback，包括 context 分组分隔符，以及非 context 模式不生成额外 `--`。 |
-| Rewrite surface | Extends rewrite/classification support for Windows-friendly command forms while keeping unsafe PowerShell object/pipeline semantics out of semantic rewrites. | 扩展 rewrite/classification 对 Windows 常见命令形态的支持，同时避免把不安全的 PowerShell 对象/管道语义错误改写为 RTK 语义命令。 |
-| Batch and script safety | Distinguishes `.ps1` transport from `.cmd`/`.bat` transport. `.ps1` arguments are preserved through `-File`; batch wrappers reject unsafe cmd metacharacters instead of pretending to provide exact native argv semantics. | 区分 `.ps1` transport 与 `.cmd`/`.bat` transport。`.ps1` 参数通过 `-File` 保真传递；batch wrapper 对不安全 cmd 元字符拒绝执行，不声称具备完全 native argv 语义。 |
-| PowerShell encoded limits | Adds explicit rejection for oversized generated PowerShell transport source, with guidance to use `.ps1` / `-File` rather than truncating or partially executing. | 对过大的生成式 PowerShell transport source 显式拒绝，并提示使用 `.ps1` / `-File`，避免截断或部分执行。 |
-| Codex analytics provider | Adds a Codex session provider for discover/session analytics, including SQLite/WAL-oriented diagnostics and safer row ordering. | 新增 Codex 会话 provider，用于 discover/session 分析，包含 SQLite/WAL 相关诊断和更安全的行排序。 |
-| Upstream correctness reconciliation | Reconciles selected upstream correctness fixes without replacing local Windows-native modules wholesale: TOML lossiness fallback, custom-filter trust hardening, Cargo JSON diagnostics, UTF-8 analytics safety, ccusage `period` aliases, and Git checkout summaries. | 选择性吸收主仓库正确性修复，同时避免整文件覆盖本地 Windows-native 模块：TOML lossiness fallback、自定义 filter trust 加固、Cargo JSON diagnostics、UTF-8 analytics 安全、ccusage `period` 兼容、Git checkout 摘要等。 |
-| Windows-native acceptance coverage | Adds a repository-level executable acceptance suite with fixed fixtures. The suite covers PowerShell cmdlets, native commands, rewrite behavior, fallback transport, `.ps1`/`.cmd` argv, UNC paths, `\\?\` extended-length paths, Unicode paths, and oversized implicit PowerShell transport rejection. | 新增仓库级 exe 验收套件与固定夹具。覆盖 PowerShell cmdlet、native 命令、rewrite 行为、fallback transport、`.ps1`/`.cmd` argv、UNC 路径、`\\?\` 长路径、Unicode 路径、以及过大的隐式 PowerShell transport 拒绝边界。 |
+下表按**已支持的命令**重新梳理 upstream `rtk-ai/rtk` 与本仓库修复后的能力面。命令以 `rtk --help` 和各子命令帮助为准；同一能力域中的命令以斜杠分隔。
+
+| 能力域 | rtk-ai/rtk | 本仓库(修复后) | 差异概述 |
+|---|---|---|---|
+| 文件、目录与检索：`ls` / `tree` / `read` / `head` / `tail` / `wc` / `grep` / `rg` / `find` / `which` / `pwd` / `touch` / `mkdir` / `df` / `du` / `ps` | 提供文件读取、搜索、目录与系统信息的压缩输出。 | 同类命令全部可用；Windows 原生实现覆盖 `ls`、`tree`、`wc`、grep fallback、`ps`、`df`、`du` 以及跨平台小命令。 | 补齐 Windows 语义：多文件 `head`/`tail`、`mkdir`、不 append 的 `touch`、path-like `which` 诊断、`df` 零总量与 `du` 访问错误处理。 |
+| 版本控制与代码托管：`git` / `diff` / `log` / `gh` / `glab` / `gt` | 提供 Git、GitHub、GitLab 与 Graphite 的压缩输出。 | 同类命令全部可用；保留 checkout、stash、日志与平台 CLI 的专用摘要。 | 本仓库额外修复 Git checkout 摘要、空 stash 输出和 Windows 参数传递；不改变原生 Git 行为。 |
+| 构建、测试与质量：`cargo` / `test` / `err` / `format` / `lint` / `prettier` / `jest` / `vitest` / `playwright` / `tsc` / `next` / `prisma` / `npm` / `npx` / `pnpm` | 提供常见构建、测试、格式化与 JS/TS 工具的压缩输出。 | 同类命令全部可用；`cargo` 保留 JSON diagnostics、失败原始输出和测试摘要。 | 吸收 Cargo 诊断正确性修复；本仓库以严格 Clippy 和 Windows 验收作为额外门槛。 |
+| 语言与生态工具：`python` 系列 `pytest` / `ruff` / `mypy` / `pip` / `uv`；Ruby `rake` / `rubocop` / `rspec`；Go `go` / `golangci-lint`；JVM `gradlew` / `mvn`；`.NET` `dotnet` | 覆盖上述语言生态的常见测试、格式化、包管理与构建命令。 | 同类命令全部可用，并保持各专用过滤器的原始工具兼容入口。 | 本轮不重写这些上游命令模块；本仓库仅在共享错误反馈和 Windows 传输层中提供增量保障。 |
+| PHP 工具链：`php` / `phpunit` / `phpstan` / `pest` / `paratest` / `ecs` / `pint` | 上游提供 PHP 命令模块与测试/静态分析/格式化过滤器。 | 顶层 PHP 命令与 `pipe --filter phpunit|pest|paratest|php-test|ecs|phpstan|pint` 全部可用。 | 与上游 PHP parity；本地只调整注册、帮助、管道和非零退出时保留 stderr 的错误反馈。 |
+| 云、容器、网络与数据库：`aws` / `docker` / `kubectl` / `oc` / `curl` / `wget` / `psql` | 提供云 CLI、容器编排、HTTP、下载与 PostgreSQL 的结构化/压缩输出。 | 同类命令全部可用。 | 保持上游过滤能力；本仓库没有把这些命令替换成 Windows 专用语义。 |
+| 命令执行与管道：`run` / `proxy` / `summary` / `smart` / `pipe` / `json` / `env` / `deps` | 提供原样代理、摘要、stdin 过滤、JSON/环境/依赖查看。 | 同类命令全部可用；`pipe` 新增完整 PHP filter 集。 | Windows 上显式 shell 保留 argv 边界；超长隐式 PowerShell 自动使用受控临时 `.ps1 -File`，不会截断脚本。 |
+| 初始化、配置与安全：`init` / `uninstall` / `config` / `trust` / `untrust` / `verify` | 管理 RTK 配置、项目过滤器、信任与完整性。 | 同类命令全部可用；新增一等 `uninstall -g --agent opencode`，保留旧 `init --uninstall`。 | 本仓库补 OpenCode 全局插件安装/卸载、干跑与状态；项目本地 TOML filter 继续采用显式信任。 |
+| Agent hooks 与改写：`hook` / `rewrite` / `hook-audit` | 为 agent 工具调用生成安全的 RTK 改写，并提供审计能力。 | 支持 Claude、Cursor、Gemini、Copilot、Cline、Windsurf、Kilo Code、Antigravity、Pi、Hermes、OpenCode 和 Droid。 | 补 Droid first-class hook；OpenCode 保持 TypeScript `tool.execute.before` 插件模型，不新增权限模型。Droid 安装/卸载额外拒绝异常 JSON、链接逃逸与非 RTK 条目误删。 |
+| 发现、会话与遥测：`discover` / `session` / `gain` / `cc-economics` / `telemetry` / `learn` | 分析历史命令、会话采用率、节省量、成本与学习规则。 | 同类命令全部可用；保留 Codex provider、SQLite/WAL 诊断和稳定排序。 | 不把 `db_path` 或 `thread_id` 当作项目路径；没有可靠 cwd 元数据时明确 unsupported。 |
+| Windows PowerShell 与脚本兼容：`powershell` / `pwsh` / `cmd` 的代理路径，以及相关 `rewrite` | 以通用 dispatch 为主，不以本地 Windows-native 兼容为核心。 | 支持受控的 `Get-Content`、`Select-String`、`Get-ChildItem`、`Get-Command` 形态；`.ps1` 通过 `-File` 传参，unsafe `.cmd`/`.bat` 元字符 fail-closed。 | 仅 RTK 自动生成的临时 `.ps1` 在执行策略检测需要时加进程级 Bypass；不提权、不修改用户/机器策略，Group Policy 阻止时返回明确错误。 |
+| 诊断与输出保真：全部 native/代理命令 | 以压缩输出和退出码为核心。 | native/fallback 失败保留底层 stderr 或明确 `rtk <cmd>:` 诊断；grep context 分隔符、空匹配和 Windows 歧义命令均有确定行为。 | 重点解决“非零退出但没有可见错误”的 agent 体验；Unix/Linux command-not-found 语义保持不变。 |
+| 验证面：`cargo` / `hook` / `pipe` / Windows acceptance | 以上游 CI/release checks 为基线。 | 当前源码要求格式检查、完整 Rust 测试、严格 Clippy、all-target check 与 Windows native acceptance。 | Windows 侧额外执行 87 项验收；非 Windows 运行时仍应由相应 CI 环境验证。 |
 
 ## Current Verification / 当前验证状态
 
@@ -92,10 +96,9 @@ Latest local result / 最新本地结果：
 | Check | Result |
 |---|---|
 | Debug build / Debug 编译 | PASS |
-| Windows native acceptance / Windows native 验收 | 83 passed, 0 skipped, 0 failed |
+| Windows native acceptance / Windows native 验收 | 87 passed, 0 skipped, 0 failed |
 | Format check / 格式检查 | PASS |
-| Rust tests / Rust 测试 | 2437 passed, 0 failed, 8 ignored |
-| Integration tests / 集成测试 | 11 passed, 0 failed |
+| Rust tests / Rust 测试 | 2475 unit tests run: 2467 passed, 0 failed, 8 ignored; 11 existing integration tests and 7 native error-feedback integration tests passed |
 
 Non-Windows runtime CI is intentionally out of scope for this local Windows verification pass. Non-Windows behavior should be reviewed by comparing the platform-neutral diffs against the main repository and by running CI in the appropriate environment before release.
 
