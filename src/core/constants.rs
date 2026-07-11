@@ -13,6 +13,7 @@ pub const RTK_META_COMMANDS: &[&str] = &[
     "discover",
     "learn",
     "init",
+    "uninstall",
     "config",
     "proxy",
     "run",
