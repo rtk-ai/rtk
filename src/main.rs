@@ -2030,11 +2030,13 @@ fn run_cli() -> Result<i32> {
             } else if agent == Some(AgentTarget::Droid) {
                 hooks::init::run_droid_mode(global, ctx)?;
             } else {
-                let install_opencode = opencode;
-                let install_claude = !opencode;
-                let install_cursor = agent == Some(AgentTarget::Cursor);
-                let install_windsurf = agent == Some(AgentTarget::Windsurf);
-                let install_cline = agent == Some(AgentTarget::Cline);
+                let (
+                    install_claude,
+                    install_opencode,
+                    install_cursor,
+                    install_windsurf,
+                    install_cline,
+                ) = init_install_targets(agent, opencode);
 
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -2723,6 +2725,20 @@ fn is_operational_command(cmd: &Commands) -> bool {
     )
 }
 
+/// Resolve which assistant integrations `rtk init` should configure.
+fn init_install_targets(
+    agent: Option<AgentTarget>,
+    opencode: bool,
+) -> (bool, bool, bool, bool, bool) {
+    (
+        !opencode && agent.is_none_or(|a| a == AgentTarget::Claude),
+        opencode,
+        agent == Some(AgentTarget::Cursor),
+        agent == Some(AgentTarget::Windsurf),
+        agent == Some(AgentTarget::Cline),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2871,6 +2887,34 @@ mod tests {
             }
             _ => panic!("Expected Init command"),
         }
+    }
+
+    #[test]
+    fn init_install_targets_cursor_skips_claude() {
+        let (install_claude, install_opencode, install_cursor, install_windsurf, install_cline) =
+            init_install_targets(Some(AgentTarget::Cursor), false);
+        assert!(!install_claude);
+        assert!(!install_opencode);
+        assert!(install_cursor);
+        assert!(!install_windsurf);
+        assert!(!install_cline);
+    }
+
+    #[test]
+    fn init_install_targets_default_installs_claude() {
+        let (install_claude, install_opencode, install_cursor, _, _) =
+            init_install_targets(None, false);
+        assert!(install_claude);
+        assert!(!install_opencode);
+        assert!(!install_cursor);
+    }
+
+    #[test]
+    fn init_install_targets_explicit_claude_installs_claude() {
+        let (install_claude, _, install_cursor, _, _) =
+            init_install_targets(Some(AgentTarget::Claude), false);
+        assert!(install_claude);
+        assert!(!install_cursor);
     }
 
     #[test]
