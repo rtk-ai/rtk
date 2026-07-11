@@ -83,4 +83,4 @@ Handled by `rtk rewrite` guards:
 
 ## License
 
-MIT -- same as RTK.
+Apache 2.0 -- same as RTK.

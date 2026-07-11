@@ -1,13 +1,13 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Kilo Code, and Antigravity
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, and Factory Droid
 sidebar:
   order: 3
 ---
 
 # Supported Agents
 
-RTK supports 12 AI coding agents across 3 integration tiers. Mistral Vibe support is planned.
+RTK supports all major AI coding agents across 3 integration tiers. Mistral Vibe support is planned.
 
 ## How it works
 
@@ -30,11 +30,14 @@ Agent runs "cargo test"
 |-------|-----------------|---------------------------|
 | Claude Code | Shell hook (`PreToolUse`) | Yes |
 | VS Code Copilot Chat | Shell hook (`PreToolUse`) | Yes |
-| GitHub Copilot CLI | Shell hook (deny-with-suggestion) | No (agent retries) |
+| GitHub Copilot CLI | Shell hook (`preToolUse` `modifiedArgs`) | Yes |
 | Cursor | Shell hook (`preToolUse`) | Yes |
 | Gemini CLI | Rust binary (`BeforeTool`) | Yes |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | Yes |
 | OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
+| Pi | TypeScript extension (`tool_call` event) | Yes |
+| Hermes | Python plugin (`terminal` command mutation) | Yes |
+| Factory Droid | Shell hook (`PreToolUse`, matcher `Execute`) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | AGENTS.md instructions | N/A |
@@ -59,16 +62,28 @@ rtk init --show    # shows hook status
 ### Cursor
 
 ```bash
-rtk init --global --cursor
+rtk init --global --agent cursor
 ```
 
 Restart Cursor. The hook uses `preToolUse` with Cursor's `updated_input` format.
 
-### VS Code Copilot Chat
+### GitHub Copilot (VS Code Chat + CLI)
 
 ```bash
-rtk init --global --copilot
+rtk init --copilot            # project-scoped (.github/hooks/)
+rtk init --global --copilot   # user-scoped (~/.copilot/hooks/, respects $COPILOT_HOME)
 ```
+
+Project-scoped writes `.github/hooks/rtk-rewrite.json` (both hosts get transparent rewrite — VS Code Chat via `updatedInput`, Copilot CLI via `modifiedArgs`) plus the RTK block in `.github/copilot-instructions.md`. User-scoped writes the same hook config to `~/.copilot/hooks/rtk-rewrite.json` and the RTK block to `~/.copilot/copilot-instructions.md` (both respect `$COPILOT_HOME` if set).
+
+Uninstall:
+
+```bash
+rtk init --uninstall --copilot
+rtk init --uninstall --global --copilot
+```
+
+Removes only RTK's hook file (and, for project, the RTK block in `copilot-instructions.md`). Other files in `.github/hooks/` or `~/.copilot/hooks/` and your own instruction content are untouched.
 
 ### Gemini CLI
 
@@ -84,6 +99,27 @@ rtk init --global --opencode
 
 Creates `~/.config/opencode/plugins/rtk.ts`. Uses the `tool.execute.before` hook.
 
+### Pi
+
+```bash
+# Project-local (default)
+rtk init --agent pi
+
+# Global — all projects
+rtk init --agent pi --global
+```
+
+Creates `.pi/extensions/rtk.ts` (local) or `~/.pi/agent/extensions/rtk.ts` (global). Pi auto-discovers extensions from both paths on startup.
+
+Uninstall:
+
+```bash
+rtk init --uninstall --agent pi
+rtk init --uninstall --agent pi --global
+```
+
+Removes only the installed Pi extension file.
+
 ### OpenClaw
 
 ```bash
@@ -92,10 +128,40 @@ openclaw plugins install ./openclaw
 
 Plugin in the `openclaw/` directory. Uses the `before_tool_call` hook, delegates to `rtk rewrite`.
 
+### Hermes
+
+```bash
+rtk init --agent hermes
+```
+
+Creates `~/.hermes/plugins/rtk-rewrite/` and enables it through `plugins.enabled` in the Hermes config. Hermes loads Python plugins, so the plugin entrypoint is Python, but it is only a thin adapter. It mutates the Hermes `terminal` tool `command` before execution and delegates all rewrite decisions to Rust through `rtk rewrite`. The repository source and tests for that adapter live in `hooks/hermes/`; only installed runtime files use the `~/.hermes/plugins/rtk-rewrite/` path.
+
+The plugin fails open. If `rtk` is missing at load time, the hook is not registered. If `rtk rewrite` errors, the tool is not `terminal`, the payload has no string `command`, or the plugin raises an exception, Hermes runs the original command unchanged. The same `rtk rewrite` limitations apply: already-prefixed `rtk` commands, compound shell commands, heredocs, and commands without filters are not rewritten.
+
+### Factory Droid
+
+```bash
+rtk init -g --agent droid    # user-scoped (~/.factory/hooks.json)
+rtk init --agent droid       # project-scoped (.factory/hooks.json, commit to share)
+```
+
+Installs a `PreToolUse` hook (matcher `Execute`) into Droid's canonical `hooks.json` — falling back to the `hooks` key of `settings.json` only when that file already carries live `PreToolUse` hooks. Respects `$FACTORY_HOME_OVERRIDE`.
+
+RTK honors Droid's own permission lists, never another agent's settings. Commands matching an explicit `commandDenylist` or `commandBlocklist` entry — read from all four settings scopes (`~/.factory/settings.json`, `~/.factory/settings.local.json`, `.factory/settings.json`, `.factory/settings.local.json`) — are left untouched so Droid's native confirmation or block fires on the original command. Every other command is rewritten via `updatedInput` with **no** permission decision: Droid's native flow (allowlist, autonomy level, other hooks) decides on the rewritten command. To auto-run rewritten read-only commands, add `rtk`-prefixed entries (e.g. `rtk git status`) to your `commandAllowlist`.
+
+Uninstall:
+
+```bash
+rtk init --uninstall -g --agent droid
+rtk init --uninstall --agent droid
+```
+
+Removes only RTK's hook entry; other hooks and settings are untouched.
+
 ### Cline / Roo Code
 
 ```bash
-rtk init --cline    # creates .clinerules in current project
+rtk init --agent cline    # creates .clinerules in current project
 ```
 
 Cline reads `.clinerules` as custom instructions. RTK adds guidance telling Cline to prefer `rtk <cmd>` over raw commands.
@@ -103,13 +169,14 @@ Cline reads `.clinerules` as custom instructions. RTK adds guidance telling Clin
 ### Windsurf
 
 ```bash
-rtk init --windsurf    # creates .windsurfrules in current project
+rtk init --global --agent windsurf    # creates .windsurfrules in current project
 ```
 
 ### Codex CLI
 
 ```bash
-rtk init --codex    # creates AGENTS.md or patches existing one
+rtk init --codex           # project-scoped (AGENTS.md)
+rtk init --global --codex  # user-global (~/.codex/AGENTS.md)
 ```
 
 ### Kilo Code
@@ -137,10 +204,10 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | Tier | Mechanism | How rewrites work |
 |------|-----------|------------------|
 | **Full hook** | Shell script or Rust binary, intercepts via agent API | Transparent — agent never sees the raw command |
-| **Plugin** | TypeScript/JS in agent's plugin system | Transparent — in-place mutation |
+| **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it.
+Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
 
 ## Windows support
 

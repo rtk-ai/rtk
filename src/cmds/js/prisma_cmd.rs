@@ -1,5 +1,7 @@
 //! Filters Prisma CLI output by stripping ASCII art and verbose decoration.
 
+use crate::core::guard::never_worse;
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::{Context, Result};
@@ -52,29 +54,26 @@ fn run_generate(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: prisma generate");
     }
 
-    let output = cmd
-        .output()
+    let result = exec_capture(&mut cmd)
         .context("Failed to run prisma generate (try: npm install -g prisma)")?;
 
-    let exit_code = crate::core::utils::exit_code_from_output(&output, "prisma");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    if !output.status.success() {
-        if !stdout.trim().is_empty() {
-            eprint!("{}", stdout);
+    if !result.success() {
+        if !result.stdout.trim().is_empty() {
+            eprint!("{}", result.stdout);
         }
-        if !stderr.trim().is_empty() {
-            eprint!("{}", stderr);
+        if !result.stderr.trim().is_empty() {
+            eprint!("{}", result.stderr);
         }
         timer.track("prisma generate", "rtk prisma generate", &raw, &raw);
-        return Ok(exit_code);
+        return Ok(result.exit_code);
     }
 
     let filtered = filter_prisma_generate(&raw);
-    println!("{}", filtered);
-    timer.track("prisma generate", "rtk prisma generate", &raw, &filtered);
+    let shown = never_worse(&raw, &filtered);
+    println!("{}", shown);
+    timer.track("prisma generate", "rtk prisma generate", &raw, shown);
 
     Ok(0)
 }
@@ -111,22 +110,19 @@ fn run_migrate(subcommand: MigrateSubcommand, args: &[String], verbose: u8) -> R
         eprintln!("Running: {}", cmd_name);
     }
 
-    let output = cmd.output().context("Failed to run prisma migrate")?;
+    let result = exec_capture(&mut cmd).context("Failed to run prisma migrate")?;
 
-    let exit_code = crate::core::utils::exit_code_from_output(&output, "prisma");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    if !output.status.success() {
-        if !stdout.trim().is_empty() {
-            eprint!("{}", stdout);
+    if !result.success() {
+        if !result.stdout.trim().is_empty() {
+            eprint!("{}", result.stdout);
         }
-        if !stderr.trim().is_empty() {
-            eprint!("{}", stderr);
+        if !result.stderr.trim().is_empty() {
+            eprint!("{}", result.stderr);
         }
         timer.track(cmd_name, &format!("rtk {}", cmd_name), &raw, &raw);
-        return Ok(exit_code);
+        return Ok(result.exit_code);
     }
 
     let filtered = match subcommand {
@@ -135,8 +131,9 @@ fn run_migrate(subcommand: MigrateSubcommand, args: &[String], verbose: u8) -> R
         MigrateSubcommand::Deploy => filter_migrate_deploy(&raw),
     };
 
-    println!("{}", filtered);
-    timer.track(cmd_name, &format!("rtk {}", cmd_name), &raw, &filtered);
+    let shown = never_worse(&raw, &filtered);
+    println!("{}", shown);
+    timer.track(cmd_name, &format!("rtk {}", cmd_name), &raw, shown);
 
     Ok(0)
 }
@@ -155,27 +152,25 @@ fn run_db_push(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: prisma db push");
     }
 
-    let output = cmd.output().context("Failed to run prisma db push")?;
+    let result = exec_capture(&mut cmd).context("Failed to run prisma db push")?;
 
-    let exit_code = crate::core::utils::exit_code_from_output(&output, "prisma");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    if !output.status.success() {
-        if !stdout.trim().is_empty() {
-            eprint!("{}", stdout);
+    if !result.success() {
+        if !result.stdout.trim().is_empty() {
+            eprint!("{}", result.stdout);
         }
-        if !stderr.trim().is_empty() {
-            eprint!("{}", stderr);
+        if !result.stderr.trim().is_empty() {
+            eprint!("{}", result.stderr);
         }
         timer.track("prisma db push", "rtk prisma db push", &raw, &raw);
-        return Ok(exit_code);
+        return Ok(result.exit_code);
     }
 
     let filtered = filter_db_push(&raw);
-    println!("{}", filtered);
-    timer.track("prisma db push", "rtk prisma db push", &raw, &filtered);
+    let shown = never_worse(&raw, &filtered);
+    println!("{}", shown);
+    timer.track("prisma db push", "rtk prisma db push", &raw, shown);
 
     Ok(0)
 }
@@ -286,7 +281,6 @@ fn filter_migrate_dev(output: &str) -> String {
 
     if !migration_name.is_empty() {
         result.push_str(&format!("Migration: {}\n", migration_name));
-        result.push_str("═══════════════════════════════════════\n");
     }
 
     result.push_str("Changes:\n");

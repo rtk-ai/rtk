@@ -1,5 +1,6 @@
 //! Filters Playwright E2E test output to show only failures.
 
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{detect_package_manager, resolved_command, strip_ansi};
 use anyhow::{Context, Result};
@@ -285,16 +286,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: playwright {}", args.join(" "));
     }
 
-    let output = cmd
-        .output()
+    let result = exec_capture(&mut cmd)
         .context("Failed to run playwright (try: npm install -g playwright)")?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
     // Parse output using PlaywrightParser
-    let parse_result = PlaywrightParser::parse(&stdout);
+    let parse_result = PlaywrightParser::parse(&result.stdout);
     let mode = FormatMode::from_verbosity(verbose);
 
     let filtered = match parse_result {
@@ -316,23 +314,19 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         }
     };
 
-    let exit_code = crate::core::utils::exit_code_from_output(&output, "playwright");
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "playwright", exit_code) {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
+    let hint = crate::core::tee::tee_and_hint(&raw, "playwright", result.exit_code);
+    let shown = crate::core::runner::emit_guarded(&filtered, hint.as_deref(), &raw);
 
     timer.track(
         &format!("playwright {}", args.join(" ")),
         &format!("rtk playwright {}", args.join(" ")),
         &raw,
-        &filtered,
+        &shown,
     );
 
     // Preserve exit code for CI/CD
-    if !output.status.success() {
-        return Ok(exit_code);
+    if !result.success() {
+        return Ok(result.exit_code);
     }
 
     Ok(0)

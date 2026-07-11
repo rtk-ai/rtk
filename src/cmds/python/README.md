@@ -7,6 +7,7 @@
 - `pytest_cmd.rs` uses a state machine text parser (no JSON available from pytest)
 - `ruff_cmd.rs` uses JSON for check mode (`--output-format=json`) and text filtering for format mode
 - `pip_cmd.rs` auto-detects `uv` as a pip alternative and routes accordingly
+- `uv_cmd.rs` preserves `uv run` environment semantics while filtering down to relevant failures
 - `python -m pytest` and `python3 -m mypy` are rewritten by the hook registry to `rtk pytest` / `rtk mypy`
 
 ## Cross-command

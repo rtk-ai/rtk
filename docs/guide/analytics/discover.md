@@ -32,7 +32,7 @@ Total missed:           23     ~66,000 tokens
 Run `rtk init --global` to capture these automatically.
 ```
 
-If commands appear in the missed list after installing RTK, it usually means the hook isn't active for that agent. See [Troubleshooting](../troubleshooting.md) — "Agent not using RTK".
+If commands appear in the missed list after installing RTK, it usually means the hook isn't active for that agent. See [Troubleshooting](../resources/troubleshooting.md) — "Agent not using RTK".
 
 ## rtk session — adoption tracking
 

@@ -1,10 +1,11 @@
 [package]
 name = "rtk"
-version = "0.34.3"
+version = "0.42.4"
 edition = "2021"
+rust-version = "1.91"
 authors = ["Patrick Szymkowiak"]
 description = "Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption"
-license = "MIT"
+license = "Apache 2.0"
 homepage = "https://www.rtk-ai.app"
 repository = "https://github.com/rtk-ai/rtk"
 readme = "README.md"
@@ -65,3 +66,7 @@ assets = [
 assets = [
     { source = "target/release/rtk", dest = "/usr/bin/rtk", mode = "755" },
 ]
+
+[lints.rust]
+unsafe_code = "deny"
+warnings = "deny"

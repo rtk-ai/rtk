@@ -32,13 +32,29 @@ cd /your/project && rtk init
 
 This installs the hook that automatically rewrites commands. Restart your AI assistant after this step.
 
+### Preview without writing: `--dry-run`
+
+To see exactly what `init` would change before it touches anything, add `--dry-run`:
+
+```bash
+rtk init --global --dry-run
+```
+
+Every would-be file create/update/patch is printed with a `[dry-run] would ...` prefix, then a `[dry-run] Nothing written.` footer. Nothing on disk is modified, no settings.json is patched, and the telemetry consent prompt is skipped. Combine with `-v` to also print the full content RTK would write:
+
+```bash
+rtk init --global --dry-run -v
+```
+
+`--dry-run` works for every init flavour (`--agent cursor`, `--gemini`, `--codex`, `--copilot`, `--uninstall`, ...). It cannot be combined with `--show`.
+
 ## Step 2: Use your tools normally
 
 Once the hook is installed, nothing changes in how you work. Your AI assistant runs commands as usual — the hook intercepts them transparently and rewrites them before execution.
 
 For example, when Claude Code runs `cargo test`, the hook rewrites it to `rtk cargo test` before it executes. The LLM receives filtered output with only the failures — not 500 lines of passing tests. You never see or type `rtk`.
 
-Supported ecosystems: Git, Cargo/Rust, JavaScript (vitest, tsc, eslint, pnpm, Next.js, Prisma), Python, Go, Ruby, .NET, Docker/Kubernetes, GitHub CLI, and more. See [What RTK Optimizes](../what-rtk-covers.md) for the full list.
+RTK covers all major ecosystems — Git, Cargo/Rust, JavaScript, Python, Go, Ruby, .NET, Docker/Kubernetes, and more. See [What RTK Optimizes](../resources/what-rtk-covers.md) for the full list.
 
 ## Step 3: Check your savings
 
@@ -65,6 +81,6 @@ rtk proxy make install
 
 ## Next steps
 
-- [What RTK Optimizes](../what-rtk-covers.md) — all supported commands and savings by ecosystem
+- [What RTK Optimizes](../resources/what-rtk-covers.md) — all supported commands and savings by ecosystem
 - [Supported agents](./supported-agents.md) — Claude Code, Cursor, Copilot, and more
 - [Configuration](./configuration.md) — customize RTK behavior

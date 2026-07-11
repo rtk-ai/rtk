@@ -164,7 +164,6 @@ pub fn filter_mypy_output(output: &str) -> String {
             errors.len(),
             by_file.len()
         ));
-        result.push_str("═══════════════════════════════════════\n");
 
         // Top error codes summary (only when 2+ distinct codes)
         let mut code_counts: Vec<_> = by_code.iter().collect();
@@ -181,7 +180,7 @@ pub fn filter_mypy_output(output: &str) -> String {
 
         // Files sorted by error count (most errors first)
         let mut files_sorted: Vec<_> = by_file.iter().collect();
-        files_sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        files_sorted.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
 
         for (file, file_errors) in &files_sorted {
             result.push_str(&format!("{} ({} errors)\n", file, file_errors.len()));

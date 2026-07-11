@@ -110,7 +110,7 @@ pub fn run(_verbose: u8) -> Result<()> {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
-        let short_id = if id.len() > 8 { &id[..8] } else { id };
+        let short_id = &id[..id.floor_char_boundary(8)];
 
         // Extract date from mtime
         let date = fs::metadata(path)

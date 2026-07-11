@@ -2,7 +2,7 @@
 title: Troubleshooting
 description: Common RTK issues and how to fix them
 sidebar:
-  order: 8
+  order: 2
 ---
 
 # Troubleshooting
