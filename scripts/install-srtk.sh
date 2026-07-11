@@ -72,7 +72,7 @@ else
 fi
 
 RTK_MD="$HOME/.claude/RTK.md"
-if [ ! -f "$RTK_MD" ] || ! grep -q 'always use `srtk`' "$RTK_MD"; then
+if [ ! -f "$RTK_MD" ] || ! grep -q '## srtk — PII Redaction' "$RTK_MD"; then
   echo "==> adding srtk note to $RTK_MD"
   cat >>"$RTK_MD" <<'EOF'
 

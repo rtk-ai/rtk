@@ -23,7 +23,11 @@ case "$CMD" in
   srtk\ *|rtk\ *|*"/srtk "*|*"/rtk "*) exit 0 ;;
 esac
 
-REWRITTEN=$("$SRTK" rewrite "$CMD" 2>/dev/null) || exit 0
+# srtk rewrite exit codes: 0 = rewritten (allow-listed), 3 = rewritten (no
+# allow rule yet — Claude will ask as usual), 1 = no equivalent, 2 = deny.
+REWRITTEN=$("$SRTK" rewrite "$CMD" 2>/dev/null)
+rc=$?
+{ [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ]; } || exit 0
 [ -n "$REWRITTEN" ] || exit 0
 
 # srtk emits "rtk ..." — force the srtk binary name.
