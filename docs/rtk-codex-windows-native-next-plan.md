@@ -621,7 +621,7 @@ Commands::Other / parse-error run_fallback
        -> PATH-resolved executable: direct argv
        -> PATH-resolved .cmd/.bat: validate batch argv, then execute resolved wrapper
        -> resolved .ps1: PowerShell -File with original argv
-       -> unresolved known cmdlet with transport-schema-valid argv: encoded PowerShell transport
+       -> unresolved known cmdlet with transport-schema-valid argv: PowerShell transport (encoded when within budget; temporary `.ps1` file otherwise)
        -> ambiguous bare PowerShell syntax: reject with explicit-host guidance
 
 Commands::Run
@@ -651,14 +651,14 @@ The schema guarantees only the explicit RTK compatibility contract above; it doe
 2. Implement `is_shell_host(name)` with case-insensitive matching for `powershell`, `powershell.exe`, `pwsh`, `pwsh.exe`, `cmd`, and `cmd.exe`.
 3. For shell hosts, resolve the requested host with `resolve_binary`, then execute `Command::new(resolved_host).args(&args[1..])` directly and return `exit_code_from_status`.
 4. Add `encode_powershell(script: &str) -> String` using UTF-16LE bytes and base64 for `powershell -EncodedCommand`.
-5. Before spawning implicit or `run -c` encoded transport, reject source over 8 KiB UTF-8 or a complete encoded command line over 30,000 UTF-16 code units. The budget is explicit: 8 KiB of UTF-8 source expands to about 16 KiB of UTF-16LE bytes and then about 21.4 KiB of base64 payload before host-argv overhead, so the 30,000-unit complete-command cap preserves headroom below the Windows 32,767-unit process limit. Return exit code `2` with explicit `.ps1` / `-File` guidance; never truncate.
+5. Before spawning implicit or `run -c` PowerShell transport, use `-EncodedCommand` only when both the 8 KiB UTF-8 source budget and the 30,000 UTF-16-unit complete encoded command-line budget are satisfied. The budget is explicit: 8 KiB of UTF-8 source expands to about 16 KiB of UTF-16LE bytes and then about 21.4 KiB of base64 payload before host-argv overhead, so the 30,000-unit complete-command cap preserves headroom below the Windows 32,767-unit process limit. When either encoded budget is exceeded, write the complete script to an automatically cleaned up UTF-8-BOM temporary `.ps1` file and invoke it with `-File`; never truncate. Detect the execution policy only for that file fallback and add process-scoped `-ExecutionPolicy Bypass` only when it is required.
 6. Add `quote_ps_literal(value: &OsStr) -> Result<String>`. Convert without `to_string_lossy`; if an `OsString` cannot be represented as valid PowerShell script text, return `RejectAmbiguous` and require direct external or explicit host execution. For valid text, single-quote the value and double embedded single quotes.
 7. Add `render_powershell_invocation(args)` for transport-only bare-cmdlet execution. Render the command name and literal values with `quote_ps_literal`. Before an RTK-only `--`, keep a parameter token bare only when it appears in the exact first-batch `CmdletTransportSpec`; after `--`, quote every token literally and omit the boundary. Treat another dash-prefixed token, a scriptblock-like token, a here-string marker, or a token that depends on unavailable syntax as `RejectAmbiguous`. Negative numbers remain quoted literal values. The rejection message must show either the `--` literal boundary or explicit `rtk powershell -NoProfile -Command ...` alternative without attempting execution.
 8. Implement `resolve_powershell_host()`. Preserve an explicitly requested host. For implicit transport, prefer `powershell.exe` to preserve current Windows behavior, then fall back to `pwsh.exe`; return a clear error if neither exists.
 9. Classify non-shell-host commands with `resolve_binary(args[0])`: `.exe` and extensionless executables use `Command::new(resolved_path).args(original_args)`. A `.ps1` file uses the resolved PowerShell host with `-File` and original argv. An unresolved name uses `PowerShellTransport` only when it is one of the four known cmdlets and `render_powershell_invocation` accepts the complete argv; otherwise use `RejectAmbiguous`.
 10. Classify `.cmd` / `.bat` as `BatchTransport`, not `DirectExternal`. Permit an argument only when it contains none of `"`, `%`, `!`, `^`, `&`, `|`, `<`, `>`, `(`, `)`, carriage return, line feed, or NUL. Empty arguments, spaces, apostrophes, Unicode, and backslashes remain allowed but require child-boundary tests. On rejection, return exit code `2` and require an explicit `rtk cmd /d /s /c <script>` invocation. Do not build a `/c` command string inside RTK.
-11. For implicit PowerShell transport, run the resolved host with `-NoProfile -EncodedCommand <encoded>`. Never add `-ExecutionPolicy Bypass` implicitly. Preserve that option only when the user supplied it to an explicit `powershell` host invocation.
-12. Define and document the Windows `Commands::Run` migration contract: keep `-c` as one Unicode script string and convert each existing positional `String` into one `OsString` without joining. `rtk run -c <script>` passes the exact script string to `run_script` and executes it through UTF-16LE `-EncodedCommand`; `rtk run <program> <args...>` calls `run_argv`, which reuses `run_other`. Resolved external programs and explicit shell hosts receive every remaining token as literal argv, including values containing `|`, `$`, braces, quotes, or empty strings; RTK must not interpret those values as shell syntax. Only unresolved commands entering implicit PowerShell transport use `CmdletTransportSpec` and `RejectAmbiguous`. This is an intentional Windows behavior change from positional string joining and requires release notes plus compatibility tests; non-Windows behavior remains unchanged in this plan.
+11. For implicit PowerShell transport, run the resolved host with `-NoProfile -EncodedCommand <encoded>` while it fits the encoded budgets. For the automatic temporary-file fallback, run `-NoProfile [-ExecutionPolicy Bypass] -File <temporary .ps1>`; the optional process-scoped bypass is permitted only when the execution-policy check requires it. Preserve a user-supplied execution-policy option unchanged for an explicit `powershell` host invocation.
+12. Define and document the Windows `Commands::Run` migration contract: keep `-c` as one Unicode script string and convert each existing positional `String` into one `OsString` without joining. `rtk run -c <script>` passes the exact script string to `run_script` and uses UTF-16LE `-EncodedCommand` when it fits the encoded budgets, otherwise the automatic UTF-8-BOM temporary `.ps1` / `-File` fallback. `rtk run <program> <args...>` calls `run_argv`, which reuses `run_other`. Resolved external programs and explicit shell hosts receive every remaining token as literal argv, including values containing `|`, `$`, braces, quotes, or empty strings; RTK must not interpret those values as shell syntax. Only unresolved commands entering implicit PowerShell transport use `CmdletTransportSpec` and `RejectAmbiguous`. This is an intentional Windows behavior change from positional string joining and requires release notes plus compatibility tests; non-Windows behavior remains unchanged in this plan.
 13. Record `DirectShellHost`, `DirectExternal`, `BatchTransport`, and `PowerShellTransport` with `track_passthrough` (0% semantic savings), not the normal optimized tracking path.
 14. Keep non-Windows `Commands::Other` and `Commands::Run` on their existing `sh -c` behavior, and keep parse-error `run_fallback` on its existing direct `resolved_command(...).args(...)` behavior. C0.5 must not unify these Unix paths under a new shell reconstruction.
 15. Add a source-level regression assertion or narrowly scoped test proving no Windows fallback execution sink is fed by `args.join(" ")`; logging and telemetry joins remain allowed, and frozen non-Windows script surfaces are excluded.
@@ -676,9 +676,9 @@ The schema guarantees only the explicit RTK compatibility contract above; it doe
 | `quotes_powershell_literal_with_single_quote` | `can't` becomes `'can''t'` |
 | `powershell_literal_rejects_non_unicode_osstring` | invalid script text is rejected without lossy replacement; direct external argv remains unaffected |
 | `encoded_command_uses_utf16le` | encoding `Write-Output 'x'` decodes to UTF-16LE script text |
-| `encoded_source_over_limit_is_rejected` | generated source larger than 8 KiB UTF-8 returns exit code 2 with `.ps1` / `-File` guidance before host spawn |
-| `encoded_command_line_over_limit_is_rejected` | a complete encoded host command line larger than 30,000 UTF-16 code units returns exit code 2 before host spawn |
-| `encoded_limit_never_truncates` | inputs at either limit execute in full; inputs over either limit are rejected, and no prefix is encoded or executed |
+| `oversized_implicit_transport_uses_file_with_bypass` | source larger than 8 KiB UTF-8 uses a complete UTF-8-BOM temporary `.ps1` through `-File`, with process-scoped bypass when required |
+| `encoded_transport_estimate_uses_actual_host_path` | a complete encoded host command line larger than 30,000 UTF-16 code units selects the temporary-file transport rather than truncating or rejecting the script |
+| `file_transport_preserves_complete_script` | inputs over either encoded budget execute their complete script through the file fallback; no prefix is encoded, written, or executed |
 | `renders_parameter_names_bare` | `["Get-Content", "-LiteralPath", "a b.txt"]` renders `-LiteralPath 'a b.txt'` |
 | `resolved_exe_uses_direct_external` | a PATH-resolved `.exe` is executed without PowerShell transport |
 | `resolved_ps1_uses_powershell_file` | a PATH-resolved `.ps1` is routed through the selected PowerShell host |
@@ -694,7 +694,8 @@ The schema guarantees only the explicit RTK compatibility contract above; it doe
 | `run_positional_preserves_literal_argv` | `rtk run <program> <args...>` renders ordered literal argv, including empty values and embedded quotes |
 | `run_positional_external_treats_operators_as_literals` | a resolved external probe receives `\|`, `$`, braces, quotes, and empty strings as unchanged argv |
 | `run_positional_unresolved_shell_text_is_rejected` | an unresolved program plus script-like argv does not become an implicitly reconstructed script and recommends `run -c` |
-| `implicit_transport_never_bypasses_execution_policy` | generated host args do not contain `-ExecutionPolicy Bypass` |
+| `short_implicit_transport_uses_encoded_command_without_policy_override` | in-budget encoded host args do not contain `-ExecutionPolicy Bypass` |
+| `execution_policy_classification_requires_bypass_only_for_restricted_or_all_signed` | file transport adds process-scoped `-ExecutionPolicy Bypass` only for `Restricted` or `AllSigned` policy |
 | `implicit_host_falls_back_to_pwsh` | `pwsh` is used when Windows PowerShell is unavailable |
 | `transport_paths_track_passthrough` | transport-only and direct-external paths record 0% semantic savings |
 | `non_windows_other_and_run_remain_sh_c` | existing non-Windows `Commands::Other` / `Commands::Run` tests still expect `sh -c` |
@@ -1639,13 +1640,14 @@ Do not add PowerShell or shell aliases such as `gc`, `gci`, `cat`, `type`, `ls`,
 | resolved `.cmd` / `.bat` receives quote, expansion, operator, parenthesis, or newline metacharacters | `BatchTransport` rejects with exit code 2 and explicit `cmd` guidance |
 | resolved `.ps1` receives quoted and Unicode arguments through `-File` | each argument reaches the script unchanged |
 | bare unresolved command contains scriptblock-like or ambiguous dash-prefixed argv | RTK does not execute a guessed command and prints explicit-shell-host guidance |
-| generated implicit PowerShell host argv | never contains an RTK-added `-ExecutionPolicy Bypass` |
+| generated implicit PowerShell host argv within encoded budgets | uses `-NoProfile -EncodedCommand` and never contains an RTK-added `-ExecutionPolicy Bypass` |
+| generated implicit PowerShell host argv over an encoded budget | uses a UTF-8-BOM temporary `.ps1` with `-File`; an RTK-added process-scoped `-ExecutionPolicy Bypass` is present only when the policy check requires it |
 | transport-only execution | no RTK semantic savings claim |
 | `rtk proxy` with multiple argv items | behavior remains unchanged and does not enter C0.5 |
 | `rtk proxy "<combined command>"` on Windows | remains the existing explicit proxy behavior; C0.5 does not copy its Bash-style splitter or claim this form is PowerShell-safe |
 | source scan of Windows fallback sinks | no `args.join(" ")` result is passed to `-Command`, `/c`, or an equivalent Windows shell parser; frozen non-Windows script surfaces are not changed by this plan |
-| generated source is larger than 8 KiB UTF-8 | exit code 2 with `.ps1` / `-File` guidance; no PowerShell host starts and no text is truncated |
-| complete encoded host command line is larger than 30,000 UTF-16 code units | exit code 2 before process creation; no prefix or partial command executes |
+| generated source is larger than 8 KiB UTF-8 | the complete source is written to an automatically cleaned up UTF-8-BOM temporary `.ps1` and executed with `-File`; no text is truncated |
+| complete encoded host command line is larger than 30,000 UTF-16 code units | the complete script uses the same temporary-file transport; no prefix or partial command executes |
 | non-Windows `Commands::Other` / `Commands::Run` | still use existing `sh -c` behavior |
 | non-Windows parse-error `run_fallback` | still executes the resolved program with original argv |
 
@@ -1726,8 +1728,8 @@ Do not add PowerShell or shell aliases such as `gc`, `gci`, `cat`, `type`, `ls`,
 | Raw PowerShell rewrite uses Bash quoting rules | High | Use the dedicated conservative PowerShell parser/renderer; prohibit `discover::lexer::shell_split` in C1 and require argv round trips |
 | Bare cmdlet argv cannot recover original PowerShell AST or quote origin | High | Accept only provably static literal/parameter shapes; reject ambiguous forms and require explicit `powershell` / `pwsh` or `rtk run` |
 | `.cmd` / `.bat` cannot provide native `.exe` argv guarantees | High | Use distinct `BatchTransport`, validate the documented safe subset, reject cmd metacharacters, and prohibit hand-built `/c` strings |
-| RTK silently overrides PowerShell execution policy | High | Never add `-ExecutionPolicy Bypass`; preserve it only on explicit user-supplied shell-host argv |
-| Base64 expansion exceeds the Windows process command-line limit or encourages silent truncation | High | Enforce the 8 KiB source and 30,000 UTF-16-unit complete-command-line caps before process creation; return exit code 2 with `.ps1` / `-File` guidance and test that no partial command executes |
+| RTK silently overrides PowerShell execution policy | High | Use process-scoped `-ExecutionPolicy Bypass` only for RTK-generated temporary `.ps1` file transport after an execution-policy check requires it; never add it to encoded transport or alter persisted policy settings |
+| Base64 expansion exceeds the Windows process command-line limit or encourages silent truncation | High | Enforce the 8 KiB source and 30,000 UTF-16-unit complete-command-line budgets for encoded transport; switch oversized scripts to an automatically cleaned up UTF-8-BOM temporary `.ps1` / `-File` transport and test that no partial command executes |
 | Upstream reconciliation deletes local Windows-native implementations | High | Treat native files as protected, port minimal blocks, inspect diffs, and run the section 0.4 gate after every patch |
 | Accidentally implementing a partial PowerShell interpreter | High | Only support explicit static command shapes |
 | Rewriting object pipeline commands into text commands incorrectly | High | Keep object pipelines passthrough except listed `Get-Content | Select-Object` windows |
@@ -1760,8 +1762,8 @@ A candidate in this document is complete only when:
 14. Batch wrappers reject the documented unsafe metacharacters and are never reported as exact native argv transport.
 15. `rtk head` output is exact and stdin tests prove it stops after N lines without EOF.
 16. Bare `Get-Command` and recursive `Get-ChildItem` produce no semantic rewrite.
-17. Generated implicit PowerShell host argv never adds `-ExecutionPolicy Bypass`.
-18. Generated PowerShell source and complete encoded host command lines enforce the documented 8 KiB and 30,000 UTF-16-unit limits before process creation; over-limit tests prove rejection without truncation or partial execution.
+17. In-budget generated implicit PowerShell host argv never adds `-ExecutionPolicy Bypass`; temporary-file fallback adds a process-scoped bypass only when the execution-policy check requires it.
+18. Generated PowerShell source and complete encoded host command lines enforce the documented 8 KiB and 30,000 UTF-16-unit budgets before encoded process creation; over-limit tests prove automatic complete-script temporary-file fallback without truncation or partial execution.
 19. Codex provider tests prove WAL writer coexistence and prove that `SQLITE_BUSY` / `SQLITE_LOCKED` after the fixed 2-second timeout produces a non-zero diagnostic rather than a zero-session success.
 20. Empty-file `rtk head` and `rtk tail` tests succeed with exactly zero stdout bytes and no omission marker.
 
@@ -1773,7 +1775,7 @@ The next practical implementation batch should be:
 
 1. Lock and record the existing Windows-native baseline and protected-file diff gate.
 2. Selectively restore upstream TOML reversible-lossiness and custom-filter trust hardening before modifying shared fallback code.
-3. Implement the Windows fallback transport runner, using direct resolved-program argv execution for external programs and encoded PowerShell only for generated scripts.
+3. Implement the Windows fallback transport runner, using direct resolved-program argv execution for external programs and encoded PowerShell for in-budget generated scripts with an automatic UTF-8-BOM temporary `.ps1` / `-File` fallback for oversized scripts.
 4. Add `Get-Content` compatibility mapped to `rtk read`.
 5. Add `CodexProvider` for `discover` / session analysis in an independent commit.
 6. Port upstream grep separator-fidelity fixes into the local native grep implementation.

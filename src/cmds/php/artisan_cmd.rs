@@ -13,7 +13,6 @@ lazy_static! {
     static ref MULTI_SPACE_RE: Regex = Regex::new(r"[ \t]{2,}").unwrap();
     static ref MULTI_BLANK_RE: Regex = Regex::new(r"\n{3,}").unwrap();
 }
-
 pub fn filter_artisan_output(output: &str) -> String {
     let mut cleaned = strip_ansi_and_controls(output);
     cleaned = BOX_CHARS_RE.replace_all(&cleaned, "").to_string();
@@ -52,4 +51,3 @@ mod tests {
         assert!(filtered.contains("OK (4 tests, 4 assertions)"));
     }
 }
-

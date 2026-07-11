@@ -19,7 +19,6 @@ fn is_progress_line(line: &str) -> bool {
 
     has_dot && progress_charset
 }
-
 pub fn filter_test_runner_output(output: &str) -> String {
     let mut lines = Vec::new();
 
@@ -82,4 +81,3 @@ mod tests {
         assert!(filtered.contains("Failed asserting true is false"));
     }
 }
-
