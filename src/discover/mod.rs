@@ -42,6 +42,7 @@ struct UnsupportedBucket {
     example: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     project: Option<&str>,
     all: bool,
@@ -94,11 +95,8 @@ pub fn run(
             provider.discover_sessions(project_filter.as_deref(), Some(since_days))?
         }
         "codex" => {
-            if project.is_some() && !all {
-                anyhow::bail!("Codex provider does not support --project yet");
-            }
             let provider = CodexProvider::new(codex_path.clone());
-            provider.discover_sessions(None, Some(since_days))?
+            provider.discover_sessions(if all { None } else { project }, Some(since_days))?
         }
         "all" => {
             let claude = ClaudeProvider;

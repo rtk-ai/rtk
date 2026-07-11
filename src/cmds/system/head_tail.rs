@@ -15,7 +15,7 @@ enum Mode {
 #[derive(Debug, PartialEq, Eq)]
 struct Spec {
     lines: usize,
-    file: PathBuf,
+    files: Vec<PathBuf>,
 }
 
 pub fn run_head(args: &[String]) -> Result<i32> {
@@ -31,18 +31,52 @@ pub fn run_tail(args: &[String]) -> Result<i32> {
 fn run_spec(mode: Mode, spec: Spec) -> Result<i32> {
     let stdout = io::stdout();
     let mut output = stdout.lock();
-    if spec.file == PathBuf::from("-") {
-        let stdin = io::stdin();
-        let input = stdin.lock();
-        write_window(mode, input, &mut output, spec.lines)?;
-        return Ok(0);
+    run_with_writer(mode, &spec, &mut output)
+}
+
+fn run_with_writer<W: Write>(mode: Mode, spec: &Spec, writer: &mut W) -> Result<i32> {
+    let multiple_files = spec.files.len() > 1;
+    let mut exit_code = 0;
+
+    for (index, path) in spec.files.iter().enumerate() {
+        if multiple_files {
+            if index > 0 {
+                writeln!(writer)?;
+            }
+            writeln!(writer, "==> {} <==", path.display())?;
+        }
+
+        let result = if path == std::path::Path::new("-") {
+            let stdin = io::stdin();
+            let input = stdin.lock();
+            write_window(mode, input, &mut *writer, spec.lines)
+        } else {
+            match File::open(path) {
+                Ok(file) => write_window(mode, BufReader::new(file), &mut *writer, spec.lines),
+                Err(err) => {
+                    eprintln!("rtk {}: cannot open {}: {err}", mode.name(), path.display());
+                    exit_code = 1;
+                    continue;
+                }
+            }
+        };
+
+        if let Err(err) = result {
+            eprintln!("rtk {}: cannot read {}: {err}", mode.name(), path.display());
+            exit_code = 1;
+        }
     }
 
-    let file = File::open(&spec.file)
-        .with_context(|| format!("failed to open file: {}", spec.file.display()))?;
-    let input = BufReader::new(file);
-    write_window(mode, input, &mut output, spec.lines)?;
-    Ok(0)
+    Ok(exit_code)
+}
+
+impl Mode {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Head => "head",
+            Self::Tail => "tail",
+        }
+    }
 }
 
 fn write_window<R: io::BufRead, W: Write>(
@@ -59,7 +93,7 @@ fn write_window<R: io::BufRead, W: Write>(
 
 fn parse(mode: Mode, args: &[String]) -> Result<Spec> {
     let mut lines = 10usize;
-    let mut file: Option<PathBuf> = None;
+    let mut files = Vec::new();
     let mut i = 0;
 
     while i < args.len() {
@@ -97,16 +131,17 @@ fn parse(mode: Mode, args: &[String]) -> Result<Spec> {
             return Err(anyhow!("unsupported option: {token}"));
         }
 
-        if file.is_some() {
-            return Err(anyhow!("multiple files are unsupported"));
-        }
-        file = Some(PathBuf::from(token));
+        files.push(PathBuf::from(token));
         i += 1;
+    }
+
+    if files.is_empty() {
+        return Err(anyhow!("usage: rtk {} [OPTION]... FILE...", mode.name()));
     }
 
     Ok(Spec {
         lines,
-        file: file.ok_or_else(|| anyhow!("missing file"))?,
+        files,
     })
 }
 
@@ -134,7 +169,7 @@ mod tests {
             parse(Mode::Head, &["foo.txt".to_string()]).unwrap(),
             Spec {
                 lines: 10,
-                file: PathBuf::from("foo.txt"),
+                files: vec![PathBuf::from("foo.txt")],
             }
         );
     }
@@ -160,8 +195,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_head_multiple_files_rejected() {
-        assert!(parse(Mode::Head, &["a".to_string(), "b".to_string()]).is_err());
+    fn parse_head_accepts_multiple_files() {
+        assert_eq!(
+            parse(Mode::Head, &["a".to_string(), "b".to_string()])
+                .unwrap()
+                .files,
+            vec![PathBuf::from("a"), PathBuf::from("b")]
+        );
+    }
+
+    #[test]
+    fn parse_head_without_a_file_returns_usage() {
+        assert!(parse(Mode::Head, &[]).unwrap_err().to_string().starts_with("usage:"));
     }
 
     #[test]
@@ -170,7 +215,7 @@ mod tests {
             parse(Mode::Tail, &["foo.txt".to_string()]).unwrap(),
             Spec {
                 lines: 10,
-                file: PathBuf::from("foo.txt"),
+                files: vec![PathBuf::from("foo.txt")],
             }
         );
     }
@@ -194,8 +239,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_tail_multiple_files_rejected() {
-        assert!(parse(Mode::Tail, &["a".to_string(), "b".to_string()]).is_err());
+    fn parse_tail_accepts_multiple_files() {
+        assert_eq!(
+            parse(Mode::Tail, &["a".to_string(), "b".to_string()])
+                .unwrap()
+                .files,
+            vec![PathBuf::from("a"), PathBuf::from("b")]
+        );
     }
 
     #[test]
@@ -235,5 +285,54 @@ mod tests {
         let mut out = Vec::new();
         write_window(Mode::Tail, Cursor::new("a\nb\n"), &mut out, 0).unwrap();
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn run_with_writer_adds_headers_and_blank_lines_for_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        std::fs::write(&first, "first\nignored\n").unwrap();
+        std::fs::write(&second, "second\nignored\n").unwrap();
+        let spec = Spec {
+            lines: 1,
+            files: vec![first.clone(), second.clone()],
+        };
+        let mut output = Vec::new();
+
+        assert_eq!(run_with_writer(Mode::Head, &spec, &mut output).unwrap(), 0);
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            format!(
+                "==> {} <==\nfirst\n\n==> {} <==\nsecond\n",
+                first.display(),
+                second.display()
+            )
+        );
+    }
+
+    #[test]
+    fn run_with_writer_continues_after_a_file_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.txt");
+        let readable = dir.path().join("readable.txt");
+        std::fs::write(&readable, "available\n").unwrap();
+        let spec = Spec {
+            lines: 10,
+            files: vec![missing.clone(), readable.clone()],
+        };
+        let mut output = Vec::new();
+
+        assert_eq!(run_with_writer(Mode::Head, &spec, &mut output).unwrap(), 1);
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            format!(
+                "==> {} <==\n\n==> {} <==\navailable\n",
+                missing.display(),
+                readable.display()
+            )
+        );
     }
 }

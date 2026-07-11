@@ -3,7 +3,9 @@
 use anyhow::{anyhow, Result};
 #[cfg(not(target_os = "windows"))]
 use crate::core::utils::{exit_code_from_status, resolved_command};
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
+use std::io::Write;
+#[cfg(any(target_os = "windows", test))]
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -47,7 +49,9 @@ fn run_native(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running native du {}", args.join(" "));
     }
 
-    match native_du_output(&options) {
+    let stderr = std::io::stderr();
+    let mut errors = stderr.lock();
+    match native_du_output(&options, &mut errors) {
         Ok(output) => {
             print!("{output}");
             Ok(0)
@@ -178,14 +182,20 @@ fn set_depth(options: &mut DuOptions, raw: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
-fn native_du_output(options: &DuOptions) -> Result<String> {
+#[cfg(any(target_os = "windows", test))]
+fn native_du_output<W: Write>(options: &DuOptions, errors: &mut W) -> Result<String> {
     let mut output = String::new();
     for path in &options.paths {
-        let metadata = std::fs::symlink_metadata(path)
-            .map_err(|err| anyhow!("{}: {}", path.display(), err))?;
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                report_access_error(errors, path, &err)?;
+                continue;
+            }
+        };
         let mut rows = Vec::new();
-        let size = collect_path_size(path, &metadata, 0, options, &mut rows)?;
+        let size = collect_path_size(path, &metadata, 0, options, &mut rows, errors)?;
         if options.summarize || options.max_depth.is_none() {
             output.push_str(&format!(
                 "{}\t{}\n",
@@ -206,13 +216,14 @@ fn native_du_output(options: &DuOptions) -> Result<String> {
     Ok(output)
 }
 
-#[cfg(target_os = "windows")]
-fn collect_path_size(
+#[cfg(any(target_os = "windows", test))]
+fn collect_path_size<W: Write>(
     path: &Path,
     metadata: &std::fs::Metadata,
     depth: usize,
     options: &DuOptions,
     rows: &mut Vec<(usize, PathBuf, u64)>,
+    errors: &mut W,
 ) -> Result<u64> {
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         let size = metadata.len();
@@ -223,20 +234,44 @@ fn collect_path_size(
     }
 
     let mut total = 0u64;
-    for entry in std::fs::read_dir(path)? {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => {
+            report_access_error(errors, path, &err)?;
+            return Ok(0);
+        }
+    };
+
+    for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
-            Err(_) => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                report_access_error(errors, path, &err)?;
+                continue;
+            }
         };
         let child_path = entry.path();
         let child_metadata = match child_path.symlink_metadata() {
             Ok(metadata) => metadata,
-            Err(_) => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                report_access_error(errors, &child_path, &err)?;
+                continue;
+            }
         };
         if child_metadata.file_type().is_symlink() {
             continue;
         }
-        let child_size = collect_path_size(&child_path, &child_metadata, depth + 1, options, rows)?;
+        let child_size = collect_path_size(
+            &child_path,
+            &child_metadata,
+            depth + 1,
+            options,
+            rows,
+            errors,
+        )?;
         total = total.saturating_add(child_size);
     }
 
@@ -244,6 +279,11 @@ fn collect_path_size(
         rows.push((depth, path.to_path_buf(), total));
     }
     Ok(total)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn report_access_error<W: Write>(errors: &mut W, path: &Path, err: &std::io::Error) -> std::io::Result<()> {
+    writeln!(errors, "rtk du: cannot access {}: {err}", path.display())
 }
 
 #[cfg(target_os = "windows")]
@@ -331,9 +371,11 @@ mod tests {
             paths: vec![file.clone()],
             ..DuOptions::default()
         };
-        let output = native_du_output(&options).unwrap();
+        let mut errors = Vec::new();
+        let output = native_du_output(&options, &mut errors).unwrap();
 
         assert_eq!(output, format!("5\t{}\n", file.display()));
+        assert!(errors.is_empty());
     }
 
     #[cfg(target_os = "windows")]
@@ -351,11 +393,46 @@ mod tests {
             paths: vec![dir.path().to_path_buf()],
             ..DuOptions::default()
         };
-        let output = native_du_output(&options).unwrap();
+        let mut errors = Vec::new();
+        let output = native_du_output(&options, &mut errors).unwrap();
 
         assert!(output.contains(&format!("8\t{}", dir.path().display())));
         assert!(output.contains(&format!("5\t{}", child_dir.display())));
         assert!(output.contains(&format!("3\t{}", direct_file.display())));
         assert!(!output.contains("nested.txt"));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_native_du_skips_missing_paths_without_diagnostics() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = DuOptions {
+            paths: vec![dir.path().join("missing")],
+            ..DuOptions::default()
+        };
+        let mut errors = Vec::new();
+
+        let output = native_du_output(&options, &mut errors).unwrap();
+
+        assert!(output.is_empty());
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_report_access_error_uses_the_rtk_du_prefix() {
+        let path = PathBuf::from("blocked");
+        let mut errors = Vec::new();
+
+        report_access_error(
+            &mut errors,
+            &path,
+            &std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(errors).unwrap(),
+            "rtk du: cannot access blocked: denied\n"
+        );
     }
 }

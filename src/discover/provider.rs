@@ -336,6 +336,9 @@ pub struct CodexProvider {
     db_path_override: Option<PathBuf>,
 }
 
+const CODEX_PROJECT_FILTER_UNSUPPORTED: &str =
+    "Codex provider does not support --project: no reliable project/cwd metadata is available in logs";
+
 struct CodexScanDiagnostics {
     elapsed: Duration,
     selected_rows: usize,
@@ -600,7 +603,10 @@ impl SessionProvider for CodexProvider {
         since_days: Option<u64>,
     ) -> Result<Vec<SessionRef>> {
         if project_filter.is_some() {
-            anyhow::bail!("Codex provider does not support --project yet");
+            // Follow-up: add SessionRef::project_path and canonical project filtering only
+            // when Codex persists a documented, per-thread cwd/project field. Do not infer
+            // project identity from a database path or thread ID.
+            anyhow::bail!(CODEX_PROJECT_FILTER_UNSUPPORTED);
         }
         let Some(path) = self.selected_db_path() else {
             return Ok(Vec::new());
@@ -1232,6 +1238,27 @@ mod tests {
         assert!(
             message.contains("locked") || message.contains("busy"),
             "expected lock diagnostic, got: {message}"
+        );
+    }
+
+    #[test]
+    fn codex_project_filter_is_rejected_without_reliable_metadata() {
+        let db = create_codex_db();
+        insert_codex_log(
+            db.path(),
+            CodexProvider::cutoff_unix(None) + 1,
+            0,
+            "thread-that-must-not-be-used-as-a-project",
+            r#"ToolCall: shell_command {\"command\":\"rtk ls\"}"#,
+        );
+
+        let err = CodexProvider::new(Some(db.path().to_path_buf()))
+            .discover_sessions(Some("rtk"), None)
+            .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "Codex provider does not support --project: no reliable project/cwd metadata is available in logs"
         );
     }
 }

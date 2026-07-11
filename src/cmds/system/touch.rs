@@ -10,19 +10,25 @@ pub fn run(path: &Path) -> Result<i32> {
         return Ok(1);
     }
 
-    match OpenOptions::new().create(true).append(true).open(path) {
-        Ok(file) => {
-            if let Err(err) = file.set_modified(SystemTime::now()) {
-                eprintln!("rtk touch: {}: {}", path.display(), err);
-                return Ok(1);
-            }
-            Ok(0)
-        }
+    let file = match OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+    {
+        Ok(file) => file,
         Err(err) => {
             eprintln!("rtk touch: {}: {}", path.display(), err);
-            Ok(1)
+            return Ok(1);
         }
+    };
+
+    if let Err(err) = file.set_modified(SystemTime::now()) {
+        eprintln!("rtk touch: {}: {}", path.display(), err);
+        return Ok(1);
     }
+
+    Ok(0)
 }
 
 #[cfg(test)]
@@ -50,12 +56,20 @@ mod tests {
     }
 
     #[test]
+    fn touch_source_does_not_enable_append_mode() {
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cmds/system/touch.rs"));
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains("append"));
+    }
+
+    #[test]
     fn touch_updates_mtime() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("mtime.txt");
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(false)
             .open(&path)
             .unwrap();
         writeln!(file, "content").unwrap();

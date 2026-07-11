@@ -92,13 +92,13 @@ fn format_df_rows(mut rows: Vec<DfRow>, human: bool) -> String {
             .used
             .saturating_mul(100)
             .checked_div(row.total)
-            .map(|percent| percent.to_string())
-            .unwrap_or_else(|| "?".to_string());
+            .map(|percent| format!("{percent}%"))
+            .unwrap_or_else(|| "-".to_string());
         let size = format_size(row.total, human);
         let used = format_size(row.used, human);
         let available = format_size(row.available, human);
         output.push_str(&format!(
-            "{} {size} {used} {available} {use_percent}%\n",
+            "{} {size} {used} {available} {use_percent}\n",
             row.mount
         ));
     }
@@ -178,7 +178,7 @@ mod tests {
 
         assert_eq!(
             output,
-            "Filesystem Size Used Avail Use%\nC:\\ 1.0K 256B 768B 25%\nZ:\\ 0B 0B 0B ?%\n"
+            "Filesystem Size Used Avail Use%\nC:\\ 1.0K 256B 768B 25%\nZ:\\ 0B 0B 0B -\n"
         );
     }
 }

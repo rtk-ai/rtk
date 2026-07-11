@@ -5,6 +5,7 @@ use anyhow::Result;
 #[derive(Debug, PartialEq, Eq)]
 struct MkdirSpec {
     path: PathBuf,
+    parents: bool,
 }
 
 pub fn run(args: &[String]) -> Result<i32> {
@@ -21,7 +22,13 @@ pub fn run(args: &[String]) -> Result<i32> {
         return Ok(1);
     }
 
-    if let Err(err) = std::fs::create_dir_all(&spec.path) {
+    let create_result = if spec.parents {
+        std::fs::create_dir_all(&spec.path)
+    } else {
+        std::fs::create_dir(&spec.path)
+    };
+
+    if let Err(err) = create_result {
         eprintln!("rtk mkdir: {}: {}", spec.path.display(), err);
         return Ok(1);
     }
@@ -55,12 +62,9 @@ fn parse(args: &[String]) -> std::result::Result<MkdirSpec, String> {
         path = Some(PathBuf::from(token));
     }
 
-    if !parents {
-        return Err("requires -p or --parents".to_string());
-    }
-
     Ok(MkdirSpec {
         path: path.ok_or_else(|| "missing path".to_string())?,
+        parents,
     })
 }
 
@@ -88,9 +92,35 @@ mod tests {
     }
 
     #[test]
-    fn mkdir_without_p_rejected() {
-        let args = vec!["target".to_string()];
-        assert_eq!(run(&args).unwrap(), 2);
+    fn mkdir_without_p_creates_single_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("target");
+        let args = vec![path.to_string_lossy().to_string()];
+        assert_eq!(run(&args).unwrap(), 0);
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn mkdir_without_p_fails_when_parent_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("missing").join("target");
+        let args = vec![path.to_string_lossy().to_string()];
+        assert_eq!(run(&args).unwrap(), 1);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn mkdir_without_arguments_returns_usage_error() {
+        assert_eq!(run(&[]).unwrap(), 2);
+    }
+
+    #[test]
+    fn mkdir_without_p_fails_for_existing_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("existing");
+        fs::create_dir(&path).unwrap();
+        let args = vec![path.to_string_lossy().to_string()];
+        assert_eq!(run(&args).unwrap(), 1);
     }
 
     #[test]

@@ -29,6 +29,7 @@ $CmdProbe = Join-Path $FixtureRoot "scripts\argv-probe.cmd"
 $TouchFile = Join-Path $Scratch "touch created file.txt"
 $TouchExisting = Join-Path $Scratch "touch existing file.txt"
 $MkdirTarget = Join-Path $Scratch "mkdir target\a b\c"
+$MkdirSingleTarget = Join-Path $Scratch "mkdir single target"
 $ExistingDir = Join-Path $Scratch "already-there"
 $ExistingFile = Join-Path $Scratch "file-blocks-mkdir.txt"
 $LongLiteralFile = Join-Path $Scratch "long-literal.txt"
@@ -239,20 +240,20 @@ Check -Name "Get-Command bare transports" -Argv @("Get-Command", "cargo") -Needl
 Check -Name "Get-Command syntax transports" -Argv @("Get-Command", "-Syntax", "cargo") -Needles @("cargo")
 Check -Name "which cargo" -Argv @("which", "cargo") -Needles @("cargo")
 Check -Name "which missing returns 1" -Argv @("which", "rtk-definitely-missing-command-for-acceptance") -ExpectedCode 1 -Needles @("not found")
-Check -Name "which path-like name is not found" -Argv @("which", ".\cargo") -ExpectedCode 1 -Needles @("not found")
+Check -Name "which path-like name is unsupported" -Argv @("which", ".\cargo") -ExpectedCode 1 -Needles @("path-like name '.\cargo' is unsupported; pass a command name from PATH")
 
 Check -Name "head default 10 lines" -Argv @("head", $HeadTailFile) -Needles @("line 01", "line 10") -Absent @("line 11", "omitted")
 Check -Name "head -n 2" -Argv @("head", "-n", "2", $HeadTailFile) -Needles @("line 01", "line 02") -Absent @("line 03", "omitted")
 Check -Name "head compact -3" -Argv @("head", "-3", $HeadTailFile) -Needles @("line 03") -Absent @("line 04", "omitted")
 CheckStdoutExact -Name "head empty file exact zero stdout" -Argv @("head", $EmptyFile) -ExpectedStdout ""
-Check -Name "head rejects multiple files" -Argv @("head", $HeadTailFile, $QuoteFile) -ExpectedCode 1 -Needles @("multiple files")
+CheckStdoutExact -Name "head multiple files have headers and separator" -Argv @("head", "-n", "1", $HeadTailFile, $HeadTailFile) -ExpectedStdout @("==> $HeadTailFile <==`nline 01`n`n==> $HeadTailFile <==`nline 01`n", "==> $HeadTailFile <==`r`nline 01`r`n`r`n==> $HeadTailFile <==`r`nline 01`r`n")
 Check -Name "head stdin stops after N lines" -Argv @("head", "-n", "2", "-") -Stdin "stdin 1`nstdin 2`nstdin 3`n" -Needles @("stdin 1", "stdin 2") -Absent @("stdin 3", "omitted")
 
 Check -Name "tail default 10 lines" -Argv @("tail", $HeadTailFile) -Needles @("line 03", "line 12") -Absent @("line 02", "omitted")
 Check -Name "tail -n 2" -Argv @("tail", "-n", "2", $HeadTailFile) -Needles @("line 11", "line 12") -Absent @("line 10", "omitted")
 CheckStdoutExact -Name "tail empty file exact zero stdout" -Argv @("tail", $EmptyFile) -ExpectedStdout ""
 Check -Name "tail -f rejected" -Argv @("tail", "-f", $HeadTailFile) -ExpectedCode 1 -Needles @("unsupported")
-Check -Name "tail rejects multiple files" -Argv @("tail", $HeadTailFile, $QuoteFile) -ExpectedCode 1 -Needles @("multiple files")
+CheckStdoutExact -Name "tail multiple files have headers and separator" -Argv @("tail", "-n", "1", $HeadTailFile, $HeadTailFile) -ExpectedStdout @("==> $HeadTailFile <==`nline 12`n`n==> $HeadTailFile <==`nline 12`n", "==> $HeadTailFile <==`r`nline 12`r`n`r`n==> $HeadTailFile <==`r`nline 12`r`n")
 Check -Name "tail stdin bounded output" -Argv @("tail", "-n", "2", "-") -Stdin "stdin 1`nstdin 2`nstdin 3`n" -Needles @("stdin 2", "stdin 3") -Absent @("stdin 1", "omitted")
 
 Check -Name "pwd" -Argv @("pwd") -Needles @($Repo)
@@ -267,7 +268,8 @@ Check -Name "touch rejects directory" -Argv @("touch", $ExistingDir) -ExpectedCo
 Check -Name "mkdir -p nested spaces" -Argv @("mkdir", "-p", $MkdirTarget)
 if (Test-Path -LiteralPath $MkdirTarget) { Add-Result "mkdir -p target exists" "PASS" } else { Add-Result "mkdir -p target exists" "FAIL" "missing $MkdirTarget" }
 Check -Name "mkdir -p existing directory succeeds" -Argv @("mkdir", "-p", $ExistingDir)
-Check -Name "mkdir without -p rejected" -Argv @("mkdir", (Join-Path $Scratch "no-p")) -ExpectedCode 2 -Needles @("-p")
+Check -Name "mkdir without -p creates single directory" -Argv @("mkdir", $MkdirSingleTarget)
+if (Test-Path -LiteralPath $MkdirSingleTarget) { Add-Result "mkdir single target exists" "PASS" } else { Add-Result "mkdir single target exists" "FAIL" "missing $MkdirSingleTarget" }
 Check -Name "mkdir -p existing file fails" -Argv @("mkdir", "-p", $ExistingFile) -ExpectedCode 1
 
 Check -Name "ls fixture root" -Argv @("ls", $FixtureRoot) -Needles @("quote-and-wildcard.txt")
@@ -320,6 +322,7 @@ CheckRewrite -Name "rewrite Get-Command bare none" -Raw "Get-Command cargo" -NoR
 CheckRewrite -Name "rewrite Get-Command syntax none" -Raw "Get-Command -Syntax cargo" -NoRewrite
 CheckRewrite -Name "rewrite where.exe none" -Raw "where.exe cargo" -NoRewrite
 CheckRewrite -Name "rewrite which" -Raw "which cargo" -Expected "rtk which cargo"
+CheckRewrite -Name "rewrite stop-parsing token none" -Raw "Get-Content --% literal.txt" -NoRewrite
 CheckRewrite -Name "rewrite head exact" -Raw "head -n 2 tests/fixtures/windows-native/head-tail.txt" -Expected "rtk head"
 CheckRewrite -Name "rewrite tail -f none" -Raw "tail -f tests/fixtures/windows-native/head-tail.txt" -NoRewrite
 

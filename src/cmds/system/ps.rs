@@ -49,7 +49,7 @@ fn run_native(args: &[String], verbose: u8) -> Result<i32> {
 
 #[cfg(target_os = "windows")]
 fn native_ps_output() -> String {
-    let mut system = sysinfo::System::new_all();
+    let mut system = sysinfo::System::new();
     system.refresh_processes();
 
     let rows: Vec<(u32, String)> = system
@@ -94,5 +94,14 @@ mod tests {
         ]);
 
         assert_eq!(output, "PID NAME\n7 alpha.exe\n42 beta.exe\n");
+    }
+
+    #[test]
+    fn native_process_listing_uses_the_lightweight_system_constructor() {
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cmds/system/ps.rs"));
+        let forbidden_constructor = ["System::new", "_all"].concat();
+
+        assert!(source.contains("System::new();"));
+        assert!(!source.contains(&forbidden_constructor));
     }
 }

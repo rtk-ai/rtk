@@ -4,7 +4,7 @@ use crate::core::utils::resolve_binary;
 
 pub fn run(name: &str) -> Result<i32> {
     if name.contains('/') || name.contains('\\') {
-        eprintln!("rtk which: {name} not found");
+        eprintln!("{}", path_like_name_error(name));
         return Ok(1);
     }
 
@@ -18,6 +18,10 @@ pub fn run(name: &str) -> Result<i32> {
             Ok(1)
         }
     }
+}
+
+fn path_like_name_error(name: &str) -> String {
+    format!("rtk which: path-like name '{name}' is unsupported; pass a command name from PATH")
 }
 
 #[cfg(test)]
@@ -34,5 +38,13 @@ mod tests {
     fn which_rejects_path_like_name() {
         let code = run("foo/bar").unwrap();
         assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn path_like_name_error_is_actionable() {
+        assert_eq!(
+            path_like_name_error("foo/bar"),
+            "rtk which: path-like name 'foo/bar' is unsupported; pass a command name from PATH"
+        );
     }
 }

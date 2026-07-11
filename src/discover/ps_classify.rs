@@ -356,6 +356,18 @@ fn is_supported_utf8_encoding(value: &str) -> bool {
 }
 
 fn is_dynamic_or_provider_path(value: &str) -> bool {
+    if let Some(unc_path) = value.strip_prefix(r"\\") {
+        let mut components = unc_path.split('\\');
+        let server = components.next().unwrap_or_default();
+        let share = components.next().unwrap_or_default();
+        let static_share =
+            !share.is_empty() && share.ends_with('$') && !share[..share.len() - 1].contains('$');
+
+        return server.contains('$')
+            || (share.contains('$') && !static_share)
+            || components.any(|component| component.contains('$'));
+    }
+
     if value.contains('$')
         || value.contains('`')
         || value.contains("$(")
@@ -422,6 +434,56 @@ mod tests {
             rewrite_get_content_raw("Get-Content $env:TEMP\\a.txt"),
             None
         );
+    }
+
+    #[test]
+    fn rewrite_get_content_raw_unc_admin_and_dollar_shares() {
+        assert_eq!(
+            rewrite_get_content_raw(r"Get-Content \\server\c$\x.txt"),
+            Some(r"rtk read \\server\c$\x.txt".to_string())
+        );
+        assert_eq!(
+            rewrite_get_content_raw(r"Get-Content \\server\share$\x.txt"),
+            Some(r"rtk read \\server\share$\x.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn rewrite_get_content_stop_parsing_passthrough() {
+        assert_eq!(rewrite_get_content_raw("Get-Content --% literal.txt"), None);
+    }
+
+    #[test]
+    fn rewrite_get_content_variable_unc_share_passthrough() {
+        assert_eq!(
+            rewrite_get_content_raw(r"Get-Content \\server\$share\x.txt"),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_get_content_subexpression_passthrough() {
+        assert_eq!(
+            rewrite_get_content_raw("Get-Content $(Join-Path $env:TEMP x.txt)"),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_get_content_embedded_variable_passthrough() {
+        assert_eq!(rewrite_get_content_raw("Get-Content file$number.txt"), None);
+    }
+
+    #[test]
+    fn unc_admin_and_dollar_share_paths_are_static() {
+        assert!(!is_dynamic_or_provider_path(r"\\server\c$"));
+        assert!(!is_dynamic_or_provider_path(r"\\server\share$\dir"));
+    }
+
+    #[test]
+    fn unc_path_with_variable_share_is_dynamic() {
+        assert!(is_dynamic_or_provider_path(r"\\server\$share"));
+        assert!(is_dynamic_or_provider_path(r"$env:TEMP\a.txt"));
     }
 
     #[test]
