@@ -1221,6 +1221,27 @@ rtk init --show                 # Verifier l'installation
 rtk init -g --uninstall         # Desinstaller
 ```
 
+### OpenCode
+
+OpenCode utilise le plugin TypeScript global RTK, installe dans
+`~/.config/opencode/plugins/rtk.ts`. Les deux formes suivantes sont équivalentes :
+
+```bash
+rtk init -g --opencode              # alias compatible
+rtk init -g --agent opencode        # forme recommandée
+```
+
+Le plugin intercepte `tool.execute.before`, transmet la commande à `rtk rewrite`
+et remplace la commande lorsque RTK connaît un équivalent. Les commandes sans
+réécriture restent inchangées (passthrough). Cette intégration est globale :
+OpenCode ne prend pas en charge l'installation par projet.
+
+```bash
+rtk init --show
+rtk init -g --uninstall --agent opencode
+rtk uninstall -g --agent opencode
+```
+
 ### Fichiers installes
 
 | Fichier | Description |

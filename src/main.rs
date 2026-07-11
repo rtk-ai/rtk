@@ -54,6 +54,8 @@ pub enum AgentTarget {
     Hermes,
     /// Factory Droid CLI
     Droid,
+    /// OpenCode (global TypeScript plugin)
+    Opencode,
 }
 
 #[derive(Parser)]
@@ -421,6 +423,21 @@ enum Commands {
         copilot: bool,
         /// Preview changes without writing any files (combine with -v to show content)
         #[arg(long = "dry-run", conflicts_with = "show")]
+        dry_run: bool,
+    },
+
+    /// Remove RTK artifacts for an assistant integration
+    Uninstall {
+        /// Remove global assistant configuration instead of project files
+        #[arg(short, long)]
+        global: bool,
+
+        /// Target agent integration to remove
+        #[arg(long, value_enum)]
+        agent: Option<AgentTarget>,
+
+        /// Preview changes without deleting any files
+        #[arg(long)]
         dry_run: bool,
     },
 
@@ -1618,12 +1635,90 @@ fn main() {
     std::process::exit(code);
 }
 
-fn uninstall_init_dispatch<UninstallHermes, UninstallDroid, UninstallStandard>(
+fn uninstall_opencode_dispatch<UninstallOpencode>(
+    global: bool,
+    ctx: hooks::init::InitContext,
+    uninstall_opencode: UninstallOpencode,
+) -> Result<()>
+where
+    UninstallOpencode: FnOnce(hooks::init::InitContext) -> Result<()>,
+{
+    if !global {
+        anyhow::bail!("OpenCode plugin is global-only. Use: rtk init -g --agent opencode");
+    }
+    uninstall_opencode(ctx)
+}
+
+fn uninstall_top_level_dispatch<UninstallOpencode>(
+    agent: Option<AgentTarget>,
+    global: bool,
+    ctx: hooks::init::InitContext,
+    uninstall_opencode: UninstallOpencode,
+) -> Result<()>
+where
+    UninstallOpencode: FnOnce(hooks::init::InitContext) -> Result<()>,
+{
+    match agent {
+        Some(AgentTarget::Opencode) => {
+            if !global {
+                anyhow::bail!(
+                    "OpenCode plugin is global-only. Use: rtk uninstall -g --agent opencode"
+                );
+            }
+            uninstall_opencode(ctx)
+        }
+        Some(agent) => {
+            let agent_name = agent
+                .to_possible_value()
+                .map(|value| value.get_name().to_owned())
+                .unwrap_or_else(|| "<agent>".to_owned());
+            anyhow::bail!(
+                "Top-level uninstall only supports OpenCode. Use: rtk init -g --uninstall --agent {agent_name}"
+            );
+        }
+        None => anyhow::bail!(
+            "Top-level uninstall requires --agent opencode. Use: rtk uninstall -g --agent opencode"
+        ),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TopLevelUninstallOptions {
+    global: bool,
+    agent: Option<AgentTarget>,
+    dry_run: bool,
+}
+
+fn uninstall_top_level_command_dispatch<UninstallOpencode>(
+    options: TopLevelUninstallOptions,
+    verbose: u8,
+    uninstall_opencode: UninstallOpencode,
+) -> Result<()>
+where
+    UninstallOpencode: FnOnce(hooks::init::InitContext) -> Result<()>,
+{
+    uninstall_top_level_dispatch(
+        options.agent,
+        options.global,
+        hooks::init::InitContext {
+            verbose,
+            dry_run: options.dry_run,
+        },
+        uninstall_opencode,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct UninstallInitOptions {
     agent: Option<AgentTarget>,
     global: bool,
     gemini: bool,
     codex: bool,
     ctx: hooks::init::InitContext,
+}
+
+fn uninstall_init_dispatch<UninstallHermes, UninstallDroid, UninstallStandard>(
+    options: UninstallInitOptions,
     uninstall_hermes: UninstallHermes,
     uninstall_droid: UninstallDroid,
     uninstall_standard: UninstallStandard,
@@ -1633,14 +1728,21 @@ where
     UninstallDroid: FnOnce(bool, hooks::init::InitContext) -> Result<()>,
     UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
-    if agent == Some(AgentTarget::Hermes) {
-        uninstall_hermes(ctx)
-    } else if agent == Some(AgentTarget::Droid) {
-        uninstall_droid(global, ctx)
+    if options.agent == Some(AgentTarget::Hermes) {
+        uninstall_hermes(options.ctx)
+    } else if options.agent == Some(AgentTarget::Droid) {
+        uninstall_droid(options.global, options.ctx)
     } else {
-        let cursor = agent == Some(AgentTarget::Cursor);
-        let pi = agent == Some(AgentTarget::Pi);
-        uninstall_standard(global, gemini, codex, cursor, pi, ctx)
+        let cursor = options.agent == Some(AgentTarget::Cursor);
+        let pi = options.agent == Some(AgentTarget::Pi);
+        uninstall_standard(
+            options.global,
+            options.gemini,
+            options.codex,
+            cursor,
+            pi,
+            options.ctx,
+        )
     }
 }
 
@@ -2099,16 +2201,22 @@ fn run_cli() -> Result<i32> {
                     hooks::init::uninstall_copilot(ctx)?;
                 }
             } else if uninstall {
-                uninstall_init_dispatch(
-                    agent,
-                    global,
-                    gemini,
-                    codex,
-                    ctx,
-                    hooks::init::uninstall_hermes,
-                    hooks::init::uninstall_droid,
-                    hooks::init::uninstall,
-                )?;
+                if agent == Some(AgentTarget::Opencode) {
+                    uninstall_opencode_dispatch(global, ctx, hooks::init::uninstall_opencode)?;
+                } else {
+                    uninstall_init_dispatch(
+                        UninstallInitOptions {
+                            agent,
+                            global,
+                            gemini,
+                            codex,
+                            ctx,
+                        },
+                        hooks::init::uninstall_hermes,
+                        hooks::init::uninstall_droid,
+                        hooks::init::uninstall,
+                    )?;
+                }
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -2142,6 +2250,13 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_hermes_mode(ctx)?;
             } else if agent == Some(AgentTarget::Droid) {
                 hooks::init::run_droid_mode(global, ctx)?;
+            } else if agent == Some(AgentTarget::Opencode) {
+                if !global {
+                    anyhow::bail!(
+                        "OpenCode plugin is global-only. Use: rtk init -g --agent opencode"
+                    );
+                }
+                hooks::init::run_opencode_mode(ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2170,6 +2285,23 @@ fn run_cli() -> Result<i32> {
                     ctx,
                 )?;
             }
+            0
+        }
+
+        Commands::Uninstall {
+            global,
+            agent,
+            dry_run,
+        } => {
+            uninstall_top_level_command_dispatch(
+                TopLevelUninstallOptions {
+                    global,
+                    agent,
+                    dry_run,
+                },
+                cli.verbose,
+                hooks::init::uninstall_opencode,
+            )?;
             0
         }
 
@@ -3113,11 +3245,13 @@ mod tests {
         };
 
         let result = uninstall_init_dispatch(
-            Some(AgentTarget::Hermes),
-            true,
-            false,
-            false,
-            ctx,
+            UninstallInitOptions {
+                agent: Some(AgentTarget::Hermes),
+                global: true,
+                gemini: false,
+                codex: false,
+                ctx,
+            },
             |ctx| {
                 hermes_called.set(true);
                 assert_eq!(ctx.verbose, 2);
@@ -3151,11 +3285,13 @@ mod tests {
         let droid_called = Cell::new(false);
         let standard_called = Cell::new(false);
         let result = uninstall_init_dispatch(
-            Some(AgentTarget::Droid),
-            true,
-            false,
-            false,
-            hooks::init::InitContext::default(),
+            UninstallInitOptions {
+                agent: Some(AgentTarget::Droid),
+                global: true,
+                gemini: false,
+                codex: false,
+                ctx: hooks::init::InitContext::default(),
+            },
             |_| Ok(()),
             |global, _| {
                 droid_called.set(true);
@@ -3171,6 +3307,231 @@ mod tests {
         assert!(result.is_ok());
         assert!(droid_called.get());
         assert!(!standard_called.get());
+    }
+
+    #[test]
+    fn test_init_uninstall_dispatch_routes_standard_agent_to_standard_cleanup() {
+        let standard_called = Cell::new(false);
+        let result = uninstall_init_dispatch(
+            UninstallInitOptions {
+                agent: Some(AgentTarget::Pi),
+                global: true,
+                gemini: false,
+                codex: false,
+                ctx: hooks::init::InitContext::default(),
+            },
+            |_| Ok(()),
+            |_, _| Ok(()),
+            |global, gemini, codex, cursor, pi, _| {
+                standard_called.set(true);
+                assert!(global);
+                assert!(!gemini);
+                assert!(!codex);
+                assert!(!cursor);
+                assert!(pi);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(standard_called.get());
+    }
+
+    #[test]
+    fn test_init_agent_opencode_parses_and_routes_to_opencode_cleanup() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "init",
+            "--uninstall",
+            "--global",
+            "--agent",
+            "opencode",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Init {
+                uninstall: true,
+                global: true,
+                agent: Some(AgentTarget::Opencode),
+                ..
+            }
+        ));
+
+        let opencode_called = Cell::new(false);
+        let result = uninstall_opencode_dispatch(true, hooks::init::InitContext::default(), |_| {
+            opencode_called.set(true);
+            Ok(())
+        });
+        assert!(result.is_ok());
+        assert!(opencode_called.get());
+    }
+
+    #[test]
+    fn test_init_agent_opencode_is_listed_in_help() {
+        use clap::CommandFactory;
+
+        let command = Cli::command();
+        let init = command.find_subcommand("init").unwrap();
+        let agent = init
+            .get_arguments()
+            .find(|arg| arg.get_id() == "agent")
+            .unwrap();
+        assert!(agent
+            .get_possible_values()
+            .iter()
+            .any(|value| value.get_name() == "opencode"));
+    }
+
+    #[test]
+    fn test_top_level_uninstall_opencode_parses_and_routes() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "uninstall",
+            "--global",
+            "--agent",
+            "opencode",
+            "--dry-run",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Uninstall {
+                global: true,
+                agent: Some(AgentTarget::Opencode),
+                dry_run: true,
+            }
+        ));
+
+        let Cli {
+            command:
+                Commands::Uninstall {
+                    global,
+                    agent,
+                    dry_run,
+                },
+            ..
+        } = cli
+        else {
+            unreachable!("asserted above");
+        };
+
+        let opencode_called = Cell::new(false);
+        let result = uninstall_top_level_command_dispatch(
+            TopLevelUninstallOptions {
+                global,
+                agent,
+                dry_run,
+            },
+            0,
+            |_| {
+                opencode_called.set(true);
+                Ok(())
+            },
+        );
+        assert!(result.is_ok());
+        assert!(opencode_called.get());
+    }
+
+    #[test]
+    fn test_top_level_uninstall_opencode_requires_global() {
+        let cli = Cli::try_parse_from(["rtk", "uninstall", "--agent", "opencode"]).unwrap();
+        let Commands::Uninstall {
+            global,
+            agent,
+            dry_run,
+        } = cli.command
+        else {
+            unreachable!("must parse as top-level uninstall");
+        };
+        let result = uninstall_top_level_command_dispatch(
+            TopLevelUninstallOptions {
+                global,
+                agent,
+                dry_run,
+            },
+            0,
+            |_| Ok(()),
+        );
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "OpenCode plugin is global-only. Use: rtk uninstall -g --agent opencode"
+        );
+    }
+
+    #[test]
+    fn test_top_level_uninstall_rejects_other_agents_without_deleting() {
+        let cli =
+            Cli::try_parse_from(["rtk", "uninstall", "--global", "--agent", "cursor"]).unwrap();
+        let Commands::Uninstall {
+            global,
+            agent,
+            dry_run,
+        } = cli.command
+        else {
+            unreachable!("must parse as top-level uninstall");
+        };
+        let called = Cell::new(false);
+        let result = uninstall_top_level_command_dispatch(
+            TopLevelUninstallOptions {
+                global,
+                agent,
+                dry_run,
+            },
+            0,
+            |_| {
+                called.set(true);
+                Ok(())
+            },
+        );
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Top-level uninstall only supports OpenCode. Use: rtk init -g --uninstall --agent cursor"
+        );
+        assert!(!called.get(), "must not invoke any deletion path");
+    }
+
+    #[test]
+    fn test_top_level_uninstall_requires_agent_without_deleting() {
+        let cli = Cli::try_parse_from(["rtk", "uninstall", "--global"]).unwrap();
+        let Commands::Uninstall {
+            global,
+            agent,
+            dry_run,
+        } = cli.command
+        else {
+            unreachable!("must parse as top-level uninstall");
+        };
+        let called = Cell::new(false);
+        let result = uninstall_top_level_command_dispatch(
+            TopLevelUninstallOptions {
+                global,
+                agent,
+                dry_run,
+            },
+            0,
+            |_| {
+                called.set(true);
+                Ok(())
+            },
+        );
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Top-level uninstall requires --agent opencode. Use: rtk uninstall -g --agent opencode"
+        );
+        assert!(!called.get(), "must not invoke any deletion path");
+    }
+
+    #[test]
+    fn test_top_level_uninstall_help_lists_agent_and_global() {
+        use clap::CommandFactory;
+
+        let command = Cli::command();
+        let uninstall = command.find_subcommand("uninstall").unwrap();
+        assert!(uninstall.get_arguments().any(|arg| arg.get_id() == "agent"));
+        assert!(uninstall
+            .get_arguments()
+            .any(|arg| arg.get_id() == "global"));
     }
 
     #[test]

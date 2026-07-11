@@ -3072,13 +3072,11 @@ fn resolve_droid_install_target(dir: &Path) -> Result<DroidHookFile> {
 
     let live = if let Some(json) = root_json.as_ref() {
         Some((root, json))
-    } else if let Some(json) = legacy_json.as_ref() {
-        Some((legacy, json))
     } else {
-        None
+        legacy_json.as_ref().map(|json| (legacy, json))
     };
     if let Some((path, json)) = live {
-        if droid_has_pre_tool_use(&json, DroidLayout::Root) {
+        if droid_has_pre_tool_use(json, DroidLayout::Root) {
             return Ok(DroidHookFile {
                 path: path.path.clone(),
                 layout: DroidLayout::Root,
@@ -3086,7 +3084,7 @@ fn resolve_droid_install_target(dir: &Path) -> Result<DroidHookFile> {
         }
     }
     if let Some(json) = settings_json.as_ref() {
-        if droid_has_pre_tool_use(&json, DroidLayout::Nested) {
+        if droid_has_pre_tool_use(json, DroidLayout::Nested) {
             return Ok(DroidHookFile {
                 path: settings.path.clone(),
                 layout: DroidLayout::Nested,
@@ -3556,9 +3554,39 @@ fn ensure_opencode_plugin_installed(path: &Path, ctx: InitContext) -> Result<boo
 
 /// Remove OpenCode plugin file
 fn remove_opencode_plugin(ctx: InitContext) -> Result<Vec<PathBuf>> {
-    let InitContext { verbose, dry_run } = ctx;
     let opencode_dir = resolve_opencode_dir()?;
-    let path = opencode_plugin_path(&opencode_dir);
+    uninstall_opencode_at(&opencode_dir, ctx)
+}
+
+/// Uninstall the global OpenCode plugin without affecting other plugins.
+pub fn uninstall_opencode(ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let opencode_dir = resolve_opencode_dir()?;
+    let removed = uninstall_opencode_at(&opencode_dir, ctx)?;
+    if removed.is_empty() {
+        println!("RTK OpenCode support was not installed (nothing to remove)");
+    } else {
+        println!(
+            "{}",
+            if dry_run {
+                "[dry-run] would uninstall RTK for OpenCode:"
+            } else {
+                "RTK uninstalled for OpenCode:"
+            }
+        );
+        for path in removed {
+            println!("  - OpenCode plugin: {}", path.display());
+        }
+    }
+    if dry_run {
+        print_dry_run_footer();
+    }
+    Ok(())
+}
+
+fn uninstall_opencode_at(opencode_dir: &Path, ctx: InitContext) -> Result<Vec<PathBuf>> {
+    let InitContext { verbose, dry_run } = ctx;
+    let path = opencode_plugin_path(opencode_dir);
     let mut removed = Vec::new();
 
     if path.exists() {
@@ -4185,9 +4213,15 @@ fn show_codex_config() -> Result<()> {
     Ok(())
 }
 
-fn run_opencode_only_mode(ctx: InitContext) -> Result<()> {
+/// Install the global OpenCode plugin.
+pub fn run_opencode_mode(ctx: InitContext) -> Result<()> {
+    let opencode_dir = resolve_opencode_dir()?;
+    run_opencode_mode_at(&opencode_dir, ctx)
+}
+
+fn run_opencode_mode_at(opencode_dir: &Path, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
-    let opencode_plugin_path = prepare_opencode_plugin_path()?;
+    let opencode_plugin_path = opencode_plugin_path(opencode_dir);
     ensure_opencode_plugin_installed(&opencode_plugin_path, ctx)?;
     if !dry_run {
         println!("\nOpenCode plugin installed (global).\n");
@@ -4195,6 +4229,10 @@ fn run_opencode_only_mode(ctx: InitContext) -> Result<()> {
         println!("  Restart OpenCode. Test with: git status\n");
     }
     Ok(())
+}
+
+fn run_opencode_only_mode(ctx: InitContext) -> Result<()> {
+    run_opencode_mode(ctx)
 }
 
 // ─── Gemini CLI support ───────────────────────────────────────────
@@ -8001,6 +8039,72 @@ mod tests {
             fs::read_to_string(&outside_file).unwrap(),
             contents,
             "a hook-file link must not receive Droid uninstall writes"
+        );
+    }
+
+    #[test]
+    fn test_opencode_install_update_idempotency_and_dry_run_at() {
+        let temp = TempDir::new().unwrap();
+        let opencode_dir = temp.path().join(CONFIG_DIR).join(OPENCODE_SUBDIR);
+        let plugin = opencode_plugin_path(&opencode_dir);
+
+        run_opencode_mode_at(&opencode_dir, InitContext::default()).unwrap();
+        assert_eq!(fs::read_to_string(&plugin).unwrap(), OPENCODE_PLUGIN);
+
+        run_opencode_mode_at(&opencode_dir, InitContext::default()).unwrap();
+        assert_eq!(fs::read_to_string(&plugin).unwrap(), OPENCODE_PLUGIN);
+
+        fs::write(&plugin, "outdated plugin").unwrap();
+        run_opencode_mode_at(&opencode_dir, InitContext::default()).unwrap();
+        assert_eq!(fs::read_to_string(&plugin).unwrap(), OPENCODE_PLUGIN);
+
+        fs::remove_file(&plugin).unwrap();
+        run_opencode_mode_at(
+            &opencode_dir,
+            InitContext {
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            !plugin.exists(),
+            "dry run must not create the OpenCode plugin"
+        );
+    }
+
+    #[test]
+    fn test_opencode_uninstall_only_removes_rtk_plugin_and_is_idempotent_at() {
+        let temp = TempDir::new().unwrap();
+        let opencode_dir = temp.path().join(CONFIG_DIR).join(OPENCODE_SUBDIR);
+        let plugin = opencode_plugin_path(&opencode_dir);
+        let other_plugin = opencode_dir.join(PLUGIN_SUBDIR).join("other.ts");
+        fs::create_dir_all(other_plugin.parent().unwrap()).unwrap();
+        fs::write(&plugin, OPENCODE_PLUGIN).unwrap();
+        fs::write(&other_plugin, "export default {};\n").unwrap();
+
+        assert!(uninstall_opencode_at(&opencode_dir, InitContext::default())
+            .unwrap()
+            .iter()
+            .any(|path| path == &plugin));
+        assert!(!plugin.exists());
+        assert!(other_plugin.exists(), "must not remove unrelated plugins");
+        assert!(uninstall_opencode_at(&opencode_dir, InitContext::default())
+            .unwrap()
+            .is_empty());
+
+        fs::write(&plugin, OPENCODE_PLUGIN).unwrap();
+        uninstall_opencode_at(
+            &opencode_dir,
+            InitContext {
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            plugin.exists(),
+            "dry run must not remove the OpenCode plugin"
         );
     }
 }
