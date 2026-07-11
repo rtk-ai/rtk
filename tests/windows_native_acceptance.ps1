@@ -31,11 +31,14 @@ $TouchExisting = Join-Path $Scratch "touch existing file.txt"
 $MkdirTarget = Join-Path $Scratch "mkdir target\a b\c"
 $ExistingDir = Join-Path $Scratch "already-there"
 $ExistingFile = Join-Path $Scratch "file-blocks-mkdir.txt"
+$LongLiteralFile = Join-Path $Scratch "long-literal.txt"
 
 Set-Content -LiteralPath $TouchExisting -Encoding UTF8 -Value "keep me"
 New-Item -ItemType Directory -Path $ExistingDir | Out-Null
 Set-Content -LiteralPath $ExistingFile -Encoding UTF8 -Value "not a directory"
 New-Item -ItemType File -Path $EmptyFile | Out-Null
+$LongLiteral = "literal quote ' and spaces " + ("x" * 9000)
+[System.IO.File]::WriteAllText($LongLiteralFile, "$LongLiteral`r`n", [System.Text.UTF8Encoding]::new($false))
 
 function ConvertTo-WindowsCommandLineArg {
     param([string]$Value)
@@ -147,7 +150,7 @@ function CheckStdoutExact {
     param(
         [string] $Name,
         [string[]] $Argv,
-        [string] $ExpectedStdout,
+        [string[]] $ExpectedStdout,
         [int] $ExpectedCode = 0,
         [string] $Stdin = $null
     )
@@ -157,8 +160,13 @@ function CheckStdoutExact {
         Add-Result $Name "FAIL" "exit=$($result.Code), expected=$ExpectedCode; output=$($result.Output.Trim())"
         return
     }
-    if ($result.Stdout -ne $ExpectedStdout) {
-        Add-Result $Name "FAIL" "stdout length=$($result.Stdout.Length), expected length=$($ExpectedStdout.Length); stdout=$($result.Stdout.Replace("`r", "\r").Replace("`n", "\n"))"
+    if ($ExpectedStdout -notcontains $result.Stdout) {
+        $expected = ($ExpectedStdout | ForEach-Object { $_.Replace("`r", "\r").Replace("`n", "\n") }) -join " or "
+        Add-Result $Name "FAIL" "stdout did not exactly match $expected; stdout=$($result.Stdout.Replace("`r", "\r").Replace("`n", "\n"))"
+        return
+    }
+    if ($result.Stderr.Length -ne 0) {
+        Add-Result $Name "FAIL" "unexpected stderr=$($result.Stderr.Replace("`r", "\r").Replace("`n", "\n"))"
         return
     }
     Add-Result $Name "PASS"
@@ -286,8 +294,9 @@ if (Test-Path -LiteralPath $uncQuotePath) {
 } else {
     Add-Result "powershell UNC path transport" "SKIP" "localhost admin share unavailable"
 }
-$longPattern = "a" * 9000
-Check -Name "implicit PowerShell transport rejects oversized source" -Argv @("Select-String", "-Context", "1", "-Pattern", $longPattern, "-Path", $QuoteFile) -ExpectedCode 2 -Needles @("too large", ".ps1", "-File")
+CheckStdoutExact -Name "implicit PowerShell file transport falls back for long literal" -Argv @("Select-String", "-Context", "1", "-SimpleMatch", "-Quiet", "-Pattern", $LongLiteral, "-Path", $LongLiteralFile) -ExpectedStdout @("True`r`n", "True`n")
+$longRunScript = "#" + ("x" * 9000) + "`nWrite-Output 'run transport stdout'`nexit 7"
+CheckStdoutExact -Name "run -c long script preserves exit and stdout" -Argv @("run", "-c", $longRunScript) -ExpectedCode 7 -ExpectedStdout @("run transport stdout`r`n", "run transport stdout`n")
 Check -Name "cmd fallback quoted literal" -Argv @("cmd", "/c", "echo hello world") -Needles @("hello world")
 CheckSkipUnlessCommand "pwsh" {
     Check -Name "pwsh transport version" -Argv @("pwsh", "-NoProfile", "-Command", '$PSVersionTable.PSVersion.Major') -ExpectedCode 0

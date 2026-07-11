@@ -1,7 +1,10 @@
 use base64::Engine;
 use std::ffi::{OsStr, OsString};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -38,6 +41,18 @@ pub enum PowerShellTransportMode {
     File { path: PathBuf },
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum PowerShellExecutionPolicy {
+    BypassNeeded,
+    BypassNotNeeded,
+}
+
+#[derive(Debug)]
+pub struct PreparedPowerShellTransport {
+    pub args: Vec<OsString>,
+    pub temp_script: Option<tempfile::TempPath>,
+}
+
 pub fn is_shell_host(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
@@ -50,29 +65,124 @@ pub fn encode_powershell(script: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-pub fn powershell_encoded_args(script: &str) -> Result<Vec<OsString>> {
+fn powershell_encoded_args(host: &OsStr, script: &str) -> Result<Vec<OsString>> {
     if script.len() > MAX_ENCODED_SOURCE_BYTES {
         anyhow::bail!(
             "PowerShell transport script is too large; write it to a .ps1 file and run powershell -File"
         );
     }
-    let encoded = encode_powershell(script);
-    let args = vec![
-        OsString::from("-NoProfile"),
-        OsString::from("-EncodedCommand"),
-        OsString::from(encoded),
-    ];
-    let command_units = "powershell.exe ".encode_utf16().count()
-        + args
-            .iter()
-            .map(|arg| arg.to_string_lossy().encode_utf16().count() + 1)
-            .sum::<usize>();
+    let args = encoded_command_args(script);
+    let command_units = encoded_command_units(host, &args);
     if command_units > MAX_ENCODED_COMMAND_UNITS {
         anyhow::bail!(
             "PowerShell encoded command line is too large; write it to a .ps1 file and run powershell -File"
         );
     }
     Ok(args)
+}
+
+fn encoded_command_args(script: &str) -> Vec<OsString> {
+    vec![
+        OsString::from("-NoProfile"),
+        OsString::from("-EncodedCommand"),
+        OsString::from(encode_powershell(script)),
+    ]
+}
+
+fn encoded_command_units(host: &OsStr, args: &[OsString]) -> usize {
+    host.to_string_lossy().encode_utf16().count()
+        + 1
+        + args
+            .iter()
+            .map(|arg| arg.to_string_lossy().encode_utf16().count() + 1)
+            .sum::<usize>()
+}
+
+pub fn prepare_powershell_transport(
+    host: &OsStr,
+    script: &str,
+    policy: PowerShellExecutionPolicy,
+) -> Result<PreparedPowerShellTransport> {
+    if let Ok(args) = powershell_encoded_args(host, script) {
+        return Ok(PreparedPowerShellTransport {
+            args,
+            temp_script: None,
+        });
+    }
+
+    let mut file = tempfile::Builder::new()
+        .suffix(".ps1")
+        .tempfile()
+        .context("rtk: PowerShell file transport: create")?;
+    file.write_all(&[0xEF, 0xBB, 0xBF])
+        .context("rtk: PowerShell file transport: BOM")?;
+    file.write_all(script.as_bytes())
+        .context("rtk: PowerShell file transport: body")?;
+    file.flush()
+        .context("rtk: PowerShell file transport: flush")?;
+    let temp_script = file.into_temp_path();
+    let args = powershell_file_args(temp_script.as_ref(), &[], policy);
+    Ok(PreparedPowerShellTransport {
+        args,
+        temp_script: Some(temp_script),
+    })
+}
+
+fn prepare_automatic_powershell_transport(
+    host: &OsStr,
+    script: &str,
+) -> Result<PreparedPowerShellTransport> {
+    let policy = if powershell_encoded_args(host, script).is_err() {
+        detect_execution_policy(host)
+    } else {
+        PowerShellExecutionPolicy::BypassNotNeeded
+    };
+    prepare_powershell_transport(host, script, policy)
+}
+
+fn classify_execution_policy(policy: &str) -> PowerShellExecutionPolicy {
+    match policy.trim().to_ascii_lowercase().as_str() {
+        "restricted" | "allsigned" => PowerShellExecutionPolicy::BypassNeeded,
+        _ => PowerShellExecutionPolicy::BypassNotNeeded,
+    }
+}
+
+fn terminate_execution_policy_probe(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn detect_execution_policy(host: &OsStr) -> PowerShellExecutionPolicy {
+    let mut child = match Command::new(host)
+        .args(["-NoProfile", "-Command", "Get-ExecutionPolicy"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return PowerShellExecutionPolicy::BypassNeeded,
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => match child.wait_with_output() {
+                Ok(output) => {
+                    return classify_execution_policy(&String::from_utf8_lossy(&output.stdout));
+                }
+                Err(_) => return PowerShellExecutionPolicy::BypassNeeded,
+            },
+            Ok(Some(_)) => return PowerShellExecutionPolicy::BypassNeeded,
+            Err(_) => {
+                terminate_execution_policy_probe(&mut child);
+                return PowerShellExecutionPolicy::BypassNeeded;
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                terminate_execution_policy_probe(&mut child);
+                return PowerShellExecutionPolicy::BypassNeeded;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+        }
+    }
 }
 
 fn resolve_os_path(command: &OsStr) -> Option<PathBuf> {
@@ -378,22 +488,18 @@ fn common_transport_params() -> &'static [&'static str] {
 }
 
 pub fn run_script(script: &str, _verbose: u8) -> Result<i32> {
-    let args = match powershell_encoded_args(script) {
-        Ok(args) => args,
-        Err(err) => {
-            eprintln!("rtk: {}", err);
-            return Ok(2);
-        }
-    };
     let Some(host) = resolve_powershell_host_path() else {
         eprintln!("rtk: PowerShell host not found; install powershell.exe or pwsh.exe");
         return Ok(2);
     };
-    let status = Command::new(host)
-        .args(args)
-        .status()
-        .with_context(|| "Failed to execute PowerShell script")?;
-    Ok(crate::core::utils::exit_code_from_status(&status, "run -c"))
+    let prepared = match prepare_automatic_powershell_transport(host.as_os_str(), script) {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            eprintln!("{err:#}");
+            return Ok(2);
+        }
+    };
+    spawn_prepared_powershell(host.into_os_string(), prepared, "run -c")
 }
 
 pub fn run_argv(args: &[OsString], verbose: u8) -> Result<i32> {
@@ -451,15 +557,20 @@ fn execute_decision(decision: WindowsFallbackDecision, verbose: u8) -> Result<i3
                     if verbose > 0 {
                         eprintln!("Windows PowerShell transport: {}", script);
                     }
-                    match powershell_encoded_args(&script) {
-                        Ok(args) => args,
+                    let prepared = match prepare_automatic_powershell_transport(&host, &script) {
+                        Ok(prepared) => prepared,
                         Err(err) => {
-                            eprintln!("rtk: {}", err);
+                            eprintln!("{err:#}");
                             return Ok(2);
                         }
-                    }
+                    };
+                    return spawn_prepared_powershell(host, prepared, "PowerShell transport");
                 }
-                PowerShellTransportMode::File { path } => powershell_file_args(&path, &child_args),
+                PowerShellTransportMode::File { path } => powershell_file_args(
+                    &path,
+                    &child_args,
+                    PowerShellExecutionPolicy::BypassNotNeeded,
+                ),
             };
             spawn_and_wait(host, args)
         }
@@ -475,12 +586,55 @@ fn spawn_and_wait(program: OsString, child_args: Vec<OsString>) -> Result<i32> {
     Ok(crate::core::utils::exit_code_from_status(&status, &label))
 }
 
-pub fn powershell_file_args(path: &Path, args: &[OsString]) -> Vec<OsString> {
-    let mut result = vec![
-        OsString::from("-NoProfile"),
-        OsString::from("-File"),
-        path.as_os_str().to_os_string(),
-    ];
+fn spawn_prepared_powershell(
+    host: OsString,
+    prepared: PreparedPowerShellTransport,
+    label: &str,
+) -> Result<i32> {
+    let PreparedPowerShellTransport { args, temp_script } = prepared;
+    let uses_file_transport = temp_script.is_some();
+    let _temp_script = temp_script;
+    let status = match Command::new(&host).args(&args).status() {
+        Ok(status) => status,
+        Err(err) if uses_file_transport => {
+            eprintln!(
+                "{}",
+                format_powershell_file_transport_spawn_error(&host, &err)
+            );
+            return Ok(2);
+        }
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "Failed to execute PowerShell {}: {}",
+                    label,
+                    host.to_string_lossy()
+                )
+            });
+        }
+    };
+    Ok(crate::core::utils::exit_code_from_status(&status, label))
+}
+
+fn format_powershell_file_transport_spawn_error(host: &OsStr, err: &std::io::Error) -> String {
+    format!(
+        "rtk: PowerShell file transport: spawn {}: {}",
+        host.to_string_lossy(),
+        err
+    )
+}
+
+pub fn powershell_file_args(
+    path: &Path,
+    args: &[OsString],
+    policy: PowerShellExecutionPolicy,
+) -> Vec<OsString> {
+    let mut result = vec![OsString::from("-NoProfile")];
+    if policy == PowerShellExecutionPolicy::BypassNeeded {
+        result.push(OsString::from("-ExecutionPolicy"));
+        result.push(OsString::from("Bypass"));
+    }
+    result.extend([OsString::from("-File"), path.as_os_str().to_os_string()]);
     result.extend(args.iter().cloned());
     result
 }
@@ -534,20 +688,106 @@ mod tests {
     }
 
     #[test]
-    fn implicit_transport_never_bypasses_execution_policy() {
-        let args = powershell_encoded_args("Write-Output 'x'").unwrap();
-        let rendered: Vec<_> = args.iter().map(|a| a.to_string_lossy()).collect();
+    fn short_implicit_transport_uses_encoded_command_without_policy_override() {
+        let prepared = prepare_powershell_transport(
+            OsStr::new("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"),
+            "Write-Output 'x'",
+            PowerShellExecutionPolicy::BypassNeeded,
+        )
+        .unwrap();
+        let rendered: Vec<_> = prepared.args.iter().map(|a| a.to_string_lossy()).collect();
+        assert!(prepared.temp_script.is_none());
+        assert!(rendered.iter().any(|a| a == "-EncodedCommand"));
         assert!(!rendered
             .iter()
             .any(|a| a.eq_ignore_ascii_case("-ExecutionPolicy")));
-        assert!(rendered.iter().any(|a| a == "-EncodedCommand"));
     }
 
     #[test]
-    fn encoded_source_over_limit_is_rejected() {
-        let script = "x".repeat(8 * 1024 + 1);
-        let err = powershell_encoded_args(&script).unwrap_err().to_string();
-        assert!(err.contains(".ps1") || err.contains("-File"));
+    fn oversized_implicit_transport_uses_file_with_bypass() {
+        let prepared = prepare_powershell_transport(
+            OsStr::new("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"),
+            &"x".repeat(8 * 1024 + 1),
+            PowerShellExecutionPolicy::BypassNeeded,
+        )
+        .unwrap();
+        let rendered: Vec<_> = prepared.args.iter().map(|a| a.to_string_lossy()).collect();
+        assert!(prepared.temp_script.is_some());
+        assert!(rendered.iter().any(|a| a == "-File"));
+        assert!(rendered.iter().any(|a| a == "-ExecutionPolicy"));
+        assert!(!rendered.iter().any(|a| a == "-EncodedCommand"));
+    }
+
+    #[test]
+    fn encoded_transport_estimate_uses_actual_host_path() {
+        let host = OsString::from(format!("C:\\{}\\powershell.exe", "x".repeat(30_000)));
+        let prepared = prepare_powershell_transport(
+            &host,
+            "Write-Output 'x'",
+            PowerShellExecutionPolicy::BypassNeeded,
+        )
+        .unwrap();
+        assert!(prepared.temp_script.is_some());
+        assert!(prepared.args.iter().any(|arg| arg == "-File"));
+    }
+
+    #[test]
+    fn automatic_file_transport_spawn_failure_returns_transport_exit_code() {
+        let prepared = prepare_powershell_transport(
+            OsStr::new("rtk-test-missing-powershell-host.exe"),
+            &"x".repeat(8 * 1024 + 1),
+            PowerShellExecutionPolicy::BypassNotNeeded,
+        )
+        .unwrap();
+        assert!(prepared.temp_script.is_some());
+
+        let code = spawn_prepared_powershell(
+            OsString::from("rtk-test-missing-powershell-host.exe"),
+            prepared,
+            "PowerShell transport",
+        )
+        .unwrap();
+
+        assert_eq!(code, 2);
+    }
+
+    #[test]
+    fn automatic_file_transport_spawn_failure_names_the_transport_stage() {
+        let message = format_powershell_file_transport_spawn_error(
+            OsStr::new("rtk-test-missing-powershell-host.exe"),
+            &std::io::Error::from(std::io::ErrorKind::NotFound),
+        );
+
+        assert!(message.starts_with("rtk: PowerShell file transport: spawn"));
+    }
+
+    #[test]
+    fn execution_policy_classification_requires_bypass_only_for_restricted_or_all_signed() {
+        assert_eq!(
+            classify_execution_policy("Restricted"),
+            PowerShellExecutionPolicy::BypassNeeded
+        );
+        assert_eq!(
+            classify_execution_policy("AllSigned\r\n"),
+            PowerShellExecutionPolicy::BypassNeeded
+        );
+        assert_eq!(
+            classify_execution_policy("RemoteSigned"),
+            PowerShellExecutionPolicy::BypassNotNeeded
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn execution_policy_probe_cleanup_terminates_and_reaps_child() {
+        let mut child = Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1 > NUL"])
+            .spawn()
+            .unwrap();
+
+        terminate_execution_policy_probe(&mut child);
+
+        assert!(child.try_wait().unwrap().is_some());
     }
 
     #[test]
@@ -640,8 +880,12 @@ mod tests {
     }
 
     #[test]
-    fn resolved_ps1_uses_powershell_file() {
-        let args = powershell_file_args(Path::new("tool.ps1"), &[OsString::from("a b")]);
+    fn explicit_ps1_uses_file_without_automatic_bypass() {
+        let args = powershell_file_args(
+            Path::new("tool.ps1"),
+            &[OsString::from("a b")],
+            PowerShellExecutionPolicy::BypassNotNeeded,
+        );
         let rendered: Vec<_> = args.iter().map(|a| a.to_string_lossy()).collect();
         assert_eq!(rendered, vec!["-NoProfile", "-File", "tool.ps1", "a b"]);
     }

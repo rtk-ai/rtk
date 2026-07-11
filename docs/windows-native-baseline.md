@@ -35,6 +35,19 @@ rtk proxy powershell -NoProfile -File scripts\windows-cargo.ps1 --version
 
 Result: exit code `0`, output `cargo 1.96.1 (356927216 2026-06-26)`.
 
+## PowerShell Transport Limits
+
+RTK's generated PowerShell source has an 8 KiB UTF-8 budget. This is an RTK
+transport budget, not an official PowerShell limit. RTK also estimates the
+complete encoded command line using the resolved host path and caps it at
+30,000 UTF-16 code units, leaving room below CreateProcess's 32,767-unit limit.
+
+When either RTK budget is exceeded, RTK writes a UTF-8-BOM temporary `.ps1`
+file and invokes the resolved PowerShell host with `-File`. It probes the
+effective execution policy only for that temporary-file path and may add the
+process-scoped `-ExecutionPolicy Bypass` only when needed. This does not
+elevate the process and does not change any persisted execution-policy setting.
+
 ## Native Test Selectors
 
 Each selector below was verified with `test <selector> -- --list`; every selector listed non-zero tests.
