@@ -1011,12 +1011,28 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^scp\b",
+        rtk_cmd: "rtk scp",
+        rewrite_prefixes: &["scp"],
+        category: "Network",
+        savings_pct: 40.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^shellcheck\b",
         rtk_cmd: "rtk shellcheck",
         pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &["shellcheck"],
         category: "Build",
         savings_pct: 65.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^ssh\b",
+        rtk_cmd: "rtk ssh",
+        rewrite_prefixes: &["ssh"],
+        category: "Network",
+        savings_pct: 40.0,
         ..RtkRule::DEFAULT
     },
     RtkRule {
