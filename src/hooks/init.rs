@@ -518,24 +518,74 @@ fn prompt_telemetry_consent() -> Result<()> {
     Ok(())
 }
 
-fn print_manual_instructions(hook_command: &str, include_opencode: bool) {
+fn print_manual_instructions(
+    hook_command: &str,
+    compact_command: &str,
+    pre_present: bool,
+    post_present: bool,
+    include_opencode: bool,
+) {
     let settings_path = resolve_claude_dir()
         .unwrap_or_else(|_| PathBuf::from(format!("~/{}", CLAUDE_DIR)))
         .join(SETTINGS_JSON);
-    println!("\n  MANUAL STEP: Add this to {}:", settings_path.display());
-    println!("  {{");
-    println!("    \"hooks\": {{ \"PreToolUse\": [{{");
-    println!("      \"matcher\": \"Bash\",");
-    println!("      \"hooks\": [{{ \"type\": \"command\",");
-    println!("        \"command\": \"{}\"", hook_command);
-    println!("      }}]");
-    println!("    }}]}}");
-    println!("  }}");
-    if include_opencode {
-        println!("\n  Then restart Claude Code and OpenCode. Test with: git status\n");
+    if pre_present {
+        println!(
+            "\n  MANUAL STEP: RTK's PostCompact hook (dedup ledger reset) is missing.\n  Merge this into {}:",
+            settings_path.display()
+        );
     } else {
-        println!("\n  Then restart Claude Code. Test with: git status\n");
+        println!(
+            "\n  MANUAL STEP: Merge this into {}:",
+            settings_path.display()
+        );
     }
+    for line in
+        manual_instructions_snippet(hook_command, compact_command, pre_present, post_present)
+            .lines()
+    {
+        println!("  {}", line);
+    }
+    let restart = if include_opencode {
+        "Claude Code and OpenCode"
+    } else {
+        "Claude Code"
+    };
+    if pre_present {
+        // Only the PostCompact hook is missing — `git status` exercises nothing new.
+        println!("\n  Then restart {}.\n", restart);
+    } else {
+        println!("\n  Then restart {}. Test with: git status\n", restart);
+    }
+}
+
+/// JSON snippet covering exactly the RTK hooks missing from settings.json, so
+/// a user following the manual step never silently drops the PostCompact hook.
+fn manual_instructions_snippet(
+    hook_command: &str,
+    compact_command: &str,
+    pre_present: bool,
+    post_present: bool,
+) -> String {
+    let mut hooks = serde_json::Map::new();
+    if !pre_present {
+        hooks.insert(
+            "PreToolUse".to_string(),
+            serde_json::json!([{
+                "matcher": "Bash",
+                "hooks": [{ "type": "command", "command": hook_command }]
+            }]),
+        );
+    }
+    if !post_present {
+        hooks.insert(
+            POST_COMPACT_KEY.to_string(),
+            serde_json::json!([{
+                "hooks": [{ "type": "command", "command": compact_command }]
+            }]),
+        );
+    }
+    serde_json::to_string_pretty(&serde_json::json!({ "hooks": hooks }))
+        .expect("JSON snippet built from string keys and literals cannot fail to serialize")
 }
 
 /// True if a settings.json hook entry carries a command matching `pred`.
@@ -997,7 +1047,13 @@ fn patch_settings_json_command(
     // Handle mode
     match mode {
         PatchMode::Skip => {
-            print_manual_instructions(hook_command, include_opencode);
+            print_manual_instructions(
+                hook_command,
+                &compact_command,
+                pre_present,
+                post_present,
+                include_opencode,
+            );
             return Ok(PatchResult::Skipped);
         }
         PatchMode::Ask => {
@@ -1008,7 +1064,13 @@ fn patch_settings_json_command(
                     settings_path.display()
                 );
             } else if !prompt_user_consent(&settings_path)? {
-                print_manual_instructions(hook_command, include_opencode);
+                print_manual_instructions(
+                    hook_command,
+                    &compact_command,
+                    pre_present,
+                    post_present,
+                    include_opencode,
+                );
                 return Ok(PatchResult::Declined);
             }
         }
@@ -6293,6 +6355,95 @@ mod tests {
             &root,
             CLAUDE_COMPACT_HOOK_COMMAND
         ));
+    }
+
+    #[test]
+    fn test_manual_snippet_both_missing_includes_both_hooks() {
+        let snippet = manual_instructions_snippet(
+            CLAUDE_HOOK_COMMAND,
+            CLAUDE_COMPACT_HOOK_COMMAND,
+            false,
+            false,
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&snippet).expect("snippet must be valid JSON");
+        assert_eq!(
+            parsed["hooks"]["PreToolUse"][0]["matcher"]
+                .as_str()
+                .unwrap(),
+            "Bash"
+        );
+        assert_eq!(
+            parsed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap(),
+            CLAUDE_HOOK_COMMAND
+        );
+        assert_eq!(
+            parsed["hooks"]["PostCompact"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap(),
+            CLAUDE_COMPACT_HOOK_COMMAND
+        );
+        // PostCompact entries carry no matcher.
+        assert!(parsed["hooks"]["PostCompact"][0].get("matcher").is_none());
+    }
+
+    #[test]
+    fn test_manual_snippet_only_postcompact_missing() {
+        let snippet = manual_instructions_snippet(
+            CLAUDE_HOOK_COMMAND,
+            CLAUDE_COMPACT_HOOK_COMMAND,
+            true,
+            false,
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&snippet).expect("snippet must be valid JSON");
+        assert!(parsed["hooks"].get("PreToolUse").is_none());
+        assert_eq!(
+            parsed["hooks"]["PostCompact"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap(),
+            CLAUDE_COMPACT_HOOK_COMMAND
+        );
+    }
+
+    #[test]
+    fn test_manual_snippet_only_pretooluse_missing() {
+        let snippet = manual_instructions_snippet(
+            CLAUDE_HOOK_COMMAND,
+            CLAUDE_COMPACT_HOOK_COMMAND,
+            false,
+            true,
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&snippet).expect("snippet must be valid JSON");
+        assert!(parsed["hooks"].get("PostCompact").is_none());
+        assert_eq!(
+            parsed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap(),
+            CLAUDE_HOOK_COMMAND
+        );
+    }
+
+    #[test]
+    fn test_manual_snippet_preserves_path_prefixed_compact_command() {
+        // A path-prefixed hook command must keep its prefix on the compact hook.
+        let snippet = manual_instructions_snippet(
+            "/usr/local/bin/rtk hook claude",
+            "/usr/local/bin/rtk hook compact",
+            false,
+            false,
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&snippet).expect("snippet must be valid JSON");
+        assert_eq!(
+            parsed["hooks"]["PostCompact"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap(),
+            "/usr/local/bin/rtk hook compact"
+        );
     }
 
     #[test]
