@@ -1401,7 +1401,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
             let code = core::windows_shell::run_other(&args_os, 0)?;
             timer.track_passthrough(&raw_command, &format!("rtk fallback: {}", raw_command));
             core::tracking::record_parse_failure_silent(&raw_command, &error_message, code != 127);
-            return Ok(code);
+            Ok(code)
         }
 
         #[cfg(not(windows))]
