@@ -24,9 +24,9 @@ pub enum ContainerCmd {
 
 pub fn run(cmd: ContainerCmd, args: &[String], verbose: u8) -> Result<i32> {
     match cmd {
-        ContainerCmd::DockerPs => docker_ps(verbose),
-        ContainerCmd::DockerPsAll => docker_ps_all(verbose),
-        ContainerCmd::DockerImages => docker_images(verbose),
+        ContainerCmd::DockerPs => docker_ps(args, verbose),
+        ContainerCmd::DockerPsAll => docker_ps_all(args, verbose),
+        ContainerCmd::DockerImages => docker_images(args, verbose),
         ContainerCmd::DockerLogs => docker_logs(args, verbose),
         ContainerCmd::KubectlPods => k8s_pods("kubectl", args, verbose),
         ContainerCmd::KubectlServices => k8s_services("kubectl", args, verbose),
@@ -55,10 +55,28 @@ where
     )
 }
 
-fn docker_ps(_verbose: u8) -> Result<i32> {
+fn without_value_option(args: &[String], option: &str) -> Vec<String> {
+    let mut filtered = Vec::with_capacity(args.len());
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == option {
+            index += 2;
+        } else if args[index].starts_with(&format!("{option}=")) {
+            index += 1;
+        } else {
+            filtered.push(args[index].clone());
+            index += 1;
+        }
+    }
+    filtered
+}
+
+fn docker_ps(args: &[String], _verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let base = exec_capture(resolved_command("docker").args(["ps"]))
+    let mut base_args = vec!["ps".to_string()];
+    base_args.extend_from_slice(args);
+    let base = exec_capture(resolved_command("docker").args(&base_args))
         .context("Failed to run docker ps")?;
     if !base.success() {
         eprint!("{}", base.stderr);
@@ -68,11 +86,13 @@ fn docker_ps(_verbose: u8) -> Result<i32> {
     }
     let raw = base.stdout;
 
-    let stdout = match exec_capture(resolved_command("docker").args([
-        "ps",
-        "--format",
-        "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}",
-    ]))
+    let mut format_args = vec!["ps".to_string()];
+    format_args.extend(without_value_option(args, "--format"));
+    format_args.extend([
+        "--format".to_string(),
+        "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}".to_string(),
+    ]);
+    let stdout = match exec_capture(resolved_command("docker").args(&format_args))
     .ok()
     .filter(|r| r.success())
     {
@@ -111,10 +131,12 @@ fn docker_ps(_verbose: u8) -> Result<i32> {
     Ok(0)
 }
 
-fn docker_ps_all(_verbose: u8) -> Result<i32> {
+fn docker_ps_all(args: &[String], _verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let base = exec_capture(resolved_command("docker").args(["ps", "-a"]))
+    let mut base_args = vec!["ps".to_string(), "-a".to_string()];
+    base_args.extend_from_slice(args);
+    let base = exec_capture(resolved_command("docker").args(&base_args))
         .context("Failed to run docker ps -a")?;
     if !base.success() {
         eprint!("{}", base.stderr);
@@ -124,12 +146,13 @@ fn docker_ps_all(_verbose: u8) -> Result<i32> {
     }
     let raw = base.stdout;
 
-    let stdout = match exec_capture(resolved_command("docker").args([
-        "ps",
-        "-a",
-        "--format",
-        "{{.State}}\t{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}",
-    ]))
+    let mut format_args = vec!["ps".to_string(), "-a".to_string()];
+    format_args.extend(without_value_option(args, "--format"));
+    format_args.extend([
+        "--format".to_string(),
+        "{{.State}}\t{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}".to_string(),
+    ]);
+    let stdout = match exec_capture(resolved_command("docker").args(&format_args))
     .ok()
     .filter(|r| r.success())
     {
@@ -227,10 +250,12 @@ fn format_container_line_from_parts(parts: &[&str], with_ports: bool) -> Option<
     ))
 }
 
-fn docker_images(_verbose: u8) -> Result<i32> {
+fn docker_images(args: &[String], _verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let base = exec_capture(resolved_command("docker").args(["images"]))
+    let mut base_args = vec!["images".to_string()];
+    base_args.extend_from_slice(args);
+    let base = exec_capture(resolved_command("docker").args(&base_args))
         .context("Failed to run docker images")?;
     if !base.success() {
         eprint!("{}", base.stderr);
@@ -240,11 +265,13 @@ fn docker_images(_verbose: u8) -> Result<i32> {
     }
     let raw = base.stdout;
 
-    let stdout = match exec_capture(resolved_command("docker").args([
-        "images",
-        "--format",
-        "{{.Repository}}:{{.Tag}}\t{{.Size}}",
-    ]))
+    let mut format_args = vec!["images".to_string()];
+    format_args.extend(without_value_option(args, "--format"));
+    format_args.extend([
+        "--format".to_string(),
+        "{{.Repository}}:{{.Tag}}\t{{.Size}}".to_string(),
+    ]);
+    let stdout = match exec_capture(resolved_command("docker").args(&format_args))
     .ok()
     .filter(|r| r.success())
     {
@@ -326,8 +353,17 @@ fn docker_logs(args: &[String], _verbose: u8) -> Result<i32> {
         return Ok(0);
     }
 
+    let options = &args[1..];
     let mut cmd = resolved_command("docker");
-    cmd.args(["logs", "--tail", "100", container]);
+    cmd.arg("logs");
+    if !options
+        .iter()
+        .any(|arg| arg == "--tail" || arg.starts_with("--tail="))
+    {
+        cmd.args(["--tail", "100"]);
+    }
+    cmd.args(options);
+    cmd.arg(container);
 
     let label = format!("logs {}", container);
     runner::run_filtered(
@@ -822,6 +858,23 @@ pub fn run_oc_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn docker_structured_query_replaces_only_user_format() {
+        let args = vec![
+            "--filter".to_string(),
+            "name=web".to_string(),
+            "--format".to_string(),
+            "{{.Names}}".to_string(),
+            "--no-trunc".to_string(),
+        ];
+
+        assert_eq!(
+            without_value_option(&args, "--format"),
+            ["--filter", "name=web", "--no-trunc"]
+        );
+        assert!(without_value_option(&["--format={{.Names}}".to_string()], "--format").is_empty());
+    }
 
     // ── format_compose_ps ──────────────────────────────────
 
