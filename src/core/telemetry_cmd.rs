@@ -129,12 +129,9 @@ fn run_forget() -> Result<()> {
     }
 
     // Purge local tracking database (GDPR Art. 17 — right to erasure applies to local data too)
-    let db_path = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(super::constants::RTK_DATA_DIR)
-        .join(super::constants::HISTORY_DB);
+    let db_path = super::tracking::get_db_path()?;
     if db_path.exists() {
-        match std::fs::remove_file(&db_path) {
+        match delete_tracking_database(&db_path) {
             Ok(()) => println!("Local tracking database deleted: {}", db_path.display()),
             Err(e) => eprintln!("rtk: could not delete {}: {}", db_path.display(), e),
         }
@@ -180,4 +177,24 @@ fn send_erasure_request(device_hash: &str) -> Result<()> {
         .send_string(&payload.to_string())?;
 
     Ok(())
+}
+
+fn delete_tracking_database(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::remove_file(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deletes_tracking_database_at_resolved_path() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let custom_path = temp.path().join("custom-history.db");
+        std::fs::write(&custom_path, b"tracking data").expect("write tracking database");
+
+        delete_tracking_database(&custom_path).expect("delete tracking database");
+
+        assert!(!custom_path.exists());
+    }
 }

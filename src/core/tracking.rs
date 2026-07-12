@@ -1217,7 +1217,7 @@ fn categorize_command(rtk_cmd: &str) -> String {
     .to_string()
 }
 
-fn get_db_path() -> Result<PathBuf> {
+pub(crate) fn get_db_path() -> Result<PathBuf> {
     // Priority 1: Environment variable RTK_DB_PATH
     if let Ok(custom_path) = std::env::var("RTK_DB_PATH") {
         return Ok(PathBuf::from(custom_path));
