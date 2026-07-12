@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::ccusage::{self, CcusagePeriod, Granularity};
 use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
@@ -479,19 +479,23 @@ fn display_summary(tracker: &Tracker, verbose: u8, audit: bool) -> Result<()> {
     println!();
 
     let audit_s = if audit {
-        let projects_dir = dirs::home_dir().map(|h| h.join(".claude").join("projects"));
-        match projects_dir {
-            Some(dir) => match audit_precise_savings(tracker, &dir) {
+        if let Some(home) = dirs::home_dir() {
+            let paths = vec![
+                home.join(".claude").join("projects"),
+                home.join(".pi").join("agent").join("sessions"),
+                home.join(".gemini").join("antigravity-cli").join("brain"),
+                home.join(".codex").join("sessions"),
+            ];
+            match audit_precise_savings(tracker, &paths) {
                 Ok(s) => Some(s),
                 Err(e) => {
                     eprintln!("rtk: --audit failed, showing weighted estimate: {e:#}");
                     None
                 }
-            },
-            None => {
-                eprintln!("rtk: --audit failed: could not resolve home directory");
-                None
             }
+        } else {
+            eprintln!("rtk: --audit failed: could not resolve home directory");
+            None
         }
     } else {
         None
@@ -540,7 +544,7 @@ fn display_summary(tracker: &Tracker, verbose: u8, audit: bool) -> Result<()> {
             pct(total_savings)
         ));
         print_row(&format!(
-            "Claude rtk calls:      {}/{} matched",
+            "Audited rtk calls:     {}/{} matched",
             s.matched, s.claude_invocations
         ));
         print_row(&format!(
@@ -902,8 +906,8 @@ fn print_csv_row(p: &PeriodEconomics) {
 
 struct SessionEvent {
     dt: DateTime<Utc>,
-    /// True only for Bash tool_use events whose command invokes `rtk` - the
-    /// authoritative signal that Claude drove an rtk-wrapped command.
+    /// True only for Bash/run_command/exec tool_use events whose command invokes `rtk` - the
+    /// authoritative signal that an agent drove an rtk-wrapped command.
     is_rtk: bool,
     cwd: Option<String>,
     cache_write: u64,
@@ -942,15 +946,153 @@ struct LogUsage {
     cache_read_input_tokens: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct PiLogEntry {
+    #[serde(rename = "type")]
+    entry_type: String,
+    id: Option<String>,
+    timestamp: Option<String>,
+    cwd: Option<String>,
+    message: Option<PiMessage>,
+    usage: Option<PiUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PiMessage {
+    role: Option<String>,
+    content: Option<Vec<PiContent>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PiContent {
+    #[serde(rename = "type")]
+    content_type: String,
+    name: Option<String>,
+    arguments: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PiUsage {
+    #[serde(rename = "cacheRead", default)]
+    cache_read: u64,
+    #[serde(rename = "cacheWrite", default)]
+    cache_write: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyLogEntry {
+    step_index: usize,
+    created_at: String,
+    tool_calls: Option<Vec<AgyToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyToolCall {
+    name: String,
+    args: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexLogEntry {
+    timestamp: String,
+    #[serde(rename = "type")]
+    entry_type: String,
+    payload: Option<CodexPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexPayload {
+    #[serde(rename = "type")]
+    payload_type: Option<String>,
+    id: Option<String>,
+    call_id: Option<String>,
+    role: Option<String>,
+    name: Option<String>,
+    input: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogFormat {
+    Claude,
+    Pi,
+    Agy,
+    Codex,
+    Unknown,
+}
+
+fn detect_log_format(path: &Path) -> LogFormat {
+    // Scan the whole file: Claude transcripts prefix many meta lines
+    // (last-prompt, mode, summaries) before the first requestId, so a tiny
+    // peek would misclassify 90%+ of Claude files as Unknown and skip them.
+    // Each `return` stops at the first matching line, so well-formed files
+    // bail out near the top regardless of size.
+    if let Ok(file) = File::open(path) {
+        let reader = BufReader::new(file);
+        for line in reader.lines().map_while(Result::ok) {
+            if line.contains("\"step_index\"") || line.contains("\"PLANNER_RESPONSE\"") {
+                return LogFormat::Agy;
+            }
+            if line.contains("\"type\":\"session\"") || line.contains("\"type\":\"model_change\"") {
+                return LogFormat::Pi;
+            }
+            if line.contains("\"session_meta\"") {
+                return LogFormat::Codex;
+            }
+            if line.contains("\"requestId\"") {
+                return LogFormat::Claude;
+            }
+        }
+    }
+    LogFormat::Unknown
+}
+
+fn extract_exec_command_cmd(input: &str) -> Option<(String, Option<String>)> {
+    let start_pat = "tools.exec_command(";
+    let idx = input.find(start_pat)?;
+    let start_obj = idx + start_pat.len();
+    let slice = &input[start_obj..];
+    let end_obj = slice.rfind(')')?;
+    let obj_str = slice[..end_obj].trim();
+    let val: serde_json::Value = serde_json::from_str(obj_str).ok()?;
+    let cmd = val.get("cmd")?.as_str()?.to_string();
+    let workdir = val
+        .get("workdir")
+        .and_then(|w| w.as_str())
+        .map(|s| s.to_string());
+    Some((cmd, workdir))
+}
+
+fn is_rtk_or_proxied(cmd: &str) -> bool {
+    let first = cmd.split_whitespace().next().unwrap_or("");
+    first == "rtk"
+        || first.ends_with("/rtk")
+        || crate::discover::registry::rewrite_command(cmd, &[], &[]).is_some()
+}
+
+/// ponytail: canonicalize via filesystem to unify symlink-equivalent paths
+/// (e.g. /var/services/homes vs /volume1/homes on Synology). Falls back to the
+/// raw string when the path no longer exists (deleted worktrees).
+fn norm_cwd(p: &str) -> String {
+    std::fs::canonicalize(p)
+        .map(|x| x.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| p.to_string())
+}
+
+/// Maximum clock skew tolerated when matching a session turn to an rtk DB
+/// command. Session logs and the rtk DB stamp the same event at different
+/// phases (model emit vs proxy execute); empirically the gap clusters in
+/// 60-120s, so 180s gives margin without inviting cross-command false matches.
+const MATCH_WINDOW_SECS: f64 = 120.0;
+
 /// Per-bucket token savings attributed to rtk compression across audited sessions.
 struct AuditSavings {
     /// Cache-write-rate billing (1.25x): tool-result appearance + eviction rebuilds.
     write_tokens: usize,
     /// Cache-read-rate billing (0.1x): steady cached turns.
     read_tokens: usize,
-    /// rtk DB commands matched to a Claude session Bash call.
+    /// rtk DB commands matched to an agent session Bash/command call.
     matched: usize,
-    /// Distinct `rtk ...` Bash events seen in Claude session logs (the authoritative
+    /// Distinct `rtk ...` Bash/command events seen in session logs (the authoritative
     /// cap; `matched` should be ~= this).
     claude_invocations: usize,
 }
@@ -962,7 +1104,7 @@ struct RtkCommandAudit {
     matched: bool,
 }
 
-fn audit_precise_savings(tracker: &Tracker, projects_dir: &Path) -> Result<AuditSavings> {
+fn audit_precise_savings(tracker: &Tracker, projects_dirs: &[PathBuf]) -> Result<AuditSavings> {
     let raw_cmds = tracker
         .get_raw_commands()
         .context("Failed to query raw commands")?;
@@ -979,14 +1121,12 @@ fn audit_precise_savings(tracker: &Tracker, projects_dir: &Path) -> Result<Audit
         .into_iter()
         .map(|(dt, project, saved)| RtkCommandAudit {
             dt,
-            project,
+            project: norm_cwd(&project),
             saved_tokens: saved,
             matched: false,
         })
         .collect();
 
-    // Earliest command timestamp minus 1 hour (mtime prune window). try_hours(1) is
-    // infallible for a 1-hour delta; fall back to no offset rather than panic.
     let min_dt =
         rtk_cmds[0].dt - chrono::TimeDelta::try_hours(1).unwrap_or_else(chrono::TimeDelta::zero);
 
@@ -994,7 +1134,14 @@ fn audit_precise_savings(tracker: &Tracker, projects_dir: &Path) -> Result<Audit
     let mut read_tokens = 0usize;
     let mut claude_invocations = 0usize;
 
-    if projects_dir.exists() {
+    // Turns gathered per file; matching is done globally after the walk so an
+    // early file can't steal a command that belongs to a turn in a later file.
+    let mut all_files: Vec<(LogFormat, Vec<SessionEvent>)> = Vec::new();
+
+    for projects_dir in projects_dirs {
+        if !projects_dir.exists() {
+            continue;
+        }
         for entry in walkdir::WalkDir::new(projects_dir)
             .into_iter()
             .filter_map(|e| e.ok())
@@ -1012,73 +1159,288 @@ fn audit_precise_savings(tracker: &Tracker, projects_dir: &Path) -> Result<Audit
                 }
             }
 
-            // Parse + dedup by requestId. Assistant turns echo across streamed chunks,
-            // so the same requestId/usage repeats; keep one turn per requestId.
+            let format = detect_log_format(path);
+            if matches!(format, LogFormat::Unknown) {
+                continue;
+            }
+
             let mut by_req: HashMap<String, SessionEvent> = HashMap::new();
+            let mut session_cwd: Option<String> = None;
+
             if let Ok(file) = File::open(path) {
                 for line in BufReader::new(file).lines().map_while(Result::ok) {
-                    if !line.contains("\"requestId\"") {
-                        continue;
-                    }
-                    let entry: LogEntry = match serde_json::from_str(&line) {
-                        Ok(e) => e,
-                        Err(_) => continue,
-                    };
-                    let Some(req_id) = entry.request_id else {
-                        continue;
-                    };
-                    let cwd = entry.cwd;
-                    let Ok(dt) = DateTime::parse_from_rfc3339(&entry.timestamp) else {
-                        continue;
-                    };
-                    let dt_utc = dt.with_timezone(&Utc);
-                    let mut is_rtk = false;
-                    let mut cache_write = 0u64;
-                    let mut cache_read = 0u64;
-                    if let Some(msg) = entry.message {
-                        if let Some(content_list) = msg.content {
-                            for item in content_list {
-                                if item.content_type == "tool_use"
-                                    && item.name.as_deref() == Some("Bash")
-                                {
-                                    if let Some(cmd) = item
-                                        .input
-                                        .as_ref()
-                                        .and_then(|i| i.get("command"))
-                                        .and_then(|c| c.as_str())
-                                    {
-                                        let first = cmd.split_whitespace().next().unwrap_or("");
-                                        is_rtk = first == "rtk" || first.ends_with("/rtk");
+                    match format {
+                        LogFormat::Claude => {
+                            if !line.contains("\"requestId\"") {
+                                continue;
+                            }
+                            let entry: LogEntry = match serde_json::from_str(&line) {
+                                Ok(e) => e,
+                                Err(_) => continue,
+                            };
+                            let Some(req_id) = entry.request_id else {
+                                continue;
+                            };
+                            let cwd = entry.cwd;
+                            let Ok(dt) = DateTime::parse_from_rfc3339(&entry.timestamp) else {
+                                continue;
+                            };
+                            let dt_utc = dt.with_timezone(&Utc);
+                            let mut is_rtk = false;
+                            let mut cache_write = 0u64;
+                            let mut cache_read = 0u64;
+                            if let Some(msg) = entry.message {
+                                if let Some(content_list) = msg.content {
+                                    for item in content_list {
+                                        if item.content_type == "tool_use"
+                                            && item.name.as_deref() == Some("Bash")
+                                        {
+                                            if let Some(cmd) = item
+                                                .input
+                                                .as_ref()
+                                                .and_then(|i| i.get("command"))
+                                                .and_then(|c| c.as_str())
+                                            {
+                                                let segments =
+                                                    crate::discover::registry::split_command_chain(
+                                                        cmd,
+                                                    );
+                                                for seg in segments {
+                                                    if is_rtk_or_proxied(seg) {
+                                                        is_rtk = true;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            break;
+                                        }
                                     }
-                                    break;
+                                }
+                                if let Some(u) = msg.usage {
+                                    cache_write = u.cache_creation_input_tokens;
+                                    cache_read = u.cache_read_input_tokens;
+                                }
+                            }
+                            match by_req.get_mut(&req_id) {
+                                Some(ev) => {
+                                    ev.is_rtk |= is_rtk;
+                                    if ev.cwd.is_none() {
+                                        ev.cwd = cwd;
+                                    }
+                                }
+                                None => {
+                                    by_req.insert(
+                                        req_id,
+                                        SessionEvent {
+                                            dt: dt_utc,
+                                            is_rtk,
+                                            cwd,
+                                            cache_write,
+                                            cache_read,
+                                        },
+                                    );
                                 }
                             }
                         }
-                        if let Some(u) = msg.usage {
-                            cache_write = u.cache_creation_input_tokens;
-                            cache_read = u.cache_read_input_tokens;
-                        }
-                    }
-                    match by_req.get_mut(&req_id) {
-                        // Usage is identical across echoes; OR the rtk flag, fill cwd.
-                        Some(ev) => {
-                            ev.is_rtk |= is_rtk;
-                            if ev.cwd.is_none() {
-                                ev.cwd = cwd;
+                        LogFormat::Pi => {
+                            let entry: PiLogEntry = match serde_json::from_str(&line) {
+                                Ok(e) => e,
+                                Err(_) => continue,
+                            };
+                            if let Some(cwd_str) = entry.cwd {
+                                session_cwd = Some(cwd_str);
+                            }
+                            if entry.entry_type != "message" {
+                                continue;
+                            }
+                            let Some(id) = entry.id else {
+                                continue;
+                            };
+                            let Some(ts_str) = entry.timestamp else {
+                                continue;
+                            };
+                            let Ok(dt) = DateTime::parse_from_rfc3339(&ts_str) else {
+                                continue;
+                            };
+                            let dt_utc = dt.with_timezone(&Utc);
+                            let mut is_rtk = false;
+                            let mut cache_write = 0u64;
+                            let mut cache_read = 0u64;
+                            if let Some(msg) = &entry.message {
+                                if msg.role.as_deref() == Some("assistant") {
+                                    if let Some(content_list) = &msg.content {
+                                        for content in content_list {
+                                            if content.content_type == "toolCall"
+                                                && content.name.as_deref() == Some("bash")
+                                            {
+                                                if let Some(args) = &content.arguments {
+                                                    if let Some(cmd) =
+                                                        args.get("command").and_then(|c| c.as_str())
+                                                    {
+                                                        let segments = crate::discover::registry::split_command_chain(cmd);
+                                                        for seg in segments {
+                                                            if is_rtk_or_proxied(seg) {
+                                                                is_rtk = true;
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(u) = &entry.usage {
+                                cache_write = u.cache_write;
+                                cache_read = u.cache_read;
+                            }
+                            match by_req.get_mut(&id) {
+                                Some(ev) => {
+                                    ev.is_rtk |= is_rtk;
+                                    if ev.cwd.is_none() {
+                                        ev.cwd = session_cwd.clone();
+                                    }
+                                }
+                                None => {
+                                    by_req.insert(
+                                        id,
+                                        SessionEvent {
+                                            dt: dt_utc,
+                                            is_rtk,
+                                            cwd: session_cwd.clone(),
+                                            cache_write,
+                                            cache_read,
+                                        },
+                                    );
+                                }
                             }
                         }
-                        None => {
+                        LogFormat::Agy => {
+                            let entry: AgyLogEntry = match serde_json::from_str(&line) {
+                                Ok(e) => e,
+                                Err(_) => continue,
+                            };
+                            let key = entry.step_index.to_string();
+                            let Ok(dt) = DateTime::parse_from_rfc3339(&entry.created_at) else {
+                                continue;
+                            };
+                            let dt_utc = dt.with_timezone(&Utc);
+                            let mut is_rtk = false;
+                            if let Some(tc) = &entry.tool_calls {
+                                for call in tc {
+                                    if call.name == "run_command" {
+                                        if let Some(cmd) =
+                                            call.args.get("CommandLine").and_then(|c| c.as_str())
+                                        {
+                                            let segments =
+                                                crate::discover::registry::split_command_chain(cmd);
+                                            for seg in segments {
+                                                if is_rtk_or_proxied(seg) {
+                                                    is_rtk = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if let Some(c) =
+                                            call.args.get("Cwd").and_then(|c| c.as_str())
+                                        {
+                                            session_cwd = Some(c.trim_matches('"').to_string());
+                                        }
+                                    }
+                                }
+                            }
                             by_req.insert(
-                                req_id,
+                                key,
                                 SessionEvent {
                                     dt: dt_utc,
                                     is_rtk,
-                                    cwd,
-                                    cache_write,
-                                    cache_read,
+                                    cwd: session_cwd.clone(),
+                                    cache_write: 0,
+                                    cache_read: 0,
                                 },
                             );
                         }
+                        LogFormat::Codex => {
+                            let entry: CodexLogEntry = match serde_json::from_str(&line) {
+                                Ok(e) => e,
+                                Err(_) => continue,
+                            };
+                            let Ok(dt) = DateTime::parse_from_rfc3339(&entry.timestamp) else {
+                                continue;
+                            };
+                            let dt_utc = dt.with_timezone(&Utc);
+                            let mut is_rtk = false;
+                            let mut should_record = false;
+                            let mut key = String::new();
+
+                            if entry.entry_type == "response_item" {
+                                if let Some(payload) = &entry.payload {
+                                    let p_type = payload.payload_type.as_deref();
+                                    if p_type == Some("custom_tool_call")
+                                        && payload.name.as_deref() == Some("exec")
+                                    {
+                                        should_record = true;
+                                        key = payload
+                                            .call_id
+                                            .clone()
+                                            .or_else(|| payload.id.clone())
+                                            .unwrap_or_else(|| Utc::now().to_rfc3339());
+                                        if let Some(input) = &payload.input {
+                                            if let Some((cmd, workdir)) =
+                                                extract_exec_command_cmd(input)
+                                            {
+                                                if let Some(wd) = workdir {
+                                                    session_cwd = Some(wd);
+                                                }
+                                                let segments =
+                                                    crate::discover::registry::split_command_chain(
+                                                        &cmd,
+                                                    );
+                                                for seg in segments {
+                                                    if is_rtk_or_proxied(seg) {
+                                                        is_rtk = true;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else if p_type == Some("message")
+                                        && payload.role.as_deref() == Some("assistant")
+                                    {
+                                        should_record = true;
+                                        key = payload
+                                            .id
+                                            .clone()
+                                            .unwrap_or_else(|| Utc::now().to_rfc3339());
+                                    }
+                                }
+                            } else if entry.entry_type == "event_msg" {
+                                if let Some(payload) = &entry.payload {
+                                    if payload.payload_type.as_deref() == Some("user_message") {
+                                        should_record = true;
+                                        key = payload
+                                            .id
+                                            .clone()
+                                            .unwrap_or_else(|| Utc::now().to_rfc3339());
+                                    }
+                                }
+                            }
+
+                            if should_record {
+                                by_req.insert(
+                                    key,
+                                    SessionEvent {
+                                        dt: dt_utc,
+                                        is_rtk,
+                                        cwd: session_cwd.clone(),
+                                        cache_write: 0,
+                                        cache_read: 0,
+                                    },
+                                );
+                            }
+                        }
+                        LogFormat::Unknown => {}
                     }
                 }
             }
@@ -1086,65 +1448,72 @@ fn audit_precise_savings(tracker: &Tracker, projects_dir: &Path) -> Result<Audit
             claude_invocations += by_req.values().filter(|e| e.is_rtk).count();
             let mut turns: Vec<SessionEvent> = by_req.into_values().collect();
             turns.sort_by_key(|e| e.dt);
+            all_files.push((format, turns));
+        }
+    }
 
-            // Match each Bash turn to the nearest unmatched rtk command (<=5s), then
-            // credit its saved tokens across every subsequent turn by that turn's bucket.
-            for (i, ev) in turns.iter().enumerate() {
-                // Only Bash events Claude invoked as `rtk ...` can match an rtk
-                // command record - this is the authoritative cap on Claude-driven use.
-                if !ev.is_rtk {
+    // Global matching: pair each rtk session turn with the closest rtk DB command
+    // that shares its (canonicalized) cwd and lies within MATCH_WINDOW_SECS. We
+    // build every candidate edge, sort by ascending gap, and greedily assign so
+    // the closest pairs lock in first — a per-file greedy mis-assigns because an
+    // early file consumes commands that truly belong to turns in a later file.
+    // edges: (gap_secs, file_idx, turn_idx, cmd_idx)
+    let mut edges: Vec<(f64, usize, usize, usize)> = Vec::new();
+    for (fi, (_fmt, turns)) in all_files.iter().enumerate() {
+        for (ti, ev) in turns.iter().enumerate() {
+            if !ev.is_rtk {
+                continue;
+            }
+            let ev_cwd = ev.cwd.as_deref().map(norm_cwd);
+            for (ci, cmd) in rtk_cmds.iter().enumerate() {
+                if ev_cwd.as_deref() != Some(cmd.project.as_str()) {
                     continue;
                 }
-                let mut best_idx: Option<usize> = None;
-                // rtk stamps its record AFTER the command finishes, so the DB timestamp
-                // lags the Claude Bash event by the command runtime. 60s recovers
-                // ~99.9% of invocations while keeping the window tight enough to avoid
-                // cross-session record stealing; the rtk-invocation + project filters
-                // pin each match, and the rtk-invocation cap means we can never exceed
-                // the number of events Claude actually drove.
-                let mut best_diff = 60.0f64;
-                for (j, cmd) in rtk_cmds.iter().enumerate() {
-                    if cmd.matched {
-                        continue;
-                    }
-                    // Scope to the same project: a Bash event may only claim an rtk
-                    // command that ran in this session's cwd. Stops cross-project
-                    // false matches (e.g. codex/terminal cmds near a Claude turn).
-                    if ev.cwd.as_deref() != Some(cmd.project.as_str()) {
-                        continue;
-                    }
-                    let diff = (cmd.dt - ev.dt).num_milliseconds().abs() as f64 / 1000.0;
-                    if diff < best_diff {
-                        best_diff = diff;
-                        best_idx = Some(j);
-                    }
+                let gap = (cmd.dt - ev.dt).num_milliseconds().abs() as f64 / 1000.0;
+                if gap < MATCH_WINDOW_SECS {
+                    edges.push((gap, fi, ti, ci));
                 }
-                let Some(j) = best_idx else { continue };
-                rtk_cmds[j].matched = true;
-                let m = rtk_cmds[j].saved_tokens;
+            }
+        }
+    }
+    edges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-                // Appearance turn (i+1): the tool result enters the cached prefix,
-                // billed as a cache write. Validated via `claude -p`: the result's
-                // turn always shows cache_creation > 0, even for tiny outputs.
-                write_tokens += m;
+    let mut turn_used: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let mut assign: std::collections::HashMap<(usize, usize), usize> =
+        std::collections::HashMap::new();
+    for (_, fi, ti, ci) in edges {
+        if rtk_cmds[ci].matched || turn_used.contains(&(fi, ti)) {
+            continue;
+        }
+        rtk_cmds[ci].matched = true;
+        turn_used.insert((fi, ti));
+        assign.insert((fi, ti), ci);
+    }
 
-                // Every later turn: the prefix (incl. the compressed region) is either
-                // re-written (eviction rebuild: cache_write > cache_read) or re-read.
-                for t in turns.iter().skip(i + 2) {
-                    if t.cache_write > t.cache_read {
-                        write_tokens += m;
-                    } else {
-                        read_tokens += m;
-                    }
+    // Per-file cache-lifecycle accounting: a matched command's saved tokens are
+    // billed at the cache-write rate on appearance, then read/write on later
+    // turns depending on each turn's cache_read vs cache_write balance.
+    for (fi, (_fmt, turns)) in all_files.iter().enumerate() {
+        for (i, ev) in turns.iter().enumerate() {
+            if !ev.is_rtk {
+                continue;
+            }
+            let Some(&ci) = assign.get(&(fi, i)) else {
+                continue;
+            };
+            let m = rtk_cmds[ci].saved_tokens;
+            write_tokens += m;
+            for t in turns.iter().skip(i + 2) {
+                if t.cache_write > t.cache_read {
+                    write_tokens += m;
+                } else {
+                    read_tokens += m;
                 }
             }
         }
     }
 
     let matched = rtk_cmds.iter().filter(|c| c.matched).count();
-
-    // Unmatched commands ran outside any Claude session (terminal/codex) and never
-    // entered an LLM context, so they earn no savings under the authoritative-cap model.
 
     Ok(AuditSavings {
         write_tokens,
@@ -1540,7 +1909,7 @@ mod tests {
         )
         .unwrap();
 
-        let s = audit_precise_savings(&tracker, &projects_dir).unwrap();
+        let s = audit_precise_savings(&tracker, std::slice::from_ref(&projects_dir)).unwrap();
         assert_eq!(s.matched, 1);
         assert_eq!(s.claude_invocations, 1);
         assert_eq!(s.write_tokens, 1800); // appearance + rebuild
@@ -1565,9 +1934,148 @@ mod tests {
             ev(&t0, "req0", Some(&project), Some("rtk c"), 0, 5000),
         )
         .unwrap();
-        let s = audit_precise_savings(&tracker, &projects_dir).unwrap();
+        let s = audit_precise_savings(&tracker, std::slice::from_ref(&projects_dir)).unwrap();
         assert_eq!(s.matched, 1);
         assert_eq!(s.write_tokens, 1000 - 100); // appearance only, no later turns
         assert_eq!(s.read_tokens, 0);
+    }
+
+    #[test]
+    fn test_audit_pi_session_logs() {
+        let tracker = Tracker::new_in_memory().unwrap();
+        tracker
+            .record("git status", "rtk git status", 500, 50, 20)
+            .unwrap();
+        let rows = tracker.get_raw_commands().unwrap();
+        let cmd_time = rows[0].0;
+        let project = rows[0].1.clone();
+        let t0 = cmd_time.to_rfc3339();
+        let t1 = (cmd_time + chrono::TimeDelta::try_seconds(1).unwrap()).to_rfc3339();
+        let t2 = (cmd_time + chrono::TimeDelta::try_seconds(2).unwrap()).to_rfc3339();
+
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("proj");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        // Pi format JSONL
+        let line0 = format!(
+            r#"{{"type":"session","version":3,"id":"sess1","timestamp":"{}","cwd":"{}"}}"#,
+            t0, project
+        );
+        let line1 = format!(
+            r#"{{"type":"message","id":"msg1","timestamp":"{}","message":{{"role":"assistant","content":[{{"type":"toolCall","id":"c1","name":"bash","arguments":{{"command":"rtk git status"}}}}]}},"usage":{{"cacheRead":0,"cacheWrite":100}}}}"#,
+            t0
+        );
+        let line2 = format!(
+            r#"{{"type":"message","id":"msg2","timestamp":"{}","message":{{"role":"assistant","content":[]}},"usage":{{"cacheRead":200,"cacheWrite":0}}}}"#,
+            t1
+        );
+        let line3 = format!(
+            r#"{{"type":"message","id":"msg3","timestamp":"{}","message":{{"role":"assistant","content":[]}},"usage":{{"cacheRead":200,"cacheWrite":0}}}}"#,
+            t2
+        );
+
+        std::fs::write(
+            sessions_dir.join("pi_session.jsonl"),
+            format!("{}\n{}\n{}\n{}\n", line0, line1, line2, line3),
+        )
+        .unwrap();
+
+        let s = audit_precise_savings(&tracker, std::slice::from_ref(&sessions_dir)).unwrap();
+        assert_eq!(s.matched, 1);
+        assert_eq!(s.claude_invocations, 1);
+        assert_eq!(s.write_tokens, 450); // appearance
+        assert_eq!(s.read_tokens, 450); // subsequent turn cache read
+    }
+
+    #[test]
+    fn test_audit_agy_session_logs() {
+        let tracker = Tracker::new_in_memory().unwrap();
+        tracker
+            .record("cargo check", "rtk cargo check", 1000, 100, 30)
+            .unwrap();
+        let rows = tracker.get_raw_commands().unwrap();
+        let cmd_time = rows[0].0;
+        let project = rows[0].1.clone();
+        let t0 = cmd_time.to_rfc3339();
+        let t1 = (cmd_time + chrono::TimeDelta::try_seconds(1).unwrap()).to_rfc3339();
+        let t2 = (cmd_time + chrono::TimeDelta::try_seconds(2).unwrap()).to_rfc3339();
+
+        let dir = tempfile::tempdir().unwrap();
+        let brain_dir = dir.path().join("brain");
+        std::fs::create_dir_all(&brain_dir).unwrap();
+
+        // Agy format JSONL
+        let line1 = format!(
+            r#"{{"step_index":0,"source":"MODEL","type":"PLANNER_RESPONSE","created_at":"{}","tool_calls":[{{"name":"run_command","args":{{"CommandLine":"rtk cargo check","Cwd":"{}"}}}}]}}"#,
+            t0, project
+        );
+        let line2 = format!(
+            r#"{{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","created_at":"{}","tool_calls":[]}}"#,
+            t1
+        );
+        let line3 = format!(
+            r#"{{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","created_at":"{}","tool_calls":[]}}"#,
+            t2
+        );
+
+        std::fs::write(
+            brain_dir.join("transcript.jsonl"),
+            format!("{}\n{}\n{}\n", line1, line2, line3),
+        )
+        .unwrap();
+
+        let s = audit_precise_savings(&tracker, std::slice::from_ref(&brain_dir)).unwrap();
+        assert_eq!(s.matched, 1);
+        assert_eq!(s.claude_invocations, 1);
+        assert_eq!(s.write_tokens, 900); // appearance write
+        assert_eq!(s.read_tokens, 900); // subsequent turn read (heuristic default)
+    }
+
+    #[test]
+    fn test_audit_codex_session_logs() {
+        let tracker = Tracker::new_in_memory().unwrap();
+        tracker
+            .record("cargo check", "rtk cargo check", 1000, 100, 50)
+            .unwrap();
+        let rows = tracker.get_raw_commands().unwrap();
+        let cmd_time = rows[0].0;
+        let project = rows[0].1.clone();
+        let t0 = cmd_time.to_rfc3339();
+        let t1 = (cmd_time + chrono::TimeDelta::try_seconds(1).unwrap()).to_rfc3339();
+        let t2 = (cmd_time + chrono::TimeDelta::try_seconds(2).unwrap()).to_rfc3339();
+
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("proj");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        // Codex format JSONL
+        let line0 = format!(
+            r#"{{"timestamp":"{}","type":"session_meta","payload":{{"session_id":"s1","cwd":"{}"}}}}"#,
+            t0, project
+        );
+        let line1 = format!(
+            r#"{{"timestamp":"{}","type":"response_item","payload":{{"type":"custom_tool_call","call_id":"c1","name":"exec","input":"const r = await tools.exec_command({{\"cmd\":\"rtk cargo check\",\"workdir\":\"{}\"}});"}}}}"#,
+            t0, project
+        );
+        let line2 = format!(
+            r#"{{"timestamp":"{}","type":"response_item","payload":{{"type":"message","id":"msg1","role":"assistant"}}}}"#,
+            t1
+        );
+        let line3 = format!(
+            r#"{{"timestamp":"{}","type":"response_item","payload":{{"type":"message","id":"msg2","role":"assistant"}}}}"#,
+            t2
+        );
+
+        std::fs::write(
+            sessions_dir.join("codex_session.jsonl"),
+            format!("{}\n{}\n{}\n{}\n", line0, line1, line2, line3),
+        )
+        .unwrap();
+
+        let s = audit_precise_savings(&tracker, std::slice::from_ref(&sessions_dir)).unwrap();
+        assert_eq!(s.matched, 1);
+        assert_eq!(s.claude_invocations, 1);
+        assert_eq!(s.write_tokens, 900); // appearance write
     }
 }
