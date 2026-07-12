@@ -131,7 +131,7 @@ fn run_forget() -> Result<()> {
     // Purge local tracking database (GDPR Art. 17 — right to erasure applies to local data too)
     let db_path = super::tracking::get_db_path()?;
     if db_path.exists() {
-        match delete_tracking_database(&db_path) {
+        match std::fs::remove_file(&db_path) {
             Ok(()) => println!("Local tracking database deleted: {}", db_path.display()),
             Err(e) => eprintln!("rtk: could not delete {}: {}", db_path.display(), e),
         }
@@ -179,22 +179,19 @@ fn send_erasure_request(device_hash: &str) -> Result<()> {
     Ok(())
 }
 
-fn delete_tracking_database(path: &std::path::Path) -> std::io::Result<()> {
-    std::fs::remove_file(path)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
-    fn deletes_tracking_database_at_resolved_path() {
+    fn forget_resolves_the_configured_tracking_database_path() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().expect("environment lock");
         let temp = tempfile::tempdir().expect("temp directory");
         let custom_path = temp.path().join("custom-history.db");
-        std::fs::write(&custom_path, b"tracking data").expect("write tracking database");
+        std::env::set_var("RTK_DB_PATH", &custom_path);
 
-        delete_tracking_database(&custom_path).expect("delete tracking database");
+        let resolved = super::super::tracking::get_db_path().expect("resolve tracking database");
 
-        assert!(!custom_path.exists());
+        std::env::remove_var("RTK_DB_PATH");
+        assert_eq!(resolved, custom_path);
     }
 }
