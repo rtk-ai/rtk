@@ -1,0 +1,35 @@
+# Active Task
+
+- Updated: 2026-07-12
+- Status: complete
+- Mode: testing/stabilization
+- Project: RTK Windows-native compatibility fork
+- Memory landing policy: ask-by-default
+- User goal: Reproduce the native `tsc` false failure, identify its root cause, and fix the RTK bug if feasible.
+- Touched modules: To be determined from evidence; expected native `tsc` dispatch, JS tool resolution, or argv forwarding.
+- Policy scope: native-tsc-argv-loss
+- ExecutionPolicy: external
+- ExecutionPolicy source: triggered execution skills
+- Execution protocol skills: superpowers:systematic-debugging; superpowers:test-driven-development; superpowers:verification-before-completion
+- Lite Demo role: memory-only
+- Scope: Trace the exact failing command path, create a minimal regression test, implement the smallest root-cause fix, and verify focused plus relevant regression suites.
+- Last approved route: User authorized project memory landing and requested reproduction and repair.
+- Interruption risk: Multi-phase Rust investigation and test/fix loop.
+- Activation packet: Typecheck passes through raw pnpm; native tee contains a no-argument TypeScript help page; investigate argv before output filtering.
+- Allowed changes: Focused tests and implementation changes proven necessary for native `tsc` argument preservation or correct dispatch.
+- Stable behavior: Existing working native commands, proxy behavior, and unrelated Windows compatibility paths.
+- 稳定模块保护判断: 当前只允许触碰被证据证明导致 `tsc` 参数丢失的链路；不顺手重构其他命令。回归检查包括聚焦测试、相关 Rust 测试和原始复现场景。
+- Memory hygiene: task-local
+- Artifact discipline: Reuse the existing tee log and local workspace before generating new broad artifacts.
+- Encoding check: Memory files written through apply_patch as UTF-8; sentinel check required after updates.
+- Pressure signals: User corrected the earlier framing and explicitly expects investigation of an RTK native wrapper defect.
+- Rejected approaches: Treating `rtk proxy pnpm typecheck` success as proof that RTK itself needs no fix.
+- Current step: Complete.
+- Completed: Root cause confirmed and fixed; red/green tests cover package-script argv, pnpm filters, and nonzero `tsc` output fidelity; temporary package fixture proved the repository binary executes the real `typecheck` script; formatting, full Rust tests, and Windows acceptance passed.
+- Next exact step: None; task complete
+- Validation gates: Observe a failing regression test before implementation; focused test green after fix; reproduce original command successfully; run relevant Rust and Windows acceptance checks.
+- Regression guards: No change to proxy semantics; no argument rewriting outside the proven failing shape; preserve exit-code fidelity.
+- Rollback/backups: Git diff provides rollback boundary; do not modify unrelated existing dirty-worktree files.
+- Do not touch: Existing user changes in Cargo.toml, Cargo.lock, README_LOCAL.md, untracked review/log files, or unrelated stable modules.
+- Resume instruction: Archived only; create a new active-task for future work.
+- Route check: Fix and verification completed within the approved pnpm/tsc routing boundary.

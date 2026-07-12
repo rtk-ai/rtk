@@ -1590,27 +1590,18 @@ fn merge_pnpm_args_os(filters: &[String], args: &[OsString]) -> Vec<OsString> {
         .collect()
 }
 
-/// Validate that pnpm filters are only used in the global context, not before subcommands like tsc.
-fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<String> {
-    // Check if this is a Build or Typecheck command with filters
-    match command {
-        PnpmCommands::Typecheck { .. } => {
-            // FIXME: if filters are present, we should find out which workspaces are selected before running rtk dedicated commands
-            if !filters.is_empty() {
-                let cmd_name = match command {
-                    PnpmCommands::Typecheck { .. } => "tsc",
-                    _ => unreachable!(),
-                };
-                let msg = format!(
-                    "[rtk] warning: --filter is not yet supported for pnpm {}, filters preceding the subcommand will be ignored",
-                    cmd_name
-                );
-                return Some(msg);
-            }
-            None
-        }
-        _ => None,
-    }
+fn pnpm_typecheck_args(filters: &[String], args: &[String]) -> Vec<OsString> {
+    filters
+        .iter()
+        .map(|filter| OsString::from(format!("--filter={}", filter)))
+        .chain(std::iter::once(OsString::from("typecheck")))
+        .chain(args.iter().map(OsString::from))
+        .collect()
+}
+
+/// All recognized pnpm commands preserve global filters when constructing argv.
+fn validate_pnpm_filters(_filters: &[String], _command: &PnpmCommands) -> Option<String> {
+    None
 }
 
 fn main() {
@@ -2010,7 +2001,9 @@ fn run_cli() -> Result<i32> {
                     &merge_pnpm_args(&filter, &args),
                     cli.verbose,
                 )?,
-                PnpmCommands::Typecheck { args } => tsc_cmd::run(&args, cli.verbose)?,
+                PnpmCommands::Typecheck { args } => {
+                    pnpm_cmd::run_passthrough(&pnpm_typecheck_args(&filter, &args), cli.verbose)?
+                }
                 PnpmCommands::Other(args) => {
                     pnpm_cmd::run_passthrough(&merge_pnpm_args_os(&filter, &args), cli.verbose)?
                 }
@@ -4238,6 +4231,20 @@ mod tests {
     }
 
     #[test]
+    fn test_pnpm_typecheck_invokes_the_package_script() {
+        let args = vec!["--workspace-concurrency=2".to_string()];
+        let routed = pnpm_typecheck_args(&[], &args);
+
+        assert_eq!(
+            routed,
+            vec![
+                OsString::from("typecheck"),
+                OsString::from("--workspace-concurrency=2"),
+            ]
+        );
+    }
+
+    #[test]
     fn test_pnpm_typecheck_with_filters() {
         let cli = Cli::try_parse_from([
             "rtk",
@@ -4255,10 +4262,26 @@ mod tests {
         .unwrap();
         match cli.command {
             Commands::Pnpm { filter, command } => {
-                let warning = validate_pnpm_filters(&filter, &command).unwrap();
+                let warning = validate_pnpm_filters(&filter, &command);
 
                 assert_eq!(filter, vec!["@app1", "@app2"]);
-                assert_eq!(warning, "[rtk] warning: --filter is not yet supported for pnpm tsc, filters preceding the subcommand will be ignored")
+                assert!(warning.is_none());
+
+                let PnpmCommands::Typecheck { args } = command else {
+                    panic!("Expected pnpm typecheck command");
+                };
+                assert_eq!(
+                    pnpm_typecheck_args(&filter, &args),
+                    vec![
+                        OsString::from("--filter=@app1"),
+                        OsString::from("--filter=@app2"),
+                        OsString::from("typecheck"),
+                        OsString::from("--filter"),
+                        OsString::from("@app3"),
+                        OsString::from("--filter"),
+                        OsString::from("@app4"),
+                    ]
+                );
             }
             _ => panic!("Expected Pnpm Build command"),
         }
