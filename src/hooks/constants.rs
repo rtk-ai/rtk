@@ -10,6 +10,8 @@ pub const BEFORE_TOOL_KEY: &str = "BeforeTool";
 
 /// Native Rust hook command for Claude Code (replaces rtk-rewrite.sh).
 pub const CLAUDE_HOOK_COMMAND: &str = "rtk hook claude";
+/// Native Rust hook command for Codex CLI.
+pub const CODEX_HOOK_COMMAND: &str = "rtk hook codex";
 /// Native Rust hook command for Cursor (replaces rtk-rewrite.sh).
 pub const CURSOR_HOOK_COMMAND: &str = "rtk hook cursor";
 /// Native Rust hook command for Factory Droid.

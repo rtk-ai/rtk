@@ -2,6 +2,11 @@
 
 **Usage**: Token-optimized CLI proxy for shell commands.
 
+When installed with `rtk init --codex`, a trusted Codex `PreToolUse` hook
+automatically rewrites eligible single, non-mutating Bash commands. These
+instructions remain as a fallback for commands that retain Codex's native
+approval flow and for shell paths that hooks do not intercept.
+
 ## Rule
 
 Always prefix shell commands with `rtk`.
