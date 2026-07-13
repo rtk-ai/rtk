@@ -103,6 +103,7 @@ rtk gain        # Should show token savings stats
 
 ```bash
 # 1. Install for your AI tool
+rtk init -g
 rtk init -g --copilot                    # Claude Code / Copilot (default)
 rtk init -g --gemini            # Gemini CLI
 rtk init -g --codex             # Codex (OpenAI)
