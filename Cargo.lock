@@ -251,11 +251,6 @@ dependencies = [
 [[package]]
 name = "crc32fast"
 version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
-dependencies = [
- "cfg-if",
-]
 
 [[package]]
 name = "crossbeam-deque"
@@ -333,6 +328,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "dunce"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "env_home"
@@ -900,6 +901,7 @@ dependencies = [
  "clap",
  "colored",
  "dirs",
+ "dunce",
  "flate2",
  "getrandom 0.4.2",
  "ignore",

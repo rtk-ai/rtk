@@ -1,9 +1,8 @@
 use super::constants::NOISE_DIRS;
-use super::ls::{self, LsRecord, LsRecordType};
+use super::ls::{self, LsRecord, LsRecordType, FormatOptions};
 
 use anyhow::Result;
 use colored::Colorize; 
-use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
@@ -17,8 +16,55 @@ pub fn estimate_raw_dir_output(records: &[LsRecord]) -> String {
     " ".repeat(chars)
 }
 
+pub fn generate_mock_raw_output(records: &[LsRecord]) -> String {
+    let mut out = String::new();
+    let total_blocks = records.iter().map(|r| (r.size + 4095) / 4096 * 4).sum::<u64>();
+    out.push_str(&format!("total {}\n", total_blocks));
+
+    for r in records {
+        let type_char = match r.file_type {
+            LsRecordType::DIRECTORY => 'd',
+            LsRecordType::SYMBOLINK => 'l',
+            _ => '-',
+        };
+        let perms = match &r.octal_permissions {
+            Some(oct) => {
+                let mut p = String::new();
+                for c in oct.chars() {
+                    let val = c.to_digit(8).unwrap_or(0);
+                    p.push(if val & 4 != 0 { 'r' } else { '-' });
+                    p.push(if val & 2 != 0 { 'w' } else { '-' });
+                    p.push(if val & 1 != 0 { 'x' } else { '-' });
+                }
+                p
+            }
+            None => "rwxr-xr-x".to_string(),
+        };
+
+        out.push_str(&format!(
+            "{}{} 1 user staff {} Jan 1 12:00 {}\n",
+            type_char, perms, r.size, r.name
+        ));
+    }
+    out
+}
+
+fn is_file_hidden(name: &str, metadata: &std::fs::Metadata) -> bool {
+    if name.starts_with('.') {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        (metadata.file_attributes() & 0x2) != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 /// Fetches file information from the filesystem using native Rust std::fs.
-/// refactor required
 pub fn fetch_entries(paths: &[String], show_all: bool) -> Result<Vec<LsRecord>> {
     let mut records = Vec::new();
     let targets: Vec<String> = if paths.is_empty() {
@@ -40,7 +86,12 @@ pub fn fetch_entries(paths: &[String], show_all: bool) -> Result<Vec<LsRecord>> 
         };
 
         if metadata.is_dir() {
-            for entry_res in std::fs::read_dir(path)? {
+            let resolved_path = match dunce::canonicalize(path) {
+                Ok(p) => p,
+                Err(_) => path.to_path_buf(),
+            };
+
+            for entry_res in std::fs::read_dir(&resolved_path)? {
                 let entry = match entry_res {
                     Ok(e) => e,
                     Err(_) => continue,
@@ -51,8 +102,11 @@ pub fn fetch_entries(paths: &[String], show_all: bool) -> Result<Vec<LsRecord>> 
                     continue;
                 }
 
-                if !show_all && NOISE_DIRS.iter().any(|noise| name == *noise) {
-                    continue;
+                let meta = entry.metadata().or_else(|_| std::fs::symlink_metadata(entry.path())).ok();
+                if let Some(ref m) = meta {
+                    if !show_all && (is_file_hidden(&name, m) || NOISE_DIRS.iter().any(|noise| name == *noise)) {
+                        continue;
+                    }
                 }
 
                 if let Ok(file_type) = entry.file_type() {
@@ -67,17 +121,22 @@ pub fn fetch_entries(paths: &[String], show_all: bool) -> Result<Vec<LsRecord>> 
                         LsRecordType::FILE
                     };
 
-                    let meta = entry.metadata().or_else(|_| std::fs::symlink_metadata(entry.path())).ok();
-                    let (size, timestamp) = if let Some(m) = meta {
+                    let (size, timestamp, is_readonly) = if let Some(ref m) = meta {
                         let ts = m.modified()
                             .ok()
                             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                             .map(|d| d.as_secs() as u64)
                             .unwrap_or(0);
-                        (m.len(), Some(ts))
+                        (m.len(), Some(ts), m.permissions().readonly())
                     } else {
-                        (0, None)
+                        (0, None, false)
                     };
+
+                    let octal_permissions = if is_readonly {
+                        if ls_file_type == LsRecordType::DIRECTORY { "555" } else { "444" }
+                    } else {
+                        if ls_file_type == LsRecordType::DIRECTORY { "755" } else { "644" }
+                    }.to_string();
 
                     records.push(LsRecord {
                         extension: ls::get_extension(&name),
@@ -85,6 +144,7 @@ pub fn fetch_entries(paths: &[String], show_all: bool) -> Result<Vec<LsRecord>> 
                         size,
                         name,
                         timestamp,
+                        octal_permissions: Some(octal_permissions),
                     });
                 }
             }
@@ -112,31 +172,48 @@ pub fn fetch_entries(paths: &[String], show_all: bool) -> Result<Vec<LsRecord>> 
                     .map(|d| d.as_secs() as u64)
                     .unwrap_or(0),
             );
+
+            let is_readonly = metadata.permissions().readonly();
+            let octal_permissions = if is_readonly {
+                if ls_file_type == LsRecordType::DIRECTORY { "555" } else { "444" }
+            } else {
+                if ls_file_type == LsRecordType::DIRECTORY { "755" } else { "644" }
+            }.to_string();
+
             records.push(LsRecord {
                 extension: ls::get_extension(&name),
                 file_type: ls_file_type,
                 size: metadata.len(),
                 name,
                 timestamp,
+                octal_permissions: Some(octal_permissions),
             });
         }
     }
     Ok(records)
 }
+
 fn warn_unsupported_flags(flags: &[String]) {
-    let allowed_flags = ["-t", "-r", "-rt", "-tr"];
+    let mut unsupported = Vec::new();
+    for f in flags {
+        if f.starts_with("--") {
+            if f != "--all" && f != "--full-time" && f != "--format=long" && f != "--format=verbose" {
+                unsupported.push(f.clone());
+            }
+        } else if f.starts_with('-') && f != "-" {
+            let bad_chars: String = f.chars().skip(1).filter(|c| *c != 'a' && *c != 'l' && *c != 't' && *c != 'r' && *c != 'h').collect();
+            if !bad_chars.is_empty() {
+                unsupported.push(f.clone());
+            }
+        }
+    }
 
-    let unsupported_flags: Vec<&String> = flags
-        .iter()
-        .filter(|f| !allowed_flags.contains(&f.as_str()))
-        .collect();
-
-    if !unsupported_flags.is_empty() {
+    if !unsupported.is_empty() {
         eprintln!(
             "{}",
             format!(
                 "rtk ls: native Windows path ignores flags: {:?}",
-                unsupported_flags
+                unsupported
             )
             .bold()
             .yellow()
@@ -144,38 +221,26 @@ fn warn_unsupported_flags(flags: &[String]) {
     }
 }
 
-pub fn run_native(paths: Vec<String>, show_all: bool, flags: Vec<String>) -> Result<(i32, String, String)> {
+pub fn run_native(paths: Vec<String>, options: FormatOptions, flags: Vec<String>) -> Result<(i32, String, String)> {
     warn_unsupported_flags(&flags);
 
-    let active_flags: HashSet<char> = flags
-        .iter()
-        .filter(|f| f.starts_with('-') && !f.starts_with("--"))
-        .flat_map(|f| f.chars().skip(1)) // 跳過 '-'
-        .collect();
+    let mut records = fetch_entries(&paths, options.show_all)?;
 
-    let is_r = active_flags.contains(&'r');
-    let is_t = active_flags.contains(&'t');
-
-    let mut records = fetch_entries(&paths, show_all)?;
-
-    let sort_fn = if is_t {
-        //
+    let sort_fn = if options.sort_by_time {
         |a: &LsRecord, b: &LsRecord| b.timestamp.unwrap_or(0).cmp(&a.timestamp.unwrap_or(0))
     } else {
-        //
         |a: &LsRecord, b: &LsRecord| a.name.cmp(&b.name)
     };
 
     records.sort_by(sort_fn);
 
-    // 
-    if is_r {
+    if options.reverse {
         records.reverse();
     }
 
-    let raw_estimate = estimate_raw_dir_output(&records);
+    let raw_estimate = generate_mock_raw_output(&records);
 
-    let (entries, summary) = super::ls_format::synthesize_output(records);
+    let (entries, summary) = super::ls_format::synthesize_output(records, &options);
     let is_tty = std::io::stdout().is_terminal();
     let output = if is_tty {
         format!("{}{}", entries, summary)
@@ -204,7 +269,8 @@ mod tests {
         File::create(dir_path.join("README.md")).unwrap();
 
         let records = fetch_entries(&[dir_path.to_string_lossy().into_owned()], false).unwrap();
-        let (entries, _summary) = synthesize_output(records);
+        let options = FormatOptions::default();
+        let (entries, _summary) = synthesize_output(records, &options);
 
         assert!(entries.contains("src/"));
         assert!(entries.contains("Cargo.toml"));
@@ -224,7 +290,8 @@ mod tests {
         File::create(dir_path.join("main.rs")).unwrap();
 
         let records = fetch_entries(&[dir_path.to_string_lossy().into_owned()], false).unwrap();
-        let (entries, _summary) = synthesize_output(records);
+        let options = FormatOptions::default();
+        let (entries, _summary) = synthesize_output(records, &options);
 
         assert!(!entries.contains("node_modules"));
         assert!(!entries.contains(".git"));
@@ -242,7 +309,8 @@ mod tests {
         fs::create_dir(dir_path.join("src")).unwrap();
 
         let records = fetch_entries(&[dir_path.to_string_lossy().into_owned()], true).unwrap();
-        let (entries, _summary) = synthesize_output(records);
+        let options = FormatOptions { show_all: true, show_long: false, sort_by_time: false, reverse: false };
+        let (entries, _summary) = synthesize_output(records, &options);
 
         assert!(entries.contains(".git/"));
         assert!(entries.contains("src/"));
@@ -254,7 +322,8 @@ mod tests {
         let dir_path = dir.path();
 
         let records = fetch_entries(&[dir_path.to_string_lossy().into_owned()], false).unwrap();
-        let (entries, summary) = synthesize_output(records);
+        let options = FormatOptions::default();
+        let (entries, summary) = synthesize_output(records, &options);
 
         assert_eq!(entries, "(empty)\n");
         assert!(summary.is_empty());
@@ -270,7 +339,6 @@ mod tests {
 
         let link_path = dir_path.join("link.txt");
         
-        // Handling symlinks specifically on windows 
         #[cfg(windows)]
         let symlink_result = std::os::windows::fs::symlink_file(&target_path, &link_path);
         
@@ -278,16 +346,14 @@ mod tests {
         let symlink_result = std::os::unix::fs::symlink(&target_path, &link_path);
 
         if let Err(e) = symlink_result {
-            // Ignore error if symlink creation failed due to lack of administrative privileges on Windows
             eprintln!("Failed to create symlink: {:?}", e);
             return;
         }
 
         let records = fetch_entries(&[dir_path.to_string_lossy().into_owned()], false).unwrap();
-        let (entries, _summary) = synthesize_output(records);
+        let options = FormatOptions::default();
+        let (entries, _summary) = synthesize_output(records, &options);
 
-        // NOTE: This assertion will FAIL with your current code, as fetch_entries 
-        // does not append " -> target.txt" to the file name. 
         assert!(
             entries.contains("link.txt -> target.txt") || entries.contains(&format!("link.txt -> {}", target_path.to_string_lossy())),
             "Symlink output does not include target, got entries:\n{}", 
@@ -306,13 +372,15 @@ mod tests {
         File::create(dir_path.join("Cargo.toml")).unwrap();
 
         let records = fetch_entries(&[dir_path.to_string_lossy().into_owned()], false).unwrap();
-        let (_entries, summary) = synthesize_output(records);
+        let options = FormatOptions::default();
+        let (_entries, summary) = synthesize_output(records, &options);
 
         assert!(summary.contains("Summary: 3 files, 1 dirs"));
         assert!(summary.contains(".rs"));
         assert!(summary.contains(".toml"));
     }
-        #[test]
+
+    #[test]
     fn test_estimate_raw_dir_output() {
         let records = vec![
             LsRecord {
@@ -321,6 +389,7 @@ mod tests {
                 size: 100,
                 timestamp: Some(1000),
                 extension: "txt".to_string(),
+                octal_permissions: Some("644".to_string()),
             },
             LsRecord {
                 name: "dir".to_string(),
@@ -328,14 +397,10 @@ mod tests {
                 size: 0,
                 timestamp: Some(2000),
                 extension: "".to_string(),
+                octal_permissions: Some("755".to_string()),
             },
         ];
         let estimate = estimate_raw_dir_output(&records);
-        // Calculation: 
-        // Base = 8 ("total 0\n")
-        // file.txt length (8) + 45 = 53
-        // dir length (3) + 45 = 48
-        // 8 + 53 + 48 = 109 spaces
         assert_eq!(estimate.len(), 109);
         assert_eq!(estimate, " ".repeat(109));
     }
@@ -348,7 +413,6 @@ mod tests {
         let file_path = dir_path.join("single.txt");
         File::create(&file_path).unwrap();
 
-        // Testing the `} else {` branch of fetch_entries
         let records = fetch_entries(&[file_path.to_string_lossy().into_owned()], false).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].name, "single.txt");
@@ -360,8 +424,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let dir_path = dir.path();
 
-        // Create files in specific order but with non-alphabetical names.
-        // We add slight sleeps to guarantee different OS file modification times.
         File::create(dir_path.join("c.txt")).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1050));
         
@@ -373,28 +435,32 @@ mod tests {
         let path_str = dir_path.to_string_lossy().into_owned();
 
         // 1. Default (alphabetical: a.txt -> b.txt -> c.txt)
-        let (_, output_default, _) = run_native(vec![path_str.clone()], false, vec![]).unwrap();
+        let options_default = FormatOptions::default();
+        let (_, output_default, _) = run_native(vec![path_str.clone()], options_default, vec![]).unwrap();
         let pos_a = output_default.find("a.txt").unwrap();
         let pos_b = output_default.find("b.txt").unwrap();
         let pos_c = output_default.find("c.txt").unwrap();
         assert!(pos_a < pos_b && pos_b < pos_c, "Default sort should be alphabetical");
 
         // 2. Reverse alphabetical (-r: c.txt -> b.txt -> a.txt)
-        let (_, output_rev, _) = run_native(vec![path_str.clone()], false, vec!["-r".to_string()]).unwrap();
+        let options_rev = FormatOptions { show_all: false, show_long: false, sort_by_time: false, reverse: true };
+        let (_, output_rev, _) = run_native(vec![path_str.clone()], options_rev, vec!["-r".to_string()]).unwrap();
         let pos_a_r = output_rev.find("a.txt").unwrap();
         let pos_b_r = output_rev.find("b.txt").unwrap();
         let pos_c_r = output_rev.find("c.txt").unwrap();
         assert!(pos_c_r < pos_b_r && pos_b_r < pos_a_r, "Reverse sort (-r) should be reverse alphabetical");
 
         // 3. Time sort (-t: newest first -> b.txt -> a.txt -> c.txt)
-        let (_, output_time, _) = run_native(vec![path_str.clone()], false, vec!["-t".to_string()]).unwrap();
+        let options_time = FormatOptions { show_all: false, show_long: false, sort_by_time: true, reverse: false };
+        let (_, output_time, _) = run_native(vec![path_str.clone()], options_time, vec!["-t".to_string()]).unwrap();
         let pos_a_t = output_time.find("a.txt").unwrap();
         let pos_b_t = output_time.find("b.txt").unwrap();
         let pos_c_t = output_time.find("c.txt").unwrap();
         assert!(pos_b_t < pos_a_t && pos_a_t < pos_c_t, "Time sort (-t) should be newest first");
 
         // 4. Reverse time sort (-rt: oldest first -> c.txt -> a.txt -> b.txt)
-        let (_, output_rev_time, _) = run_native(vec![path_str.clone()], false, vec!["-rt".to_string()]).unwrap();
+        let options_rev_time = FormatOptions { show_all: false, show_long: false, sort_by_time: true, reverse: true };
+        let (_, output_rev_time, _) = run_native(vec![path_str.clone()], options_rev_time, vec!["-rt".to_string()]).unwrap();
         let pos_a_rt = output_rev_time.find("a.txt").unwrap();
         let pos_b_rt = output_rev_time.find("b.txt").unwrap();
         let pos_c_rt = output_rev_time.find("c.txt").unwrap();
@@ -406,16 +472,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let dir_path = dir.path();
 
-        // Create Directory
         fs::create_dir(dir_path.join("folder_b")).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        // Create File
         let file_path = dir_path.join("file_a.txt");
         File::create(&file_path).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        // Create Symlink
         let link_path = dir_path.join("symlink_c");
         #[cfg(windows)]
         let symlink_result = std::os::windows::fs::symlink_file(&file_path, &link_path);
@@ -428,17 +491,16 @@ mod tests {
 
         let path_str = dir_path.to_string_lossy().into_owned();
 
-        // Run holistic function with -rt flags and show_all = true
+        let options = FormatOptions { show_all: true, show_long: false, sort_by_time: true, reverse: true };
         let (exit_code, output, estimate) = run_native(
             vec![path_str], 
-            true, 
+            options, 
             vec!["-rt".to_string()]
         ).unwrap();
 
         assert_eq!(exit_code, 0);
         assert!(!estimate.is_empty(), "Token estimate string should be generated");
         
-        // Assert output contains all elements
         assert!(output.contains("folder_b/"));
         assert!(output.contains("file_a.txt"));
         
@@ -446,12 +508,6 @@ mod tests {
             assert!(output.contains("symlink_c"));
         }
         
-        // Because synthesize_output explicitly formats into sections (Dirs -> Symlinks -> Files)
-        // the sorting flags only apply to the items *within* those sections. 
-        // We assert the summary appears at the bottom.
         assert!(output.contains("Summary: "));
     }
-
-
 }
-

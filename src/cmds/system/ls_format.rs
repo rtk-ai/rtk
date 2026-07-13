@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::ls::{LsRecord, LsRecordType};
+use super::ls::{LsRecord, LsRecordType, FormatOptions};
 
 /// Format bytes into human-readable size
 pub fn human_size(bytes: u64) -> String {
@@ -14,18 +14,19 @@ pub fn human_size(bytes: u64) -> String {
 }
 
 /// Synthesizes the compact, token-optimized string from a list of records.
-// todo : I would add the flags in the synthesize output procedure.
 #[allow(unused_mut)]
-pub fn synthesize_output(mut records: Vec<LsRecord>) -> (String, String) {
+pub fn synthesize_output(mut records: Vec<LsRecord>, options: &FormatOptions) -> (String, String) {
     if records.is_empty() {
         return ("(empty)\n".to_string(), String::new());
     }
 
     let mut by_ext = HashMap::new();
 
-    // Sort to ensure stable output order
+    // Sort to ensure stable output order on Unix if no custom sorting is requested
     #[cfg(not(target_os = "windows"))]{
-        records.sort_by(|a, b| a.name.cmp(&b.name));
+        if !options.sort_by_time && !options.reverse {
+            records.sort_by(|a, b| a.name.cmp(&b.name));
+        }
     }
 
     let mut dirs_out = String::new();
@@ -37,20 +38,30 @@ pub fn synthesize_output(mut records: Vec<LsRecord>) -> (String, String) {
     let mut sym_count = 0;
 
     for r in &records {
+        let perms_prefix = if options.show_long {
+            if let Some(oct) = &r.octal_permissions {
+                format!("{}  ", oct)
+            } else {
+                "".to_string()
+            }
+        } else {
+            "".to_string()
+        };
+
         match r.file_type {
             LsRecordType::DIRECTORY => {
-                dirs_out.push_str(&format!("{}/\n", r.name));
+                dirs_out.push_str(&format!("{}{}/\n", perms_prefix, r.name));
                 dir_count += 1;
             }
             LsRecordType::SYMBOLINK => {
-                symlinks_out.push_str(&format!("{}  {}\n", r.name, human_size(r.size)));
+                symlinks_out.push_str(&format!("{}{}{}  {}\n", perms_prefix, r.name, if r.name.contains(" -> ") { "" } else { "" }, human_size(r.size)));
                 sym_count += 1;
             }
             _ => {
                 if r.file_type == LsRecordType::FILE {
                     *by_ext.entry(r.extension.clone()).or_insert(0) += 1;
                 }
-                files_out.push_str(&format!("{}  {}\n", r.name, human_size(r.size)));
+                files_out.push_str(&format!("{}{}{}  {}\n", perms_prefix, r.name, if r.name.contains(" -> ") { "" } else { "" }, human_size(r.size)));
                 file_count += 1;
             }
         }
@@ -102,3 +113,4 @@ mod tests {
         assert_eq!(human_size(2_500_000), "2.4M");
     }
 }
+

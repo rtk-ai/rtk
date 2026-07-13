@@ -17,19 +17,39 @@ pub enum LsRecordType {
     UNKNOWN,
 }
 
+#[derive(Debug, Clone)]
 pub struct LsRecord {
     pub name: String,
     pub file_type: LsRecordType,
     pub size: u64,
     pub extension: String,
     pub timestamp: Option<u64>,
+    pub octal_permissions: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct FormatOptions {
+    pub show_all: bool,
+    pub show_long: bool,
+    pub sort_by_time: bool,
+    pub reverse: bool,
+}
 
-pub fn parser(args: &[String]) -> (Vec<String>, Vec<String>, bool) {
+pub fn parser(args: &[String]) -> (Vec<String>, Vec<String>, FormatOptions) {
     let show_all = args
         .iter()
         .any(|a| (a.starts_with('-') && !a.starts_with("--") && a.contains('a')) || a == "--all");
+
+    let show_long = args.iter().any(|f| {
+        f == "-l"
+            || f == "-g"
+            || f == "-n"
+            || f == "-o"
+            || f == "--full-time"
+            || f == "--format=long"
+            || f == "--format=verbose"
+            || (f.starts_with('-') && !f.starts_with("--") && (f.chars().skip(1).any(|c| c == 'l' || c == 'g' || c == 'n' || c == 'o')))
+    });
 
     let flags: Vec<String> = args
         .iter()
@@ -41,8 +61,13 @@ pub fn parser(args: &[String]) -> (Vec<String>, Vec<String>, bool) {
         .filter(|a| !a.starts_with('-'))
         .cloned()
         .collect();
-    (paths, flags, show_all)
+
+    let sort_by_time = flags.iter().any(|f| f.starts_with('-') && !f.starts_with("--") && f.contains('t'));
+    let reverse = flags.iter().any(|f| f.starts_with('-') && !f.starts_with("--") && f.contains('r'));
+
+    (paths, flags, FormatOptions { show_all, show_long, sort_by_time, reverse })
 }
+
 
 pub fn cmd_builder(paths: &[String], flags: &[String], _show_all: bool) -> Command {
     let mut cmd = resolved_command("ls");
@@ -76,14 +101,14 @@ pub fn cmd_builder(paths: &[String], flags: &[String], _show_all: bool) -> Comma
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let (paths, flags, show_all) = parser(args);
+    let (paths, flags, options) = parser(args);
 
     #[cfg(windows)]
     {
         if !tool_exists("ls") {
             let timer = crate::core::tracking::TimedExecution::start();
 
-            let (exit_code, output, raw_estimate) = super::ls_win::run_native(paths.clone(), show_all, flags.clone())?;
+            let (exit_code, output, raw_estimate) = super::ls_win::run_native(paths.clone(), options.clone(), flags.clone())?;
             print!("{}", output);
 
             timer.track(
@@ -97,7 +122,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         }
     }
 
-    let cmd = cmd_builder(&paths, &flags, show_all);
+    let cmd = cmd_builder(&paths, &flags, options.show_all);
 
     let target_display = if paths.is_empty() {
         ".".to_string()
@@ -110,8 +135,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "ls",
         &format!("-la {}", target_display),
         |raw| {
-            let result = compact_ls(raw, show_all);
-            let (entries, summary) = synthesize_output(result);
+            let result = compact_ls(raw, &options);
+            let (entries, summary) = synthesize_output(result, &options);
 
             // Only show summary in interactive mode (not when piped)
             let is_tty = std::io::stdout().is_terminal();
@@ -148,4 +173,5 @@ pub fn get_extension(name: &str) -> String {
         "no ext".to_string()
     }
 }
+
 
