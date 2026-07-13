@@ -3977,6 +3977,61 @@ mod tests {
     }
 
     #[test]
+    fn test_pnpm_scripts_route_through_rtk_pnpm() {
+        let script_commands = vec![
+            ("pnpm lint", "rtk pnpm lint"),
+            ("pnpm build", "rtk pnpm build"),
+            ("pnpm dev", "rtk pnpm dev"),
+            ("pnpm test", "rtk pnpm test"),
+            ("pnpm typecheck", "rtk pnpm typecheck"),
+            ("pnpm run lint", "rtk pnpm run lint"),
+            ("pnpm run build", "rtk pnpm run build"),
+        ];
+        for (command, expected) in script_commands {
+            assert_eq!(
+                classify_command(command),
+                Classification::Supported {
+                    rtk_equivalent: "rtk pnpm",
+                    category: "PackageManager",
+                    estimated_savings_pct: 80.0,
+                    status: RtkStatus::Existing,
+                },
+                "'{}' should classify as rtk pnpm",
+                command
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.into()),
+                "'{}' should rewrite to '{}'",
+                command,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_pnpm_specific_tools_still_override_generic() {
+        let specific_commands = vec![
+            ("pnpm eslint", "rtk lint"),
+            ("pnpm biome", "rtk lint"),
+            ("pnpm vitest", "rtk vitest"),
+            ("pnpm jest", "rtk jest"),
+            ("pnpm tsc", "rtk tsc"),
+            ("pnpm prettier", "rtk prettier"),
+            ("pnpm playwright", "rtk playwright"),
+        ];
+        for (command, expected_rtk) in specific_commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected_rtk.into()),
+                "'{}' should route to specific '{}', not generic rtk pnpm",
+                command,
+                expected_rtk
+            );
+        }
+    }
+
+    #[test]
     fn test_classify_jest() {
         let commands = vec![
             "jest run",
