@@ -9,7 +9,6 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::{self, Read, Write};
 
-use crate::discover::lexer::{contains_unattestable_construct, shell_split, tokenize, TokenKind};
 use crate::discover::registry::{has_heredoc, rewrite_command};
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
@@ -441,46 +440,6 @@ fn run_claude_inner(input: &str) -> Option<String> {
 
 // ── Codex CLI native hook ─────────────────────────────────────
 
-/// Codex only applies `updatedInput` when the hook also returns
-/// `permissionDecision: allow`, which suppresses its native approval prompt.
-/// Keep transparent rewrites to single, explicitly non-mutating commands that
-/// Codex normally runs without approval. Everything else passes through so
-/// Codex retains full control of its permission policy.
-fn codex_can_auto_allow(cmd: &str) -> bool {
-    if contains_unattestable_construct(cmd) {
-        return false;
-    }
-
-    let tokens = tokenize(cmd);
-    if tokens.iter().any(|token| {
-        matches!(
-            token.kind,
-            TokenKind::Operator | TokenKind::Pipe | TokenKind::Shellism
-        )
-    }) {
-        return false;
-    }
-
-    let args = shell_split(cmd);
-    match args.as_slice() {
-        [binary, subcommand, ..]
-            if matches!(binary.as_str(), "git" | "yadm")
-                && matches!(subcommand.as_str(), "status" | "log" | "diff" | "show") =>
-        {
-            true
-        }
-        [binary, ..]
-            if matches!(
-                binary.as_str(),
-                "cat" | "head" | "tail" | "ls" | "tree" | "grep" | "wc"
-            ) =>
-        {
-            true
-        }
-        _ => false,
-    }
-}
-
 fn process_codex_payload(v: &Value) -> PayloadAction {
     // Only rewrite Codex PreToolUse events for its Bash tool; ignore every
     // other event or tool payload so we never alter unrelated hook data.
@@ -502,18 +461,14 @@ fn process_codex_payload(v: &Value) -> PayloadAction {
         None => return PayloadAction::Ignore,
     };
 
-    if !codex_can_auto_allow(cmd) {
-        return PayloadAction::Skip {
-            reason: "skip:codex_native_approval",
-            cmd: cmd.to_string(),
-        };
-    }
-
-    let rewritten = match get_rewritten(cmd) {
-        Some(rewritten) if rewritten != cmd => rewritten,
-        _ => {
+    // Codex only applies `updatedInput` when the hook also returns
+    // `permissionDecision: allow`, which suppresses its native approval
+    // prompt. Ask, deny, and deferred decisions must therefore pass through.
+    let rewritten = match decide_hook_action(cmd, permissions::Host::Codex) {
+        HookDecision::AllowRewrite(rewritten) => rewritten,
+        HookDecision::AskRewrite(_) | HookDecision::Deny | HookDecision::Defer => {
             return PayloadAction::Skip {
-                reason: "skip:defer",
+                reason: "skip:codex_native_approval",
                 cmd: cmd.to_string(),
             }
         }
@@ -1369,7 +1324,14 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_does_not_auto_allow_compound_or_partial_rewrites() {
+    fn test_codex_allows_fully_read_only_compounds_only() {
+        let result = run_codex_inner(&codex_input("git status && git log -1")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            v.pointer("/hookSpecificOutput/updatedInput/command"),
+            Some(&json!("rtk git status && rtk git log -1"))
+        );
+
         for cmd in [
             "git status && rm -rf /tmp/example",
             "git status; cargo test",
@@ -1378,26 +1340,40 @@ mod tests {
         ] {
             assert!(
                 run_codex_inner(&codex_input(cmd)).is_none(),
-                "Codex must not allow a compound rewrite: {cmd}"
+                "Codex must retain native approval control for: {cmd}"
             );
         }
     }
 
     #[test]
-    fn test_codex_auto_allow_policy_is_explicitly_read_only() {
+    fn test_codex_hardcoded_rules_are_explicitly_read_only() {
         for cmd in [
             "git status",
             "git log -5",
             "git diff --stat",
             "git show HEAD",
+            "yadm status",
+            "cat README.md",
             "ls -la",
             "head -20 README.md",
+            "tail -20 README.md",
+            "tree",
+            "grep pattern README.md",
+            "wc -l README.md",
         ] {
-            assert!(codex_can_auto_allow(cmd), "expected safe command: {cmd}");
+            assert_eq!(
+                permissions::check_command_for(cmd, permissions::Host::Codex),
+                PermissionVerdict::Allow,
+                "expected allow verdict: {cmd}"
+            );
         }
 
         for cmd in ["git branch -D old", "find . -delete", "rg --pre sh pattern"] {
-            assert!(!codex_can_auto_allow(cmd), "expected unsafe command: {cmd}");
+            assert_eq!(
+                permissions::check_command_for(cmd, permissions::Host::Codex),
+                PermissionVerdict::Default,
+                "expected default verdict: {cmd}"
+            );
         }
     }
 
