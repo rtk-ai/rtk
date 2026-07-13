@@ -11,6 +11,7 @@ pub mod permissions;
 pub mod rewrite_cmd;
 pub mod trust;
 pub mod verify_cmd;
+pub mod vibe_config;
 
 pub fn is_claude_hook_command(command: &str) -> bool {
     let parts = crate::discover::lexer::shell_split(command);

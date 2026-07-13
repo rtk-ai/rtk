@@ -113,6 +113,7 @@ rtk init --agent kilocode       # Kilo Code
 rtk init --agent antigravity    # Google Antigravity
 rtk init -g --agent pi          # Pi
 rtk init --agent hermes         # Hermes
+rtk init -g --agent vibe        # Mistral Vibe (requires Vibe >= 2.15.0)
 rtk init -g --agent droid       # Factory Droid
 
 # 2. Restart your AI tool, then test
@@ -382,7 +383,7 @@ RTK supports 15 AI coding tools. Each integration rewrites shell commands to `rt
 | **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |
 | **Pi** | `rtk init -g --agent pi` (global) | TypeScript extension (tool_call) |
 | **Hermes** | `rtk init --agent hermes` | Python plugin adapter (terminal command mutation via `rtk rewrite`) |
-| **Mistral Vibe** | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Blocked on upstream |
+| **Mistral Vibe** | `rtk init -g --agent vibe` | before_tool hook (experimental, requires Vibe >= 2.15.0) |
 | **Kilo Code** | `rtk init --agent kilocode` | .kilocode/rules/rtk-rules.md (project-scoped) |
 | **Google Antigravity** | `rtk init --agent antigravity` | .agents/rules/antigravity-rtk-rules.md (project-scoped) |
 | **Factory Droid** | `rtk init -g --agent droid` (or per-project) | PreToolUse hook in `~/.factory/hooks.json` (matcher `Execute`) |

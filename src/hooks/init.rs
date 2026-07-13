@@ -16,9 +16,10 @@ use super::constants::{
     BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, DROID_DIR,
     DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR,
     DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
-    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
-    HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
-    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
+    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_DIR, VIBE_HOOKS_SUBDIR,
+    VIBE_HOOKS_TOML as VIBE_HOOKS_TOML_FILENAME, VIBE_HOOK_FILE,
 };
 use super::integrity;
 use super::is_claude_hook_command;
@@ -28,6 +29,9 @@ const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
 
 // Embedded Pi extension (auto-rewrite)
 const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
+
+// Embedded Vibe hook script (auto-rewrite)
+const VIBE_HOOK_SCRIPT: &str = include_str!("../../hooks/vibe/rtk-hook-vibe.sh");
 
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
@@ -2789,6 +2793,18 @@ fn resolve_home_subdir(subdir: &str) -> Result<PathBuf> {
         })
 }
 
+/// Set executable permissions on a file (Unix only, no-op on Windows)
+fn set_executable(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_mode(perms.mode() | 0o111); // Add execute bits for user, group, others
+        fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
 pub fn resolve_claude_dir() -> Result<PathBuf> {
     resolve_claude_dir_from(
         std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
@@ -3317,6 +3333,201 @@ fn codex_rtk_md_ref(codex_dir: &Path) -> String {
 
 fn resolve_opencode_dir() -> Result<PathBuf> {
     resolve_home_subdir(CONFIG_DIR).map(|p| p.join(OPENCODE_SUBDIR))
+}
+
+// ─── Mistral Vibe support ────────────────────────────────────────────
+
+/// Resolve Vibe config directory from $VIBE_HOME or $HOME/.vibe
+fn resolve_vibe_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("VIBE_HOME") {
+        if !dir.is_empty() {
+            return Ok(PathBuf::from(dir));
+        }
+    }
+    resolve_home_subdir(VIBE_DIR)
+}
+
+/// Return the Vibe hooks directory path
+fn vibe_hooks_dir(vibe_dir: &Path) -> PathBuf {
+    vibe_dir.join(VIBE_HOOKS_SUBDIR)
+}
+
+/// Return the path to the Vibe hook script
+fn vibe_hook_script_path(vibe_dir: &Path) -> PathBuf {
+    vibe_hooks_dir(vibe_dir).join(VIBE_HOOK_FILE)
+}
+
+/// Return the path to the Vibe hooks.toml configuration
+fn vibe_hooks_toml_path(vibe_dir: &Path) -> PathBuf {
+    vibe_dir.join(VIBE_HOOKS_TOML_FILENAME)
+}
+
+/// Install RTK hook for Mistral Vibe
+pub fn run_vibe_mode(ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let vibe_dir = resolve_vibe_dir()?;
+    run_vibe_mode_at(&vibe_dir, ctx)?;
+
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        println!("\nRTK configured for Mistral Vibe.");
+        println!(
+            "  Hook script: {}",
+            vibe_hook_script_path(&vibe_dir).display()
+        );
+        println!("  Config: {}", vibe_hooks_toml_path(&vibe_dir).display());
+        println!();
+        println!("IMPORTANT: You must enable experimental hooks in your Vibe config:");
+        println!("  Add to ~/.vibe/config.toml (or .vibe/config.toml):");
+        println!("    enable_experimental_hooks = true");
+        println!();
+        println!("Then restart Vibe. Test with: git status");
+    }
+
+    Ok(())
+}
+
+/// Install RTK hook for Mistral Vibe at a specific directory
+fn run_vibe_mode_at(vibe_dir: &Path, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+
+    // Create hooks directory
+    let hooks_dir = vibe_hooks_dir(vibe_dir);
+    if !dry_run {
+        fs::create_dir_all(&hooks_dir).with_context(|| {
+            format!(
+                "Failed to create Vibe hooks directory: {}",
+                hooks_dir.display()
+            )
+        })?;
+    }
+
+    // Write hook script
+    let hook_script_path = vibe_hook_script_path(vibe_dir);
+    write_if_changed(&hook_script_path, VIBE_HOOK_SCRIPT, "Vibe hook script", ctx)?;
+
+    // Make hook script executable
+    if !dry_run {
+        set_executable(&hook_script_path)?;
+    }
+
+    // Write hooks.toml configuration with absolute path to hook script
+    let hooks_toml_path = vibe_hooks_toml_path(vibe_dir);
+    let hook_script_path_str = hook_script_path.to_string_lossy();
+
+    // Generate hooks.toml with absolute path
+    let hooks_toml_content = super::vibe_config::format_hooks_toml(&hook_script_path_str);
+    write_if_changed(
+        &hooks_toml_path,
+        &hooks_toml_content,
+        "Vibe hooks.toml",
+        ctx,
+    )?;
+
+    Ok(())
+}
+
+/// Uninstall RTK hook for Mistral Vibe
+pub fn uninstall_vibe(ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let vibe_dir = resolve_vibe_dir()?;
+    let removed = uninstall_vibe_at(&vibe_dir, ctx)?;
+
+    if removed.is_empty() {
+        println!("RTK Mistral Vibe support was not installed (nothing to remove)");
+    } else {
+        let header = if dry_run {
+            "[dry-run] would uninstall RTK for Mistral Vibe:"
+        } else {
+            "RTK uninstalled for Mistral Vibe:"
+        };
+        println!("{}", header);
+        for item in removed {
+            println!("  - {}", item);
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    }
+
+    Ok(())
+}
+
+/// Uninstall RTK hook for Mistral Vibe at a specific directory
+fn uninstall_vibe_at(vibe_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    let InitContext { verbose, dry_run } = ctx;
+    let mut removed = Vec::new();
+
+    let hooks_dir = vibe_hooks_dir(vibe_dir);
+
+    // Remove hook script
+    let hook_script_path = vibe_hook_script_path(vibe_dir);
+    if hook_script_path.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove Vibe hook script: {}",
+                hook_script_path.display()
+            );
+        } else {
+            fs::remove_file(&hook_script_path).with_context(|| {
+                format!(
+                    "Failed to remove Vibe hook script: {}",
+                    hook_script_path.display()
+                )
+            })?;
+            if verbose > 0 {
+                eprintln!("Removed Vibe hook script: {}", hook_script_path.display());
+            }
+        }
+        removed.push(format!("Hook script: {}", hook_script_path.display()));
+    }
+
+    // Remove hooks.toml
+    let hooks_toml_path = vibe_hooks_toml_path(vibe_dir);
+    if hooks_toml_path.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove Vibe hooks.toml: {}",
+                hooks_toml_path.display()
+            );
+        } else {
+            fs::remove_file(&hooks_toml_path).with_context(|| {
+                format!(
+                    "Failed to remove Vibe hooks.toml: {}",
+                    hooks_toml_path.display()
+                )
+            })?;
+            if verbose > 0 {
+                eprintln!("Removed Vibe hooks.toml: {}", hooks_toml_path.display());
+            }
+        }
+        removed.push(format!("Hooks config: {}", hooks_toml_path.display()));
+    }
+
+    // Remove hooks directory if empty
+    if hooks_dir.exists() && hooks_dir.read_dir().map_or(true, |d| d.count() == 0) {
+        if dry_run {
+            println!(
+                "[dry-run] would remove empty Vibe hooks directory: {}",
+                hooks_dir.display()
+            );
+        } else {
+            fs::remove_dir(&hooks_dir).with_context(|| {
+                format!(
+                    "Failed to remove Vibe hooks directory: {}",
+                    hooks_dir.display()
+                )
+            })?;
+            if verbose > 0 {
+                eprintln!("Removed Vibe hooks directory: {}", hooks_dir.display());
+            }
+        }
+        removed.push(format!("Hooks directory: {}", hooks_dir.display()));
+    }
+
+    Ok(removed)
 }
 
 // ─── Pi coding agent support ──────────────────────────────────────────

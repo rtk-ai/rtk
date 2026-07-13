@@ -1,13 +1,13 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, and Factory Droid
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Mistral Vibe, Kilo Code, Antigravity, and Factory Droid
 sidebar:
   order: 3
 ---
 
 # Supported Agents
 
-RTK supports all major AI coding agents across 3 integration tiers. Mistral Vibe support is planned.
+RTK supports all major AI coding agents across 3 integration tiers.
 
 ## How it works
 
@@ -37,13 +37,13 @@ Agent runs "cargo test"
 | OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
 | Pi | TypeScript extension (`tool_call` event) | Yes |
 | Hermes | Python plugin (`terminal` command mutation) | Yes |
+| Mistral Vibe | Shell hook (`before_tool`) | Yes |
 | Factory Droid | Shell hook (`PreToolUse`, matcher `Execute`) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | AGENTS.md instructions | N/A |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
-| Mistral Vibe | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Pending upstream |
 
 ## Installation by agent
 
@@ -195,9 +195,31 @@ rtk init --agent antigravity    # creates .agents/rules/antigravity-rtk-rules.md
 
 Antigravity reads `.agents/rules/` as custom instructions. RTK adds guidance telling Antigravity to prefer `rtk <cmd>` over raw commands.
 
-### Mistral Vibe (planned)
+### Mistral Vibe
 
-Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://github.com/mistralai/mistral-vibe/issues/531)). Tracked in [#800](https://github.com/rtk-ai/rtk/issues/800).
+**Installation:**
+```bash
+rtk init -g --agent vibe
+```
+
+**Requirements:**
+- Mistral Vibe >= 2.15.0 (when `before_tool` hooks were introduced)
+- Enable experimental hooks in your Vibe config:
+  ```toml
+  # ~/.vibe/config.toml or .vibe/config.toml
+  enable_experimental_hooks = true
+  ```
+
+**How it works:** Uses Vibe's experimental `before_tool` hook system. The hook intercepts `bash` and `run_shell_command` tool calls, delegates to `rtk rewrite` for command decisions, and returns rewritten commands via JSON stdout.
+
+**Files installed:**
+- `~/.vibe/hooks/rtk-hook-vibe.sh` — Shell script hook
+- `~/.vibe/hooks/hooks.toml` — Hook configuration
+
+**Uninstall:**
+```bash
+rtk init -g --uninstall --agent vibe
+```
 
 ## Integration tiers explained
 
