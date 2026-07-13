@@ -9,3 +9,4 @@
 - `curl_cmd.rs` truncates long responses, saves full output to file for recovery
 - `wget_cmd.rs` wraps wget with output filtering
 - `psql_cmd.rs` filters PostgreSQL query output
+- `ssh_cmd.rs` compresses command-mode ssh output (strips connection banners/login noise, collapses blank runs, folds repeated lines, clips pathological lines). Interactive sessions — a TTY on stdout, an interactive login, `-t`/`-N`, or a subsystem request — are passed through untouched so the terminal is never broken. Exit codes and the failure path are preserved verbatim
