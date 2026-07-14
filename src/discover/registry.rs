@@ -878,9 +878,18 @@ fn rewrite_segment_inner(
                 | "checkout"
                 | "commit"
                 | "fetch"
+                | "merge"
+                | "mv"
                 | "pull"
                 | "push"
+                | "rebase"
+                | "reset"
+                | "rm"
+                | "clean"
+                | "cherry-pick"
+                | "bisect"
                 | "stash"
+                | "tag"
                 | "worktree"
         ) {
             return None;
@@ -1447,9 +1456,18 @@ mod tests {
             "git checkout feature/test",
             "git commit -m fix",
             "git fetch origin",
+            "git merge origin/main",
+            "git mv old new",
             "git pull --ff-only",
             "git push origin main",
+            "git rebase origin/main",
+            "git reset --soft HEAD~1",
+            "git rm old.txt",
+            "git clean -fd",
+            "git cherry-pick abc1234",
+            "git bisect start",
             "git stash push",
+            "git tag v1.0.0",
             "git worktree add /tmp/wt",
             "git -C /tmp commit -m fix",
         ] {

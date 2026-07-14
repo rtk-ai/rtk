@@ -858,7 +858,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
             &format!("rtk git status {}", args.join(" ")),
             &result.stdout,
             &filtered,
-            0,
+            result.exit_code,
         );
 
         return Ok(0);
@@ -925,7 +925,13 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         format!("rtk git status {}", args.join(" "))
     };
 
-    timer.track_with_status(&original_cmd, &rtk_cmd, &raw_output, shown, 0);
+    timer.track_with_status(
+        &original_cmd,
+        &rtk_cmd,
+        &raw_output,
+        shown,
+        result.exit_code,
+    );
 
     Ok(0)
 }
@@ -1046,8 +1052,31 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     match classify_commit_outcome(output.status.success(), verified_hash, exit_code) {
         CommitOutcome::Ok(compact) => {
             println!("{}", compact);
-            timer.track_with_status(&original_cmd, "rtk git commit", &raw_output, &compact, 0);
-            Ok(0)
+            timer.track_with_status(
+                &original_cmd,
+                "rtk git commit",
+                &raw_output,
+                &compact,
+                exit_code,
+            );
+            Ok(exit_code)
+        }
+        CommitOutcome::Unverified(message) => {
+            eprintln!("{}", message);
+            if !stderr.trim().is_empty() {
+                eprint!("{}", stderr);
+            }
+            if !stdout.trim().is_empty() {
+                eprint!("{}", stdout);
+            }
+            timer.track_with_status(
+                &original_cmd,
+                "rtk git commit",
+                &raw_output,
+                &message,
+                exit_code,
+            );
+            Ok(exit_code)
         }
         CommitOutcome::Failed(code) => {
             if !stderr.trim().is_empty() {
@@ -1072,6 +1101,7 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 /// rather than being reported as "ok" (#2494).
 enum CommitOutcome {
     Ok(String),
+    Unverified(String),
     Failed(i32),
 }
 
@@ -1084,10 +1114,12 @@ fn classify_commit_outcome(
     if success {
         // A human-formatted commit header is not an authority surface: branch
         // names and localization can look like hashes. Read the Git object.
-        let compact = verified_hash
-            .map(|hash| format!("ok {}", hash))
-            .unwrap_or_else(|| "ok (commit created; hash unavailable)".to_string());
-        CommitOutcome::Ok(compact)
+        match verified_hash {
+            Some(hash) => CommitOutcome::Ok(format!("ok {}", hash)),
+            None => CommitOutcome::Unverified(
+                "UNVERIFIED: git commit exited 0 but HEAD commit hash readback failed".to_string(),
+            ),
+        }
     } else {
         CommitOutcome::Failed(exit_code)
     }
@@ -2839,6 +2871,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     fn test_classify_commit_success_uses_verified_hash() {
         match classify_commit_outcome(true, Some("abc1234".to_string()), 0) {
             CommitOutcome::Ok(s) => assert_eq!(s, "ok abc1234"),
+            CommitOutcome::Unverified(s) => panic!("verified commit must be ok: {}", s),
             CommitOutcome::Failed(_) => panic!("successful commit must be Ok"),
         }
     }
@@ -2846,10 +2879,9 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     fn test_classify_commit_success_without_readback_does_not_invent_hash() {
         match classify_commit_outcome(true, None, 0) {
-            CommitOutcome::Ok(s) => {
-                assert_eq!(s, "ok (commit created; hash unavailable)")
-            }
-            CommitOutcome::Failed(_) => panic!("successful commit must be Ok"),
+            CommitOutcome::Unverified(s) => assert!(s.starts_with("UNVERIFIED:")),
+            CommitOutcome::Ok(s) => panic!("missing readback must not be ok: {}", s),
+            CommitOutcome::Failed(_) => panic!("git itself succeeded; result is unverified"),
         }
     }
 
@@ -2894,7 +2926,45 @@ no changes added to commit (use "git add" and/or "git commit -a")
         match classify_commit_outcome(false, None, 1) {
             CommitOutcome::Failed(code) => assert_eq!(code, 1),
             CommitOutcome::Ok(s) => panic!("nothing-to-commit must not be ok: {}", s),
+            CommitOutcome::Unverified(s) => {
+                panic!("nothing-to-commit must be a known failure: {}", s)
+            }
         }
+    }
+
+    #[test]
+    fn test_run_commit_noop_preserves_failure_and_head() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        let p = repo.path().to_string_lossy().into_owned();
+        for args in [
+            vec!["-C", &p, "init", "-q"],
+            vec!["-C", &p, "config", "user.name", "RTK Test"],
+            vec!["-C", &p, "config", "user.email", "rtk@example.invalid"],
+        ] {
+            assert!(Command::new("git").args(args).status().unwrap().success());
+        }
+        std::fs::write(repo.path().join("a.txt"), "one\n").unwrap();
+        assert!(Command::new("git")
+            .args(["-C", &p, "add", "a.txt"])
+            .status()
+            .unwrap()
+            .success());
+        let global = vec!["-C".to_string(), p.clone()];
+        assert_eq!(run_commit(&["-m".into(), "initial".into()], 0, &global).unwrap(), 0);
+        let before = Command::new("git")
+            .args(["-C", &p, "rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout;
+
+        assert_ne!(run_commit(&["-m".into(), "noop".into()], 0, &global).unwrap(), 0);
+
+        let after = Command::new("git")
+            .args(["-C", &p, "rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout;
+        assert_eq!(before, after, "no-op commit must not move HEAD");
     }
 
     #[test]
@@ -2902,6 +2972,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
         match classify_commit_outcome(false, None, 2) {
             CommitOutcome::Failed(code) => assert_eq!(code, 2),
             CommitOutcome::Ok(_) => panic!("hook abort must be a failure"),
+            CommitOutcome::Unverified(_) => panic!("hook abort must be a known failure"),
         }
     }
 
