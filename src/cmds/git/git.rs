@@ -1061,7 +1061,7 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
             );
             Ok(exit_code)
         }
-        CommitOutcome::Unverified(message) => {
+        CommitOutcome::Unverified { message, exit_code } => {
             eprintln!("{}", message);
             if !stderr.trim().is_empty() {
                 eprint!("{}", stderr);
@@ -1101,9 +1101,12 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 /// rather than being reported as "ok" (#2494).
 enum CommitOutcome {
     Ok(String),
-    Unverified(String),
+    Unverified { message: String, exit_code: i32 },
     Failed(i32),
 }
+
+// RTK-synthetic: native git exited 0, but the resulting commit object was not verifiable.
+const UNVERIFIED_COMMIT_EXIT_CODE: i32 = 3;
 
 /// Classify a `git commit` result.
 fn classify_commit_outcome(
@@ -1116,9 +1119,11 @@ fn classify_commit_outcome(
         // names and localization can look like hashes. Read the Git object.
         match verified_hash {
             Some(hash) => CommitOutcome::Ok(format!("ok {}", hash)),
-            None => CommitOutcome::Unverified(
-                "UNVERIFIED: git commit exited 0 but HEAD commit hash readback failed".to_string(),
-            ),
+            None => CommitOutcome::Unverified {
+                message: "UNVERIFIED: git commit exited 0 but HEAD commit hash readback failed"
+                    .to_string(),
+                exit_code: UNVERIFIED_COMMIT_EXIT_CODE,
+            },
         }
     } else {
         CommitOutcome::Failed(exit_code)
@@ -2871,7 +2876,9 @@ no changes added to commit (use "git add" and/or "git commit -a")
     fn test_classify_commit_success_uses_verified_hash() {
         match classify_commit_outcome(true, Some("abc1234".to_string()), 0) {
             CommitOutcome::Ok(s) => assert_eq!(s, "ok abc1234"),
-            CommitOutcome::Unverified(s) => panic!("verified commit must be ok: {}", s),
+            CommitOutcome::Unverified { message, .. } => {
+                panic!("verified commit must be ok: {}", message)
+            }
             CommitOutcome::Failed(_) => panic!("successful commit must be Ok"),
         }
     }
@@ -2879,7 +2886,11 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     fn test_classify_commit_success_without_readback_does_not_invent_hash() {
         match classify_commit_outcome(true, None, 0) {
-            CommitOutcome::Unverified(s) => assert!(s.starts_with("UNVERIFIED:")),
+            CommitOutcome::Unverified { message, exit_code } => {
+                assert!(message.starts_with("UNVERIFIED:"));
+                assert_eq!(exit_code, UNVERIFIED_COMMIT_EXIT_CODE);
+                assert_ne!(exit_code, 0);
+            }
             CommitOutcome::Ok(s) => panic!("missing readback must not be ok: {}", s),
             CommitOutcome::Failed(_) => panic!("git itself succeeded; result is unverified"),
         }
@@ -2926,8 +2937,8 @@ no changes added to commit (use "git add" and/or "git commit -a")
         match classify_commit_outcome(false, None, 1) {
             CommitOutcome::Failed(code) => assert_eq!(code, 1),
             CommitOutcome::Ok(s) => panic!("nothing-to-commit must not be ok: {}", s),
-            CommitOutcome::Unverified(s) => {
-                panic!("nothing-to-commit must be a known failure: {}", s)
+            CommitOutcome::Unverified { message, .. } => {
+                panic!("nothing-to-commit must be a known failure: {}", message)
             }
         }
     }
@@ -2972,7 +2983,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
         match classify_commit_outcome(false, None, 2) {
             CommitOutcome::Failed(code) => assert_eq!(code, 2),
             CommitOutcome::Ok(_) => panic!("hook abort must be a failure"),
-            CommitOutcome::Unverified(_) => panic!("hook abort must be a known failure"),
+            CommitOutcome::Unverified { .. } => panic!("hook abort must be a known failure"),
         }
     }
 
