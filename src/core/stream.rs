@@ -1,10 +1,39 @@
 use anyhow::{Context, Result};
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 
 #[cfg(test)]
 use regex::Regex;
+
+/// Read `reader` line by line, decoding each line lossily (invalid UTF-8
+/// bytes become U+FFFD) instead of erroring.
+///
+/// `BufRead::lines()` returns `Err` for a non-UTF-8 line, and callers
+/// commonly chain `.map_while(Result::ok)` to skip bad lines — but
+/// `map_while` stops at the *first* `None`, so one invalid-UTF-8 line (e.g.
+/// OEM/ANSI bytes from a non-English-locale Windows tool) silently discards
+/// every line after it too, not just the bad one. This reads raw bytes and
+/// never fails on the source encoding, so a garbled line still surfaces
+/// instead of vanishing along with everything downstream of it.
+fn read_lines_lossy(reader: impl Read) -> impl Iterator<Item = String> {
+    let mut reader = BufReader::new(reader);
+    std::iter::from_fn(move || {
+        let mut buf = Vec::new();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => {
+                if buf.last() == Some(&b'\n') {
+                    buf.pop();
+                    if buf.last() == Some(&b'\r') {
+                        buf.pop();
+                    }
+                }
+                Some(String::from_utf8_lossy(&buf).into_owned())
+            }
+        }
+    })
+}
 
 pub trait StreamFilter {
     fn feed_line(&mut self, line: &str) -> Option<String>;
@@ -298,10 +327,7 @@ pub fn run_streaming(
             Some(std::thread::spawn(move || {
                 let mut writer = BufWriter::new(child_stdin);
                 let stdin_handle = io::stdin();
-                for line in BufReader::new(stdin_handle.lock())
-                    .lines()
-                    .map_while(Result::ok)
-                {
+                for line in read_lines_lossy(stdin_handle.lock()) {
                     if let Some(out) = filter.feed_line(&line) {
                         if writeln!(writer, "{}", out).is_err() {
                             break;
@@ -340,7 +366,7 @@ pub fn run_streaming(
         let (tx, rx) = mpsc::channel();
         let tx_out = tx.clone();
         let stdout_thread = std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            for line in read_lines_lossy(stdout) {
                 if tx_out.send(StreamLine::Stdout(line)).is_err() {
                     break;
                 }
@@ -348,7 +374,7 @@ pub fn run_streaming(
         });
         let tx_err = tx;
         let stderr_thread = std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            for line in read_lines_lossy(stderr) {
                 if tx_err.send(StreamLine::Stderr(line)).is_err() {
                     break;
                 }
@@ -417,7 +443,7 @@ pub fn run_streaming(
         let stderr_thread = std::thread::spawn(move || -> String {
             let mut raw_err = String::new();
             let mut capped = false;
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            for line in read_lines_lossy(stderr) {
                 if raw_err.len() + line.len() < RAW_CAP {
                     raw_err.push_str(&line);
                     raw_err.push('\n');
@@ -436,7 +462,7 @@ pub fn run_streaming(
                 FilterMode::Passthrough => unreachable!("handled by early-return above"),
                 FilterMode::Streaming(_) => unreachable!("handled by is_streaming branch"),
                 FilterMode::Buffered(filter_fn) => {
-                    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    for line in read_lines_lossy(stdout) {
                         if raw_stdout.len() + line.len() < RAW_CAP {
                             raw_stdout.push_str(&line);
                             raw_stdout.push('\n');
@@ -461,7 +487,7 @@ pub fn run_streaming(
                     }
                 }
                 FilterMode::CaptureOnly => {
-                    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    for line in read_lines_lossy(stdout) {
                         if raw_stdout.len() + line.len() < RAW_CAP {
                             raw_stdout.push_str(&line);
                             raw_stdout.push('\n');
@@ -556,6 +582,42 @@ pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
 pub(crate) mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn test_read_lines_lossy_preserves_lines_after_invalid_utf8() {
+        // Line 2 contains a lone 0xE3 byte (the cp850 case from the bug report).
+        // `BufRead::lines().map_while(Result::ok)` would stop at that Err and
+        // silently lose line 3 as well — not just the bad byte.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"ERRO A: ascii\n");
+        data.extend_from_slice(&[b'E', b'R', b'R', b'O', b' ', b'B', b':', b' ', 0xE3, b'\n']);
+        data.extend_from_slice(b"ERRO C: ascii again\n");
+
+        let lines: Vec<String> = read_lines_lossy(data.as_slice()).collect();
+        assert_eq!(lines.len(), 3, "got: {:?}", lines);
+        assert_eq!(lines[0], "ERRO A: ascii");
+        assert!(lines[1].starts_with("ERRO B: "), "got: {:?}", lines[1]);
+        assert!(lines[1].contains('\u{FFFD}'), "got: {:?}", lines[1]);
+        assert_eq!(lines[2], "ERRO C: ascii again");
+    }
+
+    #[test]
+    fn test_read_lines_lossy_strips_crlf() {
+        let lines: Vec<String> = read_lines_lossy(&b"a\r\nb\n"[..]).collect();
+        assert_eq!(lines, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn test_read_lines_lossy_no_trailing_newline() {
+        let lines: Vec<String> = read_lines_lossy(&b"only line"[..]).collect();
+        assert_eq!(lines, vec!["only line".to_string()]);
+    }
+
+    #[test]
+    fn test_read_lines_lossy_empty_input() {
+        let lines: Vec<String> = read_lines_lossy(&b""[..]).collect();
+        assert!(lines.is_empty());
+    }
 
     struct LineFilter<F: FnMut(&str) -> Option<String>> {
         f: F,
