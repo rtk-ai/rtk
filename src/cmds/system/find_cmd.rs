@@ -35,6 +35,7 @@ struct FindArgs {
     max_depth: Option<usize>,
     file_type: String,
     case_insensitive: bool,
+    native_syntax: bool,
 }
 
 impl Default for FindArgs {
@@ -46,6 +47,7 @@ impl Default for FindArgs {
             max_depth: None,
             file_type: "f".to_string(),
             case_insensitive: false,
+            native_syntax: false,
         }
     }
 }
@@ -100,7 +102,10 @@ fn parse_find_args(args: &[String]) -> Result<FindArgs> {
 
 /// Parse native find syntax: `find [path] -name "*.rs" -type f -maxdepth 3`
 fn parse_native_find_args(args: &[String]) -> Result<FindArgs> {
-    let mut parsed = FindArgs::default();
+    let mut parsed = FindArgs {
+        native_syntax: true,
+        ..FindArgs::default()
+    };
     let mut i = 0;
 
     // First non-flag argument is the path (standard find behavior)
@@ -145,14 +150,24 @@ fn parse_native_find_args(args: &[String]) -> Result<FindArgs> {
 
 /// Parse RTK syntax: `find <pattern> [path] [-m max] [-t type]`
 fn parse_rtk_find_args(args: &[String]) -> Result<FindArgs> {
-    let mut parsed = FindArgs {
-        pattern: args[0].clone(),
-        ..FindArgs::default()
+    // ISSUE #2995: an explicit existing path is a search root, not a basename glob.
+    let has_explicit_search_root = args.get(1).is_some_and(|arg| !arg.starts_with('-'));
+    let first_arg_is_path = !has_explicit_search_root && Path::new(&args[0]).exists();
+    let mut parsed = if first_arg_is_path {
+        FindArgs {
+            path: args[0].clone(),
+            ..FindArgs::default()
+        }
+    } else {
+        FindArgs {
+            pattern: args[0].clone(),
+            ..FindArgs::default()
+        }
     };
     let mut i = 1;
 
     // Second positional arg (if not a flag) is the path
-    if i < args.len() && !args[i].starts_with('-') {
+    if !first_arg_is_path && i < args.len() && !args[i].starts_with('-') {
         parsed.path = args[i].clone();
         i += 1;
     }
@@ -180,27 +195,18 @@ fn parse_rtk_find_args(args: &[String]) -> Result<FindArgs> {
 /// Entry point from main.rs — parses raw args then delegates to run().
 pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
     let parsed = parse_find_args(args)?;
-    run(
-        &parsed.pattern,
-        &parsed.path,
-        parsed.max_results,
-        parsed.max_depth,
-        &parsed.file_type,
-        parsed.case_insensitive,
-        verbose,
-    )
+    run(&parsed, verbose)
 }
 
-pub fn run(
-    pattern: &str,
-    path: &str,
-    max_results: usize,
-    max_depth: Option<usize>,
-    file_type: &str,
-    case_insensitive: bool,
-    verbose: u8,
-) -> Result<()> {
+fn run(parsed: &FindArgs, verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
+    let pattern = parsed.pattern.as_str();
+    let path = parsed.path.as_str();
+    let max_results = parsed.max_results;
+    let max_depth = parsed.max_depth;
+    let file_type = parsed.file_type.as_str();
+    let case_insensitive = parsed.case_insensitive;
+    let native_syntax = parsed.native_syntax;
 
     // Treat "." as match-all
     let effective_pattern = if pattern == "." { "*" } else { pattern };
@@ -211,16 +217,18 @@ pub fn run(
 
     let want_dirs = file_type == "d";
 
-    // When the pattern targets dotfiles (e.g. -name ".claude.json"), we must walk hidden
-    // entries; otherwise skip them to keep results tidy (#1101).
-    let search_hidden = effective_pattern.starts_with('.');
+    // Native find syntax promises native visibility; compact RTK syntax keeps its
+    // ignore-aware defaults unless the pattern explicitly targets dotfiles (#1101, #2995).
+    let prune_ignored = !native_syntax;
+    let search_hidden = native_syntax || effective_pattern.starts_with('.');
 
     let mut builder = WalkBuilder::new(path);
     builder
-        .hidden(!search_hidden) // skip hidden files/dirs unless pattern targets dotfiles
-        .git_ignore(true) // respect .gitignore
-        .git_global(true)
-        .git_exclude(true);
+        .hidden(!search_hidden)
+        .ignore(prune_ignored)
+        .git_ignore(prune_ignored)
+        .git_global(prune_ignored)
+        .git_exclude(prune_ignored);
     if let Some(depth) = max_depth {
         builder.max_depth(Some(depth));
     }
@@ -263,11 +271,14 @@ pub fn run(
         }
 
         // Store path relative to search root
-        let display_path = entry_path
-            .strip_prefix(path)
-            .unwrap_or(entry_path)
-            .to_string_lossy()
-            .to_string();
+        let relative_path = entry_path.strip_prefix(path).unwrap_or(entry_path);
+        // ISSUE #2995: stripping a root entry yields an empty path, but native find
+        // includes the explicitly requested file or directory itself.
+        let display_path = if relative_path.as_os_str().is_empty() {
+            path.to_string()
+        } else {
+            relative_path.to_string_lossy().to_string()
+        };
 
         if !display_path.is_empty() {
             files.push(display_path);
@@ -275,15 +286,21 @@ pub fn run(
     }
 
     files.sort();
-
     let raw_output = files.join("\n");
 
     if files.is_empty() {
+        // ISSUE #2995: a successful zero-result search must be explicit; silence is
+        // indistinguishable from a dropped match to an automated consumer.
+        let shown = format!(
+            "0 matches for '{}' in {}\n",
+            effective_pattern, path
+        );
+        print!("{}", shown);
         timer.track(
             &format!("find {} -name '{}'", path, effective_pattern),
             "rtk find",
             &raw_output,
-            "",
+            &shown,
         );
         return Ok(());
     }
@@ -393,6 +410,29 @@ mod tests {
         values.iter().map(|s| s.to_string()).collect()
     }
 
+    fn run_compact(
+        pattern: &str,
+        path: &str,
+        max_results: usize,
+        max_depth: Option<usize>,
+        file_type: &str,
+        case_insensitive: bool,
+        verbose: u8,
+    ) -> Result<()> {
+        run(
+            &FindArgs {
+                pattern: pattern.to_string(),
+                path: path.to_string(),
+                max_results,
+                max_depth,
+                file_type: file_type.to_string(),
+                case_insensitive,
+                native_syntax: false,
+            },
+            verbose,
+        )
+    }
+
     // --- glob_match unit tests ---
 
     #[test]
@@ -447,6 +487,7 @@ mod tests {
         assert_eq!(parsed.path, ".");
         assert_eq!(parsed.file_type, "f");
         assert_eq!(parsed.max_results, 50);
+        assert!(parsed.native_syntax);
     }
 
     #[test]
@@ -454,6 +495,7 @@ mod tests {
         let parsed = parse_find_args(&args(&["src", "-name", "*.rs", "-type", "f"])).unwrap();
         assert_eq!(parsed.pattern, "*.rs");
         assert_eq!(parsed.path, "src");
+        assert!(parsed.native_syntax);
         assert_eq!(parsed.file_type, "f");
     }
 
@@ -523,6 +565,28 @@ mod tests {
         let parsed = parse_find_args(&args(&["*.rs", "src"])).unwrap();
         assert_eq!(parsed.pattern, "*.rs");
         assert_eq!(parsed.path, "src");
+        assert!(!parsed.native_syntax);
+    }
+
+    #[test]
+    fn parse_existing_pattern_with_explicit_search_root() {
+        let parsed = parse_find_args(&args(&[".", "src"])).unwrap();
+
+        assert_eq!(parsed.pattern, ".");
+        assert_eq!(parsed.path, "src");
+    }
+
+    #[test]
+    fn parse_existing_file_as_search_root() {
+        let temp = tempfile::tempdir().expect("create find fixture");
+        let file = temp.path().join("journal.md");
+        std::fs::write(&file, "hello\n").expect("write root file");
+        let file = file.to_string_lossy().to_string();
+
+        let parsed = parse_find_args(&args(&[&file])).unwrap();
+
+        assert_eq!(parsed.pattern, "*");
+        assert_eq!(parsed.path, file);
     }
 
     #[test]
@@ -569,14 +633,14 @@ mod tests {
     #[test]
     fn find_dotfile_pattern_includes_hidden() {
         // .gitignore exists at the repo root — must be found when using a dotfile pattern
-        let result = run(".gitignore", ".", 50, Some(1), "f", false, 0);
+        let result = run_compact(".gitignore", ".", 50, Some(1), "f", false, 0);
         assert!(result.is_ok(), "run with dotfile pattern should not error");
     }
 
     #[test]
     fn find_regular_pattern_skips_hidden() {
         // Non-dot pattern should not error (hidden dirs remain skipped)
-        let result = run("*.rs", "src", 5, None, "f", false, 0);
+        let result = run_compact("*.rs", "src", 5, None, "f", false, 0);
         assert!(result.is_ok());
     }
 
@@ -585,34 +649,42 @@ mod tests {
     #[test]
     fn find_rs_files_in_src() {
         // Should find .rs files without error
-        let result = run("*.rs", "src", 100, None, "f", false, 0);
+        let result = run_compact("*.rs", "src", 100, None, "f", false, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_dot_pattern_works() {
         // "." pattern should not error (was broken before)
-        let result = run(".", "src", 10, None, "f", false, 0);
+        let result = run_compact(".", "src", 10, None, "f", false, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_no_matches() {
-        let result = run("*.xyz_nonexistent", "src", 50, None, "f", false, 0);
+        let result = run_compact(
+            "*.xyz_nonexistent",
+            "src",
+            50,
+            None,
+            "f",
+            false,
+            0,
+        );
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_respects_max() {
         // With max=2, should not error
-        let result = run("*.rs", "src", 2, None, "f", false, 0);
+        let result = run_compact("*.rs", "src", 2, None, "f", false, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_gitignored_excluded() {
         // target/ is in .gitignore — files inside should not appear
-        let result = run("*", ".", 1000, None, "f", false, 0);
+        let result = run_compact("*", ".", 1000, None, "f", false, 0);
         assert!(result.is_ok());
         // We can't easily capture stdout in unit tests, but at least
         // verify it runs without error. The smoke tests verify content.

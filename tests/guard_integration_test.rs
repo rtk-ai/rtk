@@ -137,14 +137,52 @@ fn grep_no_match_emits_empty_not_a_message() {
 }
 
 #[test]
-fn find_no_results_emits_empty() {
+fn find_no_results_is_explicit() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("a.txt"), "x").expect("write");
-    let (out, _) = rtk_in_dir(dir.path(), &["find", ".", "-name", "zzz_no_match_xyz"]);
-    assert!(
-        out.trim().is_empty(),
-        "no-result find must emit empty, not a '0 for' line: {out:?}"
+    let (out, code) = rtk_in_dir(dir.path(), &["find", ".", "-name", "zzz_no_match_xyz"]);
+    assert_eq!(
+        out.trim(),
+        "0 matches for 'zzz_no_match_xyz' in .",
+        "find exits successfully on no matches, so silence would be a false negative"
     );
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn find_existing_roots_and_native_visibility_are_faithful() {
+    let dir = init_git_repo();
+    std::fs::create_dir_all(dir.path().join("sub")).expect("create ignored directory");
+    std::fs::create_dir_all(dir.path().join(".hidden")).expect("create hidden directory");
+    std::fs::write(dir.path().join("journal.md"), "hello\n").expect("write root file");
+    std::fs::write(dir.path().join("sub/note.md"), "world\n").expect("write ignored file");
+    std::fs::write(dir.path().join(".hidden/secret.md"), "secret\n").expect("write hidden file");
+    std::fs::write(dir.path().join(".gitignore"), "sub/\n").expect("write gitignore");
+
+    for args in [
+        &["find", "./journal.md", "-type", "f"][..],
+        &["find", "./journal.md"][..],
+    ] {
+        let (out, code) = rtk_in_dir(dir.path(), args);
+        assert_eq!(out, "./journal.md");
+        assert_eq!(code, Some(0));
+    }
+
+    let (out, code) = rtk_in_dir(dir.path(), &["find", "./sub", "-type", "d"]);
+    assert_eq!(out, "./sub", "native find must include its directory root");
+    assert_eq!(code, Some(0));
+
+    let (out, code) = rtk_in_dir(dir.path(), &["find", ".", "-iname", "*.md"]);
+    assert_eq!(
+        out.lines().collect::<Vec<_>>(),
+        vec![".hidden/secret.md", "journal.md", "sub/note.md"],
+        "native syntax must not silently prune hidden or gitignored matches"
+    );
+    assert_eq!(code, Some(0));
+
+    let (out, code) = rtk_in_dir(dir.path(), &["find", "*.md", "."]);
+    assert_eq!(out, "journal.md", "compact syntax keeps ignore pruning");
+    assert_eq!(code, Some(0));
 }
 
 #[test]
