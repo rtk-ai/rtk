@@ -164,6 +164,7 @@ impl SessionProvider for ClaudeProvider {
         // Second pass (same loop): collect tool_result output lengths, content, and error status
         let mut pending_tool_uses: Vec<(String, String, usize)> = Vec::new(); // (tool_use_id, command, sequence)
         let mut tool_results: HashMap<String, (usize, String, bool)> = HashMap::new(); // (len, content, is_error)
+        let mut hook_rewrites: HashMap<String, String> = HashMap::new(); // tool_use_id -> rewritten command
         let mut commands = Vec::new();
         let mut sequence_counter = 0;
 
@@ -173,8 +174,12 @@ impl SessionProvider for ClaudeProvider {
                 Err(_) => continue,
             };
 
-            // Pre-filter: skip lines that can't contain Bash tool_use or tool_result
-            if !line.contains("\"Bash\"") && !line.contains("\"tool_result\"") {
+            // Pre-filter: skip lines that can't contain Bash tool_use, tool_result,
+            // or a PreToolUse hook rewrite (updatedInput attachment)
+            if !line.contains("\"Bash\"")
+                && !line.contains("\"tool_result\"")
+                && !line.contains("updatedInput")
+            {
                 continue;
             }
 
@@ -242,6 +247,29 @@ impl SessionProvider for ClaudeProvider {
                         }
                     }
                 }
+                "attachment" => {
+                    // PreToolUse hooks (e.g. `rtk hook claude`) can rewrite the Bash
+                    // command via updatedInput. The tool_use block keeps the original
+                    // command; the executed one only appears here. Record it so the
+                    // report reflects what actually ran.
+                    if let (Some(tool_id), Some(stdout)) = (
+                        entry
+                            .pointer("/attachment/toolUseID")
+                            .and_then(|v| v.as_str()),
+                        entry.pointer("/attachment/stdout").and_then(|v| v.as_str()),
+                    ) {
+                        if let Ok(hook_out) =
+                            serde_json::from_str::<serde_json::Value>(stdout.trim())
+                        {
+                            if let Some(rewritten) = hook_out
+                                .pointer("/hookSpecificOutput/updatedInput/command")
+                                .and_then(|c| c.as_str())
+                            {
+                                hook_rewrites.insert(tool_id.to_string(), rewritten.to_string());
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -252,6 +280,8 @@ impl SessionProvider for ClaudeProvider {
                 .get(&tool_id)
                 .map(|(len, content, err)| (Some(*len), Some(content.clone()), *err))
                 .unwrap_or((None, None, false));
+
+            let command = hook_rewrites.remove(&tool_id).unwrap_or(command);
 
             commands.push(ExtractedCommand {
                 command,
@@ -297,6 +327,51 @@ mod tests {
             cmds[0].output_len.unwrap(),
             "On branch master\nnothing to commit".len()
         );
+    }
+
+    #[test]
+    fn test_hook_rewrite_replaces_original_command() {
+        // A PreToolUse hook (e.g. `rtk hook claude`) rewrites the Bash command
+        // via updatedInput; the tool_use block keeps the ORIGINAL command while
+        // the rewritten one is recorded in a hook_success attachment. discover
+        // must report what actually executed, otherwise already-rewritten
+        // commands are counted as missed savings.
+        let jsonl = make_jsonl(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_abc","name":"Bash","input":{"command":"git status"}}]}}"#,
+            r#"{"type":"attachment","attachment":{"type":"hook_success","hookName":"PreToolUse:Bash","toolUseID":"toolu_abc","hookEvent":"PreToolUse","stdout":"{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecisionReason\":\"RTK auto-rewrite\",\"updatedInput\":{\"command\":\"rtk git status\"}}}","exitCode":0,"command":"rtk hook claude"}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_abc","content":"main clean"}]}}"#,
+        ]);
+
+        let provider = ClaudeProvider;
+        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].command, "rtk git status");
+    }
+
+    #[test]
+    fn test_hook_rewrite_unmatched_tool_use_keeps_original() {
+        let jsonl = make_jsonl(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_abc","name":"Bash","input":{"command":"git status"}}]}}"#,
+            r#"{"type":"attachment","attachment":{"type":"hook_success","hookName":"PreToolUse:Bash","toolUseID":"toolu_OTHER","hookEvent":"PreToolUse","stdout":"{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"updatedInput\":{\"command\":\"rtk git log\"}}}","exitCode":0,"command":"rtk hook claude"}}"#,
+        ]);
+
+        let provider = ClaudeProvider;
+        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].command, "git status");
+    }
+
+    #[test]
+    fn test_hook_rewrite_malformed_stdout_keeps_original() {
+        let jsonl = make_jsonl(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_abc","name":"Bash","input":{"command":"git status"}}]}}"#,
+            r#"{"type":"attachment","attachment":{"type":"hook_success","hookName":"PreToolUse:Bash","toolUseID":"toolu_abc","hookEvent":"PreToolUse","stdout":"not json at all updatedInput","exitCode":0,"command":"rtk hook claude"}}"#,
+        ]);
+
+        let provider = ClaudeProvider;
+        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].command, "git status");
     }
 
     #[test]
