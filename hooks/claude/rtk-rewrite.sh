@@ -51,29 +51,63 @@ if [ -z "$CMD" ]; then
   exit 0
 fi
 
+audit_log() {
+  [ "${RTK_HOOK_AUDIT:-}" = "1" ] || return 0
+  local action="$1"
+  local original="$2"
+  local rewritten="$3"
+  local audit_dir="${RTK_AUDIT_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/rtk}"
+  mkdir -p "$audit_dir" 2>/dev/null || return 0
+  original=${original//\\/\\\\}
+  original=${original//|/\\|}
+  original=${original//$'\n'/\\n}
+  original=${original//$'\r'/\\r}
+  rewritten=${rewritten//\\/\\\\}
+  rewritten=${rewritten//|/\\|}
+  rewritten=${rewritten//$'\n'/\\n}
+  rewritten=${rewritten//$'\r'/\\r}
+  printf '%s | %s | %s | %s\n' \
+    "$(date '+%Y-%m-%dT%H:%M:%S')" "$action" "$original" "$rewritten" \
+    >>"$audit_dir/hook-audit.log" 2>/dev/null || true
+}
+
 # Delegate all rewrite + permission logic to the Rust binary.
 REWRITTEN=$(rtk rewrite "$CMD" 2>/dev/null)
 EXIT_CODE=$?
 
+# Permission policy can return 3 (ask) even when an already-RTK command is
+# unchanged. Identity is the authoritative signal that there is no rewrite.
+if { [ "$EXIT_CODE" -eq 0 ] || [ "$EXIT_CODE" -eq 3 ]; } && [ "$CMD" = "$REWRITTEN" ]; then
+  audit_log "skip:already_rtk" "$CMD" "$REWRITTEN"
+  exit 0
+fi
+
 case $EXIT_CODE in
   0)
     # Rewrite found, no permission rules matched — safe to auto-allow.
-    # If the output is identical, the command was already using RTK.
-    [ "$CMD" = "$REWRITTEN" ] && exit 0
+    audit_log "rewrite" "$CMD" "$REWRITTEN"
     ;;
   1)
     # No RTK equivalent — pass through unchanged.
+    if [[ "$CMD" == *"<<"* ]]; then
+      audit_log "skip:heredoc" "$CMD" "$CMD"
+    else
+      audit_log "skip:no_match" "$CMD" "$CMD"
+    fi
     exit 0
     ;;
   2)
     # Deny rule matched — let Claude Code's native deny rule handle it.
+    audit_log "skip:deny" "$CMD" "$CMD"
     exit 0
     ;;
   3)
     # Ask rule matched — rewrite the command but do NOT auto-allow so that
     # Claude Code prompts the user for confirmation.
+    audit_log "rewrite" "$CMD" "$REWRITTEN"
     ;;
   *)
+    audit_log "skip:error" "$CMD" "$CMD"
     exit 0
     ;;
 esac

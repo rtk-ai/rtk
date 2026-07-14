@@ -4,7 +4,8 @@
 #
 # Usage: bash ~/.claude/hooks/test-rtk-rewrite.sh
 
-HOOK="${HOOK:-$HOME/.claude/hooks/rtk-rewrite.sh}"
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+HOOK="${HOOK:-$SCRIPT_DIR/rtk-rewrite.sh}"
 PASS=0
 FAIL=0
 TOTAL=0
@@ -79,7 +80,23 @@ test_rewrite "git show abc123" \
 
 test_rewrite "git add ." \
   "git add ." \
-  "rtk git add ."
+  ""
+
+test_rewrite "git commit stays native" \
+  "git commit -m fix" \
+  ""
+
+test_rewrite "git push stays native" \
+  "git push origin main" \
+  ""
+
+test_rewrite "git checkout stays native" \
+  "git checkout feature/test" \
+  ""
+
+test_rewrite "git worktree stays native" \
+  "git worktree add /tmp/example" \
+  ""
 
 test_rewrite "gh pr list" \
   "gh pr list" \
@@ -107,7 +124,7 @@ test_rewrite "grep -rn pattern src/" \
 
 test_rewrite "rg pattern src/" \
   "rg pattern src/" \
-  "rtk grep pattern src/"
+  "rtk rg pattern src/"
 
 test_rewrite "cargo test" \
   "cargo test" \
@@ -119,7 +136,7 @@ test_rewrite "npx prisma migrate" \
 
 test_rewrite "rtk git status" \
   "rtk git status" \
-  "rtk git status"
+  ""
 
 echo ""
 
@@ -269,7 +286,7 @@ test_rewrite "cargo test &>/dev/null" \
 # a redirect — the hook still rewrites cargo test, no crash.
 test_rewrite "cargo test & git status (bash hook rewrites first segment only)" \
   "cargo test & git status" \
-  "rtk cargo test & git status"
+  "rtk cargo test & rtk git status"
 
 echo ""
 

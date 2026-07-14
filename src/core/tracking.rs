@@ -33,6 +33,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -288,6 +289,11 @@ impl Tracker {
             "ALTER TABLE commands ADD COLUMN project_path TEXT DEFAULT ''",
             [],
         );
+        // Preserve decision evidence without retaining potentially-sensitive
+        // stdout/stderr bodies. Existing databases are migrated in place.
+        let _ = conn.execute("ALTER TABLE commands ADD COLUMN exit_code INTEGER", []);
+        let _ = conn.execute("ALTER TABLE commands ADD COLUMN input_sha256 TEXT", []);
+        let _ = conn.execute("ALTER TABLE commands ADD COLUMN output_sha256 TEXT", []);
         // One-time migration: normalize NULLs from pre-default schema // changed: guarded with EXISTS
         let has_nulls: bool = conn
             .query_row(
@@ -348,7 +354,10 @@ impl Tracker {
                 saved_tokens INTEGER NOT NULL,
                 savings_pct REAL NOT NULL,
                 exec_time_ms INTEGER DEFAULT 0,
-                project_path TEXT DEFAULT ''
+                project_path TEXT DEFAULT '',
+                exit_code INTEGER,
+                input_sha256 TEXT,
+                output_sha256 TEXT
             )",
             [],
         )?;
@@ -407,6 +416,30 @@ impl Tracker {
         output_tokens: usize,
         exec_time_ms: u64,
     ) -> Result<()> {
+        self.record_with_evidence(
+            original_cmd,
+            rtk_cmd,
+            input_tokens,
+            output_tokens,
+            exec_time_ms,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_with_evidence(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        input_tokens: usize,
+        output_tokens: usize,
+        exec_time_ms: u64,
+        exit_code: Option<i32>,
+        input_sha256: Option<&str>,
+        output_sha256: Option<&str>,
+    ) -> Result<()> {
         let saved = input_tokens.saturating_sub(output_tokens);
         let pct = if input_tokens > 0 {
             (saved as f64 / input_tokens as f64) * 100.0
@@ -417,8 +450,8 @@ impl Tracker {
         let project_path = current_project_path_string(); // added: record cwd
 
         self.conn.execute(
-            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", // added: project_path
+            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms, exit_code, input_sha256, output_sha256)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 Utc::now().to_rfc3339(),
                 original_cmd,
@@ -428,7 +461,10 @@ impl Tracker {
                 output_tokens as i64,
                 saved as i64,
                 pct,
-                exec_time_ms as i64
+                exec_time_ms as i64,
+                exit_code,
+                input_sha256,
+                output_sha256,
             ],
         )?;
 
@@ -1369,6 +1405,33 @@ impl TimedExecution {
         }
     }
 
+    /// Track the exit status and exact input/output identity for commands whose
+    /// compressed result can drive a success claim. Raw bodies are not stored.
+    pub fn track_with_status(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        input: &str,
+        output: &str,
+        exit_code: i32,
+    ) {
+        let elapsed_ms = self.start.elapsed().as_millis() as u64;
+        let input_sha256 = format!("{:x}", Sha256::digest(input.as_bytes()));
+        let output_sha256 = format!("{:x}", Sha256::digest(output.as_bytes()));
+        if let Ok(tracker) = Tracker::new() {
+            let _ = tracker.record_with_evidence(
+                original_cmd,
+                rtk_cmd,
+                estimate_tokens(input),
+                estimate_tokens(output),
+                elapsed_ms,
+                Some(exit_code),
+                Some(&input_sha256),
+                Some(&output_sha256),
+            );
+        }
+    }
+
     /// Track passthrough commands (timing-only, no token counting).
     ///
     /// For commands that stream output or run interactively where output
@@ -1466,6 +1529,39 @@ mod tests {
 
         assert_eq!(test_record.saved_tokens, 80);
         assert_eq!(test_record.savings_pct, 80.0);
+    }
+
+    #[test]
+    fn test_tracker_records_exit_code_and_output_identity() {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+        tracker
+            .record_with_evidence(
+                "git commit",
+                "rtk git commit",
+                10,
+                5,
+                1,
+                Some(7),
+                Some("input-hash"),
+                Some("output-hash"),
+            )
+            .expect("record evidence");
+        let row: (Option<i32>, Option<String>, Option<String>) = tracker
+            .conn
+            .query_row(
+                "SELECT exit_code, input_sha256, output_sha256 FROM commands ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("evidence row");
+        assert_eq!(
+            row,
+            (
+                Some(7),
+                Some("input-hash".into()),
+                Some("output-hash".into())
+            )
+        );
     }
 
     // 4. track_passthrough doesn't dilute stats (input=0, output=0)

@@ -834,11 +834,12 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
             if !result.stderr.trim().is_empty() {
                 eprint!("{}", result.stderr);
             }
-            timer.track(
+            timer.track_with_status(
                 &format!("git status {}", args.join(" ")),
                 &format!("rtk git status {}", args.join(" ")),
-                &result.stdout,
-                &result.stdout,
+                &format!("{}{}", result.stdout, result.stderr),
+                &format!("{}{}", result.stdout, result.stderr),
+                result.exit_code,
             );
             return Ok(result.exit_code);
         }
@@ -850,13 +851,14 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         // Apply minimal filtering: strip ANSI, remove hints, empty lines
         let filtered = filter_status_with_args(&result.stdout);
         let filtered = never_worse(&result.stdout, &filtered).to_string();
-        print!("{}", filtered);
+        println!("{}", filtered.trim_end());
 
-        timer.track(
+        timer.track_with_status(
             &format!("git status {}", args.join(" ")),
             &format!("rtk git status {}", args.join(" ")),
             &result.stdout,
             &filtered,
+            0,
         );
 
         return Ok(0);
@@ -892,7 +894,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
             format!("rtk git status {}", args.join(" "))
         };
         let shown = never_worse(&raw_output, &message);
-        timer.track(&original_cmd, &rtk_cmd, &raw_output, shown);
+        timer.track_with_status(&original_cmd, &rtk_cmd, &raw_output, shown, result.exit_code);
         return Ok(result.exit_code);
     }
 
@@ -923,7 +925,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         format!("rtk git status {}", args.join(" "))
     };
 
-    timer.track(&original_cmd, &rtk_cmd, &raw_output, shown);
+    timer.track_with_status(&original_cmd, &rtk_cmd, &raw_output, shown, 0);
 
     Ok(0)
 }
@@ -1005,22 +1007,16 @@ fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
     cmd
 }
 
-/// Parse the first line of `git commit` success output and return a compact token.
-/// Handles: `[main abc1234def] message`, `[main (root-commit) abc1234def] msg`,
-/// localized variants, and multibyte branch names.
-fn parse_commit_output(line: &str) -> String {
-    if let Some(bracket_end) = line.find(']') {
-        let bracket_content = &line[1..bracket_end];
-        let hash = bracket_content.split_whitespace().next_back().unwrap_or("");
-        if !hash.is_empty() && hash.len() >= 7 {
-            let short_hash: String = hash.chars().take(7).collect();
-            format!("ok {}", short_hash)
-        } else {
-            "ok".to_string()
-        }
-    } else {
-        "ok".to_string()
+fn verified_head_short_hash(global_args: &[String]) -> Option<String> {
+    let output = git_cmd(global_args)
+        .args(["rev-parse", "--verify", "--short=7", "HEAD^{commit}"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
     }
+    let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (hash.len() >= 7 && hash.chars().all(|ch| ch.is_ascii_hexdigit())).then_some(hash)
 }
 
 fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
@@ -1042,10 +1038,15 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     let exit_code = exit_code_from_output(&output, "git commit");
     let raw_output = format!("{}\n{}", stdout, stderr);
 
-    match classify_commit_outcome(output.status.success(), &stdout, exit_code) {
+    let verified_hash = output
+        .status
+        .success()
+        .then(|| verified_head_short_hash(global_args))
+        .flatten();
+    match classify_commit_outcome(output.status.success(), verified_hash, exit_code) {
         CommitOutcome::Ok(compact) => {
             println!("{}", compact);
-            timer.track(&original_cmd, "rtk git commit", &raw_output, &compact);
+            timer.track_with_status(&original_cmd, "rtk git commit", &raw_output, &compact, 0);
             Ok(0)
         }
         CommitOutcome::Failed(code) => {
@@ -1055,7 +1056,13 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
             if !stdout.trim().is_empty() {
                 eprint!("{}", stdout);
             }
-            timer.track(&original_cmd, "rtk git commit", &raw_output, &raw_output);
+            timer.track_with_status(
+                &original_cmd,
+                "rtk git commit",
+                &raw_output,
+                &raw_output,
+                code,
+            );
             Ok(code)
         }
     }
@@ -1069,14 +1076,17 @@ enum CommitOutcome {
 }
 
 /// Classify a `git commit` result.
-fn classify_commit_outcome(success: bool, stdout: &str, exit_code: i32) -> CommitOutcome {
+fn classify_commit_outcome(
+    success: bool,
+    verified_hash: Option<String>,
+    exit_code: i32,
+) -> CommitOutcome {
     if success {
-        // Extract commit hash from output
-        let compact = stdout
-            .lines()
-            .next()
-            .map(parse_commit_output)
-            .unwrap_or_else(|| "ok".to_string());
+        // A human-formatted commit header is not an authority surface: branch
+        // names and localization can look like hashes. Read the Git object.
+        let compact = verified_hash
+            .map(|hash| format!("ok {}", hash))
+            .unwrap_or_else(|| "ok (commit created; hash unavailable)".to_string());
         CommitOutcome::Ok(compact)
     } else {
         CommitOutcome::Failed(exit_code)
@@ -2823,77 +2833,65 @@ no changes added to commit (use "git add" and/or "git commit -a")
         assert!(result.contains("* main"));
     }
 
-    // --- commit output parsing ---
-
-    #[test]
-    fn test_parse_commit_output_normal() {
-        let line = "[main abc1234def] add feature";
-        assert_eq!(parse_commit_output(line), "ok abc1234");
-    }
-
-    #[test]
-    fn test_parse_commit_output_root_commit() {
-        let line = "[main (root-commit) abc1234def] initial commit";
-        assert_eq!(parse_commit_output(line), "ok abc1234");
-    }
-
-    /// Regression test: multibyte branch name must not panic (was byte-slicing before fix)
-    #[test]
-    fn test_parse_commit_output_multibyte_branch() {
-        let line = "[分支名 abc1234def] 提交消息";
-        assert_eq!(parse_commit_output(line), "ok abc1234");
-    }
-
-    /// Regression test: Thai branch name (3 bytes per char)
-    #[test]
-    fn test_parse_commit_output_thai_branch() {
-        let line = "[สาขา abc1234def] commit message";
-        assert_eq!(parse_commit_output(line), "ok abc1234");
-    }
-
-    #[test]
-    fn test_parse_commit_output_no_bracket() {
-        let line = "some other output";
-        assert_eq!(parse_commit_output(line), "ok");
-    }
-
-    #[test]
-    fn test_parse_commit_output_short_hash() {
-        // Hash shorter than 7 chars — treat as "ok" (no hash shown)
-        let line = "[main abc12] message";
-        assert_eq!(parse_commit_output(line), "ok");
-    }
-
-    #[test]
-    fn test_parse_commit_output_empty() {
-        assert_eq!(parse_commit_output(""), "ok");
-    }
-
     // --- commit outcome classification (issue #2494) ---
 
     #[test]
-    fn test_classify_commit_success_extracts_hash() {
-        match classify_commit_outcome(true, "[main abc1234def] add feature", 0) {
+    fn test_classify_commit_success_uses_verified_hash() {
+        match classify_commit_outcome(true, Some("abc1234".to_string()), 0) {
             CommitOutcome::Ok(s) => assert_eq!(s, "ok abc1234"),
             CommitOutcome::Failed(_) => panic!("successful commit must be Ok"),
         }
     }
 
     #[test]
-    fn test_classify_commit_success_empty_stdout() {
-        match classify_commit_outcome(true, "", 0) {
-            CommitOutcome::Ok(s) => assert_eq!(s, "ok"),
+    fn test_classify_commit_success_without_readback_does_not_invent_hash() {
+        match classify_commit_outcome(true, None, 0) {
+            CommitOutcome::Ok(s) => {
+                assert_eq!(s, "ok (commit created; hash unavailable)")
+            }
             CommitOutcome::Failed(_) => panic!("successful commit must be Ok"),
         }
     }
 
     #[test]
+    fn test_commit_hash_is_read_from_git_object_not_branch_header() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        let p = repo.path().to_string_lossy().into_owned();
+        for args in [
+            vec!["-C", &p, "init", "-q"],
+            vec!["-C", &p, "config", "user.name", "RTK Test"],
+            vec!["-C", &p, "config", "user.email", "rtk@example.invalid"],
+        ] {
+            assert!(Command::new("git").args(args).status().unwrap().success());
+        }
+        std::fs::write(repo.path().join("a.txt"), "one\n").unwrap();
+        assert!(Command::new("git")
+            .args(["-C", &p, "add", "a.txt"])
+            .status()
+            .unwrap()
+            .success());
+        let global = vec!["-C".to_string(), p.clone()];
+        assert_eq!(run_commit(&["-m".into(), "initial".into()], 0, &global).unwrap(), 0);
+        assert!(Command::new("git")
+            .args(["-C", &p, "switch", "-qc", "feature/not-a-sha"])
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(repo.path().join("a.txt"), "two\n").unwrap();
+        assert!(Command::new("git")
+            .args(["-C", &p, "add", "a.txt"])
+            .status()
+            .unwrap()
+            .success());
+        assert_eq!(run_commit(&["-m".into(), "change".into()], 0, &global).unwrap(), 0);
+        let reported = verified_head_short_hash(&global).expect("verified commit hash");
+        assert_ne!(reported, "feature");
+        assert!(reported.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
     fn test_classify_commit_nothing_to_commit_is_failure() {
-        match classify_commit_outcome(
-            false,
-            "On branch main\nnothing to commit, working tree clean",
-            1,
-        ) {
+        match classify_commit_outcome(false, None, 1) {
             CommitOutcome::Failed(code) => assert_eq!(code, 1),
             CommitOutcome::Ok(s) => panic!("nothing-to-commit must not be ok: {}", s),
         }
@@ -2901,7 +2899,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
 
     #[test]
     fn test_classify_commit_hook_abort_propagates_exit_code() {
-        match classify_commit_outcome(false, "pre-commit hook failed", 2) {
+        match classify_commit_outcome(false, None, 2) {
             CommitOutcome::Failed(code) => assert_eq!(code, 2),
             CommitOutcome::Ok(_) => panic!("hook abort must be a failure"),
         }

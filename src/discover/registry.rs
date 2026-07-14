@@ -864,6 +864,29 @@ fn rewrite_segment_inner(
         return Some(trimmed.to_string());
     }
 
+    // Auto-rewrite is a read-output optimization, not an execution transport.
+    // Keep stateful Git commands native so their prompts, exit codes and write
+    // semantics cannot be changed by RTK's compression layer.
+    let path_normalized = strip_absolute_path(cmd_part.trim());
+    let normalized_git = strip_git_global_opts(&path_normalized);
+    if let Some(rest) = normalized_git.strip_prefix("git ") {
+        let subcommand = rest.split_whitespace().next().unwrap_or("");
+        if matches!(
+            subcommand,
+            "add"
+                | "branch"
+                | "checkout"
+                | "commit"
+                | "fetch"
+                | "pull"
+                | "push"
+                | "stash"
+                | "worktree"
+        ) {
+            return None;
+        }
+    }
+
     if cmd_part.starts_with("head -") || cmd_part.starts_with("tail ") {
         return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
     }
@@ -1347,10 +1370,7 @@ mod tests {
 
     #[test]
     fn test_rewrite_git_checkout() {
-        assert_eq!(
-            rewrite_command_no_prefixes("git checkout main", &[]),
-            Some("rtk git checkout main".into())
-        );
+        assert_eq!(rewrite_command_no_prefixes("git checkout main", &[]), None);
     }
 
     #[test]
@@ -1415,8 +1435,26 @@ mod tests {
     fn test_rewrite_compound_and() {
         assert_eq!(
             rewrite_command_no_prefixes("git add . && cargo test", &[]),
-            Some("rtk git add . && rtk cargo test".into())
+            Some("git add . && rtk cargo test".into())
         );
+    }
+
+    #[test]
+    fn test_stateful_git_commands_are_never_auto_rewritten() {
+        for command in [
+            "git add .",
+            "git branch feature/test",
+            "git checkout feature/test",
+            "git commit -m fix",
+            "git fetch origin",
+            "git pull --ff-only",
+            "git push origin main",
+            "git stash push",
+            "git worktree add /tmp/wt",
+            "git -C /tmp commit -m fix",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(command, &[]), None, "{command}");
+        }
     }
 
     #[test]
@@ -1561,7 +1599,7 @@ mod tests {
     fn test_rewrite_with_env_prefix() {
         assert_eq!(
             rewrite_command_no_prefixes("GIT_SSH_COMMAND=ssh git push", &[]),
-            Some("GIT_SSH_COMMAND=ssh rtk git push".into())
+            None
         );
     }
 
@@ -1838,7 +1876,7 @@ mod tests {
                 r#"GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no" git push"#,
                 &[]
             ),
-            Some(r#"GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no" rtk git push"#.into())
+            None
         );
     }
 
@@ -1846,7 +1884,7 @@ mod tests {
     fn test_rewrite_env_single_quoted_value_with_spaces() {
         assert_eq!(
             rewrite_command_no_prefixes("EDITOR='vim -u NONE' git commit", &[]),
-            Some("EDITOR='vim -u NONE' rtk git commit".into())
+            None
         );
     }
 
@@ -1942,13 +1980,9 @@ mod tests {
 
     #[test]
     fn test_rewrite_redirect_quotes_not_stripped() {
-        // Redirect-like chars inside quotes should NOT be stripped
-        // Known limitation: apostrophes cause conservative no-strip (safe fallback)
+        // Stateful Git remains native even when quotes and redirects are present.
         let result = rewrite_command_no_prefixes("git commit -m \"it's fixed\" 2>&1", &[]);
-        assert!(
-            result.is_some(),
-            "Should still rewrite even with apostrophe"
-        );
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -3607,7 +3641,7 @@ mod tests {
     fn test_rewrite_env_var_prefix() {
         assert_eq!(
             rewrite_command_no_prefixes("GIT_SSH_COMMAND=ssh git push origin main", &[]),
-            Some("GIT_SSH_COMMAND=ssh rtk git push origin main".into())
+            None
         );
     }
 
@@ -4294,7 +4328,7 @@ mod tests {
     fn test_rewrite_pipe_then_and() {
         assert_eq!(
             rewrite_command_no_prefixes("git log | head -5 && git stash", &[]),
-            Some("rtk git log | head -5 && rtk git stash".into())
+            Some("rtk git log | head -5 && git stash".into())
         );
     }
 
@@ -4310,7 +4344,7 @@ mod tests {
     fn test_rewrite_pipe_then_or() {
         assert_eq!(
             rewrite_command_no_prefixes("cargo test | grep FAIL || git stash", &[]),
-            Some("rtk cargo test | grep FAIL || rtk git stash".into())
+            Some("rtk cargo test | grep FAIL || git stash".into())
         );
     }
 
@@ -4321,7 +4355,7 @@ mod tests {
                 "RUST_BACKTRACE=1 cargo test 2>&1 | grep FAILED && git stash",
                 &[]
             ),
-            Some("RUST_BACKTRACE=1 rtk cargo test 2>&1 | grep FAILED && rtk git stash".into())
+            Some("RUST_BACKTRACE=1 rtk cargo test 2>&1 | grep FAILED && git stash".into())
         );
     }
 
