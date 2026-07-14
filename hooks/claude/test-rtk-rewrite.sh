@@ -6,6 +6,30 @@
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 HOOK="${HOOK:-$SCRIPT_DIR/rtk-rewrite.sh}"
+REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
+
+# A source-checkout test must exercise the binary built from that checkout,
+# not whichever released RTK happens to appear first on the user's PATH. Once
+# installed under ~/.claude there is no Cargo root, so retain the installed
+# binary behavior unless a caller supplies RTK_BIN_DIR explicitly.
+RTK_BIN_DIR="${RTK_BIN_DIR:-}"
+if [ -z "$RTK_BIN_DIR" ] && [ -f "$REPO_ROOT/Cargo.toml" ]; then
+  RTK_BIN_DIR="$REPO_ROOT/target/debug"
+fi
+
+if [ -n "$RTK_BIN_DIR" ] && [ ! -x "$RTK_BIN_DIR/rtk" ]; then
+  echo "RTK test binary is missing: $RTK_BIN_DIR/rtk. Run cargo build --bin rtk first." >&2
+  exit 2
+fi
+
+run_hook() {
+  if [ -n "$RTK_BIN_DIR" ]; then
+    PATH="$RTK_BIN_DIR:$PATH" bash "$HOOK"
+  else
+    bash "$HOOK"
+  fi
+}
+
 PASS=0
 FAIL=0
 TOTAL=0
@@ -25,7 +49,7 @@ test_rewrite() {
   local input_json
   input_json=$(jq -n --arg cmd "$input_cmd" '{"tool_name":"Bash","tool_input":{"command":$cmd}}')
   local output
-  output=$(echo "$input_json" | bash "$HOOK" 2>/dev/null) || true
+  output=$(echo "$input_json" | run_hook 2>/dev/null) || true
 
   if [ -z "$expected_cmd" ]; then
     # Expect no rewrite (hook exits 0 with no output)
@@ -361,7 +385,7 @@ test_audit_log() {
 
   local input_json
   input_json=$(jq -n --arg cmd "$input_cmd" '{"tool_name":"Bash","tool_input":{"command":$cmd}}')
-  echo "$input_json" | RTK_HOOK_AUDIT=1 RTK_AUDIT_DIR="$AUDIT_TMPDIR" bash "$HOOK" 2>/dev/null || true
+  echo "$input_json" | RTK_HOOK_AUDIT=1 RTK_AUDIT_DIR="$AUDIT_TMPDIR" run_hook 2>/dev/null || true
 
   if [ ! -f "$AUDIT_TMPDIR/hook-audit.log" ]; then
     printf "  ${RED}FAIL${RESET} %s (no log file created)\n" "$description"
@@ -411,7 +435,7 @@ test_audit_log "audit: rewrite cargo test" \
 # Test log format (4 pipe-separated fields)
 rm -f "$AUDIT_TMPDIR/hook-audit.log"
 input_json=$(jq -n --arg cmd "git status" '{"tool_name":"Bash","tool_input":{"command":$cmd}}')
-echo "$input_json" | RTK_HOOK_AUDIT=1 RTK_AUDIT_DIR="$AUDIT_TMPDIR" bash "$HOOK" 2>/dev/null || true
+echo "$input_json" | RTK_HOOK_AUDIT=1 RTK_AUDIT_DIR="$AUDIT_TMPDIR" run_hook 2>/dev/null || true
 TOTAL=$((TOTAL + 1))
 log_line=$(cat "$AUDIT_TMPDIR/hook-audit.log" 2>/dev/null || echo "")
 field_count=$(echo "$log_line" | awk -F' \\| ' '{print NF}')
@@ -427,7 +451,7 @@ fi
 # Test no log when RTK_HOOK_AUDIT is unset
 rm -f "$AUDIT_TMPDIR/hook-audit.log"
 input_json=$(jq -n --arg cmd "git status" '{"tool_name":"Bash","tool_input":{"command":$cmd}}')
-echo "$input_json" | RTK_AUDIT_DIR="$AUDIT_TMPDIR" bash "$HOOK" 2>/dev/null || true
+echo "$input_json" | RTK_AUDIT_DIR="$AUDIT_TMPDIR" run_hook 2>/dev/null || true
 TOTAL=$((TOTAL + 1))
 if [ ! -f "$AUDIT_TMPDIR/hook-audit.log" ]; then
   printf "  ${GREEN}PASS${RESET} audit: no log when RTK_HOOK_AUDIT unset\n"
