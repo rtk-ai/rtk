@@ -645,6 +645,91 @@ pub fn format_compose_build(raw: &str) -> String {
     result.trim_end().to_string()
 }
 
+/// Format `docker compose up -d` output into a compact summary.
+///
+/// Compose reprints each network/container as it moves through status
+/// transitions (e.g. Created → Starting → Started, or Running → Waiting →
+/// Healthy for entities with healthchecks) — keep only the last reported
+/// status per entity instead of every transition line.
+pub fn format_compose_up(raw: &str) -> String {
+    if raw.trim().is_empty() {
+        return "[compose] up: no output".to_string();
+    }
+
+    let mut order: Vec<String> = Vec::new();
+    let mut entities: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
+    let mut orphan_warning = false;
+    let mut other_warnings = 0usize;
+
+    for line in raw.lines() {
+        let trimmed = line.trim().trim_start_matches(['✔', '✘']).trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Docker's own log lines (orphan container notices, etc.) rather than
+        // a compose status line — surface as a condensed warning, not verbatim.
+        if trimmed.starts_with("time=") {
+            if trimmed.contains("orphan containers") {
+                orphan_warning = true;
+            } else if trimmed.contains("level=warning") || trimmed.contains("level=error") {
+                other_warnings += 1;
+            }
+            continue;
+        }
+
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 3 || !matches!(parts[0], "Network" | "Volume" | "Container" | "Image") {
+            continue;
+        }
+        let kind = parts[0].to_lowercase();
+        let name = parts[1].to_string();
+        let status = parts[2].to_string();
+
+        if !entities.contains_key(&name) {
+            order.push(name.clone());
+        }
+        entities.insert(name, (kind, status));
+    }
+
+    if order.is_empty() {
+        return "[compose] up: no output".to_string();
+    }
+
+    // Group by final status (most entities converge on the same one or two
+    // statuses) instead of repeating a line per entity.
+    let mut status_order: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for name in &order {
+        let (kind, status) = entities.get(name).expect("name was just pushed to order");
+        let label = if kind == "container" {
+            name.clone()
+        } else {
+            format!("{} ({})", name, kind)
+        };
+        groups.entry(status.clone()).or_insert_with(|| {
+            status_order.push(status.clone());
+            Vec::new()
+        });
+        groups.get_mut(status).unwrap().push(label);
+    }
+
+    let mut result = format!("[compose] up: {} services\n", order.len());
+    for status in &status_order {
+        let names = groups.get(status).expect("status was just recorded");
+        result.push_str(&format!("  {}: {}\n", status, names.join(", ")));
+    }
+    if orphan_warning {
+        result.push_str("[warn] orphan containers — run with --remove-orphans\n");
+    }
+    if other_warnings > 0 {
+        result.push_str(&format!("[warn] {} other warning(s)\n", other_warnings));
+    }
+
+    result.trim_end().to_string()
+}
+
 fn compact_ports(ports: &str) -> String {
     if ports.is_empty() {
         return "-".to_string();
@@ -755,6 +840,37 @@ pub fn run_compose_build(service: Option<&str>, verbose: u8) -> Result<i32> {
                 eprintln!("raw docker compose build:\n{}", raw);
             }
             format_compose_build(raw)
+        },
+        RunOptions::default().early_exit_on_failure(),
+    )
+}
+
+/// Run `docker compose up`. Only detached runs (`-d`/`--detach`) are filtered
+/// into a compact summary — a foreground `up` streams logs indefinitely, so it
+/// passes through untouched rather than buffering forever waiting for exit.
+pub fn run_compose_up(args: &[String], verbose: u8) -> Result<i32> {
+    let detached = args.iter().any(|a| a == "-d" || a == "--detach");
+    if !detached {
+        let mut combined = vec![OsString::from("compose"), OsString::from("up")];
+        combined.extend(args.iter().map(OsString::from));
+        return crate::core::runner::run_passthrough("docker", &combined, verbose);
+    }
+
+    let mut cmd = resolved_command("docker");
+    cmd.arg("compose").arg("up");
+    for a in args {
+        cmd.arg(a);
+    }
+
+    runner::run_filtered(
+        cmd,
+        "docker",
+        "compose up",
+        |raw| {
+            if verbose > 0 {
+                eprintln!("raw docker compose up:\n{}", raw);
+            }
+            format_compose_up(raw)
         },
         RunOptions::default().early_exit_on_failure(),
     )
@@ -934,6 +1050,82 @@ api-1  | Connected to database";
         assert!(
             !out.is_empty(),
             "should produce output even for empty input"
+        );
+    }
+
+    // ── format_compose_up ───────────────────────────────────
+
+    #[test]
+    fn test_format_compose_up_real_fixture_savings() {
+        let raw = include_str!("../../../tests/fixtures/docker_compose_up_raw.txt");
+        let out = format_compose_up(raw);
+
+        assert!(out.contains("4 services"), "should count distinct entities");
+        assert!(out.contains("datalake-postgres-1"), "should list container name");
+        // postgres transitions Running -> Waiting -> Healthy; only the last should show.
+        assert!(out.contains("Healthy"), "should keep the final status per entity");
+        assert_eq!(
+            out.matches("datalake-postgres-1").count(),
+            1,
+            "should not repeat an entity that transitioned through several statuses"
+        );
+        assert!(out.contains("[warn] orphan containers"), "should surface the orphan warning");
+        assert!(
+            !out.contains("level=warning"),
+            "should not leak raw docker log formatting"
+        );
+
+        let input_tokens = raw.split_whitespace().count();
+        let output_tokens = out.split_whitespace().count();
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        assert!(savings >= 60.0, "Expected >=60% savings, got {:.1}%", savings);
+    }
+
+    #[test]
+    fn test_format_compose_up_fresh_creation() {
+        // Compose prints a distinct set of verbs when creating from scratch
+        // rather than reconciling already-running containers. The network is
+        // only ever "Created" (never "Started"), so it must be kept — only the
+        // containers' intermediate "Starting" transition should be dropped.
+        let raw = "\
+ Network myapp_default  Created
+ Container myapp-db-1  Created
+ Container myapp-web-1  Created
+ Container myapp-db-1  Starting
+ Container myapp-web-1  Starting
+ Container myapp-db-1  Started
+ Container myapp-web-1  Started";
+        let out = format_compose_up(raw);
+        assert!(out.contains("3 services"), "should count network + 2 containers");
+        assert!(out.contains("myapp-db-1"), "should show container name");
+        assert!(out.contains("myapp_default"), "should show network name");
+        assert!(out.contains("network"), "should label the non-container entity");
+        assert!(out.contains("Started"), "should keep the containers' final status");
+        assert!(
+            !out.contains("Starting"),
+            "intermediate container transitions should be dropped"
+        );
+    }
+
+    #[test]
+    fn test_format_compose_up_empty() {
+        let out = format_compose_up("");
+        assert!(out.contains("no output"));
+    }
+
+    #[test]
+    fn test_format_compose_up_whitespace_only() {
+        let out = format_compose_up("   \n  \n");
+        assert!(out.contains("no output"));
+    }
+
+    #[test]
+    fn test_format_compose_up_no_orphan_warning_when_absent() {
+        let raw = " Container myapp-web-1 Running";
+        let out = format_compose_up(raw);
+        assert!(
+            !out.contains("[warn]"),
+            "should not mention orphans when there is no such warning"
         );
     }
 
