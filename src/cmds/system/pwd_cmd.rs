@@ -51,6 +51,12 @@ enum GitContext {
         main_root: Option<PathBuf>,
         main_branch: Option<String>,
     },
+    /// `.git` is a file pointing into `<super>/.git/modules/<name>` — a submodule.
+    Submodule {
+        root: PathBuf,
+        branch: String,
+        superproject: PathBuf,
+    },
 }
 
 fn describe(physical: &Path, logical: Option<&Path>) -> String {
@@ -82,8 +88,19 @@ fn describe(physical: &Path, logical: Option<&Path>) -> String {
                 (Some(main), None) => {
                     out.push_str(&format!("worktree of: {}\n", main.display()))
                 }
-                _ => out.push_str("worktree of: (unresolved gitdir pointer)\n"),
+                (None, _) => out.push_str("worktree of: (unresolved gitdir pointer)\n"),
             }
+        }
+        Some(GitContext::Submodule {
+            root,
+            branch,
+            superproject,
+        }) => {
+            out.push_str(&format!("branch: {}\n", branch));
+            if root != physical {
+                out.push_str(&format!("submodule root: {}\n", root.display()));
+            }
+            out.push_str(&format!("submodule of: {}\n", superproject.display()));
         }
         None => out.push_str("(not in a git repository)\n"),
     }
@@ -128,31 +145,58 @@ fn find_git_context(start: &Path) -> Option<GitContext> {
             });
         }
         if dot_git.is_file() {
-            return Some(worktree_context(dir, &dot_git));
+            return Some(gitfile_context(dir, &dot_git));
         }
         dir = dir.parent()?;
     }
 }
 
-fn worktree_context(root: &Path, dot_git_file: &Path) -> GitContext {
-    let (branch, main_root, main_branch) = match read_gitdir_pointer(dot_git_file, root) {
-        Some(gitdir) => {
-            let common = common_git_dir(&gitdir);
-            let main_root = common
-                .as_deref()
-                .and_then(Path::parent)
-                .map(Path::to_path_buf);
-            let main_branch = common.as_deref().map(read_branch);
-            (read_branch(&gitdir), main_root, main_branch)
+/// Classify a `.git` *file* (linked worktree or submodule pointer).
+fn gitfile_context(root: &Path, dot_git_file: &Path) -> GitContext {
+    let gitdir = match read_gitdir_pointer(dot_git_file, root) {
+        Some(gitdir) => gitdir,
+        None => {
+            return GitContext::Worktree {
+                root: root.to_path_buf(),
+                branch: "(unknown)".to_string(),
+                main_root: None,
+                main_branch: None,
+            }
         }
-        None => ("(unknown)".to_string(), None, None),
     };
+    let branch = read_branch(&gitdir);
+
+    if let Some(superproject) = submodule_superproject(&gitdir) {
+        return GitContext::Submodule {
+            root: root.to_path_buf(),
+            branch,
+            superproject,
+        };
+    }
+
+    let common = common_git_dir(&gitdir);
     GitContext::Worktree {
         root: root.to_path_buf(),
         branch,
-        main_root,
-        main_branch,
+        main_root: common
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf),
+        main_branch: common.as_deref().and_then(read_branch_opt),
     }
+}
+
+/// Submodule gitdirs live under `<super>/.git/modules/...`; returns the
+/// superproject root when `gitdir` matches that layout.
+fn submodule_superproject(gitdir: &Path) -> Option<PathBuf> {
+    gitdir.ancestors().find_map(|anc| {
+        let parent = anc.parent()?;
+        if anc.file_name()? == "modules" && parent.file_name()? == ".git" {
+            parent.parent().map(Path::to_path_buf)
+        } else {
+            None
+        }
+    })
 }
 
 /// A worktree's `.git` file contains `gitdir: <path/to/main/.git/worktrees/name>`.
@@ -187,18 +231,30 @@ fn common_git_dir(gitdir: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Branch name from `<gitdir>/HEAD`, or a short hash for detached HEAD.
-fn read_branch(gitdir: &Path) -> String {
-    match fs::read_to_string(gitdir.join("HEAD")) {
-        Ok(head) => {
-            let head = head.trim();
-            match head.strip_prefix("ref: refs/heads/") {
-                Some(branch) => branch.to_string(),
-                None => format!("detached @ {}", head.chars().take(9).collect::<String>()),
-            }
-        }
-        Err(_) => "(unknown)".to_string(),
+/// Branch name from `<gitdir>/HEAD`: a `refs/heads/` branch, another symbolic
+/// ref verbatim, or a short hash for detached HEAD. `None` when HEAD is
+/// missing or unparseable.
+fn read_branch_opt(gitdir: &Path) -> Option<String> {
+    let head = fs::read_to_string(gitdir.join("HEAD")).ok()?;
+    let head = head.trim();
+    if let Some(branch) = head.strip_prefix("ref: refs/heads/") {
+        return Some(branch.to_string());
     }
+    if let Some(other_ref) = head.strip_prefix("ref: ") {
+        return Some(other_ref.to_string());
+    }
+    // Detached HEAD: only trust plausible object hashes (sha1 or sha256).
+    if (7..=64).contains(&head.len()) && head.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Some(format!(
+            "detached @ {}",
+            head.chars().take(9).collect::<String>()
+        ));
+    }
+    None
+}
+
+fn read_branch(gitdir: &Path) -> String {
+    read_branch_opt(gitdir).unwrap_or_else(|| "(unknown)".to_string())
 }
 
 #[cfg(test)]
@@ -362,6 +418,84 @@ mod tests {
     fn test_pwd_note_absent_when_equal() {
         let (_guard, tmp) = tmpdir();
         assert!(pwd_mismatch_note(&tmp, &tmp).is_none());
+    }
+
+    #[test]
+    fn test_submodule_not_mislabeled_as_worktree() {
+        let (_guard, tmp) = tmpdir();
+        let superproject = tmp.join("super");
+        let sub = superproject.join("libs").join("mylib");
+        fs::create_dir_all(&sub).expect("mkdir submodule");
+        make_main_checkout(&superproject, "main");
+
+        let sub_gitdir = superproject.join(".git").join("modules").join("mylib");
+        fs::create_dir_all(&sub_gitdir).expect("mkdir submodule gitdir");
+        fs::write(sub_gitdir.join("HEAD"), "ref: refs/heads/main\n").expect("write sub HEAD");
+        fs::write(
+            sub.join(".git"),
+            format!("gitdir: {}\n", sub_gitdir.display()),
+        )
+        .expect("write .git pointer file");
+
+        let out = describe(&sub, None);
+        assert!(out.contains("branch: main\n"), "{}", out);
+        assert!(
+            out.contains(&format!("submodule of: {}\n", superproject.display())),
+            "submodule must be labeled as such: {}",
+            out
+        );
+        assert!(
+            !out.contains("worktree of:"),
+            "submodule must not claim to be a worktree: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_worktree_with_unreadable_main_head() {
+        let (_guard, tmp) = tmpdir();
+        let main = tmp.join("main-checkout");
+        let wt = tmp.join("wt");
+        fs::create_dir_all(&main).expect("mkdir main");
+        make_main_checkout(&main, "develop");
+        make_worktree(&main, &wt, "wt", "feature");
+        fs::remove_file(main.join(".git/HEAD")).expect("drop main HEAD");
+
+        let out = describe(&wt, None);
+        assert!(
+            out.contains(&format!("worktree of: {}\n", main.display())),
+            "main link without branch suffix when its HEAD is unreadable: {}",
+            out
+        );
+        assert!(!out.contains("(branch"), "{}", out);
+    }
+
+    #[test]
+    fn test_non_branch_symbolic_ref_printed_verbatim() {
+        let (_guard, tmp) = tmpdir();
+        let root = tmp.join("repo");
+        let git = root.join(".git");
+        fs::create_dir_all(&git).expect("mkdir .git");
+        fs::write(git.join("HEAD"), "ref: refs/remotes/origin/main\n").expect("write HEAD");
+
+        let out = describe(&root, None);
+        assert!(
+            out.contains("branch: refs/remotes/origin/main\n"),
+            "non-heads symbolic ref must print verbatim, not as detached garbage: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_garbage_head_degrades_to_unknown() {
+        let (_guard, tmp) = tmpdir();
+        let root = tmp.join("repo");
+        let git = root.join(".git");
+        fs::create_dir_all(&git).expect("mkdir .git");
+        fs::write(git.join("HEAD"), "totally not a ref\n").expect("write HEAD");
+
+        let out = describe(&root, None);
+        assert!(out.contains("branch: (unknown)\n"), "{}", out);
     }
 
     #[test]
