@@ -3,11 +3,19 @@ use std::io::Read;
 
 use crate::core::guard::never_worse;
 use crate::core::stream::RAW_CAP;
+use crate::core::toml_filter::{self, CompiledFilter};
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 
 const MAX_PIPE_MATCHES: usize = CAP_WARNINGS;
 const MAX_PIPE_FILES: usize = CAP_WARNINGS;
 const MAX_PIPE_DIRS: usize = CAP_LIST;
+
+/// A resolved pipe filter: either a built-in Rust function or a loaded
+/// (built-in or trusted custom) TOML filter.
+pub enum Filter {
+    Rust(fn(&str) -> String),
+    Toml(&'static CompiledFilter),
+}
 
 pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
     match name {
@@ -235,12 +243,40 @@ fn identity_filter(input: &str) -> String {
     input.to_string()
 }
 
-fn apply_filter(filter_fn: fn(&str) -> String, input: &str) -> String {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| filter_fn(input)))
-        .unwrap_or_else(|_| {
-            eprintln!("[rtk] warning: filter panicked — passing through raw output");
-            input.to_string()
-        })
+fn apply_filter(filter: &Filter, input: &str) -> String {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match filter {
+        Filter::Rust(f) => f(input),
+        Filter::Toml(cf) => toml_filter::apply_filter(cf, input),
+    }))
+    .unwrap_or_else(|_| {
+        eprintln!("[rtk] warning: filter panicked — passing through raw output");
+        input.to_string()
+    })
+}
+
+const BUILTIN_PIPE_FILTERS: &str = "cargo-test (alias cargo), pytest, go-test, go-build, tsc, \
+     vitest, grep, rg, find, fd, git-log, git-diff, git-status, log, mypy, ruff-check, \
+     ruff-format, prettier, phpunit, pest, paratest, php-test, ecs, phpstan, pint";
+
+fn unknown_filter_message(name: &str) -> String {
+    let toml_names = if toml_filter::toml_disabled() {
+        Vec::new()
+    } else {
+        toml_filter::loaded_filter_names()
+    };
+    if toml_names.is_empty() {
+        format!(
+            "Unknown filter '{}'. Built-in: {}",
+            name, BUILTIN_PIPE_FILTERS
+        )
+    } else {
+        format!(
+            "Unknown filter '{}'. Built-in: {}. TOML (built-in + trusted custom): {}",
+            name,
+            BUILTIN_PIPE_FILTERS,
+            toml_names.join(", ")
+        )
+    }
 }
 
 pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
@@ -259,20 +295,24 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
         anyhow::bail!("stdin exceeds {} byte limit", RAW_CAP);
     }
 
-    let filter_fn = match filter_name {
-        Some(name) => resolve_filter(name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Unknown filter '{}'. Available: cargo-test, pytest, go-test, go-build, \
-                 tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
-                 log, mypy, ruff-check, ruff-format, prettier, phpunit, pest, \
-                 paratest, php-test, ecs, phpstan, pint",
-                name
-            )
-        })?,
-        None => auto_detect_filter(&buf),
+    let filter = match filter_name {
+        // Built-in Rust filters take precedence over a TOML filter of the same
+        // name (mirrors the hook's resolve order). Fall back to the TOML
+        // registry by name unless the TOML engine is disabled (RTK_NO_TOML=1).
+        Some(name) => match resolve_filter(name) {
+            Some(f) => Filter::Rust(f),
+            None if toml_filter::toml_disabled() => {
+                anyhow::bail!("{}", unknown_filter_message(name))
+            }
+            None => match toml_filter::find_filter_by_name(name) {
+                Some(cf) => Filter::Toml(cf),
+                None => anyhow::bail!("{}", unknown_filter_message(name)),
+            },
+        },
+        None => Filter::Rust(auto_detect_filter(&buf)),
     };
 
-    let output = apply_filter(filter_fn, &buf);
+    let output = apply_filter(&filter, &buf);
     let shown = never_worse(&buf, &output);
     print!("{}", shown);
     Ok(())
@@ -548,8 +588,30 @@ mod tests {
             panic!("filter bug");
         }
         let input = "some output\n";
-        let result = super::apply_filter(panicking_filter, input);
+        let result = super::apply_filter(&Filter::Rust(panicking_filter), input);
         assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_unknown_filter_message_lists_builtin() {
+        let msg = super::unknown_filter_message("nope");
+        assert!(msg.contains("Unknown filter 'nope'"), "msg={}", msg);
+        assert!(msg.contains("cargo-test"), "msg={}", msg);
+    }
+
+    #[test]
+    fn test_toml_filter_resolves_by_name() {
+        // A built-in TOML filter must be resolvable by name and dispatch through
+        // the TOML pipeline (built-in filters are always trusted).
+        let cf =
+            toml_filter::find_filter_by_name("make").expect("built-in 'make' filter must load");
+        let out = super::apply_filter(&Filter::Toml(cf), "make[1]: Entering directory '/x'\nreal");
+        assert!(!out.is_empty(), "out={}", out);
+    }
+
+    #[test]
+    fn test_unknown_toml_filter_name_returns_none() {
+        assert!(toml_filter::find_filter_by_name("definitely-not-a-filter").is_none());
     }
 
     fn count_tokens(s: &str) -> usize {
