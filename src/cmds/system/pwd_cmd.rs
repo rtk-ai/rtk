@@ -44,19 +44,41 @@ pub fn run(verbose: u8) -> Result<()> {
 enum GitContext {
     /// `.git` is a directory — a main checkout.
     Main { root: PathBuf, branch: String },
-    /// `.git` is a file pointing into `<main>/.git/worktrees/<name>` — a linked worktree.
+    /// `.git` is a file pointing into `<shared>/worktrees/<name>` — a linked worktree.
     Worktree {
         root: PathBuf,
         branch: String,
         main_root: Option<PathBuf>,
         main_branch: Option<String>,
+        /// Set when the shared gitdir itself belongs to a submodule
+        /// (a linked worktree of a submodule checkout).
+        submodule: Option<SubmoduleLink>,
     },
     /// `.git` is a file pointing into `<super>/.git/modules/<name>` — a submodule.
     Submodule {
         root: PathBuf,
         branch: String,
-        superproject: PathBuf,
+        link: SubmoduleLink,
     },
+}
+
+/// Link from a submodule gitdir back to the checkout that contains it.
+struct SubmoduleLink {
+    /// The top-level superproject root (the checkout whose `.git/modules/`
+    /// holds the gitdir). For nested submodules this is the outermost
+    /// superproject, not the immediate parent submodule — `nested` flags that.
+    superproject: PathBuf,
+    nested: bool,
+}
+
+impl SubmoduleLink {
+    fn describe(&self) -> String {
+        if self.nested {
+            format!("submodule (nested) of: {}\n", self.superproject.display())
+        } else {
+            format!("submodule of: {}\n", self.superproject.display())
+        }
+    }
 }
 
 fn describe(physical: &Path, logical: Option<&Path>) -> String {
@@ -74,6 +96,7 @@ fn describe(physical: &Path, logical: Option<&Path>) -> String {
             branch,
             main_root,
             main_branch,
+            submodule,
         }) => {
             out.push_str(&format!("branch: {}\n", branch));
             if root != physical {
@@ -90,17 +113,16 @@ fn describe(physical: &Path, logical: Option<&Path>) -> String {
                 }
                 (None, _) => out.push_str("worktree of: (unresolved gitdir pointer)\n"),
             }
+            if let Some(link) = submodule {
+                out.push_str(&link.describe());
+            }
         }
-        Some(GitContext::Submodule {
-            root,
-            branch,
-            superproject,
-        }) => {
+        Some(GitContext::Submodule { root, branch, link }) => {
             out.push_str(&format!("branch: {}\n", branch));
             if root != physical {
                 out.push_str(&format!("submodule root: {}\n", root.display()));
             }
-            out.push_str(&format!("submodule of: {}\n", superproject.display()));
+            out.push_str(&link.describe());
         }
         None => out.push_str("(not in a git repository)\n"),
     }
@@ -152,6 +174,11 @@ fn find_git_context(start: &Path) -> Option<GitContext> {
 }
 
 /// Classify a `.git` *file* (linked worktree or submodule pointer).
+///
+/// Worktree layout is checked before submodule layout: a linked worktree of
+/// a submodule (gitdir `<super>/.git/modules/<name>/worktrees/<wt>`) must
+/// keep its worktree linkage — that is the drift signal this command exists
+/// to surface — and additionally reports the submodule attribution.
 fn gitfile_context(root: &Path, dot_git_file: &Path) -> GitContext {
     let gitdir = match read_gitdir_pointer(dot_git_file, root) {
         Some(gitdir) => gitdir,
@@ -161,38 +188,74 @@ fn gitfile_context(root: &Path, dot_git_file: &Path) -> GitContext {
                 branch: "(unknown)".to_string(),
                 main_root: None,
                 main_branch: None,
+                submodule: None,
             }
         }
     };
     let branch = read_branch(&gitdir);
 
-    if let Some(superproject) = submodule_superproject(&gitdir) {
-        return GitContext::Submodule {
+    let is_worktree_layout = gitdir
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "worktrees")
+        || gitdir.join("commondir").is_file();
+    if is_worktree_layout {
+        let common = common_git_dir(&gitdir);
+        let (main_root, main_branch) = match common.as_deref() {
+            // Shared gitdir is a checkout's `.git` — the normal case.
+            Some(c) if c.file_name().is_some_and(|name| name == ".git") => {
+                (c.parent().map(Path::to_path_buf), read_branch_opt(c))
+            }
+            // Shared gitdir is not `<checkout>/.git` (e.g. a submodule's
+            // gitdir under `.git/modules/`): point at the gitdir itself
+            // rather than fabricating a checkout path from its parent.
+            Some(c) => (Some(c.to_path_buf()), read_branch_opt(c)),
+            None => (None, None),
+        };
+        return GitContext::Worktree {
             root: root.to_path_buf(),
             branch,
-            superproject,
+            main_root,
+            main_branch,
+            submodule: common.as_deref().and_then(submodule_link),
         };
     }
 
-    let common = common_git_dir(&gitdir);
+    if let Some(link) = submodule_link(&gitdir) {
+        return GitContext::Submodule {
+            root: root.to_path_buf(),
+            branch,
+            link,
+        };
+    }
+
     GitContext::Worktree {
         root: root.to_path_buf(),
         branch,
-        main_root: common
-            .as_deref()
-            .and_then(Path::parent)
-            .map(Path::to_path_buf),
-        main_branch: common.as_deref().and_then(read_branch_opt),
+        main_root: None,
+        main_branch: None,
+        submodule: None,
     }
 }
 
-/// Submodule gitdirs live under `<super>/.git/modules/...`; returns the
-/// superproject root when `gitdir` matches that layout.
-fn submodule_superproject(gitdir: &Path) -> Option<PathBuf> {
+/// Submodule gitdirs live under `<super>/.git/modules/...`; returns the link
+/// when `gitdir` matches that layout. Attribution is always to the outermost
+/// superproject (the checkout owning the `.git/modules/` tree); a further
+/// `modules` component below it marks the submodule as nested.
+fn submodule_link(gitdir: &Path) -> Option<SubmoduleLink> {
     gitdir.ancestors().find_map(|anc| {
         let parent = anc.parent()?;
         if anc.file_name()? == "modules" && parent.file_name()? == ".git" {
-            parent.parent().map(Path::to_path_buf)
+            let nested = gitdir
+                .strip_prefix(anc)
+                .ok()?
+                .components()
+                .skip(1) // first component is this submodule's own name
+                .any(|c| c.as_os_str() == "modules");
+            Some(SubmoduleLink {
+                superproject: parent.parent()?.to_path_buf(),
+                nested,
+            })
         } else {
             None
         }
@@ -447,6 +510,70 @@ mod tests {
         assert!(
             !out.contains("worktree of:"),
             "submodule must not claim to be a worktree: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_worktree_of_a_submodule_keeps_worktree_linkage() {
+        let (_guard, tmp) = tmpdir();
+        let superproject = tmp.join("super");
+        fs::create_dir_all(&superproject).expect("mkdir super");
+        make_main_checkout(&superproject, "main");
+
+        // Submodule gitdir with its own linked worktree
+        let sub_gitdir = superproject.join(".git").join("modules").join("mylib");
+        let wt_gitdir = sub_gitdir.join("worktrees").join("wtx");
+        fs::create_dir_all(&wt_gitdir).expect("mkdir submodule worktree gitdir");
+        fs::write(sub_gitdir.join("HEAD"), "ref: refs/heads/main\n").expect("write sub HEAD");
+        fs::write(wt_gitdir.join("HEAD"), "ref: refs/heads/feature\n").expect("write wt HEAD");
+        fs::write(wt_gitdir.join("commondir"), "../..\n").expect("write commondir");
+
+        let wt = tmp.join("wt-sub");
+        fs::create_dir_all(&wt).expect("mkdir wt");
+        fs::write(wt.join(".git"), format!("gitdir: {}\n", wt_gitdir.display()))
+            .expect("write .git pointer file");
+
+        let out = describe(&wt, None);
+        assert!(out.contains("branch: feature\n"), "{}", out);
+        assert!(
+            out.contains(&format!("worktree of: {} (branch main)\n", sub_gitdir.display())),
+            "worktree linkage (the drift signal) must survive: {}",
+            out
+        );
+        assert!(
+            out.contains(&format!("submodule of: {}\n", superproject.display())),
+            "submodule attribution must also be reported: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_nested_submodule_labeled_as_nested() {
+        let (_guard, tmp) = tmpdir();
+        let superproject = tmp.join("super");
+        let sub = superproject.join("a").join("b");
+        fs::create_dir_all(&sub).expect("mkdir nested submodule");
+        make_main_checkout(&superproject, "main");
+
+        let gitdir = superproject
+            .join(".git")
+            .join("modules")
+            .join("a")
+            .join("modules")
+            .join("b");
+        fs::create_dir_all(&gitdir).expect("mkdir nested gitdir");
+        fs::write(gitdir.join("HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
+        fs::write(sub.join(".git"), format!("gitdir: {}\n", gitdir.display()))
+            .expect("write .git pointer file");
+
+        let out = describe(&sub, None);
+        assert!(
+            out.contains(&format!(
+                "submodule (nested) of: {}\n",
+                superproject.display()
+            )),
+            "nested submodule must flag top-level attribution: {}",
             out
         );
     }
