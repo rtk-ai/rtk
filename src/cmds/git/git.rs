@@ -2897,42 +2897,6 @@ no changes added to commit (use "git add" and/or "git commit -a")
     }
 
     #[test]
-    fn test_commit_hash_is_read_from_git_object_not_branch_header() {
-        let repo = tempfile::tempdir().expect("tempdir");
-        let p = repo.path().to_string_lossy().into_owned();
-        for args in [
-            vec!["-C", &p, "init", "-q"],
-            vec!["-C", &p, "config", "user.name", "RTK Test"],
-            vec!["-C", &p, "config", "user.email", "rtk@example.invalid"],
-        ] {
-            assert!(Command::new("git").args(args).status().unwrap().success());
-        }
-        std::fs::write(repo.path().join("a.txt"), "one\n").unwrap();
-        assert!(Command::new("git")
-            .args(["-C", &p, "add", "a.txt"])
-            .status()
-            .unwrap()
-            .success());
-        let global = vec!["-C".to_string(), p.clone()];
-        assert_eq!(run_commit(&["-m".into(), "initial".into()], 0, &global).unwrap(), 0);
-        assert!(Command::new("git")
-            .args(["-C", &p, "switch", "-qc", "feature/not-a-sha"])
-            .status()
-            .unwrap()
-            .success());
-        std::fs::write(repo.path().join("a.txt"), "two\n").unwrap();
-        assert!(Command::new("git")
-            .args(["-C", &p, "add", "a.txt"])
-            .status()
-            .unwrap()
-            .success());
-        assert_eq!(run_commit(&["-m".into(), "change".into()], 0, &global).unwrap(), 0);
-        let reported = verified_head_short_hash(&global).expect("verified commit hash");
-        assert_ne!(reported, "feature");
-        assert!(reported.chars().all(|ch| ch.is_ascii_hexdigit()));
-    }
-
-    #[test]
     fn test_classify_commit_nothing_to_commit_is_failure() {
         match classify_commit_outcome(false, None, 1) {
             CommitOutcome::Failed(code) => assert_eq!(code, 1),
@@ -2941,41 +2905,6 @@ no changes added to commit (use "git add" and/or "git commit -a")
                 panic!("nothing-to-commit must be a known failure: {}", message)
             }
         }
-    }
-
-    #[test]
-    fn test_run_commit_noop_preserves_failure_and_head() {
-        let repo = tempfile::tempdir().expect("tempdir");
-        let p = repo.path().to_string_lossy().into_owned();
-        for args in [
-            vec!["-C", &p, "init", "-q"],
-            vec!["-C", &p, "config", "user.name", "RTK Test"],
-            vec!["-C", &p, "config", "user.email", "rtk@example.invalid"],
-        ] {
-            assert!(Command::new("git").args(args).status().unwrap().success());
-        }
-        std::fs::write(repo.path().join("a.txt"), "one\n").unwrap();
-        assert!(Command::new("git")
-            .args(["-C", &p, "add", "a.txt"])
-            .status()
-            .unwrap()
-            .success());
-        let global = vec!["-C".to_string(), p.clone()];
-        assert_eq!(run_commit(&["-m".into(), "initial".into()], 0, &global).unwrap(), 0);
-        let before = Command::new("git")
-            .args(["-C", &p, "rev-parse", "HEAD"])
-            .output()
-            .unwrap()
-            .stdout;
-
-        assert_ne!(run_commit(&["-m".into(), "noop".into()], 0, &global).unwrap(), 0);
-
-        let after = Command::new("git")
-            .args(["-C", &p, "rev-parse", "HEAD"])
-            .output()
-            .unwrap()
-            .stdout;
-        assert_eq!(before, after, "no-op commit must not move HEAD");
     }
 
     #[test]

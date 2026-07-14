@@ -3,6 +3,9 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+use rusqlite::Connection;
+use sha2::{Digest, Sha256};
+
 fn rtk_stdin(args: &[&str], input: &str) -> String {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
         .args(args)
@@ -69,6 +72,24 @@ fn rtk_output_in_dir(dir: &std::path::Path, args: &[&str]) -> (String, String, O
     )
 }
 
+fn rtk_output_in_dir_with_db(
+    dir: &std::path::Path,
+    db_path: &std::path::Path,
+    args: &[&str],
+) -> (String, String, Option<i32>) {
+    let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(args)
+        .current_dir(dir)
+        .env("RTK_DB_PATH", db_path)
+        .output()
+        .expect("spawn rtk with isolated tracking DB");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code(),
+    )
+}
+
 fn rtk_in_dir(dir: &std::path::Path, args: &[&str]) -> (String, Option<i32>) {
     let (stdout, _, code) = rtk_output_in_dir(dir, args);
     (stdout, code)
@@ -113,6 +134,151 @@ fn git_in_dir(dir: &std::path::Path, args: &[&str]) {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+fn git_stdout_in_dir(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("spawn git");
+    assert!(
+        out.status.success(),
+        "git command failed: {args:?}\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn git_commit_reports_verified_object_hash_and_tracks_actual_output() {
+    let dir = init_git_repo();
+    git_in_dir(dir.path(), &["switch", "-qc", "feature/not-a-sha"]);
+    let db_path = dir.path().join("tracking.db");
+
+    let (stdout, stderr, code) = rtk_output_in_dir_with_db(
+        dir.path(),
+        &db_path,
+        &["git", "commit", "--allow-empty", "-m", "change"],
+    );
+
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert!(
+        stderr.is_empty(),
+        "successful commit wrote stderr: {stderr:?}"
+    );
+    let expected_hash = git_stdout_in_dir(dir.path(), &["rev-parse", "--short=7", "HEAD"]);
+    assert_eq!(stdout.trim(), format!("ok {expected_hash}"));
+    assert!(!stdout.contains("feature/not-a-sha"));
+    git_in_dir(
+        dir.path(),
+        &["cat-file", "-e", &format!("{expected_hash}^{{commit}}")],
+    );
+
+    let conn = Connection::open(&db_path).expect("open isolated tracking DB");
+    let (exit_code, output_sha256): (Option<i32>, Option<String>) = conn
+        .query_row(
+            "SELECT exit_code, output_sha256 FROM commands ORDER BY id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("tracked commit evidence");
+    let expected_output_sha256 = format!("{:x}", Sha256::digest(stdout.trim().as_bytes()));
+    assert_eq!(exit_code, Some(0));
+    assert_eq!(
+        output_sha256.as_deref(),
+        Some(expected_output_sha256.as_str())
+    );
+}
+
+#[test]
+fn git_commit_noop_preserves_failure_head_and_tracking_exit_code() {
+    let dir = init_git_repo();
+    let db_path = dir.path().join("tracking.db");
+    let before = git_stdout_in_dir(dir.path(), &["rev-parse", "HEAD"]);
+
+    let (stdout, stderr, code) =
+        rtk_output_in_dir_with_db(dir.path(), &db_path, &["git", "commit", "-m", "noop"]);
+
+    assert_ne!(code, Some(0));
+    assert!(
+        stdout.trim().is_empty(),
+        "failure must not emit success stdout: {stdout:?}"
+    );
+    assert!(
+        stderr.contains("nothing to commit"),
+        "native failure detail was lost: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("ok "),
+        "failure was rendered as success: {stderr:?}"
+    );
+    assert_eq!(
+        before,
+        git_stdout_in_dir(dir.path(), &["rev-parse", "HEAD"])
+    );
+
+    let conn = Connection::open(&db_path).expect("open isolated tracking DB");
+    let tracked_exit_code: Option<i32> = conn
+        .query_row(
+            "SELECT exit_code FROM commands ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("tracked no-op evidence");
+    assert_eq!(tracked_exit_code, code);
+}
+
+#[test]
+fn git_status_migrates_legacy_tracking_schema_before_recording_evidence() {
+    let dir = init_git_repo();
+    let db_path = dir.path().join("legacy-tracking.db");
+    let conn = Connection::open(&db_path).expect("create legacy tracking DB");
+    conn.execute_batch(
+        "CREATE TABLE commands (
+            id INTEGER PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            original_cmd TEXT NOT NULL,
+            rtk_cmd TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL,
+            output_tokens INTEGER NOT NULL,
+            saved_tokens INTEGER NOT NULL,
+            savings_pct REAL NOT NULL
+        );",
+    )
+    .expect("create legacy commands schema");
+    drop(conn);
+
+    let (_, stderr, code) =
+        rtk_output_in_dir_with_db(dir.path(), &db_path, &["git", "status", "--short"]);
+    assert_eq!(code, Some(0), "legacy schema migration failed: {stderr}");
+
+    let conn = Connection::open(&db_path).expect("reopen migrated tracking DB");
+    let mut columns = conn
+        .prepare("PRAGMA table_info(commands)")
+        .expect("prepare table info");
+    let column_names = columns
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("query table info")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("collect columns");
+    for expected in ["exit_code", "input_sha256", "output_sha256"] {
+        assert!(
+            column_names.iter().any(|name| name == expected),
+            "missing migrated column: {expected}"
+        );
+    }
+    let (exit_code, input_sha256, output_sha256): (Option<i32>, Option<String>, Option<String>) =
+        conn.query_row(
+            "SELECT exit_code, input_sha256, output_sha256 FROM commands ORDER BY id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("migrated evidence row");
+    assert_eq!(exit_code, Some(0));
+    assert_eq!(input_sha256.as_deref().map(str::len), Some(64));
+    assert_eq!(output_sha256.as_deref().map(str::len), Some(64));
 }
 
 fn read_text_normalized(path: &std::path::Path) -> String {

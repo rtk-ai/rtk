@@ -1532,7 +1532,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tracker_records_exit_code_and_output_identity() {
+    fn test_tracker_persists_supplied_execution_evidence() {
         let tracker = Tracker::new_in_memory().expect("in-memory tracker");
         tracker
             .record_with_evidence(
