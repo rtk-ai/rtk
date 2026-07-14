@@ -2,9 +2,9 @@
 
 ## Scope
 
-**Deployed hook artifacts** — the actual files installed on user machines by `rtk init`. These are shell scripts, TypeScript plugins, and rules files that run outside the Rust binary. They are **thin delegates**: parse agent-specific JSON, call `rtk rewrite` as a subprocess, format agent-specific response. Zero filtering logic lives here.
+**Deployed hook artifacts** — the files installed on user machines by `rtk init`, such as shell scripts, TypeScript plugins, and rules files. They are **thin delegates**: parse agent-specific JSON, call `rtk rewrite` as a subprocess, and format agent-specific responses. Native Rust hook adapters (for example, Trae) live in `src/hooks/`.
 
-Owns: per-agent hook scripts and configuration files for 9 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi).
+Owns: per-agent hook scripts and configuration files.
 
 Does **not** own: hook installation/uninstallation (that's `src/hooks/init.rs`), the rewrite pattern registry (that's `discover/registry`), or integrity verification (that's `src/hooks/integrity.rs`).
 
@@ -51,6 +51,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | VS Code Copilot Chat | Rust binary (`rtk hook copilot`) | Transparent rewrite | Yes (`updatedInput`) |
 | GitHub Copilot CLI | Rust binary (`rtk hook copilot`) | Deny-with-suggestion | No (agent retries) |
 | Cursor | Rust binary | Transparent rewrite | Yes (`updated_input`) |
+| Trae | Rust binary (`rtk hook trae`) | Transparent rewrite | Yes (`updatedInput`) |
 | Gemini CLI | Rust binary (`rtk hook gemini`) | Transparent rewrite | Yes (`hookSpecificOutput`) |
 | Cline / Roo Code | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |
@@ -99,6 +100,32 @@ Each agent subdirectory has its own README with hook-specific details:
 ```
 
 Returns `{}` when no rewrite (Cursor requires JSON for all paths).
+
+### Trae (Rust Binary)
+
+Install with `rtk init --agent trae` for `.trae/hooks.json`, or `rtk init -g --agent trae` for `~/.trae/hooks.json`; global installation also updates `~/.trae-cn/hooks.json` when that directory already exists.
+
+**Input**: Trae `PreToolUse` payloads for `RunCommand`, such as:
+
+```json
+{
+  "tool_name": "RunCommand",
+  "tool_input": { "command": "git status", "description": "Check status" }
+}
+```
+
+**Output** (only when rewritten):
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "updatedInput": { "command": "rtk git status", "description": "Check status" }
+  }
+}
+```
+
+RTK deliberately does not set `permissionDecision`; Trae retains its own command-approval policy.
 
 ### Copilot CLI (Rust Binary)
 

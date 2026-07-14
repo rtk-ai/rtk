@@ -438,6 +438,64 @@ fn run_claude_inner(input: &str) -> Option<String> {
     }
 }
 
+// ── Trae native hook ───────────────────────────────────────────
+
+fn process_trae_payload(v: &Value) -> Option<Value> {
+    if v.get("tool_name").and_then(Value::as_str) != Some("RunCommand") {
+        return None;
+    }
+
+    let command = v
+        .pointer("/tool_input/command")
+        .and_then(Value::as_str)
+        .filter(|command| !command.is_empty())?;
+    let rewritten = get_rewritten(command)?;
+
+    let mut updated_input = v.get("tool_input")?.clone();
+    updated_input
+        .as_object_mut()?
+        .insert("command".into(), Value::String(rewritten));
+
+    Some(json!({
+        "hookSpecificOutput": {
+            "hookEventName": PRE_TOOL_USE_KEY,
+            "updatedInput": updated_input
+        }
+    }))
+}
+
+/// Run the Trae PreToolUse hook natively.
+///
+/// Trae owns the command permission decision. RTK only returns an updated input
+/// when it can safely rewrite a `RunCommand` command.
+pub fn run_trae() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    if let Some(output) = process_trae_payload(&v) {
+        let _ = writeln!(io::stdout(), "{output}");
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_trae_inner(input: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    process_trae_payload(&v).map(|output| output.to_string())
+}
+
 // ── Cursor native hook ─────────────────────────────────────────
 
 /// Cursor on Windows ships hook payloads with one or more leading
@@ -1135,6 +1193,51 @@ mod tests {
     fn test_claude_no_tool_input_passthrough() {
         let input = json!({ "tool_name": "Bash" }).to_string();
         assert!(run_claude_inner(&input).is_none());
+    }
+
+    // --- Trae handler ---
+
+    fn trae_input(cmd: &str) -> String {
+        json!({
+            "tool_name": "RunCommand",
+            "tool_input": {
+                "command": cmd,
+                "description": "Check repository status",
+                "timeout": 30000
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_trae_rewrite_preserves_tool_input_without_permission_override() {
+        let result = run_trae_inner(&trae_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(hook["updatedInput"]["command"], "rtk git status");
+        assert_eq!(
+            hook["updatedInput"]["description"],
+            "Check repository status"
+        );
+        assert_eq!(hook["updatedInput"]["timeout"], 30000);
+        assert!(hook.get("permissionDecision").is_none());
+        assert!(hook.get("permissionDecisionReason").is_none());
+    }
+
+    #[test]
+    fn test_trae_skips_non_run_command_and_unsafe_commands() {
+        let non_terminal = json!({
+            "tool_name": "ReadFile",
+            "tool_input": { "command": "git status" }
+        })
+        .to_string();
+        assert!(run_trae_inner(&non_terminal).is_none());
+        assert!(run_trae_inner(&trae_input("htop")).is_none());
+        assert!(run_trae_inner(&trae_input("cat <<EOF\nhello\nEOF")).is_none());
+        assert!(run_trae_inner(&trae_input("rtk git status")).is_none());
+        assert!(run_trae_inner("not valid json {{{").is_none());
     }
 
     // --- Cursor handler ---

@@ -80,7 +80,11 @@ rtk gain        # 应显示 token 节省统计
 # 1. 为 Claude Code 安装 hook（推荐）
 rtk init --global
 
-# 2. 重启 Claude Code，然后测试
+# Trae：项目级写入 .trae/hooks.json；全局同时更新 ~/.trae，且在 ~/.trae-cn 已存在时更新它
+rtk init --agent trae
+rtk init --global --agent trae
+
+# 2. 重启相应的 AI 工具，然后测试
 git status  # 自动重写为 rtk git status
 ```
 
