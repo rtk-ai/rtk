@@ -342,21 +342,92 @@ section "wc"
 bench "wc" "wc Cargo.toml src/main.rs" "$RTK wc Cargo.toml src/main.rs"
 
 # ===================
-# curl
+# curl / wget
 # ===================
-section "curl"
-if command -v curl &> /dev/null; then
-  bench "curl json" "curl -s https://mockhttp.org/json" "$RTK curl https://mockhttp.org/json"
-  bench "curl text" "curl -s https://mockhttp.org/robots.txt" "$RTK curl https://mockhttp.org/robots.txt"
-fi
+if command -v python3 &> /dev/null && { command -v curl &> /dev/null || command -v wget &> /dev/null; }; then
+  HTTP_FIXTURE=$(mktemp -d)
+  HTTP_PORT_FILE="$HTTP_FIXTURE/port"
 
-# ===================
-# wget
-# ===================
-if command -v wget &> /dev/null; then
-  section "wget"
-  bench "wget" "wget -qO- https://mockhttp.org/json" "$RTK wget https://mockhttp.org/json"
-  rm -f json 2>/dev/null
+  cat > "$HTTP_FIXTURE/json" << 'JSONEOF'
+{
+  "slideshow": {
+    "author": "Yours Truly",
+    "date": "date of publication",
+    "slides": [
+      {
+        "title": "Wake up to WonderWidgets!",
+        "type": "all"
+      },
+      {
+        "items": [
+          "Why WonderWidgets are great",
+          "Who buys WonderWidgets"
+        ],
+        "title": "Overview",
+        "type": "all"
+      }
+    ],
+    "title": "Sample Slide Show"
+  }
+}
+JSONEOF
+
+  cat > "$HTTP_FIXTURE/robots.txt" << 'TXTEOF'
+User-agent: *
+Disallow: /deny
+TXTEOF
+
+  python3 - "$HTTP_FIXTURE" "$HTTP_PORT_FILE" << 'PYEOF' > /dev/null 2>&1 &
+import functools
+import http.server
+import pathlib
+import socketserver
+import sys
+
+directory, port_file = sys.argv[1:]
+handler = functools.partial(
+    http.server.SimpleHTTPRequestHandler, directory=directory
+)
+with socketserver.TCPServer(("127.0.0.1", 0), handler) as server:
+    pathlib.Path(port_file).write_text(str(server.server_address[1]))
+    server.serve_forever()
+PYEOF
+  HTTP_SERVER_PID=$!
+
+  cleanup_http_fixture() {
+    kill "$HTTP_SERVER_PID" 2>/dev/null || true
+    wait "$HTTP_SERVER_PID" 2>/dev/null || true
+    rm -rf "$HTTP_FIXTURE"
+  }
+  trap cleanup_http_fixture EXIT
+
+  for _ in {1..50}; do
+    [ -s "$HTTP_PORT_FILE" ] && break
+    kill -0 "$HTTP_SERVER_PID" 2>/dev/null || break
+    sleep 0.1
+  done
+
+  if [ ! -s "$HTTP_PORT_FILE" ]; then
+    echo "Error: local benchmark HTTP server failed to start."
+    exit 1
+  fi
+
+  HTTP_BASE_URL="http://127.0.0.1:$(cat "$HTTP_PORT_FILE")"
+
+  if command -v curl &> /dev/null; then
+    section "curl"
+    bench "curl json" "curl -s $HTTP_BASE_URL/json" "$RTK curl $HTTP_BASE_URL/json"
+    bench "curl text" "curl -s $HTTP_BASE_URL/robots.txt" "$RTK curl $HTTP_BASE_URL/robots.txt"
+  fi
+
+  if command -v wget &> /dev/null; then
+    section "wget"
+    bench "wget" "wget -qO- $HTTP_BASE_URL/json" "$RTK wget $HTTP_BASE_URL/json"
+    rm -f json 2>/dev/null
+  fi
+
+  cleanup_http_fixture
+  trap - EXIT
 fi
 
 # ===================
