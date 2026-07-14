@@ -194,11 +194,16 @@ fn gitfile_context(root: &Path, dot_git_file: &Path) -> GitContext {
     };
     let branch = read_branch(&gitdir);
 
-    let is_worktree_layout = gitdir
-        .parent()
-        .and_then(Path::file_name)
-        .is_some_and(|name| name == "worktrees")
-        || gitdir.join("commondir").is_file();
+    // Real linked worktrees always carry a `commondir` file. The name-based
+    // clause only covers degraded gitdirs, so exclude submodule-layout paths
+    // there: a submodule at path `worktrees/<name>` has a gitdir whose parent
+    // is also named `worktrees` and must not gain a bogus worktree link.
+    let is_worktree_layout = gitdir.join("commondir").is_file()
+        || (gitdir
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "worktrees")
+            && submodule_link(&gitdir).is_none());
     if is_worktree_layout {
         let common = common_git_dir(&gitdir);
         let (main_root, main_branch) = match common.as_deref() {
@@ -242,6 +247,11 @@ fn gitfile_context(root: &Path, dot_git_file: &Path) -> GitContext {
 /// when `gitdir` matches that layout. Attribution is always to the outermost
 /// superproject (the checkout owning the `.git/modules/` tree); a further
 /// `modules` component below it marks the submodule as nested.
+///
+/// The `nested` flag is best-effort: on disk, a nested submodule `a` → `b`
+/// (`modules/a/modules/b`) is indistinguishable from a plain submodule whose
+/// own path is `a/modules/b`, so the label can be a false positive for
+/// submodule paths that contain a `modules` component.
 fn submodule_link(gitdir: &Path) -> Option<SubmoduleLink> {
     gitdir.ancestors().find_map(|anc| {
         let parent = anc.parent()?;
@@ -544,6 +554,39 @@ mod tests {
         assert!(
             out.contains(&format!("submodule of: {}\n", superproject.display())),
             "submodule attribution must also be reported: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_submodule_at_worktrees_path_not_mislabeled() {
+        let (_guard, tmp) = tmpdir();
+        let superproject = tmp.join("super");
+        let sub = superproject.join("worktrees").join("foo");
+        fs::create_dir_all(&sub).expect("mkdir submodule");
+        make_main_checkout(&superproject, "main");
+
+        // Plain submodule at path `worktrees/foo`: gitdir parent is named
+        // `worktrees` but there is no commondir — must stay a submodule.
+        let gitdir = superproject
+            .join(".git")
+            .join("modules")
+            .join("worktrees")
+            .join("foo");
+        fs::create_dir_all(&gitdir).expect("mkdir gitdir");
+        fs::write(gitdir.join("HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
+        fs::write(sub.join(".git"), format!("gitdir: {}\n", gitdir.display()))
+            .expect("write .git pointer file");
+
+        let out = describe(&sub, None);
+        assert!(
+            !out.contains("worktree of:"),
+            "gitdir parent named 'worktrees' must not fake a worktree link: {}",
+            out
+        );
+        assert!(
+            out.contains(&format!("submodule of: {}\n", superproject.display())),
+            "{}",
             out
         );
     }
