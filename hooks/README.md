@@ -2,9 +2,9 @@
 
 ## Scope
 
-**Deployed hook artifacts** — the files installed on user machines by `rtk init`, such as shell scripts, TypeScript plugins, and rules files. They are **thin delegates**: parse agent-specific JSON, call `rtk rewrite` as a subprocess, and format agent-specific responses. Native Rust hook adapters (for example, Trae) live in `src/hooks/`.
+**Deployed hook artifacts** — the actual files installed on user machines by `rtk init`. These are shell scripts, TypeScript plugins, and rules files that run outside the Rust binary. They are **thin delegates**: parse agent-specific JSON, call `rtk rewrite` as a subprocess, format agent-specific response. Zero filtering logic lives here.
 
-Owns: per-agent hook scripts and configuration files.
+Owns: per-agent hook scripts and configuration files for 10 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Trae).
 
 Does **not** own: hook installation/uninstallation (that's `src/hooks/init.rs`), the rewrite pattern registry (that's `discover/registry`), or integrity verification (that's `src/hooks/integrity.rs`).
 
