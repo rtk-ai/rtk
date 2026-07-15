@@ -87,7 +87,11 @@ rtk gain        # Doit afficher les statistiques d'economies
 rtk init --global
 # Suivre les instructions pour enregistrer dans ~/.claude/settings.json
 
-# 2. Redemarrer Claude Code, puis tester
+# Trae : le mode projet ecrit dans .trae/hooks.json ; le mode global met a jour ~/.trae et ~/.trae-cn s'il existe
+rtk init --agent trae
+rtk init --global --agent trae
+
+# 2. Redemarrer l'outil d'IA correspondant, puis tester
 git status  # Automatiquement reecrit en rtk git status
 ```
 

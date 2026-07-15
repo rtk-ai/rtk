@@ -79,7 +79,11 @@ rtk gain        # 토큰 절약 통계 표시되어야 함
 # 1. Claude Code용 hook 설치 (권장)
 rtk init --global
 
-# 2. Claude Code 재시작 후 테스트
+# Trae: 프로젝트에서는 .trae/hooks.json에 기록하고, 전역에서는 ~/.trae와 존재하는 경우 ~/.trae-cn도 업데이트
+rtk init --agent trae
+rtk init --global --agent trae
+
+# 2. 해당 AI 도구를 재시작한 후 테스트
 git status  # 자동으로 rtk git status로 재작성
 ```
 

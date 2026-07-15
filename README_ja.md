@@ -79,7 +79,11 @@ rtk gain        # トークン節約統計が表示されるはず
 # 1. Claude Code 用フックをインストール（推奨）
 rtk init --global
 
-# 2. Claude Code を再起動してテスト
+# Trae：プロジェクトでは .trae/hooks.json に書き込み、グローバルでは ~/.trae と、存在する場合は ~/.trae-cn も更新
+rtk init --agent trae
+rtk init --global --agent trae
+
+# 2. 対応する AI ツールを再起動してテスト
 git status  # 自動的に rtk git status に書き換え
 ```
 
