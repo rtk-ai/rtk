@@ -252,9 +252,25 @@ impl Tracker {
             std::fs::create_dir_all(parent)?;
         }
 
+        // Fast path: existing DB already has the current schema. Skip CREATE /
+        // ALTER / index probes that dominate Tracker::new on every CLI call.
+        // Bump SCHEMA_MARKER_NAME when migrations change.
+        const SCHEMA_MARKER_NAME: &str = ".tracking_schema_v3";
+        let schema_marker = db_path
+            .parent()
+            .map(|p| p.join(SCHEMA_MARKER_NAME))
+            .unwrap_or_else(|| PathBuf::from(SCHEMA_MARKER_NAME));
+        let db_ready = db_path.is_file() && schema_marker.is_file();
+
         let conn = Connection::open(&db_path)?;
         // WAL mode + busy_timeout for concurrent access (multiple Claude Code instances).
         // Non-fatal: NFS/read-only filesystems may not support WAL.
+        // On the hot path only set busy_timeout (journal_mode is sticky in the file).
+        if db_ready {
+            let _ = conn.execute_batch("PRAGMA busy_timeout=5000;");
+            return Ok(Self { conn });
+        }
+
         let _ = conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA busy_timeout=5000;",
@@ -322,6 +338,9 @@ impl Tracker {
             "CREATE INDEX IF NOT EXISTS idx_pf_timestamp ON parse_failures(timestamp)",
             [],
         )?;
+
+        // Mark schema ready for subsequent process starts.
+        let _ = std::fs::write(&schema_marker, b"v3");
 
         Ok(Self { conn })
     }
