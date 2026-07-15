@@ -77,12 +77,10 @@ rtk gain        # Deve exibir estatísticas de economia
 ## Inicio rapido
 
 ```bash
-# 1. Instalar hook para Claude Code (recomendado)
-rtk init --global
-
-# Trae: o projeto grava em .trae/hooks.json; o modo global atualiza ~/.trae e ~/.trae-cn quando existir
-rtk init --agent trae
-rtk init --global --agent trae
+# 1. Instalar o hook para a ferramenta de IA correspondente
+rtk init --global               # Claude Code (padrão)
+rtk init --agent trae           # Trae (projeto)
+rtk init --global --agent trae  # Trae (global)
 
 # 2. Reiniciar a ferramenta de IA correspondente, depois testar
 git status  # Reescrito automaticamente para rtk git status
