@@ -117,15 +117,15 @@ impl ClaudeProvider {
 
     /// Encode a filesystem path to Claude Code's directory name format.
     ///
-    /// Claude Code replaces `/`, `.`, `_`, `\`, and any non-ASCII character
+    /// Claude Code replaces `/`, `.`, `_`, `\`, `:`, and any non-ASCII character
     /// with `-` when computing the project directory slug under `~/.claude/projects/`.
     ///
     /// `/Users/foo/bar`          → `-Users-foo-bar`
     /// `/Users/first.last/bar`   → `-Users-first-last-bar`
     /// `/home/chris/2_project`   → `-home-chris-2-project`
-    /// `C:\Users\foo\bar`        → `C:-Users-foo-bar`
+    /// `C:\Users\foo\bar`        → `C--Users-foo-bar`
     pub fn encode_project_path(path: &str) -> String {
-        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\', ' ', '[', ']'];
+        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\', ':', ' ', '[', ']'];
 
         path.chars()
             .map(|c| {
@@ -403,10 +403,25 @@ mod tests {
 
     #[test]
     fn test_encode_project_path_windows() {
-        // Windows backslashes are also replaced with '-'
+        // Windows backslashes AND the drive-letter colon are replaced with '-'.
+        // Claude Code turns a cwd like `C:\Users\foo\bar` into the projects-dir
+        // slug `C--Users-foo-bar`; if the colon is kept (`C:-Users-foo-bar`) the
+        // auto-detected --project filter never matches and `rtk discover` finds
+        // zero sessions on Windows.
         assert_eq!(
             ClaudeProvider::encode_project_path(r"C:\Users\foo\bar"),
-            "C:-Users-foo-bar"
+            "C--Users-foo-bar"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_unix_colon() {
+        // A colon anywhere in a POSIX path is also replaced. The slug encoding is
+        // platform-independent, so this is not a Windows-only drive-letter special
+        // case; a colon in a Unix path collapses to '-' the same way.
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/home/user/a:b/proj"),
+            "-home-user-a-b-proj"
         );
     }
 
