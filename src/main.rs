@@ -1247,12 +1247,22 @@ enum GoCommands {
 }
 
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // Non-UTF-8 argv is frequently *why* parsing failed (clap rejects it as
+    // InvalidUtf8), so this path must never assume valid UTF-8: std::env::args()
+    // would panic on exactly the input that routed us here.
+    let args_os: Vec<OsString> = std::env::args_os().skip(1).collect();
 
     // No args → show Clap's error (user ran just "rtk" with bad syntax)
-    if args.is_empty() {
+    if args_os.is_empty() {
         parse_error.exit();
     }
+
+    // Lossy copies drive matching, display and tracking; execution below forwards
+    // the original `args_os` bytes so the wrapped tool receives what the user typed.
+    let args: Vec<String> = args_os
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
 
     // RTK meta-commands should never fall back to raw execution.
     // e.g. `rtk gain --badtypo` should show Clap's error, not try to run `gain` from $PATH.
@@ -1289,14 +1299,14 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         let result = if filter.filter_stderr {
             // Merge stderr into stdout so the filter can strip banners emitted by tools like liquibase
             core::utils::resolved_command(&args[0])
-                .args(&args[1..])
+                .args(&args_os[1..])
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped()) // captured for merging
                 .output()
         } else {
             core::utils::resolved_command(&args[0])
-                .args(&args[1..])
+                .args(&args_os[1..])
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::piped()) // capture
                 .stderr(std::process::Stdio::inherit()) // stderr always direct
@@ -1365,7 +1375,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     } else {
         // No TOML match: original passthrough behaviour (Stdio::inherit, streaming)
         let status = core::utils::resolved_command(&args[0])
-            .args(&args[1..])
+            .args(&args_os[1..])
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
