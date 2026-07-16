@@ -2577,6 +2577,10 @@ mod tests {
             Some("rtk uv run --unknown pytest tests/".into())
         );
         assert_eq!(
+            rewrite_command_no_prefixes("uv run --extra dev pytest tests/ -q", &[]),
+            Some("rtk uv run --extra dev pytest tests/ -q".into())
+        );
+        assert_eq!(
             rewrite_command_no_prefixes("uv run -m pytest -q", &[]),
             Some("rtk uv run -m pytest -q".into())
         );

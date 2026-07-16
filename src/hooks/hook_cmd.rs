@@ -1118,6 +1118,22 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_compound_uv_run_with_options() {
+        // Claude Code frequently combines setup and option-bearing uv runs in one Bash call.
+        let input = "cd /repo && uv run --extra dev pytest tests/ -q 2>&1 | tail -12";
+        let result = run_claude_inner(&claude_input(input)).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(
+            cmd,
+            "cd /repo && rtk uv run --extra dev pytest tests/ -q 2>&1 | tail -12"
+        );
+    }
+
+    #[test]
     fn test_claude_json_output_structure() {
         let result = run_claude_inner(&claude_input("git status")).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
