@@ -7,6 +7,8 @@ use ignore::WalkBuilder;
 use std::collections::HashMap;
 use std::path::Path;
 
+const ANY_FILE_TYPE: &str = "";
+
 /// Match a filename against a glob pattern (supports `*` and `?`).
 fn glob_match(pattern: &str, name: &str) -> bool {
     glob_match_inner(pattern.as_bytes(), name.as_bytes())
@@ -100,7 +102,10 @@ fn parse_find_args(args: &[String]) -> Result<FindArgs> {
 
 /// Parse native find syntax: `find [path] -name "*.rs" -type f -maxdepth 3`
 fn parse_native_find_args(args: &[String]) -> Result<FindArgs> {
-    let mut parsed = FindArgs::default();
+    let mut parsed = FindArgs {
+        file_type: ANY_FILE_TYPE.to_string(),
+        ..FindArgs::default()
+    };
     let mut i = 0;
 
     // First non-flag argument is the path (standard find behavior)
@@ -191,6 +196,14 @@ pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
     )
 }
 
+fn matches_file_type(file_type: &str, is_dir: bool) -> bool {
+    match file_type {
+        ANY_FILE_TYPE => true,
+        "d" => is_dir,
+        _ => !is_dir,
+    }
+}
+
 pub fn run(
     pattern: &str,
     path: &str,
@@ -208,8 +221,6 @@ pub fn run(
     if verbose > 0 {
         eprintln!("find: {} in {}", effective_pattern, path);
     }
-
-    let want_dirs = file_type == "d";
 
     // When the pattern targets dotfiles (e.g. -name ".claude.json"), we must walk hidden
     // entries; otherwise skip them to keep results tidy (#1101).
@@ -238,10 +249,7 @@ pub fn run(
         let is_dir = ft.as_ref().is_some_and(|t| t.is_dir());
 
         // Filter by type
-        if want_dirs && !is_dir {
-            continue;
-        }
-        if !want_dirs && is_dir {
+        if !matches_file_type(file_type, is_dir) {
             continue;
         }
 
@@ -445,7 +453,7 @@ mod tests {
         let parsed = parse_find_args(&args(&[".", "-name", "*.rs"])).unwrap();
         assert_eq!(parsed.pattern, "*.rs");
         assert_eq!(parsed.path, ".");
-        assert_eq!(parsed.file_type, "f");
+        assert_eq!(parsed.file_type, ANY_FILE_TYPE);
         assert_eq!(parsed.max_results, 50);
     }
 
@@ -469,7 +477,17 @@ mod tests {
         let parsed = parse_find_args(&args(&[".", "-name", "*.toml", "-maxdepth", "2"])).unwrap();
         assert_eq!(parsed.pattern, "*.toml");
         assert_eq!(parsed.max_depth, Some(2));
+        assert_eq!(parsed.file_type, ANY_FILE_TYPE);
         assert_eq!(parsed.max_results, 50); // max_results unchanged by -maxdepth
+    }
+
+    #[test]
+    fn parse_native_find_maxdepth_without_type() {
+        let parsed = parse_find_args(&args(&["root", "-maxdepth", "1"])).unwrap();
+        assert_eq!(parsed.pattern, "*");
+        assert_eq!(parsed.path, "root");
+        assert_eq!(parsed.max_depth, Some(1));
+        assert_eq!(parsed.file_type, ANY_FILE_TYPE);
     }
 
     #[test]
@@ -516,6 +534,7 @@ mod tests {
         let parsed = parse_find_args(&args(&["*.rs"])).unwrap();
         assert_eq!(parsed.pattern, "*.rs");
         assert_eq!(parsed.path, ".");
+        assert_eq!(parsed.file_type, "f");
     }
 
     #[test]
@@ -539,6 +558,16 @@ mod tests {
         let parsed = parse_find_args(&args(&[])).unwrap();
         assert_eq!(parsed.pattern, "*");
         assert_eq!(parsed.path, ".");
+    }
+
+    #[test]
+    fn file_type_filter_supports_native_match_all() {
+        assert!(matches_file_type(ANY_FILE_TYPE, false));
+        assert!(matches_file_type(ANY_FILE_TYPE, true));
+        assert!(matches_file_type("f", false));
+        assert!(!matches_file_type("f", true));
+        assert!(!matches_file_type("d", false));
+        assert!(matches_file_type("d", true));
     }
 
     // --- run_from_args integration tests ---
