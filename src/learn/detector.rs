@@ -71,7 +71,7 @@ lazy_static! {
 
     // User rejection patterns - NOT actual errors
     static ref USER_REJECTION_RE: Regex = Regex::new(
-        r"(?i)(user (doesn't want|declined|rejected|cancelled)|operation (cancelled|aborted) by user)"
+        r"(?i)(user (doesn't want|declined|rejected|cancelled)|operation (cancelled|aborted) by user|cancelled:\s*parallel tool call)"
     ).unwrap();
 }
 
@@ -365,6 +365,28 @@ mod tests {
         assert!(!is_command_error(true, "The user doesn't want to proceed"));
         assert!(!is_command_error(true, "Operation cancelled by user"));
         assert!(is_command_error(true, "error: permission denied"));
+    }
+
+    #[test]
+    fn test_find_corrections_ignores_parallel_tool_call_cancellation() {
+        let commands = vec![
+            CommandExecution {
+                command:
+                    "git show abc123 --no-stat -p -- backend/app/memory_repository.py"
+                        .to_string(),
+                is_error: true,
+                output: "<tool_use_error>Cancelled: parallel tool call Bash(git show abc123 --no-stat -p -- backend/app/memory_repository.py) errored</tool_use_error>"
+                    .to_string(),
+            },
+            CommandExecution {
+                command: "git show abc123 --no-stat -p -- backend/app/schema.py".to_string(),
+                is_error: false,
+                output: "commit abc123".to_string(),
+            },
+        ];
+
+        let corrections = find_corrections(&commands);
+        assert!(corrections.is_empty());
     }
 
     #[test]
