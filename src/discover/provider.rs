@@ -117,15 +117,15 @@ impl ClaudeProvider {
 
     /// Encode a filesystem path to Claude Code's directory name format.
     ///
-    /// Claude Code replaces `/`, `.`, `_`, `\`, and any non-ASCII character
+    /// Claude Code replaces `/`, `.`, `_`, `\`, `:`, and any non-ASCII character
     /// with `-` when computing the project directory slug under `~/.claude/projects/`.
     ///
     /// `/Users/foo/bar`          → `-Users-foo-bar`
     /// `/Users/first.last/bar`   → `-Users-first-last-bar`
     /// `/home/chris/2_project`   → `-home-chris-2-project`
-    /// `C:\Users\foo\bar`        → `C:-Users-foo-bar`
+    /// `C:\Users\foo\bar`        → `C--Users-foo-bar`
     pub fn encode_project_path(path: &str) -> String {
-        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\', ' ', '[', ']'];
+        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\', ' ', '[', ']', ':'];
 
         path.chars()
             .map(|c| {
@@ -403,10 +403,40 @@ mod tests {
 
     #[test]
     fn test_encode_project_path_windows() {
-        // Windows backslashes are also replaced with '-'
+        // Windows backslashes AND the drive-letter colon are replaced with '-',
+        // matching Claude Code's actual encoding (verified against real
+        // ~/.claude/projects/ folder names, e.g. `C:\Repos\job-hunter` on disk
+        // as `C--Repos-job-hunter`). See issue #2919 — the colon was previously
+        // left unsanitized, so `rtk discover`'s default current-project filter
+        // never matched its own project's session folder on Windows.
         assert_eq!(
             ClaudeProvider::encode_project_path(r"C:\Users\foo\bar"),
-            "C:-Users-foo-bar"
+            "C--Users-foo-bar"
+        );
+    }
+
+    #[test]
+    fn test_discover_sessions_applies_project_filter_windows_drive_letter() {
+        // Regression test for #2919: the default (no -p, no --all) filter path
+        // encodes the current working directory and must actually match the
+        // real on-disk folder name for a Windows-style path with a drive letter.
+        let projects_dir = tempfile::tempdir().unwrap();
+        let matching_project = projects_dir.path().join("C--Users-foo-bar");
+        std::fs::create_dir_all(&matching_project).unwrap();
+        std::fs::write(matching_project.join("session.jsonl"), "").unwrap();
+
+        let encoded_cwd = ClaudeProvider::encode_project_path(r"C:\Users\foo\bar");
+        let sessions = ClaudeProvider::discover_sessions_in_projects_dir(
+            projects_dir.path(),
+            Some(&encoded_cwd),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sessions.len(),
+            1,
+            "encoded Windows drive-letter path should match its real session folder"
         );
     }
 
