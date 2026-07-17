@@ -961,7 +961,25 @@ fn rewrite_segment_inner(
             }
             rtk_equivalent
         }
-        _ => return None,
+        // TOML-only commands: consult the registry so the hook filters them too (#2179).
+        Classification::Unsupported { .. } => {
+            if crate::core::toml_filter::toml_disabled() {
+                return None;
+            }
+            let normalized = strip_absolute_path(cmd_part.trim());
+            if is_excluded(&normalized, excluded) {
+                return None;
+            }
+            let base = normalized.split_whitespace().next().unwrap_or("");
+            if crate::core::toml_filter::is_rtk_reserved_command(base) {
+                return None;
+            }
+            if crate::core::toml_filter::command_matches_filter(&normalized) {
+                return Some(format!("rtk {}{}", cmd_part, redirect_suffix));
+            }
+            return None;
+        }
+        Classification::Ignored => return None,
     };
 
     // Find the matching rule (rtk_cmd values are unique across all rules)
@@ -1415,6 +1433,14 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_git_checkout() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git checkout main", &[]),
+            Some("rtk git checkout main".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_git_log() {
         assert_eq!(
             rewrite_command_no_prefixes("git log -10", &[]),
@@ -1532,6 +1558,90 @@ mod tests {
     #[test]
     fn test_rewrite_ignored_cd() {
         assert_eq!(rewrite_command_no_prefixes("cd /tmp", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_toml_orphan_jj() {
+        assert_eq!(
+            rewrite_command_no_prefixes("jj log", &[]),
+            Some("rtk jj log".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_orphan_jq() {
+        assert_eq!(
+            rewrite_command_no_prefixes("jq .", &[]),
+            Some("rtk jq .".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_orphan_just() {
+        assert_eq!(
+            rewrite_command_no_prefixes("just build", &[]),
+            Some("rtk just build".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_absolute_path() {
+        assert_eq!(
+            rewrite_command_no_prefixes("/usr/bin/jj log", &[]),
+            Some("rtk /usr/bin/jj log".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_redirect_suffix_preserved() {
+        assert_eq!(
+            rewrite_command_no_prefixes("jj log 2>&1", &[]),
+            Some("rtk jj log 2>&1".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_in_pipe_left_only() {
+        assert_eq!(
+            rewrite_command_no_prefixes("jj log | head", &[]),
+            Some("rtk jj log | head".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_compound() {
+        assert_eq!(
+            rewrite_command_no_prefixes("jj diff && jq .", &[]),
+            Some("rtk jj diff && rtk jq .".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_env_prefix() {
+        assert_eq!(
+            rewrite_command_no_prefixes("FOO=bar jj log", &[]),
+            Some("FOO=bar rtk jj log".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_respects_exclude() {
+        let excluded = vec!["jj".to_string()];
+        assert_eq!(rewrite_command_no_prefixes("jj log", &excluded), None);
+    }
+
+    #[test]
+    fn test_rewrite_toml_exclude_matches_absolute_path() {
+        let excluded = vec!["jj".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("/usr/bin/jj log", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_unknown_command_still_none() {
+        assert_eq!(rewrite_command_no_prefixes("frobnicate xyz", &[]), None);
     }
 
     #[test]

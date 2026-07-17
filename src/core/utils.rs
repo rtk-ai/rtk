@@ -639,6 +639,17 @@ mod tests {
         assert!(result.ends_with("..."));
     }
 
+    #[test]
+    fn test_truncate_multibyte_cyrillic_issue_2787() {
+        // Regression: `rtk gain --history` panicked slicing this at byte 22,
+        // which falls inside 'н' (Cyrillic chars are 2 bytes each)
+        let cmd = "rtk ls -la Ародинамический расчёт Новый";
+        let result = truncate(cmd, 25);
+        assert_eq!(result.chars().count(), 25);
+        assert!(result.ends_with("..."));
+        assert_eq!(result, "rtk ls -la Ародинамиче...");
+    }
+
     // ===== resolve_binary tests (issue #212) =====
 
     #[test]
