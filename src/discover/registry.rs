@@ -3363,6 +3363,156 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_pnpm_script_names() {
+        // Script names containing ':' or '-' rewrite to `rtk pnpm run <script>`
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm test:micro", &[]),
+            Some("rtk pnpm run test:micro".to_string()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm lint-ts", &[]),
+            Some("rtk pnpm run lint-ts".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_run_script_wins_over_script_name() {
+        // `run-script` itself contains '-', so the script-name rule matches too;
+        // the subcommand rule has the higher index and last match wins.
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm run-script test:unit", &[]),
+            Some("rtk pnpm run-script test:unit".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_dash_builtins_not_run() {
+        // Real pnpm builtins containing '-' must NOT rewrite to `rtk pnpm run`;
+        // the subcommand rule routes them to plain `rtk pnpm` passthrough.
+        let cases = vec![
+            ("pnpm patch-commit x.patch", "rtk pnpm patch-commit x.patch"),
+            ("pnpm patch-remove x", "rtk pnpm patch-remove x"),
+            ("pnpm self-update", "rtk pnpm self-update"),
+            ("pnpm approve-builds", "rtk pnpm approve-builds"),
+            ("pnpm cat-file abc123", "rtk pnpm cat-file abc123"),
+            ("pnpm cat-index abc", "rtk pnpm cat-index abc"),
+            ("pnpm find-hash abc", "rtk pnpm find-hash abc"),
+            ("pnpm ignored-builds", "rtk pnpm ignored-builds"),
+        ];
+        for (command, expected) in cases {
+            let rewritten = rewrite_command_no_prefixes(command, &[]);
+            assert_eq!(rewritten, Some(expected.to_string()), "for {}", command);
+            assert!(
+                !expected.starts_with("rtk pnpm run"),
+                "builtin must not route to `rtk pnpm run`: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_filter_forms() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter pkg test:unit", &[]),
+            Some("rtk pnpm --filter pkg run test:unit".to_string()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -F pkg test:unit", &[]),
+            Some("rtk pnpm -F pkg run test:unit".to_string()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter=pkg test:unit", &[]),
+            Some("rtk pnpm --filter=pkg run test:unit".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_multiple_filters_no_rewrite() {
+        // Known safe gap: strip_pnpm_filter_opts only strips the FIRST --filter,
+        // so the leftover flag defeats classification and the command passes
+        // through unrewritten instead of producing a broken rewrite.
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter a --filter b test:unit", &[]),
+            None,
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_quoted_filter_value_no_rewrite() {
+        // `--filter "my pkg"`: the stripper consumes `--filter "my` and leaves a
+        // mangled command that matches no rule — passthrough, never a bad rewrite.
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter \"my pkg\" test:unit", &[]),
+            None,
+        );
+    }
+
+    #[test]
+    fn test_strip_pnpm_filter_opts() {
+        assert_eq!(
+            strip_pnpm_filter_opts("pnpm --filter pkg test:unit"),
+            "pnpm test:unit"
+        );
+        assert_eq!(
+            strip_pnpm_filter_opts("pnpm -F pkg test:unit"),
+            "pnpm test:unit"
+        );
+        assert_eq!(
+            strip_pnpm_filter_opts("pnpm --filter=pkg test:unit"),
+            "pnpm test:unit"
+        );
+        // No filter flag: unchanged
+        assert_eq!(strip_pnpm_filter_opts("pnpm test:unit"), "pnpm test:unit");
+        // Not a pnpm command: unchanged
+        assert_eq!(strip_pnpm_filter_opts("git status"), "git status");
+        // Only the first filter flag is stripped (multi-filter gap)
+        assert_eq!(
+            strip_pnpm_filter_opts("pnpm --filter a --filter b test:unit"),
+            "pnpm --filter b test:unit"
+        );
+        // Quoted value with a space: the flag + `"my` are consumed, leaving a
+        // mangled remainder that no rule matches (hence passthrough above)
+        assert_eq!(
+            strip_pnpm_filter_opts("pnpm --filter \"my pkg\" test:unit"),
+            "pnpm pkg\" test:unit"
+        );
+    }
+
+    #[test]
+    fn test_parse_pnpm_filter_parts() {
+        assert_eq!(
+            parse_pnpm_filter_parts("pnpm --filter pkg test:unit"),
+            Some(("--filter pkg", "test:unit"))
+        );
+        assert_eq!(
+            parse_pnpm_filter_parts("pnpm -F pkg test:unit"),
+            Some(("-F pkg", "test:unit"))
+        );
+        assert_eq!(
+            parse_pnpm_filter_parts("pnpm --filter=pkg test:unit"),
+            Some(("--filter=pkg", "test:unit"))
+        );
+        // Multiple filters parse fine here; the rewrite gap lives in
+        // classification (strip_pnpm_filter_opts), not in this parser
+        assert_eq!(
+            parse_pnpm_filter_parts("pnpm --filter a --filter b test:unit"),
+            Some(("--filter a --filter b", "test:unit"))
+        );
+        // No filter flags: nothing to split
+        assert_eq!(parse_pnpm_filter_parts("pnpm test:unit"), None);
+        // `--` terminates flag parsing
+        assert_eq!(parse_pnpm_filter_parts("pnpm -- test:unit"), None);
+        // Not a pnpm command
+        assert_eq!(parse_pnpm_filter_parts("npm --filter pkg x"), None);
+        // Quoted value with a space: split mid-value into mangled halves.
+        // Unreachable in practice — classification rejects the command first.
+        assert_eq!(
+            parse_pnpm_filter_parts("pnpm --filter \"my pkg\" test:unit"),
+            Some(("--filter \"my", "pkg\" test:unit"))
+        );
+    }
+
+    #[test]
     fn test_rewrite_npm_bare_subcommand() {
         let commands = vec!["exec", "run", "run-script", "x"];
         for command in commands {

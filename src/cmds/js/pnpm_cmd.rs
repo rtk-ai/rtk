@@ -373,7 +373,11 @@ pub enum PnpmCommand {
     List { depth: usize },
     Outdated,
     Install,
-    Run { script: String, args: Vec<String> },
+    Run {
+        script: String,
+        args: Vec<String>,
+        filters: Vec<String>,
+    },
 }
 
 pub fn run(cmd: PnpmCommand, args: &[String], verbose: u8) -> Result<i32> {
@@ -381,9 +385,13 @@ pub fn run(cmd: PnpmCommand, args: &[String], verbose: u8) -> Result<i32> {
         PnpmCommand::List { depth } => run_list(depth, args, verbose),
         PnpmCommand::Outdated => run_outdated(args, verbose),
         PnpmCommand::Install => run_install(args, verbose),
-        PnpmCommand::Run { script, args: run_args } => {
+        PnpmCommand::Run {
+            script,
+            args: run_args,
+            filters,
+        } => {
             let pkg_scripts = PackageScripts::load();
-            run_script(&script, &run_args, verbose, false, pkg_scripts)
+            run_script(&script, &run_args, &filters, verbose, false, pkg_scripts)
         }
     }
 }
@@ -748,13 +756,11 @@ pub(crate) fn apply_filter(route: FilterRoute, output: &str) -> Result<(String, 
     }
 
     let filtered = match route {
+        // Unreachable in production: run_script routes vitest scripts to
+        // VitestStreamFilter (streaming path). Bail so the caller falls back
+        // to the stripped output.
         FilterRoute::Vitest => {
-            let parse_result = crate::cmds::js::vitest_cmd::VitestParser::parse(output);
-            match parse_result {
-                ParseResult::Full(data) => data.format(FormatMode::Compact),
-                ParseResult::Degraded(data, _) => data.format(FormatMode::Compact),
-                ParseResult::Passthrough(raw) => raw,
-            }
+            anyhow::bail!("vitest (via pnpm run) is handled by the streaming filter")
         }
         FilterRoute::Playwright => {
             let parse_result = crate::cmds::js::playwright_cmd::PlaywrightParser::parse(output);
@@ -793,8 +799,11 @@ pub(crate) fn apply_filter(route: FilterRoute, output: &str) -> Result<(String, 
 
 lazy_static! {
     static ref VITEST_BANNER: Regex = Regex::new(r"^\s*RUN\s+v").unwrap();
+    // Vitest non-TTY default reporter file lines:
+    // passed " ✓ a.test.ts (3 tests) 5ms", failed " ❯ b.test.ts (5 tests | 1 failed) 20ms",
+    // skipped " ↓ c.test.ts (2 tests | 2 skipped)" / " ↓ c.test.ts (2 skipped)"
     static ref TEST_FILE_RESULT: Regex =
-        Regex::new(r"^\s*❯\s+.+?\((\d+)\s+tests?(?:\s*\|\s*(\d+)\s+failed)?(?:\s*\|\s*(\d+)\s+skipped)?\)\s+[\d.]+(?:ms|s|m)$")
+        Regex::new(r"^\s*([✓❯↓])\s+.+?\((?:(\d+)\s+tests?(?:\s*\|\s*(\d+)\s+failed)?(?:\s*\|\s*(\d+)\s+skipped)?|(\d+)\s+skipped)\)(?:\s+[\d.]+(?:ms|s|m))?$")
             .unwrap();
     static ref TEST_FAIL_INDIVIDUAL: Regex = Regex::new(r"^\s*×\s+").unwrap();
     static ref SUMMARY_FILES: Regex =
@@ -856,7 +865,7 @@ impl StreamFilter for VitestStreamFilter {
             if self.in_failure_detail {
                 self.failure_detail_lines += 1;
                 if self.failure_detail_lines <= 30 {
-                    return Some(line.to_string());
+                    return Some(format!("{}\n", line));
                 }
             }
             return None;
@@ -906,23 +915,37 @@ impl StreamFilter for VitestStreamFilter {
             return None;
         }
 
-        // Test file result line: count, suppress passes, show failures
+        // Test file result line: count, suppress passes/skips, show failures
         if let Some(caps) = TEST_FILE_RESULT.captures(trimmed) {
-            let test_count: usize = caps[1].parse().unwrap_or(0);
-            let failed_count: usize = caps.get(2).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
-            let skipped_count: usize = caps.get(3).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
+            let symbol = &caps[1];
+            let test_count: usize = caps.get(2).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
+            let failed_count: usize = caps.get(3).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
+            let skipped_count: usize = caps.get(4).or_else(|| caps.get(5)).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
 
-            if failed_count > 0 {
-                self.failed_suites += 1;
-                self.failed_tests += failed_count;
-                self.passed_tests += test_count - failed_count - skipped_count;
-                self.skipped_tests += skipped_count;
-                return Some(line.to_string());
-            } else {
-                self.passed_suites += 1;
-                self.passed_tests += test_count - skipped_count;
-                self.skipped_tests += skipped_count;
-                return None;
+            match symbol {
+                "✓" => {
+                    self.passed_suites += 1;
+                    self.passed_tests += test_count.saturating_sub(skipped_count);
+                    self.skipped_tests += skipped_count;
+                    return None;
+                }
+                "↓" => {
+                    self.skipped_tests += skipped_count;
+                    return None;
+                }
+                _ => {
+                    // ❯ with a failed count is a failed file; without one it is
+                    // an in-progress/other line — show it but count nothing
+                    if failed_count > 0 {
+                        self.failed_suites += 1;
+                        self.failed_tests += failed_count;
+                        self.passed_tests += test_count
+                            .saturating_sub(failed_count)
+                            .saturating_sub(skipped_count);
+                        self.skipped_tests += skipped_count;
+                    }
+                    return Some(format!("{}\n", line));
+                }
             }
         }
 
@@ -930,7 +953,7 @@ impl StreamFilter for VitestStreamFilter {
         if TEST_FAIL_INDIVIDUAL.is_match(trimmed) {
             self.in_failure_detail = true;
             self.failure_detail_lines = 0;
-            return Some(line.to_string());
+            return Some(format!("{}\n", line));
         }
 
         // FAIL detail header: pass through
@@ -941,7 +964,7 @@ impl StreamFilter for VitestStreamFilter {
             if self.failures_shown > MAX_INLINE_FAILURES {
                 return None;
             }
-            return Some(line.to_string());
+            return Some(format!("{}\n", line));
         }
 
         // Inside a failure detail block
@@ -951,16 +974,16 @@ impl StreamFilter for VitestStreamFilter {
                 return None;
             }
             if self.failure_detail_lines <= 30 {
-                return Some(line.to_string());
+                return Some(format!("{}\n", line));
             }
             if self.failure_detail_lines == 31 {
-                return Some("  ... (truncated)".to_string());
+                return Some("  ... (truncated)\n".to_string());
             }
             return None;
         }
 
         // Default: pass through
-        Some(line.to_string())
+        Some(format!("{}\n", line))
     }
 
     fn flush(&mut self) -> String {
@@ -1006,8 +1029,15 @@ impl StreamFilter for VitestStreamFilter {
         let duration = self.duration_secs.as_deref().unwrap_or("?");
 
         let summary = if tests_failed > 0 {
-            let extra = if self.failures_shown > MAX_INLINE_FAILURES {
-                format!("\n  ... and {} more failures", tests_failed - MAX_INLINE_FAILURES)
+            // failures_shown counts FAIL detail headers (hook errors inflate it
+            // beyond tests_failed), so gate the notice on the test count too
+            let extra = if self.failures_shown > MAX_INLINE_FAILURES
+                && tests_failed > MAX_INLINE_FAILURES
+            {
+                format!(
+                    "\n  ... and {} more failures",
+                    tests_failed.saturating_sub(MAX_INLINE_FAILURES)
+                )
             } else {
                 String::new()
             };
@@ -1037,7 +1067,7 @@ impl StreamFilter for VitestStreamFilter {
             )
         };
 
-        Some(summary)
+        Some(format!("{}\n", summary))
     }
 }
 
@@ -1047,15 +1077,31 @@ impl StreamFilter for VitestStreamFilter {
 pub fn run_script(
     script: &str,
     args: &[String],
+    filters: &[String],
     verbose: u8,
     skip_env: bool,
     pkg_scripts: Option<PackageScripts>,
 ) -> Result<i32> {
     let route = route_script(script, pkg_scripts.as_ref());
 
+    // Global --filter flags must precede `run` — after the script name they
+    // would be forwarded to the script instead of selecting the workspace.
+    let filter_args: Vec<String> = filters
+        .iter()
+        .map(|filter| format!("--filter={}", filter))
+        .collect();
+    let filter_prefix = if filter_args.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", filter_args.join(" "))
+    };
+
     // STREAMING PATH: vitest scripts get real-time output to avoid Claude Code timeouts
     if matches!(route, Some(FilterRoute::Vitest)) {
         let mut cmd = resolved_command("pnpm");
+        for arg in &filter_args {
+            cmd.arg(arg);
+        }
         cmd.arg("run");
         cmd.arg(script);
         // Do NOT inject --reporter=json — default reporter streams line-by-line
@@ -1066,7 +1112,12 @@ pub fn run_script(
             cmd.env("SKIP_ENV_VALIDATION", "1");
         }
         if verbose > 0 {
-            eprintln!("Running: pnpm run {} {}", script, args.join(" "));
+            eprintln!(
+                "Running: pnpm {}run {} {}",
+                filter_prefix,
+                script,
+                args.join(" ")
+            );
         }
         return crate::core::runner::run_streamed(
             cmd,
@@ -1081,6 +1132,9 @@ pub fn run_script(
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = resolved_command("pnpm");
+    for arg in &filter_args {
+        cmd.arg(arg);
+    }
     cmd.arg("run");
     cmd.arg(script);
 
@@ -1093,7 +1147,12 @@ pub fn run_script(
     }
 
     if verbose > 0 {
-        eprintln!("Running: pnpm run {} {}", script, args.join(" "));
+        eprintln!(
+            "Running: pnpm {}run {} {}",
+            filter_prefix,
+            script,
+            args.join(" ")
+        );
     }
 
     let result = exec_capture(&mut cmd)
@@ -1603,9 +1662,10 @@ Done in 5.2s
     }
 
     #[test]
-    fn test_apply_filter_vitest_label() {
-        let (_, label) = apply_filter(FilterRoute::Vitest, "some output").unwrap();
-        assert_eq!(label, "vitest (via pnpm run)");
+    fn test_apply_filter_vitest_bails_to_fallback() {
+        // Vitest scripts run through VitestStreamFilter in production; the
+        // buffered arm bails so run_script falls back to stripped output.
+        assert!(apply_filter(FilterRoute::Vitest, "some output").is_err());
     }
 
     #[test]
@@ -1886,48 +1946,286 @@ Done in 1.2s"#;
         text.split_whitespace().count()
     }
 
+    // --- VitestStreamFilter tests ---
+
+    fn stream_output(filter: &mut VitestStreamFilter, input: &str, exit_code: i32) -> String {
+        let mut out = String::new();
+        for line in input.lines() {
+            if let Some(emitted) = filter.feed_line(line) {
+                out.push_str(&emitted);
+            }
+        }
+        out.push_str(&filter.flush());
+        if let Some(summary) = filter.on_exit(exit_code, input) {
+            out.push_str(&summary);
+        }
+        out
+    }
+
     #[test]
-    fn test_full_pipeline_vitest_savings() {
-        // Realistic pnpm stdout containing vitest --reporter=json output
-        // Pipeline: raw pnpm stdout -> filter_pnpm_run_output (strip) -> apply_filter(Vitest)
-        let fixture = r#"> my-app@1.0.0 test /Users/dev/my-app
-$ vitest run --reporter=json
+    fn test_vitest_stream_all_pass_suppressed() {
+        let transcript = r#"> my-app@1.0.0 test /Users/dev/my-app
+> vitest run
 
-{"numTotalTestSuites":5,"numPassedTestSuites":4,"numFailedTestSuites":1,"numPendingTestSuites":0,"numTotalTests":25,"numPassedTests":23,"numFailedTests":2,"numPendingTests":0,"startTime":1709312400000,"endTime":1709312405200,"testResults":[{"name":"src/utils.test.ts","assertionResults":[{"fullName":"utils > formats date correctly","status":"passed","failureMessages":[]},{"fullName":"utils > validates email format","status":"passed","failureMessages":[]},{"fullName":"utils > truncates long strings","status":"passed","failureMessages":[]},{"fullName":"utils > handles null input","status":"passed","failureMessages":[]}]},{"name":"src/api.test.ts","assertionResults":[{"fullName":"api > GET /users returns list","status":"passed","failureMessages":[]},{"fullName":"api > POST /users creates user","status":"passed","failureMessages":[]},{"fullName":"api > handles auth error","status":"failed","failureMessages":["Error: expected 200 got 500\n    at Object.<anonymous> (src/api.test.ts:15:5)\n    at Promise.then.completed"]},{"fullName":"api > validates request body","status":"passed","failureMessages":[]}]},{"name":"src/hooks.test.ts","assertionResults":[{"fullName":"hooks > useAuth returns user","status":"passed","failureMessages":[]},{"fullName":"hooks > useAuth handles logout","status":"passed","failureMessages":[]},{"fullName":"hooks > useFetch caches results","status":"passed","failureMessages":[]},{"fullName":"hooks > useFetch retries on error","status":"passed","failureMessages":[]},{"fullName":"hooks > useDebounce delays call","status":"passed","failureMessages":[]}]},{"name":"src/components/Button.test.ts","assertionResults":[{"fullName":"Button > renders with text","status":"passed","failureMessages":[]},{"fullName":"Button > handles click","status":"passed","failureMessages":[]},{"fullName":"Button > applies disabled state","status":"passed","failureMessages":[]},{"fullName":"Button > shows loading spinner","status":"passed","failureMessages":[]}]},{"name":"src/store.test.ts","assertionResults":[{"fullName":"store > initializes with defaults","status":"passed","failureMessages":[]},{"fullName":"store > updates state","status":"passed","failureMessages":[]},{"fullName":"store > handles concurrent updates","status":"failed","failureMessages":["Error: Race condition detected\n    at Object.<anonymous> (src/store.test.ts:42:10)"]},{"fullName":"store > persists to localStorage","status":"passed","failureMessages":[]},{"fullName":"store > clears on logout","status":"passed","failureMessages":[]},{"fullName":"store > subscribes to changes","status":"passed","failureMessages":[]}]}]}
+ RUN  v2.1.8 /Users/dev/my-app
 
-Done in 5.2s
+ ✓ src/a.test.ts (3 tests) 5ms
+ ✓ src/b.test.ts (4 tests) 8ms
+
+ Test Files  2 passed (2)
+      Tests  7 passed (7)
+   Start at  10:00:00
+   Duration  1.23s
 "#;
+        let mut filter = VitestStreamFilter::new();
+        for line in transcript.lines() {
+            assert_eq!(
+                filter.feed_line(line),
+                None,
+                "all-pass run should suppress line: {:?}",
+                line
+            );
+        }
+        let summary = filter.on_exit(0, transcript).unwrap();
+        assert_eq!(summary, "PASS (7) | 2 suites | 1s\n");
+    }
 
-        // Stage 1: Strip pnpm boilerplate
-        let stripped = filter_pnpm_run_output(fixture);
-        assert!(
-            !stripped.contains("> my-app@"),
-            "Lifecycle header should be stripped"
-        );
-        assert!(
-            !stripped.contains("Done in"),
-            "Done line should be stripped"
-        );
-        assert!(
-            stripped.contains("numTotalTests"),
-            "JSON payload should survive stripping"
-        );
+    #[test]
+    fn test_vitest_stream_failures_shown_and_counted() {
+        let transcript = r#"> my-app@1.0.0 test /Users/dev/my-app
+> vitest run
 
-        // Stage 2: Apply vitest specialized filter
-        let (filtered, label) = apply_filter(FilterRoute::Vitest, &stripped).unwrap();
-        assert_eq!(label, "vitest (via pnpm run)");
-        assert!(
-            filtered.contains("PASS"),
-            "Filtered output should contain PASS summary"
-        );
+ RUN  v2.1.8 /Users/dev/my-app
 
-        // Stage 3: Verify token savings >= 60%
-        let input_tokens = count_tokens(fixture);
+ ✓ src/a.test.ts (3 tests) 5ms
+ ❯ src/b.test.ts (5 tests | 2 failed) 10ms
+   × b > does the first thing
+   × b > does the second thing
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/b.test.ts > b > does the first thing
+AssertionError: expected 1 to be 2
+ ❯ src/b.test.ts:10:5
+
+ Test Files  1 failed | 1 passed (2)
+      Tests  2 failed | 6 passed (8)
+   Duration  0.85s
+"#;
+        let mut filter = VitestStreamFilter::new();
+        let mut out = String::new();
+        for line in transcript.lines() {
+            if let Some(emitted) = filter.feed_line(line) {
+                out.push_str(&emitted);
+            }
+        }
+        assert!(out.contains("❯ src/b.test.ts (5 tests | 2 failed) 10ms\n"));
+        assert!(out.contains("× b > does the first thing\n"));
+        assert!(out.contains("FAIL  src/b.test.ts > b > does the first thing\n"));
+        assert!(out.contains("AssertionError: expected 1 to be 2\n"));
+        assert!(!out.contains("✓ src/a.test.ts"));
+        assert!(!out.contains("RUN  v2.1.8"));
+        assert!(!out.contains("Test Files"));
+        assert!(!out.contains("Failed Tests"));
+
+        let summary = filter.on_exit(1, transcript).unwrap();
+        assert_eq!(summary, "PASS (6) FAIL (2) | 2 suites (1 failed) | 1s\n");
+    }
+
+    #[test]
+    fn test_vitest_stream_caps_inline_failures_at_ten() {
+        let mut filter = VitestStreamFilter::new();
+        let mut out = String::new();
+        for i in 1..=12 {
+            let line = format!(" FAIL  src/f{}.test.ts > case {}", i, i);
+            if let Some(emitted) = filter.feed_line(&line) {
+                out.push_str(&emitted);
+            }
+        }
+        assert_eq!(out.matches("FAIL  src/").count(), MAX_INLINE_FAILURES);
+
+        let raw =
+            " Test Files  11 failed | 1 passed (12)\n      Tests  12 failed | 1 passed (13)\n";
+        let summary = filter.on_exit(1, raw).unwrap();
+        assert!(
+            summary.contains("... and 2 more failures"),
+            "expected truncation notice, got: {:?}",
+            summary
+        );
+    }
+
+    #[test]
+    fn test_vitest_stream_suite_headers_do_not_underflow_summary() {
+        // Suite-level FAIL headers (hook errors) inflate failures_shown beyond
+        // tests_failed — the summary must not underflow usize nor claim that
+        // failures were hidden.
+        let mut filter = VitestStreamFilter::new();
+        for i in 1..=12 {
+            let line = format!(" FAIL  src/f{}.test.ts > hook error {}", i, i);
+            filter.feed_line(&line);
+        }
+        let raw = " Test Files  4 failed | 8 passed (12)\n      Tests  5 failed | 55 passed (60)\n";
+        let summary = filter.on_exit(1, raw).unwrap();
+        assert!(summary.contains("FAIL (5)"), "got: {:?}", summary);
+        assert!(!summary.contains("more failures"), "got: {:?}", summary);
+    }
+
+    #[test]
+    fn test_vitest_stream_long_failure_detail_truncated() {
+        let mut filter = VitestStreamFilter::new();
+        let mut out = String::new();
+        if let Some(emitted) = filter.feed_line(" FAIL  src/big.test.ts > big > stack") {
+            out.push_str(&emitted);
+        }
+        for i in 1..=40 {
+            let line = format!("    at frame{} (src/big.test.ts:{}:1)", i, i);
+            if let Some(emitted) = filter.feed_line(&line) {
+                out.push_str(&emitted);
+            }
+        }
+        assert!(out.contains("... (truncated)\n"));
+        assert!(out.contains("frame30"));
+        assert!(!out.contains("frame31"));
+        assert!(!out.contains("frame40"));
+    }
+
+    #[test]
+    fn test_vitest_stream_skipped_files_not_counted_as_passed() {
+        let mut filter = VitestStreamFilter::new();
+        assert_eq!(filter.feed_line(" ✓ a.test.ts (4 tests) 5ms"), None);
+        assert_eq!(filter.feed_line(" ↓ c.test.ts (2 tests | 2 skipped)"), None);
+        assert_eq!(filter.feed_line(" ↓ d.test.ts (3 skipped)"), None);
+        // No parseable summary in raw → counted fallback
+        let summary = filter.on_exit(0, "unparseable").unwrap();
+        assert_eq!(summary, "PASS (4) | 1 suites (5 skipped) | ?\n");
+    }
+
+    #[test]
+    fn test_vitest_stream_pnpm_boilerplate_suppressed() {
+        let mut filter = VitestStreamFilter::new();
+        let boilerplate = [
+            "> pkg@1.0.0 test /path/to/pkg",
+            "> vitest run",
+            "$ vitest run",
+            "Done in 2.1s",
+            " ELIFECYCLE  Command failed with exit code 1.",
+            "Progress: resolved 1, reused 1",
+        ];
+        for line in boilerplate {
+            assert_eq!(
+                filter.feed_line(line),
+                None,
+                "boilerplate should be suppressed: {:?}",
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn test_vitest_stream_garbage_passes_through() {
+        let mut filter = VitestStreamFilter::new();
+        assert_eq!(
+            filter.feed_line("some unrecognized noise"),
+            Some("some unrecognized noise\n".to_string())
+        );
+    }
+
+    #[test]
+    fn test_vitest_stream_in_progress_line_passes_through_uncounted() {
+        // ❯ without a failed count is an in-progress/other line, not a result:
+        // shown for transparency but must not inflate pass counts.
+        let mut filter = VitestStreamFilter::new();
+        assert_eq!(
+            filter.feed_line(" ❯ src/running.test.ts (3 tests)"),
+            Some(" ❯ src/running.test.ts (3 tests)\n".to_string())
+        );
+        let summary = filter.on_exit(0, "unparseable").unwrap();
+        assert_eq!(summary, "PASS (0) | 0 suites | ?\n");
+    }
+
+    #[test]
+    fn test_vitest_stream_emissions_are_newline_terminated() {
+        let transcript = r#"> app@1.0.0 test /x
+> vitest run
+ RUN  v2.1.8 /x
+ ✓ a.test.ts (1 test) 1ms
+ ❯ b.test.ts (2 tests | 1 failed) 2ms
+ FAIL  b.test.ts > b > nope
+AssertionError: nope
+garbage line
+ Test Files  1 failed | 1 passed (2)
+      Tests  1 failed | 1 passed (2)
+   Duration  12ms
+"#;
+        let mut filter = VitestStreamFilter::new();
+        for line in transcript.lines() {
+            if let Some(emitted) = filter.feed_line(line) {
+                assert!(
+                    emitted.ends_with('\n'),
+                    "emission missing newline: {:?}",
+                    emitted
+                );
+            }
+        }
+        assert!(filter.flush().is_empty());
+        let summary = filter.on_exit(1, transcript).unwrap();
+        assert!(summary.ends_with('\n'), "summary missing newline");
+    }
+
+    #[test]
+    fn test_full_pipeline_vitest_streaming_savings() {
+        // Realistic non-TTY vitest default-reporter transcript, as streamed by
+        // `pnpm run test` (test = "vitest run") — the production path feeds
+        // this through VitestStreamFilter via run_streamed, not apply_filter.
+        let mut transcript = String::from(
+            "> my-app@1.0.0 test /Users/dev/my-app\n> vitest run\n\n RUN  v2.1.8 /Users/dev/my-app\n\n",
+        );
+        for i in 1..=40 {
+            transcript.push_str(&format!(
+                " ✓ src/components/Comp{:02}.test.tsx ({} tests) {}ms\n",
+                i,
+                i % 3 + 1,
+                i * 3
+            ));
+        }
+        transcript.push_str(" ❯ src/checkout.test.ts (5 tests | 2 failed) 20ms\n");
+        transcript.push_str("   × checkout > calculates total with tax\n");
+        transcript.push_str("   × checkout > applies discount code\n\n");
+        transcript.push_str("⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n");
+        for (name, line_no) in [("calculates total with tax", 45), ("applies discount code", 78)] {
+            transcript.push_str(&format!(
+                " FAIL  src/checkout.test.ts > checkout > {}\n",
+                name
+            ));
+            transcript.push_str(
+                "AssertionError: expected 105 to be 100 // Object.is equality\n\n- Expected\n+ Received\n\n- 100\n+ 105\n\n",
+            );
+            transcript.push_str(&format!(" ❯ src/checkout.test.ts:{}:23\n", line_no));
+            transcript.push_str(
+                " ❯ processTicksAndRejections node:internal/process/task_queues:95:5\n\n",
+            );
+        }
+        transcript.push_str(" Test Files  1 failed | 40 passed (41)\n");
+        transcript.push_str("      Tests  2 failed | 83 passed (85)\n");
+        transcript.push_str("   Start at  10:00:00\n");
+        transcript.push_str("   Duration  4.12s\n\nDone in 4.2s\n");
+
+        let mut filter = VitestStreamFilter::new();
+        let filtered = stream_output(&mut filter, &transcript, 1);
+
+        assert!(filtered.contains("❯ src/checkout.test.ts"));
+        assert!(filtered.contains("FAIL  src/checkout.test.ts > checkout >"));
+        assert!(filtered.contains("PASS (83) FAIL (2) | 41 suites (1 failed) | 4s\n"));
+        assert!(!filtered.contains("✓ src/components/Comp01"));
+        assert!(!filtered.contains("RUN  v2.1.8"));
+        assert!(!filtered.contains("Test Files"));
+
+        let input_tokens = count_tokens(&transcript);
         let output_tokens = count_tokens(&filtered);
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
         assert!(
             savings >= 60.0,
-            "Full pipeline vitest savings: expected >= 60%, got {:.1}% (input={}, output={})",
+            "Streaming vitest savings: expected >= 60%, got {:.1}% (input={}, output={})",
             savings,
             input_tokens,
             output_tokens

@@ -65,8 +65,11 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
+    // Real pnpm builtins containing '-' (patch-commit, self-update, …) also match the
+    // script-name rule above; listing them here makes the last match route them to
+    // `rtk pnpm` passthrough instead of `rtk pnpm run`.
     RtkRule {
-        pattern: r"^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script)",
+        pattern: r"^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script|approve-builds|cat-file|cat-index|find-hash|ignored-builds|patch-commit|patch-remove|self-update)",
         rtk_cmd: "rtk pnpm",
         rewrite_prefixes: &["pnpm"],
         category: "PackageManager",

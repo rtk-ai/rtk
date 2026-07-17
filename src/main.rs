@@ -1809,7 +1809,11 @@ fn run_cli() -> Result<i32> {
                 )?,
                 PnpmCommands::Typecheck { args } => tsc_cmd::run(&args, cli.verbose)?,
                 PnpmCommands::Run { script, args } => pnpm_cmd::run(
-                    pnpm_cmd::PnpmCommand::Run { script, args },
+                    pnpm_cmd::PnpmCommand::Run {
+                        script,
+                        args,
+                        filters: filter,
+                    },
                     &[],
                     cli.verbose,
                 )?,
@@ -3432,6 +3436,32 @@ mod tests {
                 assert_eq!(filter, vec!["@app1", "@app2"]);
             }
             _ => panic!("Expected Pnpm command"),
+        }
+    }
+
+    #[test]
+    fn test_pnpm_run_with_filter() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "pnpm",
+            "--filter",
+            "@app1",
+            "run",
+            "test:unit",
+            "--",
+            "--watch",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Pnpm {
+                filter,
+                command: PnpmCommands::Run { script, args },
+            } => {
+                assert_eq!(filter, vec!["@app1"]);
+                assert_eq!(script, "test:unit");
+                assert_eq!(args, vec!["--watch"]);
+            }
+            _ => panic!("Expected Pnpm Run command"),
         }
     }
 
