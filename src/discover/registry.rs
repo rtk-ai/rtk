@@ -883,7 +883,14 @@ fn rewrite_segment_inner(
         Classification::Supported { rtk_equivalent, .. } => {
             let stripped = ENV_PREFIX.replace(cmd_part, "");
             let cmd_clean = stripped.trim();
-            if is_excluded(cmd_clean, excluded) {
+            // The exclusion has to cover the tool the classifier resolved to,
+            // not just the raw text: `python -m pytest` classifies as
+            // `rtk pytest`, so `exclude_commands = ["pytest"]` must stop it
+            // even though the raw command starts with `python` (#3035).
+            let resolved_tool = rtk_equivalent
+                .strip_prefix("rtk ")
+                .unwrap_or(rtk_equivalent);
+            if is_excluded(cmd_clean, excluded) || is_excluded(resolved_tool, excluded) {
                 return None;
             }
             rtk_equivalent
@@ -3722,6 +3729,34 @@ mod tests {
     fn test_exclude_does_not_match_hyphenated_command() {
         let excluded = vec!["golangci".to_string()];
         assert!(rewrite_command_no_prefixes("golangci-lint run ./...", &excluded).is_some());
+    }
+
+    // #3035: the exclusion must cover the resolved tool, not just the raw text,
+    // so module/wrapper forms don't slip past it.
+    #[test]
+    fn test_exclude_covers_python_m_form() {
+        let excluded = vec!["pytest".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("python3 -m pytest tests/ -q", &excluded),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("python -m pytest tests/", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_exclude_resolved_tool_requires_word_boundary() {
+        // "py" must not exclude commands resolving to "pytest"
+        let excluded = vec!["py".to_string()];
+        assert!(rewrite_command_no_prefixes("python3 -m pytest tests/", &excluded).is_some());
+    }
+
+    #[test]
+    fn test_exclude_other_tool_does_not_hit_python_m_form() {
+        let excluded = vec!["mypy".to_string()];
+        assert!(rewrite_command_no_prefixes("python3 -m pytest tests/", &excluded).is_some());
     }
 
     #[test]
