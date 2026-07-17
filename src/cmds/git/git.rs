@@ -374,12 +374,21 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
             hunk_shown = 0;
             // Preserve the full unified diff hunk header, including trailing
             // function / symbol context after the second @@ marker.
-            result.push(format!("  {}", line));
+            //
+            // Hunk-body lines below are emitted at column 0, in git's own
+            // unified shape. An earlier revision indented them two spaces to
+            // nest them under the filename, which silently broke every
+            // `git diff | grep '^-'` audit: the content was all there, but the
+            // `^` anchor no longer matched, so "was anything removed?" answered
+            // a confident, wrong "no". rtk's own annotations (the `+N -M` tally
+            // and `... (N lines truncated)`) keep the indent precisely so they
+            // are not mistaken for diff lines by the same greps.
+            result.push(line.to_string());
         } else if in_hunk {
             if line.starts_with('+') && !line.starts_with("+++") {
                 added += 1;
                 if hunk_shown < max_hunk_lines {
-                    result.push(format!("  {}", line));
+                    result.push(line.to_string());
                     hunk_shown += 1;
                 } else {
                     hunk_skipped += 1;
@@ -387,15 +396,15 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
             } else if line.starts_with('-') && !line.starts_with("---") {
                 removed += 1;
                 if hunk_shown < max_hunk_lines {
-                    result.push(format!("  {}", line));
+                    result.push(line.to_string());
                     hunk_shown += 1;
                 } else {
                     hunk_skipped += 1;
                 }
             } else if hunk_shown < max_hunk_lines && !line.starts_with("\\") {
-                // Context line
+                // Context line (git already prefixes it with a space).
                 if hunk_shown > 0 {
-                    result.push(format!("  {}", line));
+                    result.push(line.to_string());
                     hunk_shown += 1;
                 }
             }
@@ -2223,6 +2232,38 @@ mod tests {
         let result = compact_diff(diff, 100);
         assert!(result.contains("foo.rs"));
         assert!(result.contains("+"));
+    }
+
+    #[test]
+    fn test_compact_diff_hunk_lines_are_grep_anchorable() {
+        // Regression: hunk-body lines were indented two spaces, so
+        // `git diff | grep '^-'` matched nothing and an audit of "was anything
+        // removed?" got a confident, wrong "no". The content was never missing;
+        // the `^` anchor was what broke. Added lines were equally affected, so
+        // this is not a deletions-only defect.
+        let diff = "diff --git a/f.txt b/f.txt\n\
+                    --- a/f.txt\n\
+                    +++ b/f.txt\n\
+                    @@ -1,5 +1,4 @@\n\
+                    \x20keep1\n\
+                    -DELETED_A\n\
+                    \x20keep2\n\
+                    -DELETED_B\n\
+                    +ADDED\n";
+        let result = compact_diff(diff, 100);
+
+        let removed: Vec<&str> = result.lines().filter(|l| l.starts_with('-')).collect();
+        let added: Vec<&str> = result.lines().filter(|l| l.starts_with('+')).collect();
+
+        assert_eq!(removed, vec!["-DELETED_A", "-DELETED_B"], "`^-` must anchor");
+        assert_eq!(added, vec!["+ADDED"], "`^+` must anchor");
+
+        // rtk's own tally stays indented so these same greps never count it as
+        // a diff line. Without this, `^+` would pick up the "+1 -2" summary.
+        assert!(result.contains("  +1 -2"), "tally must stay indented");
+
+        // Context lines keep git's leading space, so they are not `^-`/`^+`.
+        assert!(result.lines().any(|l| l == " keep2"));
     }
 
     #[test]
