@@ -9,3 +9,4 @@
 - `curl_cmd.rs` truncates long responses, saves full output to file for recovery
 - `wget_cmd.rs` wraps wget with output filtering
 - `psql_cmd.rs` filters PostgreSQL query output
+- `snow_cmd.rs` filters Snowflake CLI (`snow`) ASCII box table output — strips `+---+` borders and `|---+---|` separators, outputs tab-separated rows, caps at 20 rows; JSON/CSV formats pass through unchanged

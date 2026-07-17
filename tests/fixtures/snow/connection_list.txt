@@ -1,0 +1,12 @@
++------------------------------------------------------------------------------+
+| connection_name | parameters                                    | is_default |
+|-----------------+-----------------------------------------------+------------|
+| prod            | {'account': 'MY_ACCOUNT', 'user':             | True       |
+|                 | 'MY_USER', 'authenticator': 'externalbrowser'}|            |
+| preprod         | {'account': 'MY_ACCOUNT_PREPROD', 'user':     | False      |
+|                 | 'MY_USER', 'authenticator': 'externalbrowser'}|            |
+| dev             | {'account': 'MY_ACCOUNT_DEV', 'user':         | False      |
+|                 | 'MY_USER', 'authenticator': 'externalbrowser'}|            |
+| sandbox         | {'account': 'MY_ACCOUNT_SANDBOX', 'user':     | False      |
+|                 | 'MY_USER', 'authenticator': 'externalbrowser'}|            |
++------------------------------------------------------------------------------+

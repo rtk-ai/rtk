@@ -1,0 +1,9 @@
++-----------------------------------------------------------------------+
+| name             | database_name | schema_name | kind      | comment |
+|------------------+---------------+-------------+-----------+---------|
+| MY_TABLE         | MY_DATABASE   | PUBLIC      | TABLE     |         |
+| MY_VIEW          | MY_DATABASE   | PUBLIC      | VIEW      |         |
+| MY_STAGE_TABLE   | MY_DATABASE   | STAGING     | TABLE     |         |
+| MY_FACT_TABLE    | MY_DATABASE   | MARTS       | TABLE     |         |
+| MY_DIM_TABLE     | MY_DATABASE   | MARTS       | TABLE     |         |
++-----------------------------------------------------------------------+
