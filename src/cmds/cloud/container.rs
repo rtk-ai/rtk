@@ -17,6 +17,10 @@ pub enum ContainerCmd {
     DockerPsAll,
     DockerImages,
     DockerLogs,
+    PodmanPs,
+    PodmanPsAll,
+    PodmanImages,
+    PodmanLogs,
     KubectlPods,
     KubectlServices,
     KubectlLogs,
@@ -24,10 +28,14 @@ pub enum ContainerCmd {
 
 pub fn run(cmd: ContainerCmd, args: &[String], verbose: u8) -> Result<i32> {
     match cmd {
-        ContainerCmd::DockerPs => docker_ps(verbose),
-        ContainerCmd::DockerPsAll => docker_ps_all(verbose),
-        ContainerCmd::DockerImages => docker_images(verbose),
-        ContainerCmd::DockerLogs => docker_logs(args, verbose),
+        ContainerCmd::DockerPs => docker_ps("docker", verbose),
+        ContainerCmd::DockerPsAll => docker_ps_all("docker", verbose),
+        ContainerCmd::DockerImages => docker_images("docker", verbose),
+        ContainerCmd::DockerLogs => docker_logs("docker", args, verbose),
+        ContainerCmd::PodmanPs => docker_ps("podman", verbose),
+        ContainerCmd::PodmanPsAll => docker_ps_all("podman", verbose),
+        ContainerCmd::PodmanImages => docker_images("podman", verbose),
+        ContainerCmd::PodmanLogs => docker_logs("podman", args, verbose),
         ContainerCmd::KubectlPods => k8s_pods("kubectl", args, verbose),
         ContainerCmd::KubectlServices => k8s_services("kubectl", args, verbose),
         ContainerCmd::KubectlLogs => k8s_logs("kubectl", args, verbose),
@@ -55,20 +63,22 @@ where
     )
 }
 
-fn docker_ps(_verbose: u8) -> Result<i32> {
+fn docker_ps(cli: &str, _verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let cmd_label = format!("{} ps", cli);
+    let rtk_label = format!("rtk {} ps", cli);
 
-    let base = exec_capture(resolved_command("docker").args(["ps"]))
-        .context("Failed to run docker ps")?;
+    let base = exec_capture(resolved_command(cli).args(["ps"]))
+        .with_context(|| format!("Failed to run {} ps", cli))?;
     if !base.success() {
         eprint!("{}", base.stderr);
         print!("{}", base.stdout);
-        timer.track("docker ps", "rtk docker ps", &base.stdout, &base.stdout);
+        timer.track(&cmd_label, &rtk_label, &base.stdout, &base.stdout);
         return Ok(base.exit_code);
     }
     let raw = base.stdout;
 
-    let stdout = match exec_capture(resolved_command("docker").args([
+    let stdout = match exec_capture(resolved_command(cli).args([
         "ps",
         "--format",
         "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}",
@@ -79,7 +89,7 @@ fn docker_ps(_verbose: u8) -> Result<i32> {
         Some(r) => r.stdout,
         None => {
             print!("{}", raw);
-            timer.track("docker ps", "rtk docker ps", &raw, &raw);
+            timer.track(&cmd_label, &rtk_label, &raw, &raw);
             return Ok(0);
         }
     };
@@ -93,38 +103,40 @@ fn docker_ps(_verbose: u8) -> Result<i32> {
         .filter_map(|line| format_container_line(line, true))
         .collect();
 
-    rtk.push_str(&format!("[docker] {} containers:\n", lines.len()));
+    rtk.push_str(&format!("[{}] {} containers:\n", cli, lines.len()));
     for entry in lines.iter().take(MAX_CONTAINERS) {
         rtk.push_str(entry);
     }
     if lines.len() > MAX_CONTAINERS {
         rtk.push_str(&format!("  … +{} more\n", lines.len() - MAX_CONTAINERS));
         let full: String = lines.concat();
-        if let Some(hint) = crate::core::tee::force_tee_hint(&full, "docker-ps") {
+        if let Some(hint) = crate::core::tee::force_tee_hint(&full, &format!("{}-ps", cli)) {
             rtk.push_str(&format!("{}\n", hint));
         }
     }
 
     let shown = never_worse(&raw, &rtk);
     print!("{}", shown);
-    timer.track("docker ps", "rtk docker ps", &raw, shown);
+    timer.track(&cmd_label, &rtk_label, &raw, shown);
     Ok(0)
 }
 
-fn docker_ps_all(_verbose: u8) -> Result<i32> {
+fn docker_ps_all(cli: &str, _verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let cmd_label = format!("{} ps -a", cli);
+    let rtk_label = format!("rtk {} ps -a", cli);
 
-    let base = exec_capture(resolved_command("docker").args(["ps", "-a"]))
-        .context("Failed to run docker ps -a")?;
+    let base = exec_capture(resolved_command(cli).args(["ps", "-a"]))
+        .with_context(|| format!("Failed to run {} ps -a", cli))?;
     if !base.success() {
         eprint!("{}", base.stderr);
         print!("{}", base.stdout);
-        timer.track("docker ps -a", "rtk docker ps -a", &base.stdout, &base.stdout);
+        timer.track(&cmd_label, &rtk_label, &base.stdout, &base.stdout);
         return Ok(base.exit_code);
     }
     let raw = base.stdout;
 
-    let stdout = match exec_capture(resolved_command("docker").args([
+    let stdout = match exec_capture(resolved_command(cli).args([
         "ps",
         "-a",
         "--format",
@@ -136,7 +148,7 @@ fn docker_ps_all(_verbose: u8) -> Result<i32> {
         Some(r) => r.stdout,
         None => {
             print!("{}", raw);
-            timer.track("docker ps -a", "rtk docker ps -a", &raw, &raw);
+            timer.track(&cmd_label, &rtk_label, &raw, &raw);
             return Ok(0);
         }
     };
@@ -160,7 +172,7 @@ fn docker_ps_all(_verbose: u8) -> Result<i32> {
     let truncated = running_lines.len() > MAX_CONTAINERS || stopped_lines.len() > MAX_CONTAINERS;
 
     let mut rtk = String::new();
-    rtk.push_str(&format!("[docker] {} running:\n", running_lines.len()));
+    rtk.push_str(&format!("[{}] {} running:\n", cli, running_lines.len()));
     for l in running_lines.iter().take(MAX_CONTAINERS) {
         rtk.push_str(l);
     }
@@ -172,7 +184,8 @@ fn docker_ps_all(_verbose: u8) -> Result<i32> {
     }
     if !stopped_lines.is_empty() {
         rtk.push_str(&format!(
-            "[docker] {} stopped/exited:\n",
+            "[{}] {} stopped/exited:\n",
+            cli,
             stopped_lines.len()
         ));
         for l in stopped_lines.iter().take(MAX_CONTAINERS) {
@@ -187,14 +200,14 @@ fn docker_ps_all(_verbose: u8) -> Result<i32> {
     }
     if truncated {
         let full: String = running_lines.iter().chain(stopped_lines.iter()).cloned().collect();
-        if let Some(hint) = crate::core::tee::force_tee_hint(&full, "docker-ps-a") {
+        if let Some(hint) = crate::core::tee::force_tee_hint(&full, &format!("{}-ps-a", cli)) {
             rtk.push_str(&format!("{}\n", hint));
         }
     }
 
     let shown = never_worse(&raw, &rtk);
     print!("{}", shown);
-    timer.track("docker ps -a", "rtk docker ps -a", &raw, shown);
+    timer.track(&cmd_label, &rtk_label, &raw, shown);
     Ok(0)
 }
 
@@ -227,20 +240,22 @@ fn format_container_line_from_parts(parts: &[&str], with_ports: bool) -> Option<
     ))
 }
 
-fn docker_images(_verbose: u8) -> Result<i32> {
+fn docker_images(cli: &str, _verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let cmd_label = format!("{} images", cli);
+    let rtk_label = format!("rtk {} images", cli);
 
-    let base = exec_capture(resolved_command("docker").args(["images"]))
-        .context("Failed to run docker images")?;
+    let base = exec_capture(resolved_command(cli).args(["images"]))
+        .with_context(|| format!("Failed to run {} images", cli))?;
     if !base.success() {
         eprint!("{}", base.stderr);
         print!("{}", base.stdout);
-        timer.track("docker images", "rtk docker images", &base.stdout, &base.stdout);
+        timer.track(&cmd_label, &rtk_label, &base.stdout, &base.stdout);
         return Ok(base.exit_code);
     }
     let raw = base.stdout;
 
-    let stdout = match exec_capture(resolved_command("docker").args([
+    let stdout = match exec_capture(resolved_command(cli).args([
         "images",
         "--format",
         "{{.Repository}}:{{.Tag}}\t{{.Size}}",
@@ -251,7 +266,7 @@ fn docker_images(_verbose: u8) -> Result<i32> {
         Some(r) => r.stdout,
         None => {
             print!("{}", raw);
-            timer.track("docker images", "rtk docker images", &raw, &raw);
+            timer.track(&cmd_label, &rtk_label, &raw, &raw);
             return Ok(0);
         }
     };
@@ -281,7 +296,8 @@ fn docker_images(_verbose: u8) -> Result<i32> {
         format!("{:.0}MB", total_size_mb)
     };
     rtk.push_str(&format!(
-        "[docker] {} images ({})\n",
+        "[{}] {} images ({})\n",
+        cli,
         lines.len(),
         total_display
     ));
@@ -308,35 +324,38 @@ fn docker_images(_verbose: u8) -> Result<i32> {
     }
     if image_lines.len() > MAX_IMAGES {
         rtk.push_str(&format!("  … +{} more\n", image_lines.len() - MAX_IMAGES));
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&full_rtk, "docker-images", MAX_IMAGES + 2) {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&full_rtk, &format!("{}-images", cli), MAX_IMAGES + 2)
+        {
             rtk.push_str(&format!("{}\n", hint));
         }
     }
 
     let shown = never_worse(&raw, &rtk);
     print!("{}", shown);
-    timer.track("docker images", "rtk docker images", &raw, shown);
+    timer.track(&cmd_label, &rtk_label, &raw, shown);
     Ok(0)
 }
 
-fn docker_logs(args: &[String], _verbose: u8) -> Result<i32> {
+fn docker_logs(cli: &str, args: &[String], _verbose: u8) -> Result<i32> {
     let container = args.first().map(|s| s.as_str()).unwrap_or("");
     if container.is_empty() {
-        println!("Usage: rtk docker logs <container>");
+        println!("Usage: rtk {} logs <container>", cli);
         return Ok(0);
     }
 
-    let mut cmd = resolved_command("docker");
+    let mut cmd = resolved_command(cli);
     cmd.args(["logs", "--tail", "100", container]);
 
     let label = format!("logs {}", container);
     runner::run_filtered(
         cmd,
-        "docker",
+        cli,
         &label,
         |raw| {
             format!(
-                "[docker] Logs for {}:\n{}",
+                "[{}] Logs for {}:\n{}",
+                cli,
                 container,
                 crate::log_cmd::run_stdin_str(raw)
             )
@@ -671,16 +690,20 @@ pub fn run_docker_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
     crate::core::runner::run_passthrough("docker", args, verbose)
 }
 
-/// Run `docker compose ps` (or `docker compose ps -a`) with compact output
-pub fn run_compose_ps(all: bool, verbose: u8) -> Result<i32> {
+pub fn run_podman_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
+    crate::core::runner::run_passthrough("podman", args, verbose)
+}
+
+/// Run `<cli> compose ps` (or `<cli> compose ps -a`) with compact output
+pub fn run_compose_ps(cli: &str, all: bool, verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     let mut raw_args: Vec<&str> = vec!["compose", "ps"];
     if all {
         raw_args.push("-a");
     }
-    let raw_result = exec_capture(resolved_command("docker").args(&raw_args))
-        .context("Failed to run docker compose ps")?;
+    let raw_result = exec_capture(resolved_command(cli).args(&raw_args))
+        .with_context(|| format!("Failed to run {} compose ps", cli))?;
 
     if !raw_result.success() {
         eprintln!("{}", raw_result.stderr);
@@ -693,8 +716,8 @@ pub fn run_compose_ps(all: bool, verbose: u8) -> Result<i32> {
         format_args.push("-a");
     }
     format_args.extend(["--format", "{{.Name}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"]);
-    let result = exec_capture(resolved_command("docker").args(&format_args))
-        .context("Failed to run docker compose ps --format")?;
+    let result = exec_capture(resolved_command(cli).args(&format_args))
+        .with_context(|| format!("Failed to run {} compose ps --format", cli))?;
 
     if !result.success() {
         eprintln!("{}", result.stderr);
@@ -703,20 +726,28 @@ pub fn run_compose_ps(all: bool, verbose: u8) -> Result<i32> {
     let structured = result.stdout;
 
     if verbose > 0 {
-        eprintln!("raw docker compose ps:\n{}", raw);
+        eprintln!("raw {} compose ps:\n{}", cli, raw);
     }
 
     let rtk = format_compose_ps(&structured);
     let shown = never_worse(&raw, &rtk);
     println!("{}", shown);
-    let label = if all { "docker compose ps -a" } else { "docker compose ps" };
-    let rtk_label = if all { "rtk docker compose ps -a" } else { "rtk docker compose ps" };
-    timer.track(label, rtk_label, &raw, shown);
+    let label = if all {
+        format!("{} compose ps -a", cli)
+    } else {
+        format!("{} compose ps", cli)
+    };
+    let rtk_label = if all {
+        format!("rtk {} compose ps -a", cli)
+    } else {
+        format!("rtk {} compose ps", cli)
+    };
+    timer.track(&label, &rtk_label, &raw, shown);
     Ok(0)
 }
 
-pub fn run_compose_logs(service: Option<&str>, tail: u32, verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("docker");
+pub fn run_compose_logs(cli: &str, service: Option<&str>, tail: u32, verbose: u8) -> Result<i32> {
+    let mut cmd = resolved_command(cli);
     let tail_str = tail.to_string();
     cmd.args(["compose", "logs", "--tail", &tail_str]);
     if let Some(svc) = service {
@@ -726,11 +757,11 @@ pub fn run_compose_logs(service: Option<&str>, tail: u32, verbose: u8) -> Result
     let svc_label = service.unwrap_or("all");
     runner::run_filtered(
         cmd,
-        "docker",
+        cli,
         &format!("compose logs {}", svc_label),
         |raw| {
             if verbose > 0 {
-                eprintln!("raw docker compose logs:\n{}", raw);
+                eprintln!("raw {} compose logs:\n{}", cli, raw);
             }
             format_compose_logs(raw)
         },
@@ -738,8 +769,8 @@ pub fn run_compose_logs(service: Option<&str>, tail: u32, verbose: u8) -> Result
     )
 }
 
-pub fn run_compose_build(service: Option<&str>, verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("docker");
+pub fn run_compose_build(cli: &str, service: Option<&str>, verbose: u8) -> Result<i32> {
+    let mut cmd = resolved_command(cli);
     cmd.args(["compose", "build"]);
     if let Some(svc) = service {
         cmd.arg(svc);
@@ -748,11 +779,11 @@ pub fn run_compose_build(service: Option<&str>, verbose: u8) -> Result<i32> {
     let svc_label = service.unwrap_or("all");
     runner::run_filtered(
         cmd,
-        "docker",
+        cli,
         &format!("compose build {}", svc_label),
         |raw| {
             if verbose > 0 {
-                eprintln!("raw docker compose build:\n{}", raw);
+                eprintln!("raw {} compose build:\n{}", cli, raw);
             }
             format_compose_build(raw)
         },
@@ -760,10 +791,10 @@ pub fn run_compose_build(service: Option<&str>, verbose: u8) -> Result<i32> {
     )
 }
 
-pub fn run_compose_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
+pub fn run_compose_passthrough(cli: &str, args: &[OsString], verbose: u8) -> Result<i32> {
     let mut combined = vec![OsString::from("compose")];
     combined.extend_from_slice(args);
-    crate::core::runner::run_passthrough("docker", &combined, verbose)
+    crate::core::runner::run_passthrough(cli, &combined, verbose)
 }
 
 pub fn run_kubectl_get(args: &[String], verbose: u8) -> Result<i32> {
