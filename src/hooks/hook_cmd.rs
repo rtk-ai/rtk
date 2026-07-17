@@ -385,6 +385,11 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
             .as_object_mut()
             .unwrap()
             .insert("permissionDecision".into(), json!("allow"));
+    } else if v.get("permission_mode").and_then(Value::as_str) != Some("bypassPermissions") {
+        hook_output
+            .as_object_mut()
+            .unwrap()
+            .insert("permissionDecision".into(), json!("ask"));
     }
 
     PayloadAction::Rewrite {
@@ -1124,11 +1129,26 @@ mod tests {
         let hook = &v["hookSpecificOutput"];
 
         assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
-        // permissionDecision is only set when an explicit allow rule matches;
-        // with default-to-ask semantics (no rules configured), it is absent.
+        assert_eq!(hook["permissionDecision"], "ask");
         assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
         assert!(hook["updatedInput"].is_object());
         assert!(hook["updatedInput"]["command"].is_string());
+    }
+
+    #[test]
+    fn test_claude_bypass_ask_omits_permission_decision() {
+        let input = json!({
+            "permission_mode": "bypassPermissions",
+            "tool_name": "Bash",
+            "tool_input": { "command": "git status" }
+        })
+        .to_string();
+        let result = run_claude_inner(&input).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert!(hook.get("permissionDecision").is_none());
+        assert_eq!(hook["updatedInput"]["command"], "rtk git status");
     }
 
     #[test]
