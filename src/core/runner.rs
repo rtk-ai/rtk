@@ -122,6 +122,15 @@ where
         return Ok(exit_code);
     }
 
+    // `filter_stdout_only` keeps stderr out of the filter input, so nothing
+    // downstream can surface it — a failing child's diagnostics would be dropped
+    // and the exit code left as the only signal (#3026). Emit them here. Only on
+    // failure: on a successful run stderr is the incidental noise RTK exists to
+    // suppress, and the filtered stdout already carries the result.
+    if opts.filter_stdout_only && exit_code != 0 && !result.raw_stderr.trim().is_empty() {
+        eprint!("{}", result.raw_stderr);
+    }
+
     let text_to_filter = if opts.filter_stdout_only {
         raw_stdout
     } else {
