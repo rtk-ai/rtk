@@ -5,7 +5,7 @@ use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
 use crate::core::utils::{format_tokens, truncate};
 use crate::hooks::hook_check;
 use anyhow::{Context, Result};
-use chrono::Local;
+use chrono::{Local, SecondsFormat, Utc};
 use colored::Colorize;
 use serde::Serialize;
 use std::io::IsTerminal;
@@ -505,13 +505,30 @@ fn print_monthly(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
 
 #[derive(Serialize)]
 struct ExportData {
+    /// "global", or the project path when scoped with --project.
+    scope: String,
+    /// Lets downstream tooling adapt when this schema changes.
+    rtk_version: &'static str,
+    generated_at: String,
     summary: ExportSummary,
+    by_command: Vec<ExportCommand>,
     #[serde(skip_serializing_if = "Option::is_none")]
     daily: Option<Vec<DayStats>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     weekly: Option<Vec<WeekStats>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     monthly: Option<Vec<MonthStats>>,
+}
+
+/// One row of the per-command breakdown the text report renders as a table.
+#[derive(Serialize)]
+struct ExportCommand {
+    rank: usize,
+    command: String,
+    count: usize,
+    saved: usize,
+    avg_pct: f64,
+    avg_time_ms: u64,
 }
 
 #[derive(Serialize)]
@@ -538,6 +555,24 @@ fn export_json(
         .context("Failed to load token savings summary from database")?;
 
     let export = ExportData {
+        scope: project_scope.unwrap_or("global").to_string(),
+        rtk_version: env!("CARGO_PKG_VERSION"),
+        generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        by_command: summary
+            .by_command
+            .iter()
+            .enumerate()
+            .map(
+                |(idx, (command, count, saved, avg_pct, avg_time_ms))| ExportCommand {
+                    rank: idx + 1,
+                    command: command.clone(),
+                    count: *count,
+                    saved: *saved,
+                    avg_pct: *avg_pct,
+                    avg_time_ms: *avg_time_ms,
+                },
+            )
+            .collect(),
         summary: ExportSummary {
             total_commands: summary.total_commands,
             total_input: summary.total_input,
