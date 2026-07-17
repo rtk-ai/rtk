@@ -16,6 +16,10 @@ use std::ffi::OsString;
 use std::process::Command;
 use std::process::Stdio;
 
+/// Leads every commit block in RTK's injected `git log` pretty-format, letting the
+/// parser anchor each commit even when git appends a diffstat after the format.
+const COMMIT_MARKER: &str = "---RTK-COMMIT---";
+
 #[derive(Debug, Clone)]
 pub enum GitCommand {
     Diff,
@@ -451,8 +455,17 @@ fn run_log(
     // Apply RTK defaults only if user didn't specify them
     // Use %b (body) to preserve first line of commit body for agent context
     // (BREAKING CHANGE, Closes #xxx, design notes)
+    //
+    // The marker leads each commit rather than terminating it: with --stat (and
+    // friends) git appends the diffstat *after* the pretty-format output, so a
+    // trailing marker would leave those lines heading the next block, where the
+    // parser read them as that commit's header and lost the real one (#2882).
+    // Leading it keeps every commit anchored and each diffstat with its own commit.
     if !has_format_flag {
-        cmd.args(["--pretty=format:%h %s (%ar) <%an>%n%b%n---END---"]);
+        cmd.args([format!(
+            "--pretty=format:{}%n%h %s (%ar) <%an>%n%b",
+            COMMIT_MARKER
+        )]);
     }
 
     // Determine limit: respect user's explicit -N flag, use sensible defaults otherwise
@@ -564,7 +577,7 @@ pub(crate) fn filter_log_output(
     let truncate_width = if user_set_limit { 120 } else { 80 };
 
     // When user specified their own format (--oneline, --pretty, --format),
-    // RTK did not inject ---END--- markers. Use simple line-based truncation.
+    // RTK did not inject commit markers. Use simple line-based truncation.
     if user_format {
         let lines: Vec<&str> = output.lines().collect();
         let max_lines = if user_set_limit { lines.len() } else { limit };
@@ -576,16 +589,19 @@ pub(crate) fn filter_log_output(
             .join("\n");
     }
 
-    // RTK injected format: split output into commit blocks separated by ---END---
-    let commits: Vec<&str> = output.split("---END---").collect();
+    // RTK injected format: COMMIT_MARKER leads each commit block, so everything git
+    // appends after the format (a --stat diffstat) stays inside its own commit.
+    // Blanks are dropped before `take` — the empty region ahead of the first marker
+    // would otherwise consume one commit's slot.
+    let commits: Vec<&str> = output
+        .split(COMMIT_MARKER)
+        .map(|block| block.trim())
+        .filter(|block| !block.is_empty())
+        .collect();
     let max_commits = if user_set_limit { commits.len() } else { limit };
 
     let mut result = Vec::new();
     for block in commits.iter().take(max_commits) {
-        let block = block.trim();
-        if block.is_empty() {
-            continue;
-        }
         let mut lines = block.lines();
         // First line is the header: hash subject (date) <author>
         let header = match lines.next() {
@@ -2613,8 +2629,11 @@ A  added.rs
 
     #[test]
     fn test_filter_log_output() {
-        let output = "abc1234 This is a commit message (2 days ago) <author>\n\n---END---\ndef5678 Another commit (1 week ago) <other>\n\n---END---\n";
-        let result = filter_log_output(output, 10, false, false);
+        let output = format!(
+            "{M}\nabc1234 This is a commit message (2 days ago) <author>\n\n{M}\ndef5678 Another commit (1 week ago) <other>\n",
+            M = COMMIT_MARKER
+        );
+        let result = filter_log_output(&output, 10, false, false);
         assert!(result.contains("abc1234"));
         assert!(result.contains("def5678"));
         assert_eq!(result.lines().count(), 2);
@@ -2623,8 +2642,11 @@ A  added.rs
     #[test]
     fn test_filter_log_output_with_body() {
         // Commit with body: first non-trailer body line should appear indented
-        let output = "abc1234 feat: add feature (2 days ago) <author>\nBREAKING CHANGE: removed old API\nSigned-off-by: Author <a@b.com>\n---END---\ndef5678 fix: typo (1 day ago) <other>\n\n---END---\n";
-        let result = filter_log_output(output, 10, false, false);
+        let output = format!(
+            "{M}\nabc1234 feat: add feature (2 days ago) <author>\nBREAKING CHANGE: removed old API\nSigned-off-by: Author <a@b.com>\n{M}\ndef5678 fix: typo (1 day ago) <other>\n",
+            M = COMMIT_MARKER
+        );
+        let result = filter_log_output(&output, 10, false, false);
         assert!(result.contains("abc1234"));
         assert!(result.contains("BREAKING CHANGE: removed old API"));
         assert!(!result.contains("Signed-off-by:"));
@@ -2637,12 +2659,66 @@ A  added.rs
     #[test]
     fn test_filter_log_output_skips_trailers() {
         // Body with only trailers should not produce a body line
-        let output = "abc1234 chore: bump (1 day ago) <bot>\nSigned-off-by: Bot <bot@ci>\nCo-authored-by: Human <h@b>\n---END---\n";
-        let result = filter_log_output(output, 10, false, false);
+        let output = format!(
+            "{M}\nabc1234 chore: bump (1 day ago) <bot>\nSigned-off-by: Bot <bot@ci>\nCo-authored-by: Human <h@b>\n",
+            M = COMMIT_MARKER
+        );
+        let result = filter_log_output(&output, 10, false, false);
         assert!(result.contains("abc1234"));
         assert!(!result.contains("Signed-off-by:"));
         assert!(!result.contains("Co-authored-by:"));
         assert_eq!(result.lines().count(), 1);
+    }
+
+    /// #2882: with --stat git appends a diffstat after the pretty-format output.
+    /// Every commit must survive that, including merge commits — which carry no
+    /// diffstat at all and so used to knock the parser out of step.
+    #[test]
+    fn test_filter_log_output_stat_keeps_every_commit() {
+        // Mirrors real `git log --stat` shape: merge commits have no diffstat,
+        // regular commits have one trailing their own block.
+        let output = format!(
+            "{M}\na0530e8 Merge branch 'x' (1 day ago) <dev>\n\
+             {M}\n463e523 skill: DoD evaluator sweep (1 day ago) <dev>\n\n \
+             src/a.rs | 5 +++--\n 1 file changed, 3 insertions(+), 2 deletions(-)\n\
+             {M}\ndeaa799 fix: typo (2 days ago) <dev>\n\n \
+             src/b.rs | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n",
+            M = COMMIT_MARKER
+        );
+
+        let result = filter_log_output(&output, 10, false, false);
+
+        // The middle commit was the one the issue reported vanishing between its
+        // two neighbours.
+        for hash in ["a0530e8", "463e523", "deaa799"] {
+            assert!(result.contains(hash), "commit {hash} dropped from:\n{result}");
+        }
+        // Diffstat lines must not be mistaken for commit headers.
+        assert!(
+            !result.starts_with(" src/a.rs"),
+            "diffstat parsed as header:\n{result}"
+        );
+    }
+
+    /// A diffstat longer than the body budget must be disclosed, never silently cut.
+    #[test]
+    fn test_filter_log_output_stat_overflow_is_disclosed() {
+        let stat: String = (1..=6)
+            .map(|i| format!(" src/f{i}.rs | 2 +-\n"))
+            .collect::<Vec<_>>()
+            .join("");
+        let output = format!(
+            "{M}\nabc1234 feat: wide change (1 day ago) <author>\n\n{stat}",
+            M = COMMIT_MARKER
+        );
+
+        let result = filter_log_output(&output, 10, false, false);
+
+        assert!(result.contains("abc1234"));
+        assert!(
+            result.contains("lines omitted"),
+            "dropped diffstat lines without a notice:\n{result}"
+        );
     }
 
     #[test]
@@ -2657,7 +2733,12 @@ A  added.rs
     #[test]
     fn test_filter_log_output_cap_lines() {
         let output = (0..20)
-            .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
+            .map(|i| {
+                format!(
+                    "{M}\nhash{i} message {i} (1 day ago) <author>\n",
+                    M = COMMIT_MARKER
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let result = filter_log_output(&output, 5, false, false);
@@ -2668,7 +2749,12 @@ A  added.rs
     fn test_filter_log_output_user_limit_no_cap() {
         // When user explicitly passes -N, all N lines should be returned (no re-truncation)
         let output = (0..20)
-            .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
+            .map(|i| {
+                format!(
+                    "{M}\nhash{i} message {i} (1 day ago) <author>\n",
+                    M = COMMIT_MARKER
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let result = filter_log_output(&output, 20, true, false);
@@ -3193,8 +3279,9 @@ no changes added to commit (use "git add" and/or "git commit -a")
             .collect::<Vec<_>>()
             .join("\n");
         let output = format!(
-            "abc1234 feat: big change (1 day ago) <author>\n{}\n---END---\n",
-            body_lines
+            "{M}\nabc1234 feat: big change (1 day ago) <author>\n{}\n",
+            body_lines,
+            M = COMMIT_MARKER
         );
         let result = filter_log_output(&output, 10, false, false);
         assert!(
