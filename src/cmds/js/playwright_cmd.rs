@@ -235,6 +235,30 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
     failures
 }
 
+fn has_explicit_reporter(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| arg == "--reporter" || arg.starts_with("--reporter="))
+}
+
+fn append_playwright_args(cmd: &mut std::process::Command, args: &[String]) -> bool {
+    let is_test = args.first().is_some_and(|arg| arg == "test");
+    if !is_test {
+        cmd.args(args);
+        return false;
+    }
+
+    cmd.arg("test");
+    let explicit_reporter = has_explicit_reporter(&args[1..]);
+    if explicit_reporter {
+        cmd.args(&args[1..]);
+    } else {
+        cmd.arg("--reporter=json");
+        cmd.args(&args[1..]);
+    }
+
+    explicit_reporter
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -259,22 +283,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         }
     };
 
-    // Only inject --reporter=json for `playwright test` runs
-    let is_test = args.first().map(|a| a == "test").unwrap_or(false);
-    if is_test {
-        cmd.arg("test");
-        cmd.arg("--reporter=json");
-        // Strip user's --reporter to avoid conflicts with our forced JSON
-        for arg in &args[1..] {
-            if !arg.starts_with("--reporter") {
-                cmd.arg(arg);
-            }
-        }
-    } else {
-        for arg in args {
-            cmd.arg(arg);
-        }
-    }
+    let preserve_native_output = append_playwright_args(&mut cmd, args);
 
     if verbose > 0 {
         eprintln!("Running: playwright {}", args.join(" "));
@@ -285,30 +294,36 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    // Parse output using PlaywrightParser
-    let parse_result = PlaywrightParser::parse(&result.stdout);
-    let mode = FormatMode::from_verbosity(verbose);
+    let (filtered, hint) = if preserve_native_output {
+        (raw.clone(), None)
+    } else {
+        // Parse output using PlaywrightParser
+        let parse_result = PlaywrightParser::parse(&result.stdout);
+        let mode = FormatMode::from_verbosity(verbose);
 
-    let filtered = match parse_result {
-        ParseResult::Full(data) => {
-            if verbose > 0 {
-                eprintln!("playwright test (Tier 1: Full JSON parse)");
+        let filtered = match parse_result {
+            ParseResult::Full(data) => {
+                if verbose > 0 {
+                    eprintln!("playwright test (Tier 1: Full JSON parse)");
+                }
+                data.format(mode)
             }
-            data.format(mode)
-        }
-        ParseResult::Degraded(data, warnings) => {
-            if verbose > 0 {
-                emit_degradation_warning("playwright", &warnings.join(", "));
+            ParseResult::Degraded(data, warnings) => {
+                if verbose > 0 {
+                    emit_degradation_warning("playwright", &warnings.join(", "));
+                }
+                data.format(mode)
             }
-            data.format(mode)
-        }
-        ParseResult::Passthrough(raw) => {
-            emit_passthrough_warning("playwright", "All parsing tiers failed");
-            raw
-        }
+            ParseResult::Passthrough(raw) => {
+                emit_passthrough_warning("playwright", "All parsing tiers failed");
+                raw
+            }
+        };
+
+        let hint = crate::core::tee::tee_and_hint(&raw, "playwright", result.exit_code);
+        (filtered, hint)
     };
 
-    let hint = crate::core::tee::tee_and_hint(&raw, "playwright", result.exit_code);
     let shown = crate::core::runner::emit_guarded(&filtered, hint.as_deref(), &raw);
 
     timer.track(
@@ -470,5 +485,58 @@ mod tests {
         let result = PlaywrightParser::parse(invalid);
         assert_eq!(result.tier(), 3); // Passthrough
         assert!(!result.is_ok());
+    }
+
+    #[test]
+    fn test_explicit_reporter_is_preserved() {
+        let mut command = std::process::Command::new("playwright");
+        let args = vec![
+            "test".to_string(),
+            "tests/e2e/foo.spec.ts".to_string(),
+            "--reporter=list".to_string(),
+        ];
+
+        assert!(append_playwright_args(&mut command, &args));
+        assert_eq!(
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["test", "tests/e2e/foo.spec.ts", "--reporter=list"]
+        );
+    }
+
+    #[test]
+    fn test_separate_explicit_reporter_is_preserved() {
+        let mut command = std::process::Command::new("playwright");
+        let args = vec![
+            "test".to_string(),
+            "--reporter".to_string(),
+            "line".to_string(),
+        ];
+
+        assert!(append_playwright_args(&mut command, &args));
+        assert_eq!(
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["test", "--reporter", "line"]
+        );
+    }
+
+    #[test]
+    fn test_json_reporter_is_injected_by_default() {
+        let mut command = std::process::Command::new("playwright");
+        let args = vec!["test".to_string(), "tests/e2e/foo.spec.ts".to_string()];
+
+        assert!(!append_playwright_args(&mut command, &args));
+        assert_eq!(
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["test", "--reporter=json", "tests/e2e/foo.spec.ts"]
+        );
     }
 }
