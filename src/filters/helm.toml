@@ -7,7 +7,6 @@ strip_lines_matching = [
   "^W\\d{4}",
 ]
 truncate_lines_at = 120
-max_lines = 40
 
 [[tests.helm]]
 name = "strips blank lines, preserves release info"
@@ -27,3 +26,78 @@ expected = "NAME: my-release\nLAST DEPLOYED: Mon Jan 15 10:30:00 2024\nNAMESPACE
 name = "strips glog W-prefix warnings"
 input = "W0115 10:30:00 warning message from internal\nNAME: my-chart\nSTATUS: deployed"
 expected = "NAME: my-chart\nSTATUS: deployed"
+
+[[tests.helm]]
+name = "helm template output is not truncated"
+input = """
+# Source: my-chart/templates/namespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: my-ns
+---
+# Source: my-chart/templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: my-secret
+---
+# Source: my-chart/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-cm
+---
+# Source: my-chart/templates/pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-pvc
+---
+# Source: my-chart/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-svc
+---
+# Source: my-chart/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-deploy
+"""
+expected = """# Source: my-chart/templates/namespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: my-ns
+---
+# Source: my-chart/templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: my-secret
+---
+# Source: my-chart/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-cm
+---
+# Source: my-chart/templates/pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-pvc
+---
+# Source: my-chart/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-svc
+---
+# Source: my-chart/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-deploy"""

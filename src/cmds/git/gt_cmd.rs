@@ -2,6 +2,7 @@
 
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
+use crate::core::truncate::{reduced, CAP_LIST};
 use crate::core::utils::{ok_confirmation, resolved_command, strip_ansi, truncate};
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
@@ -58,11 +59,8 @@ fn run_gt_filtered(
         filter_fn(&clean)
     };
 
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, tee_label, cmd_output.exit_code) {
-        println!("{}\n{}", output, hint);
-    } else {
-        println!("{}", output);
-    }
+    let hint = crate::core::tee::tee_and_hint(&raw, tee_label, cmd_output.exit_code);
+    let shown = crate::core::runner::emit_guarded(&output, hint.as_deref(), &raw);
 
     if !cmd_output.stderr.trim().is_empty() {
         eprintln!("{}", cmd_output.stderr.trim());
@@ -74,7 +72,7 @@ fn run_gt_filtered(
         format!("gt {} {}", subcmd_str, args.join(" "))
     };
     let rtk_label = format!("rtk {}", label);
-    timer.track(&label, &rtk_label, &raw, &output);
+    timer.track(&label, &rtk_label, &raw, &shown);
 
     Ok(cmd_output.exit_code)
 }
@@ -168,7 +166,8 @@ fn passthrough_gt(subcommand: &str, args: &[String], verbose: u8) -> Result<i32>
     crate::core::runner::run_passthrough("gt", &os_args, verbose)
 }
 
-const MAX_LOG_ENTRIES: usize = 15;
+// gt log entries are multi-line — trim the list cap to keep token savings above 60%.
+const MAX_LOG_ENTRIES: usize = reduced(CAP_LIST, 5);
 
 fn filter_gt_log_entries(input: &str) -> String {
     let trimmed = input.trim();

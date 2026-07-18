@@ -137,7 +137,7 @@ if (shouldRun(3)) {
   await testCmd("log:large", `${RTK} log /tmp/large.log`);
 
   // Network
-  await testCmd("net:curl", `${RTK} curl https://httpbin.org/get`, "any");
+  await testCmd("net:curl", `${RTK} curl https://mockhttp.org/get`, "any");
 
   // GitHub
   await testCmd("gh:pr list", `cd /home/ubuntu/rtk && ${RTK} gh pr list`, "any");

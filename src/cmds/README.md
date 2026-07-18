@@ -252,6 +252,21 @@ When filtering fails, fall back to raw output and warn on stderr. Never block th
 
 Modules that parse structured output (JSON, NDJSON, state machines) must call `tee::tee_and_hint()` so users can recover full output on failure.
 
+### Internal Truncation Recovery
+
+When a filter caps a list at N items (e.g. `take(20)`), the remaining items must be accessible via a tee hint. **Never show `"… +N more"` without a recovery path** — the agent has no way to retrieve the hidden content.
+
+**Choosing the right hint:**
+
+| Content type | Function | Condition |
+|---|---|---|
+| Flat list — one item = one line in the tee | `force_tee_tail_hint(content, slug, MAX + 1)` | PR lists, error lines, file paths — anything where each item is a single-line string |
+| Multi-line blocks | `force_tee_hint(content, slug)` | Test failures, build error blocks — items that span multiple lines so a line offset is meaningless |
+
+**Cap values come from `src/core/truncate.rs`.** Pick the `CAP_*` matching your data class (`CAP_ERRORS`, `CAP_WARNINGS`, `CAP_LIST`, `CAP_INVENTORY`) and bind it to a local `const MAX_XXX: usize = CAP_Y;`. Derive `take(MAX_XXX)`, `> MAX_XXX`, and the offset `MAX_XXX + 1` from the local. These CAPs will later become the configuration surface for per-filter cap tuning (user-overridable via config) — keep all truncation values routed through them so that hook lands as a single switch rather than a codebase-wide hunt. A filter that genuinely needs to deviate uses **`truncate::reduced(CAP_Y, n)`** (e.g. `reduced(CAP_WARNINGS, 5)`) so it still tracks the global when reconfigured — never a bare literal, never `cap - n` (underflows once caps are runtime-configurable), and never `*`/`/` (those scale unboundedly). `reduced` falls back to the full cap if the reduction would empty the list. Each deviation needs a one-line comment stating why; if there's no real reason, just use the plain CAP. See `src/core/README.md` ("Truncation Caps") for the full rationale.
+
+**The tee content must match what `tail` produces.** For `force_tee_tail_hint`, build the tee from the same formatted values shown in the output — not raw/intermediate data. If the filter reformats items before displaying them, pre-build a `Vec<String>` of formatted lines and use it for both the display loop and the tee.
+
 ### Stderr Handling
 
 Modules must capture stderr and include it in the raw string passed to `timer.track()`, so token savings reflect total output.
@@ -278,6 +293,7 @@ Adding a new filter or command requires changes in multiple places. For TOML-vs-
    - Use `RunOptions::default()` when filtering combined text output
    - Add `.tee("label")` when the filter parses structured output (enables raw output recovery on failure)
    - **Exit codes**: handled automatically by `run_filtered()` — just return its result
+   - **Truncation**: if the filter caps any list at N items, emit `force_tee_tail_hint` (flat lists) or `force_tee_hint` (multi-line blocks) so the agent can recover hidden items — see [Internal Truncation Recovery](#internal-truncation-recovery). Use a named constant for the cap; derive the offset from it (`MAX_XXX + 1`)
 2. **Register module**:
    - Ecosystem `mod.rs` files use `automod::dir!()` — any `.rs` file in the directory becomes a public module automatically. No manual `pub mod` needed, but be aware: WIP or helper files will also be exposed. Only commit command-ready modules.
    - Add variant to `Commands` enum in `main.rs` with `#[arg(trailing_var_arg = true, allow_hyphen_values = true)]`

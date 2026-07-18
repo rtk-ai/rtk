@@ -117,6 +117,7 @@ jobs:
           release-type: rust
           package-name: rtk
           token: ${{ steps.app-token.outputs.token }}
+          target-branch: ${{ github.ref_name }}
 
   build-release:
     name: Build and upload release assets

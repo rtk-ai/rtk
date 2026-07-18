@@ -1,0 +1,79 @@
+[INFO] Scanning for projects...
+[INFO] ------------------------------------------------------------------------
+[INFO] Reactor Build Order:
+[INFO] 
+[INFO] multi-module-skeleton                                              [pom]
+[INFO] child-a                                                            [jar]
+[INFO] child-b                                                            [jar]
+[INFO] 
+[INFO] ---------------< com.example.rtk:multi-module-skeleton >----------------
+[INFO] Building multi-module-skeleton 1.0.0-SNAPSHOT                      [1/3]
+[INFO]   from pom.xml
+[INFO] --------------------------------[ pom ]---------------------------------
+[INFO] 
+[INFO] --- install:3.1.2:install (default-install) @ multi-module-skeleton ---
+[INFO] Installing /tmp/rtk-reactor/pom.xml to /home/vcyber/.m2/repository/com/example/rtk/multi-module-skeleton/1.0.0-SNAPSHOT/multi-module-skeleton-1.0.0-SNAPSHOT.pom
+[INFO] 
+[INFO] ----------------------< com.example.rtk:child-a >-----------------------
+[INFO] Building child-a 1.0.0-SNAPSHOT                                    [2/3]
+[INFO]   from child-a/pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ child-a ---
+[INFO] skip non existing resourceDirectory /tmp/rtk-reactor/child-a/src/main/resources
+[INFO] 
+[INFO] --- compiler:3.13.0:compile (default-compile) @ child-a ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO] 
+[INFO] --- resources:3.3.1:testResources (default-testResources) @ child-a ---
+[INFO] skip non existing resourceDirectory /tmp/rtk-reactor/child-a/src/test/resources
+[INFO] 
+[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ child-a ---
+[INFO] No sources to compile
+[INFO] 
+[INFO] --- surefire:2.17:test (default-test) @ child-a ---
+[INFO] No tests to run.
+[INFO] 
+[INFO] --- jar:3.1.2:jar (default-jar) @ child-a ---
+[INFO] 
+[INFO] --- install:3.1.2:install (default-install) @ child-a ---
+[INFO] Installing /tmp/rtk-reactor/child-a/pom.xml to /home/vcyber/.m2/repository/com/example/rtk/child-a/1.0.0-SNAPSHOT/child-a-1.0.0-SNAPSHOT.pom
+[INFO] Installing /tmp/rtk-reactor/child-a/target/child-a-1.0.0-SNAPSHOT.jar to /home/vcyber/.m2/repository/com/example/rtk/child-a/1.0.0-SNAPSHOT/child-a-1.0.0-SNAPSHOT.jar
+[INFO] 
+[INFO] ----------------------< com.example.rtk:child-b >-----------------------
+[INFO] Building child-b 1.0.0-SNAPSHOT                                    [3/3]
+[INFO]   from child-b/pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ child-b ---
+[INFO] skip non existing resourceDirectory /tmp/rtk-reactor/child-b/src/main/resources
+[INFO] 
+[INFO] --- compiler:3.13.0:compile (default-compile) @ child-b ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO] 
+[INFO] --- resources:3.3.1:testResources (default-testResources) @ child-b ---
+[INFO] skip non existing resourceDirectory /tmp/rtk-reactor/child-b/src/test/resources
+[INFO] 
+[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ child-b ---
+[INFO] No sources to compile
+[INFO] 
+[INFO] --- surefire:2.17:test (default-test) @ child-b ---
+[INFO] No tests to run.
+[INFO] 
+[INFO] --- jar:3.1.2:jar (default-jar) @ child-b ---
+[INFO] 
+[INFO] --- install:3.1.2:install (default-install) @ child-b ---
+[INFO] Installing /tmp/rtk-reactor/child-b/pom.xml to /home/vcyber/.m2/repository/com/example/rtk/child-b/1.0.0-SNAPSHOT/child-b-1.0.0-SNAPSHOT.pom
+[INFO] Installing /tmp/rtk-reactor/child-b/target/child-b-1.0.0-SNAPSHOT.jar to /home/vcyber/.m2/repository/com/example/rtk/child-b/1.0.0-SNAPSHOT/child-b-1.0.0-SNAPSHOT.jar
+[INFO] ------------------------------------------------------------------------
+[INFO] Reactor Summary for multi-module-skeleton 1.0.0-SNAPSHOT:
+[INFO] 
+[INFO] multi-module-skeleton .............................. SUCCESS [  0.353 s]
+[INFO] child-a ............................................ SUCCESS [  1.676 s]
+[INFO] child-b ............................................ SUCCESS [  0.069 s]
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  2.284 s
+[INFO] Finished at: 2026-05-25T12:11:31-03:00
+[INFO] ------------------------------------------------------------------------

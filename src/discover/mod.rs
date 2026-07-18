@@ -263,6 +263,7 @@ pub fn run(
         parse_errors,
         rtk_disabled_count,
         rtk_disabled_examples,
+        agent_status: report::AgentIntegrationStatus::detect(),
     };
 
     match format {

@@ -1,0 +1,44 @@
+[INFO] Scanning for projects...
+[INFO]
+[INFO] ----------------------< commons-cli:commons-cli >-----------------------
+[INFO] Building Apache Commons CLI 1.11.1-SNAPSHOT
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO]
+[INFO] --- compiler:3.15.0:compile (default-compile) @ commons-cli ---
+[INFO] Recompiling the module because of changed source code.
+[INFO] Compiling 47 source files with javac [debug parameters release 11] to target/classes
+[INFO]
+[INFO] --- compiler:3.15.0:testCompile (default-testCompile) @ commons-cli ---
+[INFO] Recompiling the module because of changed dependency.
+[INFO] Compiling 52 source files with javac [debug parameters release 11] to target/test-classes
+[INFO]
+[INFO] --- surefire:3.5.5:test (default-test) @ commons-cli ---
+[INFO]
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running org.apache.commons.cli.help.UtilTest
+[INFO] Tests run: 34, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 1.023 s -- in org.apache.commons.cli.help.UtilTest
+[INFO] Running org.apache.commons.cli.DefaultParserTest
+[WARNING] Tests run: 87, Failures: 0, Errors: 0, Skipped: 2, Time elapsed: 1.023 s -- in org.apache.commons.cli.DefaultParserTest
+[INFO] Running org.apache.commons.cli.AlreadySelectedExceptionTest
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.014 s -- in org.apache.commons.cli.AlreadySelectedExceptionTest
+[INFO]
+[INFO] Results:
+[INFO]
+[INFO] Tests run: 977, Failures: 0, Errors: 0, Skipped: 61
+[INFO]
+[INFO] --- jar:3.5.0:jar (default-jar) @ commons-cli ---
+[INFO] Building jar: target/commons-cli-1.11.1-SNAPSHOT.jar
+[INFO]
+[INFO] --- install:3.1.4:install (default-install) @ commons-cli ---
+[INFO] Installing pom.xml to /root/.m2/repository/commons-cli/commons-cli/1.11.1-SNAPSHOT/commons-cli-1.11.1-SNAPSHOT.pom
+[INFO] Installing target/commons-cli-1.11.1-SNAPSHOT.jar to /root/.m2/repository/commons-cli/commons-cli/1.11.1-SNAPSHOT/commons-cli-1.11.1-SNAPSHOT.jar
+[INFO] Installing target/commons-cli-1.11.1-SNAPSHOT-sources.jar to /root/.m2/repository/commons-cli/commons-cli/1.11.1-SNAPSHOT/commons-cli-1.11.1-SNAPSHOT-sources.jar
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  01:29 min
+[INFO] Finished at: 2026-05-21T15:13:00Z
+[INFO] ------------------------------------------------------------------------
