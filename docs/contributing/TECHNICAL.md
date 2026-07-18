@@ -92,6 +92,14 @@ When an LLM agent runs a command (e.g., `git status`):
 
 All rewrite logic lives in Rust (`src/discover/registry.rs`). Hooks are thin delegates that handle agent-specific JSON formats.
 
+Before a hook emits `updatedInput`, the shared lexer rejects constructs whose
+shell semantics cannot be safely attested: command/process substitution,
+parenthesized syntax (including fish command substitution), incomplete
+quoting, file-target redirects, and shell control keywords at command
+boundaries. These commands are returned to the host unchanged. The host still
+owns command parsing and shell selection; RTK never translates syntax between
+fish, POSIX shells, and zsh.
+
 > **Details**: [`hooks/README.md`](../hooks/README.md) covers each agent's JSON format, the rewrite registry, compound command handling, and the `RTK_DISABLED` override.
 
 #### Rewrite Pipeline
