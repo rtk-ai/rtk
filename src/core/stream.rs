@@ -227,6 +227,16 @@ impl StreamResult {
     }
 }
 
+/// Context message for a failed `spawn`/`status` call, naming the program so the
+/// error points at the missing binary rather than a bare "Failed to spawn process".
+fn spawn_failure_context(cmd: &Command) -> String {
+    let program = cmd.get_program().to_string_lossy();
+    format!(
+        "failed to spawn `{program}` (is it installed, or does its \
+         shebang point at a missing interpreter?)"
+    )
+}
+
 pub fn status_to_exit_code(status: std::process::ExitStatus) -> i32 {
     if let Some(code) = status.code() {
         return code;
@@ -260,13 +270,8 @@ pub fn run_streaming(
         };
         cmd.stdout(Stdio::inherit());
         cmd.stderr(Stdio::inherit());
-        let program = cmd.get_program().to_string_lossy().into_owned();
-        let status = cmd.status().with_context(|| {
-            format!(
-                "failed to spawn `{program}` (is it installed, or does its \
-                 shebang point at a missing interpreter?)"
-            )
-        })?;
+        let spawn_ctx = spawn_failure_context(cmd);
+        let status = cmd.status().with_context(|| spawn_ctx)?;
         return Ok(StreamResult {
             exit_code: status_to_exit_code(status),
             raw: String::new(),
@@ -296,13 +301,8 @@ pub fn run_streaming(
 
     let is_streaming = matches!(stdout_mode, FilterMode::Streaming(_));
 
-    let program = cmd.get_program().to_string_lossy().into_owned();
-    let mut child = ChildGuard(cmd.spawn().with_context(|| {
-        format!(
-            "failed to spawn `{program}` (is it installed, or does its \
-             shebang point at a missing interpreter?)"
-        )
-    })?);
+    let spawn_ctx = spawn_failure_context(cmd);
+    let mut child = ChildGuard(cmd.spawn().with_context(|| spawn_ctx)?);
 
     let stdin_thread: Option<std::thread::JoinHandle<()>> = match stdin_mode {
         StdinMode::Filter(mut filter) => {
