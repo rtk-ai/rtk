@@ -1060,6 +1060,12 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_fish_constructs_not_rewritten() {
+        assert!(run_claude_inner(&claude_input("git status (printf x)")).is_none());
+        assert!(run_claude_inner(&claude_input("git status; and printf x")).is_none());
+    }
+
+    #[test]
     fn test_claude_file_redirect_not_rewritten() {
         assert!(run_claude_inner(&claude_input("git log > /tmp/out.txt")).is_none());
     }

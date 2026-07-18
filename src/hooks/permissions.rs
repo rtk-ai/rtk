@@ -929,6 +929,18 @@ mod tests {
     }
 
     #[test]
+    fn test_fish_constructs_never_auto_allowed() {
+        let allow = vec!["*".to_string()];
+        for cmd in ["git status (printf x)", "git status; and printf x"] {
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &[], &allow),
+                PermissionVerdict::Ask,
+                "{cmd} must not auto-allow"
+            );
+        }
+    }
+
+    #[test]
     fn test_double_quoted_substitution_never_auto_allowed() {
         let allow = vec!["git *".to_string()];
         for cmd in [
@@ -972,11 +984,11 @@ mod tests {
     }
 
     #[test]
-    fn test_legitimate_subshell_allow() {
+    fn test_subshell_requires_confirmation() {
         let allow = vec!["git *".to_string(), "cargo *".to_string()];
         assert_eq!(
             check_command_with_rules("(git status; cargo build)", &[], &[], &allow),
-            PermissionVerdict::Allow
+            PermissionVerdict::Ask
         );
     }
 
