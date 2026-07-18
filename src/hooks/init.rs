@@ -1105,6 +1105,21 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result
     Ok(())
 }
 
+/// True when a usable rewrite hook is already registered, so a caller can
+/// pick the slim awareness note over the verbose prefix instructions.
+fn claude_hook_usable() -> bool {
+    let Ok(claude_dir) = resolve_claude_dir() else {
+        return false;
+    };
+    let Ok(content) = fs::read_to_string(claude_dir.join(SETTINGS_JSON)) else {
+        return false;
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
+    };
+    hook_already_present(&root, CLAUDE_HOOK_COMMAND)
+}
+
 /// Check if RTK hook is already present in settings.json
 /// Matches on legacy rtk-rewrite.sh path OR new `rtk hook claude` command
 fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
@@ -1136,8 +1151,27 @@ fn run_default_mode(
 ) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
     if !global {
-        // Local init: inject CLAUDE.md + generate project-local filters template
-        run_claude_md_mode(false, install_opencode, ctx)?;
+        // Without a hook to rewrite for it, the agent must prefix itself, so
+        // fall back to the verbose instructions. `--claude-md` forces them too.
+        if claude_hook_usable() {
+            let rtk_md_path = PathBuf::from(RTK_MD);
+            let claude_md_path = PathBuf::from(CLAUDE_MD);
+
+            write_if_changed(&rtk_md_path, RTK_SLIM, RTK_MD, ctx)?;
+            let migrated = patch_claude_md(&claude_md_path, ctx)?;
+
+            if !dry_run {
+                println!("\nRTK configured (project-local).\n");
+                println!("  RTK.md:    {}", rtk_md_path.display());
+                println!("  CLAUDE.md: @RTK.md reference added");
+                if migrated {
+                    println!("\n  [ok] Migrated: removed 137-line RTK block from CLAUDE.md");
+                    println!("              replaced with @RTK.md");
+                }
+            }
+        } else {
+            run_claude_md_mode(false, install_opencode, ctx)?;
+        }
         generate_project_filters_template(ctx)?;
         return Ok(());
     }
@@ -4464,31 +4498,9 @@ const COPILOT_HOOK_JSON: &str = r#"{
 "#;
 
 const COPILOT_INSTRUCTIONS: &str = r#"<!-- rtk-instructions v2 -->
-# RTK — Token-Optimized CLI
+# RTK — Rust Token Killer
 
-**rtk** is a CLI proxy that filters and compresses command outputs, saving 60-90% tokens.
-
-## Rule
-
-Always prefix shell commands with `rtk`:
-
-```bash
-# Instead of:              Use:
-git status                 rtk git status
-git log -10                rtk git log -10
-cargo test                 rtk cargo test
-docker ps                  rtk docker ps
-kubectl get pods           rtk kubectl pods
-```
-
-## Meta commands (use directly)
-
-```bash
-rtk gain              # Token savings dashboard
-rtk gain --history    # Per-command savings history
-rtk discover          # Find missed rtk opportunities
-rtk proxy <cmd>       # Run raw (no filtering) but track usage
-```
+**rtk is running.** It transparently rewrites your shell commands to a token-optimized `rtk` equivalent before they execute and compresses their output to save tokens — this is automatic and you don't need to add `rtk` yourself. If a command's output ever looks wrong, truncated, or is missing information you need, re-run it with `rtk proxy <cmd>` to bypass the filtering and get the raw, unfiltered output.
 <!-- /rtk-instructions -->
 "#;
 
@@ -6920,23 +6932,63 @@ mod tests {
     }
 
     #[test]
-    fn test_local_init_no_hook() {
+    fn test_local_init_no_hook_keeps_verbose() {
         let tmp = TempDir::new().unwrap();
         let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
 
-        let result = run_default_mode(false, PatchMode::Auto, false, InitContext::default());
+        // Empty claude dir => no usable hook.
+        with_claude_dir_override(&tmp, |_| {
+            run_default_mode(false, PatchMode::Auto, false, InitContext::default()).unwrap();
+        });
         std::env::set_current_dir(&cwd).unwrap();
 
-        result.unwrap();
+        let claude_md = fs::read_to_string(tmp.path().join(CLAUDE_MD)).unwrap();
         assert!(
-            tmp.path().join(CLAUDE_MD).exists(),
-            "local CLAUDE.md must be created"
+            claude_md.contains(RTK_BLOCK_START),
+            "no usable hook => verbose rewrite context must be kept"
+        );
+        assert!(
+            !tmp.path().join(RTK_MD).exists(),
+            "verbose mode must not write the slim RTK.md"
         );
         assert!(
             !tmp.path().join(SETTINGS_JSON).exists(),
             "settings.json must not be created for local init"
+        );
+    }
+
+    #[test]
+    fn test_local_init_with_hook_is_slim() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let settings = format!(
+                r#"{{"hooks":{{"PreToolUse":[{{"hooks":[{{"type":"command","command":"{}"}}]}}]}}}}"#,
+                CLAUDE_HOOK_COMMAND
+            );
+            fs::write(claude_dir.join(SETTINGS_JSON), settings).unwrap();
+
+            run_default_mode(false, PatchMode::Auto, false, InitContext::default()).unwrap();
+        });
+        std::env::set_current_dir(&cwd).unwrap();
+
+        assert!(
+            tmp.path().join(RTK_MD).exists(),
+            "usable hook => slim RTK.md must be written"
+        );
+        let claude_md = fs::read_to_string(tmp.path().join(CLAUDE_MD)).unwrap();
+        assert!(
+            claude_md.contains(RTK_MD_REF),
+            "@RTK.md reference must be added"
+        );
+        assert!(
+            !claude_md.contains(RTK_BLOCK_START),
+            "usable hook => no verbose block in CLAUDE.md"
         );
     }
 
@@ -7482,7 +7534,7 @@ mod tests {
             "Stale RTK block content must be removed"
         );
         assert!(
-            updated.contains("rtk cargo test"),
+            updated.contains("rtk proxy <cmd>"),
             "Fresh COPILOT_INSTRUCTIONS content must be present"
         );
     }
@@ -7520,7 +7572,7 @@ mod tests {
         let content = fs::read_to_string(&instructions_path).unwrap();
         assert!(content.contains(RTK_BLOCK_START));
         assert!(content.contains(RTK_BLOCK_END));
-        assert!(content.contains("rtk cargo test"));
+        assert!(content.contains("rtk proxy <cmd>"));
     }
 
     #[test]
@@ -7698,7 +7750,7 @@ mod tests {
         );
         let content = fs::read_to_string(&instructions).unwrap();
         assert!(content.contains(RTK_BLOCK_START));
-        assert!(content.contains("rtk cargo test"));
+        assert!(content.contains("rtk proxy <cmd>"));
     }
 
     #[test]

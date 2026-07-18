@@ -209,6 +209,14 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 
 Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
 
+## What RTK tells the agent
+
+For **full hook** and **plugin** integrations the rewrite is automatic, so RTK injects only a one-paragraph awareness note (e.g. `~/.claude/RTK.md`, `.github/copilot-instructions.md`): rtk is running, output is filtered to save tokens, and `rtk proxy <cmd>` returns the raw output if a filter ever drops something the agent needs. These agents are never told to type `rtk` themselves — that would be redundant.
+
+**Rules file** integrations have no hook, so their files keep the explicit "prefix commands with `rtk`" guidance — the model is the only thing that can apply it.
+
+`rtk init` (project-local, no `-g`) mirrors this: if a usable Claude hook is already installed it writes the slim note plus an `@RTK.md` reference; otherwise it falls back to the full prefix instructions. `rtk init --claude-md` always writes the full instructions (the no-hook / Windows fallback).
+
 ## Windows support
 
 The shell hook (`rtk-rewrite.sh`) requires a Unix shell. On native Windows:
