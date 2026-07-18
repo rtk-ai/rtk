@@ -463,6 +463,7 @@ rtk telemetry forget     # Withdraw consent + delete all local data + request se
 **Override via environment:**
 ```bash
 export RTK_TELEMETRY_DISABLED=1   # Blocks telemetry regardless of consent
+export DO_NOT_TRACK=true          # Standard opt-out convention; 1 also works
 ```
 
 ## Star History

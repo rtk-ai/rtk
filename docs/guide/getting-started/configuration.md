@@ -60,6 +60,7 @@ For full details on what is collected, opt-out options, and GDPR rights, see [Te
 | `RTK_DISABLED=1` | Disable RTK for a single command (`RTK_DISABLED=1 git status`) |
 | `RTK_TEE_DIR` | Override the tee directory |
 | `RTK_TELEMETRY_DISABLED=1` | Disable telemetry |
+| `DO_NOT_TRACK=true` | Disable telemetry using the standard opt-out convention (`1` also works) |
 | `RTK_HOOK_AUDIT=1` | Enable hook audit logging |
 | `SKIP_ENV_VALIDATION=1` | Skip env validation (useful with Next.js) |
 

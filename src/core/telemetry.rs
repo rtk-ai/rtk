@@ -16,6 +16,48 @@ static CACHED_SALT: OnceLock<String> = OnceLock::new();
 const TELEMETRY_URL: Option<&str> = option_env!("RTK_TELEMETRY_URL");
 const TELEMETRY_TOKEN: Option<&str> = option_env!("RTK_TELEMETRY_TOKEN");
 const PING_INTERVAL_SECS: u64 = 23 * 3600; // 23 hours
+const RTK_TELEMETRY_DISABLED_ENV: &str = "RTK_TELEMETRY_DISABLED";
+const DO_NOT_TRACK_ENV: &str = "DO_NOT_TRACK";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TelemetryEnvOverride {
+    RtkTelemetryDisabled,
+    DoNotTrack,
+}
+
+impl TelemetryEnvOverride {
+    pub(crate) fn status_message(self) -> &'static str {
+        match self {
+            Self::RtkTelemetryDisabled => "RTK_TELEMETRY_DISABLED (blocked)",
+            Self::DoNotTrack => "DO_NOT_TRACK (blocked)",
+        }
+    }
+}
+
+pub(crate) fn telemetry_env_override() -> Option<TelemetryEnvOverride> {
+    telemetry_env_override_from_values(
+        std::env::var(RTK_TELEMETRY_DISABLED_ENV).ok().as_deref(),
+        std::env::var(DO_NOT_TRACK_ENV).ok().as_deref(),
+    )
+}
+
+fn telemetry_env_override_from_values(
+    rtk_disabled: Option<&str>,
+    do_not_track: Option<&str>,
+) -> Option<TelemetryEnvOverride> {
+    if rtk_disabled == Some("1") {
+        return Some(TelemetryEnvOverride::RtkTelemetryDisabled);
+    }
+    if do_not_track.is_some_and(is_truthy_env) {
+        return Some(TelemetryEnvOverride::DoNotTrack);
+    }
+    None
+}
+
+fn is_truthy_env(value: &str) -> bool {
+    let v = value.trim();
+    v == "1" || v.eq_ignore_ascii_case("true")
+}
 
 /// Send a telemetry ping if enabled and not already sent today.
 /// Fire-and-forget: errors are silently ignored.
@@ -26,7 +68,7 @@ pub fn maybe_ping() {
     }
 
     // Check opt-out: env var
-    if std::env::var("RTK_TELEMETRY_DISABLED").unwrap_or_default() == "1" {
+    if telemetry_env_override().is_some() {
         return;
     }
 
@@ -497,6 +539,55 @@ mod tests {
     fn test_marker_path_exists() {
         let path = telemetry_marker_path();
         assert!(path.to_string_lossy().contains("rtk"));
+    }
+
+    #[test]
+    fn test_telemetry_env_override_baseline() {
+        assert_eq!(telemetry_env_override_from_values(None, None), None);
+        assert_eq!(telemetry_env_override_from_values(Some(""), Some("")), None);
+    }
+
+    #[test]
+    fn test_telemetry_env_override_honors_rtk_specific_opt_out() {
+        assert_eq!(
+            telemetry_env_override_from_values(Some("1"), None),
+            Some(TelemetryEnvOverride::RtkTelemetryDisabled)
+        );
+
+        for value in ["0", "true", "TRUE", "false", "yes", "no", "", " 1 "] {
+            assert_eq!(
+                telemetry_env_override_from_values(Some(value), None),
+                None,
+                "RTK_TELEMETRY_DISABLED={value:?} should not block telemetry"
+            );
+        }
+    }
+
+    #[test]
+    fn test_telemetry_env_override_honors_do_not_track() {
+        for value in ["true", "TRUE", "TrUe", "1", " true "] {
+            assert_eq!(
+                telemetry_env_override_from_values(None, Some(value)),
+                Some(TelemetryEnvOverride::DoNotTrack),
+                "DO_NOT_TRACK={value:?} should block telemetry"
+            );
+        }
+
+        for value in ["false", "0", "yes", "no", ""] {
+            assert_eq!(
+                telemetry_env_override_from_values(None, Some(value)),
+                None,
+                "DO_NOT_TRACK={value:?} should not block telemetry"
+            );
+        }
+    }
+
+    #[test]
+    fn test_telemetry_env_override_prefers_rtk_specific_opt_out() {
+        assert_eq!(
+            telemetry_env_override_from_values(Some("1"), Some("true")),
+            Some(TelemetryEnvOverride::RtkTelemetryDisabled)
+        );
     }
 
     #[test]

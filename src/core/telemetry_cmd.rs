@@ -33,7 +33,7 @@ fn run_status() -> Result<()> {
         "no"
     };
 
-    let env_override = std::env::var("RTK_TELEMETRY_DISABLED").unwrap_or_default() == "1";
+    let env_override = super::telemetry::telemetry_env_override();
 
     println!("Telemetry status:");
     println!("  consent:       {}", consent_str);
@@ -41,8 +41,8 @@ fn run_status() -> Result<()> {
         println!("  consent date:  {}", date);
     }
     println!("  enabled:       {}", enabled_str);
-    if env_override {
-        println!("  env override:  RTK_TELEMETRY_DISABLED=1 (blocked)");
+    if let Some(env_override) = env_override {
+        println!("  env override:  {}", env_override.status_message());
     }
 
     let salt_path = super::telemetry::salt_file_path();

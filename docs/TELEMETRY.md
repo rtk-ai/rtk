@@ -130,6 +130,8 @@ rtk telemetry forget     # Withdraw consent + delete local data + request server
 Environment variable override (blocks telemetry regardless of consent):
 ```bash
 export RTK_TELEMETRY_DISABLED=1
+# Standard "do not track" convention is also respected:
+export DO_NOT_TRACK=1             # accepts 1 or true (case-insensitive)
 ```
 
 ## Retention Policy
@@ -147,7 +149,7 @@ Under the EU General Data Protection Regulation, you have the right to:
 - **Erasure** (Art. 17): run `rtk telemetry forget` to delete local data and send an erasure request to the server. Alternatively, email contact@rtk-ai.app with your device hash.
 - **Restriction of processing**: `rtk telemetry disable` stops all data collection immediately.
 - **Portability**: the local SQLite database at `~/.local/share/rtk/tracking.db` contains all locally stored data.
-- **Objection**: `rtk telemetry disable` or `export RTK_TELEMETRY_DISABLED=1`.
+- **Objection**: `rtk telemetry disable`, `export RTK_TELEMETRY_DISABLED=1`, or `export DO_NOT_TRACK=true`.
 
 ## Erasure Procedure
 

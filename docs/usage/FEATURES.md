@@ -1338,6 +1338,7 @@ exclude_commands = []       # Commandes a exclure de la recriture automatique
 |----------|-------------|
 | `RTK_TEE_DIR` | Surcharge le repertoire tee |
 | `RTK_TELEMETRY_DISABLED=1` | Desactiver la telemetrie |
+| `DO_NOT_TRACK=true` | Desactiver la telemetrie via la convention standard (`1` fonctionne aussi) |
 | `RTK_HOOK_AUDIT=1` | Activer l'audit du hook |
 | `SKIP_ENV_VALIDATION=1` | Desactiver la validation d'env (Next.js, etc.) |
 
@@ -1392,6 +1393,7 @@ rtk telemetry forget     # Retirer + supprimer donnees locales + demande d'effac
 **Desactiver via variable d'environnement :**
 ```bash
 export RTK_TELEMETRY_DISABLED=1
+export DO_NOT_TRACK=true  # ou DO_NOT_TRACK=1
 ```
 
 Aucune donnee personnelle, aucun contenu de commande, aucun chemin de fichier n'est transmis. Conservation serveur : 12 mois max. Details : [docs/TELEMETRY.md](../TELEMETRY.md)
