@@ -44,7 +44,11 @@ impl Default for FindArgs {
             path: ".".to_string(),
             max_results: 50,
             max_depth: None,
-            file_type: "f".to_string(),
+            // Empty = no type filter (matches real `find`'s default of matching every
+            // entry type). Only set to "f" or "d" when the caller explicitly passes
+            // -type/-t. See #3016 -- this used to default to "f", silently narrowing
+            // every unfiltered search to files-only.
+            file_type: String::new(),
             case_insensitive: false,
         }
     }
@@ -209,7 +213,9 @@ pub fn run(
         eprintln!("find: {} in {}", effective_pattern, path);
     }
 
+    // "" (no -type/-t given) means match any entry type, like real `find`.
     let want_dirs = file_type == "d";
+    let want_files_only = !file_type.is_empty() && file_type != "d";
 
     // When the pattern targets dotfiles (e.g. -name ".claude.json"), we must walk hidden
     // entries; otherwise skip them to keep results tidy (#1101).
@@ -241,7 +247,7 @@ pub fn run(
         if want_dirs && !is_dir {
             continue;
         }
-        if !want_dirs && is_dir {
+        if want_files_only && is_dir {
             continue;
         }
 
@@ -445,7 +451,8 @@ mod tests {
         let parsed = parse_find_args(&args(&[".", "-name", "*.rs"])).unwrap();
         assert_eq!(parsed.pattern, "*.rs");
         assert_eq!(parsed.path, ".");
-        assert_eq!(parsed.file_type, "f");
+        // No -type given: real `find` matches any entry type. See #3016.
+        assert_eq!(parsed.file_type, "");
         assert_eq!(parsed.max_results, 50);
     }
 
@@ -462,6 +469,15 @@ mod tests {
         let parsed = parse_find_args(&args(&[".", "-type", "d"])).unwrap();
         assert_eq!(parsed.pattern, "*");
         assert_eq!(parsed.file_type, "d");
+    }
+
+    #[test]
+    fn parse_native_find_maxdepth_no_type_matches_any_entry() {
+        // Regression test for #3016: `find <dir> -maxdepth N` with no -type must not
+        // silently narrow to files-only, or directory-only results vanish.
+        let parsed = parse_find_args(&args(&[".", "-maxdepth", "1"])).unwrap();
+        assert_eq!(parsed.file_type, "");
+        assert_eq!(parsed.max_depth, Some(1));
     }
 
     #[test]
