@@ -3147,6 +3147,10 @@ mod tests {
             "ecs",
             "pint",
             "uv",
+            "gcc",
+            "g++",
+            "clang",
+            "clang++",
         ];
 
         let unclassified: Vec<String> = Cli::command()
