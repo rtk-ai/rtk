@@ -55,10 +55,58 @@ fn single_multi_recursive_and_h_match_grep_n() {
 }
 
 #[test]
+fn lowercase_h_is_no_filename_not_help() {
+    // GNU/BSD grep `-h` is `--no-filename`, NOT help. On a multi-file search grep
+    // normally prefixes each line with the filename; `-h` suppresses it. rtk must
+    // match `grep -n -h` (position + content, no filename), and must NOT intercept
+    // `-h` as its own --help banner.
+    let d = tempfile::tempdir().unwrap();
+    let f1 = write(d.path(), "f1.txt", "apple\nzebra apple\n");
+    let f2 = write(d.path(), "f2.txt", "apricot apple\n");
+    assert_eq_grep_n(&["-h", "apple", &f1, &f2]);
+    // Guard the symptom directly: output must be a match, never the rtk help text.
+    let (out, _) = rtk_grep(&["-h", "apple", &f1, &f2]);
+    assert!(out.contains("apple"), "should match, got: {out:?}");
+    assert!(
+        !out.contains("Usage:") && !out.contains("Compact grep"),
+        "-h must not print rtk help: {out:?}"
+    );
+    assert!(
+        !out.contains("f1.txt") && !out.contains("f2.txt"),
+        "-h must suppress the filename prefix: {out:?}"
+    );
+}
+
+#[test]
+fn lowercase_h_in_cluster_suppresses_filename() {
+    // `-hi`: no-filename (-h) + ignore-case (-i) bundled. The `-h` must be honored
+    // inside a cluster (filename suppressed) while `-i` still applies, matching
+    // `grep -n -hi` across multiple files.
+    let d = tempfile::tempdir().unwrap();
+    let f1 = write(d.path(), "f1.txt", "Apple\nzebra\n");
+    let f2 = write(d.path(), "f2.txt", "apple pie\n");
+    assert_eq_grep_n(&["-hi", "apple", &f1, &f2]);
+}
+
+#[test]
 fn no_match_matches_grep_n() {
     let d = tempfile::tempdir().unwrap();
     let f = write(d.path(), "f.txt", "hello\n");
     assert_eq_grep_n(&["zzz_no_match_xyz", &f]); // empty stdout, exit 1
+}
+
+// `\|` means different things per dialect, so it must never be rewritten before
+// the engine: in ERE (`-E`) it is a LITERAL pipe, in BRE (default) it is GNU
+// alternation, and under `-F` the whole pattern is literal. Pin each against
+// `grep -n` so any future pattern munging that breaks one dialect is caught.
+#[test]
+fn escaped_pipe_dialect_matches_grep_n() {
+    let d = tempfile::tempdir().unwrap();
+    let f = write(d.path(), "p.txt", "a\nb\na|b\nc\n| None\nNone\n");
+    assert_eq_grep_n(&["-E", r"\| None", &f]); // ERE: literal pipe → only "| None"
+    assert_eq_grep_n(&["-E", r"a\|b", &f]); // ERE: literal → only "a|b"
+    assert_eq_grep_n(&[r"a\|b", &f]); // BRE: alternation → a, b, a|b
+    assert_eq_grep_n(&["-F", "a|b", &f]); // fixed-string pipe → only "a|b"
 }
 
 #[test]
