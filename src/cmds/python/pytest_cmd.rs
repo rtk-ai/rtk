@@ -67,15 +67,21 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
     let mut current_failure: Vec<String> = Vec::new();
     let mut xfail_lines: Vec<String> = Vec::new();
     let mut summary_line = String::new();
+    let mut has_collection_error = false;
 
     for line in output.lines() {
         let trimmed = line.trim();
+        if trimmed.contains("ERROR collecting") || trimmed.contains("error during collection") {
+            has_collection_error = true;
+        }
 
         // State transitions
         if trimmed.starts_with("===") && trimmed.contains("test session starts") {
             state = ParseState::Header;
             continue;
-        } else if trimmed.starts_with("===") && trimmed.contains("FAILURES") {
+        } else if trimmed.starts_with("===")
+            && (trimmed.contains("FAILURES") || trimmed.contains("ERRORS"))
+        {
             state = ParseState::Failures;
             continue;
         } else if trimmed.starts_with("===") && trimmed.contains("short test summary") {
@@ -89,7 +95,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         } else if trimmed.starts_with("===")
             && (trimmed.contains("passed")
                 || trimmed.contains("failed")
-                || trimmed.contains("skipped"))
+                || trimmed.contains("skipped")
+                || trimmed.contains(" error"))
         {
             summary_line = trimmed.to_string();
             continue;
@@ -100,7 +107,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
             && !trimmed.starts_with("ERROR")
             && (trimmed.contains(" passed")
                 || trimmed.contains(" failed")
-                || trimmed.contains(" skipped"))
+                || trimmed.contains(" skipped")
+                || trimmed.contains(" error"))
             && trimmed.contains(" in ")
         {
             summary_line = trimmed.to_string();
@@ -138,8 +146,15 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
             }
             ParseState::Summary => {
                 // FAILED test lines
-                if trimmed.starts_with("FAILED") || trimmed.starts_with("ERROR") {
+                if trimmed.starts_with("FAILED") {
                     failures.push(trimmed.to_string());
+                } else if let Some(error_target) = trimmed.strip_prefix("ERROR ") {
+                    if !failures
+                        .iter()
+                        .any(|failure| failure.contains(error_target))
+                    {
+                        failures.push(trimmed.to_string());
+                    }
                 } else if trimmed.starts_with("XFAIL") || trimmed.starts_with("XPASS") {
                     xfail_lines.push(trimmed.to_string());
                 }
@@ -153,7 +168,13 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
     }
 
     // Build compact output
-    build_pytest_summary(&summary_line, &test_files, &failures, &xfail_lines)
+    build_pytest_summary(
+        &summary_line,
+        &test_files,
+        &failures,
+        &xfail_lines,
+        has_collection_error,
+    )
 }
 
 #[derive(Default)]
@@ -163,6 +184,7 @@ struct PytestCounts {
     skipped: usize,
     xfailed: usize,
     xpassed: usize,
+    errors: usize,
 }
 
 fn build_pytest_summary(
@@ -170,6 +192,7 @@ fn build_pytest_summary(
     _test_files: &[String],
     failures: &[String],
     xfail_lines: &[String],
+    has_collection_error: bool,
 ) -> String {
     let counts = parse_summary_line(summary);
     let PytestCounts {
@@ -178,20 +201,50 @@ fn build_pytest_summary(
         skipped,
         xfailed,
         xpassed,
+        errors,
     } = counts;
 
-    if passed == 0 && failed == 0 && skipped == 0 && xfailed == 0 && xpassed == 0 {
+    if passed == 0
+        && failed == 0
+        && skipped == 0
+        && xfailed == 0
+        && xpassed == 0
+        && errors == 0
+        && failures.is_empty()
+    {
         return "Pytest: No tests collected".to_string();
     }
 
-    let extras_present = skipped > 0 || xfailed > 0 || xpassed > 0 || !xfail_lines.is_empty();
+    let extras_present =
+        skipped > 0 || xfailed > 0 || xpassed > 0 || errors > 0 || !xfail_lines.is_empty();
 
     if failed == 0 && passed > 0 && !extras_present {
         return format!("Pytest: {} passed", passed);
     }
 
-    let mut result = String::new();
-    result.push_str(&format!("Pytest: {} passed, {} failed", passed, failed));
+    let mut result = if errors > 0 && passed == 0 && failed == 0 {
+        let suffix = if has_collection_error {
+            " during collection"
+        } else {
+            ""
+        };
+        format!(
+            "Pytest: {} error{}{}",
+            errors,
+            if errors == 1 { "" } else { "s" },
+            suffix
+        )
+    } else {
+        let mut summary = format!("Pytest: {} passed, {} failed", passed, failed);
+        if errors > 0 {
+            summary.push_str(&format!(
+                ", {} error{}",
+                errors,
+                if errors == 1 { "" } else { "s" }
+            ));
+        }
+        summary
+    };
     if skipped > 0 {
         result.push_str(&format!(", {} skipped", skipped));
     }
@@ -224,7 +277,17 @@ fn build_pytest_summary(
     }
 
     // Show failures (limit to key information)
-    result.push_str("\nFailures:\n");
+    if errors > 0 && failed == 0 {
+        if has_collection_error {
+            result.push_str("\nCollection errors:\n");
+        } else {
+            result.push_str("\nErrors:\n");
+        }
+    } else if errors > 0 {
+        result.push_str("\nFailures and errors:\n");
+    } else {
+        result.push_str("\nFailures:\n");
+    }
 
     for (i, failure) in failures.iter().take(MAX_PYTEST_FAILURES).enumerate() {
         // Extract test name and key error info
@@ -235,7 +298,11 @@ fn build_pytest_summary(
             if first_line.starts_with("___") {
                 // Extract test name between ___
                 let test_name = first_line.trim_matches('_').trim();
-                result.push_str(&format!("{}. [FAIL] {}\n", i + 1, test_name));
+                if let Some(error_target) = test_name.strip_prefix("ERROR collecting ") {
+                    result.push_str(&format!("{}. [ERROR] {}\n", i + 1, error_target));
+                } else {
+                    result.push_str(&format!("{}. [FAIL] {}\n", i + 1, test_name));
+                }
             } else if first_line.starts_with("FAILED") {
                 // Summary format: "FAILED tests/test_foo.py::test_bar - AssertionError"
                 let parts: Vec<&str> = first_line.split(" - ").collect();
@@ -247,6 +314,8 @@ fn build_pytest_summary(
                     result.push_str(&format!("     {}\n", truncate(parts[1], 100)));
                 }
                 continue;
+            } else if let Some(error_target) = first_line.strip_prefix("ERROR ") {
+                result.push_str(&format!("{}. [ERROR] {}\n", i + 1, error_target));
             }
         }
 
@@ -309,6 +378,8 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
                 counts.failed = n;
             } else if word.contains("skipped") {
                 counts.skipped = n;
+            } else if *word == "error" || *word == "errors" {
+                counts.errors = n;
             }
         }
     }
@@ -400,6 +471,25 @@ collected 0 items
     }
 
     #[test]
+    fn test_filter_pytest_collection_error() {
+        let output = include_str!("../../../tests/fixtures/pytest_collection_error.txt");
+
+        let result = filter_pytest_output(output);
+
+        assert!(
+            !result.contains("No tests collected"),
+            "collection errors must not be reported as no tests: {result}"
+        );
+        assert!(result.contains("1 error"), "missing error count: {result}");
+        assert!(
+            result.contains("Collection errors:"),
+            "missing collection error section: {result}"
+        );
+        assert!(result.contains("tests/test_x.py"), "missing module: {result}");
+        assert!(result.contains("ImportError"), "missing root cause: {result}");
+    }
+
+    #[test]
     fn test_parse_summary_line() {
         let c = parse_summary_line("=== 5 passed in 0.50s ===");
         assert_eq!((c.passed, c.failed, c.skipped), (5, 0, 0));
@@ -415,6 +505,9 @@ collected 0 items
             (c.passed, c.failed, c.xfailed, c.xpassed),
             (2, 1, 2, 1)
         );
+
+        let c = parse_summary_line("=== 1 passed, 2 errors in 0.50s ===");
+        assert_eq!((c.passed, c.errors), (1, 2));
     }
 
     #[test]

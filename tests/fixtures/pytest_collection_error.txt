@@ -1,0 +1,19 @@
+============================= test session starts =============================
+platform win32 -- Python 3.13.9, pytest-8.4.2, pluggy-1.6.0
+rootdir: C:\workspace\example
+collected 0 items / 1 error
+
+==================================== ERRORS ====================================
+_______________________ ERROR collecting tests/test_x.py _______________________
+ImportError while importing test module 'C:\workspace\example\tests\test_x.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+C:\Python313\Lib\importlib\__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+tests\test_x.py:1: in <module>
+    from mypkg import DoesNotExistYet
+E   ImportError: cannot import name 'DoesNotExistYet' from 'mypkg'
+=========================== short test summary info ===========================
+ERROR tests/test_x.py
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+=============================== 1 error in 0.12s ===============================
