@@ -1203,11 +1203,6 @@ mod tests {
         let cases = [
             ("Bash", "git add .", "rtk git add ."),
             ("Shell", "pnpm install", "rtk pnpm install"),
-            (
-                "PowerShell",
-                "gc -Tail 15 src\\main.rs",
-                "rtk read --tail-lines 15 src\\main.rs",
-            ),
         ];
 
         for (tool, input, expected) in cases {
@@ -1222,6 +1217,24 @@ mod tests {
                 .and_then(|c| c.as_str())
                 .unwrap();
             assert_eq!(cmd, expected, "failed for {tool}: {input}");
+        }
+    }
+
+    #[test]
+    fn test_codex_powershell_exact_read_flags_passthrough() {
+        for command in [
+            "gc -Tail 15 src\\main.rs",
+            "Get-Content -TotalCount 20 src\\main.rs",
+            "Get-Content -Raw package.json",
+        ] {
+            let input: Value = serde_json::from_str(&agent_input("PowerShell", command)).unwrap();
+            assert!(
+                !matches!(
+                    process_codex_payload_for_verdict(&input, PermissionVerdict::Allow),
+                    PayloadAction::Rewrite { .. }
+                ),
+                "PowerShell exact-read semantics must remain native: {command}"
+            );
         }
     }
 

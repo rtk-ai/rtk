@@ -605,6 +605,15 @@ pub fn rewrite_command(
         return None;
     }
 
+    // A physical newline is a statement boundary in both PowerShell and POSIX
+    // shells. The lexer intentionally treats whitespace uniformly, so trying to
+    // rewrite a multi-line payload here can merge separate commands and corrupt
+    // quoting. Keep the entire payload native; explicit `\\` continuations were
+    // already collapsed above and remain eligible for rewriting.
+    if normalized.contains(['\n', '\r']) {
+        return None;
+    }
+
     if has_rtk_disabled_assignment(trimmed) {
         eprintln!(
             "[rtk] RTK_DISABLED=1 detected — skipping filter for this command. \
@@ -975,6 +984,13 @@ fn rewrite_segment_inner(
         return None;
     }
 
+    // `python -m pytest` deliberately selects the Python resolved by the shell.
+    // Rewriting it to `rtk pytest` may instead select an unrelated pytest.exe,
+    // which changes site-packages and sys.path on Windows.
+    if is_python_module_pytest(cmd_part) {
+        return None;
+    }
+
     // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
     // semantics than rtk read or no equivalent at all. Only `-n` (line numbers)
     // maps correctly to `rtk read -n`. Skip rewrite for any other flag.
@@ -1060,6 +1076,18 @@ fn rewrite_segment_inner(
         {
             return None;
         }
+    }
+
+    // The Playwright wrapper injects the JSON test reporter and resolves the
+    // Node package-manager binary. Only test runs share those semantics; version
+    // probes and install commands must retain their original executable/output.
+    if rule.rtk_cmd == "rtk playwright"
+        && !rule.rewrite_prefixes.iter().any(|prefix| {
+            strip_word_prefix(cmd_part, prefix).and_then(|rest| rest.split_whitespace().next())
+                == Some("test")
+        })
+    {
+        return None;
     }
 
     // For the Composer-resolved php tools, normalize the leading invocation
@@ -1177,6 +1205,26 @@ fn rewrite_cmd_findstr(args: &[(&str, usize, usize)], redirect_suffix: &str) -> 
     ))
 }
 
+fn is_python_module_pytest(cmd: &str) -> bool {
+    let args = split_arg_token_spans(cmd);
+    let Some((interpreter, _, _)) = args.first().copied() else {
+        return false;
+    };
+    let interpreter = interpreter.to_ascii_lowercase();
+    let Some(version) = interpreter.strip_prefix("python") else {
+        return false;
+    };
+    let is_python = version.is_empty()
+        || version
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-'));
+    is_python
+        && args.get(1).is_some_and(|arg| arg.0 == "-m")
+        && args
+            .get(2)
+            .is_some_and(|arg| arg.0.eq_ignore_ascii_case("pytest"))
+}
+
 fn looks_like_file_path(token: &str) -> bool {
     let unquoted = token.trim_matches('"').trim_matches('\'');
     unquoted.contains('.')
@@ -1227,17 +1275,11 @@ fn rewrite_powershell_get_content(
         if is_ps_flag(token, &["Path", "LiteralPath"]) {
             i += 1;
             paths.push(args.get(i)?.0);
-        } else if is_ps_flag(token, &["Raw"]) {
-            // Raw changes PowerShell object shape, not the terminal text we optimize.
-        } else if is_ps_flag(token, &["TotalCount", "First", "Head"]) {
-            i += 1;
-            output_args.push("--max-lines");
-            output_args.push(args.get(i)?.0);
-        } else if is_ps_flag(token, &["Tail", "Last"]) {
-            i += 1;
-            output_args.push("--tail-lines");
-            output_args.push(args.get(i)?.0);
         } else if token.starts_with('-') {
+            // Beyond -Path/-LiteralPath, PowerShell flags carry semantics that
+            // `rtk read` cannot preserve. In particular, -Raw promises one
+            // unmodified string and line-window flags promise exact physical
+            // lines rather than a smart non-contiguous source excerpt.
             return None;
         } else {
             paths.push(token);
@@ -2112,6 +2154,21 @@ mod tests {
     }
 
     #[test]
+    fn test_multiline_shell_payloads_passthrough() {
+        for input in [
+            "Get-Content -LiteralPath 'a.txt' -Raw\nGet-Content -LiteralPath 'b.txt' -Raw",
+            "rg -n needle src\nGet-Content -LiteralPath 'src\\main.rs' -TotalCount 40",
+            "git status\ncargo test",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                None,
+                "multi-line payload must preserve native statement boundaries: {input}"
+            );
+        }
+    }
+
+    #[test]
     fn test_rewrite_cat_with_incompatible_flags_skipped() {
         // cat flags with different semantics than rtk read — skip rewrite
         assert_eq!(rewrite_command_no_prefixes("cat -A file.cpp", &[]), None);
@@ -2167,6 +2224,21 @@ mod tests {
                 Some("rtk playwright test".into()),
                 "Failed for command: {}",
                 command
+            );
+        }
+    }
+
+    #[test]
+    fn test_playwright_non_test_commands_passthrough() {
+        for command in [
+            "playwright --version",
+            "playwright install chromium",
+            "npx playwright --version",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "non-test Playwright command must preserve native resolution and output: {command}"
             );
         }
     }
@@ -3177,7 +3249,7 @@ mod tests {
     fn test_rewrite_python_m_pytest() {
         assert_eq!(
             rewrite_command_no_prefixes("python -m pytest -x tests/", &[]),
-            Some("rtk pytest -x tests/".into())
+            None
         );
     }
 
@@ -4903,7 +4975,7 @@ mod tests {
     fn test_python3_m_pytest() {
         assert_eq!(
             rewrite_command_no_prefixes("python3 -m pytest tests/", &[]),
-            Some("rtk pytest tests/".into())
+            None
         );
     }
 
@@ -5329,14 +5401,18 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_get_content_total_count_and_tail() {
+    fn test_get_content_semantic_flags_passthrough() {
         assert_eq!(
             rewrite_command_no_prefixes("Get-Content -TotalCount 20 src\\main.rs", &[]),
-            Some("rtk read --max-lines 20 src\\main.rs".into())
+            None
         );
         assert_eq!(
             rewrite_command_no_prefixes("gc -Tail 15 src\\main.rs", &[]),
-            Some("rtk read --tail-lines 15 src\\main.rs".into())
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("Get-Content -Raw package.json", &[]),
+            None
         );
     }
 
