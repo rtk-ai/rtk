@@ -142,15 +142,16 @@ fn run_forget() -> Result<()> {
         let _ = std::fs::remove_file(&marker_path);
     }
 
-    // Purge local tracking database (GDPR Art. 17 — right to erasure applies to local data too)
-    let db_path = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(super::constants::RTK_DATA_DIR)
-        .join(super::constants::HISTORY_DB);
-    if db_path.exists() {
-        match std::fs::remove_file(&db_path) {
-            Ok(()) => println!("Local tracking database deleted: {}", db_path.display()),
-            Err(e) => eprintln!("rtk: could not delete {}: {}", db_path.display(), e),
+    // Purge local tracking database (GDPR Art. 17 — right to erasure applies to local data too).
+    // Must go through the same resolver every other read/write uses (RTK_DB_PATH env var,
+    // then config.toml's tracking.database_path, then the default) — a hardcoded default-only
+    // path here would silently miss a redirected database.
+    if let Ok(db_path) = super::tracking::get_db_path() {
+        if db_path.exists() {
+            match std::fs::remove_file(&db_path) {
+                Ok(()) => println!("Local tracking database deleted: {}", db_path.display()),
+                Err(e) => eprintln!("rtk: could not delete {}: {}", db_path.display(), e),
+            }
         }
     }
 
