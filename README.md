@@ -58,6 +58,21 @@ rtk filters and compresses command outputs before they reach your LLM context. S
 
 ## Installation
 
+> [!WARNING]
+> **Check for an `rtk` name collision before installing.**
+>
+> An unrelated project, [Rust Type Kit](https://github.com/reachingforthejack/rtk), also installs a binary named `rtk`. If that version appears first on your `PATH`, RTK commands such as `rtk gain` will fail with an unknown-subcommand error.
+>
+> Check any existing installation:
+>
+> ```bash
+> which rtk
+> rtk --version
+> rtk gain
+> ```
+>
+> If `rtk gain` reports that the subcommand is unknown, uninstall the Rust Type Kit version before installing this project.
+
 ### Homebrew (recommended)
 
 ```bash
@@ -96,8 +111,6 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 rtk --version   # Should show "rtk 0.28.2"
 rtk gain        # Should show token savings stats
 ```
-
-> **Name collision warning**: Another project named "rtk" (Rust Type Kit) exists on crates.io. If `rtk gain` fails, you have the wrong package. Use `cargo install --git` above instead.
 
 ## Quick Start
 
