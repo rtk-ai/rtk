@@ -116,6 +116,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^qmd\s+ls(?:\s|$)",
+        rtk_cmd: "rtk qmd",
+        rewrite_prefixes: &["qmd"],
+        category: "Files",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^find\s+",
         rtk_cmd: "rtk find",
         rewrite_prefixes: &["find"],
