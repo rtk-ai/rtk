@@ -232,11 +232,12 @@ fn run_show(
         .iter()
         .any(|arg| arg.starts_with("--pretty") || arg.starts_with("--format"));
 
-    // `git show rev:path` prints a blob, not a commit diff. In this mode we should
-    // pass through directly to avoid duplicated output from compact-show steps.
-    let wants_blob_show = args.iter().any(|arg| is_blob_show_arg(arg));
+    // `git show rev:path` prints a blob (file content), not a commit diff. A pathspec
+    // (`--`) keeps it a commit-diff, so that case is excluded from blob handling.
+    let blob_args: Vec<&String> = args.iter().filter(|a| is_blob_show_arg(a)).collect();
+    let wants_blob_show = !blob_args.is_empty() && !args.iter().any(|a| a == "--");
 
-    if wants_stat_only || wants_format || wants_blob_show || emits_word_diff(args) {
+    if wants_stat_only || wants_format || emits_word_diff(args) {
         let mut cmd = git_cmd(global_args);
         cmd.arg("show");
         for arg in args {
@@ -247,11 +248,7 @@ fn run_show(
             eprintln!("{}", result.stderr);
             return Ok(result.exit_code);
         }
-        if wants_blob_show {
-            print!("{}", result.stdout);
-        } else {
-            println!("{}", result.stdout.trim());
-        }
+        println!("{}", result.stdout.trim());
 
         timer.track(
             &format!("git show {}", args.join(" ")),
@@ -259,6 +256,58 @@ fn run_show(
             &result.stdout,
             &result.stdout,
         );
+
+        return Ok(0);
+    }
+
+    if wants_blob_show {
+        let mut cmd = git_cmd(global_args);
+        cmd.arg("show");
+        for arg in args {
+            cmd.arg(arg);
+        }
+        // Capture raw bytes: `git show` of an ISO-8859/Latin-1 file (e.g. Oracle
+        // PL/SQL `.pck`) is not UTF-8, and lossy decoding would corrupt accents into
+        // U+FFFD (`É` → `�`) and inflate the output. `decode_output` transcodes safe
+        // Latin-1 losslessly and passes true binary / ambiguous encodings through.
+        let result =
+            crate::core::stream::exec_capture_bytes(&mut cmd).context("Failed to run git show")?;
+        if !result.success() {
+            eprint!("{}", String::from_utf8_lossy(&result.stderr));
+            return Ok(result.exit_code);
+        }
+        let label = format!("git show {}", args.join(" "));
+        let rtk_label = format!("rtk git show {}", args.join(" "));
+        let text = match crate::core::stream::decode_output(&result.stdout) {
+            crate::core::stream::Decoded::Utf8(s) | crate::core::stream::Decoded::Latin1(s) => s,
+            // Binary or ambiguous single-byte encoding: never window or transcode —
+            // write the raw bytes through, tracked as a passthrough.
+            crate::core::stream::Decoded::Binary => {
+                return emit_raw_bytes_passthrough(
+                    &result.stdout,
+                    &label,
+                    &rtk_label,
+                    &timer,
+                    result.exit_code,
+                );
+            }
+        };
+        // A blob dump is unfiltered file content: cap large text blobs to a byte
+        // budget with a tail-recovery pointer, mirroring how the commit-diff path
+        // below caps at `max_lines`. `--max-lines` does not apply here — blob output
+        // is bounded by bytes, not lines. (Recovery for a transcoded Latin-1 blob is
+        // UTF-8-normalized text, not byte-identical to the on-disk ISO-8859 file.)
+        let raw = &text;
+        let shown = if blob_args.len() == 1 {
+            compact_blob_show(raw, blob_args[0])
+        } else {
+            // Multiple blob args are concatenated by git; don't risk cutting the
+            // second blob mid-stream — pass the composite through unchanged.
+            raw.clone()
+        };
+        print!("{}", shown);
+
+        timer.track(&label, &rtk_label, raw, &shown);
 
         return Ok(0);
     }
@@ -364,7 +413,97 @@ fn emits_word_diff(args: &[String]) -> bool {
 
 fn is_blob_show_arg(arg: &str) -> bool {
     // Detect `rev:path` style arguments while ignoring flags like `--pretty=format:...`.
-    !arg.starts_with('-') && arg.contains(':')
+    // `:/text` is a commit-message search, not a blob, so it is excluded. `:path` and
+    // `:N:path` (index / merge-stage blobs) start with `:` but ARE blobs, so only the
+    // literal `:/` prefix is filtered out.
+    !arg.starts_with('-') && !arg.starts_with(":/") && arg.contains(':')
+}
+
+/// Byte budget for a blob preview before truncation kicks in (~2k tokens).
+const MAX_BLOB_BYTES: usize = 8192;
+
+/// Decide how to window a `git show <rev>:<path>` blob. Returns
+/// `Some((head, remaining_lines, tail_offset))` when the blob should be truncated,
+/// or `None` to pass it through unchanged: a small blob, a binary blob, a tree
+/// listing, a blob too large for the recovery file to store intact, or a single line
+/// too long to cut at a line boundary.
+///
+/// `max_recoverable` is the byte size the recovery tee file can hold whole; a larger
+/// blob is passed through so the tail hint never promises unrecoverable content.
+///
+/// Pure and side-effect free so it can be unit-tested against real blob fixtures.
+fn blob_truncation(raw: &str, budget: usize, max_recoverable: usize) -> Option<(&str, usize, usize)> {
+    // `git show <rev>:<dir>` prints a tree listing (`tree <rev>:<dir>\n\n...`), not
+    // file content.
+    if raw.starts_with("tree ") {
+        return None;
+    }
+    // Binary blob, or bytes mangled by lossy UTF-8 decoding: never window.
+    if raw.contains('\0') || raw.contains('\u{FFFD}') {
+        return None;
+    }
+    // The recovery tee file is capped: a blob larger than it can store intact could
+    // not be recovered in full via the tail hint, so keep it whole.
+    if raw.len() > max_recoverable {
+        return None;
+    }
+    if raw.len() <= budget {
+        return None;
+    }
+    // Walk back to a valid UTF-8 char boundary at or below the budget before slicing
+    // (slicing mid-codepoint panics — see core::tee::write_tee_file for the same fix).
+    let mut end = budget;
+    while end > 0 && !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    // Cut at the last line boundary inside the window. No newline means a single line
+    // longer than the budget, which tail-based recovery cannot re-window: pass through.
+    let cut = raw[..end].rfind('\n')? + 1;
+    let head = &raw[..cut];
+    let head_lines = head.lines().count();
+    let total_lines = raw.lines().count();
+    let remaining = total_lines.checked_sub(head_lines).filter(|&r| r > 0)?;
+    // `tail -n +offset` recovers everything from the first un-shown line onward.
+    Some((head, remaining, head_lines + 1))
+}
+
+/// Window a single blob dump: cap large text blobs with a tail-recovery hint, but
+/// only when the full content was successfully tee'd — never drop data without a way
+/// to recover it.
+fn compact_blob_show(raw: &str, blob_arg: &str) -> String {
+    let max_recoverable = crate::core::tee::max_recoverable_bytes();
+    let Some((head, remaining, offset)) = blob_truncation(raw, MAX_BLOB_BYTES, max_recoverable)
+    else {
+        return raw.to_string();
+    };
+    let slug = format!("git-show-{}", blob_arg.rsplit(':').next().unwrap_or(blob_arg));
+    match crate::core::tee::force_tee_tail_hint(raw, &slug, offset) {
+        Some(hint) => {
+            let out = format!("{}... (+{} lines) {}\n", head, remaining, hint);
+            never_worse(raw, &out).to_string()
+        }
+        // Tee unavailable (disabled / RTK_TEE=0): without recovery, keep the blob whole.
+        None => raw.to_string(),
+    }
+}
+
+/// Write raw (binary or non-transcodable) bytes straight to stdout, tracked as a
+/// passthrough. Mirrors the binary path in `cloud/curl_cmd.rs`.
+fn emit_raw_bytes_passthrough(
+    bytes: &[u8],
+    label: &str,
+    rtk_label: &str,
+    timer: &tracking::TimedExecution,
+    exit_code: i32,
+) -> Result<i32> {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    handle
+        .write_all(bytes)
+        .context("Failed to write blob to stdout")?;
+    timer.track_passthrough(label, rtk_label);
+    Ok(exit_code)
 }
 
 /// Path named by a diff section header.
@@ -3413,9 +3552,118 @@ mod tests {
     fn test_is_blob_show_arg() {
         assert!(is_blob_show_arg("develop:modules/pairs_backtest.py"));
         assert!(is_blob_show_arg("HEAD:src/main.rs"));
+        // Index / merge-stage blobs start with `:` but are still blobs.
+        assert!(is_blob_show_arg(":Cargo.toml"));
+        assert!(is_blob_show_arg(":2:conflict.rs"));
         assert!(!is_blob_show_arg("--pretty=format:%h"));
         assert!(!is_blob_show_arg("--format=short"));
         assert!(!is_blob_show_arg("HEAD"));
+        // `:/text` is a commit-message search, not a blob.
+        assert!(!is_blob_show_arg(":/fix the bug"));
+    }
+
+    #[test]
+    fn test_blob_truncation_small_passthrough() {
+        // Real committed file, ~1.7KB < budget: passed through unchanged.
+        let small = include_str!("../../../Cargo.toml");
+        assert!(blob_truncation(small, MAX_BLOB_BYTES, usize::MAX).is_none());
+    }
+
+    #[test]
+    fn test_blob_truncation_large_windowed() {
+        // Real blob fixture (`git show HEAD:src/main.rs | head -350`), ~10.7KB.
+        let large = include_str!("../../../tests/fixtures/git/blob_large.txt");
+        let (head, remaining, offset) =
+            blob_truncation(large, MAX_BLOB_BYTES, usize::MAX).expect("large blob should window");
+        assert!(head.len() <= MAX_BLOB_BYTES);
+        assert!(head.ends_with('\n'), "head must end at a line boundary");
+        let head_lines = head.lines().count();
+        // N formula: remaining == total - head_lines, offset == head_lines + 1.
+        assert_eq!(offset, head_lines + 1);
+        assert_eq!(remaining, large.lines().count() - head_lines);
+        assert!(remaining > 0);
+    }
+
+    #[test]
+    fn test_blob_truncation_exceeds_recoverable_passthrough() {
+        // ~10.7KB real blob. If the recovery tee can only store 5KB, truncating would
+        // promise a tail the tee file cannot hold → pass the blob through whole.
+        let large = include_str!("../../../tests/fixtures/git/blob_large.txt");
+        assert!(large.len() > 5_000);
+        assert!(blob_truncation(large, MAX_BLOB_BYTES, 5_000).is_none());
+        // With ample recovery capacity it windows normally.
+        assert!(blob_truncation(large, MAX_BLOB_BYTES, 1_000_000).is_some());
+    }
+
+    #[test]
+    fn test_blob_truncation_tree_passthrough() {
+        // Real tree listing (`git show HEAD:src`): `tree <rev>:<dir>\n\n...`.
+        let tree = include_str!("../../../tests/fixtures/git/tree_listing.txt");
+        assert!(tree.starts_with("tree "));
+        assert!(blob_truncation(tree, MAX_BLOB_BYTES, usize::MAX).is_none());
+    }
+
+    #[test]
+    fn test_blob_truncation_binary_passthrough() {
+        let mut binary = "x".repeat(9000);
+        binary.push('\0');
+        assert!(blob_truncation(&binary, MAX_BLOB_BYTES, usize::MAX).is_none());
+        // Replacement char from lossy UTF-8 decoding of a binary blob.
+        let lossy = format!("{}\u{FFFD}", "y".repeat(9000));
+        assert!(blob_truncation(&lossy, MAX_BLOB_BYTES, usize::MAX).is_none());
+    }
+
+    #[test]
+    fn test_blob_truncation_giant_single_line_passthrough() {
+        // A single line longer than the budget has no line boundary to cut at.
+        let giant = "a".repeat(20_000);
+        assert!(blob_truncation(&giant, MAX_BLOB_BYTES, usize::MAX).is_none());
+    }
+
+    #[test]
+    fn test_blob_truncation_utf8_boundary_no_panic() {
+        // Multibyte content so the byte budget can land mid-codepoint: must not panic.
+        let mut s = String::new();
+        while s.len() < 9000 {
+            s.push_str("áéíóú-ñ-日本語");
+            s.push('\n');
+        }
+        // Exercise budgets straddling a multibyte char around the window edge.
+        let _ = blob_truncation(&s, MAX_BLOB_BYTES, usize::MAX);
+        let _ = blob_truncation(&s, 8191, usize::MAX);
+        let _ = blob_truncation(&s, 8193, usize::MAX);
+        // Should still window (multi-line, over budget) without crashing.
+        assert!(blob_truncation(&s, MAX_BLOB_BYTES, usize::MAX).is_some());
+    }
+
+    #[test]
+    fn test_blob_truncation_no_trailing_newline() {
+        let mut s = String::new();
+        for i in 0..500 {
+            s.push_str(&format!("line number {i} with a bit of content here\n"));
+        }
+        s.pop(); // drop the final newline
+        let (head, remaining, offset) =
+            blob_truncation(&s, MAX_BLOB_BYTES, usize::MAX).expect("should window");
+        assert_eq!(offset, head.lines().count() + 1);
+        assert_eq!(remaining, s.lines().count() - head.lines().count());
+    }
+
+    #[test]
+    fn test_blob_latin1_fixture_decodes_and_windows() {
+        // Real ISO-8859-1 slice of an Oracle PL/SQL `.pck` (14KB, contains "MÉTODO",
+        // not valid UTF-8). The blob path must transcode it losslessly (no U+FFFD) and
+        // then window it for savings — instead of the old lossy-decode passthrough.
+        let bytes = include_bytes!("../../../tests/fixtures/git/latin1_blob.pck");
+        let crate::core::stream::Decoded::Latin1(text) =
+            crate::core::stream::decode_output(bytes)
+        else {
+            panic!("expected Latin1 decode of the .pck fixture");
+        };
+        assert!(!text.contains('\u{FFFD}'), "transcode must not corrupt");
+        assert!(text.contains("MÉTODO"));
+        assert!(text.len() > MAX_BLOB_BYTES);
+        assert!(blob_truncation(&text, MAX_BLOB_BYTES, usize::MAX).is_some());
     }
 
     #[test]

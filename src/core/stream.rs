@@ -598,6 +598,87 @@ fn capture(cmd: &mut Command) -> Result<CaptureResult> {
     })
 }
 
+/// Raw-byte capture result, for callers that must control decoding themselves —
+/// e.g. non-UTF-8 output that [`exec_capture`]'s `from_utf8_lossy` would corrupt.
+pub struct CaptureBytes {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub exit_code: i32,
+}
+
+impl CaptureBytes {
+    pub fn success(&self) -> bool {
+        self.exit_code == 0
+    }
+}
+
+/// Like [`exec_capture`] but returns raw bytes so the caller decides how to decode.
+pub fn exec_capture_bytes(cmd: &mut Command) -> Result<CaptureBytes> {
+    cmd.stdin(Stdio::null());
+    let output = cmd.output().context("Failed to execute command")?;
+    Ok(CaptureBytes {
+        stdout: output.stdout,
+        stderr: output.stderr,
+        exit_code: status_to_exit_code(output.status),
+    })
+}
+
+/// How captured bytes were decoded into text.
+pub enum Decoded {
+    /// Valid UTF-8.
+    Utf8(String),
+    /// Not UTF-8, but safe ISO-8859-1 (Latin-1) text transcoded losslessly.
+    Latin1(String),
+    /// Binary, or a byte in the 0x80–0x9F range where ISO-8859-1 and Windows-1252
+    /// disagree — transcoding would guess and could corrupt silently. The caller
+    /// should pass the raw bytes through unchanged.
+    Binary,
+}
+
+/// Decode captured stdout bytes, preferring fidelity over guessing:
+/// - Valid UTF-8 → [`Decoded::Utf8`].
+/// - Invalid UTF-8 that looks binary (NUL / dense control bytes) or uses the
+///   ambiguous 0x80–0x9F range → [`Decoded::Binary`] (pass raw bytes through).
+/// - Otherwise ISO-8859-1 text: each byte 0x00–0xFF maps to U+0000–U+00FF, a
+///   lossless Latin-1 → UTF-8 transcode → [`Decoded::Latin1`].
+///
+/// This fixes the corruption where `from_utf8_lossy` turns Latin-1 accents into
+/// U+FFFD (`É` → `�`), inflating and mangling e.g. ISO-8859 PL/SQL source blobs.
+pub fn decode_output(bytes: &[u8]) -> Decoded {
+    // Check binary first: NUL is a valid UTF-8 codepoint, so a NUL-laden binary blob
+    // can pass `from_utf8` — treat it as binary regardless of UTF-8 validity.
+    if looks_binary(bytes) {
+        return Decoded::Binary;
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(s) => Decoded::Utf8(s.to_string()),
+        Err(_) => {
+            if bytes.iter().any(|&b| (0x80..=0x9F).contains(&b)) {
+                Decoded::Binary
+            } else {
+                Decoded::Latin1(bytes.iter().map(|&b| b as char).collect())
+            }
+        }
+    }
+}
+
+/// Heuristic: a NUL byte, or more than 2% C0 control bytes (excluding tab/newline/CR)
+/// in the first 8 KiB, marks content as binary rather than single-byte text.
+fn looks_binary(bytes: &[u8]) -> bool {
+    if bytes.contains(&0) {
+        return true;
+    }
+    let sample = &bytes[..bytes.len().min(8192)];
+    if sample.is_empty() {
+        return false;
+    }
+    let control = sample
+        .iter()
+        .filter(|&&b| b < 0x09 || (0x0D < b && b < 0x20))
+        .count();
+    control * 100 / sample.len() > 2
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -672,6 +753,61 @@ pub(crate) mod tests {
         // clean EOF would, but via the Err(_) arm instead of Ok(0).
         let lines: Vec<String> = read_lines_lossy(reader).collect();
         assert_eq!(lines, vec!["line one".to_string(), "line two".to_string()]);
+    }
+
+    #[test]
+    fn test_decode_output_utf8() {
+        assert!(matches!(decode_output(b"hello world"), Decoded::Utf8(_)));
+        assert!(matches!(
+            decode_output("café ☕".as_bytes()),
+            Decoded::Utf8(_)
+        ));
+    }
+
+    #[test]
+    fn test_decode_output_latin1_lossless() {
+        // 0xC9 = É, 0xF3 = ó in ISO-8859-1; invalid UTF-8, no 0x80-0x9F byte.
+        let bytes = b"M\xC9TODO acci\xF3n";
+        let Decoded::Latin1(s) = decode_output(bytes) else {
+            panic!("expected Latin1");
+        };
+        assert_eq!(s, "MÉTODO acción");
+        assert!(!s.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn test_decode_output_cp1252_ambiguous_is_binary() {
+        // 0x93/0x94 = smart quotes in CP1252, control C1 in ISO-8859-1: ambiguous,
+        // so pass through raw rather than guess and corrupt silently.
+        assert!(matches!(
+            decode_output(b"say \x93hi\x94 there"),
+            Decoded::Binary
+        ));
+    }
+
+    #[test]
+    fn test_decode_output_binary_nul() {
+        assert!(matches!(
+            decode_output(b"PK\x03\x04\x00\x00binary"),
+            Decoded::Binary
+        ));
+    }
+
+    #[test]
+    fn test_looks_binary() {
+        assert!(looks_binary(b"\x00\x01\x02")); // NUL
+        assert!(!looks_binary(b"plain ascii text\n"));
+        assert!(!looks_binary("café".as_bytes())); // UTF-8 accents, no control
+        assert!(!looks_binary(b"")); // empty is not binary
+                                     // A single ESC in otherwise-text stays under the 2% threshold.
+        assert!(!looks_binary(
+            b"line one\x1bline two with lots of text here\n"
+        ));
+        // Dense control bytes read as binary.
+        let ctrl: Vec<u8> = (0..100)
+            .map(|i| if i % 2 == 0 { 0x01 } else { b'a' })
+            .collect();
+        assert!(looks_binary(&ctrl));
     }
 
     struct LineFilter<F: FnMut(&str) -> Option<String>> {
