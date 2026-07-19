@@ -80,6 +80,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^pm2\s+(list|ls|status|logs|restart)(\s|$)",
+        rtk_cmd: "rtk pm2",
+        rewrite_prefixes: &["pm2"],
+        category: "ProcessManager",
+        savings_pct: 40.0,
+        subcmd_savings: &[("list", 95.0), ("ls", 95.0), ("status", 95.0)],
+        subcmd_status: &[("restart", RtkStatus::Passthrough)],
+    },
+    RtkRule {
         pattern: r"^(cat|head|tail)\s+",
         rtk_cmd: "rtk read",
         rewrite_prefixes: &["cat", "head", "tail"],

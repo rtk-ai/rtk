@@ -8,6 +8,7 @@
 - `lint_cmd.rs` is a cross-ecosystem router: detects Python projects and delegates to `mypy_cmd` or `ruff_cmd`
 - `vitest_cmd.rs` uses the `parser/` module for structured output parsing
 - `playwright_cmd.rs` uses the `parser/` module for test result extraction
+- `pm2_cmd.rs` compacts `pm2 list` from structured `jlist` data, streams ANSI-clean logs, and passes lifecycle commands through unchanged
 
 ## Cross-command
 
