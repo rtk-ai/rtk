@@ -12,3 +12,4 @@
 ## Cross-command
 
 - `format_cmd` routes to `cmds/js/prettier_cmd` and `cmds/python/ruff_cmd`
+- `constants.rs` defines storage metadata exclusions shared by `ls`, `tree`, and `find`; AppleDouble `._*` entries and Synology `@eaDir` trees stay hidden even when normal dotfiles are requested.

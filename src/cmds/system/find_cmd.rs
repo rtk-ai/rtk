@@ -1,5 +1,6 @@
 //! Filters find results by grouping files by directory.
 
+use super::constants::is_system_metadata_path;
 use crate::core::guard::never_worse;
 use crate::core::tracking;
 use anyhow::{Context, Result};
@@ -220,7 +221,8 @@ pub fn run(
         .hidden(!search_hidden) // skip hidden files/dirs unless pattern targets dotfiles
         .git_ignore(true) // respect .gitignore
         .git_global(true)
-        .git_exclude(true);
+        .git_exclude(true)
+        .filter_entry(|entry| !is_system_metadata_path(entry.path()));
     if let Some(depth) = max_depth {
         builder.max_depth(Some(depth));
     }
@@ -578,6 +580,15 @@ mod tests {
         // Non-dot pattern should not error (hidden dirs remain skipped)
         let result = run("*.rs", "src", 5, None, "f", false, 0);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn metadata_paths_are_pruned_even_for_hidden_searches() {
+        assert!(is_system_metadata_path(Path::new("._index.ts")));
+        assert!(is_system_metadata_path(Path::new(
+            "@eaDir/index.ts/SYNOPHOTO_THUMB_XL.jpg"
+        )));
+        assert!(!is_system_metadata_path(Path::new(".claude/settings.json")));
     }
 
     // --- integration: run on this repo ---
