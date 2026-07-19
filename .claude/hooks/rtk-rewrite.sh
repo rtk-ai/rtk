@@ -32,8 +32,16 @@ fi
 set -euo pipefail
 
 INPUT=$(cat)
-CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
-
+# Suppress stderr: invalid JSON escapes (e.g. raw \| in command strings) make jq fail.
+# Check exit code so a parse error does not look like an empty command and silently
+# pass the original tool call through without a rewrite attempt.
+CMD=""
+JQ_EXIT=0
+CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null) || JQ_EXIT=$?
+if [ "$JQ_EXIT" -ne 0 ]; then
+  _rtk_audit_log "skip:jq_error" "-"
+  exit 0
+fi
 if [ -z "$CMD" ]; then
   _rtk_audit_log "skip:empty" "-"
   exit 0

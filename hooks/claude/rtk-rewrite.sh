@@ -45,9 +45,12 @@ if [ ! -f "$CACHE_FILE" ]; then
 fi
 
 INPUT=$(cat)
-CMD=$(jq -r '.tool_input.command // empty' <<<"$INPUT")
-
-if [ -z "$CMD" ]; then
+# Suppress stderr: invalid JSON escapes (e.g. raw \| in command strings) make jq fail.
+# Check exit code so a parse error does not look like an empty command and silently
+# pass the original tool call through without a rewrite attempt.
+CMD=$(jq -r '.tool_input.command // empty' <<<"$INPUT" 2>/dev/null)
+JQ_EXIT=$?
+if [ "$JQ_EXIT" -ne 0 ] || [ -z "$CMD" ]; then
   exit 0
 fi
 

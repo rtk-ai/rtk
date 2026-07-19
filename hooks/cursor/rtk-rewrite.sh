@@ -31,9 +31,12 @@ if [ -n "$RTK_VERSION" ]; then
 fi
 
 INPUT=$(cat)
-CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
-
-if [ -z "$CMD" ]; then
+# Suppress stderr: invalid JSON escapes (e.g. raw \| in command strings) make jq fail.
+# Check exit code so a parse error does not look like an empty command and silently
+# pass the original tool call through without a rewrite attempt.
+CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)
+JQ_EXIT=$?
+if [ "$JQ_EXIT" -ne 0 ] || [ -z "$CMD" ]; then
   echo '{}'
   exit 0
 fi
