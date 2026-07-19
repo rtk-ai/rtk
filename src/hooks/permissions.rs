@@ -1,5 +1,5 @@
 use super::constants::{
-    CLAUDE_DIR, CURSOR_DIR, DROID_DIR, DROID_HOME_ENV, DROID_SETTINGS_FILE, GEMINI_DIR,
+    CLAUDE_DIR, CURSOR_DIR, DROID_DIR, DROID_HOME_ENV, DROID_SETTINGS_FILE, GEMINI_DIR, QWEN_DIR,
     SETTINGS_JSON, SETTINGS_LOCAL_JSON,
 };
 use crate::core::stream::exec_capture;
@@ -35,6 +35,7 @@ pub enum Host {
     Claude,
     Cursor,
     Gemini,
+    Qwen,
     Droid,
 }
 
@@ -43,6 +44,7 @@ pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
         Host::Claude => load_permission_rules(),
         Host::Cursor => load_cursor_rules(),
         Host::Gemini => load_gemini_rules(),
+        Host::Qwen => load_qwen_rules(),
         Host::Droid => load_droid_rules(),
     };
     check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
@@ -276,6 +278,28 @@ fn load_gemini_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
     (Vec::new(), ask, allow)
 }
 
+fn load_qwen_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
+    global_config(QWEN_DIR, SETTINGS_JSON)
+        .as_ref()
+        .map(qwen_rules_from_settings)
+        .unwrap_or_default()
+}
+
+fn qwen_rules_from_settings(settings: &Value) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut deny = Vec::new();
+    let mut ask = Vec::new();
+    let mut allow = Vec::new();
+    let shells = ["Bash(", "Shell(", "run_shell_command("];
+
+    if let Some(perms) = settings.get("permissions") {
+        append_wrapped_rules(perms.get("deny"), &shells, &mut deny);
+        append_wrapped_rules(perms.get("ask"), &shells, &mut ask);
+        append_wrapped_rules(perms.get("allow"), &shells, &mut allow);
+    }
+
+    (deny, ask, allow)
+}
+
 // All four Droid settings scopes: user (honoring $FACTORY_HOME_OVERRIDE) and
 // project `.factory/`, each with settings.json + settings.local.json
 // (docs.factory.ai/cli/configuration/settings). Missing files are skipped.
@@ -475,6 +499,22 @@ fn split_compound_command(cmd: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_qwen_permission_rules_extract_shell_aliases() {
+        let settings = serde_json::json!({
+            "permissions": {
+                "allow": ["Bash(git *)", "Read(**/*)"],
+                "ask": ["Shell(git push *)"],
+                "deny": ["run_shell_command(rm -rf *)"]
+            }
+        });
+
+        let (deny, ask, allow) = qwen_rules_from_settings(&settings);
+        assert_eq!(deny, vec!["rm -rf *"]);
+        assert_eq!(ask, vec!["git push *"]);
+        assert_eq!(allow, vec!["git *"]);
+    }
 
     #[test]
     fn test_parse_bash_pattern() {

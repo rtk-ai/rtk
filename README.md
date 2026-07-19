@@ -114,6 +114,7 @@ rtk gain        # Should show the savings dashboard
 # 1. Install for your AI tool
 rtk init -g                     # Claude Code / Copilot (default)
 rtk init -g --gemini            # Gemini CLI
+rtk init -g --qwen              # Qwen Code CLI
 rtk init -g --codex             # Codex (OpenAI)
 rtk init -g --agent cursor      # Cursor
 rtk init -g --agent windsurf    # Windsurf
@@ -381,7 +382,7 @@ rtk init -g
 
 ## Supported AI Tools
 
-RTK supports 15 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
+RTK supports 16 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -390,6 +391,7 @@ RTK supports 15 AI coding tools. Each integration rewrites shell commands to `rt
 | **GitHub Copilot CLI** | `rtk init -g --copilot` | PreToolUse deny-with-suggestion (CLI limitation) |
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
 | **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook |
+| **Qwen Code CLI** | `rtk init -g --qwen` | PreToolUse hook with native permission preservation |
 | **Codex** | `rtk init -g --codex` | AGENTS.md + RTK.md instructions |
 | **Windsurf** | `rtk init -g --agent windsurf` | .windsurfrules (project-scoped) |
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |

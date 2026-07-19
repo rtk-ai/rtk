@@ -332,6 +332,115 @@ fn print_gemini(decision: &str, rewrite: Option<&str>) {
     let _ = writeln!(io::stdout(), "{}", gemini_json(decision, rewrite));
 }
 
+// ── Qwen Code hook ────────────────────────────────────────────
+
+/// Run the Qwen Code PreToolUse hook.
+pub fn run_qwen() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let input = strip_leading_bom(&input).trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let json: Value = match serde_json::from_str(input) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = writeln!(
+                io::stderr(),
+                "[rtk hook] Failed to parse JSON input: {error}"
+            );
+            return Ok(());
+        }
+    };
+
+    if json.get("tool_name").and_then(Value::as_str) != Some("run_shell_command") {
+        return Ok(());
+    }
+
+    let tool_input = json.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+    let Some(command) = tool_input
+        .get("command")
+        .and_then(Value::as_str)
+        .filter(|command| !command.is_empty())
+    else {
+        return Ok(());
+    };
+
+    let configured_verdict = permissions::check_command_for(command, permissions::Host::Qwen);
+    let verdict = qwen_effective_verdict(
+        configured_verdict,
+        json.get("permission_mode").and_then(Value::as_str),
+    );
+    if let Some(output) = qwen_response(command, &tool_input, verdict) {
+        let _ = writeln!(io::stdout(), "{output}");
+    }
+
+    Ok(())
+}
+
+fn qwen_effective_verdict(
+    configured: PermissionVerdict,
+    permission_mode: Option<&str>,
+) -> PermissionVerdict {
+    if configured == PermissionVerdict::Default && permission_mode == Some("yolo") {
+        PermissionVerdict::Allow
+    } else {
+        configured
+    }
+}
+
+fn qwen_response(command: &str, tool_input: &Value, verdict: PermissionVerdict) -> Option<Value> {
+    match decide_from_verdict(command, verdict) {
+        HookDecision::Deny => {
+            audit_log("deny", command, "");
+            Some(qwen_json("deny", None))
+        }
+        HookDecision::AllowRewrite(rewritten) => {
+            audit_log("rewrite", command, &rewritten);
+            Some(qwen_json(
+                "allow",
+                Some(rewrite_tool_input(tool_input, &rewritten)),
+            ))
+        }
+        HookDecision::AskRewrite { rewritten, .. } => {
+            audit_log("ask", command, &rewritten);
+            Some(qwen_json(
+                "ask",
+                Some(rewrite_tool_input(tool_input, &rewritten)),
+            ))
+        }
+        HookDecision::Defer => None,
+    }
+}
+
+fn rewrite_tool_input(tool_input: &Value, rewritten: &str) -> Value {
+    let mut updated = tool_input.clone();
+    if let Some(object) = updated.as_object_mut() {
+        object.insert("command".to_string(), Value::String(rewritten.to_string()));
+        updated
+    } else {
+        json!({ "command": rewritten })
+    }
+}
+
+fn qwen_json(decision: &str, updated_input: Option<Value>) -> Value {
+    let mut hook_output = json!({
+        "hookEventName": PRE_TOOL_USE_KEY,
+        "permissionDecision": decision,
+        "permissionDecisionReason": if decision == "deny" {
+            "Blocked by RTK permission rule"
+        } else {
+            "RTK auto-rewrite"
+        }
+    });
+
+    if let Some(input) = updated_input {
+        hook_output["updatedInput"] = input;
+    }
+
+    json!({ "hookSpecificOutput": hook_output })
+}
+
 // ── Audit logging ─────────────────────────────────────────────
 
 /// Best-effort audit log when RTK_HOOK_AUDIT=1.
@@ -1680,6 +1789,83 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(v["decision"], "deny");
+    }
+
+    // --- Qwen Code rendering ---
+
+    #[test]
+    fn test_qwen_allow_emits_current_pre_tool_use_schema() {
+        let input = json!({ "command": "git status", "description": "Inspect worktree" });
+        let output = qwen_response("git status", &input, PermissionVerdict::Allow).unwrap();
+
+        assert_eq!(
+            output["hookSpecificOutput"]["hookEventName"],
+            PRE_TOOL_USE_KEY
+        );
+        assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(
+            output["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk git status"
+        );
+        assert_eq!(
+            output["hookSpecificOutput"]["updatedInput"]["description"],
+            "Inspect worktree"
+        );
+    }
+
+    #[test]
+    fn test_qwen_default_asks_with_rewritten_input() {
+        let input = json!({ "command": "cargo test" });
+        let output = qwen_response("cargo test", &input, PermissionVerdict::Default).unwrap();
+
+        assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "ask");
+        assert_eq!(
+            output["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk cargo test"
+        );
+    }
+
+    #[test]
+    fn test_qwen_deny_omits_updated_input() {
+        let input = json!({ "command": "rm -rf /tmp/x" });
+        let output = qwen_response("rm -rf /tmp/x", &input, PermissionVerdict::Deny).unwrap();
+
+        assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(output["hookSpecificOutput"].get("updatedInput").is_none());
+    }
+
+    #[test]
+    fn test_qwen_unsupported_or_unsafe_commands_defer_to_host() {
+        let unsupported = json!({ "command": "unknown-tool --flag" });
+        assert!(qwen_response(
+            "unknown-tool --flag",
+            &unsupported,
+            PermissionVerdict::Default
+        )
+        .is_none());
+        let unsafe_input = json!({ "command": "git status $(rm -rf /tmp/x)" });
+        assert!(qwen_response(
+            "git status $(rm -rf /tmp/x)",
+            &unsafe_input,
+            PermissionVerdict::Allow
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn test_qwen_yolo_only_upgrades_default_permission() {
+        assert_eq!(
+            qwen_effective_verdict(PermissionVerdict::Default, Some("yolo")),
+            PermissionVerdict::Allow
+        );
+        assert_eq!(
+            qwen_effective_verdict(PermissionVerdict::Ask, Some("yolo")),
+            PermissionVerdict::Ask
+        );
+        assert_eq!(
+            qwen_effective_verdict(PermissionVerdict::Deny, Some("yolo")),
+            PermissionVerdict::Deny
+        );
     }
 
     // --- Factory Droid hook ---

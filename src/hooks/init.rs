@@ -18,7 +18,7 @@ use super::constants::{
     DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
     HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
     HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
-    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, QWEN_DIR, QWEN_HOOK_FILE, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 use super::is_claude_hook_command;
@@ -69,6 +69,7 @@ const CLAUDE_MD: &str = "CLAUDE.md";
 const AGENTS_MD: &str = "AGENTS.md";
 const RTK_MD_REF: &str = "@RTK.md";
 const GEMINI_MD: &str = "GEMINI.md";
+const QWEN_MD: &str = "QWEN.md";
 
 const RTK_BLOCK_START: &str = "<!-- rtk-instructions";
 const RTK_BLOCK_END: &str = "<!-- /rtk-instructions -->";
@@ -4446,6 +4447,297 @@ fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
     Ok(removed)
 }
 
+// ─── Qwen Code support ──────────────────────────────────────────
+
+const QWEN_HOOK_SCRIPT: &str = r#"#!/bin/bash
+exec rtk hook qwen
+"#;
+
+fn resolve_qwen_dir() -> Result<PathBuf> {
+    resolve_home_subdir(QWEN_DIR)
+}
+
+fn qwen_awareness() -> String {
+    RTK_SLIM
+        .replace(
+            "All other commands are automatically rewritten by the Claude Code hook.",
+            "All other commands are automatically rewritten by the Qwen Code hook.",
+        )
+        .replace("Refer to CLAUDE.md", "Refer to QWEN.md")
+}
+
+pub fn run_qwen(
+    global: bool,
+    hook_only: bool,
+    patch_mode: PatchMode,
+    ctx: InitContext,
+) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    if !global {
+        anyhow::bail!(
+            "Qwen Code support is global-only. Use: rtk init -g --qwen (or --agent qwen)"
+        );
+    }
+
+    let qwen_dir = resolve_qwen_dir()?;
+    let hook_dir = qwen_dir.join(HOOKS_SUBDIR);
+    if !dry_run {
+        fs::create_dir_all(&hook_dir)
+            .with_context(|| format!("Failed to create Qwen hook dir: {}", hook_dir.display()))?;
+    }
+
+    let hook_path = hook_dir.join(QWEN_HOOK_FILE);
+    write_if_changed(&hook_path, QWEN_HOOK_SCRIPT, "Qwen hook", ctx)?;
+
+    #[cfg(unix)]
+    if !dry_run {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+    }
+
+    if !dry_run {
+        integrity::store_hash(&hook_path).with_context(|| {
+            format!("Failed to store integrity hash for {}", hook_path.display())
+        })?;
+    }
+
+    if !hook_only {
+        let awareness = qwen_awareness();
+        write_if_changed(&qwen_dir.join(QWEN_MD), &awareness, QWEN_MD, ctx)?;
+    }
+
+    patch_qwen_settings(&qwen_dir, &hook_path, patch_mode, ctx)?;
+
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        println!("\nQwen Code hook installed (global).\n");
+        println!("  Hook: {}", hook_path.display());
+        if !hook_only {
+            println!("  QWEN.md: {}", qwen_dir.join(QWEN_MD).display());
+        }
+        println!("  Restart Qwen Code. Test with: git status\n");
+    }
+
+    Ok(())
+}
+
+fn qwen_hook_entry(hook_command: &str) -> serde_json::Value {
+    serde_json::json!({
+        "matcher": "^run_shell_command$",
+        "hooks": [{
+            "type": "command",
+            "command": hook_command,
+            "name": "rtk-rewrite",
+            "description": "Rewrite supported shell commands through RTK",
+            "timeout": 10000
+        }]
+    })
+}
+
+fn is_qwen_rtk_hook(entry: &serde_json::Value) -> bool {
+    entry
+        .get("hooks")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|hook| hook.get("command").and_then(serde_json::Value::as_str))
+        .any(|command| command.contains("rtk hook qwen") || command.contains(QWEN_HOOK_FILE))
+}
+
+fn insert_qwen_hook(settings: &mut serde_json::Value, hook_command: &str) -> Result<bool> {
+    let hooks = settings
+        .as_object_mut()
+        .context("Qwen settings.json is not an object")?
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+    let pre_tool_use = hooks
+        .as_object_mut()
+        .context("Qwen settings hooks is not an object")?
+        .entry(PRE_TOOL_USE_KEY)
+        .or_insert_with(|| serde_json::json!([]));
+    let entries = pre_tool_use
+        .as_array_mut()
+        .context("Qwen PreToolUse hooks is not an array")?;
+
+    if entries.iter().any(is_qwen_rtk_hook) {
+        return Ok(false);
+    }
+
+    entries.push(qwen_hook_entry(hook_command));
+    Ok(true)
+}
+
+fn remove_qwen_hook(settings: &mut serde_json::Value) -> bool {
+    let Some(entries) = settings
+        .pointer_mut("/hooks/PreToolUse")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+
+    let before = entries.len();
+    entries.retain(|entry| !is_qwen_rtk_hook(entry));
+    entries.len() != before
+}
+
+fn patch_qwen_settings(
+    qwen_dir: &Path,
+    hook_path: &Path,
+    patch_mode: PatchMode,
+    ctx: InitContext,
+) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+    let settings_path = qwen_dir.join(SETTINGS_JSON);
+    let mut settings = if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)
+            .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+        serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse {}", settings_path.display()))?
+    } else {
+        serde_json::json!({})
+    };
+
+    if settings
+        .pointer("/hooks/PreToolUse")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|entries| entries.iter().any(is_qwen_rtk_hook))
+    {
+        if verbose > 0 {
+            eprintln!("Qwen settings.json already has RTK hook");
+        }
+        return Ok(());
+    }
+
+    if patch_mode == PatchMode::Skip {
+        println!(
+            "\nManual setup needed: add the RTK PreToolUse hook to {}",
+            settings_path.display()
+        );
+        return Ok(());
+    }
+
+    if patch_mode == PatchMode::Ask {
+        if dry_run {
+            println!(
+                "[dry-run] would prompt before patching {}",
+                settings_path.display()
+            );
+        } else {
+            print!("Patch {} with RTK hook? [y/N] ", settings_path.display());
+            std::io::Write::flush(&mut std::io::stdout())?;
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer)?;
+            if !answer.trim().eq_ignore_ascii_case("y") {
+                println!("Skipped. Add the hook manually later.");
+                return Ok(());
+            }
+        }
+    }
+
+    insert_qwen_hook(&mut settings, &hook_path.to_string_lossy())?;
+    let content = serde_json::to_string_pretty(&settings)?;
+
+    if dry_run {
+        println!(
+            "[dry-run] would patch Qwen settings.json: {}",
+            settings_path.display()
+        );
+        if verbose > 0 {
+            println!("[dry-run] content:\n{}", content);
+        }
+        return Ok(());
+    }
+
+    let tmp = NamedTempFile::new_in(qwen_dir)?;
+    fs::write(tmp.path(), &content)?;
+    tmp.persist(&settings_path)
+        .with_context(|| format!("Failed to write {}", settings_path.display()))?;
+
+    if verbose > 0 {
+        eprintln!("Patched {}", settings_path.display());
+    }
+
+    Ok(())
+}
+
+pub fn uninstall_qwen(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+    if !global {
+        anyhow::bail!("Qwen Code support is global-only. Use: rtk init -g --qwen --uninstall");
+    }
+
+    let qwen_dir = resolve_qwen_dir()?;
+    let hook_path = qwen_dir.join(HOOKS_SUBDIR).join(QWEN_HOOK_FILE);
+    let mut removed = Vec::new();
+
+    if hook_path.exists() {
+        if dry_run {
+            println!("[dry-run] would remove Qwen hook: {}", hook_path.display());
+        } else {
+            // nosemgrep: filesystem-deletion -- Qwen uninstall removes only the RTK-managed hook file.
+            fs::remove_file(&hook_path)
+                .with_context(|| format!("Failed to remove {}", hook_path.display()))?;
+            let _ = integrity::remove_hash(&hook_path);
+        }
+        removed.push(format!("Qwen hook: {}", hook_path.display()));
+    }
+
+    let qwen_md = qwen_dir.join(QWEN_MD);
+    if qwen_md.exists() {
+        if dry_run {
+            println!("[dry-run] would remove QWEN.md: {}", qwen_md.display());
+        } else {
+            // nosemgrep: filesystem-deletion -- Qwen uninstall removes only the RTK-managed instructions file.
+            fs::remove_file(&qwen_md)
+                .with_context(|| format!("Failed to remove {}", qwen_md.display()))?;
+        }
+        removed.push(format!("QWEN.md: {}", qwen_md.display()));
+    }
+
+    let settings_path = qwen_dir.join(SETTINGS_JSON);
+    if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)?;
+        let mut settings: serde_json::Value = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse {}", settings_path.display()))?;
+        if remove_qwen_hook(&mut settings) {
+            if dry_run {
+                println!(
+                    "[dry-run] would remove RTK hook from Qwen settings.json: {}",
+                    settings_path.display()
+                );
+            } else {
+                fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+            }
+            removed.push("Qwen settings.json: removed RTK hook entry".to_string());
+        }
+    }
+
+    if removed.is_empty() {
+        println!("RTK Qwen support was not installed (nothing to remove)");
+    } else {
+        let prefix = if dry_run {
+            "[dry-run] would uninstall RTK (Qwen):"
+        } else {
+            "RTK uninstalled (Qwen):"
+        };
+        println!("\n{prefix}");
+        for item in &removed {
+            println!("  - {item}");
+        }
+        if !dry_run {
+            println!("\nRestart Qwen Code to apply changes.");
+        }
+    }
+
+    if verbose > 0 && !removed.is_empty() {
+        eprintln!("Qwen artifacts removed");
+    }
+
+    Ok(())
+}
+
 // ── Copilot integration ─────────────────────────────────────
 
 // PreToolUse = VS Code schema, preToolUse = Copilot CLI schema (same file, both hosts).
@@ -4761,6 +5053,64 @@ fn uninstall_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<V
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_insert_qwen_hook_uses_current_schema_and_is_idempotent() {
+        let mut settings = serde_json::json!({
+            "theme": "dark",
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "write_file",
+                    "hooks": [{ "type": "command", "command": "check-write" }]
+                }]
+            }
+        });
+
+        assert!(
+            insert_qwen_hook(&mut settings, "/home/user/.qwen/hooks/rtk-hook-qwen.sh").unwrap()
+        );
+        assert!(
+            !insert_qwen_hook(&mut settings, "/home/user/.qwen/hooks/rtk-hook-qwen.sh").unwrap()
+        );
+
+        let entries = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        let rtk = &entries[1];
+        assert_eq!(rtk["matcher"], "^run_shell_command$");
+        assert_eq!(rtk["hooks"][0]["type"], "command");
+        assert_eq!(rtk["hooks"][0]["name"], "rtk-rewrite");
+        assert_eq!(rtk["hooks"][0]["timeout"], 10000);
+        assert_eq!(settings["theme"], "dark");
+    }
+
+    #[test]
+    fn test_remove_qwen_hook_preserves_other_hooks() {
+        let mut settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    qwen_hook_entry("/tmp/rtk-hook-qwen.sh"),
+                    {
+                        "matcher": "write_file",
+                        "hooks": [{ "type": "command", "command": "check-write" }]
+                    }
+                ]
+            }
+        });
+
+        assert!(remove_qwen_hook(&mut settings));
+        assert!(!remove_qwen_hook(&mut settings));
+        let entries = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["matcher"], "write_file");
+    }
+
+    #[test]
+    fn test_qwen_awareness_uses_qwen_names() {
+        let awareness = qwen_awareness();
+        assert!(awareness.contains("rewritten by the Qwen Code hook"));
+        assert!(awareness.contains("Refer to QWEN.md"));
+        assert!(awareness.contains("Analyze Claude Code history"));
+    }
 
     #[test]
     fn test_init_mentions_all_top_level_commands() {

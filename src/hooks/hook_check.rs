@@ -152,7 +152,7 @@ mod tests {
     use crate::hooks::constants::{
         CODEX_DIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HERMES_DIR,
         HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
-        OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+        OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR, QWEN_DIR, QWEN_HOOK_FILE,
     };
 
     fn other_integration_installed(home: &std::path::Path) -> bool {
@@ -168,6 +168,7 @@ mod tests {
             home.join(GEMINI_DIR)
                 .join(HOOKS_SUBDIR)
                 .join(GEMINI_HOOK_FILE),
+            home.join(QWEN_DIR).join(HOOKS_SUBDIR).join(QWEN_HOOK_FILE),
             home.join(HERMES_DIR)
                 .join(HERMES_PLUGINS_SUBDIR)
                 .join(HERMES_PLUGIN_NAME)
@@ -289,6 +290,19 @@ mod tests {
     }
 
     #[test]
+    fn test_other_integration_qwen() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp
+            .path()
+            .join(QWEN_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(QWEN_HOOK_FILE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"hook").unwrap();
+        assert!(other_integration_installed(tmp.path()));
+    }
+
+    #[test]
     fn test_other_integration_hermes() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp
@@ -308,6 +322,7 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join(CURSOR_DIR).join(HOOKS_SUBDIR)).unwrap();
         std::fs::create_dir_all(tmp.path().join(CODEX_DIR)).unwrap();
         std::fs::create_dir_all(tmp.path().join(GEMINI_DIR)).unwrap();
+        std::fs::create_dir_all(tmp.path().join(QWEN_DIR)).unwrap();
         std::fs::create_dir_all(
             tmp.path()
                 .join(HERMES_DIR)

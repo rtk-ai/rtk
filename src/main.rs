@@ -55,6 +55,8 @@ pub enum AgentTarget {
     Hermes,
     /// Factory Droid CLI
     Droid,
+    /// Qwen Code CLI
+    Qwen,
 }
 
 #[derive(Parser)]
@@ -348,6 +350,13 @@ enum Commands {
         /// Initialize for Gemini CLI instead of Claude Code
         #[arg(long)]
         gemini: bool,
+
+        /// Initialize for Qwen Code CLI instead of Claude Code
+        #[arg(
+            long,
+            conflicts_with_all = ["agent", "gemini", "opencode", "codex", "copilot"]
+        )]
+        qwen: bool,
 
         /// Target agent to install hooks for (default: claude)
         #[arg(long, value_enum)]
@@ -862,6 +871,8 @@ enum HookCommands {
     Cursor,
     /// Process Gemini CLI BeforeTool hook (reads JSON from stdin)
     Gemini,
+    /// Process Qwen Code PreToolUse hook (reads JSON from stdin)
+    Qwen,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
     /// Process Factory Droid PreToolUse hook (reads JSON from stdin)
@@ -1995,6 +2006,7 @@ fn run_cli() -> Result<i32> {
             global,
             opencode,
             gemini,
+            qwen,
             agent,
             show,
             claude_md,
@@ -2020,6 +2032,8 @@ fn run_cli() -> Result<i32> {
                 } else {
                     hooks::init::uninstall_copilot(ctx)?;
                 }
+            } else if uninstall && (qwen || agent == Some(AgentTarget::Qwen)) {
+                hooks::init::uninstall_qwen(global, ctx)?;
             } else if uninstall {
                 uninstall_init_dispatch(
                     agent,
@@ -2039,6 +2053,15 @@ fn run_cli() -> Result<i32> {
                     hooks::init::PatchMode::Ask
                 };
                 hooks::init::run_gemini(global, hook_only, patch_mode, ctx)?;
+            } else if qwen || agent == Some(AgentTarget::Qwen) {
+                let patch_mode = if auto_patch {
+                    hooks::init::PatchMode::Auto
+                } else if no_patch {
+                    hooks::init::PatchMode::Skip
+                } else {
+                    hooks::init::PatchMode::Ask
+                };
+                hooks::init::run_qwen(global, hook_only, patch_mode, ctx)?;
             } else if copilot {
                 if global {
                     hooks::init::run_copilot_global(ctx)?;
@@ -2428,6 +2451,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Gemini => {
                 hooks::hook_cmd::run_gemini()?;
+                0
+            }
+            HookCommands::Qwen => {
+                hooks::hook_cmd::run_qwen()?;
                 0
             }
             HookCommands::Copilot => {
@@ -3617,5 +3644,39 @@ mod tests {
             }
             _ => panic!("Expected Init command"),
         }
+    }
+
+    #[test]
+    fn test_init_qwen_flag_and_agent_value_parse() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--global", "--qwen"]).unwrap();
+        match cli.command {
+            Commands::Init { global, qwen, .. } => {
+                assert!(global);
+                assert!(qwen);
+            }
+            _ => panic!("Expected Init command"),
+        }
+
+        let cli = Cli::try_parse_from(["rtk", "init", "--global", "--agent", "qwen"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => assert_eq!(agent, Some(AgentTarget::Qwen)),
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_init_qwen_rejects_conflicting_agent() {
+        assert!(Cli::try_parse_from(["rtk", "init", "--qwen", "--agent", "claude"]).is_err());
+    }
+
+    #[test]
+    fn test_qwen_hook_command_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "qwen"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::Qwen
+            }
+        ));
     }
 }
