@@ -6,6 +6,14 @@ Filters for JVM-based build tools.
 |------------------|--------------------------------------|----------------------------------------------------------------------------------------|
 | `gradlew_cmd.rs` | `./gradlew`, `gradlew.bat`, `gradle` | Build / Test / ConnectedTest / Lint / Dependencies — streaming line filter + passthrough |
 | `mvn_cmd.rs`     | `mvn`, `./mvnw`, `mvnw.cmd`          | Test / Compile / Package / Passthrough — buffered single-pass filter per phase           |
+| `jar_cmd.rs`     | `jar`                                | Archive listing capped at 50 entries; mutations and extraction pass through              |
+| `javap_cmd.rs`   | `javap`                              | Class/member output capped at 50 non-empty lines with full-output recovery                |
+
+## JVM inspection (`jar_cmd.rs`, `javap_cmd.rs`)
+
+- `jar tf` and equivalent traditional list modes use the shared inventory cap. `jar xf`, archive creation/update, and unsupported modes are exact passthroughs.
+- `javap` keeps the requested output shape and caps only oversized successful output. Help/version and all failed invocations pass through unchanged.
+- Both filters participate in RTK's standard tee policy, so successful output can be retained when tee mode is configured as `always`.
 
 ## Maven (`mvn_cmd.rs`)
 
@@ -35,7 +43,7 @@ Token-savings tests run inline as part of `cargo test --all` and verify ≥90% s
 
 ### Integrity-check whitelist
 
-`Commands::Mvn` is intentionally omitted from `is_operational_command` in `src/main.rs`, matching the gradle precedent (`Commands::Gradlew` also omitted). The whitelist guards SHA-256 hook-integrity verification; filter modules invoked through an already-verified hook do not need a second check on their own dispatch path. Per the comment above the function, the whitelist is opt-in by design and a forgotten command fails open rather than creating false confidence about what's protected.
+The JVM filter commands (`Commands::Gradlew`, `Commands::Mvn`, `Commands::Jar`, and `Commands::Javap`) are intentionally omitted from `is_operational_command` in `src/main.rs`. The whitelist guards SHA-256 hook-integrity verification; filter modules invoked through an already-verified hook do not need a second check on their own dispatch path. Per the comment above the function, the whitelist is opt-in by design and a forgotten command fails open rather than creating false confidence about what's protected.
 
 ## Gradle (`gradlew_cmd.rs`)
 

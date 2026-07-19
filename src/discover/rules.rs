@@ -749,6 +749,27 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^jar\s+-?(tf|tvf|xf|xvf)\b",
+        rtk_cmd: "rtk jar",
+        rewrite_prefixes: &["jar"],
+        category: "Files",
+        savings_pct: 80.0,
+        subcmd_savings: &[("tf", 90.0), ("tvf", 90.0), ("xf", 0.0), ("xvf", 0.0)],
+        subcmd_status: &[
+            ("xf", RtkStatus::Passthrough),
+            ("xvf", RtkStatus::Passthrough),
+        ],
+    },
+    RtkRule {
+        pattern: r"^javap(?:\s|$)",
+        rtk_cmd: "rtk javap",
+        rewrite_prefixes: &["javap"],
+        category: "Files",
+        savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^helm\b",
         rtk_cmd: "rtk helm",
         rewrite_prefixes: &["helm"],
