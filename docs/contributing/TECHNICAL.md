@@ -100,6 +100,15 @@ boundaries. These commands are returned to the host unchanged. The host still
 owns command parsing and shell selection; RTK never translates syntax between
 fish, POSIX shells, and zsh.
 
+The narrow exception is a quoted command string passed through an exact
+`sh -c`, `bash -c`, `zsh -c`, or `fish -c` wrapper. RTK can rewrite the
+portable inner command subset while preserving the original wrapper, quote
+delimiters, whitespace, and suffix arguments. RTK never marks the wrapper
+auto-allowed: Ask-capable hosts receive `Ask`, other hosts retain their native
+permission flow, and inner deny rules still take precedence. Active outer
+expansion, unsupported shell options, fish-specific control syntax, file
+redirects, and nested wrappers remain passthrough.
+
 > **Details**: [`hooks/README.md`](../hooks/README.md) covers each agent's JSON format, the rewrite registry, compound command handling, and the `RTK_DISABLED` override.
 
 #### Rewrite Pipeline
@@ -107,7 +116,7 @@ fish, POSIX shells, and zsh.
 The rewrite pipeline is how RTK intercepts and rewrites commands. The call chain is:
 
 ```
-hook shell → rewrite_cmd.rs → rewrite_command() → rewrite_compound() → rewrite_segment() → classify_command()
+hook shell → rewrite_cmd.rs → rewrite_command() → rewrite_compound() → rewrite_segment() → shell_wrapper/classify_command()
 ```
 
 Traced step by step for `cargo fmt --all && cargo test 2>&1 | tail -20`:
@@ -161,24 +170,29 @@ rewrite_compound(cmd, excluded)                    [src/discover/registry.rs]
   v
 rewrite_segment(seg, excluded)                     [src/discover/registry.rs]
   |
-  |  Step 3 — Strip trailing redirects
+  |  Step 3 — Recognize a conservative quoted shell wrapper
+  |  exact sh/bash/zsh/fish -c + one quoted script
+  |  → rewrite the inner compound command, replace only its byte span
+  |  → unsupported/ambiguous wrapper → None (skip rewrite)
+  |
+  |  Step 4 — Strip trailing redirects
   |  strip_trailing_redirects() re-tokenizes the segment:
   |    "cargo test 2>&1" → cmd_part="cargo test", redirect=" 2>&1"
   |  (simple commands like "cargo fmt --all" → no redirect, suffix is "")
   |
-  |  Step 4 — Already RTK → return as-is
+  |  Step 5 — Already RTK → return as-is
   |
-  |  Step 5 — Special cases (short-circuit before classification)
+  |  Step 6 — Special cases (short-circuit before classification)
   |  head -N / --lines=N → rewrite_line_range() → "rtk read file --max-lines N"
   |  tail -N / -n N / --lines N → rewrite_line_range() → "rtk read file --tail-lines N"
   |  head/tail with unsupported flag (-c, -f) → None (skip rewrite)
   |  cat with incompatible flag (-A, -v, -e) → None (skip rewrite)
   |
-  |  Step 6 — classify_command(cmd_part) [see below]
+  |  Step 7 — classify_command(cmd_part) [see below]
   |  → Supported → check excluded list → continue
   |  → Unsupported/Ignored → None (skip rewrite)
   |
-  |  Step 7 — Build rewritten command
+  |  Step 8 — Build rewritten command
   |  a. Find matching rule from rules.rs
   |  b. Extract env prefix (ENV_PREFIX regex, second pass — first was in classify)
   |     e.g. "GIT_SSH_COMMAND=\"ssh -o ...\" git push" → prefix="GIT_SSH_COMMAND=..."
@@ -213,6 +227,7 @@ LLM Agent executes rewritten command
 Key design decisions:
 - **Lexer-based tokenization**: A single-pass state machine (`lexer.rs`) handles all shell constructs (quotes, escapes, redirects, operators). Used for both compound splitting and redirect stripping.
 - **Segment-level rewriting**: Compound commands are split by operators, each segment rewritten independently. Bash recombines them at execution time.
+- **Conservative shell-wrapper recursion**: Only exact quoted `-c` wrappers enter one level of inner rewriting. The parser preserves byte ranges instead of decoding and re-quoting the script.
 - **Pipe semantics**: Only the left side of `|` is rewritten. The pipe consumer (grep, head, wc) runs raw. `find`/`fd` before a pipe is never rewritten (output format incompatible with xargs).
 - **Double env prefix handling**: `classify_command()` strips env prefixes to match the underlying command against rules. `rewrite_segment()` extracts the same prefix separately to re-prepend it to the rewritten command.
 - **Fallback contract**: If any segment fails to match, it stays raw. `rewrite_command()` returns `None` only when zero segments were rewritten.

@@ -5,10 +5,12 @@ use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 use std::path::Path;
 
-use super::lexer::{split_on_operators, tokenize, TokenKind};
+use super::lexer::{contains_unattestable_construct, split_on_operators, tokenize, TokenKind};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
+use super::shell_wrapper::parse_shell_wrapper;
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
+const MAX_SHELL_WRAPPER_DEPTH: usize = 1;
 
 /// Result of classifying a command.
 #[derive(Debug, PartialEq)]
@@ -592,7 +594,7 @@ pub fn rewrite_command(
         return Some(trimmed.to_string());
     }
 
-    rewrite_compound(trimmed, &compiled, &normalized_prefixes)
+    rewrite_compound(trimmed, &compiled, &normalized_prefixes, 0)
 }
 
 /// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each segment.
@@ -600,6 +602,7 @@ fn rewrite_compound(
     cmd: &str,
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
+    shell_wrapper_depth: usize,
 ) -> Option<String> {
     let tokens = tokenize(cmd);
     let mut result = String::with_capacity(cmd.len() + 32);
@@ -613,8 +616,9 @@ fn rewrite_compound(
         match tok.kind {
             TokenKind::Operator => {
                 let seg = cmd[seg_start..tok.offset].trim();
-                let rewritten = rewrite_segment(seg, excluded, transparent_prefixes)
-                    .unwrap_or_else(|| seg.to_string());
+                let rewritten =
+                    rewrite_segment(seg, excluded, transparent_prefixes, shell_wrapper_depth)
+                        .unwrap_or_else(|| seg.to_string());
                 if rewritten != seg {
                     any_changed = true;
                 }
@@ -644,7 +648,7 @@ fn rewrite_compound(
                 let rewritten = if is_pipe_incompatible {
                     seg.to_string()
                 } else {
-                    rewrite_segment(seg, excluded, transparent_prefixes)
+                    rewrite_segment(seg, excluded, transparent_prefixes, shell_wrapper_depth)
                         .unwrap_or_else(|| seg.to_string())
                 };
                 if rewritten != seg {
@@ -673,8 +677,9 @@ fn rewrite_compound(
             }
             TokenKind::Shellism if tok.value == "&" => {
                 let seg = cmd[seg_start..tok.offset].trim();
-                let rewritten = rewrite_segment(seg, excluded, transparent_prefixes)
-                    .unwrap_or_else(|| seg.to_string());
+                let rewritten =
+                    rewrite_segment(seg, excluded, transparent_prefixes, shell_wrapper_depth)
+                        .unwrap_or_else(|| seg.to_string());
                 if rewritten != seg {
                     any_changed = true;
                 }
@@ -690,8 +695,8 @@ fn rewrite_compound(
     }
 
     let seg = cmd[seg_start..].trim();
-    let rewritten =
-        rewrite_segment(seg, excluded, transparent_prefixes).unwrap_or_else(|| seg.to_string());
+    let rewritten = rewrite_segment(seg, excluded, transparent_prefixes, shell_wrapper_depth)
+        .unwrap_or_else(|| seg.to_string());
     if rewritten != seg {
         any_changed = true;
     }
@@ -791,8 +796,9 @@ fn rewrite_segment(
     seg: &str,
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
+    shell_wrapper_depth: usize,
 ) -> Option<String> {
-    rewrite_segment_inner(seg, excluded, transparent_prefixes, 0)
+    rewrite_segment_inner(seg, excluded, transparent_prefixes, 0, shell_wrapper_depth)
 }
 
 fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
@@ -807,6 +813,7 @@ fn rewrite_segment_inner(
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
     depth: usize,
+    shell_wrapper_depth: usize,
 ) -> Option<String> {
     let trimmed = seg.trim();
     if trimmed.is_empty() {
@@ -815,6 +822,14 @@ fn rewrite_segment_inner(
 
     if depth >= MAX_PREFIX_DEPTH {
         return None;
+    }
+
+    if depth == 0 && shell_wrapper_depth < MAX_SHELL_WRAPPER_DEPTH {
+        if let Some(rewritten) =
+            rewrite_shell_wrapper(trimmed, excluded, transparent_prefixes, shell_wrapper_depth)
+        {
+            return Some(rewritten);
+        }
     }
 
     let (env_prefix, rest_after_env) = strip_disabled_prefix(trimmed);
@@ -828,8 +843,13 @@ fn rewrite_segment_inner(
             );
             return None;
         }
-        let rewritten =
-            rewrite_segment_inner(rest_after_env, excluded, transparent_prefixes, depth + 1)?;
+        let rewritten = rewrite_segment_inner(
+            rest_after_env,
+            excluded,
+            transparent_prefixes,
+            depth + 1,
+            shell_wrapper_depth,
+        )?;
         return Some(format!("{}{}", env_prefix, rewritten));
     }
 
@@ -838,8 +858,14 @@ fn rewrite_segment_inner(
             if rest.is_empty() {
                 return None;
             }
-            return rewrite_segment_inner(rest, excluded, transparent_prefixes, depth + 1)
-                .map(|rewritten| format!("{} {}", prefix, rewritten));
+            return rewrite_segment_inner(
+                rest,
+                excluded,
+                transparent_prefixes,
+                depth + 1,
+                shell_wrapper_depth,
+            )
+            .map(|rewritten| format!("{} {}", prefix, rewritten));
         }
     }
 
@@ -850,8 +876,14 @@ fn rewrite_segment_inner(
             if rest.is_empty() {
                 return None;
             }
-            return rewrite_segment_inner(rest, excluded, transparent_prefixes, depth + 1)
-                .map(|rewritten| format!("{} {}", prefix, rewritten));
+            return rewrite_segment_inner(
+                rest,
+                excluded,
+                transparent_prefixes,
+                depth + 1,
+                shell_wrapper_depth,
+            )
+            .map(|rewritten| format!("{} {}", prefix, rewritten));
         }
     }
 
@@ -970,6 +1002,31 @@ fn rewrite_segment_inner(
     }
 
     None
+}
+
+fn rewrite_shell_wrapper(
+    command: &str,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+    shell_wrapper_depth: usize,
+) -> Option<String> {
+    let wrapper = parse_shell_wrapper(command)?;
+    let script = wrapper.script(command)?;
+    if script.contains(['\n', '\r'])
+        || has_heredoc(script)
+        || script.contains("$((")
+        || contains_unattestable_construct(script)
+    {
+        return None;
+    }
+
+    let rewritten = rewrite_compound(
+        script,
+        excluded,
+        transparent_prefixes,
+        shell_wrapper_depth + 1,
+    )?;
+    wrapper.replace_script(command, &rewritten)
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -4085,6 +4142,100 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("noglob unknown_cmd --flag", &[]),
             None
+        );
+    }
+
+    // --- quoted shell wrapper tests ---
+
+    #[test]
+    fn test_shell_wrapper_rewrites_bash_command_string() {
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"bash -c "head foo && grep -R bar .""#, &[]),
+            Some(r#"bash -c "rtk read foo && rtk grep -R bar .""#.into())
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_rewrites_fish_portable_command_string() {
+        assert_eq!(
+            rewrite_command_no_prefixes("fish -c 'git status; cargo test'", &[]),
+            Some("fish -c 'rtk git status; rtk cargo test'".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_preserves_path_quotes_and_suffix_arguments() {
+        assert_eq!(
+            rewrite_command_no_prefixes("/bin/bash -c 'git status' command-name 'a b'", &[]),
+            Some("/bin/bash -c 'rtk git status' command-name 'a b'".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_supports_sh_zsh_and_horizontal_spacing() {
+        assert_eq!(
+            rewrite_command_no_prefixes("sh\t-c\t'git status'\tname", &[]),
+            Some("sh\t-c\t'rtk git status'\tname".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("zsh -c 'cargo test'", &[]),
+            Some("zsh -c 'rtk cargo test'".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_rewrites_inside_outer_compound_command() {
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"bash -c "git status && cargo test" || git status"#, &[]),
+            Some(r#"bash -c "rtk git status && rtk cargo test" || rtk git status"#.into())
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_applies_inner_exclusions() {
+        let excluded = vec!["git".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("bash -c 'git status; cargo test'", &excluded),
+            Some("bash -c 'git status; rtk cargo test'".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_preserves_fd_redirect() {
+        assert_eq!(
+            rewrite_command_no_prefixes("bash -c 'git status' 2>&1", &[]),
+            Some("bash -c 'rtk git status' 2>&1".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_rejects_unsafe_or_unsupported_scripts() {
+        for command in [
+            "bash -c 'git status $(whoami)'",
+            "bash -c 'git status > /tmp/out'",
+            "bash -c 'git status\ncargo test'",
+            "fish -c 'git status; and cargo test'",
+            "bash -lc 'git status'",
+            r#"bash -c "git status $HOME""#,
+            "command bash -c 'git status'",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "unsafe or unsupported wrapper must pass through: {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_shell_wrapper_does_not_rewrite_nested_wrapper() {
+        assert_eq!(
+            rewrite_command_no_prefixes("bash -c 'bash -c \"git status\"'", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("bash -c 'git status && bash -c \"cargo test\"'", &[]),
+            Some("bash -c 'rtk git status && bash -c \"cargo test\"'".into())
         );
     }
 
