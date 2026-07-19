@@ -3308,6 +3308,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_rewrite_bun_commands() {
+        let cases = [
+            (
+                "bun test src/example.test.ts",
+                "rtk bun test src/example.test.ts",
+            ),
+            (
+                "bun --env-file=.env.test test tests/unit",
+                "rtk bun --env-file=.env.test test tests/unit",
+            ),
+            ("bun run tsc --noEmit", "rtk bun run tsc --noEmit"),
+            ("bun drizzle-kit generate", "rtk bun drizzle-kit generate"),
+            ("bun", "rtk bun"),
+        ];
+
+        for (command, expected) in cases {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.to_string()),
+                "Failed for command: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_bun_preserves_environment_prefix() {
+        assert_eq!(
+            rewrite_command("SMS_PROVIDER=console bun test src/module.test.ts", &[], &[]),
+            Some("SMS_PROVIDER=console rtk bun test src/module.test.ts".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bunx() {
+        assert_eq!(
+            rewrite_command_no_prefixes("bunx tsc --noEmit", &[]),
+            Some("rtk bunx tsc --noEmit".to_string()),
+        );
+    }
+
     // --- Gradle ---
 
     #[test]

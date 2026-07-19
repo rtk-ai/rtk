@@ -12,8 +12,8 @@ use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
-    lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
-    vitest_cmd,
+    bun_cmd, lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd,
+    tsc_cmd, vitest_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpunit_cmd, pint_cmd};
@@ -562,6 +562,20 @@ enum Commands {
     /// npx with intelligent routing (tsc, eslint, prisma -> specialized filters)
     Npx {
         /// npx arguments (command + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Bun commands with compact output
+    Bun {
+        /// Bun arguments (subcommand, script, and options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// bunx commands with compact output
+    Bunx {
+        /// bunx arguments (command and options)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2320,6 +2334,15 @@ fn run_cli() -> Result<i32> {
             }
         }
 
+        Commands::Bun { args } => bun_cmd::run(&args, cli.verbose, cli.skip_env)?,
+
+        Commands::Bunx { args } => {
+            if args.is_empty() {
+                anyhow::bail!("bunx requires a command argument");
+            }
+            bun_cmd::exec(&args, cli.verbose, cli.skip_env)?
+        }
+
         Commands::Ruff { args } => ruff_cmd::run(&args, cli.verbose)?,
 
         Commands::Pytest { args } => pytest_cmd::run(&args, cli.verbose)?,
@@ -2709,6 +2732,8 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Cargo { .. }
             | Commands::Npm { .. }
             | Commands::Npx { .. }
+            | Commands::Bun { .. }
+            | Commands::Bunx { .. }
             | Commands::Curl { .. }
             | Commands::Ruff { .. }
             | Commands::Pytest { .. }
@@ -3091,6 +3116,8 @@ mod tests {
             "cargo",
             "npm",
             "npx",
+            "bun",
+            "bunx",
             "curl",
             "ruff",
             "pytest",
@@ -3534,6 +3561,37 @@ mod tests {
                 assert_eq!(args, vec!["cowsay", "hello"]);
             }
             _ => panic!("Expected Commands::Npx for unknown tool"),
+        }
+    }
+
+    #[test]
+    fn test_bun_commands_preserve_arguments() {
+        let cases = [
+            vec!["rtk", "bun", "test", "src/example.test.ts"],
+            vec!["rtk", "bun", "--env-file=.env.test", "test", "tests/unit"],
+            vec!["rtk", "bun", "run", "tsc", "--noEmit"],
+            vec!["rtk", "bun", "drizzle-kit", "generate"],
+        ];
+
+        for case in cases {
+            let expected = case[2..]
+                .iter()
+                .map(|arg| arg.to_string())
+                .collect::<Vec<_>>();
+            let cli = Cli::try_parse_from(case).unwrap();
+            match cli.command {
+                Commands::Bun { args } => assert_eq!(args, expected),
+                _ => panic!("Expected Commands::Bun"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_bunx_preserves_arguments() {
+        let cli = Cli::try_parse_from(["rtk", "bunx", "tsc", "--noEmit"]).unwrap();
+        match cli.command {
+            Commands::Bunx { args } => assert_eq!(args, vec!["tsc", "--noEmit"]),
+            _ => panic!("Expected Commands::Bunx"),
         }
     }
 

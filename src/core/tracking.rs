@@ -1203,8 +1203,8 @@ fn categorize_command(rtk_cmd: &str) -> String {
     match tool {
         "git" | "gh" | "gt" => "git",
         "cargo" => "cargo",
-        "npm" | "npx" | "pnpm" | "vitest" | "tsc" | "lint" | "prettier" | "next" | "playwright"
-        | "prisma" => "js",
+        "npm" | "npx" | "pnpm" | "bun" | "bunx" | "vitest" | "tsc" | "lint" | "prettier"
+        | "next" | "playwright" | "prisma" => "js",
         "pytest" | "ruff" | "mypy" | "pip" => "python",
         "go" | "golangci-lint" => "go",
         "docker" | "kubectl" => "cloud",

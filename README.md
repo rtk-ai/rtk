@@ -205,6 +205,8 @@ rtk rubocop                     # Ruby linting (JSON, -60%+)
 ### Package Managers
 ```bash
 rtk pnpm list                   # Compact dependency tree
+rtk bun run build               # Bun scripts (strip banner and command echo)
+rtk bunx tsc --noEmit           # bunx tools with compact output
 rtk uv run pytest               # Preserve uv env, errors only
 rtk pip list                    # Python packages (auto-detect uv)
 rtk pip outdated                # Outdated packages
