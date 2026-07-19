@@ -205,6 +205,7 @@ rtk lint                        # ESLint grouped by rule/file
 rtk lint biome                  # Supports other linters
 rtk tsc                         # TypeScript errors grouped by file
 rtk next build                  # Next.js build compact
+rtk vite build                  # Vite assets, totals, largest chunks
 rtk prettier --check .          # Files needing formatting
 rtk cargo build                 # Cargo build (-80%)
 rtk cargo clippy                # Cargo clippy (-80%)

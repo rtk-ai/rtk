@@ -1935,6 +1935,41 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_and_rewrite_vite_build() {
+        let commands = [
+            "vite build",
+            "npx vite build",
+            "pnpm exec vite build",
+            "npm exec vite build",
+        ];
+        for command in commands {
+            assert!(matches!(
+                classify_command(command),
+                Classification::Supported {
+                    rtk_equivalent: "rtk vite",
+                    category: "Build",
+                    estimated_savings_pct: 85.0,
+                    ..
+                }
+            ));
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("{command} --mode staging"), &[]),
+                Some("rtk vite build --mode staging".into()),
+                "Failed for command: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_vite_non_build_commands_are_not_rewritten() {
+        assert!(matches!(
+            classify_command("vite dev"),
+            Classification::Unsupported { .. }
+        ));
+        assert_eq!(rewrite_command_no_prefixes("vite dev", &[]), None);
+    }
+
+    #[test]
     fn test_rewrite_pipe_final_safe_stage_only() {
         assert_eq!(
             rewrite_command_no_prefixes("git log -10 | grep feat", &[]),
