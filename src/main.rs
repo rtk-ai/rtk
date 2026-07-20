@@ -19,7 +19,7 @@ use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpunit_cmd, pint_cmd};
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
-use cmds::cpp::{cmake_cmd, ninja_cmd};
+use cmds::cpp::{cmake_cmd, ninja_cmd, xmake_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
     deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
@@ -566,6 +566,16 @@ enum Commands {
         #[arg(short = 'C', long, default_value = ".")]
         directory: String,
         /// Additional ninja arguments (-j, -k, targets, etc.)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// xmake build/configure with compact output (strip compiler commands, keep errors)
+    ///
+    /// Example: rtk xmake build
+    /// Example: rtk xmake f -c config.lua
+    Xmake {
+        /// xmake arguments (build, f, -c, etc.)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2227,6 +2237,8 @@ fn run_cli() -> Result<i32> {
             ninja_cmd::run(&directory, &args, cli.verbose)?
         }
 
+        Commands::Xmake { args } => xmake_cmd::run(&args, cli.verbose)?,
+
         Commands::Cargo { command } => match command {
             CargoCommands::Build { args } => {
                 cargo_cmd::run(cargo_cmd::CargoCommand::Build, &args, cli.verbose)?
@@ -2740,6 +2752,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Playwright { .. }
             | Commands::Cmake { .. }
             | Commands::Ninja { .. }
+            | Commands::Xmake { .. }
             | Commands::Cargo { .. }
             | Commands::Npm { .. }
             | Commands::Npx { .. }
@@ -3148,6 +3161,7 @@ mod tests {
             "ecs",
             "pint",
             "uv",
+            "xmake",
         ];
 
         let unclassified: Vec<String> = Cli::command()
