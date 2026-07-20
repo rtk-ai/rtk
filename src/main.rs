@@ -8,6 +8,7 @@ mod parser;
 
 // Re-export command modules for routing
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use cmds::cpp::{cmake_cmd, ninja_cmd, xmake_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
@@ -19,7 +20,6 @@ use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpunit_cmd, pint_cmd};
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
-use cmds::cpp::{cmake_cmd, ninja_cmd, xmake_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
     deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
@@ -2229,13 +2229,9 @@ fn run_cli() -> Result<i32> {
 
         Commands::Playwright { args } => playwright_cmd::run(&args, cli.verbose)?,
 
-        Commands::Cmake { args } => {
-            cmake_cmd::run(&args, cli.verbose)?
-        }
+        Commands::Cmake { args } => cmake_cmd::run(&args, cli.verbose)?,
 
-        Commands::Ninja { directory, args } => {
-            ninja_cmd::run(&directory, &args, cli.verbose)?
-        }
+        Commands::Ninja { directory, args } => ninja_cmd::run(&directory, &args, cli.verbose)?,
 
         Commands::Xmake { args } => xmake_cmd::run(&args, cli.verbose)?,
 

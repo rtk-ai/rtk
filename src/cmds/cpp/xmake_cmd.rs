@@ -99,8 +99,7 @@ impl XmakeStats {
 
 /// Returns `true` if the line is an xmake section header like `=== XMAKE DEBUG CONFIG ===`.
 fn is_section_header(trimmed: &str) -> bool {
-    trimmed.starts_with("=== XMAKE ")
-        && trimmed.ends_with(" ===")
+    trimmed.starts_with("=== XMAKE ") && trimmed.ends_with(" ===")
 }
 
 /// Returns `true` if the line is an xmake probe line (`checking for ...`).
@@ -158,7 +157,8 @@ fn is_progress_line(trimmed: &str) -> Option<ProgressInfo> {
     // [  7%]: <mimalloc> compiling.debug path/to/file.c
     // [ 25%]: <lc-yyjson> archiving.debug luisa-ext-lc-yyjson.lib
     // [ 26%]: <glfw> linking.debug luisa-ext-glfw.dll
-    let re = lazy_re!(r"^\[\s*\d+%\]:\s*<([^>]+)>\s+(compiling|archiving|linking)\.(debug|release)\s");
+    let re =
+        lazy_re!(r"^\[\s*\d+%\]:\s*<([^>]+)>\s+(compiling|archiving|linking)\.(debug|release)\s");
     let caps = re.captures(trimmed)?;
     Some(ProgressInfo {
         target: caps.get(1)?.as_str().to_string(),
@@ -492,17 +492,26 @@ fn filter_xmake_output_verbose(input: &str, _exit_code: i32, verbose: u8) -> Str
             match info.action.as_str() {
                 "compiling" => {
                     stats.compile_count += 1;
-                    let entry = stats.targets.entry(info.target.clone()).or_insert((0, 0, 0));
+                    let entry = stats
+                        .targets
+                        .entry(info.target.clone())
+                        .or_insert((0, 0, 0));
                     entry.0 += 1;
                 }
                 "archiving" => {
                     stats.archive_count += 1;
-                    let entry = stats.targets.entry(info.target.clone()).or_insert((0, 0, 0));
+                    let entry = stats
+                        .targets
+                        .entry(info.target.clone())
+                        .or_insert((0, 0, 0));
                     entry.1 += 1;
                 }
                 "linking" => {
                     stats.link_count += 1;
-                    let entry = stats.targets.entry(info.target.clone()).or_insert((0, 0, 0));
+                    let entry = stats
+                        .targets
+                        .entry(info.target.clone())
+                        .or_insert((0, 0, 0));
                     entry.2 += 1;
                 }
                 _ => {}
@@ -526,7 +535,11 @@ fn compose_output(stats: &XmakeStats) -> String {
 
     // Build mode string
     let mode_str = if stats.build_modes.is_empty() {
-        if is_build { "debug".to_string() } else { String::new() }
+        if is_build {
+            "debug".to_string()
+        } else {
+            String::new()
+        }
     } else {
         stats.build_modes.join(",")
     };
@@ -548,7 +561,10 @@ fn compose_output(stats: &XmakeStats) -> String {
     let total_targets = stats.targets.len();
 
     // ── Error case ──
-    if !stats.errors.is_empty() || stats.build_exit_code == Some(1) || stats.config_exit_code == Some(1) {
+    if !stats.errors.is_empty()
+        || stats.build_exit_code == Some(1)
+        || stats.config_exit_code == Some(1)
+    {
         output.push_str(&format!(
             "xmake: {} failed ({}{}{})\n",
             if is_build { "build" } else { "configure" },
@@ -569,9 +585,15 @@ fn compose_output(stats: &XmakeStats) -> String {
             targets.sort_by(|a, b| a.0.cmp(b.0));
             for (target, &(comp, arch, link)) in &targets {
                 let mut parts = Vec::new();
-                if comp > 0 { parts.push(format!("{} compiled", comp)); }
-                if arch > 0 { parts.push(format!("{} archived", arch)); }
-                if link > 0 { parts.push(format!("{} linked", link)); }
+                if comp > 0 {
+                    parts.push(format!("{} compiled", comp));
+                }
+                if arch > 0 {
+                    parts.push(format!("{} archived", arch));
+                }
+                if link > 0 {
+                    parts.push(format!("{} linked", link));
+                }
                 output.push_str(&format!(" <{}>: {}\n", target, parts.join(", ")));
             }
         }
@@ -582,33 +604,29 @@ fn compose_output(stats: &XmakeStats) -> String {
     // ── Success case ──
     if is_build || stats.compile_count > 0 || stats.archive_count > 0 || stats.link_count > 0 {
         let status = if !stats.warning_counts.is_empty() {
-            format!(" — with {} warnings", stats.warning_counts.values().sum::<usize>())
+            format!(
+                " — with {} warnings",
+                stats.warning_counts.values().sum::<usize>()
+            )
         } else {
             String::new()
         };
 
         output.push_str(&format!(
             "ok xmake: build ({}{}{}){}\n",
-            mode_str,
-            platform_str,
-            compiler_str,
-            status,
+            mode_str, platform_str, compiler_str, status,
         ));
 
         // Target stats
         output.push_str(&format!(
             " {} compiled, {} archived, {} linked ({} targets)\n",
-            stats.compile_count,
-            stats.archive_count,
-            stats.link_count,
-            total_targets,
+            stats.compile_count, stats.archive_count, stats.link_count, total_targets,
         ));
     } else {
         // Config only
         output.push_str(&format!(
             "ok xmake: configured ({}{})\n",
-            platform_str,
-            compiler_str,
+            platform_str, compiler_str,
         ));
     }
 
@@ -629,9 +647,15 @@ fn compose_output(stats: &XmakeStats) -> String {
         targets.sort_by(|a, b| a.0.cmp(b.0));
         for (target, &(comp, arch, link)) in &targets {
             let mut parts = Vec::new();
-            if comp > 0 { parts.push(format!("{} compiled", comp)); }
-            if arch > 0 { parts.push(format!("{} archived", arch)); }
-            if link > 0 { parts.push(format!("{} linked", link)); }
+            if comp > 0 {
+                parts.push(format!("{} compiled", comp));
+            }
+            if arch > 0 {
+                parts.push(format!("{} archived", arch));
+            }
+            if link > 0 {
+                parts.push(format!("{} linked", link));
+            }
             output.push_str(&format!(" <{}>: {}\n", target, parts.join(", ")));
         }
     }
@@ -706,7 +730,8 @@ mod tests {
 
     #[test]
     fn test_is_progress_line_archiving() {
-        let result = is_progress_line("[ 75%]: <lc-yyjson> archiving.debug luisa-ext-lc-yyjson.lib");
+        let result =
+            is_progress_line("[ 75%]: <lc-yyjson> archiving.debug luisa-ext-lc-yyjson.lib");
         assert!(result.is_some());
         if let Some(info) = result {
             assert_eq!(info.target, "lc-yyjson");
@@ -743,80 +768,117 @@ mod tests {
 
     #[test]
     fn test_is_section_header_not() {
-        assert!(!is_section_header("[  7%]: <mimalloc> compiling.debug file.c"));
+        assert!(!is_section_header(
+            "[  7%]: <mimalloc> compiling.debug file.c"
+        ));
         assert!(!is_section_header("error: something"));
     }
 
     #[test]
     fn test_is_unity_gen_line() {
-        assert!(is_unity_gen_line("generating.unityfile path\\to\\unity_16.cpp"));
-        assert!(is_unity_gen_line("generating.unityfile path/to/unity_16.cpp"));
-        assert!(!is_unity_gen_line("[  7%]: <mimalloc> compiling.debug file.c"));
+        assert!(is_unity_gen_line(
+            "generating.unityfile path\\to\\unity_16.cpp"
+        ));
+        assert!(is_unity_gen_line(
+            "generating.unityfile path/to/unity_16.cpp"
+        ));
+        assert!(!is_unity_gen_line(
+            "[  7%]: <mimalloc> compiling.debug file.c"
+        ));
     }
 
     #[test]
     fn test_is_full_command_line_msvc() {
         // MSVC compiler command line
         let line = "\"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.38.33130\\bin\\Hostx64\\x64\\cl.exe\" -c -nologo -MDd -Zi -FS -Fd\"build\\.objs\\luisa-compute\\windows\\x64\\debug\\lc-core\\src\\core\\clock.cpp.pdb\" -Fo\"build\\.objs\\luisa-compute\\windows\\x64\\debug\\lc-core\\src\\core\\clock.cpp.obj\" -I\"src\" -I\"include\" -std:c++20 -DUNITY_BUILD -DLC_BACKEND_DX_ENABLED=1 \"-FAsrc\\core\\clock.cpp.asm\" -showIncludes \"src\\core\\clock.cpp\"";
-        assert!(is_full_command_line(line), "MSVC compiler line should be detected");
+        assert!(
+            is_full_command_line(line),
+            "MSVC compiler line should be detected"
+        );
     }
 
     #[test]
     fn test_is_full_command_line_msvc_link_dll() {
         let line = "\"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.38.33130\\bin\\Hostx64\\x64\\link.exe\" -dll -nologo -machine:x64 \"build\\.objs\\luisa-compute\\windows\\x64\\debug\\lc-yyjson\\src\\json.cpp.obj\" -out:\"build\\windows\\x64\\debug\\lc-yyjson.dll\"";
-        assert!(is_full_command_line(line), "MSVC link DLL line should be detected");
+        assert!(
+            is_full_command_line(line),
+            "MSVC link DLL line should be detected"
+        );
     }
 
     #[test]
     fn test_is_full_command_line_msvc_link_lib() {
         let line = "\"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.38.33130\\bin\\Hostx64\\x64\\link.exe\" -lib -nologo -machine:x64 \"build\\.objs\\luisa-compute\\windows\\x64\\debug\\lc-core\\src\\core\\clock.cpp.obj\" -out:\"build\\windows\\x64\\debug\\lc-core.lib\"";
-        assert!(is_full_command_line(line), "MSVC link lib line should be detected");
+        assert!(
+            is_full_command_line(line),
+            "MSVC link lib line should be detected"
+        );
     }
 
     #[test]
     fn test_is_full_command_line_gcc() {
         let line = "\"/usr/bin/g++\" -c -g -std=c++20 -fPIC -I\"src/core\" -I\"src/include\" -I\"src/third_party/abseil-cpp\" -DUNITY_BUILD -DBUILD_TESTING=1 -DBUILD_BENCHMARKS=1 -o\"build/.objs/lc-core/src/core/clock.cpp.o\" \"src/core/clock.cpp\"";
-        assert!(is_full_command_line(line), "GCC compiler line should be detected");
+        assert!(
+            is_full_command_line(line),
+            "GCC compiler line should be detected"
+        );
     }
 
     #[test]
     fn test_is_full_command_line_clang() {
         let line = "\"/usr/bin/clang++\" -c -g -std=c++20 -I\"src/core\" -I\"src/include\" -I\"src/vendor/abseil-cpp/absl\" -I\"src/vendor/googletest/googletest/include\" -DUNITY_BUILD -DLC_BACKEND_DX_ENABLED=1 -o\"build/.objs/lc-core/src/core/clock.cpp.o\" \"src/core/clock.cpp\"";
-        assert!(is_full_command_line(line), "Clang compiler line should be detected");
+        assert!(
+            is_full_command_line(line),
+            "Clang compiler line should be detected"
+        );
     }
 
     #[test]
     fn test_is_full_command_line_archiver_gcc() {
         let line = "\"/usr/bin/ar\" rcs \"build/lib/liblc-core.a\" build/.objs/lc-core/src/core/clock.cpp.o build/.objs/lc-core/src/core/hash.cpp.o build/.objs/lc-core/src/core/arena.cpp.o build/.objs/lc-core/src/core/buffer.cpp.o build/.objs/lc-core/src/core/context.cpp.o";
-        assert!(is_full_command_line(line), "GCC archiver line should be detected");
+        assert!(
+            is_full_command_line(line),
+            "GCC archiver line should be detected"
+        );
     }
 
     #[test]
     fn test_is_full_command_line_linker_gcc() {
         let line = "\"/usr/bin/g++\" -shared -o\"build/lib/liblc-yyjson.so\" \"build/.objs/lc-yyjson/src/json.cpp.o\" \"build/.objs/lc-yyjson/src/parse.cpp.o\" \"build/.objs/lc-yyjson/src/stringify.cpp.o\" \"build/.objs/lc-yyjson/src/sax.cpp.o\" \"build/.objs/lc-yyjson/src/utf8.cpp.o\"";
-        assert!(is_full_command_line(line), "GCC linker line should be detected");
+        assert!(
+            is_full_command_line(line),
+            "GCC linker line should be detected"
+        );
     }
 
     #[test]
     fn test_is_not_full_command_line() {
         // Progress line — short and no flags
-        assert!(!is_full_command_line("[  7%]: <mimalloc> compiling.debug path/to/file.c"));
+        assert!(!is_full_command_line(
+            "[  7%]: <mimalloc> compiling.debug path/to/file.c"
+        ));
         // Short line
         assert!(!is_full_command_line("error: unity_16.cpp"));
         // Regular message
-        assert!(!is_full_command_line("checking for platform ... windows (x64)"));
+        assert!(!is_full_command_line(
+            "checking for platform ... windows (x64)"
+        ));
         // Empty
         assert!(!is_full_command_line(""));
     }
 
     #[test]
     fn test_is_error_line_msvc() {
-        assert!(is_error_line("src\\scalar_evolution.h(118): error C2375: function_name: redefinition"));
+        assert!(is_error_line(
+            "src\\scalar_evolution.h(118): error C2375: function_name: redefinition"
+        ));
     }
 
     #[test]
     fn test_is_error_line_gcc() {
-        assert!(is_error_line("src/core/hash.h:42:13: error: static assertion failed: Hash must be specialized"));
+        assert!(is_error_line(
+            "src/core/hash.h:42:13: error: static assertion failed: Hash must be specialized"
+        ));
     }
 
     #[test]
@@ -832,54 +894,78 @@ mod tests {
 
     #[test]
     fn test_is_warning_line_msvc() {
-        assert!(is_warning_line("src\\main.cpp(42): warning C4100: 'x': unreferenced formal parameter"));
+        assert!(is_warning_line(
+            "src\\main.cpp(42): warning C4100: 'x': unreferenced formal parameter"
+        ));
     }
 
     #[test]
     fn test_is_warning_line_gcc() {
-        assert!(is_warning_line("src/api/api.cpp:42:10: warning: unused parameter 'device_id' [-Wunused-parameter]"));
+        assert!(is_warning_line(
+            "src/api/api.cpp:42:10: warning: unused parameter 'device_id' [-Wunused-parameter]"
+        ));
     }
 
     #[test]
     fn test_is_warning_line_not() {
         assert!(!is_warning_line("error: unity_16.cpp"));
-        assert!(!is_warning_line("[ 50%]: <lc-core> compiling.release file.cpp"));
+        assert!(!is_warning_line(
+            "[ 50%]: <lc-core> compiling.release file.cpp"
+        ));
     }
 
     #[test]
     fn test_extract_warning_flag_msvc() {
-        assert_eq!(extract_warning_flag("warning C4100: 'x': unreferenced formal parameter"), Some("C4100".to_string()));
+        assert_eq!(
+            extract_warning_flag("warning C4100: 'x': unreferenced formal parameter"),
+            Some("C4100".to_string())
+        );
     }
 
     #[test]
     fn test_extract_warning_flag_gcc() {
         assert_eq!(
-            extract_warning_flag("src/api/api.cpp:42:10: warning: unused parameter 'device_id' [-Wunused-parameter]"),
+            extract_warning_flag(
+                "src/api/api.cpp:42:10: warning: unused parameter 'device_id' [-Wunused-parameter]"
+            ),
             Some("-Wunused-parameter".to_string())
         );
     }
 
     #[test]
     fn test_extract_platform_windows() {
-        assert_eq!(extract_platform("checking for platform ... windows (x64)"), Some("windows (x64)".to_string()));
+        assert_eq!(
+            extract_platform("checking for platform ... windows (x64)"),
+            Some("windows (x64)".to_string())
+        );
     }
 
     #[test]
     fn test_extract_platform_linux() {
-        assert_eq!(extract_platform("checking for platform ... linux (x86_64)"), Some("linux (x86_64)".to_string()));
+        assert_eq!(
+            extract_platform("checking for platform ... linux (x86_64)"),
+            Some("linux (x86_64)".to_string())
+        );
     }
 
     #[test]
     fn test_extract_platform_macos() {
-        assert_eq!(extract_platform("checking for platform ... macosx (arm64)"), Some("macosx (arm64)".to_string()));
+        assert_eq!(
+            extract_platform("checking for platform ... macosx (arm64)"),
+            Some("macosx (arm64)".to_string())
+        );
     }
 
     #[test]
     fn test_is_probe_line_true() {
-        assert!(is_probe_line("checking for Microsoft C/C++ Compiler ... ok"));
+        assert!(is_probe_line(
+            "checking for Microsoft C/C++ Compiler ... ok"
+        ));
         assert!(is_probe_line("checking for gcc ... /usr/bin/gcc"));
         assert!(is_probe_line("checking for clang ... /usr/bin/clang"));
-        assert!(is_probe_line("checking for the c++ compiler (cxx) ... clang++"));
+        assert!(is_probe_line(
+            "checking for the c++ compiler (cxx) ... clang++"
+        ));
         assert!(is_probe_line("checking for flags (-FS) ... ok"));
         assert!(is_probe_line("checking for link.exe ... /usr/bin/ld"));
     }
@@ -919,34 +1005,50 @@ mod tests {
 
     #[test]
     fn test_is_exit_code_line() {
-        assert_eq!(is_exit_code_line("Config exit code: 0"), Some(("config".to_string(), 0)));
-        assert_eq!(is_exit_code_line("Build exit code: 1"), Some(("build".to_string(), 1)));
+        assert_eq!(
+            is_exit_code_line("Config exit code: 0"),
+            Some(("config".to_string(), 0))
+        );
+        assert_eq!(
+            is_exit_code_line("Build exit code: 1"),
+            Some(("build".to_string(), 1))
+        );
         assert_eq!(is_exit_code_line("not an exit code line"), None);
     }
 
     #[test]
     fn test_is_compiler_diag_gcc_error() {
-        assert!(is_compiler_diag("src/core/hash.h:42:13: error: static assertion failed: Hash must be specialized"));
+        assert!(is_compiler_diag(
+            "src/core/hash.h:42:13: error: static assertion failed: Hash must be specialized"
+        ));
     }
 
     #[test]
     fn test_is_compiler_diag_msvc_error() {
-        assert!(is_compiler_diag("src/backends/dx/dx_codegen.cpp(88): error C2039: 'visit': is not a member"));
+        assert!(is_compiler_diag(
+            "src/backends/dx/dx_codegen.cpp(88): error C2039: 'visit': is not a member"
+        ));
     }
 
     #[test]
     fn test_is_compiler_diag_warning() {
-        assert!(is_compiler_diag("src/api/api.cpp:42:10: warning: unused parameter 'device_id' [-Wunused-parameter]"));
+        assert!(is_compiler_diag(
+            "src/api/api.cpp:42:10: warning: unused parameter 'device_id' [-Wunused-parameter]"
+        ));
     }
 
     #[test]
     fn test_is_compiler_diag_note() {
-        assert!(is_compiler_diag("src/core/hash.h:42:13: note: in instantiation of template class"));
+        assert!(is_compiler_diag(
+            "src/core/hash.h:42:13: note: in instantiation of template class"
+        ));
     }
 
     #[test]
     fn test_is_compiler_diag_not() {
-        assert!(!is_compiler_diag("[  7%]: <mimalloc> compiling.debug file.c"));
+        assert!(!is_compiler_diag(
+            "[  7%]: <mimalloc> compiling.debug file.c"
+        ));
         assert!(!is_compiler_diag("checking for platform ... windows (x64)"));
         assert!(!is_compiler_diag(""));
     }
@@ -977,11 +1079,31 @@ generating.unityfile src\\core\\unity_17.cpp
 Build exit code: 0
 ";
         let result = filter_xmake(input, 0);
-        assert!(result.contains("ok xmake: build (debug, windows (x64), msvc)"), "got: {}", result);
-        assert!(result.contains("5 compiled, 1 archived, 2 linked (4 targets)"), "got: {}", result);
-        assert!(!result.contains("generating.unityfile"), "should strip unity gen lines, got: {}", result);
-        assert!(!result.contains("[  7%]"), "should strip progress lines, got: {}", result);
-        assert!(!result.contains("checking for"), "should strip probe lines, got: {}", result);
+        assert!(
+            result.contains("ok xmake: build (debug, windows (x64), msvc)"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("5 compiled, 1 archived, 2 linked (4 targets)"),
+            "got: {}",
+            result
+        );
+        assert!(
+            !result.contains("generating.unityfile"),
+            "should strip unity gen lines, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("[  7%]"),
+            "should strip progress lines, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("checking for"),
+            "should strip probe lines, got: {}",
+            result
+        );
     }
 
     #[test]
@@ -1002,8 +1124,16 @@ Config exit code: 0
 Build exit code: 0
 ";
         let result = filter_xmake(input, 0);
-        assert!(result.contains("ok xmake: build (debug, linux (x86_64), gcc)"), "got: {}", result);
-        assert!(result.contains("4 compiled, 1 archived, 1 linked (4 targets)"), "got: {}", result);
+        assert!(
+            result.contains("ok xmake: build (debug, linux (x86_64), gcc)"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("4 compiled, 1 archived, 1 linked (4 targets)"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]
@@ -1016,7 +1146,11 @@ Config exit code: 0
 ";
         let result = filter_xmake(input, 0);
         assert!(result.contains("ok xmake: configured"), "got: {}", result);
-        assert!(!result.contains("build"), "should not mention build, got: {}", result);
+        assert!(
+            !result.contains("build"),
+            "should not mention build, got: {}",
+            result
+        );
     }
 
     #[test]
@@ -1033,7 +1167,11 @@ Build exit code: 0
 ";
         let result = filter_xmake(input, 0);
         assert!(result.contains("ok xmake: build"), "got: {}", result);
-        assert!(result.contains("1 compiled, 0 archived, 1 linked (1 targets)"), "got: {}", result);
+        assert!(
+            result.contains("1 compiled, 0 archived, 1 linked (1 targets)"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]
@@ -1062,7 +1200,8 @@ Build exit code: 0
         // 20 archive/link lines with their command lines
         for i in 1..=10 {
             input.push_str(&format!(
-                "[{:3}%]: <lc-core> archiving.debug lc-core.lib\n", 80 + i
+                "[{:3}%]: <lc-core> archiving.debug lc-core.lib\n",
+                80 + i
             ));
             input.push_str(&format!(
                 "\"C:\\link.exe\" -lib -nologo -machine:x64 \"build\\file_{}.obj\" -out:\"build\\lc-core.lib\"\n",
@@ -1071,7 +1210,8 @@ Build exit code: 0
         }
         for i in 1..=5 {
             input.push_str(&format!(
-                "[{:3}%]: <lc-core> linking.debug lc-core.dll\n", 90 + i
+                "[{:3}%]: <lc-core> linking.debug lc-core.dll\n",
+                90 + i
             ));
             input.push_str(&format!(
                 "\"C:\\link.exe\" -dll -nologo -machine:x64 \"build\\file_{}.obj\" -out:\"build\\lc-core.dll\"\n",
@@ -1089,7 +1229,11 @@ Build exit code: 0
         } else {
             0
         };
-        assert!(savings >= 90, "token savings: {}% (expected >=90%)", savings);
+        assert!(
+            savings >= 90,
+            "token savings: {}% (expected >=90%)",
+            savings
+        );
     }
 
     #[test]
@@ -1114,10 +1258,12 @@ Build exit code: 0
 
         for i in 1..=10 {
             input.push_str(&format!(
-                "[{:3}%]: <lc-core> archiving.debug liblc-core.a\n", 80 + i
+                "[{:3}%]: <lc-core> archiving.debug liblc-core.a\n",
+                80 + i
             ));
             input.push_str(&format!(
-                "\"/usr/bin/ar\" rcs \"build/liblc-core.a\" build/file_{}.o\n", i
+                "\"/usr/bin/ar\" rcs \"build/liblc-core.a\" build/file_{}.o\n",
+                i
             ));
         }
 
@@ -1131,7 +1277,11 @@ Build exit code: 0
         } else {
             0
         };
-        assert!(savings >= 90, "token savings: {}% (expected >=90%)", savings);
+        assert!(
+            savings >= 90,
+            "token savings: {}% (expected >=90%)",
+            savings
+        );
     }
 
     // ── Warning cases ──
@@ -1148,8 +1298,12 @@ Build exit code: 0
 ";
         let result = filter_xmake(input, 0);
         assert!(result.contains("ok xmake: build"), "got: {}", result);
-        assert!(result.contains("warnings: C4100 ×1, C4244 ×1") || result.contains("warnings: C4244 ×1, C4100 ×1"),
-            "should show warning counts, got: {}", result);
+        assert!(
+            result.contains("warnings: C4100 ×1, C4244 ×1")
+                || result.contains("warnings: C4244 ×1, C4100 ×1"),
+            "should show warning counts, got: {}",
+            result
+        );
     }
 
     #[test]
@@ -1163,9 +1317,12 @@ src/core/clock.cpp:15:20: warning: variable 'old_val' set but not used [-Wunused
 Build exit code: 0
 ";
         let result = filter_xmake(input, 0);
-        assert!(result.contains("warnings: -Wunused-parameter ×1, -Wunused-but-set-variable ×1")
-            || result.contains("warnings: -Wunused-but-set-variable ×1, -Wunused-parameter ×1"),
-            "should show GCC warning flags, got: {}", result);
+        assert!(
+            result.contains("warnings: -Wunused-parameter ×1, -Wunused-but-set-variable ×1")
+                || result.contains("warnings: -Wunused-but-set-variable ×1, -Wunused-parameter ×1"),
+            "should show GCC warning flags, got: {}",
+            result
+        );
     }
 
     // ── Error cases ──
@@ -1184,7 +1341,11 @@ Build exit code: 1
         assert!(result.contains("xmake: build failed"), "got: {}", result);
         assert!(result.contains("error C2375"), "got: {}", result);
         assert!(result.contains("error C3861"), "got: {}", result);
-        assert!(result.contains("note: previous definition"), "got: {}", result);
+        assert!(
+            result.contains("note: previous definition"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]
@@ -1200,8 +1361,16 @@ Build exit code: 1
         let result = filter_xmake(input, 1);
         assert!(result.contains("xmake: build failed"), "got: {}", result);
         assert!(result.contains("error: redefinition"), "got: {}", result);
-        assert!(result.contains("note: previous definition"), "got: {}", result);
-        assert!(result.contains("error: use of undeclared"), "got: {}", result);
+        assert!(
+            result.contains("note: previous definition"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("error: use of undeclared"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]
@@ -1215,7 +1384,11 @@ Build exit code: 1
 ";
         let result = filter_xmake(input, 1);
         assert!(result.contains("xmake: build failed"), "got: {}", result);
-        assert!(result.contains("error: use of undeclared"), "got: {}", result);
+        assert!(
+            result.contains("error: use of undeclared"),
+            "got: {}",
+            result
+        );
         assert!(result.contains("did you mean"), "got: {}", result);
     }
 
@@ -1230,7 +1403,11 @@ Build exit code: 1
 ";
         let result = filter_xmake(input, 1);
         assert!(result.contains("error: redefinition of"), "got: {}", result);
-        assert!(result.contains("note: previous definition"), "got: {}", result);
+        assert!(
+            result.contains("note: previous definition"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]
@@ -1256,14 +1433,22 @@ Build exit code: 2
                       Build exit code: 1\n";
         let result = filter_xmake(input, 1);
         // No ANSI escape sequences should remain
-        assert!(!result.contains("\x1b["), "ANSI codes should be stripped, got: {}", result);
+        assert!(
+            !result.contains("\x1b["),
+            "ANSI codes should be stripped, got: {}",
+            result
+        );
         assert!(result.contains("xmake: build failed"), "got: {}", result);
     }
 
     #[test]
     fn test_xmake_empty_input() {
         let result = filter_xmake("", 0);
-        assert!(result.contains("xmake"), "should have a summary, got: '{}'", result);
+        assert!(
+            result.contains("xmake"),
+            "should have a summary, got: '{}'",
+            result
+        );
     }
 
     #[test]
@@ -1282,16 +1467,22 @@ Config exit code: 0
     #[test]
     fn test_xmake_cross_compiler() {
         let line = "\"/opt/toolchains/arm-gcc/bin/arm-none-eabi-g++\" -c -g -std=c++17 -fPIC -I\"src/arm\" -I\"src/arm/include\" -I\"src/arm/third_party/freetype/include\" -DARM_TARGET=1 -DCMAKE_BUILD_TYPE=Release -o\"build/arm/file.o\" \"src/arm/file.cpp\"";
-        assert!(is_full_command_line(line), "Cross-compiler command line should be detected");
+        assert!(
+            is_full_command_line(line),
+            "Cross-compiler command line should be detected"
+        );
     }
 
     #[test]
     fn test_xmake_extract_diag_message_gcc() {
         let msg = extract_diag_message(
-            "src/core/hash.h:42:13: error: static assertion failed: Hash must be specialized"
+            "src/core/hash.h:42:13: error: static assertion failed: Hash must be specialized",
         );
-        assert_eq!(msg, "static assertion failed: Hash must be specialized",
-            "should capture full message including colons, got: '{}'", msg);
+        assert_eq!(
+            msg, "static assertion failed: Hash must be specialized",
+            "should capture full message including colons, got: '{}'",
+            msg
+        );
     }
 
     #[test]
@@ -1299,8 +1490,11 @@ Config exit code: 0
         let msg = extract_diag_message(
             "src/backends/dx/dx_codegen.cpp(88): error C2039: 'visit' is not a member of 'luisa::compute::dx::DXCodegen'"
         );
-        assert_eq!(msg, "'visit' is not a member of 'luisa::compute::dx::DXCodegen'",
-            "should capture full message including ::, got: '{}'", msg);
+        assert_eq!(
+            msg, "'visit' is not a member of 'luisa::compute::dx::DXCodegen'",
+            "should capture full message including ::, got: '{}'",
+            msg
+        );
     }
 
     #[test]
@@ -1318,8 +1512,16 @@ Config exit code: 0\n\
 [100%]: <lc-core> linking.debug liblc-core.dylib\n\
 Build exit code: 0\n";
         let result = filter_xmake(input, 0);
-        assert!(result.contains("ok xmake: build (debug, macosx (arm64), clang)"), "got: {}", result);
-        assert!(result.contains("2 compiled, 1 archived, 1 linked (2 targets)"), "got: {}", result);
+        assert!(
+            result.contains("ok xmake: build (debug, macosx (arm64), clang)"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("2 compiled, 1 archived, 1 linked (2 targets)"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]
@@ -1331,8 +1533,16 @@ Build exit code: 0\n";
 [100%]: <lc-core> linking.debug lc-core\n\
 Build exit code: 0\n";
         let result = filter_xmake(input, 0);
-        assert!(result.contains("ok xmake: build (debug)"), "got: {}", result);
-        assert!(result.contains("2 compiled, 0 archived, 1 linked (1 targets)"), "got: {}", result);
+        assert!(
+            result.contains("ok xmake: build (debug)"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("2 compiled, 0 archived, 1 linked (1 targets)"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]
@@ -1347,10 +1557,26 @@ src/core/main.cpp:100:5: error: use of undeclared identifier 'bar'\n\
 Build exit code: 1\n";
         let result = filter_xmake(input, 1);
         assert!(result.contains("xmake: build failed"), "got: {}", result);
-        assert!(result.contains("use of undeclared identifier 'foo'"), "got: {}", result);
-        assert!(result.contains("use of undeclared identifier 'bar'"), "got: {}", result);
-        assert!(result.contains("note: in instantiation of template"), "got: {}", result);
-        assert!(result.contains("note: while compiling class"), "got: {}", result);
+        assert!(
+            result.contains("use of undeclared identifier 'foo'"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("use of undeclared identifier 'bar'"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("note: in instantiation of template"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("note: while compiling class"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]
@@ -1363,10 +1589,26 @@ Build exit code: 1\n";
 [100%]: <glfw> compiling.debug src/glfw/init.cpp\n\
 Build exit code: 0\n";
         let result = filter_xmake_output_verbose(input, 0, 1);
-        assert!(result.contains("ok xmake: build (debug)"), "got: {}", result);
-        assert!(result.contains("3 compiled, 0 archived, 1 linked (2 targets)"), "got: {}", result);
-        assert!(result.contains("<lc-core>: 2 compiled, 1 linked"), "should show per-target detail, got: {}", result);
-        assert!(result.contains("<glfw>: 1 compiled"), "should show per-target detail, got: {}", result);
+        assert!(
+            result.contains("ok xmake: build (debug)"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("3 compiled, 0 archived, 1 linked (2 targets)"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("<lc-core>: 2 compiled, 1 linked"),
+            "should show per-target detail, got: {}",
+            result
+        );
+        assert!(
+            result.contains("<glfw>: 1 compiled"),
+            "should show per-target detail, got: {}",
+            result
+        );
     }
 
     #[test]
@@ -1378,6 +1620,10 @@ src/core/main.cpp:42:5: error: use of undeclared identifier 'foo'\n\
 Build exit code: 1\n";
         let result = filter_xmake_output_verbose(input, 1, 1);
         assert!(result.contains("xmake: build failed"), "got: {}", result);
-        assert!(result.contains("<lc-core>: 1 compiled"), "should show per-target detail even on failure, got: {}", result);
+        assert!(
+            result.contains("<lc-core>: 1 compiled"),
+            "should show per-target detail even on failure, got: {}",
+            result
+        );
     }
 }

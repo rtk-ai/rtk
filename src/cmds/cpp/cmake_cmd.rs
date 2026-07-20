@@ -44,6 +44,8 @@ fn is_droppable_line(trimmed: &str) -> bool {
 
 /// Lines that start a multi-line error block.
 const ERROR_BLOCK_START: &str = "CMake Error at ";
+/// Lines that start with `CMake Error:` (colon variant, e.g. source directory not found).
+const ERROR_LINE_START: &str = "CMake Error:";
 
 /// Lines that start a multi-line warning block.
 const WARNING_BLOCK_START: &str = "CMake Warning at ";
@@ -132,10 +134,7 @@ fn is_significant_found_line(line: &str) -> Option<&str> {
     if !stripped.starts_with("Found ") {
         return None;
     }
-    if NOISY_FOUND_MODULES
-        .iter()
-        .any(|p| stripped.starts_with(p))
-    {
+    if NOISY_FOUND_MODULES.iter().any(|p| stripped.starts_with(p)) {
         return None;
     }
     Some(stripped)
@@ -170,7 +169,15 @@ fn should_keep_line(line: &str, stats: &mut CmakeStats) -> bool {
 
     // ── Error block detection (multi-line) ──
 
+    // CMake Error at file:line (message): — multi-line error block
     if trimmed.starts_with(ERROR_BLOCK_START) {
+        let ansi_free = strip_ansi(trimmed);
+        stats.errors.push(ansi_free);
+        return true;
+    }
+    // CMake Error: ... — single-line error (e.g. source dir not found)
+    if trimmed.starts_with(ERROR_LINE_START) {
+        stats.has_fatal = true;
         let ansi_free = strip_ansi(trimmed);
         stats.errors.push(ansi_free);
         return true;
@@ -180,6 +187,7 @@ fn should_keep_line(line: &str, stats: &mut CmakeStats) -> bool {
     if !stats.errors.is_empty()
         && !trimmed.starts_with("-- ")
         && !trimmed.starts_with("CMake Error at ")
+        && !trimmed.starts_with("CMake Error:")
         && !trimmed.starts_with("CMake Warning at ")
     {
         let last = stats.errors.last_mut().unwrap();
@@ -320,8 +328,8 @@ fn compose_output(stats: &CmakeStats) -> String {
         let dir = stats.build_dir.trim();
         let short = dir
             .split('/')
-            .last()
-            .or_else(|| dir.split('\\').last())
+            .next_back()
+            .or_else(|| dir.split('\\').next_back())
             .unwrap_or(dir);
         format!(", {}/", short)
     };
@@ -376,12 +384,20 @@ fn compose_output(stats: &CmakeStats) -> String {
 }
 
 /// Filter cmake configure output.
-fn filter_cmake_output(input: &str, _exit_code: i32) -> String {
+fn filter_cmake_output(input: &str, exit_code: i32) -> String {
     let ansi_free = strip_ansi(input);
     let mut stats = CmakeStats::new();
 
     for line in ansi_free.lines() {
         should_keep_line(line, &mut stats);
+    }
+
+    // If cmake exited with non-zero but no errors were captured (e.g.
+    // `CMake Error: source dir not found`), fall back to fatal.
+    if exit_code != 0 && !stats.has_fatal && stats.errors.is_empty() {
+        stats.has_fatal = true;
+        // Keep the raw input so the user sees what went wrong.
+        stats.errors.push(strip_ansi(input).trim().to_string());
     }
 
     compose_output(&stats)
@@ -422,13 +438,27 @@ mod tests {
 
     #[test]
     fn test_is_droppable_language_probes() {
-        assert!(is_droppable_line("-- The C compiler identification is GNU 13.2.0"));
-        assert!(is_droppable_line("-- The CXX compiler identification is Clang 19.1.0"));
-        assert!(is_droppable_line("-- The CUDA compiler identification is NVIDIA 12.3"));
-        assert!(is_droppable_line("-- The Fortran compiler identification is GFC"));
-        assert!(is_droppable_line("-- The HIP compiler identification is ROCm 6.0"));
-        assert!(is_droppable_line("-- The Rust compiler identification is rustc 1.80"));
-        assert!(is_droppable_line("-- Check for working C compiler: /usr/bin/gcc"));
+        assert!(is_droppable_line(
+            "-- The C compiler identification is GNU 13.2.0"
+        ));
+        assert!(is_droppable_line(
+            "-- The CXX compiler identification is Clang 19.1.0"
+        ));
+        assert!(is_droppable_line(
+            "-- The CUDA compiler identification is NVIDIA 12.3"
+        ));
+        assert!(is_droppable_line(
+            "-- The Fortran compiler identification is GFC"
+        ));
+        assert!(is_droppable_line(
+            "-- The HIP compiler identification is ROCm 6.0"
+        ));
+        assert!(is_droppable_line(
+            "-- The Rust compiler identification is rustc 1.80"
+        ));
+        assert!(is_droppable_line(
+            "-- Check for working C compiler: /usr/bin/gcc"
+        ));
         assert!(is_droppable_line("-- Detecting CXX compiler ABI info"));
         assert!(is_droppable_line("-- Detecting C compile features"));
         assert!(is_droppable_line("-- Performing Test HAVE_SOME_FEATURE"));
@@ -442,7 +472,9 @@ mod tests {
     fn test_is_droppable_not_false_positive() {
         assert!(!is_droppable_line("-- Build for Linux (x86_64)"));
         assert!(!is_droppable_line("-- Configuring Project 1.0..."));
-        assert!(!is_droppable_line("CMake Error at CMakeLists.txt:5 (message):"));
+        assert!(!is_droppable_line(
+            "CMake Error at CMakeLists.txt:5 (message):"
+        ));
         assert!(!is_droppable_line("-- Could NOT find CUDAToolkit"));
     }
 
@@ -469,16 +501,28 @@ mod tests {
 
     #[test]
     fn test_is_significant_found_line_drops_noisy() {
-        assert_eq!(is_significant_found_line("-- Found PkgConfig: /usr/bin/pkg-config (found version \"0.29.2\")"), None);
-        assert_eq!(is_significant_found_line("-- Found wayland, version 1.22.0"), None);
+        assert_eq!(
+            is_significant_found_line(
+                "-- Found PkgConfig: /usr/bin/pkg-config (found version \"0.29.2\")"
+            ),
+            None
+        );
+        assert_eq!(
+            is_significant_found_line("-- Found wayland, version 1.22.0"),
+            None
+        );
     }
 
     #[test]
     fn test_is_significant_found_line_keeps_user_packages() {
-        assert!(is_significant_found_line("-- Found CUDAToolkit: /usr/local/cuda/include").is_some());
+        assert!(
+            is_significant_found_line("-- Found CUDAToolkit: /usr/local/cuda/include").is_some()
+        );
         assert!(is_significant_found_line("-- Found Vulkan: /usr/lib/libvulkan.so").is_some());
         assert!(is_significant_found_line("-- Found LLVM: /usr/lib/llvm-18/include").is_some());
-        assert!(is_significant_found_line("-- Found embree: /usr/lib/cmake/embree-4.3.0").is_some());
+        assert!(
+            is_significant_found_line("-- Found embree: /usr/lib/cmake/embree-4.3.0").is_some()
+        );
     }
 
     // ── Success cases ──
@@ -515,16 +559,32 @@ mod tests {
 ";
         let result = filter_cmake(input, 0);
         assert!(result.contains("ok cmake: configured"), "got: {}", result);
-        assert!(!result.contains("The C compiler identification"), "should strip probe lines, got: {}", result);
-        assert!(!result.contains("Detecting C compiler"), "should strip probe lines, got: {}", result);
+        assert!(
+            !result.contains("The C compiler identification"),
+            "should strip probe lines, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("Detecting C compiler"),
+            "should strip probe lines, got: {}",
+            result
+        );
 
         // Found packages should be listed
-        assert!(result.contains("found: Found CUDAToolkit"), "got: {}", result);
+        assert!(
+            result.contains("found: Found CUDAToolkit"),
+            "got: {}",
+            result
+        );
         assert!(result.contains("found: Found Vulkan"), "got: {}", result);
         assert!(result.contains("found: Found LLVM"), "got: {}", result);
 
         // PkgConfig noise should be stripped
-        assert!(!result.contains("PkgConfig"), "should strip PkgConfig, got: {}", result);
+        assert!(
+            !result.contains("PkgConfig"),
+            "should strip PkgConfig, got: {}",
+            result
+        );
 
         // Token savings check
         let raw_tokens = estimate_tokens(input);
@@ -534,7 +594,11 @@ mod tests {
         } else {
             0
         };
-        assert!(savings >= 55, "token savings: {}% (expected >=55%)", savings);
+        assert!(
+            savings >= 55,
+            "token savings: {}% (expected >=55%)",
+            savings
+        );
     }
 
     #[test]
@@ -558,9 +622,21 @@ mod tests {
 ";
         let result = filter_cmake(input, 0);
         assert!(result.contains("ok cmake:"), "got: {}", result);
-        assert!(result.contains("LUISA_COMPUTE_ENABLE_RUST:BOOL=OFF"), "should keep cache vars, got: {}", result);
-        assert!(result.contains("CMAKE_BUILD_TYPE:STRING=Release"), "should keep cache vars, got: {}", result);
-        assert!(!result.contains("The C compiler"), "should strip probes, got: {}", result);
+        assert!(
+            result.contains("LUISA_COMPUTE_ENABLE_RUST:BOOL=OFF"),
+            "should keep cache vars, got: {}",
+            result
+        );
+        assert!(
+            result.contains("CMAKE_BUILD_TYPE:STRING=Release"),
+            "should keep cache vars, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("The C compiler"),
+            "should strip probes, got: {}",
+            result
+        );
     }
 
     // ── Warning cases ──
@@ -588,7 +664,11 @@ Call Stack (most recent call first):
         assert!(result.contains("configured"), "got: {}", result);
         assert!(result.contains("missing:"), "got: {}", result);
         assert!(result.contains("CUDAToolkit"), "got: {}", result);
-        assert!(result.contains("CMake Warning"), "warning block should be preserved, got: {}", result);
+        assert!(
+            result.contains("CMake Warning"),
+            "warning block should be preserved, got: {}",
+            result
+        );
         assert!(result.contains("CUDA backend"), "got: {}", result);
     }
 
@@ -638,9 +718,17 @@ Call Stack (most recent call first):
 ";
         let result = filter_cmake(input, 1);
         assert!(result.contains("configuration failed"), "got: {}", result);
-        assert!(result.contains("CMake Error"), "error block should be preserved, got: {}", result);
+        assert!(
+            result.contains("CMake Error"),
+            "error block should be preserved, got: {}",
+            result
+        );
         assert!(result.contains("DirectX backend"), "got: {}", result);
-        assert!(result.contains("Call Stack"), "call stack should be preserved, got: {}", result);
+        assert!(
+            result.contains("Call Stack"),
+            "call stack should be preserved, got: {}",
+            result
+        );
     }
 
     #[test]
@@ -665,7 +753,11 @@ Call Stack (most recent call first):
 ";
         let result = filter_cmake(input, 1);
         assert!(result.contains("configuration failed"), "got: {}", result);
-        assert!(result.contains("Could not find a package"), "got: {}", result);
+        assert!(
+            result.contains("Could not find a package"),
+            "got: {}",
+            result
+        );
         assert!(result.contains("SomeLibConfig.cmake"), "got: {}", result);
         assert!(result.contains("CMAKE_PREFIX_PATH"), "got: {}", result);
     }
@@ -701,14 +793,21 @@ CMake Error at CMakeLists.txt:10 (message):
         // No ANSI escape sequences should remain
         assert!(!result.contains("\x1b["), "ANSI codes should be stripped");
         // Without "Configuring incomplete", this is a SEND_ERROR level
-        assert!(result.contains("configured with errors") || result.contains("configuration failed"),
-            "should mention errors, got: {}", result);
+        assert!(
+            result.contains("configured with errors") || result.contains("configuration failed"),
+            "should mention errors, got: {}",
+            result
+        );
     }
 
     #[test]
     fn test_cmake_empty_input() {
         let result = filter_cmake("", 0);
-        assert!(result.contains("cmake"), "should have a summary, got: '{}'", result);
+        assert!(
+            result.contains("cmake"),
+            "should have a summary, got: '{}'",
+            result
+        );
     }
 
     #[test]
@@ -724,8 +823,16 @@ CMake Error at CMakeLists.txt:10 (message):
 ";
         let result = filter_cmake(input, 0);
         // No meaningful output, but should still say something sensible
-        assert!(result.contains("cmake"), "should have a summary, got: '{}'", result);
-        assert!(!result.contains("The C compiler"), "should strip probes, got: {}", result);
+        assert!(
+            result.contains("cmake"),
+            "should have a summary, got: '{}'",
+            result
+        );
+        assert!(
+            !result.contains("The C compiler"),
+            "should strip probes, got: {}",
+            result
+        );
     }
 
     #[test]
@@ -763,7 +870,11 @@ Call Stack (most recent call first):
         } else {
             0
         };
-        assert!(savings >= 60, "token savings: {}% (expected >=60%)", savings);
+        assert!(
+            savings >= 60,
+            "token savings: {}% (expected >=60%)",
+            savings
+        );
     }
 
     /// Windows backslash paths should produce a clean short name.
@@ -777,6 +888,10 @@ Call Stack (most recent call first):
 -- Build files have been written to: D:\\myproject\\build_out
 ";
         let result = filter_cmake(input, 0);
-        assert!(result.contains("build_out/"), "should extract dir name from backslash path, got: {}", result);
+        assert!(
+            result.contains("build_out/"),
+            "should extract dir name from backslash path, got: {}",
+            result
+        );
     }
 }

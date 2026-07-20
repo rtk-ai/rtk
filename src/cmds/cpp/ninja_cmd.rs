@@ -352,8 +352,10 @@ fn extract_diag_message(line: &str) -> String {
             // split only at the FIRST colon after the severity code.
             let code_part = &after_colon[..first_colon];
             // Skip the severity word to check if this is indeed a compiler diag
-            if code_part.contains("error") || code_part.contains("warning")
-                || code_part.contains("note") || code_part.contains("fatal")
+            if code_part.contains("error")
+                || code_part.contains("warning")
+                || code_part.contains("note")
+                || code_part.contains("fatal")
             {
                 let msg = after_colon[first_colon + 1..].trim();
                 if !msg.is_empty() {
@@ -396,10 +398,7 @@ pub fn run(directory: &str, args: &[String], verbose: u8) -> Result<i32> {
         } else {
             format!(" {}", args.join(" "))
         };
-        eprintln!(
-            "ninja: running ninja -C {}{}",
-            directory, args_display
-        );
+        eprintln!("ninja: running ninja -C {}{}", directory, args_display);
     }
 
     let mut cmd = resolved_command("ninja");
@@ -449,25 +448,33 @@ mod tests {
 
     #[test]
     fn test_is_progress_line_normal() {
-        assert!(is_progress_line("[123/456] Building CXX object src/core/CMakeFiles/lc_core.dir/clock.cpp.o"));
+        assert!(is_progress_line(
+            "[123/456] Building CXX object src/core/CMakeFiles/lc_core.dir/clock.cpp.o"
+        ));
     }
 
     #[test]
     fn test_is_progress_line_linking() {
-        assert!(is_progress_line("[455/456] Linking CXX executable bin/lc_test"));
+        assert!(is_progress_line(
+            "[455/456] Linking CXX executable bin/lc_test"
+        ));
     }
 
     #[test]
     fn test_is_progress_line_not() {
         assert!(!is_progress_line("FAILED: src/core/hash.cpp.o"));
-        assert!(!is_progress_line("ninja: build stopped: subcommand failed."));
+        assert!(!is_progress_line(
+            "ninja: build stopped: subcommand failed."
+        ));
         assert!(!is_progress_line(""));
     }
 
     #[test]
     fn test_parse_ninja_progress_normal() {
         assert_eq!(
-            parse_ninja_progress("[123/456] Building CXX object src/core/CMakeFiles/lc_core.dir/clock.cpp.o"),
+            parse_ninja_progress(
+                "[123/456] Building CXX object src/core/CMakeFiles/lc_core.dir/clock.cpp.o"
+            ),
             Some((123, 456))
         );
     }
@@ -498,10 +505,13 @@ mod tests {
     fn test_extract_diag_message_gcc() {
         // GCC diag: file:line:col: severity: message with : colons
         let msg = extract_diag_message(
-            "src/core/hash.h:42:13: error: static assertion failed: Hash must be specialized"
+            "src/core/hash.h:42:13: error: static assertion failed: Hash must be specialized",
         );
-        assert_eq!(msg, "static assertion failed: Hash must be specialized",
-            "should capture full message including colons, got: '{}'", msg);
+        assert_eq!(
+            msg, "static assertion failed: Hash must be specialized",
+            "should capture full message including colons, got: '{}'",
+            msg
+        );
     }
 
     #[test]
@@ -510,61 +520,80 @@ mod tests {
         let msg = extract_diag_message(
             "src/backends/dx/dx_codegen.cpp(88): error C2039: 'visit' is not a member of 'luisa::compute::dx::DXCodegen'"
         );
-        assert_eq!(msg, "'visit' is not a member of 'luisa::compute::dx::DXCodegen'",
-            "should capture full message including ::, got: '{}'", msg);
+        assert_eq!(
+            msg, "'visit' is not a member of 'luisa::compute::dx::DXCodegen'",
+            "should capture full message including ::, got: '{}'",
+            msg
+        );
     }
 
     #[test]
     fn test_extract_diag_message_msvc_no_message() {
         // MSVC diag without message body
-        let msg = extract_diag_message(
-            "src/main.cpp(42): warning C4100:"
-        );
+        let msg = extract_diag_message("src/main.cpp(42): warning C4100:");
         // No message body, should fall back to line or partial
         assert!(!msg.is_empty(), "should not be empty, got: '{}'", msg);
     }
 
     #[test]
     fn test_is_compiler_diag_gcc_error() {
-        assert!(is_compiler_diag("src/core/hash.h:42:13: error: static assertion failed: Hash must be specialized"));
+        assert!(is_compiler_diag(
+            "src/core/hash.h:42:13: error: static assertion failed: Hash must be specialized"
+        ));
     }
 
     #[test]
     fn test_is_compiler_diag_msvc_error() {
-        assert!(is_compiler_diag("src/backends/dx/dx_codegen.cpp(88): error C2039: 'visit': is not a member"));
+        assert!(is_compiler_diag(
+            "src/backends/dx/dx_codegen.cpp(88): error C2039: 'visit': is not a member"
+        ));
     }
 
     #[test]
     fn test_is_compiler_diag_warning() {
-        assert!(is_compiler_diag("src/api/api.cpp:42:10: warning: unused parameter 'device_id' [-Wunused-parameter]"));
+        assert!(is_compiler_diag(
+            "src/api/api.cpp:42:10: warning: unused parameter 'device_id' [-Wunused-parameter]"
+        ));
     }
 
     #[test]
     fn test_is_compiler_diag_note() {
-        assert!(is_compiler_diag("src/core/hash.h:42:13: note: in instantiation of template class"));
+        assert!(is_compiler_diag(
+            "src/core/hash.h:42:13: note: in instantiation of template class"
+        ));
     }
 
     #[test]
     fn test_is_compiler_diag_fatal() {
-        assert!(is_compiler_diag("src/main.cpp:1:1: fatal error: No such file or directory"));
+        assert!(is_compiler_diag(
+            "src/main.cpp:1:1: fatal error: No such file or directory"
+        ));
     }
 
     #[test]
     fn test_is_compiler_diag_not_a_diag() {
-        assert!(!is_compiler_diag("FAILED: src/core/CMakeFiles/lc_core.dir/hash.cpp.o"));
+        assert!(!is_compiler_diag(
+            "FAILED: src/core/CMakeFiles/lc_core.dir/hash.cpp.o"
+        ));
         assert!(!is_compiler_diag("[1/456] Building CXX object ..."));
-        assert!(!is_compiler_diag("ninja: build stopped: subcommand failed."));
+        assert!(!is_compiler_diag(
+            "ninja: build stopped: subcommand failed."
+        ));
         assert!(!is_compiler_diag(""));
     }
 
     #[test]
     fn test_is_compiler_diag_with_path_containing_dots() {
-        assert!(is_compiler_diag("src/backends/cuda/cuda_codegen.cpp:142:13: error: no matching function for call"));
+        assert!(is_compiler_diag(
+            "src/backends/cuda/cuda_codegen.cpp:142:13: error: no matching function for call"
+        ));
     }
 
     #[test]
     fn test_is_compiler_diag_msvc_with_path() {
-        assert!(is_compiler_diag("C:\\Users\\test\\project\\src\\main.cpp(42): error C2065: 'x' : undeclared identifier"));
+        assert!(is_compiler_diag(
+            "C:\\Users\\test\\project\\src\\main.cpp(42): error C2065: 'x' : undeclared identifier"
+        ));
     }
 
     // ── Success cases ──
@@ -592,17 +621,28 @@ mod tests {
                       [19/20] Linking CXX static library lib/liblc_core.a\n\
                       [20/20] Linking CXX executable bin/lc_test\n";
         let result = filter_ninja(input, 0);
-        assert!(result.contains("ok ninja: 20 edges, 0 failed"), "got: {}", result);
+        assert!(
+            result.contains("ok ninja: 20 edges, 0 failed"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]
     fn test_ninja_full_luisa_build() {
         let mut input = String::new();
         for i in 1..=456 {
-            input.push_str(&format!("[{}/456] Building CXX object src/core/file_{}.cpp.o\n", i, i));
+            input.push_str(&format!(
+                "[{}/456] Building CXX object src/core/file_{}.cpp.o\n",
+                i, i
+            ));
         }
         let result = filter_ninja(&input, 0);
-        assert!(result.contains("ok ninja: 456 edges, 0 failed"), "got: {}", result);
+        assert!(
+            result.contains("ok ninja: 456 edges, 0 failed"),
+            "got: {}",
+            result
+        );
     }
 
     // ── Failure cases ──
@@ -620,9 +660,21 @@ mod tests {
                       ninja: build stopped: subcommand failed.\n";
         let result = filter_ninja(input, 1);
         assert!(result.contains("1/20 edges failed"), "got: {}", result);
-        assert!(result.contains("FAILED: src/backends/cuda/CMakeFiles/lc_cuda.dir/cuda_codegen.cpp.o"), "got: {}", result);
-        assert!(result.contains("error: no matching function"), "got: {}", result);
-        assert!(!result.contains("[3/20]"), "should not contain progress lines, got: {}", result);
+        assert!(
+            result.contains("FAILED: src/backends/cuda/CMakeFiles/lc_cuda.dir/cuda_codegen.cpp.o"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("error: no matching function"),
+            "got: {}",
+            result
+        );
+        assert!(
+            !result.contains("[3/20]"),
+            "should not contain progress lines, got: {}",
+            result
+        );
         assert!(result.contains("build stopped"), "got: {}", result);
     }
 
@@ -639,8 +691,16 @@ mod tests {
                       ninja: build stopped: subcommand failed.\n";
         let result = filter_ninja(input, 1);
         assert!(result.contains("2/20 edges failed"), "got: {}", result);
-        assert!(result.contains("FAILED: src/backends/cuda"), "got: {}", result);
-        assert!(result.contains("FAILED: src/backends/dx"), "got: {}", result);
+        assert!(
+            result.contains("FAILED: src/backends/cuda"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("FAILED: src/backends/dx"),
+            "got: {}",
+            result
+        );
         assert!(result.contains("error C2039:"), "got: {}", result);
     }
 
@@ -676,7 +736,11 @@ mod tests {
         assert!(result.contains("2/3 edges failed"), "got: {}", result);
         assert!(result.contains("FAILED: src/a.cpp.o"), "got: {}", result);
         assert!(result.contains("FAILED: src/b.cpp.o"), "got: {}", result);
-        assert!(!result.contains("[1/3]"), "should not contain progress lines, got: {}", result);
+        assert!(
+            !result.contains("[1/3]"),
+            "should not contain progress lines, got: {}",
+            result
+        );
     }
 
     // ── Warning handling ──
@@ -685,9 +749,14 @@ mod tests {
     fn test_ninja_warnings_only_no_errors() {
         let mut input = String::new();
         for i in 1..=10 {
-            input.push_str(&format!("[{}/10] Building CXX object src/file_{}.cpp.o\n", i, i));
+            input.push_str(&format!(
+                "[{}/10] Building CXX object src/file_{}.cpp.o\n",
+                i, i
+            ));
         }
-        input.push_str("src/api/api.cpp:42:10: warning: unused parameter 'device_id' [-Wunused-parameter]\n");
+        input.push_str(
+            "src/api/api.cpp:42:10: warning: unused parameter 'device_id' [-Wunused-parameter]\n",
+        );
         input.push_str("src/core/clock.cpp:15:20: warning: variable 'old_val' set but not used [-Wunused-but-set-variable]\n");
 
         let result = filter_ninja(&input, 0);
@@ -722,7 +791,10 @@ mod tests {
         // 456 progress lines + 2 FAILED blocks
         let mut input = String::new();
         for i in 1..=456 {
-            input.push_str(&format!("[{}/456] Building CXX object src/file_{}.cpp.o\n", i, i));
+            input.push_str(&format!(
+                "[{}/456] Building CXX object src/file_{}.cpp.o\n",
+                i, i
+            ));
         }
         input.push_str("FAILED: src/cuda_codegen.cpp.o\n/usr/bin/nvcc -c src/cuda_codegen.cpp\nsrc/cuda_codegen.cpp:142:13: error: no matching function\n");
         input.push_str("FAILED: src/dx_codegen.cpp.o\ncl.exe /c src/dx_codegen.cpp\nsrc/dx_codegen.cpp(88): error C2039: 'visit': is not a member\n");
@@ -732,10 +804,15 @@ mod tests {
         let raw_token_count = crate::core::tracking::estimate_tokens(&input);
         let filtered_token_count = crate::core::tracking::estimate_tokens(&result);
         let savings = if raw_token_count > 0 {
-            ((raw_token_count - filtered_token_count) as f64 / raw_token_count as f64 * 100.0) as usize
+            ((raw_token_count - filtered_token_count) as f64 / raw_token_count as f64 * 100.0)
+                as usize
         } else {
             0
         };
-        assert!(savings >= 80, "token savings: {}% (expected >=80%)", savings);
+        assert!(
+            savings >= 80,
+            "token savings: {}% (expected >=80%)",
+            savings
+        );
     }
 }
