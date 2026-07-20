@@ -289,6 +289,18 @@ impl Engine {
     }
 }
 
+fn add_default_search_excludes(cmd: &mut std::process::Command, engine: Engine) {
+    match engine {
+        // Native grep can only exclude recursive directories by basename.
+        Engine::Grep => {
+            cmd.arg("--exclude-dir=.claude");
+        }
+        Engine::Rg => {
+            cmd.args(["--glob", "!**/.claude/worktrees/**"]);
+        }
+    }
+}
+
 /// Runs the agent's exact engine + flags for the grouping path, appending only the
 /// parse aids (see `Engine::parse_flags`).
 fn engine_capture<T: AsRef<str>>(
@@ -299,6 +311,7 @@ fn engine_capture<T: AsRef<str>>(
 ) -> Result<CaptureResult> {
     let mut cmd = resolved_command(engine.bin());
     cmd.args(engine.parse_flags());
+    add_default_search_excludes(&mut cmd, engine);
     for a in extra_args {
         cmd.arg(a.as_ref());
     }
@@ -319,6 +332,7 @@ fn passthrough<T: AsRef<str>>(
     real_cmd: &str,
 ) -> Result<i32> {
     let mut cmd = resolved_command(engine.bin());
+    add_default_search_excludes(&mut cmd, engine);
     for a in args {
         cmd.arg(a.as_ref());
     }
