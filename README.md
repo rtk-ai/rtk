@@ -369,7 +369,7 @@ rtk init -g
 
 ## Supported AI Tools
 
-RTK supports 16 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents for 60-90% token savings where the agent supports command interception.
+RTK supports 17 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents for 60-90% token savings where the agent supports command interception.
 
 | Tool | Install | Method |
 |------|---------|--------|
