@@ -204,6 +204,7 @@ rtk rubocop                     # Ruby linting (JSON, -60%+)
 ### Package Managers
 ```bash
 rtk pnpm list                   # Compact dependency tree
+rtk pnpm run <script>           # Smart script routing (vitest, tsc, eslint, prettier)
 rtk uv run pytest               # Preserve uv env, errors only
 rtk pip list                    # Python packages (auto-detect uv)
 rtk pip outdated                # Outdated packages
