@@ -22,8 +22,8 @@ use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
-    summary, tree, wc_cmd,
+    deps, env_cmd, find_cmd, format_cmd, fs_cli_cmd, journalctl_cmd, json_cmd, local_llm, log_cmd,
+    ls, pipe_cmd, read, search, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -412,6 +412,21 @@ enum Commands {
     /// Word/line/byte count with compact output (strips paths and padding)
     Wc {
         /// Arguments passed to wc (files, flags like -l, -w, -c)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// systemd journal logs with compact host and duplicate handling
+    Journalctl {
+        /// journalctl arguments (e.g., -u app.service -n 100 --since today)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// FreeSWITCH CLI output with compact table formatting
+    #[command(name = "fs_cli")]
+    FsCli {
+        /// fs_cli arguments (e.g., -x "sofia status")
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2124,6 +2139,10 @@ fn run_cli() -> Result<i32> {
 
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
 
+        Commands::Journalctl { args } => journalctl_cmd::run(&args, cli.verbose)?,
+
+        Commands::FsCli { args } => fs_cli_cmd::run(&args, cli.verbose)?,
+
         Commands::Gain {
             project, // added
             graph,
@@ -2738,6 +2757,8 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Grep { .. }
             | Commands::Rg { .. }
             | Commands::Wget { .. }
+            | Commands::Journalctl { .. }
+            | Commands::FsCli { .. }
             | Commands::Vitest { .. }
             | Commands::Prisma { .. }
             | Commands::Tsc { .. }
@@ -3119,6 +3140,8 @@ mod tests {
             "grep",
             "wget",
             "wc",
+            "journalctl",
+            "fs_cli",
             "jest",
             "vitest",
             "prisma",
@@ -3576,6 +3599,23 @@ mod tests {
             }
             _ => panic!("Expected Commands::Npx for unknown tool"),
         }
+    }
+
+    #[test]
+    fn test_journalctl_and_fs_cli_native_args_parse() {
+        let cli =
+            Cli::try_parse_from(["rtk", "journalctl", "-u", "app.service", "-n", "50"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Journalctl { args }
+                if args == ["-u", "app.service", "-n", "50"]
+        ));
+
+        let cli = Cli::try_parse_from(["rtk", "fs_cli", "-x", "sofia status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::FsCli { args } if args == ["-x", "sofia status"]
+        ));
     }
 
     #[test]

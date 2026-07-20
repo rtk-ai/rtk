@@ -1104,6 +1104,7 @@ fn rewrite_segment_inner(
     // classify_command does, so a small canonical prefix list matches every
     // invocation form instead of enumerating each literal spelling.
     let php_normalized;
+    let system_normalized;
     let strip_target: &str = if rule
         .rtk_cmd
         .strip_prefix("rtk ")
@@ -1116,6 +1117,9 @@ fn rewrite_segment_inner(
         let unwrapped = unwrapped.strip_prefix("./").unwrap_or(unwrapped);
         php_normalized = normalize_php_tool_command(unwrapped);
         &php_normalized
+    } else if matches!(rule.rtk_cmd, "rtk journalctl" | "rtk fs_cli") {
+        system_normalized = strip_absolute_path(cmd_part);
+        &system_normalized
     } else {
         cmd_part
     };
@@ -3956,6 +3960,41 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("find . -name '*.rs' -type f", &[]),
             Some("rtk find . -name '*.rs' -type f".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_journalctl_direct_and_absolute_path() {
+        assert!(matches!(
+            classify_command("journalctl -u app.service -n 50"),
+            Classification::Supported {
+                rtk_equivalent: "rtk journalctl",
+                category: "System",
+                ..
+            }
+        ));
+        assert_eq!(
+            rewrite_command_no_prefixes("sudo /usr/bin/journalctl -u app.service -n 50", &[]),
+            Some("sudo rtk journalctl -u app.service -n 50".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_fs_cli_direct_and_absolute_path() {
+        assert!(matches!(
+            classify_command("fs_cli -x 'sofia status'"),
+            Classification::Supported {
+                rtk_equivalent: "rtk fs_cli",
+                category: "System",
+                ..
+            }
+        ));
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "sudo /usr/local/freeswitch/bin/fs_cli -x 'show channels'",
+                &[]
+            ),
+            Some("sudo rtk fs_cli -x 'show channels'".into())
         );
     }
 
