@@ -15,8 +15,14 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
         eprintln!("Comparing: {} vs {}", file1.display(), file2.display());
     }
 
-    let content1 = fs::read_to_string(file1)?;
-    let content2 = fs::read_to_string(file2)?;
+    let content1 = match read_diff_file(file1) {
+        Ok(content) => content,
+        Err(exit_code) => return Ok(exit_code),
+    };
+    let content2 = match read_diff_file(file2) {
+        Ok(content) => content,
+        Err(exit_code) => return Ok(exit_code),
+    };
     let raw = format!("{}\n---\n{}", content1, content2);
 
     let (rtk, exit_code) = render_file_diff(file1, file2, &content1, &content2);
@@ -30,6 +36,13 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
         shown,
     );
     Ok(exit_code)
+}
+
+fn read_diff_file(path: &Path) -> std::result::Result<String, i32> {
+    fs::read_to_string(path).map_err(|error| {
+        eprintln!("diff: {}: {error}", path.display());
+        2
+    })
 }
 
 /// Renders the condensed file comparison and returns it with the
@@ -216,6 +229,17 @@ fn condense_unified_diff(diff: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_input_returns_posix_error_exit_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("existing.txt");
+        let missing = dir.path().join("missing.txt");
+        fs::write(&existing, "content\n").unwrap();
+
+        assert_eq!(run(&existing, &missing, 0).unwrap(), 2);
+        assert_eq!(run(&missing, &existing, 0).unwrap(), 2);
+    }
 
     // --- similarity ---
 
