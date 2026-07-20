@@ -3215,17 +3215,19 @@ mod tests {
             "lint",
         ];
         for command in commands {
-            assert!(
-                matches!(
-                    classify_command(command),
-                    Classification::Supported {
-                        rtk_equivalent: "rtk lint",
-                        ..
-                    }
-                ),
-                "Failed for command: {}",
-                command
-            );
+            let expected = if command.split_whitespace().any(|part| part == "biome") {
+                "rtk lint biome"
+            } else if command.split_whitespace().any(|part| part == "eslint") {
+                "rtk lint eslint"
+            } else {
+                "rtk lint"
+            };
+            match classify_command(command) {
+                Classification::Supported { rtk_equivalent, .. } => {
+                    assert_eq!(rtk_equivalent, expected, "Failed for command: {command}");
+                }
+                other => panic!("Unexpected classification for {command}: {other:?}"),
+            }
         }
     }
 
@@ -3275,13 +3277,36 @@ mod tests {
             "lint",
         ];
         for command in commands {
+            let expected = if command.split_whitespace().any(|part| part == "biome") {
+                "rtk lint biome"
+            } else if command.split_whitespace().any(|part| part == "eslint") {
+                "rtk lint eslint"
+            } else {
+                "rtk lint"
+            };
             assert_eq!(
                 rewrite_command_no_prefixes(command, &[]),
-                Some("rtk lint".into()),
+                Some(expected.into()),
                 "Failed for command: {}",
                 command
             );
         }
+    }
+
+    #[test]
+    fn test_rewrite_preserves_explicit_linter_name_and_arguments() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm exec biome ci .", &[]),
+            Some("rtk lint biome ci .".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm exec biome --version", &[]),
+            Some("rtk lint biome --version".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm exec eslint src", &[]),
+            Some("rtk lint eslint src".into())
+        );
     }
 
     #[test]

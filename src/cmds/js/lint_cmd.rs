@@ -11,6 +11,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+const KNOWN_LINTERS: &[&str] = &["biome", "eslint", "flake8", "mypy", "pylint", "ruff"];
+
 #[derive(Debug, Deserialize, Serialize)]
 struct EslintMessage {
     #[serde(rename = "ruleId")]
@@ -75,16 +77,15 @@ fn strip_pm_prefix(args: &[String]) -> usize {
 /// Detect the linter name from args (after stripping PM prefixes).
 /// Returns the linter name and whether it was explicitly specified.
 fn detect_linter(args: &[String]) -> (&str, bool) {
-    let is_path_or_flag = args.is_empty()
-        || args[0].starts_with('-')
-        || args[0].contains('/')
-        || args[0].contains('.');
-
-    if is_path_or_flag {
-        ("eslint", false)
+    if let Some(linter) = args.first().filter(|arg| KNOWN_LINTERS.contains(&arg.as_str())) {
+        (linter, true)
     } else {
-        (&args[0], true)
+        ("eslint", false)
     }
+}
+
+fn is_signal_exit_code(exit_code: i32) -> bool {
+    (129..=192).contains(&exit_code)
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
@@ -170,7 +171,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     ))?;
 
     // Check if process was killed by signal (SIGABRT, SIGKILL, etc.)
-    if !result.success() && result.exit_code > 128 {
+    if !result.success() && is_signal_exit_code(result.exit_code) {
         eprintln!("[warn] Linter process terminated abnormally (possibly out of memory)");
         if !result.stderr.is_empty() {
             eprintln!(
@@ -676,6 +677,16 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_linter_does_not_treat_subcommand_as_linter() {
+        for subcommand in ["ci", "check", "format", "lint"] {
+            let args = vec![subcommand.to_string(), ".".to_string()];
+            let (linter, explicit) = detect_linter(&args);
+            assert_eq!(linter, "eslint");
+            assert!(!explicit, "{subcommand} is not a linter executable");
+        }
+    }
+
+    #[test]
     fn test_detect_linter_after_npx_strip() {
         // Simulates: rtk lint npx eslint src/ → after strip_pm_prefix, args = ["eslint", "src/"]
         let full_args: Vec<String> = vec!["npx".into(), "eslint".into(), "src/".into()];
@@ -704,5 +715,13 @@ mod tests {
         assert!(!is_python_linter("eslint"));
         assert!(!is_python_linter("biome"));
         assert!(!is_python_linter("unknown"));
+    }
+
+    #[test]
+    fn test_signal_exit_code_does_not_classify_pnpm_254_as_signal() {
+        assert!(is_signal_exit_code(137));
+        assert!(is_signal_exit_code(143));
+        assert!(!is_signal_exit_code(128));
+        assert!(!is_signal_exit_code(254));
     }
 }
