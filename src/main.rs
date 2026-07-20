@@ -17,7 +17,7 @@ use cmds::js::{
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpunit_cmd, pint_cmd};
-use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
+use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, python_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
@@ -412,6 +412,17 @@ enum Commands {
     /// Word/line/byte count with compact output (strips paths and padding)
     Wc {
         /// Arguments passed to wc (files, flags like -l, -w, -c)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Python with large-output summarization
+    #[command(visible_alias = "py")]
+    Python {
+        /// Python executable selected by hook rewriting
+        #[arg(long, hide = true, default_value = "python3")]
+        executable: String,
+        /// Arguments passed to Python
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2124,6 +2135,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
 
+        Commands::Python { executable, args } => python_cmd::run(&executable, &args, cli.verbose)?,
+
         Commands::Gain {
             project, // added
             graph,
@@ -2749,6 +2762,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Npm { .. }
             | Commands::Npx { .. }
             | Commands::Curl { .. }
+            | Commands::Python { .. }
             | Commands::Ruff { .. }
             | Commands::Pytest { .. }
             | Commands::Php { .. }
@@ -3119,6 +3133,7 @@ mod tests {
             "grep",
             "wget",
             "wc",
+            "python",
             "jest",
             "vitest",
             "prisma",
@@ -3597,6 +3612,20 @@ mod tests {
                 );
             }
             _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_python_proxy_parses_hidden_executable_and_native_flags() {
+        let cli =
+            Cli::try_parse_from(["rtk", "python", "--executable", "python", "-c", "print(1)"])
+                .unwrap();
+        match cli.command {
+            Commands::Python { executable, args } => {
+                assert_eq!(executable, "python");
+                assert_eq!(args, vec!["-c", "print(1)"]);
+            }
+            _ => panic!("Expected Python command"),
         }
     }
 
