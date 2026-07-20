@@ -4357,6 +4357,39 @@ mod tests {
         );
     }
 
+    // --- #2315: tmux proxy and output filtering ---
+
+    #[test]
+    fn test_classify_tmux_commands() {
+        for command in [
+            "tmux list-sessions",
+            "tmux capture-pane -p -t build",
+            "tmux new-session -d -s worker",
+            "tmux kill-session -t worker",
+            "tmux -L agent list-sessions",
+        ] {
+            assert!(matches!(
+                classify_command(command),
+                Classification::Supported {
+                    rtk_equivalent: "rtk tmux",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn test_rewrite_tmux_commands() {
+        assert_eq!(
+            rewrite_command_no_prefixes("tmux list-sessions", &[]),
+            Some("rtk tmux list-sessions".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("tmux -L agent capture-pane -p -t build", &[]),
+            Some("rtk tmux -L agent capture-pane -p -t build".into())
+        );
+    }
+
     #[test]
     fn test_classify_command_substitution_passthrough() {
         assert_eq!(
