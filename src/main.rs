@@ -19,6 +19,7 @@ use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpunit_cmd, pint_cmd};
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
+use cmds::cpp::{cmake_cmd, ninja_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
     deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
@@ -542,6 +543,29 @@ enum Commands {
     /// Playwright E2E tests with compact output
     Playwright {
         /// Playwright arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// CMake configure with compact output (strip compiler probes, keep errors)
+    ///
+    /// Use `-S` to specify source dir, `-B` for build dir.
+    /// Example: rtk cmake -S . -B build -G Ninja
+    Cmake {
+        /// cmake arguments (-S, -B, -D, -G, etc.)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Ninja build with compact output (FAILED blocks only, progress stripped)
+    ///
+    /// Use this instead of `cmake --build` for filtered build output.
+    /// Example: rtk ninja -C build -j 8
+    Ninja {
+        /// Build directory (default: .)
+        #[arg(short = 'C', long, default_value = ".")]
+        directory: String,
+        /// Additional ninja arguments (-j, -k, targets, etc.)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2195,6 +2219,14 @@ fn run_cli() -> Result<i32> {
 
         Commands::Playwright { args } => playwright_cmd::run(&args, cli.verbose)?,
 
+        Commands::Cmake { args } => {
+            cmake_cmd::run(&args, cli.verbose)?
+        }
+
+        Commands::Ninja { directory, args } => {
+            ninja_cmd::run(&directory, &args, cli.verbose)?
+        }
+
         Commands::Cargo { command } => match command {
             CargoCommands::Build { args } => {
                 cargo_cmd::run(cargo_cmd::CargoCommand::Build, &args, cli.verbose)?
@@ -2706,6 +2738,8 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Lint { .. }
             | Commands::Prettier { .. }
             | Commands::Playwright { .. }
+            | Commands::Cmake { .. }
+            | Commands::Ninja { .. }
             | Commands::Cargo { .. }
             | Commands::Npm { .. }
             | Commands::Npx { .. }
@@ -3089,6 +3123,7 @@ mod tests {
             "format",
             "playwright",
             "cargo",
+            "cmake",
             "npm",
             "npx",
             "curl",
@@ -3104,6 +3139,7 @@ mod tests {
             "golangci-lint",
             "gradlew",
             "mvn",
+            "ninja",
             "php",
             "phpunit",
             "phpstan",
