@@ -1009,18 +1009,17 @@ fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
 /// Handles: `[main abc1234def] message`, `[main (root-commit) abc1234def] msg`,
 /// localized variants, and multibyte branch names.
 fn parse_commit_output(line: &str) -> String {
-    if let Some(bracket_end) = line.find(']') {
-        let bracket_content = &line[1..bracket_end];
-        let hash = bracket_content.split_whitespace().next_back().unwrap_or("");
-        if !hash.is_empty() && hash.len() >= 7 {
-            let short_hash: String = hash.chars().take(7).collect();
-            format!("ok {}", short_hash)
-        } else {
-            "ok".to_string()
+    if let Some(rest) = line.strip_prefix('[') {
+        if let Some(bracket_end) = rest.find(']') {
+            let bracket_content = &rest[..bracket_end];
+            let hash = bracket_content.split_whitespace().next_back().unwrap_or("");
+            if !hash.is_empty() && hash.len() >= 7 {
+                let short_hash: String = hash.chars().take(7).collect();
+                return format!("ok {}", short_hash);
+            }
         }
-    } else {
-        "ok".to_string()
     }
+    "ok".to_string()
 }
 
 fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
@@ -2854,6 +2853,14 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     fn test_parse_commit_output_no_bracket() {
         let line = "some other output";
+        assert_eq!(parse_commit_output(line), "ok");
+    }
+
+    /// Regression: a line that does not start with `[` but contains `]` after a
+    /// multibyte first char must not byte-slice into a char boundary (#3100).
+    #[test]
+    fn test_parse_commit_output_multibyte_before_bracket() {
+        let line = "검사 완료] 커밋 계속";
         assert_eq!(parse_commit_output(line), "ok");
     }
 
