@@ -5148,6 +5148,35 @@ mod tests {
     }
 
     #[test]
+    fn test_uninstall_kimi_removes_agents_md_block() {
+        let temp = TempDir::new().unwrap();
+        run_kimi_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let agents_md = temp.path().join("AGENTS.md");
+        let installed = fs::read_to_string(&agents_md).unwrap();
+        assert!(
+            installed.contains(RTK_BLOCK_START),
+            "install should write the RTK instructions block"
+        );
+
+        let removed = uninstall_kimi_at(temp.path(), InitContext::default()).unwrap();
+
+        let content = fs::read_to_string(&agents_md).unwrap();
+        assert!(
+            !content.contains(RTK_BLOCK_START),
+            "uninstall should remove the RTK instructions block"
+        );
+        assert!(
+            removed.iter().any(|r| r.contains("rtk-instructions block")),
+            "uninstall should report the removed block"
+        );
+
+        // Second run is a no-op (nothing left to remove).
+        let removed_again = uninstall_kimi_at(temp.path(), InitContext::default()).unwrap();
+        assert!(removed_again.is_empty(), "Idempotent: nothing to remove");
+    }
+
+    #[test]
     fn test_patch_agents_md_creates_missing_file() {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");

@@ -2965,6 +2965,32 @@ mod tests {
     }
 
     #[test]
+    fn test_init_uninstall_dispatch_routes_kimi_to_standard_with_kimi_flag() {
+        let kimi_flag = Cell::new(false);
+        let ctx = hooks::init::InitContext {
+            verbose: 0,
+            dry_run: true,
+        };
+
+        let result = uninstall_init_dispatch(
+            Some(AgentTarget::Kimi),
+            false,
+            false,
+            false,
+            ctx,
+            |_| panic!("kimi must not route to hermes cleanup"),
+            |global, gemini, codex, cursor, pi, kimi, _| {
+                assert!(!global && !gemini && !codex && !cursor && !pi);
+                kimi_flag.set(kimi);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(kimi_flag.get());
+    }
+
+    #[test]
     fn test_try_parse_help_is_display_help() {
         match Cli::try_parse_from(["rtk", "--help"]) {
             Err(e) => assert_eq!(e.kind(), ErrorKind::DisplayHelp),
