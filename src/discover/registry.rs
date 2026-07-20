@@ -2500,7 +2500,7 @@ mod tests {
         assert!(matches!(
             classify_command("uv pip list"),
             Classification::Supported {
-                rtk_equivalent: "rtk pip",
+                rtk_equivalent: "rtk uv",
                 ..
             }
         ));
@@ -2606,7 +2606,19 @@ mod tests {
     fn test_rewrite_uv_pip_list() {
         assert_eq!(
             rewrite_command_no_prefixes("uv pip list", &[]),
-            Some("rtk pip list".into())
+            Some("rtk uv pip list".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pip_and_uv_pip_install_preserve_tool() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pip install pytest", &[]),
+            Some("rtk pip install pytest".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv pip install pytest", &[]),
+            Some("rtk uv pip install pytest".into())
         );
     }
 
