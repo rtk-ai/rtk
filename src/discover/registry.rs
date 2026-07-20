@@ -69,9 +69,10 @@ lazy_static! {
         Regex::new(r"^(?:(?:-C\s+\S+|-c\s+\S+|--git-dir(?:=\S+|\s+\S+)|--work-tree(?:=\S+|\s+\S+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\s+)+").unwrap();
     // pnpm --filter/-F flags before the subcommand or script name.
     // e.g. pnpm --filter wavebid-a2o-ui test:micro → pnpm test:micro (for matching)
-    // The filter is preserved in the rewritten command.
+    // The filter is preserved in the rewritten command. Repeated flags are all
+    // consumed: pnpm --filter a --filter b test:micro → pnpm test:micro.
     static ref PNPM_FILTER_OPT: Regex =
-        Regex::new(r"^(?:(?:-F|--filter)(?:=\S+|\s+\S+))\s+").unwrap();
+        Regex::new(r"^(?:(?:-F|--filter)(?:=\S+|\s+\S+)\s+)+").unwrap();
     // Issue #1362: each capture expects a SINGLE file argument (`\S+$`). Multi-file
     // invocations like `head -3 a b c` fail to match so the segment is passed through
     // to the native `head`/`tail` binary — which already handles multi-file with
@@ -3398,6 +3399,8 @@ mod tests {
             ("pnpm cat-index abc", "rtk pnpm cat-index abc"),
             ("pnpm find-hash abc", "rtk pnpm find-hash abc"),
             ("pnpm ignored-builds", "rtk pnpm ignored-builds"),
+            ("pnpm install-test", "rtk pnpm install-test"),
+            ("pnpm install-completion", "rtk pnpm install-completion"),
         ];
         for (command, expected) in cases {
             let rewritten = rewrite_command_no_prefixes(command, &[]);
@@ -3408,6 +3411,29 @@ mod tests {
                 command
             );
         }
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_anchored_subcommands() {
+        // The subcommand alternation is anchored with (\s|$): builtin PREFIXES of
+        // longer script names no longer match, so those hit the script rule.
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm run:test", &[]),
+            Some("rtk pnpm run run:test".to_string()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm i-foo", &[]),
+            Some("rtk pnpm run i-foo".to_string()),
+        );
+        // Real subcommands still match, with args or bare
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm i", &[]),
+            Some("rtk pnpm i".to_string()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm install --frozen-lockfile", &[]),
+            Some("rtk pnpm install --frozen-lockfile".to_string()),
+        );
     }
 
     #[test]
@@ -3427,13 +3453,12 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_pnpm_multiple_filters_no_rewrite() {
-        // Known safe gap: strip_pnpm_filter_opts only strips the FIRST --filter,
-        // so the leftover flag defeats classification and the command passes
-        // through unrewritten instead of producing a broken rewrite.
+    fn test_rewrite_pnpm_multiple_filters() {
+        // Repeated --filter flags all strip for classification and are
+        // preserved verbatim in the rewrite
         assert_eq!(
             rewrite_command_no_prefixes("pnpm --filter a --filter b test:unit", &[]),
-            None,
+            Some("rtk pnpm --filter a --filter b run test:unit".to_string()),
         );
     }
 
@@ -3465,10 +3490,10 @@ mod tests {
         assert_eq!(strip_pnpm_filter_opts("pnpm test:unit"), "pnpm test:unit");
         // Not a pnpm command: unchanged
         assert_eq!(strip_pnpm_filter_opts("git status"), "git status");
-        // Only the first filter flag is stripped (multi-filter gap)
+        // Repeated filter flags are all stripped
         assert_eq!(
             strip_pnpm_filter_opts("pnpm --filter a --filter b test:unit"),
-            "pnpm --filter b test:unit"
+            "pnpm test:unit"
         );
         // Quoted value with a space: the flag + `"my` are consumed, leaving a
         // mangled remainder that no rule matches (hence passthrough above)

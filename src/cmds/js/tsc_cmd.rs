@@ -105,6 +105,13 @@ impl BlockHandler for TscHandler {
 }
 
 pub(crate) fn filter_tsc_output(output: &str) -> String {
+    filter_tsc_output_recognized(output)
+        .unwrap_or_else(|| "TypeScript compilation completed".to_string())
+}
+
+/// `None` when the output has neither tsc errors nor its summary line — on a
+/// failure path callers must show the raw output instead of a success message.
+pub(crate) fn filter_tsc_output_recognized(output: &str) -> Option<String> {
     struct TsError {
         file: String,
         line: usize,
@@ -151,9 +158,9 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
 
     if errors.is_empty() {
         if output.contains("Found 0 errors") {
-            return "TypeScript: No errors found".to_string();
+            return Some("TypeScript: No errors found".to_string());
         }
-        return "TypeScript compilation completed".to_string();
+        return None;
     }
 
     // Group by file
@@ -210,7 +217,7 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
         result.push('\n');
     }
 
-    result.trim().to_string()
+    Some(result.trim().to_string())
 }
 
 #[cfg(test)]

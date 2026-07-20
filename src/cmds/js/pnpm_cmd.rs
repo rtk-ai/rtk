@@ -1,14 +1,13 @@
 //! Filters pnpm output — dependency trees, install logs, outdated packages.
 //!
-//! Includes smart script routing (PR #232) for `pnpm run <script>`:
+//! Includes smart script routing for `pnpm run <script>`:
 //! - Detects test/lint/tsc/prettier/playwright scripts from package.json
 //! - Routes to specialized filters for maximum token compression
-//! - Injects `--reporter=json` when routing to Vitest/Playwright parsers
 
 use crate::core::guard::never_worse;
 use crate::core::stream::{exec_capture, StreamFilter};
 use crate::core::tracking;
-use crate::core::truncate::CAP_LIST;
+use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
@@ -389,10 +388,7 @@ pub fn run(cmd: PnpmCommand, args: &[String], verbose: u8) -> Result<i32> {
             script,
             args: run_args,
             filters,
-        } => {
-            let pkg_scripts = PackageScripts::load();
-            run_script(&script, &run_args, &filters, verbose, false, pkg_scripts)
-        }
+        } => run_script(&script, &run_args, &filters, verbose),
     }
 }
 
@@ -579,7 +575,7 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
     crate::core::runner::run_passthrough("pnpm", args, verbose)
 }
 
-// --- pnpm run <script> smart routing (PR #232) ---
+// --- pnpm run <script> smart routing ---
 
 /// Filter route for specialized script output processing
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -592,9 +588,9 @@ pub(crate) enum FilterRoute {
     Playwright,
 }
 
-/// Walk up from CWD to find the nearest package.json (mirrors pnpm resolution).
-fn find_package_json() -> Option<std::path::PathBuf> {
-    let mut dir = std::env::current_dir().ok()?;
+/// Walk up from `start` to find the nearest package.json (mirrors pnpm resolution).
+fn find_package_json_from(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut dir = start.to_path_buf();
     for _ in 0..10 {
         let candidate = dir.join("package.json");
         if candidate.is_file() {
@@ -618,7 +614,13 @@ impl PackageScripts {
     /// Read package.json from CWD, parse scripts field. Returns None if
     /// file is missing, unparseable, or has no scripts section.
     pub fn load() -> Option<Self> {
-        let path = find_package_json()?;
+        Self::load_from(&std::env::current_dir().ok()?)
+    }
+
+    /// Like `load`, but starts the package.json walk-up from `start`
+    /// (kept separate so tests can point at a tempdir).
+    pub fn load_from(start: &std::path::Path) -> Option<Self> {
+        let path = find_package_json_from(start)?;
         let content = std::fs::read_to_string(path).ok()?;
         let json: serde_json::Value = serde_json::from_str(&content).ok()?;
         let scripts_obj = json.get("scripts")?.as_object()?;
@@ -636,27 +638,62 @@ impl PackageScripts {
     }
 
     /// Detect the underlying tool from the script command string.
-    /// Replaces the old detect_tool_from_package_json function.
+    /// Routes on the resolved FIRST command token only — substring matches
+    /// deeper in the command (`tsc && vite build` is tsc, `openapi-typescript`
+    /// is nothing) would misroute output to a filter that fabricates a summary.
     pub fn detect_tool(&self, script: &str) -> Option<FilterRoute> {
         let command = self.scripts.get(script)?;
-        let cmd_lower = command.to_lowercase();
-
-        if cmd_lower.contains("playwright") {
-            Some(FilterRoute::Playwright)
-        } else if cmd_lower.contains("vitest") {
-            Some(FilterRoute::Vitest)
-        } else if cmd_lower.contains("jest") {
-            Some(FilterRoute::TestRunner)
-        } else if cmd_lower.contains("tsc") || cmd_lower.contains("typescript") {
-            Some(FilterRoute::Tsc)
-        } else if cmd_lower.contains("eslint") || cmd_lower.contains("biome") {
-            Some(FilterRoute::Lint)
-        } else if cmd_lower.contains("prettier") {
-            Some(FilterRoute::Prettier)
-        } else {
-            None
+        let token = first_command_token(command)?;
+        let tool = token.rsplit('/').next().unwrap_or(token.as_str());
+        match tool {
+            "playwright" => Some(FilterRoute::Playwright),
+            "vitest" => Some(FilterRoute::Vitest),
+            "jest" => Some(FilterRoute::TestRunner),
+            "tsc" => Some(FilterRoute::Tsc),
+            "eslint" | "biome" => Some(FilterRoute::Lint),
+            "prettier" => Some(FilterRoute::Prettier),
+            _ => None,
         }
     }
+}
+
+/// First meaningful command token of a script, lowercased: skips leading env
+/// assignments (`FOO=bar`) and launcher wrappers (`cross-env`, `npx`, `pnpx`,
+/// `pnpm exec`, `pnpm dlx`). Returns None when nothing routable resolves.
+fn first_command_token(command: &str) -> Option<String> {
+    let mut tokens = command.split_whitespace();
+    while let Some(token) = tokens.next() {
+        let lower = token.to_lowercase();
+        if is_env_assignment(&lower) {
+            continue;
+        }
+        match lower.as_str() {
+            "cross-env" | "npx" | "pnpx" => continue,
+            "pnpm" => match tokens.next().map(|t| t.to_lowercase()) {
+                Some(launcher) if launcher == "exec" || launcher == "dlx" => continue,
+                // any other pnpm form is not a directly routable tool
+                _ => return None,
+            },
+            _ => return Some(lower),
+        }
+    }
+    None
+}
+
+fn is_env_assignment(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && !name.chars().next().unwrap().is_ascii_digit()
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// True when a forced --reporter (user args or the script text itself) breaks
+/// the default-reporter line format the stream filter parses.
+fn reporter_forced(args: &[String], script_cmd: Option<&String>) -> bool {
+    args.iter().any(|a| a.starts_with("--reporter"))
+        || script_cmd.is_some_and(|cmd| cmd.contains("--reporter"))
 }
 
 /// Strip pnpm-specific boilerplate from script output.
@@ -741,7 +778,14 @@ fn is_pnpm_script(name: &str, pkg_scripts: &Option<PackageScripts>) -> bool {
 
 /// Apply a specialized filter to script output.
 /// Returns Result to allow caller fallback on error (replaces catch_unwind).
-pub(crate) fn apply_filter(route: FilterRoute, output: &str) -> Result<(String, &'static str)> {
+/// `succeeded` is the script's exit status: on failure, a filter that did not
+/// positively recognize the tool's output must not replace real error text
+/// with a counts-only or success summary — the raw output is shown instead.
+pub(crate) fn apply_filter(
+    route: FilterRoute,
+    output: &str,
+    succeeded: bool,
+) -> Result<(String, &'static str)> {
     // Empty/whitespace input is an error -- nothing meaningful to filter
     if output.trim().is_empty() {
         let label = match route {
@@ -756,21 +800,38 @@ pub(crate) fn apply_filter(route: FilterRoute, output: &str) -> Result<(String, 
     }
 
     let filtered = match route {
-        // Unreachable in production: run_script routes vitest scripts to
-        // VitestStreamFilter (streaming path). Bail so the caller falls back
-        // to the stripped output.
+        // Reached only when a forced --reporter keeps the run off the
+        // streaming path — parse the JSON reporter output.
         FilterRoute::Vitest => {
-            anyhow::bail!("vitest (via pnpm run) is handled by the streaming filter")
-        }
-        FilterRoute::Playwright => {
-            let parse_result = crate::cmds::js::playwright_cmd::PlaywrightParser::parse(output);
+            let parse_result = crate::cmds::js::vitest_cmd::VitestParser::parse(output);
             match parse_result {
                 ParseResult::Full(data) => data.format(FormatMode::Compact),
                 ParseResult::Degraded(data, _) => data.format(FormatMode::Compact),
                 ParseResult::Passthrough(raw) => raw,
             }
         }
+        FilterRoute::Playwright => {
+            let parse_result = crate::cmds::js::playwright_cmd::PlaywrightParser::parse(output);
+            match parse_result {
+                ParseResult::Full(data) => data.format(FormatMode::Compact),
+                // Degraded is counts-only: on failure it would replace the
+                // error text and code frames playwright printed to stdout.
+                ParseResult::Degraded(data, _) if succeeded => {
+                    data.format(FormatMode::Compact)
+                }
+                ParseResult::Degraded(_, _) => output.to_string(),
+                ParseResult::Passthrough(raw) => raw,
+            }
+        }
+        FilterRoute::Tsc if !succeeded => {
+            crate::cmds::js::tsc_cmd::filter_tsc_output_recognized(output)
+                .unwrap_or_else(|| output.to_string())
+        }
         FilterRoute::Tsc => crate::cmds::js::tsc_cmd::filter_tsc_output(output),
+        FilterRoute::Lint if !succeeded => {
+            crate::cmds::js::lint_cmd::filter_generic_lint_recognized(output)
+                .unwrap_or_else(|| output.to_string())
+        }
         FilterRoute::Lint => crate::cmds::js::lint_cmd::filter_generic_lint(output),
         FilterRoute::Prettier => crate::cmds::js::prettier_cmd::filter_prettier_output(output),
         FilterRoute::TestRunner => {
@@ -817,16 +878,20 @@ lazy_static! {
     static ref SEPARATOR_LINE: Regex = Regex::new(r"^⎯{5,}").unwrap();
     static ref PNPM_CMD_ECHO: Regex = Regex::new(r"^>\s+\S").unwrap();
 
-    // For on_exit summary parsing
+    // For on_exit summary parsing. Each `N label` segment is optional and
+    // consumes its own trailing `|` so every vitest form matches:
+    // "Test Files  2 passed (2)", "… 1 failed | 2 passed | 1 skipped (4)",
+    // "Tests  2 todo (2)", "Tests  1 skipped (1)"
     static ref RE_SUMMARY_FILES: Regex =
-        Regex::new(r"Test Files\s+(?:(\d+)\s+failed\s*\|\s*)?(\d+)\s+passed\s*\((\d+)\)").unwrap();
+        Regex::new(r"Test Files\s+(?:(\d+)\s+failed(?:\s*\|\s*)?)?(?:(\d+)\s+passed(?:\s*\|\s*)?)?(?:(\d+)\s+skipped(?:\s*\|\s*)?)?(?:(\d+)\s+todo(?:\s*\|\s*)?)?\s*\((\d+)\)").unwrap();
     static ref RE_SUMMARY_TESTS: Regex =
-        Regex::new(r"Tests\s+(?:(\d+)\s+failed\s*\|\s*)?(\d+)\s+passed(?:\s*\|\s*(\d+)\s+skipped)?(?:\s*\|\s*(\d+)\s+todo)?\s*\((\d+)\)").unwrap();
+        Regex::new(r"Tests\s+(?:(\d+)\s+failed(?:\s*\|\s*)?)?(?:(\d+)\s+passed(?:\s*\|\s*)?)?(?:(\d+)\s+skipped(?:\s*\|\s*)?)?(?:(\d+)\s+todo(?:\s*\|\s*)?)?\s*\((\d+)\)").unwrap();
     static ref RE_SUMMARY_DURATION: Regex =
         Regex::new(r"Duration\s+([\d.]+)(ms|s|m)").unwrap();
 }
 
-const MAX_INLINE_FAILURES: usize = 10;
+const MAX_INLINE_FAILURES: usize = CAP_WARNINGS;
+const MAX_DETAIL_LINES: usize = 30;
 
 struct VitestStreamFilter {
     passed_suites: usize,
@@ -838,6 +903,7 @@ struct VitestStreamFilter {
     failure_detail_lines: usize,
     failures_shown: usize,
     duration_secs: Option<String>,
+    seen_banner: bool,
 }
 
 impl VitestStreamFilter {
@@ -852,6 +918,7 @@ impl VitestStreamFilter {
             failure_detail_lines: 0,
             failures_shown: 0,
             duration_secs: None,
+            seen_banner: false,
         }
     }
 }
@@ -864,7 +931,7 @@ impl StreamFilter for VitestStreamFilter {
         if trimmed.is_empty() {
             if self.in_failure_detail {
                 self.failure_detail_lines += 1;
-                if self.failure_detail_lines <= 30 {
+                if self.failure_detail_lines <= MAX_DETAIL_LINES {
                     return Some(format!("{}\n", line));
                 }
             }
@@ -872,18 +939,28 @@ impl StreamFilter for VitestStreamFilter {
         }
 
         // Pnpm boilerplate: always suppress
-        if LIFECYCLE_HEADER.is_match(trimmed)
-            || SCRIPT_ECHO.is_match(trimmed)
-            || DONE_MSG.is_match(trimmed)
+        if DONE_MSG.is_match(trimmed)
             || ELIFECYCLE_ONLY.is_match(trimmed)
             || PROGRESS.is_match(trimmed)
-            || PNPM_CMD_ECHO.is_match(trimmed)
+        {
+            return None;
+        }
+
+        // The `> pkg@ver script` header and `> cmd` / `$ cmd` echoes only appear
+        // before vitest's RUN banner — after it, such lines are user output
+        // (console.log("> foo")) and must pass through.
+        if !self.seen_banner
+            && (LIFECYCLE_HEADER.is_match(trimmed)
+                || SCRIPT_ECHO.is_match(trimmed)
+                || PNPM_CMD_ECHO.is_match(trimmed))
         {
             return None;
         }
 
         // Vitest banner: suppress
         if VITEST_BANNER.is_match(trimmed) {
+            self.seen_banner = true;
+            self.in_failure_detail = false;
             return None;
         }
 
@@ -899,9 +976,11 @@ impl StreamFilter for VitestStreamFilter {
                 };
                 self.duration_secs = Some(format!("{:.0}s", secs));
             }
+            self.in_failure_detail = false;
             return None;
         }
         if SUMMARY_FILES.is_match(trimmed) || SUMMARY_TESTS.is_match(trimmed) || SUMMARY_START.is_match(trimmed) {
+            self.in_failure_detail = false;
             return None;
         }
 
@@ -917,6 +996,8 @@ impl StreamFilter for VitestStreamFilter {
 
         // Test file result line: count, suppress passes/skips, show failures
         if let Some(caps) = TEST_FILE_RESULT.captures(trimmed) {
+            // A new file result ends any open failure detail block
+            self.in_failure_detail = false;
             let symbol = &caps[1];
             let test_count: usize = caps.get(2).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
             let failed_count: usize = caps.get(3).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
@@ -973,10 +1054,10 @@ impl StreamFilter for VitestStreamFilter {
             if self.failures_shown > MAX_INLINE_FAILURES {
                 return None;
             }
-            if self.failure_detail_lines <= 30 {
+            if self.failure_detail_lines <= MAX_DETAIL_LINES {
                 return Some(format!("{}\n", line));
             }
-            if self.failure_detail_lines == 31 {
+            if self.failure_detail_lines == MAX_DETAIL_LINES + 1 {
                 return Some("  ... (truncated)\n".to_string());
             }
             return None;
@@ -1003,13 +1084,13 @@ impl StreamFilter for VitestStreamFilter {
 
         if let Some(caps) = RE_SUMMARY_FILES.captures(raw) {
             files_failed = caps.get(1).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
-            _files_passed = caps[2].parse().unwrap_or(0);
-            files_total = caps[3].parse().unwrap_or(0);
+            _files_passed = caps.get(2).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
+            files_total = caps[5].parse().unwrap_or(0);
         }
 
         if let Some(caps) = RE_SUMMARY_TESTS.captures(raw) {
             tests_failed = caps.get(1).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
-            tests_passed = caps[2].parse().unwrap_or(0);
+            tests_passed = caps.get(2).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
             tests_skipped = caps.get(3).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
             _tests_todo = caps.get(4).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
             _tests_total = caps[5].parse().unwrap_or(0);
@@ -1074,15 +1155,17 @@ impl StreamFilter for VitestStreamFilter {
 /// Adapted to v0.39.0 API: uses `exec_capture` + `resolved_command`, returns `Result<i32>`.
 /// For vitest routes, uses streaming output for real-time progress.
 /// For other routes, uses buffered capture with specialized filters.
-pub fn run_script(
-    script: &str,
-    args: &[String],
-    filters: &[String],
-    verbose: u8,
-    skip_env: bool,
-    pkg_scripts: Option<PackageScripts>,
-) -> Result<i32> {
-    let route = route_script(script, pkg_scripts.as_ref());
+pub fn run_script(script: &str, args: &[String], filters: &[String], verbose: u8) -> Result<i32> {
+    // Static routes need no package.json read; load lazily when the script name
+    // alone doesn't decide, or when the streaming decision needs the script text.
+    let mut pkg_scripts: Option<PackageScripts> = None;
+    let route = match route_script(script, None) {
+        Some(route) => Some(route),
+        None => {
+            pkg_scripts = PackageScripts::load();
+            route_script(script, pkg_scripts.as_ref())
+        }
+    };
 
     // Global --filter flags must precede `run` — after the script name they
     // would be forwarded to the script instead of selecting the workspace.
@@ -1096,8 +1179,22 @@ pub fn run_script(
         format!("{} ", filter_args.join(" "))
     };
 
+    // A forced --reporter (script-defined or user args) breaks the
+    // default-reporter line format the stream filter parses.
+    let stream_vitest = if matches!(route, Some(FilterRoute::Vitest)) {
+        if pkg_scripts.is_none() {
+            pkg_scripts = PackageScripts::load();
+        }
+        !reporter_forced(
+            args,
+            pkg_scripts.as_ref().and_then(|ps| ps.scripts.get(script)),
+        )
+    } else {
+        false
+    };
+
     // STREAMING PATH: vitest scripts get real-time output to avoid Claude Code timeouts
-    if matches!(route, Some(FilterRoute::Vitest)) {
+    if stream_vitest {
         let mut cmd = resolved_command("pnpm");
         for arg in &filter_args {
             cmd.arg(arg);
@@ -1107,9 +1204,6 @@ pub fn run_script(
         // Do NOT inject --reporter=json — default reporter streams line-by-line
         for arg in args {
             cmd.arg(arg);
-        }
-        if skip_env {
-            cmd.env("SKIP_ENV_VALIDATION", "1");
         }
         if verbose > 0 {
             eprintln!(
@@ -1142,10 +1236,6 @@ pub fn run_script(
         cmd.arg(arg);
     }
 
-    if skip_env {
-        cmd.env("SKIP_ENV_VALIDATION", "1");
-    }
-
     if verbose > 0 {
         eprintln!(
             "Running: pnpm {}run {} {}",
@@ -1171,7 +1261,7 @@ pub fn run_script(
         // FAILURE PATH: filter stdout through specialized filter, show stderr
         let filtered = if !stripped.is_empty() {
             match route {
-                Some(route) => match apply_filter(route, &stripped) {
+                Some(route) => match apply_filter(route, &stripped, false) {
                     Ok((result, label)) => {
                         if verbose > 0 {
                             eprintln!("Routed to: {}", label);
@@ -1202,23 +1292,19 @@ pub fn run_script(
             .collect::<Vec<_>>()
             .join("\n");
 
-        if let Some(hint) =
-            crate::core::tee::tee_and_hint(&raw_for_tee, &format!("pnpm-run-{}", script), exit_code)
-        {
-            if display.is_empty() {
-                println!("{}", hint);
-            } else {
-                println!("{}\n{}", display, hint);
-            }
-        } else if !display.is_empty() {
-            println!("{}", display);
-        }
+        let shown = crate::core::runner::print_with_hint(
+            &display,
+            &raw_for_tee,
+            &raw_for_tee,
+            &format!("pnpm-run-{}", script),
+            exit_code,
+        );
 
         timer.track(
             &format!("pnpm run {} {}", script, args.join(" ")),
             &format!("rtk pnpm run {} {}", script, args.join(" ")),
             &raw_for_tee,
-            &display,
+            &shown,
         );
         return Ok(exit_code);
     }
@@ -1238,7 +1324,7 @@ pub fn run_script(
 
     // Route to specialized filter
     let filtered = match route {
-        Some(route) => match apply_filter(route, &stripped) {
+        Some(route) => match apply_filter(route, &stripped, true) {
             Ok((result, label)) => {
                 if verbose > 0 {
                     eprintln!("Routed to: {}", label);
@@ -1255,19 +1341,19 @@ pub fn run_script(
         None => stripped.clone(),
     };
 
-    if let Some(hint) =
-        crate::core::tee::tee_and_hint(&raw_for_tee, &format!("pnpm-run-{}", script), exit_code)
-    {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
+    let shown = crate::core::runner::print_with_hint(
+        &filtered,
+        &raw_for_tee,
+        &raw_for_tee,
+        &format!("pnpm-run-{}", script),
+        exit_code,
+    );
 
     timer.track(
         &format!("pnpm run {} {}", script, args.join(" ")),
         &format!("rtk pnpm run {} {}", script, args.join(" ")),
         &raw_for_tee,
-        &filtered,
+        &shown,
     );
 
     Ok(0)
@@ -1537,9 +1623,50 @@ Done in 5.2s
     // --- PackageScripts tests ---
 
     #[test]
-    fn test_package_scripts_load_returns_none_without_package_json() {
-        // Test CWD has no package.json -> load() returns None
-        assert!(PackageScripts::load().is_none());
+    fn test_package_scripts_load_from_reads_scripts() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{ "name": "x", "scripts": { "test": "vitest run" } }"#,
+        )
+        .unwrap();
+        let ps = PackageScripts::load_from(dir.path()).expect("should load");
+        assert!(ps.contains("test"));
+        assert_eq!(ps.detect_tool("test"), Some(FilterRoute::Vitest));
+    }
+
+    #[test]
+    fn test_package_scripts_load_from_walks_up() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{ "scripts": { "lint": "eslint ." } }"#,
+        )
+        .unwrap();
+        let nested = dir.path().join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        let ps = PackageScripts::load_from(&nested).expect("should find parent package.json");
+        assert!(ps.contains("lint"));
+    }
+
+    #[test]
+    fn test_package_scripts_load_from_none_without_package_json() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(PackageScripts::load_from(dir.path()).is_none());
+    }
+
+    #[test]
+    fn test_package_scripts_load_from_none_on_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), "not json").unwrap();
+        assert!(PackageScripts::load_from(dir.path()).is_none());
+    }
+
+    #[test]
+    fn test_package_scripts_load_from_none_without_scripts_key() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), r#"{ "name": "x" }"#).unwrap();
+        assert!(PackageScripts::load_from(dir.path()).is_none());
     }
 
     #[test]
@@ -1620,6 +1747,97 @@ Done in 5.2s
         assert_eq!(ps.detect_tool("dev"), None);
     }
 
+    // --- first-token routing tests ---
+
+    #[test]
+    fn test_detect_tool_substring_in_name_does_not_route() {
+        // "tsc"/"typescript" appearing inside another tool's name must not route
+        let ps = PackageScripts {
+            scripts: HashMap::from([(
+                "gen".to_string(),
+                "openapi-typescript generate".to_string(),
+            )]),
+        };
+        assert_eq!(ps.detect_tool("gen"), None);
+    }
+
+    #[test]
+    fn test_detect_tool_chained_script_routes_by_first_token() {
+        // Conservative: the first command decides; the tsc half is real
+        let ps = PackageScripts {
+            scripts: HashMap::from([("build".to_string(), "tsc && vite build".to_string())]),
+        };
+        assert_eq!(ps.detect_tool("build"), Some(FilterRoute::Tsc));
+    }
+
+    #[test]
+    fn test_detect_tool_skips_wrappers_and_env_assignments() {
+        let ps = PackageScripts {
+            scripts: HashMap::from([
+                (
+                    "test".to_string(),
+                    "cross-env NODE_ENV=test vitest run".to_string(),
+                ),
+                ("unit".to_string(), "FOO=bar vitest run".to_string()),
+                ("e2e".to_string(), "npx playwright test".to_string()),
+                ("check".to_string(), "pnpm exec tsc --noEmit".to_string()),
+                (
+                    "check-bin".to_string(),
+                    "./node_modules/.bin/tsc --noEmit".to_string(),
+                ),
+            ]),
+        };
+        assert_eq!(ps.detect_tool("test"), Some(FilterRoute::Vitest));
+        assert_eq!(ps.detect_tool("unit"), Some(FilterRoute::Vitest));
+        assert_eq!(ps.detect_tool("e2e"), Some(FilterRoute::Playwright));
+        assert_eq!(ps.detect_tool("check"), Some(FilterRoute::Tsc));
+        assert_eq!(ps.detect_tool("check-bin"), Some(FilterRoute::Tsc));
+    }
+
+    #[test]
+    fn test_first_command_token_edge_cases() {
+        assert_eq!(first_command_token("vitest run").as_deref(), Some("vitest"));
+        assert_eq!(
+            first_command_token("FOO=bar BAR=baz eslint .").as_deref(),
+            Some("eslint")
+        );
+        assert_eq!(
+            first_command_token("pnpm dlx prettier .").as_deref(),
+            Some("prettier")
+        );
+        // another pnpm subcommand is not a routable tool
+        assert_eq!(first_command_token("pnpm install"), None);
+        // no command at all
+        assert_eq!(first_command_token("FOO=bar"), None);
+    }
+
+    #[test]
+    fn test_reporter_forced_detection() {
+        assert!(reporter_forced(
+            &["--reporter=json".to_string()],
+            None
+        ));
+        assert!(reporter_forced(
+            &[],
+            Some(&"vitest run --reporter=dot".to_string())
+        ));
+        assert!(!reporter_forced(
+            &[],
+            Some(&"vitest run".to_string())
+        ));
+        assert!(!reporter_forced(&[], None));
+    }
+
+    #[test]
+    fn test_emit_guarded_caps_output_at_raw() {
+        // run_script routes display through print_with_hint/emit_guarded: a
+        // fabricated summary longer than the raw output must never be shown
+        let shown = crate::core::runner::emit_guarded("TypeScript compilation completed", None, "x");
+        assert_eq!(shown, "x");
+        let shown = crate::core::runner::emit_guarded("ok", None, "much longer raw output");
+        assert_eq!(shown, "ok");
+    }
+
     #[test]
     fn test_package_scripts_detect_tool_missing_script() {
         let ps = PackageScripts {
@@ -1641,55 +1859,95 @@ Done in 5.2s
     }
 
     #[test]
-    fn test_find_package_json_cwd_first() {
-        // When CWD has a package.json, find_package_json should return it.
-        let result = find_package_json();
-        let cwd_has_pkg = std::path::Path::new("package.json").is_file();
-        if cwd_has_pkg {
-            assert!(result.is_some());
-            assert!(result.unwrap().ends_with("package.json"));
-        } else {
-            // No package.json in any ancestor -- None is acceptable
-        }
+    fn test_find_package_json_from_finds_nearest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), r#"{ "name": "x" }"#).unwrap();
+        let nested = dir.path().join("sub");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(
+            find_package_json_from(&nested),
+            Some(dir.path().join("package.json"))
+        );
     }
 
     // --- apply_filter tests ---
 
     #[test]
     fn test_apply_filter_tsc_label() {
-        let (_, label) = apply_filter(FilterRoute::Tsc, "some output").unwrap();
+        let (_, label) = apply_filter(FilterRoute::Tsc, "some output", true).unwrap();
         assert_eq!(label, "tsc (via pnpm run)");
     }
 
     #[test]
-    fn test_apply_filter_vitest_bails_to_fallback() {
-        // Vitest scripts run through VitestStreamFilter in production; the
-        // buffered arm bails so run_script falls back to stripped output.
-        assert!(apply_filter(FilterRoute::Vitest, "some output").is_err());
+    fn test_apply_filter_vitest_buffered_json() {
+        // Reached when a forced --reporter keeps vitest off the streaming path
+        let json = r#"{"numTotalTests":3,"numPassedTests":2,"numFailedTests":1,"numPendingTests":0,"testResults":[{"name":"src/a.test.ts","assertionResults":[{"fullName":"a > works","status":"failed","failureMessages":["Error: nope"]}]}]}"#;
+        let (filtered, label) = apply_filter(FilterRoute::Vitest, json, false).unwrap();
+        assert_eq!(label, "vitest (via pnpm run)");
+        assert!(filtered.contains("FAIL (1)"), "got: {}", filtered);
+        assert!(filtered.contains("a > works"), "got: {}", filtered);
     }
 
     #[test]
     fn test_apply_filter_lint_label() {
-        let (_, label) = apply_filter(FilterRoute::Lint, "some output").unwrap();
+        let (_, label) = apply_filter(FilterRoute::Lint, "some output", true).unwrap();
         assert_eq!(label, "lint (via pnpm run)");
     }
 
     #[test]
     fn test_apply_filter_prettier_label() {
-        let (_, label) = apply_filter(FilterRoute::Prettier, "some output").unwrap();
+        let (_, label) = apply_filter(FilterRoute::Prettier, "some output", true).unwrap();
         assert_eq!(label, "prettier (via pnpm run)");
     }
 
     #[test]
     fn test_apply_filter_test_runner_label() {
-        let (_, label) = apply_filter(FilterRoute::TestRunner, "some output").unwrap();
+        let (_, label) = apply_filter(FilterRoute::TestRunner, "some output", true).unwrap();
         assert_eq!(label, "test (via pnpm run)");
     }
 
     #[test]
     fn test_apply_filter_playwright_label() {
-        let (_, label) = apply_filter(FilterRoute::Playwright, "some output").unwrap();
+        let (_, label) = apply_filter(FilterRoute::Playwright, "some output", true).unwrap();
         assert_eq!(label, "playwright (via pnpm run)");
+    }
+
+    // --- apply_filter failure-path hardening ---
+
+    #[test]
+    fn test_apply_filter_tsc_failure_unrecognized_falls_back_to_raw() {
+        // A failing script routed to tsc whose output has no tsc errors must
+        // not print a fabricated "compilation completed"
+        let output = "vite build failed\nRollupError: unexpected token";
+        let (filtered, _) = apply_filter(FilterRoute::Tsc, output, false).unwrap();
+        assert_eq!(filtered, output);
+        // Success path keeps the historical placeholder
+        let (filtered, _) = apply_filter(FilterRoute::Tsc, output, true).unwrap();
+        assert_eq!(filtered, "TypeScript compilation completed");
+    }
+
+    #[test]
+    fn test_apply_filter_lint_failure_unrecognized_falls_back_to_raw() {
+        let output = "biome: configuration file not found";
+        let (filtered, _) = apply_filter(FilterRoute::Lint, output, false).unwrap();
+        assert_eq!(filtered, output);
+        let (filtered, _) = apply_filter(FilterRoute::Lint, "all clean", true).unwrap();
+        assert_eq!(filtered, "Lint: No issues found");
+    }
+
+    #[test]
+    fn test_apply_filter_playwright_failure_keeps_error_text() {
+        // Non-JSON failing playwright output: degraded parse is counts-only and
+        // would drop the error/code-frame sections — fall back to raw instead.
+        let transcript = "Running 2 tests using 1 worker\n\n  ✓  1 tests/login.spec.ts:3:1 › works (500ms)\n  ✘  2 tests/login.spec.ts:8:1 › fails (300ms)\n\n\n  1) tests/login.spec.ts:8:1 › fails\n\n    Error: expect(received).toBe(expected)\n\n      8 | test('fails', async ({ page }) => {\n      9 |   await expect(page.locator('h1')).toBe('x');\n       |                                                 ^\n\n  1 failed\n    tests/login.spec.ts:8:1 › fails (300ms)\n  1 passed (1.2s)\n";
+        let (filtered, _) = apply_filter(FilterRoute::Playwright, transcript, false).unwrap();
+        assert_eq!(filtered, transcript);
+        assert!(filtered.contains("expect(received).toBe(expected)"));
+
+        // Same transcript on success-path formatting stays counts-only compact
+        let green = "Running 1 test using 1 worker\n\n  ✓  1 tests/a.spec.ts:3:1 › works (100ms)\n\n  1 passed (2.0s)\n";
+        let (filtered, _) = apply_filter(FilterRoute::Playwright, green, true).unwrap();
+        assert!(filtered.contains("PASS (1)"), "got: {}", filtered);
     }
 
     // --- integration tests ---
@@ -1712,7 +1970,7 @@ Done in 1.2s"#;
         let route = route_script("lint", Some(&ps));
         assert_eq!(route, Some(FilterRoute::Lint));
 
-        let (filtered, label) = apply_filter(route.unwrap(), &stripped).unwrap();
+        let (filtered, label) = apply_filter(route.unwrap(), &stripped, true).unwrap();
         assert_eq!(label, "lint (via pnpm run)");
         assert!(!filtered.is_empty());
     }
@@ -1789,14 +2047,14 @@ Done in 1.2s"#;
     #[test]
     fn test_apply_filter_empty_output_returns_error() {
         // Empty output triggers Err (fallback to stripped output in caller)
-        let result = apply_filter(FilterRoute::Tsc, "");
+        let result = apply_filter(FilterRoute::Tsc, "", true);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_apply_filter_whitespace_only_returns_error() {
         // Whitespace-only output triggers Err
-        let result = apply_filter(FilterRoute::Lint, "   \n\n  ");
+        let result = apply_filter(FilterRoute::Lint, "   \n\n  ", true);
         assert!(result.is_err());
     }
 
@@ -2173,6 +2431,85 @@ garbage line
     }
 
     #[test]
+    fn test_vitest_stream_summary_with_skipped_files() {
+        // "Test Files  2 passed | 1 skipped (3)" must parse — a green suite with
+        // skipped files previously fell back to counted zeros ("0 suites").
+        let raw = " Test Files  2 passed | 1 skipped (3)\n      Tests  5 passed | 2 skipped (7)\n   Duration  1.5s\n";
+        let mut filter = VitestStreamFilter::new();
+        for line in raw.lines() {
+            filter.feed_line(line);
+        }
+        let summary = filter.on_exit(0, raw).unwrap();
+        assert_eq!(summary, "PASS (5) | 3 suites (2 skipped) | 2s\n");
+    }
+
+    #[test]
+    fn test_vitest_stream_summary_failed_passed_skipped_files() {
+        let raw = " Test Files  1 failed | 1 passed | 1 skipped (3)\n      Tests  2 failed | 4 passed | 1 skipped (7)\n";
+        let mut filter = VitestStreamFilter::new();
+        let summary = filter.on_exit(1, raw).unwrap();
+        assert_eq!(
+            summary,
+            "PASS (4) FAIL (2) | 3 suites (1 failed) | 1 skipped | ?\n"
+        );
+    }
+
+    #[test]
+    fn test_vitest_stream_summary_todo_only() {
+        let raw = " Test Files  1 skipped (1)\n      Tests  2 todo (2)\n";
+        let mut filter = VitestStreamFilter::new();
+        let summary = filter.on_exit(0, raw).unwrap();
+        assert_eq!(summary, "PASS (0) | 1 suites | ?\n");
+    }
+
+    #[test]
+    fn test_vitest_stream_echo_suppression_stops_after_banner() {
+        let mut filter = VitestStreamFilter::new();
+        // pnpm preamble: header + script echo are suppressed before the banner
+        assert_eq!(filter.feed_line("> pkg@1.0.0 test /path"), None);
+        assert_eq!(filter.feed_line("> vitest run"), None);
+        assert_eq!(filter.feed_line("$ vitest run"), None);
+        assert_eq!(filter.feed_line(" RUN  v2.1.8 /path"), None);
+        // after the RUN banner, `>` / `$` lines are user output and pass through
+        assert_eq!(
+            filter.feed_line("> hello"),
+            Some("> hello\n".to_string())
+        );
+        assert_eq!(
+            filter.feed_line("$ foo"),
+            Some("$ foo\n".to_string())
+        );
+    }
+
+    #[test]
+    fn test_vitest_stream_failure_detail_resets_on_file_result() {
+        let mut filter = VitestStreamFilter::new();
+        filter.feed_line("   × a > fails");
+        assert!(filter.in_failure_detail);
+        // a new file result ends the detail block…
+        assert_eq!(filter.feed_line(" ✓ b.test.ts (2 tests) 3ms"), None);
+        assert!(!filter.in_failure_detail);
+        // …so later lines are not eaten by the detail-line budget
+        let mut out = String::new();
+        for i in 1..=35 {
+            if let Some(s) = filter.feed_line(&format!("noise line {}", i)) {
+                out.push_str(&s);
+            }
+        }
+        assert!(out.contains("noise line 35"));
+        assert!(!out.contains("truncated"));
+    }
+
+    #[test]
+    fn test_vitest_stream_failure_detail_resets_on_summary_line() {
+        let mut filter = VitestStreamFilter::new();
+        filter.feed_line("   × a > fails");
+        assert!(filter.in_failure_detail);
+        filter.feed_line(" Test Files  1 passed (1)");
+        assert!(!filter.in_failure_detail);
+    }
+
+    #[test]
     fn test_full_pipeline_vitest_streaming_savings() {
         // Realistic non-TTY vitest default-reporter transcript, as streamed by
         // `pnpm run test` (test = "vitest run") — the production path feeds
@@ -2260,7 +2597,7 @@ Done in 12.3s
         );
 
         // Stage 2: Apply playwright specialized filter
-        let (filtered, label) = apply_filter(FilterRoute::Playwright, &stripped).unwrap();
+        let (filtered, label) = apply_filter(FilterRoute::Playwright, &stripped, true).unwrap();
         assert_eq!(label, "playwright (via pnpm run)");
         assert!(
             filtered.contains("PASS"),
