@@ -269,6 +269,7 @@ rtk env -f AWS                  # Filtered env vars
 rtk log app.log                 # Deduplicated logs
 rtk curl <url>                  # Truncate + save full output
 rtk wget <url>                  # Download, strip progress bars
+rtk powershell -Command Get-Date # Compact PowerShell output
 rtk summary <long command>      # Heuristic summary
 rtk proxy <command>             # Raw passthrough + tracking
 ```

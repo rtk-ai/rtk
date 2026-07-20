@@ -4357,6 +4357,42 @@ mod tests {
         );
     }
 
+    // --- #2313: PowerShell and WSL interop proxy ---
+
+    #[test]
+    fn test_classify_powershell_commands() {
+        for command in [
+            "powershell.exe -NoProfile -Command 'Get-Process'",
+            "pwsh -Command Get-Date",
+            "powershell -File script.ps1",
+        ] {
+            assert!(matches!(
+                classify_command(command),
+                Classification::Supported {
+                    rtk_equivalent: "rtk powershell --executable powershell.exe"
+                        | "rtk powershell --executable pwsh"
+                        | "rtk powershell --executable powershell",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn test_rewrite_powershell_preserves_executable() {
+        assert_eq!(
+            rewrite_command_no_prefixes("powershell.exe -NoProfile -Command 'Get-Process'", &[]),
+            Some(
+                "rtk powershell --executable powershell.exe -NoProfile -Command 'Get-Process'"
+                    .into()
+            )
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pwsh -Command Get-Date", &[]),
+            Some("rtk powershell --executable pwsh -Command Get-Date".into())
+        );
+    }
+
     #[test]
     fn test_classify_command_substitution_passthrough() {
         assert_eq!(
