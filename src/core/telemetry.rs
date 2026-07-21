@@ -25,8 +25,8 @@ pub fn maybe_ping() {
         return;
     }
 
-    // Check opt-out: env var
-    if std::env::var("RTK_TELEMETRY_DISABLED").unwrap_or_default() == "1" {
+    // Check opt-out: env var (single source of truth in telemetry_cmd)
+    if super::telemetry_cmd::telemetry_disabled_by_env() {
         return;
     }
 

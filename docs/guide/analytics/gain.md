@@ -172,7 +172,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - run: cargo install rtk
+      - run: cargo install --git https://github.com/rtk-ai/rtk --branch master rtk
       - run: rtk gain --weekly --format json > stats/week-$(date +%Y-%W).json
       - run: git add stats/ && git commit -m "Weekly rtk stats" && git push
 ```

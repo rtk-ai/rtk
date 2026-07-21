@@ -369,7 +369,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Install RTK
-        run: cargo install --git https://github.com/rtk-ai/rtk
+        run: cargo install --git https://github.com/rtk-ai/rtk --branch master
 
       - name: Export weekly stats
         run: |

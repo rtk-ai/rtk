@@ -477,6 +477,16 @@ fn prompt_telemetry_consent() -> Result<()> {
         None => {}
     }
 
+    // Explicit opt-out must short-circuit before the TTY heuristic: some
+    // non-interactive environments (devcontainer `postCreateCommand`, certain
+    // CI agents) hand rtk a pseudo-TTY, so `is_terminal()` returns true even
+    // though no human is available to answer — the prompt then hangs forever.
+    // Setting `RTK_TELEMETRY_DISABLED=1` is the documented workaround, so the
+    // init prompt has to honour it too, not only `telemetry::maybe_ping`.
+    if crate::core::telemetry_cmd::telemetry_disabled_by_env() {
+        return Ok(());
+    }
+
     if !io::stdin().is_terminal() {
         return Ok(());
     }

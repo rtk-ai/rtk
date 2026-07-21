@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 
 fn rtk_stdin(args: &[&str], input: &str) -> String {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .env("LC_ALL", "C")
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -58,6 +59,7 @@ fn guard_does_not_block_real_compression() {
 
 fn rtk_output_in_dir(dir: &std::path::Path, args: &[&str]) -> (String, String, Option<i32>) {
     let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .env("LC_ALL", "C")
         .args(args)
         .current_dir(dir)
         .output()

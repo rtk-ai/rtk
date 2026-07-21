@@ -44,7 +44,7 @@ brew install rtk-ai/tap/rtk
 :::
 
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk rtk
+cargo install --git https://github.com/rtk-ai/rtk --branch master rtk
 ```
 
 ## Pre-built binaries (Windows, Linux, macOS)
