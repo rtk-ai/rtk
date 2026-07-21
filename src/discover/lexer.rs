@@ -1,6 +1,8 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeKind {
+    /// Standard stdout pipeline (`|`).
     Stdout,
+    /// Combined stdout-and-stderr pipeline (`|&`).
     StdoutAndStderr,
 }
 

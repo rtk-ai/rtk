@@ -1118,6 +1118,17 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_pipeline_rewrites_only_safe_final_stage() {
+        let result = run_claude_inner(&claude_input("cargo test | grep FAILED")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "cargo test | rtk grep FAILED");
+    }
+
+    #[test]
     fn test_claude_json_output_structure() {
         let result = run_claude_inner(&claude_input("git status")).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
