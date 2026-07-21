@@ -1,0 +1,51 @@
+[filters.composer-analyse]
+description = "Compact composer analyse/check-style/validate — strip PHPStan progress noise and PHP deprecations"
+match_command = "^composer\\s+(analyse|analyze|check-style|validate|test|dump-autoload)\\b"
+strip_ansi = true
+filter_stderr = true
+replace = [
+  { pattern = "\\r\\s*\\d+/\\d+ \\[[█░▓\\- ]+\\]\\s*\\d+%", replacement = "" },
+  { pattern = "\\r+", replacement = "\n" },
+  { pattern = "\\s*(?:\\d+/\\d+ \\[[█░▓\\- ]+\\]\\s*\\d+%\\s*)+", replacement = "" },
+  { pattern = "\\d+/\\d+ \\[[█░▓\\- ]+\\]\\s*\\d+%", replacement = "" },
+]
+strip_lines_matching = [
+  "^\\s*$",
+  "^Deprecated:",
+  "^PHP Deprecated:",
+  "^Note: Using configuration file",
+  "^Loading composer",
+  "^> ",
+  "^ -- -+$",
+  "^    \\.\\.+$",
+]
+match_output = [
+  { pattern = "\\[OK\\] No errors", message = "phpstan: ok (no errors)" },
+  { pattern = "No errors$", message = "phpstan: ok (no errors)" },
+]
+max_lines = 80
+tail_lines = 50
+
+[[tests.composer-analyse]]
+name = "strips inline progress bars"
+input = "Note: Using configuration file phpstan.neon.\n 0/2838 [░░░░]   0%\r 20/2838 [░░░░]   0%\r 2838/2838 [████] 100%\n\n [OK] No errors\n"
+expected = "phpstan: ok (no errors)"
+
+[[tests.composer-analyse]]
+name = "strips deprecations and progress"
+input = """
+Deprecated: Constant PDO::MYSQL_ATTR_SSL_CA
+> ./vendor/bin/phpstan analyse
+ 1/1 [████] 100%
+"""
+expected = ""
+
+[[tests.composer-analyse]]
+name = "empty input"
+input = ""
+expected = ""
+
+[[tests.composer-analyse]]
+name = "strips concatenated progress on one line"
+input = "[ERROR] Found 1 error\n            120/2838 [▓░░░░░░░░░░░░░░░░░░░░░░░░░░░]   4%  180/2838 [▓░░░░░░░░░░░░░░░░░░░░░░░░░░░]   6%\n"
+expected = "[ERROR] Found 1 error\n"

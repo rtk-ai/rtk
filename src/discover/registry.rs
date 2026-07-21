@@ -4569,6 +4569,26 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_composer_analyse() {
+        assert_eq!(
+            rewrite_command_no_prefixes("composer analyse", &[]),
+            Some("rtk composer analyse".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("composer check-style", &[]),
+            Some("rtk composer check-style".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_composer_install_still_rewrites() {
+        assert_eq!(
+            rewrite_command_no_prefixes("composer install", &[]),
+            Some("rtk composer install".into())
+        );
+    }
+
+    #[test]
     fn test_classify_pest() {
         assert!(matches!(
             classify_command("vendor/bin/pest tests/"),

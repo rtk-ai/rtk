@@ -1,0 +1,54 @@
+[filters.phpstan]
+description = "Compact PHPStan analyse output — collapse Symfony progress bars (complements rtk phpstan JSON filter for php-wrapper invocations)"
+match_command = "(^|[/\\w.-]+/)phpstan\\b|^php\\s+.*phpstan\\b"
+strip_ansi = true
+filter_stderr = true
+replace = [
+  { pattern = "\\r\\s*\\d+/\\d+ \\[[█░▓\\- ]+\\]\\s*\\d+%", replacement = "" },
+  { pattern = "\\r+", replacement = "\n" },
+  { pattern = "\\s*(?:\\d+/\\d+ \\[[█░▓\\- ]+\\]\\s*\\d+%\\s*)+", replacement = "" },
+  { pattern = "\\d+/\\d+ \\[[█░▓\\- ]+\\]\\s*\\d+%", replacement = "" },
+]
+strip_lines_matching = [
+  "^\\s*$",
+  "^Note: Using configuration file",
+  "^ -- -+$",
+  "^    \\.\\.+$",
+]
+match_output = [
+  { pattern = "\\[OK\\] No errors", message = "phpstan: ok (no errors)" },
+  { pattern = "No errors$", message = "phpstan: ok (no errors)" },
+]
+max_lines = 80
+tail_lines = 50
+
+[[tests.phpstan]]
+name = "collapses carriage-return progress spam"
+input = " 0/10 [░░░░░░░░░░]   0%\r 5/10 [▓▓░░░░░░░░]  50%\r 10/10 [▓▓▓▓▓▓▓▓▓▓] 100%\n\n [OK] No errors\n"
+expected = "phpstan: ok (no errors)"
+
+[[tests.phpstan]]
+name = "strips concatenated progress on one line"
+input = "[ERROR] Found 1 error\n            120/2838 [▓░░░░░░░░░░░░░░░░░░░░░░░░░░░]   4%  180/2838 [▓░░░░░░░░░░░░░░░░░░░░░░░░░░░]   6%\n"
+expected = "[ERROR] Found 1 error\n"
+
+[[tests.phpstan]]
+name = "preserves error findings"
+input = """
+ -- ----------------------------------------------------------------------- 
+     Error                                                                  
+ -- ----------------------------------------------------------------------- 
+     Undefined variable $foo                                                
+ -- ----------------------------------------------------------------------- 
+
+ [ERROR] Found 1 error
+"""
+expected = """
+ -- ----------------------------------------------------------------------- 
+     Error                                                                  
+ -- ----------------------------------------------------------------------- 
+     Undefined variable $foo                                                
+ -- ----------------------------------------------------------------------- 
+
+ [ERROR] Found 1 error
+"""

@@ -677,12 +677,18 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^composer\s+(install|update|require)\b",
+        pattern: r"^composer\s+(install|update|require|analyse|analyze|check-style|validate|test|dump-autoload)\b",
         rtk_cmd: "rtk composer",
         rewrite_prefixes: &["composer"],
         category: "PackageManager",
         savings_pct: 65.0,
-        subcmd_savings: &[],
+        subcmd_savings: &[
+            ("analyse", 65.0),
+            ("analyze", 65.0),
+            ("check-style", 65.0),
+            ("validate", 60.0),
+            ("test", 70.0),
+        ],
         subcmd_status: &[],
     },
     RtkRule {
