@@ -197,11 +197,12 @@ The registry (`src/discover/registry.rs`) handles command patterns across these 
 
 ### Compound Command Handling
 
-The registry handles `&&`, `||`, `;`, `|`, and `&` operators:
+The registry handles `&&`, `||`, `;`, `|`, `|&`, and `&` operators:
 
-- **Pipe** (`|`): Only the left side is rewritten (right side consumes output format)
+- **Pipe** (`|`): Producers and intermediate stages stay raw; only a pipeline-safe final stage is rewritten
+- **Stderr pipe** (`|&`): The complete pipeline stays raw
 - **And/Or/Semicolon** (`&&`, `||`, `;`): Both sides rewritten independently
-- **find/fd in pipes**: Never rewritten (output format incompatible with xargs/wc/grep)
+- **Pipeline-safe rules**: Initially limited to argument-safe `grep`, `rg`, and `wc` invocations; search pattern-file forms defer
 
 Example: `cargo fmt --all && cargo test` becomes `rtk cargo fmt --all && rtk cargo test`
 
