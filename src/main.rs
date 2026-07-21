@@ -322,7 +322,33 @@ enum Commands {
         /// Show line numbers (always on, accepted for grep/rg compatibility)
         #[arg(short = 'n', long)]
         line_numbers: bool,
-        /// Extra ripgrep arguments (e.g., -i, -A 3, -w, --glob)
+        /// Extended regex (GNU grep -E). Accepted and dropped: rg is already
+        /// extended-regex by default, and rg's own -E means --encoding=VALUE.
+        #[arg(short = 'E', long = "extended-regexp")]
+        extended_regexp: bool,
+        /// Recursive (GNU grep -r/-R). Accepted and dropped: rg recurses by
+        /// default, and rg's own -r means --replace=VALUE.
+        #[arg(short = 'r', long = "recursive")]
+        recursive: bool,
+        /// Recursive, follow symlinks (GNU grep -R). Accepted and dropped.
+        #[arg(short = 'R', long = "dereference-recursive")]
+        dereference_recursive: bool,
+        /// Case-insensitive match (forwarded to rg)
+        #[arg(short = 'i', long = "ignore-case")]
+        ignore_case: bool,
+        /// Match whole words only (forwarded to rg)
+        #[arg(short = 'w', long = "word-regexp")]
+        word_regexp: bool,
+        /// Lines of context after each match (forwarded to rg)
+        #[arg(short = 'A', long = "after-context", value_name = "NUM")]
+        after_context: Option<usize>,
+        /// Lines of context before each match (forwarded to rg)
+        #[arg(short = 'B', long = "before-context", value_name = "NUM")]
+        before_context: Option<usize>,
+        /// Lines of context around each match (forwarded to rg)
+        #[arg(short = 'C', long = "context", value_name = "NUM")]
+        context: Option<usize>,
+        /// Extra ripgrep arguments (e.g., --glob, -F)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
     },
@@ -1807,17 +1833,51 @@ fn run_cli() -> Result<i32> {
             context_only,
             file_type,
             line_numbers: _, // no-op: line numbers always enabled in grep_cmd::run
+            // GNU-grep flags rg already implies. Accepted so clap does not reject
+            // the invocation, then intentionally dropped: rg's -E is
+            // --encoding=VALUE and rg's -r is --replace=VALUE, so forwarding
+            // them would silently consume the next argument (see rtk-ai/rtk#2253).
+            extended_regexp: _,
+            recursive: _,
+            dereference_recursive: _,
+            ignore_case,
+            word_regexp,
+            after_context,
+            before_context,
+            context,
             extra_args,
-        } => grep_cmd::run(
-            &pattern,
-            &path,
-            max_len,
-            max,
-            context_only,
-            file_type.as_deref(),
-            &extra_args,
-            cli.verbose,
-        )?,
+        } => {
+            // Translate the GNU-grep flags whose rg semantics are identical.
+            let mut rg_args: Vec<String> = Vec::new();
+            if ignore_case {
+                rg_args.push("-i".to_string());
+            }
+            if word_regexp {
+                rg_args.push("-w".to_string());
+            }
+            for (flag, value) in [
+                ("-A", after_context),
+                ("-B", before_context),
+                ("-C", context),
+            ] {
+                if let Some(n) = value {
+                    rg_args.push(flag.to_string());
+                    rg_args.push(n.to_string());
+                }
+            }
+            rg_args.extend(extra_args.iter().cloned());
+
+            grep_cmd::run(
+                &pattern,
+                &path,
+                max_len,
+                max,
+                context_only,
+                file_type.as_deref(),
+                &rg_args,
+                cli.verbose,
+            )?
+        }
 
         Commands::Init {
             global,

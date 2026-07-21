@@ -43,8 +43,7 @@ pub fn run(
     }
 
     for arg in extra_args {
-        // Fix: skip grep-ism -r flag (rg is recursive by default; rg -r means --replace)
-        if arg == "-r" || arg == "--recursive" {
+        if is_rg_incompatible_grep_flag(arg) {
             continue;
         }
         rg_cmd.arg(arg);
@@ -180,6 +179,26 @@ fn parse_match_line(line: &str) -> Option<(String, usize, &str)> {
         let line_num: usize = line_num.parse().ok()?;
         Some((file.to_string(), line_num, content))
     })
+}
+
+/// GNU-grep flags that must NOT be forwarded to ripgrep.
+///
+/// `rg`'s short forms for these collide with grep's and, critically, **take a
+/// value** — so forwarding them silently consumes the following argument
+/// (the mechanism behind rtk-ai/rtk#2253, where a pattern got eaten):
+///
+/// | flag | GNU grep          | ripgrep              |
+/// |------|-------------------|----------------------|
+/// | `-E` | extended regex    | `--encoding=VALUE`   |
+/// | `-r` | recursive         | `--replace=VALUE`    |
+///
+/// Dropping them is semantically correct: `rg` is recursive and
+/// extended-regex by default, so grep's intent is already satisfied.
+fn is_rg_incompatible_grep_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "-r" | "--recursive" | "-R" | "--dereference-recursive" | "-E" | "--extended-regexp"
+    )
 }
 
 fn has_format_flag(extra_args: &[String]) -> bool {
@@ -506,5 +525,62 @@ mod tests {
             );
         }
         // If rg is not installed, skip gracefully (test still passes)
+    }
+
+    // ── GNU-grep flag compatibility (rtk-ai/rtk#2614, #2253) ──────────────
+
+    #[test]
+    fn value_taking_rg_collisions_are_dropped() {
+        // rg -E is --encoding=VALUE and rg -r is --replace=VALUE. Forwarding
+        // either would swallow the NEXT argument, silently corrupting the
+        // search (issue #2253). They must never reach rg.
+        for flag in [
+            "-E",
+            "--extended-regexp",
+            "-r",
+            "--recursive",
+            "-R",
+            "--dereference-recursive",
+        ] {
+            assert!(
+                is_rg_incompatible_grep_flag(flag),
+                "{flag} must be dropped before reaching rg"
+            );
+        }
+    }
+
+    #[test]
+    fn identical_semantics_flags_are_forwarded() {
+        // These mean the same thing in grep and rg, so they must pass through.
+        for flag in ["-i", "--ignore-case", "-w", "--word-regexp", "-A", "-B", "-C"] {
+            assert!(
+                !is_rg_incompatible_grep_flag(flag),
+                "{flag} has identical rg semantics and must be forwarded"
+            );
+        }
+    }
+
+    #[test]
+    fn dropping_a_flag_does_not_consume_the_following_argument() {
+        // Regression guard for #2253: filtering must be per-argument, so the
+        // token after a dropped flag survives.
+        let args: Vec<String> = ["-E", "def", "-r", "src/"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let forwarded: Vec<&String> = args
+            .iter()
+            .filter(|a| !is_rg_incompatible_grep_flag(a))
+            .collect();
+        assert_eq!(forwarded, vec!["def", "src/"], "pattern must not be eaten");
+    }
+
+    #[test]
+    fn max_len_short_flag_is_not_reinterpreted_as_gnu_files_with_matches() {
+        // rtk's -l means max_len. GNU grep's -l means --files-with-matches.
+        // We deliberately did NOT change this (no breaking change), so -l must
+        // still be treated as a format flag by the passthrough path only.
+        assert!(has_format_flag(&["-l".to_string()]));
+        assert!(!is_rg_incompatible_grep_flag("-l"));
     }
 }
