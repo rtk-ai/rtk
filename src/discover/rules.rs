@@ -980,6 +980,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^(?:soffice|libreoffice)\s+.*--convert-to\b",
+        rtk_cmd: "rtk soffice",
+        rewrite_prefixes: &["soffice", "libreoffice"],
+        category: "Build",
+        savings_pct: 60.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^gt\s+",
         rtk_cmd: "rtk gt",
         rewrite_prefixes: &["gt"],
