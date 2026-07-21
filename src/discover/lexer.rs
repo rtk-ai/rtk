@@ -1,8 +1,14 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipeKind {
+    Stdout,
+    StdoutAndStderr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
     Arg,
     Operator,
-    Pipe,
+    Pipe(PipeKind),
     Redirect,
     Shellism,
 }
@@ -118,9 +124,17 @@ fn tokenize_inner(input: &str, emit_newline: bool) -> Vec<ParsedToken> {
                         value: "||".into(),
                         offset: start,
                     });
+                } else if chars.peek() == Some(&'&') {
+                    chars.next();
+                    byte_pos += 1;
+                    tokens.push(ParsedToken {
+                        kind: TokenKind::Pipe(PipeKind::StdoutAndStderr),
+                        value: "|&".into(),
+                        offset: start,
+                    });
                 } else {
                     tokens.push(ParsedToken {
-                        kind: TokenKind::Pipe,
+                        kind: TokenKind::Pipe(PipeKind::Stdout),
                         value: "|".into(),
                         offset: start,
                     });
@@ -346,7 +360,7 @@ pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
 
     for tok in &tokens {
         let is_boundary = match tok.kind {
-            TokenKind::Operator | TokenKind::Pipe => true,
+            TokenKind::Operator | TokenKind::Pipe(_) => true,
             TokenKind::Shellism => matches!(tok.value.as_str(), "&" | "(" | ")"),
             _ => false,
         };
@@ -398,7 +412,7 @@ pub fn split_on_operators(cmd: &str, stop_at_pipe: bool) -> Vec<&str> {
                 }
                 seg_start = tok.offset + tok.value.len();
             }
-            TokenKind::Pipe => {
+            TokenKind::Pipe(_) => {
                 let segment = trimmed[seg_start..tok.offset].trim();
                 if !segment.is_empty() {
                     results.push(segment);
@@ -643,13 +657,35 @@ mod tests {
     #[test]
     fn test_pipe_detection() {
         let tokens = tokenize("cat file | grep pattern");
-        assert!(tokens.iter().any(|t| t.kind == TokenKind::Pipe));
+        assert!(tokens
+            .iter()
+            .any(|t| t.kind == TokenKind::Pipe(PipeKind::Stdout)));
+    }
+
+    #[test]
+    fn test_stderr_pipe_is_atomic() {
+        let tokens = tokenize("cargo test |& grep FAILED");
+        let pipes: Vec<_> = tokens
+            .iter()
+            .filter(|token| matches!(token.kind, TokenKind::Pipe(_)))
+            .collect();
+
+        assert_eq!(pipes.len(), 1);
+        assert_eq!(pipes[0].kind, TokenKind::Pipe(PipeKind::StdoutAndStderr));
+        assert_eq!(pipes[0].value, "|&");
+        assert!(!tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::Shellism && token.value == "&"));
+        assert_eq!(
+            split_for_permissions("cargo test |& grep FAILED"),
+            vec!["cargo test", "grep FAILED"]
+        );
     }
 
     #[test]
     fn test_quoted_pipe_not_pipe() {
         let tokens = tokenize("\"a|b\"");
-        assert!(!tokens.iter().any(|t| t.kind == TokenKind::Pipe));
+        assert!(!tokens.iter().any(|t| matches!(t.kind, TokenKind::Pipe(_))));
     }
 
     #[test]
@@ -657,7 +693,7 @@ mod tests {
         let tokens = tokenize("a | b | c");
         let pipes: Vec<_> = tokens
             .iter()
-            .filter(|t| t.kind == TokenKind::Pipe)
+            .filter(|t| matches!(t.kind, TokenKind::Pipe(_)))
             .collect();
         assert_eq!(pipes.len(), 2);
     }
@@ -896,7 +932,7 @@ mod tests {
         assert!(tokens
             .iter()
             .any(|t| t.kind == TokenKind::Redirect && t.value == "2>&1"));
-        assert!(tokens.iter().any(|t| t.kind == TokenKind::Pipe));
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Pipe(_))));
     }
 
     #[test]
@@ -997,7 +1033,7 @@ mod tests {
         let tokens = tokenize("find . -name '*.rs' | xargs grep 'fn run'");
         let pipe_idx = tokens
             .iter()
-            .position(|t| t.kind == TokenKind::Pipe)
+            .position(|t| matches!(t.kind, TokenKind::Pipe(_)))
             .unwrap();
         assert!(pipe_idx > 0);
         let before_pipe: Vec<_> = tokens[..pipe_idx]

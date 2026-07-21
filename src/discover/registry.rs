@@ -635,7 +635,7 @@ fn rewrite_compound(
                     seg_start += 1;
                 }
             }
-            TokenKind::Pipe => {
+            TokenKind::Pipe(_) => {
                 let seg = cmd[seg_start..tok.offset].trim();
                 let is_pipe_incompatible = seg.starts_with("find ")
                     || seg == "find"

@@ -601,6 +601,15 @@ mod tests {
     }
 
     #[test]
+    fn test_stderr_pipe_segments_checked() {
+        let deny = vec!["rm -rf".to_string()];
+        assert_eq!(
+            check_command_with_rules("cat file |& rm -rf /", &deny, &[], &[]),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
     fn test_ask_verdict() {
         let ask = vec!["git push".to_string()];
         assert_eq!(
