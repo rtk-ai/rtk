@@ -117,15 +117,16 @@ impl ClaudeProvider {
 
     /// Encode a filesystem path to Claude Code's directory name format.
     ///
-    /// Claude Code replaces `/`, `.`, `_`, `\`, and any non-ASCII character
-    /// with `-` when computing the project directory slug under `~/.claude/projects/`.
+    /// Claude Code replaces path separators, `.`, `_`, spaces, brackets,
+    /// apostrophes, and any non-ASCII character with `-` when computing the
+    /// project directory slug under `~/.claude/projects/`.
     ///
     /// `/Users/foo/bar`          → `-Users-foo-bar`
     /// `/Users/first.last/bar`   → `-Users-first-last-bar`
     /// `/home/chris/2_project`   → `-home-chris-2-project`
     /// `C:\Users\foo\bar`        → `C:-Users-foo-bar`
     pub fn encode_project_path(path: &str) -> String {
-        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\', ' ', '[', ']'];
+        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\', ' ', '[', ']', '\''];
 
         path.chars()
             .map(|c| {
@@ -407,6 +408,14 @@ mod tests {
         assert_eq!(
             ClaudeProvider::encode_project_path(r"C:\Users\foo\bar"),
             "C:-Users-foo-bar"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_windows_apostrophe() {
+        assert_eq!(
+            ClaudeProvider::encode_project_path(r"C:\Users\Daniel's PC\project"),
+            "C:-Users-Daniel-s-PC-project"
         );
     }
 
