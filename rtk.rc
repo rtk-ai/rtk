@@ -1,0 +1,32 @@
+// Windows VERSIONINFO resource — https://learn.microsoft.com/en-us/windows/win32/menurc/versioninfo-resource
+//
+// Unsigned CLI binaries with no embedded version metadata are a well-documented
+// contributing factor to AV heuristic false positives (rtk-ai/rtk#3124). This
+// doesn't replace code signing (tracked separately in #2989) but gives the
+// compiled .exe real publisher/product identity instead of looking "faceless."
+1 VERSIONINFO
+FILEVERSION     0,42,4,0
+PRODUCTVERSION  0,42,4,0
+FILEFLAGSMASK   0x3fL
+FILEFLAGS       0x0L
+FILEOS          0x40004L
+FILETYPE        0x1L
+FILESUBTYPE     0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "rtk-ai\0"
+            VALUE "FileDescription", "rtk - Rust Token Killer, CLI proxy for LLM token savings\0"
+            VALUE "OriginalFilename", "rtk.exe\0"
+            VALUE "ProductName", "rtk\0"
+            VALUE "LegalCopyright", "Apache-2.0. See https://github.com/rtk-ai/rtk\0"
+        END
+    END
+
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
