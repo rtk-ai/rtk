@@ -3399,6 +3399,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_rewrite_sbt_test_only() {
+        assert_eq!(
+            rewrite_command_no_prefixes("sbt testOnly com.example.MySpec", &[]),
+            Some("rtk sbt testOnly com.example.MySpec".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"sbt "testOnly com.example.MySpec""#, &[]),
+            Some(r#"rtk sbt "testOnly com.example.MySpec""#.into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"sbt "testOnly *MySpec -- -z foo""#, &[]),
+            Some(r#"rtk sbt "testOnly *MySpec -- -z foo""#.into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("sbt testQuick", &[]),
+            Some("rtk sbt testQuick".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_sbt_does_not_match_unrelated_tasks() {
+        assert_eq!(rewrite_command_no_prefixes("sbt testify", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"sbt "test:compile""#, &[]),
+            None
+        );
+    }
+
     // --- Maven ---
 
     #[test]

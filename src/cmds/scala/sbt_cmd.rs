@@ -60,6 +60,12 @@ fn is_integration_test_cmd(subcommand: &str) -> bool {
     ) || (subcommand.ends_with(":test") || subcommand.ends_with("/test"))
 }
 
+fn is_test_task(subcommand: &str) -> bool {
+    let task = subcommand.split_whitespace().next().unwrap_or(subcommand);
+    let task = task.rsplit(['/', ':']).next().unwrap_or(task);
+    matches!(task, "testOnly" | "testQuick")
+}
+
 /// Returns true if `s` is a scoped SBT task (e.g. `Test/test`, `it/Test/compile`).
 fn is_scoped_task(s: &str) -> bool {
     !s.starts_with('-') && (s.contains('/') || s.contains(':'))
@@ -130,7 +136,7 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
     // ScalaTest output — filter them like `sbt test`, through the shared runner so the
     // never_worse cap and tee hint apply (an unrecognized output would otherwise be
     // reprinted verbatim plus the hint, i.e. more than the raw command produced).
-    if is_integration_test_cmd(&subcommand) {
+    if is_integration_test_cmd(&subcommand) || is_test_task(&subcommand) {
         let mut cmd = resolved_command("sbt");
         cmd.arg(&subcommand);
         for arg in &args[1..] {
@@ -140,6 +146,12 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
         if verbose > 0 {
             eprintln!("Running: sbt {} ...", subcommand);
         }
+
+        let tee_label = if is_integration_test_cmd(&subcommand) {
+            "sbt_it_test"
+        } else {
+            "sbt_test"
+        };
 
         let rest: Vec<String> = args[1..]
             .iter()
@@ -156,7 +168,7 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
             "sbt",
             &args_display,
             filter_sbt_test,
-            RunOptions::with_tee("sbt_it_test"),
+            RunOptions::with_tee(tee_label),
         );
     }
 
@@ -692,6 +704,23 @@ mod tests {
         assert!(!is_integration_test_cmd("test"));
         assert!(!is_integration_test_cmd("compile"));
         assert!(!is_integration_test_cmd("assembly"));
+    }
+
+    #[test]
+    fn test_is_test_task() {
+        assert!(is_test_task("testOnly"));
+        assert!(is_test_task("testQuick"));
+        assert!(is_test_task("Test/testOnly"));
+        assert!(is_test_task("core/testOnly"));
+        assert!(is_test_task("it:testOnly"));
+        assert!(is_test_task("testOnly com.example.MySpec"));
+        assert!(is_test_task("testOnly *CalcSpec"));
+        assert!(is_test_task("core/testOnly com.example.MySpec"));
+        assert!(!is_test_task("test"));
+        assert!(!is_test_task("Test/test"));
+        assert!(!is_test_task("testOnlyFoo"));
+        assert!(!is_test_task("compile"));
+        assert!(!is_test_task("clean; testOnly com.example.MySpec"));
     }
 
     // --- sbt test: munit format ---

@@ -508,12 +508,12 @@ pub const RULES: &[RtkRule] = &[
     },
     // Scala/SBT
     RtkRule {
-        pattern: r"^sbt\s+(test|compile|run|clean|assembly|package)(?:\s|$)",
+        pattern: r#"^sbt\s+["']?(testOnly|testQuick|test|compile|run|clean|assembly|package)(?:[\s"']|$)"#,
         rtk_cmd: "rtk sbt",
         rewrite_prefixes: &["sbt"],
         category: "Build",
         savings_pct: 80.0,
-        subcmd_savings: &[("test", 90.0), ("compile", 75.0)],
+        subcmd_savings: &[("test", 90.0), ("testOnly", 90.0), ("compile", 75.0)],
         subcmd_status: &[],
     },
     RtkRule {
