@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+@AGENTS.md
+
 ## Project Overview
 
 **rtk (Rust Token Killer)** is a high-performance CLI proxy that minimizes LLM token consumption by filtering and compressing command outputs. It reduces bash output by 60-90% on common development operations through smart filtering, grouping, truncation, and deduplication. All percentages in this repo measure bash output, not your bill. RTK ships no tokenizer (`src/core/tracking.rs` estimates tokens as `bytes / 4`), so the ratios are reliable but the absolute token counts are approximate.
