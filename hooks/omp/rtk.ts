@@ -30,8 +30,12 @@ interface ToolCallEvent {
 interface ExtensionContext {
 	cwd: string;
 	signal?: AbortSignal;
+	ui?: {
+		setStatus(key: string, text: string | undefined): void;
+	};
 }
 interface ExtensionAPI {
+	setLabel(label: string): void;
 	on(
 		event: "tool_call",
 		handler: (
@@ -41,6 +45,13 @@ interface ExtensionAPI {
 			| Promise<{ block?: boolean; reason?: string } | void>
 			| { block?: boolean; reason?: string }
 			| void,
+	): void;
+	on(
+		event: "session_start",
+		handler: (
+			event: unknown,
+			ctx: ExtensionContext,
+		) => Promise<void> | void,
 	): void;
 	exec(
 		command: string,
@@ -76,10 +87,15 @@ async function rewriteCommand(
 }
 
 export default async function (pi: ExtensionAPI): Promise<void> {
+	pi.setLabel("RTK");
+
 	// Probe rtk version at load time; disables extension if missing or too old.
 	const ver = await pi.exec("rtk", ["--version"], { timeout: REWRITE_TIMEOUT_MS });
 	if (ver.code !== 0) {
 		pi.logger.warn("[rtk] rtk binary not found in PATH — extension disabled");
+		pi.on("session_start", (_event, ctx) => {
+			ctx?.ui?.setStatus("rtk", "RTK extension disabled: rtk binary not found in PATH.");
+		});
 		return;
 	}
 
