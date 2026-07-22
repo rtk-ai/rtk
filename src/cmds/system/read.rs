@@ -5,6 +5,7 @@ use crate::core::guard::never_worse;
 use crate::core::tracking;
 use anyhow::{Context, Result};
 use std::fs;
+use std::io::{Read as IoRead, Seek, SeekFrom};
 use std::path::Path;
 
 pub fn run(
@@ -21,9 +22,22 @@ pub fn run(
         eprintln!("Reading: {} (filter: {})", file.display(), level);
     }
 
-    // Read file content
-    let content = fs::read_to_string(file)
-        .with_context(|| format!("Failed to read file: {}", file.display()))?;
+    // For --tail-lines, read only the needed slice from the end of the file
+    // instead of the whole thing: on a large file, `fs::read_to_string`
+    // materializes the entire file (and its later `.clone()`s) in memory
+    // before the tail window is ever applied, which turned a bounded
+    // `tail -n 3000` into a 49GB RSS OOM on a 161GB log (rtk-ai/rtk#3107).
+    // `max_lines` (smart_truncate) isn't bounded here: it intentionally scans
+    // the whole file for structurally important lines anywhere in it, so a
+    // prefix-only read would silently change its output — a separate,
+    // harder problem left for a follow-up.
+    let content = if let Some(tail) = tail_lines {
+        read_tail_lines_bounded(file, tail)
+            .with_context(|| format!("Failed to read file: {}", file.display()))?
+    } else {
+        fs::read_to_string(file)
+            .with_context(|| format!("Failed to read file: {}", file.display()))?
+    };
 
     // Detect language from extension
     let lang = file
@@ -159,6 +173,55 @@ fn format_with_line_numbers(content: &str) -> String {
     out
 }
 
+/// Reads roughly the last `tail_lines` lines of `path` without loading the
+/// whole file into memory: seeks backward from the end in fixed-size chunks,
+/// stopping once enough newlines have been seen (or the start of the file is
+/// reached). Memory use is bounded by the tail content itself plus one
+/// chunk, not file size.
+fn read_tail_lines_bounded(path: &Path, tail_lines: usize) -> Result<String> {
+    const CHUNK_SIZE: u64 = 64 * 1024;
+
+    if tail_lines == 0 {
+        return Ok(String::new());
+    }
+
+    let mut file = fs::File::open(path)?;
+    let file_len = file.metadata()?.len();
+    if file_len == 0 {
+        return Ok(String::new());
+    }
+
+    let mut pos = file_len;
+    let mut newline_count = 0usize;
+    // Chunks are read newest-to-oldest; reversed once collection stops.
+    let mut chunks: Vec<Vec<u8>> = Vec::new();
+
+    while pos > 0 {
+        let read_size = CHUNK_SIZE.min(pos);
+        pos -= read_size;
+        file.seek(SeekFrom::Start(pos))?;
+        let mut chunk = vec![0u8; read_size as usize];
+        file.read_exact(&mut chunk)?;
+        newline_count += chunk.iter().filter(|&&b| b == b'\n').count();
+        chunks.push(chunk);
+        if newline_count > tail_lines {
+            break;
+        }
+    }
+
+    chunks.reverse();
+    let bytes: Vec<u8> = chunks.into_iter().flatten().collect();
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(tail_lines);
+    let mut result = lines[start..].join("\n");
+    if text.ends_with('\n') {
+        result.push('\n');
+    }
+    Ok(result)
+}
+
 fn apply_line_window(
     content: &str,
     max_lines: Option<usize>,
@@ -189,6 +252,71 @@ fn apply_line_window(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn test_read_tail_lines_bounded_matches_naive_window() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        write!(file, "a\nb\nc\nd\ne\n")?;
+        let bounded = read_tail_lines_bounded(file.path(), 2)?;
+        assert_eq!(bounded, "d\ne\n");
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_tail_lines_bounded_tail_exceeds_file() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        write!(file, "a\nb\n")?;
+        let bounded = read_tail_lines_bounded(file.path(), 100)?;
+        assert_eq!(bounded, "a\nb\n");
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_tail_lines_bounded_no_trailing_newline() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        write!(file, "a\nb\nc")?;
+        let bounded = read_tail_lines_bounded(file.path(), 2)?;
+        assert_eq!(bounded, "b\nc");
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_tail_lines_bounded_empty_file() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let bounded = read_tail_lines_bounded(file.path(), 5)?;
+        assert_eq!(bounded, "");
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_tail_lines_bounded_zero_tail() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        write!(file, "a\nb\nc\n")?;
+        let bounded = read_tail_lines_bounded(file.path(), 0)?;
+        assert_eq!(bounded, "");
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_tail_lines_bounded_spans_multiple_chunks() -> Result<()> {
+        // Force the backward reader across several 64KB chunk boundaries and
+        // confirm the extracted tail still matches an in-memory reference
+        // computed the naive way.
+        let mut file = NamedTempFile::new()?;
+        let mut expected_lines = Vec::new();
+        for i in 0..20_000 {
+            let line = format!("line-{i:06}-{}", "x".repeat(20));
+            writeln!(file, "{line}")?;
+            expected_lines.push(line);
+        }
+        file.flush()?;
+
+        let tail_n = 500;
+        let bounded = read_tail_lines_bounded(file.path(), tail_n)?;
+        let expected = expected_lines[expected_lines.len() - tail_n..].join("\n") + "\n";
+        assert_eq!(bounded, expected);
+        Ok(())
+    }
     use tempfile::NamedTempFile;
 
     #[test]
