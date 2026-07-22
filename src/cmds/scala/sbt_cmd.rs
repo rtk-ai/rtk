@@ -60,6 +60,21 @@ fn is_integration_test_cmd(subcommand: &str) -> bool {
     ) || (subcommand.ends_with(":test") || subcommand.ends_with("/test"))
 }
 
+/// Selective/single-test task names that emit ScalaTest/munit output just like
+/// `sbt test` (e.g. `sbt testOnly com.example.MySpec`, `sbt testQuick`).
+const SELECTIVE_TEST_TASKS: &[&str] = &["testOnly", "testQuick"];
+
+/// Returns true if `subcommand` produces ScalaTest/munit test output and should be
+/// filtered like `sbt test`. Covers integration-test tasks (it:test,
+/// IntegrationTest/test) and selective test tasks (testOnly, testQuick), including
+/// scoped forms such as `Test/testOnly` or `it/testQuick`.
+fn is_test_cmd(subcommand: &str) -> bool {
+    // A scoped task carries the config as a prefix ("Test/testOnly", "it:testOnly");
+    // the task name is the final segment after any '/' or ':'.
+    let task = subcommand.rsplit(['/', ':']).next().unwrap_or(subcommand);
+    SELECTIVE_TEST_TASKS.contains(&task) || is_integration_test_cmd(subcommand)
+}
+
 /// Returns true if `s` is a scoped SBT task (e.g. `Test/test`, `it/Test/compile`).
 fn is_scoped_task(s: &str) -> bool {
     !s.starts_with('-') && (s.contains('/') || s.contains(':'))
@@ -126,11 +141,13 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
 
     let subcommand = args[0].to_string_lossy().into_owned();
 
-    // Integration test commands (it:test, IntegrationTest/test, etc.) produce standard
-    // ScalaTest output — filter them like `sbt test`, through the shared runner so the
-    // never_worse cap and tee hint apply (an unrecognized output would otherwise be
-    // reprinted verbatim plus the hint, i.e. more than the raw command produced).
-    if is_integration_test_cmd(&subcommand) {
+    // Test-producing tasks — integration tests (it:test, IntegrationTest/test) and
+    // selective tests (testOnly, testQuick, incl. scoped forms like Test/testOnly) —
+    // emit standard ScalaTest/munit output, so filter them like `sbt test`. Routing
+    // through the shared runner applies the never_worse cap and tee hint (an
+    // unrecognized output would otherwise be reprinted verbatim plus the hint, i.e.
+    // more than the raw command produced).
+    if is_test_cmd(&subcommand) {
         let mut cmd = resolved_command("sbt");
         cmd.arg(&subcommand);
         for arg in &args[1..] {
@@ -146,9 +163,17 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         let args_display = if rest.is_empty() {
-            subcommand
+            subcommand.clone()
         } else {
             format!("{} {}", subcommand, rest.join(" "))
+        };
+
+        // Integration tests keep their own tee label; selective tests share the
+        // `sbt test` log since they are the same task family.
+        let tee_label = if is_integration_test_cmd(&subcommand) {
+            "sbt_it_test"
+        } else {
+            "sbt_test"
         };
 
         return runner::run_filtered(
@@ -156,7 +181,7 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
             "sbt",
             &args_display,
             filter_sbt_test,
-            RunOptions::with_tee("sbt_it_test"),
+            RunOptions::with_tee(tee_label),
         );
     }
 
@@ -692,6 +717,25 @@ mod tests {
         assert!(!is_integration_test_cmd("test"));
         assert!(!is_integration_test_cmd("compile"));
         assert!(!is_integration_test_cmd("assembly"));
+    }
+
+    #[test]
+    fn test_is_test_cmd() {
+        // Selective/single-test tasks (bare and scoped) route to the test filter.
+        assert!(is_test_cmd("testOnly"));
+        assert!(is_test_cmd("testQuick"));
+        assert!(is_test_cmd("Test/testOnly"));
+        assert!(is_test_cmd("it/testQuick"));
+        assert!(is_test_cmd("it:testOnly"));
+        // Integration-test tasks still qualify (delegates to is_integration_test_cmd).
+        assert!(is_test_cmd("it:test"));
+        assert!(is_test_cmd("IntegrationTest/test"));
+        assert!(is_test_cmd("e2e/test"));
+        // Non-test tasks must not be filtered as tests.
+        assert!(!is_test_cmd("compile"));
+        assert!(!is_test_cmd("assembly"));
+        assert!(!is_test_cmd("update"));
+        assert!(!is_test_cmd("testable")); // must not substring-match "test"
     }
 
     // --- sbt test: munit format ---

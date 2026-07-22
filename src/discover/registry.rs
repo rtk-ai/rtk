@@ -1412,6 +1412,30 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_sbt_test_only() {
+        // Single/selective test tasks must rewrite so they get ScalaTest filtering.
+        assert_eq!(
+            rewrite_command_no_prefixes("sbt testOnly com.example.MySpec", &[]),
+            Some("rtk sbt testOnly com.example.MySpec".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("sbt testQuick", &[]),
+            Some("rtk sbt testQuick".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("sbt test", &[]),
+            Some("rtk sbt test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_sbt_does_not_match_unrelated_tasks() {
+        // The `(?:\s|$)` anchor must keep us from rewriting tasks that merely
+        // start with a recognized subcommand (e.g. a custom `testify` task).
+        assert_eq!(rewrite_command_no_prefixes("sbt testify", &[]), None);
+    }
+
+    #[test]
     fn test_rewrite_compound_and() {
         assert_eq!(
             rewrite_command_no_prefixes("git add . && cargo test", &[]),
