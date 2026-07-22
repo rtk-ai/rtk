@@ -17,8 +17,9 @@ use super::constants::{
     DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR,
     DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
     HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
-    HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
-    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    HOOKS_SUBDIR, OMP_AGENT_DIR_ENV, OMP_DIR, OMP_HOOKS_PRE_SUBDIR, OMP_LOCAL_DIR, OMP_PLUGIN_FILE,
+    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 use super::is_claude_hook_command;
@@ -28,6 +29,9 @@ const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
 
 // Embedded Pi extension (auto-rewrite)
 const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
+
+// Embedded OMP extension (auto-rewrite)
+const OMP_PLUGIN: &str = include_str!("../../hooks/omp/rtk.ts");
 
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
@@ -3502,6 +3506,120 @@ fn print_pi_result(plugin_path: &Path, installed: bool) {
     println!("Verify: pi -e {} --no-session", plugin_path.display());
 }
 
+// ─── OMP (Oh My Pi) coding agent support ──────────────────────────────
+
+/// Resolve OMP config directory, honouring `OMP_AGENT_DIR` override.
+fn resolve_omp_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var(OMP_AGENT_DIR_ENV) {
+        if !dir.is_empty() {
+            return Ok(PathBuf::from(dir));
+        }
+    }
+    resolve_home_subdir(OMP_DIR)
+}
+
+/// Return the OMP extension install path for the given scope.
+/// global=true  → `$OMP_AGENT_DIR/hooks/pre/rtk.ts`
+/// global=false → `.omp/hooks/pre/rtk.ts`
+fn omp_plugin_path_for_scope(global: bool) -> Result<PathBuf> {
+    if global {
+        let omp_dir = resolve_omp_dir()?;
+        Ok(omp_dir.join(OMP_HOOKS_PRE_SUBDIR).join(OMP_PLUGIN_FILE))
+    } else {
+        Ok(PathBuf::from(OMP_LOCAL_DIR)
+            .join(OMP_HOOKS_PRE_SUBDIR)
+            .join(OMP_PLUGIN_FILE))
+    }
+}
+
+/// Write the OMP extension file if missing or outdated. Returns true if written.
+fn ensure_omp_plugin_installed(path: &Path, ctx: InitContext) -> Result<bool> {
+    write_if_changed(path, OMP_PLUGIN, "OMP extension", ctx)
+}
+
+/// Uninstall OMP extension for the given scope.
+pub fn uninstall_omp(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+    let plugin_path = omp_plugin_path_for_scope(global)?;
+    let mut removed: Vec<String> = Vec::new();
+
+    if plugin_path.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove OMP extension: {}",
+                plugin_path.display()
+            );
+        } else {
+            // nosemgrep: filesystem-deletion -- OMP uninstall removes only the RTK-managed extension file.
+            fs::remove_file(&plugin_path).with_context(|| {
+                format!("Failed to remove OMP extension: {}", plugin_path.display())
+            })?;
+            if verbose > 0 {
+                eprintln!("Removed OMP extension: {}", plugin_path.display());
+            }
+            removed.push(format!("OMP extension: {}", plugin_path.display()));
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    } else if !removed.is_empty() {
+        println!("RTK uninstalled (OMP):");
+        for item in &removed {
+            println!("  - {}", item);
+        }
+        println!("\nRestart OMP to apply changes.");
+    } else {
+        println!("RTK OMP extension was not installed (nothing to remove)");
+    }
+    Ok(())
+}
+
+/// Install the OMP extension (hook-only; no AGENTS.md injection).
+///
+/// global=true  → `$OMP_AGENT_DIR/hooks/pre/rtk.ts`
+/// global=false → `.omp/hooks/pre/rtk.ts`
+pub fn run_omp_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let plugin_path = if global {
+        let omp_dir = resolve_omp_dir()?;
+        let path = omp_dir.join(OMP_HOOKS_PRE_SUBDIR).join(OMP_PLUGIN_FILE);
+        if let Some(parent) = path.parent() {
+            ensure_pi_extensions_dir(parent, "OMP hooks/pre directory", ctx)?;
+        }
+        path
+    } else {
+        let path = omp_plugin_path_for_scope(false)?;
+        if let Some(parent) = path.parent() {
+            ensure_pi_extensions_dir(parent, "local OMP hooks/pre directory", ctx)?;
+        }
+        path
+    };
+
+    let installed = ensure_omp_plugin_installed(&plugin_path, ctx)?;
+
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        print_omp_result(&plugin_path, installed);
+    }
+
+    Ok(())
+}
+
+fn print_omp_result(plugin_path: &Path, installed: bool) {
+    let status = if installed {
+        "installed"
+    } else {
+        "already up to date"
+    };
+    println!("RTK OMP extension {}:", status);
+    println!("  Extension: {}", plugin_path.display());
+    println!();
+    println!("OMP will load the extension automatically on next start.");
+    println!("Verify: omp -e {} --no-session", plugin_path.display());
+}
+
 /// Return OpenCode plugin path: ~/.config/opencode/plugins/rtk.ts
 fn opencode_plugin_path(opencode_dir: &Path) -> PathBuf {
     opencode_dir.join(PLUGIN_SUBDIR).join(OPENCODE_PLUGIN_FILE)
@@ -6824,6 +6942,7 @@ mod tests {
     use std::sync::Mutex;
     static CLAUDE_DIR_LOCK: Mutex<()> = Mutex::new(());
     static PI_DIR_LOCK: Mutex<()> = Mutex::new(());
+    static OMP_DIR_LOCK: Mutex<()> = Mutex::new(());
     /// Serialises all tests that mutate the process-wide working directory.
     static CWD_LOCK: Mutex<()> = Mutex::new(());
 
@@ -6852,6 +6971,20 @@ mod tests {
         match orig {
             Some(v) => std::env::set_var(PI_CODING_AGENT_DIR_ENV, v),
             None => std::env::remove_var(PI_CODING_AGENT_DIR_ENV),
+        }
+    }
+
+    fn with_omp_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
+        let _guard = OMP_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let omp_dir = tmp.path().join("omp_agent");
+        fs::create_dir_all(&omp_dir).unwrap();
+
+        let orig = std::env::var_os(OMP_AGENT_DIR_ENV);
+        std::env::set_var(OMP_AGENT_DIR_ENV, &omp_dir);
+        f(&omp_dir);
+        match orig {
+            Some(v) => std::env::set_var(OMP_AGENT_DIR_ENV, v),
+            None => std::env::remove_var(OMP_AGENT_DIR_ENV),
         }
     }
 
@@ -7398,6 +7531,251 @@ mod tests {
         assert!(
             plugin.exists(),
             "dry-run uninstall must not remove the local Pi extension"
+        );
+    }
+
+    // ─── OMP integration tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_run_omp_mode_global_installs_plugin() {
+        let tmp = TempDir::new().unwrap();
+        with_omp_dir_override(&tmp, |omp_dir| {
+            run_omp_mode(true, InitContext::default()).unwrap();
+
+            let plugin = omp_dir.join(OMP_HOOKS_PRE_SUBDIR).join(OMP_PLUGIN_FILE);
+            assert!(plugin.exists(), "global OMP extension must be created");
+
+            let content = fs::read_to_string(&plugin).unwrap();
+            assert!(
+                content.contains("rtk rewrite"),
+                "extension must delegate to rtk rewrite"
+            );
+        });
+    }
+
+    #[test]
+    fn test_run_omp_mode_local_installs_plugin() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let result = run_omp_mode(false, InitContext::default());
+        std::env::set_current_dir(&cwd).unwrap();
+        result.unwrap();
+
+        let plugin = tmp
+            .path()
+            .join(OMP_LOCAL_DIR)
+            .join(OMP_HOOKS_PRE_SUBDIR)
+            .join(OMP_PLUGIN_FILE);
+        assert!(plugin.exists(), "local OMP extension must be created");
+    }
+
+    #[test]
+    fn test_run_omp_mode_global_does_not_create_agents_md() {
+        let tmp = TempDir::new().unwrap();
+        with_omp_dir_override(&tmp, |omp_dir| {
+            run_omp_mode(true, InitContext::default()).unwrap();
+
+            let agents_md = omp_dir.join(AGENTS_MD);
+            assert!(!agents_md.exists(), "AGENTS.md must not be created");
+        });
+    }
+
+    #[test]
+    fn test_run_omp_mode_global_creates_plugin_when_dir_absent() {
+        let tmp = TempDir::new().unwrap();
+        let absent_dir = tmp.path().join("no_such_omp_dir");
+        let _guard = OMP_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let orig = std::env::var_os(OMP_AGENT_DIR_ENV);
+        std::env::set_var(OMP_AGENT_DIR_ENV, &absent_dir);
+
+        let result = run_omp_mode(true, InitContext::default());
+
+        match orig {
+            Some(v) => std::env::set_var(OMP_AGENT_DIR_ENV, v),
+            None => std::env::remove_var(OMP_AGENT_DIR_ENV),
+        }
+
+        result.unwrap();
+
+        let plugin = absent_dir.join(OMP_HOOKS_PRE_SUBDIR).join(OMP_PLUGIN_FILE);
+        assert!(
+            plugin.exists(),
+            "plugin must be written even when dir was absent"
+        );
+    }
+
+    #[test]
+    fn test_omp_global_uninstall_removes_plugin() {
+        let tmp = TempDir::new().unwrap();
+        with_omp_dir_override(&tmp, |omp_dir| {
+            run_omp_mode(true, InitContext::default()).unwrap();
+
+            let plugin = omp_dir.join(OMP_HOOKS_PRE_SUBDIR).join(OMP_PLUGIN_FILE);
+            assert!(plugin.exists());
+
+            uninstall_omp(true, InitContext::default()).unwrap();
+
+            assert!(!plugin.exists(), "plugin must be removed");
+        });
+    }
+
+    #[test]
+    fn test_omp_local_uninstall_removes_plugin() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        run_omp_mode(false, InitContext::default()).unwrap();
+        let result = uninstall_omp(false, InitContext::default());
+        std::env::set_current_dir(&cwd).unwrap();
+        result.unwrap();
+
+        let plugin = tmp
+            .path()
+            .join(OMP_LOCAL_DIR)
+            .join(OMP_HOOKS_PRE_SUBDIR)
+            .join(OMP_PLUGIN_FILE);
+        assert!(!plugin.exists(), "local plugin must be removed");
+    }
+
+    #[test]
+    fn test_omp_plugin_path_for_scope_global() {
+        let tmp = TempDir::new().unwrap();
+        with_omp_dir_override(&tmp, |omp_dir| {
+            let path = omp_plugin_path_for_scope(true).unwrap();
+            assert_eq!(
+                path,
+                omp_dir.join(OMP_HOOKS_PRE_SUBDIR).join(OMP_PLUGIN_FILE)
+            );
+        });
+    }
+
+    #[test]
+    fn test_omp_plugin_path_for_scope_local() {
+        let path = omp_plugin_path_for_scope(false).unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from(OMP_LOCAL_DIR)
+                .join(OMP_HOOKS_PRE_SUBDIR)
+                .join(OMP_PLUGIN_FILE)
+        );
+    }
+
+    #[test]
+    fn test_run_omp_mode_global_dry_run_writes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        with_omp_dir_override(&tmp, |omp_dir| {
+            run_omp_mode(
+                true,
+                InitContext {
+                    verbose: 0,
+                    dry_run: true,
+                },
+            )
+            .unwrap();
+
+            assert!(
+                !omp_dir.join(OMP_HOOKS_PRE_SUBDIR).exists(),
+                "dry-run must not create the OMP hooks/pre directory"
+            );
+            assert!(
+                !omp_dir
+                    .join(OMP_HOOKS_PRE_SUBDIR)
+                    .join(OMP_PLUGIN_FILE)
+                    .exists(),
+                "dry-run must not create the OMP extension file"
+            );
+        });
+    }
+
+    #[test]
+    fn test_run_omp_mode_local_dry_run_writes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let result = run_omp_mode(
+            false,
+            InitContext {
+                verbose: 0,
+                dry_run: true,
+            },
+        );
+        std::env::set_current_dir(&cwd).unwrap();
+        result.unwrap();
+
+        assert!(
+            !tmp.path()
+                .join(OMP_LOCAL_DIR)
+                .join(OMP_HOOKS_PRE_SUBDIR)
+                .exists(),
+            "dry-run must not create .omp/hooks/pre/"
+        );
+    }
+
+    #[test]
+    fn test_omp_global_uninstall_dry_run_keeps_plugin() {
+        let tmp = TempDir::new().unwrap();
+        with_omp_dir_override(&tmp, |omp_dir| {
+            run_omp_mode(true, InitContext::default()).unwrap();
+            let plugin = omp_dir.join(OMP_HOOKS_PRE_SUBDIR).join(OMP_PLUGIN_FILE);
+            assert!(
+                plugin.exists(),
+                "plugin must exist before uninstall dry-run"
+            );
+
+            uninstall_omp(
+                true,
+                InitContext {
+                    verbose: 0,
+                    dry_run: true,
+                },
+            )
+            .unwrap();
+
+            assert!(
+                plugin.exists(),
+                "dry-run uninstall must not remove the OMP extension"
+            );
+        });
+    }
+
+    #[test]
+    fn test_omp_local_uninstall_dry_run_keeps_plugin() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        run_omp_mode(false, InitContext::default()).unwrap();
+        let plugin = tmp
+            .path()
+            .join(OMP_LOCAL_DIR)
+            .join(OMP_HOOKS_PRE_SUBDIR)
+            .join(OMP_PLUGIN_FILE);
+        assert!(
+            plugin.exists(),
+            "plugin must exist before uninstall dry-run"
+        );
+
+        let result = uninstall_omp(
+            false,
+            InitContext {
+                verbose: 0,
+                dry_run: true,
+            },
+        );
+        std::env::set_current_dir(&cwd).unwrap();
+        result.unwrap();
+
+        assert!(
+            plugin.exists(),
+            "dry-run uninstall must not remove the local OMP extension"
         );
     }
 

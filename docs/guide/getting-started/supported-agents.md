@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, and Factory Droid
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, OMP, Kilo Code, Antigravity, and Factory Droid
 sidebar:
   order: 3
 ---
@@ -36,6 +36,7 @@ Agent runs "cargo test"
 | OpenCode | TypeScript plugin (`tool.execute.before`) | Yes |
 | OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
 | Pi | TypeScript extension (`tool_call` event) | Yes |
+| OMP (Oh My Pi) | TypeScript extension (`tool_call` event) | Yes |
 | Hermes | Python plugin (`terminal` command mutation) | Yes |
 | Factory Droid | Shell hook (`PreToolUse`, matcher `Execute`) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
@@ -119,6 +120,27 @@ rtk init --uninstall --agent pi --global
 ```
 
 Removes only the installed Pi extension file.
+
+### OMP (Oh My Pi)
+
+```bash
+# Project-local (default)
+rtk init --agent omp
+
+# Global — all projects
+rtk init --agent omp --global
+```
+
+Creates `.omp/hooks/pre/rtk.ts` (local) or `~/.omp/agent/hooks/pre/rtk.ts` (global). OMP auto-discovers extensions from the `hooks/pre/` directory on startup. The extension uses `rtk rewrite` for in-place command mutation — same architecture as the Pi extension.
+
+Uninstall:
+
+```bash
+rtk init --uninstall --agent omp
+rtk init --uninstall --agent omp --global
+```
+
+Removes only the installed OMP extension file.
 
 ### OpenClaw
 
@@ -207,7 +229,7 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi, OMP) use in-place mutation via the agent's TypeScript extension API.
 
 ## Windows support
 
