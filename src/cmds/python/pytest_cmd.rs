@@ -3,10 +3,32 @@
 use crate::core::runner;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, tool_exists, truncate};
-use anyhow::Result;
+use anyhow::{bail, Result};
+use std::env;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const MAX_XFAIL: usize = CAP_WARNINGS;
 const MAX_PYTEST_FAILURES: usize = CAP_WARNINGS;
+
+/// Look for a project-local virtualenv's `pytest` before ever falling back to
+/// PATH: an active `$VIRTUAL_ENV`, then `.venv/`, then `venv/` next to `cwd`.
+/// Without this, `rtk pytest` only checked bare `pytest` on PATH and failed
+/// with an opaque spawn ENOENT in any project whose pytest lives only inside
+/// an unactivated `.venv` (rtk-ai/rtk#3108).
+fn venv_pytest(cwd: &Path, virtual_env: Option<&str>) -> Option<PathBuf> {
+    let bin_dir = if cfg!(windows) { "Scripts" } else { "bin" };
+    let exe_name = if cfg!(windows) { "pytest.exe" } else { "pytest" };
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(venv) = virtual_env {
+        candidates.push(Path::new(venv).join(bin_dir).join(exe_name));
+    }
+    candidates.push(cwd.join(".venv").join(bin_dir).join(exe_name));
+    candidates.push(cwd.join("venv").join(bin_dir).join(exe_name));
+
+    candidates.into_iter().find(|p| p.is_file())
+}
 
 #[derive(Debug, PartialEq)]
 enum ParseState {
@@ -17,12 +39,20 @@ enum ParseState {
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = if tool_exists("pytest") {
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut cmd = if let Some(venv_bin) = venv_pytest(&cwd, env::var("VIRTUAL_ENV").ok().as_deref())
+    {
+        Command::new(venv_bin)
+    } else if tool_exists("pytest") {
         resolved_command("pytest")
-    } else {
+    } else if tool_exists("python") {
         let mut c = resolved_command("python");
         c.arg("-m").arg("pytest");
         c
+    } else {
+        bail!(
+            "pytest not found (checked VIRTUAL_ENV, .venv/, venv/, and PATH) — install pytest or activate your project's virtualenv"
+        );
     };
 
     let has_tb_flag = args.iter().any(|a| a.starts_with("--tb"));
@@ -319,6 +349,55 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    fn touch_exe(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        let name = if cfg!(windows) { "pytest.exe" } else { "pytest" };
+        std::fs::write(dir.join(name), b"").unwrap();
+    }
+
+    #[test]
+    fn test_venv_pytest_none_found() {
+        let tmp = TempDir::new().unwrap();
+        assert_eq!(venv_pytest(tmp.path(), None), None);
+    }
+
+    #[test]
+    fn test_venv_pytest_finds_dot_venv() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = if cfg!(windows) { "Scripts" } else { "bin" };
+        touch_exe(&tmp.path().join(".venv").join(bin_dir));
+
+        let found = venv_pytest(tmp.path(), None);
+        assert!(found.is_some());
+        assert!(found.unwrap().starts_with(tmp.path().join(".venv")));
+    }
+
+    #[test]
+    fn test_venv_pytest_finds_venv_fallback() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = if cfg!(windows) { "Scripts" } else { "bin" };
+        touch_exe(&tmp.path().join("venv").join(bin_dir));
+
+        let found = venv_pytest(tmp.path(), None);
+        assert!(found.is_some());
+        assert!(found.unwrap().starts_with(tmp.path().join("venv")));
+    }
+
+    #[test]
+    fn test_venv_pytest_prefers_virtual_env_over_dot_venv() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = if cfg!(windows) { "Scripts" } else { "bin" };
+
+        // Both an active VIRTUAL_ENV and a stale .venv/ exist — VIRTUAL_ENV wins.
+        let active = tmp.path().join("active-env");
+        touch_exe(&active.join(bin_dir));
+        touch_exe(&tmp.path().join(".venv").join(bin_dir));
+
+        let found = venv_pytest(tmp.path(), Some(active.to_str().unwrap()));
+        assert!(found.unwrap().starts_with(&active));
+    }
 
     #[test]
     fn test_filter_pytest_all_pass() {
