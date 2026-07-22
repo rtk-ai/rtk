@@ -17,7 +17,7 @@
 <p align="center">
   <a href="https://www.rtk-ai.app">웹사이트</a> &bull;
   <a href="#설치">설치</a> &bull;
-  <a href="docs/TROUBLESHOOTING.md">문제 해결</a> &bull;
+  <a href="https://www.rtk-ai.app/guide/troubleshooting">문제 해결</a> &bull;
   <a href="docs/contributing/ARCHITECTURE.md">아키텍처</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
@@ -25,7 +25,8 @@
 <p align="center">
   <a href="README.md">English</a> &bull;
   <a href="README_fr.md">Francais</a> &bull;
-  <a href="README_zh.md">中文</a> &bull;
+  <a href="README_zh-Hans.md">简体中文</a> &bull;
+  <a href="README_zh-Hant.md">繁體中文</a> &bull;
   <a href="README_ja.md">日本語</a> &bull;
   <a href="README_ko.md">한국어</a> &bull;
   <a href="README_es.md">Espanol</a>

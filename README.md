@@ -25,7 +25,8 @@
 <p align="center">
   <a href="README.md">English</a> &bull;
   <a href="README_fr.md">Francais</a> &bull;
-  <a href="README_zh.md">中文</a> &bull;
+  <a href="README_zh-Hans.md">简体中文</a> &bull;
+  <a href="README_zh-Hant.md">繁體中文</a> &bull;
   <a href="README_ja.md">日本語</a> &bull;
   <a href="README_ko.md">한국어</a> &bull;
   <a href="README_es.md">Espanol</a> &bull;
@@ -103,7 +104,8 @@ rtk gain        # Should show token savings stats
 
 ```bash
 # 1. Install for your AI tool
-rtk init -g                     # Claude Code / Copilot (default)
+rtk init -g                     # Claude Code (default)
+rtk init -g --copilot           # GitHub Copilot
 rtk init -g --gemini            # Gemini CLI
 rtk init -g --codex             # Codex (OpenAI)
 rtk init -g --agent cursor      # Cursor
