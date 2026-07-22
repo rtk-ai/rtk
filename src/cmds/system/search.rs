@@ -7,7 +7,8 @@
 //! `file:line:content` shape.
 
 use crate::core::stream::{
-    self, exec_capture, exec_capture_stdin, CaptureResult, FilterMode, StdinMode, StreamFilter,
+    self, exec_capture, exec_capture_stdin_bounded, CaptureResult, FilterMode, StdinMode,
+    StreamFilter,
 };
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, strip_ansi};
@@ -303,7 +304,7 @@ fn engine_capture<T: AsRef<str>>(
     paths: &[String],
 ) -> Result<CaptureResult> {
     let mut cmd = engine_command(engine, extra_args, patterns, paths, false);
-    exec_capture_stdin(&mut cmd).context("search failed")
+    exec_capture_stdin_bounded(&mut cmd).context("search failed")
 }
 
 fn engine_command<T: AsRef<str>>(
@@ -460,7 +461,7 @@ fn passthrough<T: AsRef<str>>(
             .context("search failed")?
             .exit_code
     } else {
-        let result = exec_capture_stdin(&mut cmd).context("search failed")?;
+        let result = exec_capture_stdin_bounded(&mut cmd).context("search failed")?;
         print!("{}", strip_ansi(&result.stdout));
         if !result.stderr.is_empty() {
             eprint!("{}", result.stderr);
