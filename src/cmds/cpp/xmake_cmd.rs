@@ -5,31 +5,23 @@
 //! Uses structural heuristics (length > 200, tool invocation patterns, flag patterns)
 //! to detect full compiler/linker command lines without hard-coding tool paths.
 
+use super::diag;
 use crate::core::runner;
 use crate::core::utils::{resolved_command, strip_ansi};
 use anyhow::Result;
 use std::collections::HashMap;
-
-/// Regex patterns for line classification — compiled once via `lazy_static!`.
-macro_rules! lazy_re {
-    ($re:literal) => {{
-        lazy_static::lazy_static! {
-            static ref RE: regex::Regex = regex::Regex::new($re).unwrap();
-        }
-        &*RE
-    }};
-}
 
 /// Track state during xmake output parsing.
 struct XmakeStats {
     /// Section tracking
     section: String, // "config" or "build"
 
-    // Counters
+    /// Counters
     compile_count: usize,
     archive_count: usize,
     link_count: usize,
     unity_gen_count: usize,
+    generate_count: usize,
 
     /// Target tracking: target_name -> (compile, archive, link)
     targets: HashMap<String, (usize, usize, usize)>,
@@ -71,6 +63,7 @@ impl XmakeStats {
             archive_count: 0,
             link_count: 0,
             unity_gen_count: 0,
+            generate_count: 0,
             targets: HashMap::new(),
             errors: Vec::new(),
             in_error_block: false,
@@ -88,7 +81,7 @@ impl XmakeStats {
     }
 
     fn track_dedup(&mut self, diag_line: &str) -> bool {
-        let msg = extract_diag_message(diag_line);
+        let msg = diag::extract_diag_message(diag_line);
         let count = self.seen_diagnostics.entry(msg).or_insert(0);
         *count += 1;
         *count <= 3
@@ -143,6 +136,47 @@ fn is_unity_gen_line(trimmed: &str) -> bool {
     trimmed.starts_with("generating.unityfile")
 }
 
+/// Returns `true` for `xmake lua cli.binutils.bin2obj ...` tool invocations.
+fn is_bin2obj_command(trimmed: &str) -> bool {
+    trimmed.starts_with("xmake lua cli.binutils.bin2obj ")
+}
+
+/// Returns `true` for bin2obj internal output lines that should be dropped:
+/// - `running imported module cli.binutils.bin2obj ...`
+/// - `converting binary file ... to coff object file ...`
+/// - `.obj generated!` / `.h.obj generated!` completion lines
+/// - Numbered argument dump lines (` 1: "-i"`, ` 2: "-o"`, etc.)
+fn is_bin2obj_noise(trimmed: &str) -> bool {
+    // Module execution noise: "running imported module ..."
+    if trimmed.starts_with("running imported module ") {
+        return true;
+    }
+    // "with args:" continuation (from interleaved parallel output)
+    if trimmed.starts_with("with args:") {
+        return true;
+    }
+    // "converting binary file ... to coff object file ..."
+    if trimmed.starts_with("converting binary file ") && trimmed.contains(" to coff object file ") {
+        return true;
+    }
+    // ".obj generated!" or similar completion messages
+    if trimmed.ends_with(" generated!") {
+        return true;
+    }
+    // Numbered argument dumps: " 1: \"-i\"", " 2: \"-o\"", etc.
+    diag::lazy_re!("^\\s*\\d+:\\s*\"").is_match(trimmed)
+}
+
+/// Returns `true` for probe test lines like `> cl.exe` with flags.
+/// These are compiler/linker probe diagnostic lines that xmake emits during
+/// `checking for flags (...)` sequences.
+fn is_probe_test_line(trimmed: &str) -> bool {
+    trimmed.starts_with("> ")
+        && trimmed.len() > 2
+        // Ensure it's not just "> " with nothing meaningful
+        && !trimmed.starts_with("> [")
+}
+
 /// Information extracted from a progress line.
 struct ProgressInfo {
     target: String,
@@ -157,8 +191,9 @@ fn is_progress_line(trimmed: &str) -> Option<ProgressInfo> {
     // [  7%]: <mimalloc> compiling.debug path/to/file.c
     // [ 25%]: <lc-yyjson> archiving.debug luisa-ext-lc-yyjson.lib
     // [ 26%]: <glfw> linking.debug luisa-ext-glfw.dll
-    let re =
-        lazy_re!(r"^\[\s*\d+%\]:\s*<([^>]+)>\s+(compiling|archiving|linking)\.(debug|release)\s");
+    let re = diag::lazy_re!(
+        r"^\[\s*\d+%\]:\s*<([^>]+)>\s+(compiling|archiving|linking|generating)\.(\w+)\s"
+    );
     let caps = re.captures(trimmed)?;
     Some(ProgressInfo {
         target: caps.get(1)?.as_str().to_string(),
@@ -182,10 +217,10 @@ fn is_full_command_line(trimmed: &str) -> bool {
 
     // Gate 2: Tool invocation gate
     let looks_like_tool = trimmed.starts_with('"')
-        || lazy_re!(r"^(/[A-Za-z_][A-Za-z0-9_\-/]*)?\b(g\+\+|gcc|clang\+\+|clang|cc|c\+\+|cl\.exe|link\.exe|ld|lld|ar)\b").is_match(trimmed)
-        || lazy_re!(r"^[A-Za-z]:\\").is_match(trimmed) // Windows path start like C:\
+        || diag::lazy_re!(r"^(/[A-Za-z_][A-Za-z0-9_\-/]*)?\b(g\+\+|gcc|clang\+\+|clang|cc|c\+\+|cl\.exe|link\.exe|ld|lld|ar)\b").is_match(trimmed)
+        || diag::lazy_re!(r"^[A-Za-z]:\\").is_match(trimmed) // Windows path start like C:\
             && trimmed.contains("cl.exe")
-        || lazy_re!(r"^[A-Za-z]:\\").is_match(trimmed)
+        || diag::lazy_re!(r"^[A-Za-z]:\\").is_match(trimmed)
             && trimmed.contains("link.exe");
 
     if !looks_like_tool {
@@ -194,67 +229,7 @@ fn is_full_command_line(trimmed: &str) -> bool {
 
     // Gate 3: Flags gate — must contain compiler/linker flag patterns
     // Also matches archiver flags (rcs) and miscellaneous build flags
-    lazy_re!(r"(?:\s-[DIo]\b|\s-Fo\b|\s-lib\b|\s-dll\b|\s-shared\b|\s/EHs|\s/GS|\s/Gd|\s/Zc:|\s-std=c\+\+|\s-std=c\b|\s-fPIC\b|\s-fPIE\b|\s-nologo\b|\s-MD\b|\srcs\b)").is_match(trimmed)
-}
-
-/// Check if a line matches a compiler diagnostic pattern (GCC/Clang or MSVC).
-fn is_compiler_diag(line: &str) -> bool {
-    let trimmed = line.trim_start();
-
-    // GCC/Clang: file:line:col: severity
-    if let Some(colon) = trimmed.find(':') {
-        let before_first = &trimmed[..colon];
-        // Must not contain spaces (simple file path)
-        if before_first.contains(' ') {
-            return is_msvc_diag(trimmed);
-        }
-        // After first colon, expect digits
-        let after = &trimmed[colon + 1..];
-        if let Some(second_colon) = after.find(':') {
-            let digits_part = &after[..second_colon];
-            if digits_part.parse::<usize>().is_ok() {
-                let after_second = &after[second_colon + 1..];
-                if let Some(third_colon) = after_second.find(':') {
-                    let col_part = &after_second[..third_colon];
-                    if col_part.parse::<usize>().is_ok() {
-                        let after_third = after_second[third_colon + 1..].trim_start();
-                        return after_third.starts_with("error")
-                            || after_third.starts_with("warning")
-                            || after_third.starts_with("note")
-                            || after_third.starts_with("fatal error");
-                    }
-                }
-                // Maybe just file:line: severity (no column)
-                let after_second = after_second.trim_start();
-                return after_second.starts_with("error")
-                    || after_second.starts_with("warning")
-                    || after_second.starts_with("note")
-                    || after_second.starts_with("fatal error");
-            }
-        }
-    }
-
-    is_msvc_diag(trimmed)
-}
-
-/// Check MSVC diagnostic format: `file(line): severity code: message`
-fn is_msvc_diag(line: &str) -> bool {
-    if let Some(paren) = line.find('(') {
-        if let Some(close_paren) = line.find(')') {
-            let line_num = &line[paren + 1..close_paren];
-            if line_num.parse::<usize>().is_ok() {
-                let after = line[close_paren + 1..].trim_start();
-                if after.starts_with(": ") || after.starts_with(" : ") {
-                    let after_colon = after.trim_start_matches(':').trim_start();
-                    return after_colon.starts_with("error")
-                        || after_colon.starts_with("warning")
-                        || after_colon.starts_with("note")
-                        || after_colon.starts_with("fatal error");
-                }
-            }
-        }
-    }
-    false
+    diag::lazy_re!(r"(?:\s-[DIo]\b|\s-Fo\b|\s-lib\b|\s-dll\b|\s-shared\b|\s/EHs|\s/GS|\s/Gd|\s/Zc:|\s-std=c\+\+|\s-std=c\b|\s-fPIC\b|\s-fPIE\b|\s-nologo\b|\s-MD\b|\srcs\b)").is_match(trimmed)
 }
 
 /// Check if a line is an error line (xmake aggregate or compiler diagnostic).
@@ -263,65 +238,17 @@ fn is_error_line(trimmed: &str) -> bool {
     if trimmed.starts_with("error:") {
         return true;
     }
-    is_compiler_diag(trimmed) && diag_has_severity(trimmed, "error")
+    diag::is_compiler_diag(trimmed) && diag::diag_has_severity(trimmed, "error")
 }
 
 /// Check if a line is a warning line (compiler diagnostic).
 fn is_warning_line(trimmed: &str) -> bool {
-    is_compiler_diag(trimmed) && diag_has_severity(trimmed, "warning")
+    diag::is_compiler_diag(trimmed) && diag::diag_has_severity(trimmed, "warning")
 }
 
 /// Check if a line is a note line (compiler diagnostic continuation).
 fn is_note_line(trimmed: &str) -> bool {
-    is_compiler_diag(trimmed) && diag_has_severity(trimmed, "note")
-}
-
-/// Check if a compiler diagnostic line has a given severity.
-/// Handles both MSVC (`file(line): severity CODE:`) and GCC/Clang (`file:line:col: severity:`) formats.
-fn diag_has_severity(line: &str, severity: &str) -> bool {
-    let lower = line.to_lowercase();
-    // Try MSVC format first: file(line): severity ...
-    if let Some(paren) = line.find('(') {
-        if let Some(close_paren) = line.find(')') {
-            if line[paren + 1..close_paren].parse::<usize>().is_ok() {
-                let after = line[close_paren + 1..].trim_start();
-                let after_colon = after.trim_start_matches(':').trim_start();
-                if after_colon.to_lowercase().starts_with(severity) {
-                    return true;
-                }
-            }
-        }
-    }
-    // GCC/Clang format: the severity word appears right before a colon
-    // e.g. "file:line:col: severity: message" or "file:line: severity: message"
-    // Look for ": severity:" pattern
-    let target = format!(": {}:", severity);
-    lower.contains(&target)
-}
-
-/// Extract warning flag from a compiler diagnostic line.
-fn extract_warning_flag(line: &str) -> Option<String> {
-    // Match patterns like [-Wunused-parameter] (GCC/Clang)
-    if let Some(start) = line.rfind('[') {
-        if let Some(end) = line[start..].find(']') {
-            let flag = &line[start + 1..start + end];
-            if flag.starts_with("-W") {
-                return Some(flag.to_string());
-            }
-        }
-    }
-    // MSVC warning codes: CXXXX
-    let upper = line.to_uppercase();
-    for prefix in &["WARNING C", "ERROR C"] {
-        if let Some(pos) = upper.find(prefix) {
-            let after = &upper[pos + prefix.len()..];
-            let code: String = after.chars().take_while(|c| c.is_alphanumeric()).collect();
-            if code.len() >= 4 {
-                return Some(format!("C{}", code));
-            }
-        }
-    }
-    None
+    diag::is_compiler_diag(trimmed) && diag::diag_has_severity(trimmed, "note")
 }
 
 /// Check if line is an exit code line: `Config exit code: N` or `Build exit code: N`.
@@ -335,49 +262,6 @@ fn is_exit_code_line(trimmed: &str) -> Option<(String, i32)> {
         return Some(("build".to_string(), code));
     }
     None
-}
-
-/// Extract the core message from a compiler diagnostic line for dedup purposes.
-fn extract_diag_message(line: &str) -> String {
-    let line = strip_ansi(line);
-
-    // Try MSVC format first: file(line): severity code: message
-    if let Some(close_paren) = line.find(')') {
-        let after = line[close_paren + 1..].trim_start();
-        let after_colon = after.trim_start_matches(':').trim_start();
-        if let Some(first_colon) = after_colon.find(':') {
-            let code_part = &after_colon[..first_colon];
-            if code_part.contains("error")
-                || code_part.contains("warning")
-                || code_part.contains("note")
-                || code_part.contains("fatal")
-            {
-                let msg = after_colon[first_colon + 1..].trim();
-                if !msg.is_empty() {
-                    return msg.to_string();
-                }
-            }
-        }
-    }
-
-    // Try GCC/Clang format: file:line:col: severity: message
-    let parts: Vec<&str> = line.splitn(5, ':').collect();
-    if parts.len() >= 5 {
-        return parts[4].trim().to_string();
-    }
-    if parts.len() >= 4 {
-        let possible_severity = parts[3].trim();
-        if possible_severity.starts_with("error")
-            || possible_severity.starts_with("warning")
-            || possible_severity.starts_with("note")
-            || possible_severity.starts_with("fatal")
-        {
-            return possible_severity.to_string();
-        }
-        return parts[3].trim().to_string();
-    }
-
-    line
 }
 
 // ─── Main Filter Function ───
@@ -428,7 +312,7 @@ fn filter_xmake_output_verbose(input: &str, _exit_code: i32, verbose: u8) -> Str
             stats.in_error_block = true;
             // Track warnings inside error blocks too
             if trimmed.to_lowercase().contains("warning:") {
-                if let Some(flag) = extract_warning_flag(trimmed) {
+                if let Some(flag) = diag::extract_warning_flag(trimmed) {
                     *stats.warning_counts.entry(flag).or_insert(0) += 1;
                 }
             }
@@ -442,7 +326,7 @@ fn filter_xmake_output_verbose(input: &str, _exit_code: i32, verbose: u8) -> Str
         // Warning lines — keep verbatim, dedup by flag
         if is_warning_line(trimmed) {
             stats.in_error_block = false;
-            if let Some(flag) = extract_warning_flag(trimmed) {
+            if let Some(flag) = diag::extract_warning_flag(trimmed) {
                 *stats.warning_counts.entry(flag).or_insert(0) += 1;
             }
             if stats.track_dedup(trimmed) {
@@ -482,6 +366,21 @@ fn filter_xmake_output_verbose(input: &str, _exit_code: i32, verbose: u8) -> Str
             continue;
         }
 
+        // Bin2obj command lines — drop (progress line already counts the action)
+        if is_bin2obj_command(trimmed) {
+            continue;
+        }
+
+        // Bin2obj internal noise — drop
+        if is_bin2obj_noise(trimmed) {
+            continue;
+        }
+
+        // Probe test lines ("> cl.exe ...") — drop
+        if is_probe_test_line(trimmed) {
+            continue;
+        }
+
         // Full command lines — drop
         if is_full_command_line(trimmed) {
             continue;
@@ -513,6 +412,14 @@ fn filter_xmake_output_verbose(input: &str, _exit_code: i32, verbose: u8) -> Str
                         .entry(info.target.clone())
                         .or_insert((0, 0, 0));
                     entry.2 += 1;
+                }
+                "generating" => {
+                    stats.generate_count += 1;
+                    let entry = stats
+                        .targets
+                        .entry(info.target.clone())
+                        .or_insert((0, 0, 0));
+                    entry.0 += 1;
                 }
                 _ => {}
             }
@@ -617,10 +524,18 @@ fn compose_output(stats: &XmakeStats) -> String {
             mode_str, platform_str, compiler_str, status,
         ));
 
-        // Target stats
+        // Target stats — include generate_count when non-zero
+        let mut stat_parts: Vec<String> = Vec::new();
+        stat_parts.push(format!("{} compiled", stats.compile_count));
+        if stats.generate_count > 0 {
+            stat_parts.push(format!("{} generated", stats.generate_count));
+        }
+        stat_parts.push(format!("{} archived", stats.archive_count));
+        stat_parts.push(format!("{} linked", stats.link_count));
         output.push_str(&format!(
-            " {} compiled, {} archived, {} linked ({} targets)\n",
-            stats.compile_count, stats.archive_count, stats.link_count, total_targets,
+            " {} ({} targets)\n",
+            stat_parts.join(", "),
+            total_targets,
         ));
     } else {
         // Config only
@@ -917,7 +832,7 @@ mod tests {
     #[test]
     fn test_extract_warning_flag_msvc() {
         assert_eq!(
-            extract_warning_flag("warning C4100: 'x': unreferenced formal parameter"),
+            diag::extract_warning_flag("warning C4100: 'x': unreferenced formal parameter"),
             Some("C4100".to_string())
         );
     }
@@ -925,7 +840,7 @@ mod tests {
     #[test]
     fn test_extract_warning_flag_gcc() {
         assert_eq!(
-            extract_warning_flag(
+            diag::extract_warning_flag(
                 "src/api/api.cpp:42:10: warning: unused parameter 'device_id' [-Wunused-parameter]"
             ),
             Some("-Wunused-parameter".to_string())
@@ -1018,39 +933,41 @@ mod tests {
 
     #[test]
     fn test_is_compiler_diag_gcc_error() {
-        assert!(is_compiler_diag(
+        assert!(diag::is_compiler_diag(
             "src/core/hash.h:42:13: error: static assertion failed: Hash must be specialized"
         ));
     }
 
     #[test]
     fn test_is_compiler_diag_msvc_error() {
-        assert!(is_compiler_diag(
+        assert!(diag::is_compiler_diag(
             "src/backends/dx/dx_codegen.cpp(88): error C2039: 'visit': is not a member"
         ));
     }
 
     #[test]
     fn test_is_compiler_diag_warning() {
-        assert!(is_compiler_diag(
+        assert!(diag::is_compiler_diag(
             "src/api/api.cpp:42:10: warning: unused parameter 'device_id' [-Wunused-parameter]"
         ));
     }
 
     #[test]
     fn test_is_compiler_diag_note() {
-        assert!(is_compiler_diag(
+        assert!(diag::is_compiler_diag(
             "src/core/hash.h:42:13: note: in instantiation of template class"
         ));
     }
 
     #[test]
     fn test_is_compiler_diag_not() {
-        assert!(!is_compiler_diag(
+        assert!(!diag::is_compiler_diag(
             "[  7%]: <mimalloc> compiling.debug file.c"
         ));
-        assert!(!is_compiler_diag("checking for platform ... windows (x64)"));
-        assert!(!is_compiler_diag(""));
+        assert!(!diag::is_compiler_diag(
+            "checking for platform ... windows (x64)"
+        ));
+        assert!(!diag::is_compiler_diag(""));
     }
 
     // ── Success cases ──
@@ -1475,7 +1392,7 @@ Config exit code: 0
 
     #[test]
     fn test_xmake_extract_diag_message_gcc() {
-        let msg = extract_diag_message(
+        let msg = diag::extract_diag_message(
             "src/core/hash.h:42:13: error: static assertion failed: Hash must be specialized",
         );
         assert_eq!(
@@ -1487,7 +1404,7 @@ Config exit code: 0
 
     #[test]
     fn test_xmake_extract_diag_message_msvc() {
-        let msg = extract_diag_message(
+        let msg = diag::extract_diag_message(
             "src/backends/dx/dx_codegen.cpp(88): error C2039: 'visit' is not a member of 'luisa::compute::dx::DXCodegen'"
         );
         assert_eq!(
@@ -1623,6 +1540,274 @@ Build exit code: 1\n";
         assert!(
             result.contains("<lc-core>: 1 compiled"),
             "should show per-target detail even on failure, got: {}",
+            result
+        );
+    }
+
+    // ── New filter rules tests ──
+
+    #[test]
+    fn test_is_progress_line_generating_bin2obj() {
+        let result = is_progress_line(
+            "[ 16%]: <cuda-builtin> generating.bin2obj thirdparty\\SomeLib\\src\\backends\\cuda\\cuda_builtin\\cuda_builtin_kernels.cu"
+        );
+        assert!(
+            result.is_some(),
+            "should parse generating.bin2obj progress line"
+        );
+        if let Some(info) = result {
+            assert_eq!(info.target, "cuda-builtin");
+            assert_eq!(info.action, "generating");
+            assert_eq!(info._mode, "bin2obj");
+        }
+    }
+
+    #[test]
+    fn test_is_bin2obj_command_true() {
+        assert!(is_bin2obj_command(
+            "xmake lua cli.binutils.bin2obj -i thirdparty\\SomeLib\\src\\backends\\cuda\\cuda_builtin\\cuda_builtin_kernels.cu -o build\\.objs\\cuda-builtin\\windows\\x64\\debug\\thirdparty\\SomeLib\\src\\backends\\cuda\\cuda_builtin\\cuda_builtin_kernels.cu.obj -f coff -a x64 -p windows"
+        ));
+    }
+
+    #[test]
+    fn test_is_bin2obj_command_false() {
+        assert!(!is_bin2obj_command(
+            "[ 16%]: <cuda-builtin> generating.bin2obj file.cu"
+        ));
+        assert!(!is_bin2obj_command("xmake build"));
+        assert!(!is_bin2obj_command(""));
+    }
+
+    #[test]
+    fn test_is_bin2obj_noise_running_imported_module() {
+        assert!(is_bin2obj_noise(
+            "running imported module cli.binutils.bin2obj with args:"
+        ));
+    }
+
+    #[test]
+    fn test_is_bin2obj_noise_with_args() {
+        assert!(is_bin2obj_noise("with args:"));
+    }
+
+    #[test]
+    fn test_is_bin2obj_noise_converting_binary() {
+        assert!(is_bin2obj_noise(
+            "converting binary file C:\\dev\\myproject\\thirdparty\\SomeLib\\src\\backends\\cuda\\cuda_builtin\\cuda_device_math.h to coff object file C:\\dev\\myproject\\build\\.objs\\cuda-builtin\\windows\\x64\\debug\\thirdparty\\SomeLib\\src\\backends\\cuda\\cuda_builtin\\cuda_device_math.h.obj .."
+        ));
+    }
+
+    #[test]
+    fn test_is_bin2obj_noise_generated() {
+        assert!(is_bin2obj_noise(
+            "C:\\dev\\myproject\\build\\.objs\\cuda-builtin\\windows\\x64\\debug\\thirdparty\\SomeLib\\src\\backends\\cuda\\cuda_builtin\\cuda_builtin_kernels.cu.obj generated!"
+        ));
+        assert!(is_bin2obj_noise(
+            "C:\\dev\\myproject\\build\\.objs\\cuda-builtin\\windows\\x64\\debug\\thirdparty\\SomeLib\\src\\backends\\cuda\\cuda_builtin\\cuda_device_half.h.obj generated!"
+        ));
+    }
+
+    #[test]
+    fn test_is_bin2obj_noise_numbered_args() {
+        assert!(is_bin2obj_noise(" 1: \"-i\""));
+        assert!(is_bin2obj_noise(" 2: \"-o\""));
+        assert!(is_bin2obj_noise(" 5: \"-f\""));
+        assert!(is_bin2obj_noise("10: \"windows\""));
+        assert!(!is_bin2obj_noise("1: not a quoted arg"));
+        assert!(!is_bin2obj_noise(
+            "[  7%]: <mimalloc> compiling.debug file.c"
+        ));
+    }
+
+    #[test]
+    fn test_is_probe_test_line_true() {
+        assert!(is_probe_test_line(
+            "> cl.exe \"-FS\" \"-FdC:\\Users\\user\\AppData\\Local\\Temp\\.xmake\\240101\\_a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6.pdb\" \"-nologo\""
+        ));
+        assert!(is_probe_test_line("> cl.exe \"-std:c++20\" \"-nologo\""));
+        assert!(is_probe_test_line(
+            "> cl.exe \"/sourceDependencies\" \"C:\\Users\\...\\_a3c4f1b719d59ba2eb8030ef5e51fbe1.json\" \"-nologo\""
+        ));
+    }
+
+    #[test]
+    fn test_is_probe_test_line_false() {
+        assert!(!is_probe_test_line("checking for flags (-FS) ... ok"));
+        assert!(!is_probe_test_line(
+            "[  7%]: <mimalloc> compiling.debug file.c"
+        ));
+        assert!(!is_probe_test_line("> [some output]"));
+        assert!(!is_probe_test_line(">"));
+        assert!(!is_probe_test_line(""));
+    }
+
+    // ── Integration tests with real log patterns ──
+
+    #[test]
+    fn test_xmake_with_bin2obj_actions() {
+        // Simulates a build that includes generating.bin2obj steps (e.g., CUDA backend)
+        let input = "\
+=== XMAKE DEBUG BUILD (rebuild) ===\n\
+[  7%]: <mimalloc> compiling.debug thirdparty\\SomeLib\\src\\ext\\EASTL\\packages\\mimalloc\\src\\static.c\n\
+[ 16%]: <cuda-builtin> generating.bin2obj thirdparty\\SomeLib\\src\\backends\\cuda\\cuda_builtin\\cuda_builtin_kernels.cu\n\
+xmake lua cli.binutils.bin2obj -i thirdparty\\SomeLib\\src\\backends\\cuda\\cuda_builtin\\cuda_builtin_kernels.cu -o build\\.objs\\cuda-builtin\\windows\\x64\\debug\\thirdparty\\SomeLib\\src\\backends\\cuda\\cuda_builtin\\cuda_builtin_kernels.cu.obj -f coff -a x64 -p windows\n\
+running imported module cli.binutils.bin2obj with args:\n\
+ 1: \"-i\"\n\
+ 2: \"thirdparty\\SomeLib\\src\\backends\\cuda\\cuda_builtin\\cuda_builtin_kernels.cu\"\n\
+ 3: \"-o\"\n\
+ 4: \"build\\.objs\\cuda-builtin\\windows\\x64\\debug\\thirdparty\\SomeLib\\src\\backends\\cuda\\cuda_builtin\\cuda_builtin_kernels.cu.obj\"\n\
+ 5: \"-f\"\n\
+ 6: \"coff\"\n\
+ 7: \"-a\"\n\
+ 8: \"x64\"\n\
+ 9: \"-p\"\n\
+10: \"windows\"\n\
+converting binary file C:\\dev\\myproject\\thirdparty\\SomeLib\\src\\backends\\cuda\\cuda_builtin\\cuda_builtin_kernels.cu to coff object file C:\\dev\\myproject\\build\\.objs\\cuda-builtin\\windows\\x64\\debug\\thirdparty\\SomeLib\\src\\backends\\cuda\\cuda_builtin\\cuda_builtin_kernels.cu.obj ..\n\
+C:\\dev\\myproject\\build\\.objs\\cuda-builtin\\windows\\x64\\debug\\thirdparty\\SomeLib\\src\\backends\\cuda\\cuda_builtin\\cuda_builtin_kernels.cu.obj generated!\n\
+[ 50%]: <lc-core> compiling.debug src\\core\\clock.cpp\n\
+[100%]: <lc-core> linking.debug lc-core.dll\n\
+Build exit code: 0\n";
+        let result = filter_xmake(input, 0);
+        assert!(result.contains("ok xmake: build"), "got: {}", result);
+        assert!(
+            result.contains("2 compiled, 1 generated, 0 archived, 1 linked"),
+            "should show generate count, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("xmake lua cli.binutils.bin2obj"),
+            "should strip bin2obj commands, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("running imported module"),
+            "should strip bin2obj noise, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("converting binary file"),
+            "should strip conversion lines, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("generated!"),
+            "should strip generated completion, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_xmake_with_probe_test_lines() {
+        // Simulates probe test lines mixed with config output
+        let input = "\
+=== XMAKE DEBUG CONFIG ===\n\
+checking for platform ... windows (x64)\n\
+checking for Microsoft C/C++ Compiler ... ok\n\
+checking for flags (-FS) ... ok\n\
+> cl.exe \"-FS\" \"-FdC:\\Users\\user\\AppData\\Local\\Temp\\.xmake\\_test.pdb\" \"-nologo\"\n\
+checking for flags (-std:c++20) ... ok\n\
+> cl.exe \"-std:c++20\" \"-nologo\"\n\
+Config exit code: 0\n";
+        let result = filter_xmake(input, 0);
+        assert!(result.contains("ok xmake: configured"), "got: {}", result);
+        assert!(
+            !result.contains("> cl.exe"),
+            "should strip probe test lines, got: {}",
+            result
+        );
+        assert!(
+            result.contains("windows (x64)"),
+            "should keep platform info, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_xmake_token_savings_with_bin2obj_noise() {
+        // Verify token savings stay >90% even with heavy bin2obj noise
+        let mut input = String::new();
+        input.push_str("=== XMAKE DEBUG CONFIG ===\n");
+        input.push_str("checking for platform ... windows (x64)\n");
+        input.push_str("checking for Microsoft C/C++ Compiler ... ok\n");
+        input.push_str("Config exit code: 0\n");
+        input.push_str("=== XMAKE DEBUG BUILD (rebuild) ===\n");
+
+        // 50 normal compile lines with command lines
+        for i in 1..=50 {
+            input.push_str(&format!(
+                "[{:3}%]: <lc-core> compiling.debug src/core/file_{}.cpp\n",
+                i, i
+            ));
+            input.push_str(&format!(
+                "\"C:\\cl.exe\" -c -nologo -MDd -Zi -FS -Fd\"build\\file_{}.pdb\" -Fo\"build\\file_{}.obj\" -I\"src\" -std:c++20 \"src\\core\\file_{}.cpp\"\n",
+                i, i, i
+            ));
+        }
+
+        // 30 bin2obj noise blocks (simulating heavy CUDA compilation)
+        for i in 1..=30 {
+            input.push_str(&format!(
+                "[{:3}%]: <lc-cuda-builtin> generating.bin2obj cuda_builtin_{}.cu\n",
+                50 + i,
+                i
+            ));
+            input.push_str(&format!(
+                "xmake lua cli.binutils.bin2obj -i cuda_builtin_{}.cu -o cuda_builtin_{}.obj -f coff -a x64 -p windows\n",
+                i, i
+            ));
+            input.push_str("running imported module cli.binutils.bin2obj with args:\n");
+            for j in 1..=10 {
+                input.push_str(&format!(" {:2}: \"-arg_{}_{}\"\n", j, i, j));
+            }
+            input.push_str(&format!(
+                "converting binary file cuda_builtin_{}.cu to coff object file cuda_builtin_{}.obj ..\n",
+                i, i
+            ));
+            input.push_str(&format!("cuda_builtin_{}.obj generated!\n", i));
+        }
+
+        input.push_str("Build exit code: 0\n");
+
+        let result = filter_xmake(&input, 0);
+        let raw_tokens = estimate_tokens(&input);
+        let filtered_tokens = estimate_tokens(&result);
+        let savings = if raw_tokens > 0 {
+            ((raw_tokens - filtered_tokens) as f64 / raw_tokens as f64 * 100.0) as usize
+        } else {
+            0
+        };
+        assert!(
+            savings >= 90,
+            "token savings: {}% (expected >=90%), raw={}, filtered={}",
+            savings,
+            raw_tokens,
+            filtered_tokens
+        );
+        // Verify generate count shown
+        assert!(
+            result.contains("generated"),
+            "should show generate count when bin2obj present, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_xmake_no_generate_count_when_zero() {
+        // Existing behaviour: no "generated" when there are no bin2obj steps
+        let input = "\
+=== XMAKE DEBUG BUILD (rebuild) ===\n\
+[ 50%]: <lc-core> compiling.debug src/core/main.cpp\n\
+[100%]: <lc-core> linking.debug lc-core.dll\n\
+Build exit code: 0\n";
+        let result = filter_xmake(input, 0);
+        assert!(
+            !result.contains("generated"),
+            "should NOT show 'generated' when count is 0, got: {}",
+            result
+        );
+        assert!(
+            result.contains("1 compiled, 0 archived, 1 linked"),
+            "should show standard format, got: {}",
             result
         );
     }

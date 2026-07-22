@@ -1,5 +1,6 @@
 //! Filters ninja build output — FAILED blocks kept verbatim, progress lines counted/stripped.
 
+use super::diag;
 use crate::core::runner;
 use crate::core::stream::{BlockHandler, BlockStreamFilter};
 use crate::core::utils::{resolved_command, strip_ansi};
@@ -37,99 +38,6 @@ pub fn parse_ninja_progress(line: &str) -> Option<(usize, usize)> {
     let n = inner[..slash].parse::<usize>().ok()?;
     let m = inner[slash + 1..].parse::<usize>().ok()?;
     Some((n, m))
-}
-
-/// Check if a line matches a compiler diagnostic pattern (GCC/Clang or MSVC).
-pub fn is_compiler_diag(line: &str) -> bool {
-    // GCC/Clang: file:line:col: severity
-    let trimmed = line.trim_start();
-    if let Some(colon) = trimmed.find(':') {
-        let before_first = &trimmed[..colon];
-        // Must not contain spaces (simple file path)
-        if before_first.contains(' ') {
-            // Maybe MSVC format?
-            return is_msvc_diag(trimmed);
-        }
-        // After first colon, expect digits
-        let after = &trimmed[colon + 1..];
-        if let Some(second_colon) = after.find(':') {
-            let digits_part = &after[..second_colon];
-            if digits_part.parse::<usize>().is_ok() {
-                // Could be: file:line:
-                let after_second = &after[second_colon + 1..];
-                if let Some(third_colon) = after_second.find(':') {
-                    let col_part = &after_second[..third_colon];
-                    if col_part.parse::<usize>().is_ok() {
-                        let after_third = after_second[third_colon + 1..].trim_start();
-                        return after_third.starts_with("error")
-                            || after_third.starts_with("warning")
-                            || after_third.starts_with("note")
-                            || after_third.starts_with("fatal error");
-                    }
-                }
-                // Maybe just file:line: severity (no column)
-                let after_second = after_second.trim_start();
-                return after_second.starts_with("error")
-                    || after_second.starts_with("warning")
-                    || after_second.starts_with("note")
-                    || after_second.starts_with("fatal error");
-            }
-        }
-    }
-    is_msvc_diag(trimmed)
-}
-
-/// Check MSVC diagnostic format: `file(line): severity code: message`
-fn is_msvc_diag(line: &str) -> bool {
-    if let Some(paren) = line.find('(') {
-        if let Some(close_paren) = line.find(')') {
-            let line_num = &line[paren + 1..close_paren];
-            if line_num.parse::<usize>().is_ok() {
-                let after = line[close_paren + 1..].trim_start();
-                if after.starts_with(": ") || after.starts_with(" : ") {
-                    let after_colon = after.trim_start_matches(':').trim_start();
-                    return after_colon.starts_with("error")
-                        || after_colon.starts_with("warning")
-                        || after_colon.starts_with("note")
-                        || after_colon.starts_with("fatal error");
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Extract warning flag from a compiler diagnostic line (e.g., `-Wunused-parameter`).
-fn extract_warning_flag(line: &str) -> Option<String> {
-    // Match patterns like [-Wunused-parameter] or /W4 etc.
-    if let Some(start) = line.rfind('[') {
-        if let Some(end) = line[start..].find(']') {
-            let flag = &line[start + 1..start + end];
-            if flag.starts_with("-W") {
-                return Some(flag.to_string());
-            }
-        }
-    }
-    // MSVC warning codes: CXXXX
-    if let Some(cap) = extract_msvc_warning(line) {
-        return Some(cap);
-    }
-    None
-}
-
-fn extract_msvc_warning(line: &str) -> Option<String> {
-    // MSVC: warning CXXXX: or error CXXXX:
-    let upper = line.to_uppercase();
-    for prefix in &["WARNING C", "ERROR C"] {
-        if let Some(pos) = upper.find(prefix) {
-            let after = &upper[pos + prefix.len()..];
-            let code: String = after.chars().take_while(|c| c.is_alphanumeric()).collect();
-            if code.len() >= 4 {
-                return Some(format!("C{}", code));
-            }
-        }
-    }
-    None
 }
 
 // --- State machine ---
@@ -171,20 +79,10 @@ impl NinjaBuildHandler {
 
     fn track_dedup(&mut self, diag_line: &str) -> bool {
         // Extract the message part (after file:line:col: severity:)
-        let msg = extract_diag_message(diag_line);
+        let msg = diag::extract_diag_message(diag_line);
         let count = self.seen_diagnostics.entry(msg).or_insert(0);
         *count += 1;
         *count <= 3 // Show first 3 occurrences, collapse rest
-    }
-
-    fn is_continuation_line(&self, line: &str) -> bool {
-        line.starts_with(' ')
-            || line.starts_with('\t')
-            || line.starts_with("In file")
-            || line.starts_with("from ")
-            || line.starts_with('|')
-            || line.starts_with('^')
-            || line.starts_with("--")
     }
 }
 
@@ -231,12 +129,12 @@ impl BlockHandler for NinjaBuildHandler {
         }
 
         // Standalone compiler diagnostic (no preceding FAILED line)
-        if is_compiler_diag(&cleaned) {
+        if diag::is_compiler_diag(&cleaned) {
             self.in_diag_block = true;
             self.in_failed_edge = false;
             // Track warnings
             if cleaned.contains("warning:") {
-                if let Some(flag) = extract_warning_flag(&cleaned) {
+                if let Some(flag) = diag::extract_warning_flag(&cleaned) {
                     *self.warning_counts.entry(flag).or_insert(0) += 1;
                 } else {
                     *self.warning_counts.entry("other".to_string()).or_insert(0) += 1;
@@ -258,11 +156,11 @@ impl BlockHandler for NinjaBuildHandler {
                 return false;
             }
             // Check if this line is a compiler diagnostic (inside FAILED block)
-            if is_compiler_diag(&cleaned) {
+            if diag::is_compiler_diag(&cleaned) {
                 self.in_failed_edge = false;
                 self.in_diag_block = true;
                 if cleaned.contains("warning:") {
-                    if let Some(flag) = extract_warning_flag(&cleaned) {
+                    if let Some(flag) = diag::extract_warning_flag(&cleaned) {
                         *self.warning_counts.entry(flag).or_insert(0) += 1;
                     } else {
                         *self.warning_counts.entry("other".to_string()).or_insert(0) += 1;
@@ -290,11 +188,11 @@ impl BlockHandler for NinjaBuildHandler {
                 return false;
             }
             // Continuation patterns
-            return self.is_continuation_line(&cleaned) || cleaned.starts_with("  ");
+            return diag::is_diag_continuation(&cleaned) || cleaned.starts_with("  ");
         }
 
         // Generic block continuation (indentation or known continuation prefixes)
-        self.is_continuation_line(&cleaned)
+        diag::is_diag_continuation(&cleaned)
     }
 
     fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
@@ -333,59 +231,6 @@ impl BlockHandler for NinjaBuildHandler {
 
         Some(lines.join("\n") + "\n")
     }
-}
-
-/// Extract the core message from a compiler diagnostic line for dedup purposes.
-fn extract_diag_message(line: &str) -> String {
-    let line = strip_ansi(line);
-
-    // Try MSVC format first: file(line): severity code: message
-    if let Some(close_paren) = line.find(')') {
-        let after = line[close_paren + 1..].trim_start();
-        // after = "error C2039: 'visit' is not a member of 'luisa::compute::dx::DXCodegen'"
-        // Split into at most 2 parts on the FIRST colon after the severity code.
-        // Severity+code = "error C2039", message = " 'visit' is not a member of 'luisa::compute::dx::DXCodegen'"
-        let after_colon = after.trim_start_matches(':').trim_start();
-        if let Some(first_colon) = after_colon.find(':') {
-            // Skip "error C2039" (up to first colon), take the rest as the message.
-            // The message may contain colons (e.g. namespace paths), so use splitn(2) to
-            // split only at the FIRST colon after the severity code.
-            let code_part = &after_colon[..first_colon];
-            // Skip the severity word to check if this is indeed a compiler diag
-            if code_part.contains("error")
-                || code_part.contains("warning")
-                || code_part.contains("note")
-                || code_part.contains("fatal")
-            {
-                let msg = after_colon[first_colon + 1..].trim();
-                if !msg.is_empty() {
-                    return msg.to_string();
-                }
-            }
-        }
-    }
-
-    // Try GCC/Clang format: file:line:col: severity: message
-    // Split at the 5th colon (or 4th for file:line:severity without column)
-    let parts: Vec<&str> = line.splitn(5, ':').collect();
-    if parts.len() >= 5 {
-        return parts[4].trim().to_string();
-    }
-    if parts.len() >= 4 {
-        // Check that one of the middle parts looks like severity
-        let possible_severity = parts[3].trim();
-        if possible_severity.starts_with("error")
-            || possible_severity.starts_with("warning")
-            || possible_severity.starts_with("note")
-            || possible_severity.starts_with("fatal")
-        {
-            // No column number — take everything after severity
-            return possible_severity.to_string();
-        }
-        return parts[3].trim().to_string();
-    }
-
-    line
 }
 
 // --- Public API ---
@@ -504,7 +349,7 @@ mod tests {
     #[test]
     fn test_extract_diag_message_gcc() {
         // GCC diag: file:line:col: severity: message with : colons
-        let msg = extract_diag_message(
+        let msg = diag::extract_diag_message(
             "src/core/hash.h:42:13: error: static assertion failed: Hash must be specialized",
         );
         assert_eq!(
@@ -517,7 +362,7 @@ mod tests {
     #[test]
     fn test_extract_diag_message_msvc() {
         // MSVC diag: file(line): severity code: message with :: namespace
-        let msg = extract_diag_message(
+        let msg = diag::extract_diag_message(
             "src/backends/dx/dx_codegen.cpp(88): error C2039: 'visit' is not a member of 'luisa::compute::dx::DXCodegen'"
         );
         assert_eq!(
@@ -530,68 +375,68 @@ mod tests {
     #[test]
     fn test_extract_diag_message_msvc_no_message() {
         // MSVC diag without message body
-        let msg = extract_diag_message("src/main.cpp(42): warning C4100:");
+        let msg = diag::extract_diag_message("src/main.cpp(42): warning C4100:");
         // No message body, should fall back to line or partial
         assert!(!msg.is_empty(), "should not be empty, got: '{}'", msg);
     }
 
     #[test]
     fn test_is_compiler_diag_gcc_error() {
-        assert!(is_compiler_diag(
+        assert!(diag::is_compiler_diag(
             "src/core/hash.h:42:13: error: static assertion failed: Hash must be specialized"
         ));
     }
 
     #[test]
     fn test_is_compiler_diag_msvc_error() {
-        assert!(is_compiler_diag(
+        assert!(diag::is_compiler_diag(
             "src/backends/dx/dx_codegen.cpp(88): error C2039: 'visit': is not a member"
         ));
     }
 
     #[test]
     fn test_is_compiler_diag_warning() {
-        assert!(is_compiler_diag(
+        assert!(diag::is_compiler_diag(
             "src/api/api.cpp:42:10: warning: unused parameter 'device_id' [-Wunused-parameter]"
         ));
     }
 
     #[test]
     fn test_is_compiler_diag_note() {
-        assert!(is_compiler_diag(
+        assert!(diag::is_compiler_diag(
             "src/core/hash.h:42:13: note: in instantiation of template class"
         ));
     }
 
     #[test]
     fn test_is_compiler_diag_fatal() {
-        assert!(is_compiler_diag(
+        assert!(diag::is_compiler_diag(
             "src/main.cpp:1:1: fatal error: No such file or directory"
         ));
     }
 
     #[test]
     fn test_is_compiler_diag_not_a_diag() {
-        assert!(!is_compiler_diag(
+        assert!(!diag::is_compiler_diag(
             "FAILED: src/core/CMakeFiles/lc_core.dir/hash.cpp.o"
         ));
-        assert!(!is_compiler_diag("[1/456] Building CXX object ..."));
-        assert!(!is_compiler_diag(
+        assert!(!diag::is_compiler_diag("[1/456] Building CXX object ..."));
+        assert!(!diag::is_compiler_diag(
             "ninja: build stopped: subcommand failed."
         ));
-        assert!(!is_compiler_diag(""));
+        assert!(!diag::is_compiler_diag(""));
     }
 
     #[test]
     fn test_is_compiler_diag_with_path_containing_dots() {
-        assert!(is_compiler_diag(
+        assert!(diag::is_compiler_diag(
             "src/backends/cuda/cuda_codegen.cpp:142:13: error: no matching function for call"
         ));
     }
 
     #[test]
     fn test_is_compiler_diag_msvc_with_path() {
-        assert!(is_compiler_diag(
+        assert!(diag::is_compiler_diag(
             "C:\\Users\\test\\project\\src\\main.cpp(42): error C2065: 'x' : undeclared identifier"
         ));
     }

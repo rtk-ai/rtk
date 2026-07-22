@@ -11,22 +11,12 @@
 
 #![allow(dead_code)]
 
+use super::diag;
 use crate::core::runner;
 use crate::core::stream::{BlockHandler, BlockStreamFilter};
 use crate::core::utils::{resolved_command, strip_ansi};
 use anyhow::Result;
 use std::collections::HashSet;
-
-// ─── Regex helper ───
-
-macro_rules! lazy_re {
-    ($re:literal) => {{
-        lazy_static::lazy_static! {
-            static ref RE: regex::Regex = regex::Regex::new($re).unwrap();
-        }
-        &*RE
-    }};
-}
 
 // ─── Line Classification Helpers ───
 
@@ -34,14 +24,14 @@ macro_rules! lazy_re {
 fn extract_content(line: &str) -> String {
     let cleaned = strip_ansi(line);
     // Remove timestamp prefix like "10:45:41.690     0>" or "10:45:41.690     0]"
-    let re = lazy_re!(r"^\d{2}:\d{2}:\d{2}\.\d{3}\s+\d+[>\]]\s*");
+    let re = diag::lazy_re!(r"^\d{2}:\d{2}:\d{2}\.\d{3}\s+\d+[>\]]\s*");
     let after_ts = re.replace(&cleaned, "");
     after_ts.trim().to_string()
 }
 
 /// Check if a line (after stripping ANSI) is just a timestamp prefix with optional node id.
 fn is_timestamp_only(line: &str) -> bool {
-    lazy_re!(r"^\d{2}:\d{2}:\d{2}\.\d{3}\s+\d+>$").is_match(line.trim())
+    diag::lazy_re!(r"^\d{2}:\d{2}:\d{2}\.\d{3}\s+\d+>$").is_match(line.trim())
 }
 
 /// Check if a line has meaningful content (not just ANSI noise / timestamp).
@@ -57,13 +47,12 @@ fn has_meaningful_content(line: &str) -> bool {
 /// Check if a line is a project start: contains a `.csproj` / `.sln` / `.vcxproj` path
 /// with parenthesized node number like `(1)` → `(28:20)`.
 fn is_project_start_line(cleaned: &str) -> bool {
-    let has_project_ext = cleaned.contains(".csproj")
-        || cleaned.contains(".vcxproj")
-        || cleaned.contains(".sln");
+    let has_project_ext =
+        cleaned.contains(".csproj") || cleaned.contains(".vcxproj") || cleaned.contains(".sln");
     if !has_project_ext {
         return false;
     }
-    lazy_re!(r"\(\d+(:\d+)?\)").is_match(cleaned)
+    diag::lazy_re!(r"\(\d+(:\d+)?\)").is_match(cleaned)
 }
 
 /// Check if a line is a project completion line: contains only a `.csproj` / `.vcxproj` path
@@ -94,7 +83,9 @@ fn is_build_output_line(cleaned: &str) -> Option<String> {
             return None;
         }
         // Right side must be a file path with a build artifact extension
-        if output.contains('.') && lazy_re!(r"\.(dll|exe|lib|pyd|so|dylib|app|target|winmd)$").is_match(output) {
+        if output.contains('.')
+            && diag::lazy_re!(r"\.(dll|exe|lib|pyd|so|dylib|app|target|winmd)$").is_match(output)
+        {
             return Some(format!("{} -> {}", project, output));
         }
     }
@@ -117,7 +108,10 @@ fn is_target_execution_line(cleaned: &str) -> bool {
         return false;
     }
     // Skip if it looks like a Windows drive path with colon (e.g., "D:\path:")
-    if cleaned.len() >= 3 && cleaned.chars().nth(1) == Some(':') && cleaned.chars().nth(2) == Some('\\') {
+    if cleaned.len() >= 3
+        && cleaned.chars().nth(1) == Some(':')
+        && cleaned.chars().nth(2) == Some('\\')
+    {
         return false;
     }
     true
@@ -127,15 +121,15 @@ fn is_target_execution_line(cleaned: &str) -> bool {
 /// Matches both standalone (`error MSBXXXX:`) and embedded (`file(line): error CSXXXX:`) formats.
 fn is_error_line(cleaned: &str) -> bool {
     // Standalone: "error MSB3202: ..." or "error CS0103: ..."
-    if lazy_re!(r"^error (MSB\d+|CS\d+)").is_match(cleaned) {
+    if diag::lazy_re!(r"^error (MSB\d+|CS\d+)").is_match(cleaned) {
         return true;
     }
     // Embedded in file path: "file(line): error CSXXXX: ..."
-    if lazy_re!(r":\s*error (MSB\d+|CS\d+):").is_match(cleaned) {
+    if diag::lazy_re!(r":\s*error (MSB\d+|CS\d+):").is_match(cleaned) {
         return true;
     }
     // Embedded without line number: "file: error CSXXXX: ..."
-    if lazy_re!(r"error (MSB\d+|CS\d+):").is_match(cleaned) {
+    if diag::lazy_re!(r"error (MSB\d+|CS\d+):").is_match(cleaned) {
         return true;
     }
     false
@@ -143,7 +137,7 @@ fn is_error_line(cleaned: &str) -> bool {
 
 /// Check if a line is a warning line.
 fn is_warning_line(cleaned: &str) -> bool {
-    lazy_re!(r"^warning (MSB\d+|CS\d+)").is_match(cleaned)
+    diag::lazy_re!(r"^warning (MSB\d+|CS\d+)").is_match(cleaned)
 }
 
 /// Check if a line starts a nested UBT build block.
@@ -153,8 +147,10 @@ fn is_nested_ubt_build_start(cleaned: &str) -> bool {
 
 /// Check if a line is an MSBuild version banner.
 fn is_msbuild_version_line(cleaned: &str) -> bool {
-    cleaned.contains("MSBuild") && lazy_re!(r"\d+\.\d+\.\d+").is_match(cleaned)
-        && !cleaned.starts_with("error") && !cleaned.starts_with("warning")
+    cleaned.contains("MSBuild")
+        && diag::lazy_re!(r"\d+\.\d+\.\d+").is_match(cleaned)
+        && !cleaned.starts_with("error")
+        && !cleaned.starts_with("warning")
 }
 
 /// Check if a line is a build header like `=== REBUILD (incremental, 2nd attempt) ===`.
@@ -293,7 +289,7 @@ impl BlockHandler for MsBuildHandler {
         // MSBuild version banner — capture
         if is_msbuild_version_line(&content) {
             // Extract version number
-            if let Some(caps) = lazy_re!(r"(\d+\.\d+\.\d+)").captures(&content) {
+            if let Some(caps) = diag::lazy_re!(r"(\d+\.\d+\.\d+)").captures(&content) {
                 self.msbuild_version = Some(caps.get(1).unwrap().as_str().to_string());
             }
             return true;
@@ -301,7 +297,11 @@ impl BlockHandler for MsBuildHandler {
 
         // Build header — capture mode
         if is_build_header(&content) {
-            let mode = content.trim_start_matches("=== ").trim_end_matches(" ===").trim().to_string();
+            let mode = content
+                .trim_start_matches("=== ")
+                .trim_end_matches(" ===")
+                .trim()
+                .to_string();
             self.build_mode = Some(mode);
             return true;
         }
@@ -398,8 +398,7 @@ impl BlockHandler for MsBuildHandler {
         if self.errors.is_empty() {
             lines.push(format!(
                 "ok msbuild: {} projects built{}",
-                built,
-                mode_display
+                built, mode_display
             ));
         } else {
             lines.push(format!(
@@ -517,7 +516,9 @@ mod tests {
     #[test]
     fn test_is_project_start_line_not() {
         assert!(!is_project_start_line("some random text"));
-        assert!(!is_project_start_line("Build: D:\\UE_5.6\\Engine\\Build\\BatchFiles\\Build.bat"));
+        assert!(!is_project_start_line(
+            "Build: D:\\UE_5.6\\Engine\\Build\\BatchFiles\\Build.bat"
+        ));
     }
 
     #[test]
@@ -553,8 +554,12 @@ mod tests {
 
     #[test]
     fn test_is_error_line() {
-        assert!(is_error_line("error MSB3202: The source file 'x' could not be found"));
-        assert!(is_error_line("error CS0103: The name 'foo' does not exist in the current context"));
+        assert!(is_error_line(
+            "error MSB3202: The source file 'x' could not be found"
+        ));
+        assert!(is_error_line(
+            "error CS0103: The name 'foo' does not exist in the current context"
+        ));
     }
 
     #[test]
@@ -700,16 +705,8 @@ Total execution time: 0.57 seconds
             "should contain nested UBT summary, got: {}",
             result
         );
-        assert!(
-            result.contains("Target is up to date"),
-            "got: {}",
-            result
-        );
-        assert!(
-            result.contains("Result: Succeeded"),
-            "got: {}",
-            result
-        );
+        assert!(result.contains("Target is up to date"), "got: {}", result);
+        assert!(result.contains("Result: Succeeded"), "got: {}", result);
     }
 
     #[test]
@@ -729,21 +726,9 @@ Total execution time: 0.57 seconds
             "should have 3 projects, got: {}",
             result
         );
-        assert!(
-            result.contains("built: ModuleA ->"),
-            "got: {}",
-            result
-        );
-        assert!(
-            result.contains("built: ModuleB ->"),
-            "got: {}",
-            result
-        );
-        assert!(
-            result.contains("built: ModuleC ->"),
-            "got: {}",
-            result
-        );
+        assert!(result.contains("built: ModuleA ->"), "got: {}", result);
+        assert!(result.contains("built: ModuleB ->"), "got: {}", result);
+        assert!(result.contains("built: ModuleC ->"), "got: {}", result);
     }
 
     #[test]
@@ -855,16 +840,8 @@ Result: Succeeded
             "build output should be preserved, got: {}",
             result
         );
-        assert!(
-            result.contains("built: ModuleB ->"),
-            "got: {}",
-            result
-        );
-        assert!(
-            result.contains("built: ModuleC ->"),
-            "got: {}",
-            result
-        );
+        assert!(result.contains("built: ModuleB ->"), "got: {}", result);
+        assert!(result.contains("built: ModuleC ->"), "got: {}", result);
     }
 
     #[test]

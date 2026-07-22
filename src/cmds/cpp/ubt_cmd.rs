@@ -6,20 +6,10 @@
 
 #![allow(dead_code)]
 
+use super::diag;
 use crate::core::runner;
 use crate::core::utils::{resolved_command, strip_ansi};
 use anyhow::Result;
-
-// ─── Regex helper ───
-
-macro_rules! lazy_re {
-    ($re:literal) => {{
-        lazy_static::lazy_static! {
-            static ref RE: regex::Regex = regex::Regex::new($re).unwrap();
-        }
-        &*RE
-    }};
-}
 
 // ─── State ───
 
@@ -75,7 +65,7 @@ impl UbtStats {
 /// Check if a line is a `@progress 'Phase Name' N%` line.
 fn is_progress_line(trimmed: &str) -> Option<&str> {
     // Matches: @progress 'Phase Name' 0% through 100%
-    lazy_re!(r"^@progress '([^']+)' \d+%$")
+    diag::lazy_re!(r"^@progress '([^']+)' \d+%$")
         .captures(trimmed)
         .map(|c| c.get(1).unwrap().as_str())
 }
@@ -83,7 +73,7 @@ fn is_progress_line(trimmed: &str) -> Option<&str> {
 /// Check if a line is a phase timing line like `Adding projects for all targets took 0.88s`.
 /// Returns (phase_name, timing_string).
 fn is_phase_timing(trimmed: &str) -> Option<(&str, &str)> {
-    let re = lazy_re!(r"^(.+?) took ([\d.]+)s$");
+    let re = diag::lazy_re!(r"^(.+?) took ([\d.]+)s$");
     let caps = re.captures(trimmed)?;
     Some((caps.get(1)?.as_str(), caps.get(2)?.as_str()))
 }
@@ -302,9 +292,9 @@ fn compose_output(stats: &UbtStats) -> String {
                 "ubt: projectfiles".to_string()
             }
         } else if cmd.contains("-build") || cmd.contains("-make") {
-            format!("ubt: build")
+            "ubt: build".to_string()
         } else {
-            format!("ubt")
+            "ubt".to_string()
         }
     };
 
@@ -383,7 +373,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         cmd,
         "ubt",
         &args_str,
-        move |input, exit_code| filter_ubt_output(input, exit_code),
+        filter_ubt_output,
         runner::RunOptions::with_tee("ubt"),
     )
 }
@@ -616,12 +606,12 @@ Result: Succeeded
 ";
         let result = filter_ubt(input, 0);
         // Should have phases listed but no progress lines
+        assert!(!result.contains("@progress"), "got: {}", result);
         assert!(
-            !result.contains("@progress"),
+            result.contains("Phase One") || result.contains("Phase Two"),
             "got: {}",
             result
         );
-        assert!(result.contains("Phase One") || result.contains("Phase Two"), "got: {}", result);
     }
 
     #[test]
@@ -632,10 +622,7 @@ Result: Succeeded
         // 50 progress lines (10 phases × 5 lines each)
         for phase in 1..=10 {
             for pct in &[0, 25, 50, 75, 100] {
-                input.push_str(&format!(
-                    "@progress 'Phase {}' {}%\n",
-                    phase, pct
-                ));
+                input.push_str(&format!("@progress 'Phase {}' {}%\n", phase, pct));
             }
         }
         input.push_str("Available x64 toolchains (1):\n");
