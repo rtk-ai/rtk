@@ -5,6 +5,9 @@
   "description": "Transparently rewrites shell commands to their RTK equivalents for 60-90% LLM token savings",
   "homepage": "https://github.com/rtk-ai/rtk",
   "license": "Apache-2.0",
+  "activation": {
+    "onStartup": true
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -18,11 +21,18 @@
         "type": "boolean",
         "default": false,
         "description": "Log rewrite decisions to console for debugging"
+      },
+      "approvalMode": {
+        "type": "string",
+        "enum": ["auto", "ask"],
+        "default": "auto",
+        "description": "How to handle exit-3 (ask) rewrites: 'auto' applies silently, 'ask' prompts the user"
       }
     }
   },
   "uiHints": {
     "enabled": { "label": "Enable RTK rewriting" },
-    "verbose": { "label": "Verbose logging" }
+    "verbose": { "label": "Verbose logging" },
+    "approvalMode": { "label": "Approval mode" }
   }
 }
