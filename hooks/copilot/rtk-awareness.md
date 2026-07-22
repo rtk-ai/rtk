@@ -58,3 +58,15 @@ When Copilot CLI adds `updatedInput` support, only `rtk hook` needs updating —
 | GitHub Copilot CLI    | `PreToolUse` deny-with-suggestion       | Denial + retry           | `.github/hooks/rtk-rewrite.json`   |
 | OpenCode              | Plugin `tool.execute.before`            | Transparent rewrite      | `hooks/opencode-rtk.ts`            |
 | (any)                 | Custom instructions                     | Prompt-level guidance    | `.github/copilot-instructions.md`  |
+
+## Reading the full output
+
+RTK output is a filtered summary — for most commands it keeps what matters
+(test failures, panics, and build errors are preserved). When you need the
+complete, unfiltered output to confirm a claim (tests really passed, build is
+really clean) rather than skim it, get the raw output instead of trusting the
+summary:
+
+- Run `rtk proxy <cmd>` to re-run the command with no filtering.
+- Or, when the filtered output ends with `[full output: <path>]`, read that
+  file directly — it is the complete, unfiltered log already on disk.

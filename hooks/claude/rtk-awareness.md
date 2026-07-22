@@ -26,4 +26,16 @@ which rtk             # Verify correct binary
 All other commands are automatically rewritten by the Claude Code hook.
 Example: `git status` → `rtk git status` (transparent, 0 tokens overhead)
 
-Refer to CLAUDE.md for full command reference.
+## Reading the full output
+
+RTK output is a filtered summary — for most commands it keeps what matters
+(test failures, panics, and build errors are preserved). When you need the
+complete, unfiltered output to confirm a claim (tests really passed, build is
+really clean) rather than skim it, get the raw output instead of trusting the
+summary:
+
+- Run `rtk proxy <cmd>` to re-run the command with no filtering.
+- Or, when the filtered output ends with `[full output: <path>]`, read that
+  file directly — it is the complete, unfiltered log already on disk.
+
+Run `rtk --help` for the full command reference.
