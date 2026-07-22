@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 
 fn rtk_stdin(args: &[&str], input: &str) -> String {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .env("LC_ALL", "C")
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -63,6 +64,7 @@ fn rtk_output_in_dir(dir: &std::path::Path, args: &[&str]) -> (String, String, O
         dir.to_path_buf()
     };
     let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .env("LC_ALL", "C")
         .args(args)
         .current_dir(dir)
         .env("CLAUDE_CONFIG_DIR", dir.join(".rtk-test-no-claude"))
