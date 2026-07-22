@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, and Factory Droid
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, Grok Build, OpenCode, Hermes, Kilo Code, Antigravity, and Factory Droid
 sidebar:
   order: 3
 ---
@@ -41,6 +41,7 @@ Agent runs "cargo test"
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | AGENTS.md instructions | N/A |
+| Grok Build | `~/.grok/AGENTS.md` instructions | N/A |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
 | Mistral Vibe | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Pending upstream |
@@ -179,6 +180,20 @@ rtk init --codex           # project-scoped (AGENTS.md)
 rtk init --global --codex  # user-global (~/.codex/AGENTS.md)
 ```
 
+### Grok Build
+
+```bash
+rtk init -g --agent grok   # global-only (~/.grok/AGENTS.md + RTK.md sidecar)
+```
+
+Grok only auto-loads **recognized** instruction filenames under `~/.grok/` (for example `AGENTS.md`). RTK installs a managed prefer-`rtk` block into `~/.grok/AGENTS.md` and keeps a human-readable `~/.grok/RTK.md` sidecar (not auto-loaded). Soft guidance only — Grok does not apply Claude-style command mutation. Restart Grok (or start a new session) and verify with `grok inspect`.
+
+Uninstall:
+
+```bash
+rtk init -g --uninstall --agent grok
+```
+
 ### Kilo Code
 
 ```bash
@@ -207,7 +222,7 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Codex, Grok Build, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
 
 ## Windows support
 

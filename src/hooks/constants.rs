@@ -58,3 +58,17 @@ pub const HERMES_PLUGINS_SUBDIR: &str = "plugins";
 pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";
 pub const HERMES_PLUGIN_INIT_FILE: &str = "__init__.py";
 pub const HERMES_PLUGIN_MANIFEST_FILE: &str = "plugin.yaml";
+
+/// Grok Build config directory under home.
+pub const GROK_DIR: &str = ".grok";
+/// Global agents-instructions filename under `~/.grok/` (recognized by Grok).
+///
+/// Grok only auto-loads recognized top-level names (`AGENTS.md`, `Claude.md`,
+/// …). `RTK.md` alone is not discovered — install must patch this file.
+pub const GROK_AGENTS_FILE: &str = "AGENTS.md";
+/// Optional sidecar awareness body under `~/.grok/` (not auto-loaded by Grok).
+pub const GROK_AWARENESS_FILE: &str = "RTK.md";
+/// Legacy PreToolUse hook file from the hybrid Grok install (migration cleanup).
+pub const GROK_LEGACY_HOOKS_SUBDIR: &str = "hooks";
+/// Legacy RTK-owned hook JSON filename under `~/.grok/hooks/`.
+pub const GROK_LEGACY_HOOK_JSON: &str = "rtk.json";

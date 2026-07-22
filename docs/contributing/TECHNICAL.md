@@ -317,6 +317,7 @@ Start here, then drill down into each README for file-level details.
 | [`windsurf/`](../hooks/windsurf/README.md) | Windsurf / Cascade | Rules file (workspace-scoped) |
 | [`codex/`](../hooks/codex/README.md) | OpenAI Codex CLI | Awareness document, AGENTS.md integration |
 | [`opencode/`](../hooks/opencode/README.md) | OpenCode | TypeScript plugin, zx library, in-place mutation |
+| [`grok/`](../hooks/grok/README.md) | Grok Build | Codex-style awareness (`~/.grok/AGENTS.md` + `RTK.md` sidecar); no PreToolUse rewrite |
 
 ---
 
@@ -331,6 +332,7 @@ RTK supports the following LLM agents through hook integrations:
 | GitHub Copilot CLI | Rust binary | `rtk hook copilot` reads JSON | No (deny + suggestion) |
 | Cursor | Rust binary | `rtk hook cursor` reads JSON | Yes (`updated_input`) |
 | Gemini CLI | Rust binary | `rtk hook gemini` reads JSON | Yes (`hookSpecificOutput`) |
+| Grok Build | Awareness doc | `~/.grok/AGENTS.md` managed block + `RTK.md` sidecar (Codex-style prompt guidance) | N/A (prompt) |
 | Cline/Roo Code | Rules file | Prompt-level guidance | N/A (prompt) |
 | Windsurf | Rules file | Prompt-level guidance | N/A (prompt) |
 | Codex CLI | Awareness doc | AGENTS.md integration | N/A (prompt) |
