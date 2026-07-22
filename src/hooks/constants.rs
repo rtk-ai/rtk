@@ -53,6 +53,21 @@ pub const DROID_EXECUTE_MATCHER: &str = "Execute";
 /// `.factory` segment is appended to it): `$FACTORY_HOME_OVERRIDE/.factory`.
 pub const DROID_HOME_ENV: &str = "FACTORY_HOME_OVERRIDE";
 
+/// Devin CLI config directory (project: `.devin/`, global: `~/.config/devin/`).
+pub const DEVIN_DIR: &str = ".devin";
+/// Standalone Devin hooks file (project-level, root is the event map).
+pub const DEVIN_HOOKS_FILE: &str = "hooks.v1.json";
+/// Devin settings file (global and project, hooks live under a top-level `hooks` key).
+pub const DEVIN_SETTINGS_FILE: &str = "config.json";
+/// Devin local override settings file (`gitignored` personal project overrides).
+pub const DEVIN_SETTINGS_LOCAL_JSON: &str = "config.local.json";
+/// Tool matcher used by Devin CLI for shell command execution.
+pub const DEVIN_EXECUTE_MATCHER: &str = "^exec$";
+/// Native Rust hook command for Devin CLI.
+pub const DEVIN_HOOK_COMMAND: &str = "rtk hook devin";
+/// Environment variable to override the Devin global config directory.
+pub const DEVIN_CONFIG_DIR_ENV: &str = "DEVIN_CONFIG_DIR";
+
 pub const HERMES_DIR: &str = ".hermes";
 pub const HERMES_PLUGINS_SUBDIR: &str = "plugins";
 pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";

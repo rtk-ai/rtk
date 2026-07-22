@@ -13,15 +13,18 @@ use crate::hooks::constants::{
 };
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, DROID_DIR,
-    DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR,
-    DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
-    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
-    HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
-    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, DEVIN_DIR,
+    DEVIN_EXECUTE_MATCHER, DEVIN_HOOKS_FILE, DEVIN_HOOK_COMMAND, DEVIN_SETTINGS_FILE,
+    DEVIN_SETTINGS_LOCAL_JSON, DROID_DIR, DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE,
+    DROID_HOOKS_SUBDIR, DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR,
+    HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE,
+    HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR,
+    PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
+    SETTINGS_JSON,
 };
 use super::integrity;
 use super::is_claude_hook_command;
+use super::permissions;
 
 // Embedded OpenCode plugin (auto-rewrite)
 const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
@@ -3356,6 +3359,549 @@ fn remove_droid_hook_from_json(root: &mut serde_json::Value, layout: DroidLayout
     modified
 }
 
+// ─── Devin CLI support ────────────────────────────────────────────────
+
+const RTK_DEVIN_AGENTS_BLOCK: &str = r##"<!-- rtk-instructions -->
+When running shell commands, prefer `rtk <command>` (e.g. `rtk git status`, `rtk cargo test`, `rtk grep`, `rtk find`, `rtk read`). RTK compacts supported command output and passes unsupported commands through unchanged.
+<!-- /rtk-instructions -->"##;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DevinLayout {
+    /// `hooks.v1.json`: the event map is the file's root object.
+    Root,
+    /// `config.json`: hook events live under a top-level `hooks` key.
+    Nested,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct DevinHookFile {
+    path: PathBuf,
+    layout: DevinLayout,
+}
+
+/// Install Devin CLI PreToolUse hook.
+pub fn run_devin_mode(global: bool, patch_mode: PatchMode, ctx: InitContext) -> Result<()> {
+    let target = resolve_devin_install_target(global)?;
+
+    if !ctx.dry_run {
+        if let Some(parent) = target.path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create Devin config directory: {}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+
+    let patched = patch_devin_hook_file(&target, patch_mode, ctx)?;
+
+    if !global && patch_mode != PatchMode::Skip && patched {
+        maybe_patch_devin_agents_md(ctx)?;
+    }
+
+    if ctx.dry_run {
+        print_dry_run_footer();
+    } else {
+        let scope = if global { "global" } else { "project" };
+        println!("\nDevin CLI hook registered ({scope}).\n");
+        println!("  Command:    {}", DEVIN_HOOK_COMMAND);
+        println!("  Hooks file: {}", target.path.display());
+        if patched {
+            println!("  RTK PreToolUse entry added");
+        } else {
+            println!("  RTK PreToolUse entry already present or skipped");
+        }
+        println!("  Restart Devin CLI. Test with: git status\n");
+    }
+
+    Ok(())
+}
+
+fn resolve_devin_install_target(global: bool) -> Result<DevinHookFile> {
+    if global {
+        let dir = permissions::resolve_devin_config_dir()
+            .context("Cannot determine Devin config directory. Set $DEVIN_CONFIG_DIR or $HOME.")?;
+        return Ok(DevinHookFile {
+            path: dir.join(DEVIN_SETTINGS_FILE),
+            layout: DevinLayout::Nested,
+        });
+    }
+
+    let devin_dir = std::env::current_dir()
+        .context("Failed to read current directory")?
+        .join(DEVIN_DIR);
+
+    let candidates = devin_hook_file_candidates(&devin_dir);
+
+    for candidate in &candidates {
+        if let Some(json) = read_devin_json(&candidate.path)? {
+            if devin_hook_already_present(&json, candidate.layout) {
+                return Ok(candidate.clone());
+            }
+        }
+    }
+
+    for candidate in &candidates {
+        if candidate.path.exists() {
+            return Ok(candidate.clone());
+        }
+    }
+
+    Ok(DevinHookFile {
+        path: devin_dir.join(DEVIN_HOOKS_FILE),
+        layout: DevinLayout::Root,
+    })
+}
+
+fn devin_hook_file_candidates(devin_dir: &Path) -> [DevinHookFile; 3] {
+    [
+        DevinHookFile {
+            path: devin_dir.join(DEVIN_HOOKS_FILE),
+            layout: DevinLayout::Root,
+        },
+        DevinHookFile {
+            path: devin_dir.join(DEVIN_SETTINGS_FILE),
+            layout: DevinLayout::Nested,
+        },
+        DevinHookFile {
+            path: devin_dir.join(DEVIN_SETTINGS_LOCAL_JSON),
+            layout: DevinLayout::Nested,
+        },
+    ]
+}
+
+fn read_devin_json(path: &Path) -> Result<Option<serde_json::Value>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    if content.trim().is_empty() {
+        return Ok(Some(serde_json::json!({})));
+    }
+    serde_json::from_str(&content)
+        .map(Some)
+        .with_context(|| format!("Failed to parse {} as JSON", path.display()))
+}
+
+fn devin_events(root: &serde_json::Value, layout: DevinLayout) -> &serde_json::Value {
+    match layout {
+        DevinLayout::Root => root,
+        DevinLayout::Nested => root.get("hooks").unwrap_or(&serde_json::Value::Null),
+    }
+}
+
+fn devin_hook_already_present(root: &serde_json::Value, layout: DevinLayout) -> bool {
+    let pre = match devin_events(root, layout)
+        .get(PRE_TOOL_USE_KEY)
+        .and_then(|p| p.as_array())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    pre.iter().any(|matcher_entry| {
+        let matcher = matcher_entry
+            .get("matcher")
+            .and_then(|m| m.as_str())
+            .unwrap_or("");
+        if matcher != DEVIN_EXECUTE_MATCHER {
+            return false;
+        }
+        matcher_entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .map(|arr| arr.as_slice())
+            .unwrap_or(&[])
+            .iter()
+            .any(|hook| {
+                hook.get("command")
+                    .and_then(|c| c.as_str())
+                    .is_some_and(|cmd| cmd == DEVIN_HOOK_COMMAND)
+            })
+    })
+}
+
+fn insert_devin_hook_entry(root: &mut serde_json::Value, layout: DevinLayout) -> Result<()> {
+    let events = match layout {
+        DevinLayout::Root => root
+            .as_object_mut()
+            .context("Devin hook file root is not an object")?,
+        DevinLayout::Nested => root
+            .as_object_mut()
+            .context("Devin config root is not an object")?
+            .entry("hooks")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .context("Devin config `hooks` key is not an object")?,
+    };
+
+    let pre_tool_use = events
+        .entry(PRE_TOOL_USE_KEY)
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .context("PreToolUse value is not an array")?;
+
+    for entry in pre_tool_use.iter_mut() {
+        let matcher = entry.get("matcher").and_then(|m| m.as_str()).unwrap_or("");
+        if matcher == DEVIN_EXECUTE_MATCHER {
+            if let Some(hook_array) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                hook_array.push(serde_json::json!({
+                    "type": "command",
+                    "command": DEVIN_HOOK_COMMAND
+                }));
+                return Ok(());
+            }
+        }
+    }
+
+    pre_tool_use.push(serde_json::json!({
+        "matcher": DEVIN_EXECUTE_MATCHER,
+        "hooks": [
+            { "type": "command", "command": DEVIN_HOOK_COMMAND }
+        ]
+    }));
+    Ok(())
+}
+
+fn patch_devin_hook_file(file: &DevinHookFile, mode: PatchMode, ctx: InitContext) -> Result<bool> {
+    let InitContext { verbose, dry_run } = ctx;
+    let path = &file.path;
+
+    let mut root = read_devin_json(path)?.unwrap_or_else(|| serde_json::json!({}));
+
+    if devin_hook_already_present(&root, file.layout) {
+        if verbose > 0 {
+            eprintln!("{}: RTK hook already present", path.display());
+        }
+        return Ok(false);
+    }
+
+    match mode {
+        PatchMode::Skip => {
+            print_devin_manual_instructions(path, file.layout);
+            return Ok(false);
+        }
+        PatchMode::Ask => {
+            if dry_run {
+                println!("[dry-run] would prompt before patching {}", path.display());
+            } else if !prompt_user_consent(path)? {
+                print_devin_manual_instructions(path, file.layout);
+                return Ok(false);
+            }
+        }
+        PatchMode::Auto => {}
+    }
+
+    insert_devin_hook_entry(&mut root, file.layout)?;
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize Devin hook file")?;
+
+    if dry_run {
+        println!("[dry-run] would patch Devin hook file: {}", path.display());
+        if verbose > 0 {
+            println!("[dry-run] content:\n{}", serialized);
+        }
+        return Ok(true);
+    }
+
+    if path.exists() {
+        let backup_path = path.with_extension("json.bak");
+        fs::copy(path, &backup_path)
+            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+        if verbose > 0 {
+            eprintln!("Backup: {}", backup_path.display());
+        }
+    }
+
+    atomic_write(path, &serialized)?;
+    Ok(true)
+}
+
+fn print_devin_manual_instructions(path: &Path, layout: DevinLayout) {
+    println!(
+        "To install manually, add the following to {}:",
+        path.display()
+    );
+    let entry = serde_json::json!({
+        "matcher": DEVIN_EXECUTE_MATCHER,
+        "hooks": [
+            { "type": "command", "command": DEVIN_HOOK_COMMAND }
+        ]
+    });
+    match layout {
+        DevinLayout::Root => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    PRE_TOOL_USE_KEY: [entry]
+                }))
+                .unwrap()
+            );
+        }
+        DevinLayout::Nested => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "hooks": {
+                        PRE_TOOL_USE_KEY: [entry]
+                    }
+                }))
+                .unwrap()
+            );
+        }
+    }
+}
+
+fn maybe_patch_devin_agents_md(ctx: InitContext) -> Result<()> {
+    let path = PathBuf::from(AGENTS_MD);
+    if !path.exists() {
+        return Ok(());
+    }
+    write_rtk_block(
+        &path,
+        RTK_DEVIN_AGENTS_BLOCK,
+        "RTK instructions",
+        "rtk init --agent devin",
+        ctx,
+    )?;
+    Ok(())
+}
+
+pub fn uninstall_devin(global: bool, ctx: InitContext) -> Result<()> {
+    let removed = uninstall_devin_artifacts(global, ctx)?;
+
+    if removed.is_empty() {
+        println!("RTK Devin CLI support was not installed (nothing to remove)");
+    } else {
+        let header = if ctx.dry_run {
+            "[dry-run] would uninstall RTK for Devin CLI:"
+        } else {
+            "RTK uninstalled for Devin CLI:"
+        };
+        println!("{}", header);
+        for item in removed {
+            println!("  - {}", item);
+        }
+    }
+
+    if ctx.dry_run {
+        print_dry_run_footer();
+    }
+    Ok(())
+}
+
+fn uninstall_devin_artifacts(global: bool, ctx: InitContext) -> Result<Vec<String>> {
+    let mut removed = Vec::new();
+
+    let devin_dir = if global {
+        permissions::resolve_devin_config_dir()
+            .context("Cannot determine Devin config directory. Set $DEVIN_CONFIG_DIR or $HOME.")?
+    } else {
+        std::env::current_dir()
+            .context("Failed to read current directory")?
+            .join(DEVIN_DIR)
+    };
+
+    for candidate in devin_hook_file_candidates(&devin_dir) {
+        if remove_devin_hook_from_file(&candidate, ctx)? {
+            removed.push(format!("Devin hook file: {}", candidate.path.display()));
+        }
+    }
+
+    if !global {
+        let agents_md = PathBuf::from(AGENTS_MD);
+        if agents_md.exists() {
+            let content = fs::read_to_string(&agents_md)
+                .with_context(|| format!("Failed to read AGENTS.md: {}", agents_md.display()))?;
+            if content.contains(RTK_BLOCK_START) {
+                let (cleaned, did_remove) = remove_rtk_block(&content);
+                if did_remove {
+                    if !ctx.dry_run {
+                        atomic_write(&agents_md, &cleaned)?;
+                    }
+                    removed.push(format!("AGENTS.md: {}", agents_md.display()));
+                }
+            }
+        }
+    }
+
+    Ok(removed)
+}
+
+fn remove_devin_hook_from_file(file: &DevinHookFile, ctx: InitContext) -> Result<bool> {
+    let InitContext { verbose, dry_run } = ctx;
+    let path = &file.path;
+
+    let mut root = match read_devin_json(path)? {
+        Some(v) => v,
+        None => return Ok(false),
+    };
+
+    if !remove_devin_hook_from_json(&mut root, file.layout) {
+        return Ok(false);
+    }
+
+    if dry_run {
+        println!(
+            "[dry-run] would remove RTK entry from Devin hook file: {}",
+            path.display()
+        );
+    } else {
+        let backup_path = path.with_extension("json.bak");
+        fs::copy(path, &backup_path).ok();
+
+        let serialized =
+            serde_json::to_string_pretty(&root).context("Failed to serialize Devin hook file")?;
+        atomic_write(path, &serialized)?;
+
+        if verbose > 0 {
+            eprintln!("Removed RTK hook from {}", path.display());
+        }
+    }
+    Ok(true)
+}
+
+fn remove_devin_hook_from_json(root: &mut serde_json::Value, layout: DevinLayout) -> bool {
+    let events_obj = match layout {
+        DevinLayout::Root => root.as_object_mut(),
+        DevinLayout::Nested => root.get_mut("hooks").and_then(|h| h.as_object_mut()),
+    };
+    let events_obj = match events_obj {
+        Some(o) => o,
+        None => return false,
+    };
+
+    let pre_tool_use = match events_obj
+        .get_mut(PRE_TOOL_USE_KEY)
+        .and_then(|p| p.as_array_mut())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    let mut modified = false;
+    let mut empty_matchers = Vec::new();
+
+    for (idx, entry) in pre_tool_use.iter_mut().enumerate() {
+        let matcher = entry.get("matcher").and_then(|m| m.as_str()).unwrap_or("");
+        if matcher != DEVIN_EXECUTE_MATCHER {
+            continue;
+        }
+        if let Some(hook_arr) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+            let original = hook_arr.len();
+            hook_arr.retain(|hook| {
+                hook.get("command").and_then(|c| c.as_str()) != Some(DEVIN_HOOK_COMMAND)
+            });
+            if hook_arr.len() < original {
+                modified = true;
+            }
+            if hook_arr.is_empty() {
+                empty_matchers.push(idx);
+            }
+        }
+    }
+
+    for idx in empty_matchers.into_iter().rev() {
+        pre_tool_use.remove(idx);
+        modified = true;
+    }
+
+    if pre_tool_use.is_empty() {
+        events_obj.remove(PRE_TOOL_USE_KEY);
+        modified = true;
+    }
+
+    if layout == DevinLayout::Nested
+        && root
+            .get("hooks")
+            .and_then(|h| h.as_object())
+            .is_some_and(|o| o.is_empty())
+    {
+        if let Some(obj) = root.as_object_mut() {
+            obj.remove("hooks");
+        }
+    }
+
+    modified
+}
+
+pub fn show_devin_config() -> Result<()> {
+    println!("rtk Configuration (Devin CLI):\n");
+
+    match permissions::resolve_devin_config_dir() {
+        Some(dir) => {
+            let global_config = dir.join(DEVIN_SETTINGS_FILE);
+            if let Some(v) = read_devin_json(&global_config)? {
+                if devin_hook_already_present(&v, DevinLayout::Nested) {
+                    println!(
+                        "[ok] Global hook: {} in {}",
+                        DEVIN_HOOK_COMMAND,
+                        global_config.display()
+                    );
+                } else {
+                    println!(
+                        "[--] Global hook: not present in {}",
+                        global_config.display()
+                    );
+                }
+            } else {
+                println!("[--] Global hook: {} not found", global_config.display());
+            }
+        }
+        None => println!("[--] Devin config directory not found"),
+    }
+
+    let local_devin_dir = std::env::current_dir()
+        .map(|d| d.join(DEVIN_DIR))
+        .unwrap_or_default();
+    for path in [
+        local_devin_dir.join(DEVIN_HOOKS_FILE),
+        local_devin_dir.join(DEVIN_SETTINGS_FILE),
+        local_devin_dir.join(DEVIN_SETTINGS_LOCAL_JSON),
+    ] {
+        let layout = if path.file_name().and_then(|n| n.to_str()) == Some(DEVIN_HOOKS_FILE) {
+            DevinLayout::Root
+        } else {
+            DevinLayout::Nested
+        };
+        if let Some(v) = read_devin_json(&path)? {
+            if devin_hook_already_present(&v, layout) {
+                println!(
+                    "[ok] Project hook: {} in {}",
+                    DEVIN_HOOK_COMMAND,
+                    path.display()
+                );
+            } else {
+                println!("[--] Project hook: not present in {}", path.display());
+            }
+        } else {
+            println!("[--] Project hook: {} not found", path.display());
+        }
+    }
+
+    let agents_md = PathBuf::from(AGENTS_MD);
+    if agents_md.exists()
+        && fs::read_to_string(&agents_md)
+            .unwrap_or_default()
+            .contains(RTK_BLOCK_START)
+    {
+        println!("[ok] AGENTS.md: RTK instructions present");
+    } else {
+        println!("[--] AGENTS.md: not found or no RTK instructions");
+    }
+
+    println!("\nUsage:");
+    println!("  rtk init -g --agent devin          # Global Devin CLI hook");
+    println!("  rtk init --agent devin             # Project Devin CLI hook");
+    println!("  rtk init --agent devin --uninstall # Remove Devin CLI hook");
+    println!("  rtk init --agent devin --dry-run   # Preview changes");
+
+    Ok(())
+}
+
 fn codex_rtk_md_ref(codex_dir: &Path) -> String {
     format!("@{}", codex_dir.join(RTK_MD).display())
 }
@@ -3868,12 +4414,12 @@ fn remove_cursor_hook_from_json(root: &mut serde_json::Value) -> bool {
 }
 
 /// Show current rtk configuration
-pub fn show_config(codex: bool) -> Result<()> {
-    if codex {
-        return show_codex_config();
+pub fn show_config(codex: bool, agent: Option<crate::AgentTarget>) -> Result<()> {
+    match agent {
+        Some(crate::AgentTarget::Devin) => show_devin_config(),
+        _ if codex => show_codex_config(),
+        _ => show_claude_config(),
     }
-
-    show_claude_config()
 }
 
 fn show_claude_config() -> Result<()> {
@@ -4103,6 +4649,7 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --codex         # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
     println!("  rtk init -g --opencode      # OpenCode plugin only");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
+    println!("  rtk init -g --agent devin   # Install Devin CLI hook");
 
     Ok(())
 }
