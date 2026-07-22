@@ -23,6 +23,22 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 
 **Compound splitting** — The rewrite engine walks the tokens, splitting on `Operator` (`&&`, `||`, `;`) and `Pipe` (`|`). Each segment is rewritten independently. For pipes, only the left side is rewritten (the pipe consumer like `grep` or `head` runs raw). `find`/`fd` before a pipe is never rewritten because rtk's grouped output format breaks pipe consumers like `xargs`.
 
+**Quoted shell wrappers** — An exact `sh -c`, `bash -c`, `zsh -c`, or
+`fish -c` wrapper with one quoted script can recurse through the same compound
+rewrite:
+
+```
+bash -c "head foo && grep -R bar ."
+→ bash -c "rtk read foo && rtk grep -R bar ."
+```
+
+The wrapper parser replaces only the script's byte span, preserving the shell
+path, quote delimiters, whitespace, and suffix arguments. It accepts the
+portable operator subset understood by the shared lexer. Unquoted scripts,
+combined or additional shell options, active expansion in an outer double
+quote, redirects to files, fish-specific control syntax, and nested wrappers
+remain unchanged.
+
 **Per-segment rewriting** — Each segment goes through:
 
 1. Strip trailing redirects (`2>&1`, `>/dev/null`) — matched via lexer tokens, set aside, re-appended after rewriting
@@ -32,12 +48,14 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 
 **Guards along the way:**
 - `RTK_DISABLED=1` in the env prefix → skip rewrite
+- Command/process substitution, parenthesized syntax, incomplete quoting, or a shell control keyword at a command boundary → defer unchanged to the host
+- Quoted shell wrappers that fall outside the conservative `-c` subset → defer unchanged to the host
 - `gh` with `--json`/`--jq`/`--template` → skip (structured output, rtk would corrupt it)
 - `cat` with flags other than `-n` → skip (different semantics than `rtk read`)
 - `cat`/`head`/`tail` with `>` or `>>` → skip (write operation, not a read)
 - Command in `hooks.exclude_commands` config → skip
 
-**Result**: `rtk cargo fmt --all && rtk cargo test 2>&1 | tail -20`. Bash handles the `&&` and `|` at execution time — each `rtk` invocation is a separate process.
+**Result**: `rtk cargo fmt --all && rtk cargo test 2>&1 | tail -20`. The host shell handles the `&&` and `|` at execution time — each `rtk` invocation is a separate process. RTK does not select or replace that shell.
 
 ## How History Analysis Works
 

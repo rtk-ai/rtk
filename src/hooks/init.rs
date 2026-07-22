@@ -5620,6 +5620,18 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_awareness_documents_explicit_shell_selection() {
+        assert!(
+            RTK_SLIM_CODEX.contains("rtk run --shell fish -c '<script>'"),
+            "Codex awareness must document explicit fish shell selection"
+        );
+        assert!(
+            RTK_SLIM_CODEX.contains("host may evaluate a command before RTK starts"),
+            "Codex awareness must preserve the host-shell caveat"
+        );
+    }
+
+    #[test]
     fn test_resolve_codex_dir_prefers_codex_home_and_ignores_empty_value() {
         let codex_home = PathBuf::from("/tmp/custom-codex-home");
         let home_dir = PathBuf::from("/tmp/home");

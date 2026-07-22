@@ -2,10 +2,9 @@
 
 use crate::core::stream::StreamFilter;
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::process::Command;
 
 const MAX_RUNNER_FAILURES: usize = CAP_WARNINGS;
 const MAX_RUNNER_LINES: usize = CAP_LIST;
@@ -102,44 +101,36 @@ impl StreamFilter for ErrorStreamFilter {
     }
 }
 
-fn build_shell_command(command: &str) -> Command {
-    if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd");
-        c.args(["/C", command]);
-        c
-    } else {
-        let mut c = Command::new("sh");
-        c.args(["-c", command]);
-        c
-    }
-}
-
 /// Run a command and filter output to show only errors/warnings
-pub fn run_err(command: &str, verbose: u8) -> Result<i32> {
+pub fn run_err(command: &[String], shell: Option<&str>, verbose: u8) -> Result<i32> {
+    let command_display = crate::core::shell::display_args(command);
     if verbose > 0 {
-        eprintln!("Running: {}", command);
+        eprintln!("Running: {}", command_display);
     }
-    let cmd = build_shell_command(command);
+    let cmd = crate::core::shell::command_from_args(command, shell)
+        .context("Failed to prepare err command")?;
     crate::core::runner::run_streamed(
         cmd,
         "err",
-        command,
+        &command_display,
         Box::new(ErrorStreamFilter::new()),
         crate::core::runner::RunOptions::with_tee("err"),
     )
 }
 
 /// Run tests and show only failures
-pub fn run_test(command: &str, verbose: u8) -> Result<i32> {
+pub fn run_test(command: &[String], shell: Option<&str>, verbose: u8) -> Result<i32> {
+    let command_display = crate::core::shell::display_args(command);
     if verbose > 0 {
-        eprintln!("Running tests: {}", command);
+        eprintln!("Running tests: {}", command_display);
     }
-    let cmd = build_shell_command(command);
-    let command_owned = command.to_string();
+    let cmd = crate::core::shell::command_from_args(command, shell)
+        .context("Failed to prepare test command")?;
+    let command_owned = command_display.clone();
     crate::core::runner::run_filtered(
         cmd,
         "test",
-        command,
+        &command_display,
         move |raw| extract_test_summary(raw, &command_owned),
         crate::core::runner::RunOptions::with_tee("test"),
     )

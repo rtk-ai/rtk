@@ -184,8 +184,9 @@ rtk go test                     # Go tests (NDJSON, -90%)
 rtk cargo test                  # Cargo tests (-90%)
 rtk rake test                   # Ruby minitest (-90%)
 rtk rspec                       # RSpec tests (JSON, -60%+)
-rtk err <cmd>                   # Filter errors only from any command
-rtk test <cmd>                  # Generic test wrapper - failures only (-90%)
+rtk err <cmd> [args...]         # Direct argv execution, errors/warnings only
+rtk test <cmd> [args...]        # Direct argv execution, failures only (-90%)
+rtk err --shell fish '<script>' # Explicit shell for shell-specific syntax
 ```
 
 ### Build & Lint
@@ -258,9 +259,20 @@ rtk env -f AWS                  # Filtered env vars
 rtk log app.log                 # Deduplicated logs
 rtk curl <url>                  # Truncate + save full output
 rtk wget <url>                  # Download, strip progress bars
-rtk summary <long command>      # Heuristic summary
+rtk summary <cmd> [args...]     # Direct argv execution + heuristic summary
+rtk run <cmd> [args...]         # Raw direct execution (no filtering/tracking)
+rtk run -c '<script>'           # Shell string via sh (cmd on Windows)
+rtk run --shell fish -c '<script>' # Explicit shell for shell-specific syntax
 rtk proxy <command>             # Raw passthrough + tracking
 ```
+
+`rtk run`, `rtk err`, `rtk test`, and `rtk summary` preserve positional
+argument boundaries and do not expand globs, variables, or operators by
+default. Use `-c` with `rtk run`, or `--shell <name>` with the filtered
+wrappers, only when a command intentionally requires shell syntax. Pass an
+explicit shell script as one quoted argument; RTK does not infer the parser
+from `$SHELL` because the environment value may differ from the actual command
+executor.
 
 ### Token Savings Analytics
 ```bash
@@ -319,6 +331,20 @@ The most effective way to use rtk. The hook transparently intercepts Bash comman
 **Result**: 100% rtk adoption across all conversations and subagents, zero token overhead.
 
 **Scope note:** this only applies to Bash tool calls. Claude Code built-in tools such as `Read`, `Grep`, and `Glob` bypass the hook, so use shell commands or explicit `rtk` commands when you want RTK filtering there.
+
+Simple quoted shell wrappers are also rewritten without changing the selected
+shell:
+
+```bash
+bash -c "head foo && grep -R bar ."
+# → bash -c "rtk read foo && rtk grep -R bar ."
+```
+
+This support is intentionally conservative: it covers exact `sh -c`,
+`bash -c`, `zsh -c`, and `fish -c` wrappers with a quoted portable script. Shell
+expansion in an outer double quote, additional shell options, redirects to
+files, fish-specific control syntax, and nested wrappers pass through
+unchanged.
 
 ### Setup
 

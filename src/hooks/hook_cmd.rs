@@ -790,6 +790,23 @@ mod tests {
     }
 
     #[test]
+    fn test_copilot_cli_shell_wrapper_rewrites_without_auto_allow() {
+        let command = "bash -c 'git status; cargo test'";
+        let verdict = permissions::check_command_with_rules(command, &[], &[], &["*".to_string()]);
+        let response = copilot_cli_response_from_decision(
+            &cli_args(command),
+            decide_from_verdict(command, verdict),
+            command,
+        )
+        .expect("wrapper rewrite expected");
+        assert_eq!(
+            response["modifiedArgs"]["command"],
+            "bash -c 'rtk git status; rtk cargo test'"
+        );
+        assert!(response.get("permissionDecision").is_none());
+    }
+
+    #[test]
     fn test_copilot_cli_deny_returns_none() {
         assert!(copilot_cli_response_from_decision(
             &cli_args("cargo test"),
@@ -1046,6 +1063,19 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_shell_wrapper_rewrites_without_auto_allow() {
+        let result = run_claude_inner(&claude_input(r#"bash -c "head foo && grep -R bar .""#))
+            .expect("wrapper rewrite expected");
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let output = &v["hookSpecificOutput"];
+        assert_eq!(
+            output["updatedInput"]["command"],
+            r#"bash -c "rtk read foo && rtk grep -R bar .""#
+        );
+        assert!(output.get("permissionDecision").is_none());
+    }
+
+    #[test]
     fn test_claude_passthrough_no_output() {
         assert!(run_claude_inner(&claude_input("htop")).is_none());
     }
@@ -1057,6 +1087,12 @@ mod tests {
         assert!(run_claude_inner(&claude_input("git status `rm -rf /tmp/x`")).is_none());
         assert!(run_claude_inner(&claude_input("git status $(rm -rf /tmp/x)")).is_none());
         assert!(run_claude_inner(&claude_input("git log --pretty=\"$(rm -rf /tmp/x)\"")).is_none());
+    }
+
+    #[test]
+    fn test_claude_fish_constructs_not_rewritten() {
+        assert!(run_claude_inner(&claude_input("git status (printf x)")).is_none());
+        assert!(run_claude_inner(&claude_input("git status; and printf x")).is_none());
     }
 
     #[test]
@@ -1173,6 +1209,17 @@ mod tests {
         // `continue: true` keeps the Cursor preToolUse panel from collapsing
         // to `Output: {}`; without it the rewrite is invisible to users.
         assert_eq!(v["continue"], true);
+    }
+
+    #[test]
+    fn test_cursor_shell_wrapper_rewrites_without_auto_allow() {
+        let result = run_cursor_allowed(&cursor_input(r#"bash -c "git status && cargo test""#));
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["permission"], "ask");
+        assert_eq!(
+            v["updated_input"]["command"],
+            r#"bash -c "rtk git status && rtk cargo test""#
+        );
     }
 
     #[test]
@@ -1418,6 +1465,21 @@ mod tests {
     }
 
     #[test]
+    fn test_decide_asks_for_allowed_shell_wrapper_rewrite() {
+        match decide_with_rules(
+            r#"bash -c "head foo && grep -R bar .""#,
+            &[],
+            &[],
+            &all_allowed(),
+        ) {
+            HookDecision::AskRewrite(rewritten) => {
+                assert_eq!(rewritten, r#"bash -c "rtk read foo && rtk grep -R bar .""#)
+            }
+            _ => panic!("supported shell wrapper must rewrite with confirmation"),
+        }
+    }
+
+    #[test]
     fn test_decide_deny() {
         assert!(matches!(
             decide_with_rules(
@@ -1494,6 +1556,22 @@ mod tests {
     }
 
     #[test]
+    fn test_gemini_shell_wrapper_asks_user_with_rewrite() {
+        let v: Value = serde_json::from_str(&gemini_render(
+            r#"fish -c "git status && cargo test""#,
+            &[],
+            &[],
+            &all_allowed(),
+        ))
+        .unwrap();
+        assert_eq!(v["decision"], "ask_user");
+        assert_eq!(
+            v["hookSpecificOutput"]["tool_input"]["command"],
+            r#"fish -c "rtk git status && rtk cargo test""#
+        );
+    }
+
+    #[test]
     fn test_gemini_substitution_asks_user_without_rewrite() {
         let v: Value = serde_json::from_str(&gemini_render(
             "git status `rm -rf /tmp/x`",
@@ -1555,6 +1633,21 @@ mod tests {
                 .is_none(),
             "RTK must never assert a permission decision for Droid"
         );
+    }
+
+    #[test]
+    fn test_droid_shell_wrapper_rewrites_without_permission_decision() {
+        let input = droid_input("Execute", "bash -c 'git status; cargo test'");
+        let out = run_droid_inner(&input).expect("rewrite expected");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v.pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(Value::as_str),
+            Some("bash -c 'rtk git status; rtk cargo test'")
+        );
+        assert!(v
+            .pointer("/hookSpecificOutput/permissionDecision")
+            .is_none());
     }
 
     #[test]

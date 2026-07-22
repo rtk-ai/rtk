@@ -6,7 +6,7 @@
 
 Domain-agnostic building blocks with **no knowledge of any specific command, hook, or agent**. If a module references "git", "cargo", "claude", or any external tool by name, it does not belong here. Core is a leaf in the dependency graph — it is consumed by all other components but imports from none of them.
 
-Owns: configuration loading, token tracking persistence, TOML filter engine, tee output recovery, display formatting, telemetry, and shared utilities.
+Owns: configuration loading, token tracking persistence, TOML filter engine, tee output recovery, display formatting, explicit shell/direct command construction, telemetry, and shared utilities.
 
 Does **not** own: command-specific filtering logic (that's `cmds/`), hook lifecycle management (that's `src/hooks/`), or analytics dashboards (that's `analytics/`).
 
@@ -110,6 +110,19 @@ Key functions available to all command modules:
 ## Consumer Contracts
 
 Core provides infrastructure that `cmds/` and other components consume. These contracts define expected usage.
+
+### Command Construction (`shell`)
+
+Use `shell::direct_command()` when the caller already has an argv vector. It
+preserves argument boundaries and never expands globs, variables, redirects,
+or operators. Use `shell::shell_command()` only for an intentional command
+string, with an explicit shell when syntax is shell-specific. The platform
+default remains `sh -c` on Unix and `cmd /C` on Windows for compatibility.
+
+Never infer the command parser from `$SHELL`: agent hosts and terminal wrappers
+can execute a different shell while preserving the user's login-shell value.
+Callers that accept `--shell` must require the complete script as one quoted
+argument instead of reconstructing it by joining parsed argv.
 
 ### Tracking (`TimedExecution`)
 
