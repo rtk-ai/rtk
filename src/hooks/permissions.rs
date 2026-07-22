@@ -1,5 +1,6 @@
 use super::constants::{
-    CLAUDE_DIR, CURSOR_DIR, DROID_DIR, DROID_HOME_ENV, DROID_SETTINGS_FILE, GEMINI_DIR,
+    CLAUDE_DIR, CURSOR_DIR, DEVIN_CONFIG_DIR_ENV, DEVIN_DIR, DEVIN_SETTINGS_FILE,
+    DEVIN_SETTINGS_LOCAL_JSON, DROID_DIR, DROID_HOME_ENV, DROID_SETTINGS_FILE, GEMINI_DIR,
     SETTINGS_JSON, SETTINGS_LOCAL_JSON,
 };
 use crate::core::stream::exec_capture;
@@ -36,6 +37,7 @@ pub enum Host {
     Cursor,
     Gemini,
     Droid,
+    Devin,
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
@@ -44,6 +46,7 @@ pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
         Host::Cursor => load_cursor_rules(),
         Host::Gemini => load_gemini_rules(),
         Host::Droid => load_droid_rules(),
+        Host::Devin => load_devin_rules(),
     };
     check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
 }
@@ -186,6 +189,82 @@ fn get_settings_paths() -> Vec<PathBuf> {
     }
 
     paths
+}
+
+// ── Devin CLI permission rules ───────────────────────────────────
+
+fn load_devin_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut deny_rules = Vec::new();
+    let mut ask_rules = Vec::new();
+    let mut allow_rules = Vec::new();
+
+    for path in get_devin_settings_paths() {
+        let Some(json) = read_json(&path) else {
+            continue;
+        };
+        let Some(permissions) = json.get("permissions") else {
+            continue;
+        };
+
+        append_devin_rules(permissions.get("deny"), &mut deny_rules);
+        append_devin_rules(permissions.get("ask"), &mut ask_rules);
+        append_devin_rules(permissions.get("allow"), &mut allow_rules);
+    }
+
+    (deny_rules, ask_rules, allow_rules)
+}
+
+fn get_devin_settings_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Some(root) = find_project_root() {
+        paths.push(root.join(DEVIN_DIR).join(DEVIN_SETTINGS_FILE));
+        paths.push(root.join(DEVIN_DIR).join(DEVIN_SETTINGS_LOCAL_JSON));
+    }
+    if let Some(dir) = resolve_devin_config_dir() {
+        paths.push(dir.join(DEVIN_SETTINGS_FILE));
+    }
+
+    paths
+}
+
+pub(crate) fn resolve_devin_config_dir() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(DEVIN_CONFIG_DIR_ENV).filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(xdg).join("devin"));
+    }
+    default_devin_config_dir()
+}
+
+#[cfg(windows)]
+fn default_devin_config_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("devin"))
+}
+
+#[cfg(not(windows))]
+fn default_devin_config_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|d| d.join(".config/devin"))
+}
+
+/// Extract `Exec(<pattern>)` and tool-based `exec` rules from Devin permissions.
+fn append_devin_rules(rules_value: Option<&Value>, target: &mut Vec<String>) {
+    let Some(arr) = rules_value.and_then(|v| v.as_array()) else {
+        return;
+    };
+    for rule in arr.iter().filter_map(|r| r.as_str()) {
+        if rule == "exec" {
+            target.push("*".to_string());
+            continue;
+        }
+        if let Some(inner) = rule.strip_prefix("Exec(").and_then(|s| s.strip_suffix(')')) {
+            let inner = inner.trim();
+            if !inner.is_empty() {
+                target.push(inner.to_string());
+            }
+        }
+    }
 }
 
 fn read_json(path: &std::path::Path) -> Option<Value> {
@@ -334,14 +413,14 @@ pub(crate) fn droid_rules_from_settings(
     (deny, Vec::new(), Vec::new())
 }
 
-/// Locate the project root by walking up from CWD looking for `.claude/`.
+/// Locate the project root by walking up from CWD looking for `.claude/` or `.devin/`.
 ///
 /// Falls back to `git rev-parse --show-toplevel` if not found via directory walk.
 fn find_project_root() -> Option<PathBuf> {
-    // Fast path: walk up CWD looking for .claude/ — no subprocess needed.
+    // Fast path: walk up CWD looking for .claude/ or .devin/ — no subprocess needed.
     let mut dir = std::env::current_dir().ok()?;
     loop {
-        if dir.join(CLAUDE_DIR).exists() {
+        if dir.join(CLAUDE_DIR).exists() || dir.join(DEVIN_DIR).exists() {
             return Some(dir);
         }
         if !dir.pop() {

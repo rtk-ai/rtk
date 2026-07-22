@@ -128,11 +128,18 @@ fn get_rewritten(cmd: &str) -> Option<String> {
 enum HookDecision {
     AllowRewrite(String),
     AskRewrite(String),
+    /// Approve the original command unchanged (used when the user explicitly
+    /// allowed it but RTK has no filter for it).
+    AllowOriginal(String),
     Defer,
     Deny,
 }
 
-fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
+fn decide_from_verdict(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    allow_original: bool,
+) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
     }
@@ -142,12 +149,20 @@ fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
     match get_rewritten(cmd) {
         Some(r) if verdict == PermissionVerdict::Allow => HookDecision::AllowRewrite(r),
         Some(r) => HookDecision::AskRewrite(r),
+        None if allow_original && verdict == PermissionVerdict::Allow => {
+            HookDecision::AllowOriginal(cmd.to_string())
+        }
         None => HookDecision::Defer,
     }
 }
 
 fn decide_hook_action(cmd: &str, host: permissions::Host) -> HookDecision {
-    decide_from_verdict(cmd, permissions::check_command_for(cmd, host))
+    let allow_original = host == permissions::Host::Devin;
+    decide_from_verdict(
+        cmd,
+        permissions::check_command_for(cmd, host),
+        allow_original,
+    )
 }
 
 fn handle_vscode(cmd: &str) -> Result<()> {
@@ -157,7 +172,7 @@ fn handle_vscode(cmd: &str) -> Result<()> {
             return Ok(());
         }
         HookDecision::Defer => return Ok(()),
-        HookDecision::AllowRewrite(r) => ("allow", r),
+        HookDecision::AllowRewrite(r) | HookDecision::AllowOriginal(r) => ("allow", r),
         HookDecision::AskRewrite(r) => ("ask", r),
     };
 
@@ -201,7 +216,7 @@ fn copilot_cli_response_from_decision(
             return None;
         }
         HookDecision::Defer => return None,
-        HookDecision::AllowRewrite(r) => (r, true),
+        HookDecision::AllowRewrite(r) | HookDecision::AllowOriginal(r) => (r, true),
         HookDecision::AskRewrite(r) => (r, false),
     };
 
@@ -262,6 +277,7 @@ pub fn run_gemini() -> Result<()> {
             audit_log("ask", cmd, rewritten);
             print_gemini("ask_user", Some(rewritten));
         }
+        HookDecision::AllowOriginal(_) => print_gemini("allow", None),
         HookDecision::Defer => print_gemini("ask_user", None),
     }
 
@@ -362,7 +378,7 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
                 cmd: cmd.to_string(),
             }
         }
-        HookDecision::AllowRewrite(r) => (r, true),
+        HookDecision::AllowRewrite(r) | HookDecision::AllowOriginal(r) => (r, true),
         HookDecision::AskRewrite(r) => (r, false),
     };
 
@@ -548,7 +564,7 @@ fn run_cursor_inner_with_rules(
     };
 
     let verdict = permissions::check_command_with_rules(&cmd, deny_rules, ask_rules, allow_rules);
-    match decide_from_verdict(&cmd, verdict) {
+    match decide_from_verdict(&cmd, verdict, false) {
         HookDecision::AllowRewrite(rewritten) => cursor_allow(&rewritten),
         HookDecision::AskRewrite(rewritten) => cursor_ask(&rewritten),
         _ => "{}".to_string(),
@@ -595,7 +611,7 @@ fn droid_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) ->
             audit_log("deny", cmd, "");
             return None;
         }
-        HookDecision::Defer => return None,
+        HookDecision::Defer | HookDecision::AllowOriginal(_) => return None,
         HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r) => r,
     };
 
@@ -640,6 +656,95 @@ pub fn run_droid() -> Result<()> {
     Ok(())
 }
 
+// ── Devin CLI PreToolUse hook ──────────────────────────────────
+
+fn process_devin_payload(v: &Value) -> Option<Value> {
+    let cmd = devin_execute_command(v)?;
+    devin_response_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::Devin))
+}
+
+/// Extract the shell command when the payload targets Devin CLI's `exec` tool.
+fn devin_execute_command(v: &Value) -> Option<&str> {
+    let tool_name = v.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
+    // The installed matcher is `^exec$`; tolerate a missing/ambiguous tool_name defensively.
+    if !matches!(tool_name, "exec" | "bash" | "") {
+        return None;
+    }
+
+    v.pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+}
+
+/// Build the Devin CLI hook response for a decision from the shared flow.
+///
+/// Devin CLI expects a top-level `decision` (`approve`/`block`) and a
+/// `hookSpecificOutput.updatedInput` for rewrites. On `Ask`/`Default` we omit
+/// `decision` so Devin runs its own permission prompt on the rewritten command.
+fn devin_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) -> Option<Value> {
+    match decision {
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            Some(json!({
+                "decision": "block",
+                "reason": "Blocked by RTK permission rule"
+            }))
+        }
+        HookDecision::AllowOriginal(_) => {
+            audit_log("allow", cmd, "");
+            Some(json!({"decision": "approve"}))
+        }
+        HookDecision::Defer => None,
+        HookDecision::AllowRewrite(rewritten) => {
+            audit_log("rewrite", cmd, &rewritten);
+            build_devin_rewrite_response(v, &rewritten, true)
+        }
+        HookDecision::AskRewrite(rewritten) => {
+            audit_log("ask", cmd, &rewritten);
+            build_devin_rewrite_response(v, &rewritten, false)
+        }
+    }
+}
+
+fn build_devin_rewrite_response(v: &Value, rewritten: &str, allow: bool) -> Option<Value> {
+    let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+    if let Some(obj) = ti.as_object_mut() {
+        obj.insert("command".into(), Value::String(rewritten.to_string()));
+    }
+    let mut output = json!({
+        "hookSpecificOutput": {
+            "hookEventName": PRE_TOOL_USE_KEY,
+            "updatedInput": ti
+        }
+    });
+    if allow {
+        output["decision"] = json!("approve");
+    }
+    Some(output)
+}
+
+/// Run the Devin CLI PreToolUse hook natively.
+pub fn run_devin() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let input = strip_leading_bom(&input).trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    if let Some(output) = process_devin_payload(&v) {
+        let _ = writeln!(io::stdout(), "{output}");
+    }
+    Ok(())
+}
+
 /// Hermetic test path: no Droid settings (empty rules).
 #[cfg(test)]
 fn run_droid_inner(input: &str) -> Option<String> {
@@ -657,7 +762,28 @@ fn run_droid_inner_with_rules(
     let v: Value = serde_json::from_str(input).ok()?;
     let cmd = droid_execute_command(&v)?;
     let verdict = permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
-    droid_response_from_decision(&v, cmd, decide_from_verdict(cmd, verdict)).map(|o| o.to_string())
+    droid_response_from_decision(&v, cmd, decide_from_verdict(cmd, verdict, false))
+        .map(|o| o.to_string())
+}
+
+#[cfg(test)]
+fn run_devin_inner(input: &str) -> Option<String> {
+    run_devin_inner_with_rules(input, &[], &[], &[])
+}
+
+#[cfg(test)]
+fn run_devin_inner_with_rules(
+    input: &str,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+) -> Option<String> {
+    let input = strip_leading_bom(input).trim();
+    let v: Value = serde_json::from_str(input).ok()?;
+    let cmd = devin_execute_command(&v)?;
+    let verdict = permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
+    devin_response_from_decision(&v, cmd, decide_from_verdict(cmd, verdict, true))
+        .map(|o| o.to_string())
 }
 
 #[cfg(test)]
@@ -868,7 +994,11 @@ mod tests {
             &[],
             &["Bash(git:*)".to_string()],
         );
-        copilot_cli_response_from_decision(&cli_args(cmd), decide_from_verdict(cmd, verdict), cmd)
+        copilot_cli_response_from_decision(
+            &cli_args(cmd),
+            decide_from_verdict(cmd, verdict, false),
+            cmd,
+        )
     }
 
     #[test]
@@ -1405,7 +1535,7 @@ mod tests {
         allow: &[String],
     ) -> HookDecision {
         let verdict = permissions::check_command_with_rules(cmd, deny, ask, allow);
-        decide_from_verdict(cmd, verdict)
+        decide_from_verdict(cmd, verdict, false)
     }
 
     fn all_allowed() -> Vec<String> {
@@ -1483,6 +1613,7 @@ mod tests {
             }
             HookDecision::AllowRewrite(r) => gemini_json("allow", Some(&r)),
             HookDecision::AskRewrite(r) => gemini_json("ask_user", Some(&r)),
+            HookDecision::AllowOriginal(_) => gemini_json("allow", None),
             HookDecision::Defer => gemini_json("ask_user", None),
         }
     }
@@ -1741,5 +1872,139 @@ mod tests {
         // so Droid runs them unchanged.
         let input = droid_input("Execute", "definitely-not-a-real-binary --foo");
         assert!(run_droid_inner(&input).is_none());
+    }
+
+    // --- Devin CLI hook ---
+
+    fn devin_input(tool: &str, cmd: &str) -> String {
+        json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool,
+            "tool_input": { "command": cmd, "shell_id": "main" }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_devin_allow_emits_approve_and_rewrite() {
+        let input = devin_input("exec", "git status");
+        let out = run_devin_inner_with_rules(&input, &[], &[], &["git".to_string()])
+            .expect("rewrite expected");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["decision"], "approve");
+        assert_eq!(
+            v.pointer("/hookSpecificOutput/updatedInput/command"),
+            Some(&json!("rtk git status"))
+        );
+        assert_eq!(
+            v.pointer("/hookSpecificOutput/hookEventName"),
+            Some(&json!("PreToolUse"))
+        );
+        // Extra tool_input fields must be preserved.
+        assert_eq!(
+            v.pointer("/hookSpecificOutput/updatedInput/shell_id"),
+            Some(&json!("main"))
+        );
+    }
+
+    #[test]
+    fn test_devin_exec_tool_rule_allows_all() {
+        let input = devin_input("exec", "cargo test");
+        let out = run_devin_inner_with_rules(&input, &[], &[], &["*".to_string()])
+            .expect("rewrite expected");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["decision"], "approve");
+        assert!(v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .is_some_and(|c| c.starts_with("rtk ")));
+    }
+
+    #[test]
+    fn test_devin_default_asks_without_decision() {
+        let input = devin_input("exec", "git status");
+        let out = run_devin_inner(&input).expect("rewrite expected");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            v.get("decision").is_none(),
+            "Ask/Default must omit decision"
+        );
+        assert_eq!(
+            v.pointer("/hookSpecificOutput/updatedInput/command"),
+            Some(&json!("rtk git status"))
+        );
+    }
+
+    #[test]
+    fn test_devin_deny_emits_block() {
+        let input = devin_input("exec", "rm -rf /tmp/x");
+        let out = run_devin_inner_with_rules(&input, &["rm -rf".to_string()], &[], &[])
+            .expect("block expected");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["decision"], "block");
+        assert!(v.get("hookSpecificOutput").is_none());
+    }
+
+    #[test]
+    fn test_devin_passthrough_unsupported() {
+        let input = devin_input("exec", "htop");
+        assert!(run_devin_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_devin_allow_unsupported_approves_original() {
+        // If the user explicitly allowed a command RTK cannot rewrite,
+        // RTK should still emit approve so Devin CLI auto-runs the original.
+        let input = devin_input("exec", "htop");
+        let out = run_devin_inner_with_rules(&input, &[], &[], &["htop".to_string()])
+            .expect("approve expected");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["decision"], "approve");
+        assert!(v.get("hookSpecificOutput").is_none());
+    }
+
+    #[test]
+    fn test_devin_already_rtk_passthrough() {
+        let input = devin_input("exec", "rtk git status");
+        assert!(run_devin_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_devin_env_prefix_preserved() {
+        let input = devin_input("exec", "RUST_LOG=debug cargo test");
+        let out = run_devin_inner_with_rules(&input, &[], &[], &["*".to_string()])
+            .expect("rewrite expected");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v.pointer("/hookSpecificOutput/updatedInput/command"),
+            Some(&json!("RUST_LOG=debug rtk cargo test"))
+        );
+    }
+
+    #[test]
+    fn test_devin_ignores_non_exec_tool() {
+        let input = devin_input("read", "src/main.rs");
+        assert!(run_devin_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_devin_empty_command_passthrough() {
+        let input = devin_input("exec", "");
+        assert!(run_devin_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_devin_malformed_json_passthrough() {
+        assert!(run_devin_inner("not-json").is_none());
+    }
+
+    #[test]
+    fn test_devin_bom_stripped() {
+        let payload = devin_input("exec", "git status");
+        let with_bom = format!("\u{feff}{}", payload);
+        let out = run_devin_inner_with_rules(&with_bom, &[], &[], &["git".to_string()])
+            .expect("rewrite expected");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["decision"], "approve");
     }
 }

@@ -38,6 +38,7 @@ Agent runs "cargo test"
 | Pi | TypeScript extension (`tool_call` event) | Yes |
 | Hermes | Python plugin (`terminal` command mutation) | Yes |
 | Factory Droid | Shell hook (`PreToolUse`, matcher `Execute`) | Yes |
+| Devin CLI | Shell hook (`PreToolUse`, matcher `exec`) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | AGENTS.md instructions | N/A |
@@ -157,6 +158,26 @@ rtk init --uninstall --agent droid
 ```
 
 Removes only RTK's hook entry; other hooks and settings are untouched.
+
+### Devin CLI
+
+```bash
+rtk init -g --agent devin    # user-scoped (~/.config/devin/config.json)
+rtk init --agent devin       # project-scoped (.devin/hooks.v1.json, commit to share)
+```
+
+Installs a `PreToolUse` hook (matcher `^exec$`) into Devin CLI's hook config. RTK picks an existing Devin hook file when possible (`.devin/hooks.v1.json`, `.devin/config.json`, or `.devin/config.local.json` for project; `~/.config/devin/config.json` for global), and respects `$DEVIN_CONFIG_DIR`.
+
+RTK reads Devin CLI's own `permissions` settings (`allow`/`ask`/`deny`) from `~/.config/devin/config.json`, `.devin/config.json`, and `.devin/config.local.json`. Rules like `Exec(git)` or tool-level `"exec"` are mapped to RTK's permission check. Allowed commands emit `decision: approve` plus the rewritten `updatedInput`; denied commands emit `decision: block`; everything else is rewritten via `updatedInput` without a decision so Devin CLI prompts on the rewritten command. If an existing project `AGENTS.md` is present, RTK appends a short instructions block encouraging use of `rtk read`/`rtk grep`/`rtk find` for Devin CLI built-ins.
+
+Uninstall:
+
+```bash
+rtk init --uninstall -g --agent devin
+rtk init --uninstall --agent devin
+```
+
+Removes only RTK's hook entry and the AGENTS.md block; other hooks and settings are untouched.
 
 ### Cline / Roo Code
 

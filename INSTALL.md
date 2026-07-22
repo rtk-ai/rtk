@@ -323,6 +323,23 @@ rtk gain --graph      # With ASCII graph
 rtk gain --history    # With command history
 ```
 
+## Devin CLI Setup
+
+```bash
+# User-scoped (all Devin projects)
+rtk init -g --agent devin
+
+# Project-scoped (commit .devin/ to share)
+rtk init --agent devin
+
+# Verify
+rtk init --agent devin --show
+```
+
+Installs a `PreToolUse` hook (matcher `^exec$`) into `~/.config/devin/config.json` (global) or `.devin/hooks.v1.json` (project). Respects `$DEVIN_CONFIG_DIR`.
+
+RTK syncs with Devin CLI's own permission settings. Allowed commands are auto-approved and rewritten; blocked commands are blocked; all others are rewritten so Devin CLI can prompt on the rewritten command.
+
 ## What RTK Filters
 
 RTK compresses the output of a shell command before your agent reads it. What that looks like in practice:

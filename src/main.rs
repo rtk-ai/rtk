@@ -55,6 +55,8 @@ pub enum AgentTarget {
     Hermes,
     /// Factory Droid CLI
     Droid,
+    /// Devin CLI
+    Devin,
 }
 
 #[derive(Parser)]
@@ -866,6 +868,8 @@ enum HookCommands {
     Copilot,
     /// Process Factory Droid PreToolUse hook (reads JSON from stdin)
     Droid,
+    /// Process Devin CLI PreToolUse hook (reads JSON from stdin)
+    Devin,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -2013,7 +2017,9 @@ fn run_cli() -> Result<i32> {
                 dry_run,
             };
             if show {
-                hooks::init::show_config(codex)?;
+                hooks::init::show_config(codex, agent)?;
+            } else if uninstall && agent == Some(AgentTarget::Devin) {
+                hooks::init::uninstall_devin(global, ctx)?;
             } else if uninstall && copilot {
                 if global {
                     hooks::init::uninstall_copilot_global(ctx)?;
@@ -2068,6 +2074,18 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_hermes_mode(ctx)?;
             } else if agent == Some(AgentTarget::Droid) {
                 hooks::init::run_droid_mode(global, ctx)?;
+            } else if agent == Some(AgentTarget::Devin) {
+                if codex || gemini || copilot || opencode || claude_md {
+                    anyhow::bail!("--agent devin cannot be combined with --codex, --gemini, --copilot, --opencode, or --claude-md");
+                }
+                let patch_mode = if auto_patch {
+                    hooks::init::PatchMode::Auto
+                } else if no_patch {
+                    hooks::init::PatchMode::Skip
+                } else {
+                    hooks::init::PatchMode::Ask
+                };
+                hooks::init::run_devin_mode(global, patch_mode, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2436,6 +2454,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Droid => {
                 hooks::hook_cmd::run_droid()?;
+                0
+            }
+            HookCommands::Devin => {
+                hooks::hook_cmd::run_devin()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {
@@ -2921,6 +2943,17 @@ mod tests {
     }
 
     #[test]
+    fn test_try_parse_init_agent_devin() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "devin"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Devin));
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
     fn test_try_parse_kubectl_get_alias() {
         let cli = Cli::try_parse_from(["rtk", "kubectl", "get", "pods", "-n", "default"]).unwrap();
 
@@ -3203,6 +3236,17 @@ mod tests {
             cli.command,
             Commands::Hook {
                 command: HookCommands::Claude
+            }
+        ));
+    }
+
+    #[test]
+    fn test_hook_devin_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "devin"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::Devin
             }
         ));
     }
