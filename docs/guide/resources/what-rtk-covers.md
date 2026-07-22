@@ -51,8 +51,7 @@ Typical savings: 60-99%.
 
 | Command | Savings | What changes |
 |---------|---------|--------------|
-| `jest` | 94-99% | Failures only |
-| `vitest` | 94-99% | Failures only |
+| `vitest run` | 94-99% | Failures only |
 | `tsc` | 75% | Type errors grouped by file |
 | `eslint` | 84% | Violations grouped by rule |
 | `pnpm list` | 70-90% | Compact dependency tree |
@@ -124,6 +123,19 @@ Typical savings: 60-99%.
 | `aws` | 70% | JSON condensed, relevant fields only |
 | `psql` | 65% | Query results without decoration |
 | `curl` | 60% | Response body only, headers stripped |
+
+### Azure CLI (`az`)
+
+| Command | Savings | What changes |
+|---------|---------|--------------|
+| `az pipelines build list` | 70-90% | Compact one-line-per-build summary |
+| `az pipelines build show` | 60-80% | Key build fields only |
+| `az pipelines runs list` | 70-90% | Compact one-line-per-run summary (same shape as build list) |
+| `az pipelines runs show` | 60-80% | Key run fields only |
+| `az devops invoke --resource timeline` | 70-85% | Timeline records with status, compact |
+| `az devops invoke --resource logs` | 40-50% | Content preserved, timestamps stripped |
+| `az account get-access-token` | — | Token masked for security |
+| All other `az *` | varies | Value-preserving compact JSON, Azure noise keys pruned |
 
 ## Global flags
 

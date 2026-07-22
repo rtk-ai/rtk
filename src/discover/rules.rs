@@ -660,6 +660,23 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^az\s+",
+        rtk_cmd: "rtk az",
+        rewrite_prefixes: &["az"],
+        category: "Infra",
+        savings_pct: 80.0,
+        subcmd_savings: &[
+            ("pipelines", 90.0),
+            ("devops", 95.0),
+            ("account", 80.0),
+            ("vm", 85.0),
+            ("storage", 70.0),
+            ("cosmosdb", 75.0),
+            ("keyvault", 82.0),
+        ],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^psql(\s|$)",
         rtk_cmd: "rtk psql",
         rewrite_prefixes: &["psql"],
