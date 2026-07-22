@@ -60,10 +60,6 @@ fn is_integration_test_cmd(subcommand: &str) -> bool {
     ) || (subcommand.ends_with(":test") || subcommand.ends_with("/test"))
 }
 
-/// Selective/single-test task names that emit ScalaTest/munit output just like
-/// `sbt test` (e.g. `sbt testOnly com.example.MySpec`, `sbt testQuick`).
-const SELECTIVE_TEST_TASKS: &[&str] = &["testOnly", "testQuick"];
-
 /// Returns true if `subcommand` produces ScalaTest/munit test output and should be
 /// filtered like `sbt test`. Covers integration-test tasks (it:test,
 /// IntegrationTest/test) and selective test tasks (testOnly, testQuick), including
@@ -72,7 +68,7 @@ fn is_test_cmd(subcommand: &str) -> bool {
     // A scoped task carries the config as a prefix ("Test/testOnly", "it:testOnly");
     // the task name is the final segment after any '/' or ':'.
     let task = subcommand.rsplit(['/', ':']).next().unwrap_or(subcommand);
-    SELECTIVE_TEST_TASKS.contains(&task) || is_integration_test_cmd(subcommand)
+    matches!(task, "testOnly" | "testQuick") || is_integration_test_cmd(subcommand)
 }
 
 /// Returns true if `s` is a scoped SBT task (e.g. `Test/test`, `it/Test/compile`).
@@ -158,22 +154,22 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
             eprintln!("Running: sbt {} ...", subcommand);
         }
 
-        let rest: Vec<String> = args[1..]
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        let args_display = if rest.is_empty() {
-            subcommand.clone()
-        } else {
-            format!("{} {}", subcommand, rest.join(" "))
-        };
-
         // Integration tests keep their own tee label; selective tests share the
         // `sbt test` log since they are the same task family.
         let tee_label = if is_integration_test_cmd(&subcommand) {
             "sbt_it_test"
         } else {
             "sbt_test"
+        };
+
+        let rest: Vec<String> = args[1..]
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let args_display = if rest.is_empty() {
+            subcommand
+        } else {
+            format!("{} {}", subcommand, rest.join(" "))
         };
 
         return runner::run_filtered(
