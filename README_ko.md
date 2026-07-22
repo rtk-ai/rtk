@@ -69,7 +69,7 @@ cargo install --git https://github.com/rtk-ai/rtk
 ### 확인
 
 ```bash
-rtk --version   # "rtk 0.27.x" 표시되어야 함
+rtk --version   # 버전이 표시되어야 함 (예: "rtk 0.42.4"), "command not found" 아님
 rtk gain        # 토큰 절약 통계 표시되어야 함
 ```
 

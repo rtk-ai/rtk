@@ -69,7 +69,7 @@ cargo install --git https://github.com/rtk-ai/rtk
 ### Verificacion
 
 ```bash
-rtk --version   # Debe mostrar "rtk 0.27.x"
+rtk --version   # Debe mostrar una versión (p. ej. "rtk 0.42.4"), no "command not found"
 rtk gain        # Debe mostrar estadisticas de ahorro
 ```
 

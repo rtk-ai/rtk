@@ -70,7 +70,7 @@ cargo install --git https://github.com/rtk-ai/rtk
 ### 验证
 
 ```bash
-rtk --version   # 应显示 "rtk 0.27.x"
+rtk --version   # 应显示版本号（例如 "rtk 0.42.4"），而非 "command not found"
 rtk gain        # 应显示 token 节省统计
 ```
 

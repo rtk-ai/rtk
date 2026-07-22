@@ -69,7 +69,7 @@ cargo install --git https://github.com/rtk-ai/rtk
 ### 確認
 
 ```bash
-rtk --version   # "rtk 0.27.x" と表示されるはず
+rtk --version   # バージョンが表示されるはず（例: "rtk 0.42.4"）。"command not found" はNG
 rtk gain        # トークン節約統計が表示されるはず
 ```
 
