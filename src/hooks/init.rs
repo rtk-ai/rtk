@@ -7570,6 +7570,11 @@ mod tests {
             .join(OMP_HOOKS_PRE_SUBDIR)
             .join(OMP_PLUGIN_FILE);
         assert!(plugin.exists(), "local OMP extension must be created");
+        let content = fs::read_to_string(&plugin).unwrap();
+        assert!(
+            content.contains("rtk rewrite"),
+            "local extension must delegate to rtk rewrite"
+        );
     }
 
     #[test]
@@ -7630,15 +7635,18 @@ mod tests {
         std::env::set_current_dir(tmp.path()).unwrap();
 
         run_omp_mode(false, InitContext::default()).unwrap();
-        let result = uninstall_omp(false, InitContext::default());
-        std::env::set_current_dir(&cwd).unwrap();
-        result.unwrap();
 
         let plugin = tmp
             .path()
             .join(OMP_LOCAL_DIR)
             .join(OMP_HOOKS_PRE_SUBDIR)
             .join(OMP_PLUGIN_FILE);
+        assert!(plugin.exists(), "plugin must exist before uninstall");
+
+        let result = uninstall_omp(false, InitContext::default());
+        std::env::set_current_dir(&cwd).unwrap();
+        result.unwrap();
+
         assert!(!plugin.exists(), "local plugin must be removed");
     }
 
