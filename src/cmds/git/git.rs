@@ -1009,15 +1009,23 @@ fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
 /// Handles: `[main abc1234def] message`, `[main (root-commit) abc1234def] msg`,
 /// localized variants, and multibyte branch names.
 fn parse_commit_output(line: &str) -> String {
-    if let Some(bracket_end) = line.find(']') {
-        let bracket_content = &line[1..bracket_end];
-        let hash = bracket_content.split_whitespace().next_back().unwrap_or("");
-        if !hash.is_empty() && hash.len() >= 7 {
-            let short_hash: String = hash.chars().take(7).collect();
-            format!("ok {}", short_hash)
-        } else {
-            "ok".to_string()
-        }
+    // Locate '[' by search rather than assuming it's byte 0: a multibyte
+    // character before the bracket (e.g. a localized prefix) would make the
+    // old hardcoded `line[1..]` cut mid-character and panic. `[` is ASCII
+    // (1 byte), so `bracket_start + 1` is always a valid boundary regardless
+    // of what precedes it.
+    let Some(bracket_start) = line.find('[') else {
+        return "ok".to_string();
+    };
+    let after_open = &line[bracket_start + 1..];
+    let Some(bracket_end) = after_open.find(']') else {
+        return "ok".to_string();
+    };
+    let bracket_content = &after_open[..bracket_end];
+    let hash = bracket_content.split_whitespace().next_back().unwrap_or("");
+    if !hash.is_empty() && hash.len() >= 7 {
+        let short_hash: String = hash.chars().take(7).collect();
+        format!("ok {}", short_hash)
     } else {
         "ok".to_string()
     }
@@ -2849,6 +2857,25 @@ no changes added to commit (use "git add" and/or "git commit -a")
     fn test_parse_commit_output_thai_branch() {
         let line = "[สาขา abc1234def] commit message";
         assert_eq!(parse_commit_output(line), "ok abc1234");
+    }
+
+    /// Regression test (#3100): a multibyte character *before* the bracket
+    /// used to panic. The old code hardcoded `line[1..bracket_end]`, assuming
+    /// `[` is always the first (1-byte) character; if something multibyte
+    /// precedes it, byte offset 1 lands mid-character. The hash should still
+    /// be extracted correctly, not just avoid panicking.
+    #[test]
+    fn test_parse_commit_output_multibyte_before_bracket() {
+        let line = "初め[main abc1234def] add feature";
+        assert_eq!(parse_commit_output(line), "ok abc1234");
+    }
+
+    /// Same shape as above but with the bracket itself absent — still must
+    /// not panic, falling back to the no-hash "ok".
+    #[test]
+    fn test_parse_commit_output_multibyte_prefix_no_bracket() {
+        let line = "初めsome other output";
+        assert_eq!(parse_commit_output(line), "ok");
     }
 
     #[test]
