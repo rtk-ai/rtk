@@ -17,6 +17,7 @@ use registry::{
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
 use crate::discover::registry::prefix_contains_rtk_disabled;
+use crate::hooks::hook_check::{status as hook_status, HookStatus};
 
 /// Aggregation bucket for supported commands.
 struct SupportedBucket {
@@ -72,6 +73,17 @@ pub fn run(
         }
     }
 
+    // Transcripts record commands as the model emitted them, before the PreToolUse
+    // hook rewrites them. If the hook is installed, a command it would rewrite was
+    // already routed through RTK at runtime — it's coverage, not a missed opportunity.
+    // Uses the same rewrite engine the hook itself calls (`rtk hook check`), so a
+    // command excluded via config or containing an unattestable construct (the hook
+    // would defer on it) still counts as a genuine miss below.
+    let hook_installed = hook_status() != HookStatus::Missing;
+    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
+        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
+        .unwrap_or_default();
+
     let mut total_commands: usize = 0;
     let mut already_rtk: usize = 0;
     let mut parse_errors: usize = 0;
@@ -115,6 +127,18 @@ pub fn run(
                 }
 
                 match classify_command(part) {
+                    Classification::Supported { .. }
+                        if covered_by_hook(
+                            part,
+                            hook_installed,
+                            &excluded,
+                            &transparent_prefixes,
+                        ) =>
+                    {
+                        // Hook is installed and would rewrite this exact command —
+                        // it already ran through RTK, not a missed opportunity.
+                        already_rtk += 1;
+                    }
                     Classification::Supported {
                         rtk_equivalent,
                         category,
@@ -169,8 +193,7 @@ pub fn run(
                         bucket.count += 1;
                     }
                     Classification::Ignored => {
-                        // Check if it starts with "rtk "
-                        if part.trim().starts_with("rtk ") {
+                        if is_already_rtk(part) {
                             already_rtk += 1;
                         }
                         // Otherwise just skip
@@ -274,6 +297,31 @@ pub fn run(
     Ok(())
 }
 
+/// Whether a `Supported` command was already routed through RTK by an installed
+/// PreToolUse hook, using the same rewrite engine the hook itself calls (`rtk hook
+/// check`). A transcript records the command as the model emitted it — before any
+/// hook rewrite — so this re-derives whether the hook would have intercepted this
+/// exact instance, respecting excludes/transparent-prefixes and the same
+/// unattestable-construct defer the hook applies (heredocs, substitutions, etc.).
+fn covered_by_hook(
+    cmd: &str,
+    hook_installed: bool,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+) -> bool {
+    hook_installed
+        && !lexer::contains_unattestable_construct(cmd)
+        && registry::rewrite_command(cmd, excluded, transparent_prefixes).is_some()
+}
+
+/// Whether an already-`rtk`-prefixed command counts as coverage. `rtk proxy <cmd>`
+/// deliberately runs the raw command unfiltered, so it must not count — that would
+/// let the audit flatter itself via its own escape hatch.
+fn is_already_rtk(cmd: &str) -> bool {
+    let trimmed = cmd.trim();
+    trimmed.starts_with("rtk ") && !trimmed.starts_with("rtk proxy")
+}
+
 /// Extract the subcommand from a command string (second word).
 fn extract_subcmd(cmd: &str) -> &str {
     let parts: Vec<&str> = cmd.trim().splitn(3, char::is_whitespace).collect();
@@ -293,5 +341,63 @@ fn truncate_command(cmd: &str) -> String {
         0 => String::new(),
         1 => parts[0].to_string(),
         _ => format!("{} {}", parts[0], parts[1]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // rtk-ai/rtk#3148: hook-rewritten commands were counted as missed savings
+    // because transcripts record the pre-rewrite (raw) form of the command.
+
+    #[test]
+    fn test_covered_by_hook_false_when_hook_not_installed() {
+        // No hook installed → the raw command genuinely ran unfiltered; still a miss.
+        assert!(!covered_by_hook("grep -n foo bar.py", false, &[], &[]));
+    }
+
+    #[test]
+    fn test_covered_by_hook_true_for_rewritable_command() {
+        // Hook installed and this command has a rewrite → already covered at runtime.
+        assert!(covered_by_hook("grep -n foo bar.py", true, &[], &[]));
+        assert!(covered_by_hook("ls -la", true, &[], &[]));
+    }
+
+    #[test]
+    fn test_covered_by_hook_false_for_unattestable_construct() {
+        // The hook itself defers on unattestable constructs (substitutions, etc.),
+        // so a command containing one was never actually rewritten — genuine miss.
+        assert!(!covered_by_hook(
+            "git status $(rm -rf /tmp/x)",
+            true,
+            &[],
+            &[]
+        ));
+    }
+
+    #[test]
+    fn test_covered_by_hook_false_when_excluded_by_config() {
+        // Even with the hook installed, a command the user excluded via config
+        // was never rewritten — the hook stepped aside, so it's a genuine miss.
+        let excluded = vec!["grep".to_string()];
+        assert!(!covered_by_hook("grep -n foo bar.py", true, &excluded, &[]));
+    }
+
+    #[test]
+    fn test_is_already_rtk_plain_rewrite() {
+        assert!(is_already_rtk("rtk grep -n foo bar.py"));
+    }
+
+    #[test]
+    fn test_is_already_rtk_excludes_proxy_escape_hatch() {
+        // rtk#3148 secondary finding: `rtk proxy` deliberately bypasses filtering,
+        // so it must not count as coverage.
+        assert!(!is_already_rtk("rtk proxy grep -n foo bar.py"));
+    }
+
+    #[test]
+    fn test_is_already_rtk_false_for_unrelated_command() {
+        assert!(!is_already_rtk("grep -n foo bar.py"));
     }
 }
