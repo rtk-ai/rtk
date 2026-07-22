@@ -1,0 +1,20 @@
+[info] welcome to sbt 1.9.7 (Eclipse Adoptium Java 17.0.9)
+[info] loading settings for project root-build from plugins.sbt ...
+[info] loading project definition from /home/user/myproject/project
+[info] loading settings for project root from build.sbt ...
+[info] set current project to myproject (in build file:/home/user/myproject/)
+[info] Compiling 3 Scala sources to /home/user/myproject/target/scala-2.13/classes ...
+[error] /home/user/myproject/src/main/scala/com/example/MyService.scala:42:5: type mismatch;
+[error]  found   : String
+[error]  required: Int
+[error]     val count: Int = "hello"
+[error]                      ^
+[error] /home/user/myproject/src/main/scala/com/example/MyService.scala:58:12: not found: value undeclaredVar
+[error]     println(undeclaredVar)
+[error]             ^
+[error] /home/user/myproject/src/main/scala/com/example/MyRepository.scala:23:8: value nonExistentMethod is not a member of com.example.Database
+[error]     db.nonExistentMethod()
+[error]        ^
+[error] three errors found
+[error] (Compile / compileIncremental) Compilation failed
+[error] Total time: 8 s, completed Jan 15, 2025 10:29:15 AM
