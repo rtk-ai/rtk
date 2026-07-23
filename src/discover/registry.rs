@@ -595,6 +595,26 @@ pub fn rewrite_command(
     rewrite_compound(trimmed, &compiled, &normalized_prefixes)
 }
 
+/// Commands whose rtk rewrite changes the OUTPUT SHAPE — summary headers,
+/// grouped/capped matches, elision markers, size columns, tree layout.
+/// Feeding that shape into a pipe corrupts the consumer: `grep -n X f | wc -l`
+/// counts the header and elision lines (measured 28 for 60 real matches),
+/// `$(ls -t | head -1)` captures a size-decorated name, and `rtk read`'s
+/// `[N more lines]` marker reaches whatever parses the file content.
+/// `find`/`fd` were the original members (tree output vs `xargs`, #439).
+const PIPE_INCOMPATIBLE: &[&str] = &["find", "fd", "grep", "rg", "ls", "head", "tail", "cat"];
+
+/// True when `seg`'s command is one whose filtered output must not feed a pipe.
+/// Leading `VAR=value` assignments are skipped, matching `rewrite_segment`'s
+/// own env-prefix handling.
+fn is_pipe_incompatible(seg: &str) -> bool {
+    let first = seg
+        .split_whitespace()
+        .find(|word| !word.contains('='))
+        .unwrap_or("");
+    PIPE_INCOMPATIBLE.contains(&first)
+}
+
 /// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each segment.
 fn rewrite_compound(
     cmd: &str,
@@ -637,11 +657,7 @@ fn rewrite_compound(
             }
             TokenKind::Pipe => {
                 let seg = cmd[seg_start..tok.offset].trim();
-                let is_pipe_incompatible = seg.starts_with("find ")
-                    || seg == "find"
-                    || seg.starts_with("fd ")
-                    || seg == "fd";
-                let rewritten = if is_pipe_incompatible {
+                let rewritten = if is_pipe_incompatible(seg) {
                     seg.to_string()
                 } else {
                     rewrite_segment(seg, excluded, transparent_prefixes)
@@ -1724,6 +1740,63 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("find . -name '*.rs'", &[]),
             Some("rtk find . -name '*.rs'".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_grep_pipe_skipped() {
+        // rtk grep prepends a "N matches in M files:" header, caps matches and
+        // appends an elision line — a downstream consumer sees those instead
+        // of matches (`grep -n X f | wc -l` counted 28 for 60 real matches).
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -n match sixty.txt | wc -l", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_ls_pipe_skipped() {
+        // rtk ls decorates names with size columns; `$(ls -t | head -1)`
+        // must capture a clean path.
+        assert_eq!(rewrite_command_no_prefixes("ls -t | head -1", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_head_pipe_skipped() {
+        // head maps to `rtk read --max-lines`, whose "[N more lines]" marker
+        // would reach whatever parses the file content downstream.
+        assert_eq!(
+            rewrite_command_no_prefixes("head -20 src/main.rs | grep use", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_grep_env_prefix_pipe_skipped() {
+        // A leading VAR=value assignment does not hide the pipe-incompatible
+        // command (rewrite_segment strips env prefixes the same way).
+        assert_eq!(
+            rewrite_command_no_prefixes("LC_ALL=C grep -n match f.txt | sort", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_grep_no_pipe_still_rewritten() {
+        // grep WITHOUT a pipe keeps its rewrite — the compact form is for the
+        // agent's eyes, and no downstream program consumes it.
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -rn TODO src", &[]),
+            Some("rtk grep -rn TODO src".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_skip_only_affects_pipeline_segment() {
+        // Segments joined by `&&` after the pipeline still get rewritten.
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -n x f | wc -l && git status", &[]),
+            Some("grep -n x f | wc -l && rtk git status".into())
         );
     }
 
