@@ -18,7 +18,7 @@ def test_hook_rewrites_git_status():
         "parent_session_id": None,
         "transcript_path": "/tmp/test.jsonl",
         "cwd": "/tmp",
-        "hook_event_name": "before_tool",
+        "hook_event_name": "pre_tool",
         "tool_name": "bash",
         "tool_call_id": "test-call",
         "tool_input": {"command": "git status"}

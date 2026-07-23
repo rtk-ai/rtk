@@ -1575,7 +1575,7 @@ where
     } else if agent == Some(AgentTarget::Vibe) {
         uninstall_vibe(ctx)
     } else if agent == Some(AgentTarget::Droid) {
-        hooks::init::uninstall_droid(global, ctx)
+        hooks::init::uninstall_droid(flags.global, ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);

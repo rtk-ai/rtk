@@ -42,7 +42,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
 - **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, `isToolCallEventType` guard, in-place mutation, `~/.pi/agent/extensions/`
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
-- **[`vibe/`](vibe/README.md)** — Shell hook, `before_tool` hook, Mistral Vibe experimental hooks (requires Vibe >= 2.15.0)
+- **[`vibe/`](vibe/README.md)** — Shell hook, `pre_tool` hook
 
 ## Supported Agents
 
@@ -59,7 +59,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | OpenCode | TypeScript plugin (`tool.execute.before`) | In-place mutation | Yes |
 | Pi | TypeScript extension (`tool_call` event) | In-place mutation | Yes |
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
-| Mistral Vibe | Shell hook (`before_tool`) | Transparent rewrite | Yes (`hook_specific_output.tool_input`) |
+| Mistral Vibe | Shell hook (`pre_tool`) | Transparent rewrite | Yes (`hook_specific_output.tool_input`) |
 
 ## JSON Formats by Agent
 
@@ -192,7 +192,7 @@ if result.returncode in {0, 3} and rewritten and rewritten != command:
   "parent_session_id": null,
   "transcript_path": "/path/to/transcript.jsonl",
   "cwd": "/path/to/project",
-  "hook_event_name": "before_tool",
+  "hook_event_name": "pre_tool",
   "tool_name": "bash",
   "tool_call_id": "def456",
   "tool_input": { "command": "git status" }

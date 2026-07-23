@@ -1,13 +1,12 @@
 # RTK hook configuration for Mistral Vibe
 # Place this file in ~/.vibe/hooks.toml or .vibe/hooks.toml
-# Requires enable_experimental_hooks = true in config.toml
 #
 # This file is installed by: rtk init --agent vibe
 # To uninstall: rtk init --uninstall --agent vibe
 
 [[hooks]]
 name = "rtk-rewrite"
-type = "before_tool"
+type = "pre_tool"
 match = "bash"                # Match bash tool calls
 command = "rtk-hook-vibe.sh"  # Path relative to hooks directory or absolute
 timeout = 60.0                # seconds; default 60 for all hooks
@@ -16,7 +15,7 @@ description = "Rewrite bash commands to use RTK for 60-90% token savings"
 
 [[hooks]]
 name = "rtk-rewrite-shell"
-type = "before_tool"
+type = "pre_tool"
 match = "run_shell_command"  # Match run_shell_command tool calls (alternative name)
 command = "rtk-hook-vibe.sh"  # Path relative to hooks directory or absolute
 timeout = 60.0

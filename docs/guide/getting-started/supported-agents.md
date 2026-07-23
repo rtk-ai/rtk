@@ -37,7 +37,7 @@ Agent runs "cargo test"
 | OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
 | Pi | TypeScript extension (`tool_call` event) | Yes |
 | Hermes | Python plugin (`terminal` command mutation) | Yes |
-| Mistral Vibe | Shell hook (`before_tool`) | Yes |
+| Mistral Vibe | Shell hook (`pre_tool`) | Yes |
 | Factory Droid | Shell hook (`PreToolUse`, matcher `Execute`) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
@@ -203,14 +203,9 @@ rtk init -g --agent vibe
 ```
 
 **Requirements:**
-- Mistral Vibe >= 2.15.0 (when `before_tool` hooks were introduced)
-- Enable experimental hooks in your Vibe config:
-  ```toml
-  # ~/.vibe/config.toml or .vibe/config.toml
-  enable_experimental_hooks = true
-  ```
+- Mistral Vibe >= 2.21.0 (when `pre_tool` hooks were introduced)
 
-**How it works:** Uses Vibe's experimental `before_tool` hook system. The hook intercepts `bash` and `run_shell_command` tool calls, delegates to `rtk rewrite` for command decisions, and returns rewritten commands via JSON stdout.
+**How it works:** Uses Vibe's experimental `pre_tool` hook system. The hook intercepts `bash` and `run_shell_command` tool calls, delegates to `rtk rewrite` for command decisions, and returns rewritten commands via JSON stdout.
 
 **Files installed:**
 - `~/.vibe/hooks/rtk-hook-vibe.sh` — Shell script hook

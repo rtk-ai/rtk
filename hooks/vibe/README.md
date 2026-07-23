@@ -10,8 +10,7 @@ RTK's Mistral Vibe hook is a **rewrite-only token optimizer**. It intercepts Vib
 
 ## Specifics
 
-- Shell script hook using Mistral Vibe's experimental `before_tool` hook system
-- Requires `enable_experimental_hooks = true` in Vibe's `config.toml`
+- Shell script hook using Mistral Vibe's `pre_tool` hook system
 - Intercepts `bash` and `run_shell_command` tool calls
 - Calls `rtk rewrite` as a subprocess; returns rewritten command via JSON stdout
 - All rewrite logic lives in RTK's Rust `rtk rewrite` command (single source of truth)
@@ -25,15 +24,6 @@ rtk init --agent vibe
 
 This creates or updates `~/.vibe/hooks.toml` with the RTK hook configuration. The hook script itself lives at `~/.vibe/hooks/rtk-hook-vibe.sh`.
 
-After installation, ensure your Vibe config has:
-
-```toml
-# ~/.vibe/config.toml or .vibe/config.toml
-enable_experimental_hooks = true
-```
-
-Then restart Vibe.
-
 ## Uninstall
 
 ```bash
@@ -44,7 +34,7 @@ This removes the RTK hook entry from `~/.vibe/hooks.toml` and the hook script.
 
 ## How it works
 
-Vibe's `before_tool` hook receives JSON on stdin describing the tool call, including `tool_name` and `tool_input`. The RTK hook:
+Vibe's `pre_tool` hook receives JSON on stdin describing the tool call, including `tool_name` and `tool_input`. The RTK hook:
 
 1. Checks if the tool is `bash` or `run_shell_command`
 2. Extracts the command from `tool_input.command`
@@ -69,8 +59,7 @@ The hook does not block command execution. If anything goes wrong, Vibe runs the
 
 - Only `bash` and `run_shell_command` tool calls are rewritten
 - Commands skipped by `rtk rewrite` stay unchanged (already prefixed with `rtk`, compound shell commands, heredocs, etc.)
-- Requires Vibe 2.15.0+ (when `before_tool` hooks were introduced)
-- Requires `enable_experimental_hooks = true` in Vibe config
+- Requires Vibe 2.21.0+ (when `pre_tool` hooks were introduced)
 
 ## JSON Format
 
@@ -82,7 +71,7 @@ The hook does not block command execution. If anything goes wrong, Vibe runs the
   "parent_session_id": null,
   "transcript_path": "/path/to/transcript.jsonl",
   "cwd": "/path/to/project",
-  "hook_event_name": "before_tool",
+  "hook_event_name": "pre_tool",
   "tool_name": "bash",
   "tool_call_id": "def456",
   "tool_input": { "command": "git status" }

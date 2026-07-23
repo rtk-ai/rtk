@@ -16,10 +16,10 @@ use super::constants::{
     BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, DROID_DIR,
     DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR,
     DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
-    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
-    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
-    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_DIR, VIBE_HOOKS_SUBDIR,
-    VIBE_HOOKS_TOML as VIBE_HOOKS_TOML_FILENAME, VIBE_HOOK_FILE,
+    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
+    HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
+    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_DIR,
+    VIBE_HOOKS_SUBDIR, VIBE_HOOKS_TOML as VIBE_HOOKS_TOML_FILENAME, VIBE_HOOK_FILE,
 };
 use super::integrity;
 use super::is_claude_hook_command;
@@ -3421,13 +3421,6 @@ pub fn run_vibe_mode(ctx: InitContext) -> Result<()> {
             "  Hook script: {}",
             vibe_hook_script_path(&vibe_dir).display()
         );
-        println!("  Config: {}", vibe_hooks_toml_path(&vibe_dir).display());
-        println!();
-        println!("IMPORTANT: You must enable experimental hooks in your Vibe config:");
-        println!("  Add to ~/.vibe/config.toml (or .vibe/config.toml):");
-        println!("    enable_experimental_hooks = true");
-        println!();
-        println!("Then restart Vibe. Test with: git status");
     }
 
     Ok(())
