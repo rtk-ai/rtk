@@ -17,7 +17,8 @@ RTK's hook fast, predictable, and composable with other OMP extensions.
 - Subscribes to `tool_call` event, narrows to `bash` tool via `toolName` check
 - Calls `rtk rewrite` via `pi.exec`; mutates `event.input.command` in-place if rewrite differs
 - All error paths return `undefined` (pass through); RTK never blocks execution
-- Version guard at load time: checks `rtk >= 0.23.0`; warns and registers no-op if too old or missing
+- Sets UI label to "RTK" via `pi.setLabel("RTK")` so the extension is identifiable in OMP's status line
+- Version guard at load time: probes `rtk --version`; if the binary is missing, sets a persistent status-line warning via `session_start` (`ctx.ui.setStatus`) and disables rewrites; if `< 0.23.0`, logs a warning and disables rewrites — the extension never blocks on a missing or stale binary
 - Installed to `.omp/hooks/pre/rtk.ts` (project-local) or `~/.omp/agent/hooks/pre/rtk.ts` (global)
 
 ## Architecture
@@ -29,6 +30,27 @@ transparently before the bash tool runs.
 
 This is the same architecture as the Pi extension. OMP and Pi share a common extension API
 lineage (Earendil Works).
+
+## Install
+
+```bash
+# Project-local (default)
+rtk init --agent omp
+# → creates .omp/hooks/pre/rtk.ts
+
+# Global — all projects
+rtk init -g --agent omp
+# → creates ~/.omp/agent/hooks/pre/rtk.ts
+```
+
+OMP auto-discovers extensions from the `hooks/pre/` directory on startup. Set the
+`OMP_AGENT_DIR` environment variable to override the global install location.
+
+Preview the install without writing files:
+
+```bash
+rtk init --agent omp --dry-run
+```
 
 ## Uninstall
 
