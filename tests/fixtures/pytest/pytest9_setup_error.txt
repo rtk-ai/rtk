@@ -1,0 +1,7 @@
+E                                                                        [100%]
+==================================== ERRORS ====================================
+________________ ERROR at setup of test_setup_error_is_reported ________________
+tests/setup_error/conftest.py:6: in broken_setup
+    import rtk_missing_setup_dependency
+E   ModuleNotFoundError: No module named 'rtk_missing_setup_dependency'
+1 error in 0.01s

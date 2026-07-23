@@ -1,0 +1,20 @@
+F                                                                        [100%]
+==================================== ERRORS ====================================
+_ ERROR collecting tests/python/partial/test_missing_dependency.py _
+ImportError while importing test module '/repo/tests/python/partial/test_missing_dependency.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.14/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+tests/python/partial/test_missing_dependency.py:1: in <module>
+    import rtk_missing_dependency_partial
+E   ModuleNotFoundError: No module named 'rtk_missing_dependency_partial'
+=================================== FAILURES ===================================
+______________________ test_loadable_failure_is_reported _______________________
+tests/python/partial/test_failure.py:2: in test_loadable_failure_is_reported
+    assert "actual" == "expected"
+E   AssertionError: assert 'actual' == 'expected'
+E
+E     - expected
+E     + actual
+1 failed, 1 error in 0.15s

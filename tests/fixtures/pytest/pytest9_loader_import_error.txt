@@ -1,0 +1,4 @@
+ImportError while loading conftest '/repo/tests/python/loader_missing/conftest.py'.
+tests/python/loader_missing/conftest.py:1: in <module>
+    import rtk_missing_core_loader_dependency
+E   ModuleNotFoundError: No module named 'rtk_missing_core_loader_dependency'
