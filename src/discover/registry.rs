@@ -972,6 +972,12 @@ fn rewrite_segment_inner(
         }
     }
 
+    // Debugger prefixes must never be stripped even if listed in transparent_prefixes
+    // (#1387: dbg stack / gdbg break main.py:27 were being mangled).
+    if trimmed.starts_with("dbg ") || trimmed.starts_with("gdbg ") {
+        return None;
+    }
+
     // User-configured wrapper prefixes (e.g. `docker exec mycontainer`). Same
     // strip-recurse-reprepend contract as the builtin list above.
     for prefix in transparent_prefixes {
@@ -4944,5 +4950,24 @@ mod tests {
             normalize_php_tool_command_with_dirs("./tools/bin/pest", &dirs),
             "pest"
         );
+    }
+
+    // #1387: dbg/gdbg debugger commands must never be rewritten, even when
+    // listed in transparent_prefixes — the guard fires before the prefix loop.
+    #[test]
+    fn test_dbg_commands_pass_through() {
+        assert_eq!(rewrite_command_no_prefixes("dbg stack", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("dbg p distance_miles", &[]),
+            None
+        );
+        assert_eq!(rewrite_command_no_prefixes("dbg where", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("gdbg break main.py:27", &[]),
+            None
+        );
+        // Guard holds even when dbg is a configured transparent_prefix
+        let prefixes = vec!["dbg".to_string()];
+        assert_eq!(super::rewrite_command("dbg stack", &[], &prefixes), None);
     }
 }
