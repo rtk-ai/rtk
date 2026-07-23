@@ -12,7 +12,9 @@
 
 LLM-powered coding agents (Claude Code, Copilot, Cursor, etc.) consume tokens for every CLI command output they process. Most command outputs contain boilerplate, progress bars, ANSI escape codes, and verbose formatting that wastes tokens without providing actionable information.
 
-RTK sits between the agent and the CLI, filtering outputs to keep only what matters. This achieves 60-90% token savings per command, reducing costs and increasing effective context window utilization. RTK is a single Rust binary with no runtime dependencies beyond the compiled binary itself, adding less than 10ms overhead per command.
+RTK sits between the agent and the CLI, filtering outputs to keep only what matters. This cuts 60-90% of the bash output per command, reducing costs and increasing effective context window utilization. RTK is a single Rust binary with no runtime dependencies beyond the compiled binary itself, adding less than 10ms overhead per command.
+
+Every percentage below measures **bash output**, which is one contributor to input tokens, themselves only part of a bill that also counts output tokens. RTK ships no tokenizer (`src/core/tracking.rs` estimates `bytes / 4`), so the ratios are reliable but the absolute token counts are approximate.
 
 ---
 
@@ -246,7 +248,7 @@ When Clap parsing fails (unknown command):
 1. Guard: check if the command is an RTK meta-command (`gain`, `init`, etc.) -- if so, show Clap error
 2. Look up TOML DSL filters via `toml_filter::find_matching_filter()`
 3. If TOML match: capture stdout, apply filter pipeline, track savings
-4. If no match: pure passthrough with `Stdio::inherit`, track as 0% savings
+4. If no match: pure passthrough with `Stdio::inherit`, track as 0% output reduction
 
 ```
 Command received
@@ -255,7 +257,7 @@ Command received
      -> No:  run_fallback()
               -> TOML filter match?
                  -> Yes: Capture stdout, apply filter, track savings
-                 -> No:  Passthrough (inherit stdio, track 0% savings)
+                 -> No:  Passthrough (inherit stdio, track 0% reduction)
 ```
 
 > **Details**: [`src/core/README.md`](../src/core/README.md) covers the TOML filter engine, filter pipeline stages, and trust-gated project filters.
@@ -344,7 +346,7 @@ RTK supports the following LLM agents through hook integrations:
 
 ### Rust Filters (cmds/**)
 
-Compiled filter modules for complex transformations with 60-95% token savings.
+Compiled filter modules for complex transformations, cutting 60-95% of the bash output.
 
 > **Details**: [`src/cmds/README.md`](../src/cmds/README.md) and each ecosystem subdirectory README.
 
@@ -363,7 +365,7 @@ Declarative filters with an 8-stage pipeline: strip ANSI, regex replace, match o
 | Startup time | < 10ms | `hyperfine 'rtk git status' 'git status'` |
 | Memory usage | < 5MB resident | `/usr/bin/time -v rtk git status` |
 | Binary size | < 5MB stripped | `ls -lh target/release/rtk` |
-| Token savings | 60-90% per filter | Snapshot + token count tests |
+| Bash output reduction | ≥20% per filter (floor) | Snapshot + token count tests |
 
 Achieved through:
 - Zero async overhead (single-threaded, no tokio)
@@ -395,14 +397,14 @@ fn test_my_filter() {
 }
 ```
 
-**3. Verify token savings** (60% minimum required):
+**3. Verify the output reduction** (>=20% of the bash output required; `count_tokens` in tests and the `bytes / 4` estimator behind `rtk gain` are both approximations, reliable as ratios):
 ```rust
 #[test]
 fn test_my_filter_savings() {
     let input = include_str!("../tests/fixtures/my_cmd_raw.txt");
     let output = filter_my_cmd(input);
     let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
-    assert!(savings >= 60.0, "Expected >=60% savings, got {:.1}%", savings);
+    assert!(savings >= 20.0, "Expected >=20% savings, got {:.1}%", savings);
 }
 ```
 

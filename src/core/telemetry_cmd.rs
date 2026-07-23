@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
 
+const TELEMETRY_DISABLED_ENV: &str = "RTK_TELEMETRY_DISABLED";
+const TELEMETRY_DISABLED_VALUE: &str = "1";
+
 #[derive(Debug, Subcommand)]
 pub enum TelemetrySubcommand {
     Status,
@@ -18,6 +21,17 @@ pub fn run(command: &TelemetrySubcommand) -> Result<()> {
     }
 }
 
+/// Returns true when telemetry is explicitly disabled through the
+/// `RTK_TELEMETRY_DISABLED` env var (value `"1"`).
+///
+/// Single source of truth for the env opt-out so the consent prompt
+/// (`init::prompt_telemetry_consent`), the status command, and
+/// `telemetry::maybe_ping` never diverge — if the accepted values ever grow
+/// (e.g. `"true"`, `"y"`), they change here once.
+pub fn telemetry_disabled_by_env() -> bool {
+    std::env::var(TELEMETRY_DISABLED_ENV).unwrap_or_default() == TELEMETRY_DISABLED_VALUE
+}
+
 fn run_status() -> Result<()> {
     let config = crate::core::config::Config::load().unwrap_or_default();
 
@@ -33,7 +47,7 @@ fn run_status() -> Result<()> {
         "no"
     };
 
-    let env_override = std::env::var("RTK_TELEMETRY_DISABLED").unwrap_or_default() == "1";
+    let env_override = telemetry_disabled_by_env();
 
     println!("Telemetry status:");
     println!("  consent:       {}", consent_str);
@@ -180,4 +194,41 @@ fn send_erasure_request(device_hash: &str) -> Result<()> {
         .send_string(&payload.to_string())?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for #1307: the env opt-out must short-circuit telemetry
+    /// consent paths so `rtk init` cannot hang in non-interactive environments.
+    /// All cases are bundled in one test to serialize env-var mutations.
+    #[test]
+    fn test_telemetry_disabled_by_env_honors_opt_out() {
+        #[allow(deprecated)]
+        std::env::remove_var(TELEMETRY_DISABLED_ENV);
+        assert!(
+            !telemetry_disabled_by_env(),
+            "unset env must not count as disabled"
+        );
+
+        #[allow(deprecated)]
+        std::env::set_var(TELEMETRY_DISABLED_ENV, TELEMETRY_DISABLED_VALUE);
+        assert!(
+            telemetry_disabled_by_env(),
+            "RTK_TELEMETRY_DISABLED=1 must disable telemetry prompts (issue #1307)"
+        );
+
+        for other in ["0", "true", "false", "yes", "no", ""] {
+            #[allow(deprecated)]
+            std::env::set_var(TELEMETRY_DISABLED_ENV, other);
+            assert!(
+                !telemetry_disabled_by_env(),
+                "value {other:?} must not be treated as disabled"
+            );
+        }
+
+        #[allow(deprecated)]
+        std::env::remove_var(TELEMETRY_DISABLED_ENV);
+    }
 }
