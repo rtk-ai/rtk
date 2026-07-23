@@ -113,7 +113,7 @@ rtk init --agent kilocode       # Kilo Code
 rtk init --agent antigravity    # Google Antigravity
 rtk init --agent kimi           # Kimi AI
 rtk init -g --agent pi          # Pi
-rtk init -g --agent omp          # OMP (Oh My Pi)
+rtk init -g --agent omp         # OMP (Oh My Pi)
 rtk init --agent hermes         # Hermes
 rtk init -g --agent droid       # Factory Droid
 
