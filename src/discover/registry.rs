@@ -5,7 +5,7 @@ use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 use std::path::Path;
 
-use super::lexer::{split_on_operators, tokenize, TokenKind};
+use super::lexer::{shell_split, split_on_operators, tokenize, TokenKind};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
@@ -640,7 +640,9 @@ fn rewrite_compound(
                 let is_pipe_incompatible = seg.starts_with("find ")
                     || seg == "find"
                     || seg.starts_with("fd ")
-                    || seg == "fd";
+                    || seg == "fd"
+                    || seg == "rg --files"
+                    || seg.starts_with("rg --files ");
                 let rewritten = if is_pipe_incompatible {
                     seg.to_string()
                 } else {
@@ -868,6 +870,10 @@ fn rewrite_segment_inner(
         return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
     }
 
+    if is_rg_files_invocation(cmd_part) {
+        return rewrite_rg_files(cmd_part, redirect_suffix);
+    }
+
     // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
     // semantics than rtk read or no equivalent at all. Only `-n` (line numbers)
     // maps correctly to `rtk read -n`. Skip rewrite for any other flag.
@@ -970,6 +976,28 @@ fn rewrite_segment_inner(
     }
 
     None
+}
+
+fn is_rg_files_invocation(cmd_part: &str) -> bool {
+    strip_word_prefix(cmd_part, "rg")
+        .map(|rest| rest == "--files" || rest.starts_with("--files "))
+        .unwrap_or(false)
+}
+
+fn rewrite_rg_files(cmd_part: &str, redirect_suffix: &str) -> Option<String> {
+    let rest = strip_word_prefix(cmd_part, "rg")?;
+    let paths = strip_word_prefix(rest, "--files")?;
+
+    if paths.is_empty() {
+        return Some(format!("rtk find{}", redirect_suffix));
+    }
+
+    let args = shell_split(paths);
+    if args.len() != 1 || args[0].starts_with('-') {
+        return None;
+    }
+
+    Some(format!("rtk find '*' {}{}", paths, redirect_suffix))
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -1630,6 +1658,35 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("rg \"fn main\"", &[]),
             Some("rtk rg \"fn main\"".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_files_to_find() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files", &[]),
+            Some("rtk find".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_files_path_to_find() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files src", &[]),
+            Some("rtk find '*' src".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_files_pipe_skipped() {
+        assert_eq!(rewrite_command_no_prefixes("rg --files | wc -l", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_rg_files_unsupported_flags_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files --hidden", &[]),
+            None
         );
     }
 
