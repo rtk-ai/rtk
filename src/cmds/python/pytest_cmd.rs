@@ -62,7 +62,6 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
 pub(crate) fn filter_pytest_output(output: &str) -> String {
     let mut state = ParseState::Header;
-    let mut test_files: Vec<String> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     let mut current_failure: Vec<String> = Vec::new();
     let mut xfail_lines: Vec<String> = Vec::new();
@@ -75,7 +74,9 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         if trimmed.starts_with("===") && trimmed.contains("test session starts") {
             state = ParseState::Header;
             continue;
-        } else if trimmed.starts_with("===") && trimmed.contains("FAILURES") {
+        } else if trimmed.starts_with("===")
+            && (trimmed.contains("FAILURES") || trimmed.contains("ERRORS"))
+        {
             state = ParseState::Failures;
             continue;
         } else if trimmed.starts_with("===") && trimmed.contains("short test summary") {
@@ -89,7 +90,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         } else if trimmed.starts_with("===")
             && (trimmed.contains("passed")
                 || trimmed.contains("failed")
-                || trimmed.contains("skipped"))
+                || trimmed.contains("skipped")
+                || trimmed.contains("error"))
         {
             summary_line = trimmed.to_string();
             continue;
@@ -105,6 +107,18 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         {
             summary_line = trimmed.to_string();
             continue;
+        // quiet mode, errors only: "1 error in 0.06s" (collection/setup errors).
+        // Require a leading count so traceback prose can't masquerade as summary.
+        } else if summary_line.is_empty()
+            && trimmed.contains(" error")
+            && trimmed.contains(" in ")
+            && trimmed
+                .split_whitespace()
+                .next()
+                .is_some_and(|w| w.parse::<usize>().is_ok())
+        {
+            summary_line = trimmed.to_string();
+            continue;
         }
 
         // Process based on state
@@ -114,15 +128,7 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
                     state = ParseState::TestProgress;
                 }
             }
-            ParseState::TestProgress => {
-                // Lines like "tests/test_foo.py ....  [ 40%]"
-                if !trimmed.is_empty()
-                    && !trimmed.starts_with("===")
-                    && (trimmed.contains(".py") || trimmed.contains("%]"))
-                {
-                    test_files.push(trimmed.to_string());
-                }
-            }
+            ParseState::TestProgress => {}
             ParseState::Failures => {
                 // Collect failure details
                 if trimmed.starts_with("___") {
@@ -132,7 +138,12 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
                         current_failure.clear();
                     }
                     current_failure.push(trimmed.to_string());
-                } else if !trimmed.is_empty() && !trimmed.starts_with("===") {
+                } else if !trimmed.is_empty()
+                    && !trimmed.starts_with("===")
+                    && !trimmed.starts_with('!')
+                {
+                    // '!' lines are Interrupted/stopping banners — the error
+                    // count already lands in the summary header.
                     current_failure.push(trimmed.to_string());
                 }
             }
@@ -152,8 +163,24 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         failures.push(current_failure.join("\n"));
     }
 
+    let counts = parse_summary_line(&summary_line);
+
+    if counts.is_empty() && failures.is_empty() && xfail_lines.is_empty() {
+        // Nothing recognizable parsed. Only claim "No tests collected" when
+        // pytest actually said so; otherwise (--version, --help, plugin
+        // banners…) pass the output through unchanged.
+        let trimmed_out = output.trim();
+        if trimmed_out.is_empty()
+            || output.contains("no tests ran")
+            || output.contains("collected 0 items")
+        {
+            return "Pytest: No tests collected".to_string();
+        }
+        return trimmed_out.to_string();
+    }
+
     // Build compact output
-    build_pytest_summary(&summary_line, &test_files, &failures, &xfail_lines)
+    build_pytest_summary(&counts, &failures, &xfail_lines)
 }
 
 #[derive(Default)]
@@ -163,35 +190,49 @@ struct PytestCounts {
     skipped: usize,
     xfailed: usize,
     xpassed: usize,
+    errors: usize,
+}
+
+impl PytestCounts {
+    fn is_empty(&self) -> bool {
+        self.passed == 0
+            && self.failed == 0
+            && self.skipped == 0
+            && self.xfailed == 0
+            && self.xpassed == 0
+            && self.errors == 0
+    }
 }
 
 fn build_pytest_summary(
-    summary: &str,
-    _test_files: &[String],
+    counts: &PytestCounts,
     failures: &[String],
     xfail_lines: &[String],
 ) -> String {
-    let counts = parse_summary_line(summary);
     let PytestCounts {
         passed,
         failed,
         skipped,
         xfailed,
         xpassed,
-    } = counts;
-
-    if passed == 0 && failed == 0 && skipped == 0 && xfailed == 0 && xpassed == 0 {
-        return "Pytest: No tests collected".to_string();
-    }
+        errors,
+    } = *counts;
 
     let extras_present = skipped > 0 || xfailed > 0 || xpassed > 0 || !xfail_lines.is_empty();
 
-    if failed == 0 && passed > 0 && !extras_present {
+    if failed == 0 && errors == 0 && passed > 0 && !extras_present && failures.is_empty() {
         return format!("Pytest: {} passed", passed);
     }
 
     let mut result = String::new();
     result.push_str(&format!("Pytest: {} passed, {} failed", passed, failed));
+    if errors > 0 {
+        result.push_str(&format!(
+            ", {} error{}",
+            errors,
+            if errors == 1 { "" } else { "s" }
+        ));
+    }
     if skipped > 0 {
         result.push_str(&format!(", {} skipped", skipped));
     }
@@ -224,7 +265,11 @@ fn build_pytest_summary(
     }
 
     // Show failures (limit to key information)
-    result.push_str("\nFailures:\n");
+    result.push_str(if failed == 0 && errors > 0 {
+        "\nErrors:\n"
+    } else {
+        "\nFailures:\n"
+    });
 
     for (i, failure) in failures.iter().take(MAX_PYTEST_FAILURES).enumerate() {
         // Extract test name and key error info
@@ -235,13 +280,20 @@ fn build_pytest_summary(
             if first_line.starts_with("___") {
                 // Extract test name between ___
                 let test_name = first_line.trim_matches('_').trim();
-                result.push_str(&format!("{}. [FAIL] {}\n", i + 1, test_name));
-            } else if first_line.starts_with("FAILED") {
+                let (tag, test_name) = match test_name.strip_prefix("ERROR ") {
+                    Some(rest) => ("[ERR]", rest),
+                    None => ("[FAIL]", test_name),
+                };
+                result.push_str(&format!("{}. {} {}\n", i + 1, tag, test_name));
+            } else if first_line.starts_with("FAILED") || first_line.starts_with("ERROR") {
                 // Summary format: "FAILED tests/test_foo.py::test_bar - AssertionError"
                 let parts: Vec<&str> = first_line.split(" - ").collect();
                 if let Some(test_path) = parts.first() {
-                    let test_name = test_path.trim_start_matches("FAILED ");
-                    result.push_str(&format!("{}. [FAIL] {}\n", i + 1, test_name));
+                    let (tag, test_name) = match test_path.strip_prefix("ERROR ") {
+                        Some(rest) => ("[ERR]", rest),
+                        None => ("[FAIL]", test_path.trim_start_matches("FAILED ")),
+                    };
+                    result.push_str(&format!("{}. {} {}\n", i + 1, tag, test_name));
                 }
                 if parts.len() > 1 {
                     result.push_str(&format!("     {}\n", truncate(parts[1], 100)));
@@ -250,20 +302,42 @@ fn build_pytest_summary(
             }
         }
 
-        // Show relevant error lines (assertions, errors, file locations)
-        let mut relevant_lines = 0;
-        for line in &lines[1..] {
+        // Show relevant error lines. Assertion/exception lines ('>' and 'E'
+        // markers) are the root cause — select them first so traceback
+        // location boilerplate can't crowd them out of the 3-line cap,
+        // then render in original order.
+        let body = &lines[1..];
+        let is_strong = |line: &str| {
+            let t = line.trim();
+            t.starts_with('>') || t.starts_with('E')
+        };
+        let is_relevant = |line: &str| {
             let line_lower = line.to_lowercase();
-            let is_relevant = line.trim().starts_with('>')
-                || line.trim().starts_with('E')
+            is_strong(line)
                 || line_lower.contains("assert")
                 || line_lower.contains("error")
-                || line.contains(".py:");
+                || line.contains(".py:")
+        };
 
-            if is_relevant && relevant_lines < 3 {
-                result.push_str(&format!("     {}\n", truncate(line, 100)));
-                relevant_lines += 1;
+        let mut selected: Vec<usize> = body
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| is_strong(line))
+            .map(|(idx, _)| idx)
+            .take(3)
+            .collect();
+        for (idx, line) in body.iter().enumerate() {
+            if selected.len() >= 3 {
+                break;
             }
+            if is_relevant(line) && !selected.contains(&idx) {
+                selected.push(idx);
+            }
+        }
+        selected.sort_unstable();
+
+        for idx in selected {
+            result.push_str(&format!("     {}\n", truncate(body[idx], 100)));
         }
 
         if i < failures.len() - 1 {
@@ -309,6 +383,8 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
                 counts.failed = n;
             } else if word.contains("skipped") {
                 counts.skipped = n;
+            } else if word.contains("error") {
+                counts.errors = n;
             }
         }
     }
@@ -499,6 +575,73 @@ FAILED tests/test_foo.py::test_something - AssertionError
             "Should show actual test counts. Got: {}",
             result
         );
+    }
+
+    #[test]
+    fn test_filter_pytest_collection_error_quiet() {
+        // Real `pytest --tb=short -q -rxX` output (pytest 9) for an import
+        // error during collection: no session banner, no short summary,
+        // just an ERRORS section and a bare "1 error in 0.06s" line.
+        let output = include_str!("../../../tests/fixtures/pytest_collection_error_q.txt");
+
+        let result = filter_pytest_output(output);
+        assert!(
+            !result.contains("No tests collected"),
+            "Collection errors must not be reported as 'No tests collected'. Got: {}",
+            result
+        );
+        assert!(result.contains("1 error"), "got: {}", result);
+        assert!(
+            result.contains("collecting tests/test_broken.py"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("ModuleNotFoundError"),
+            "The root-cause E line must survive filtering. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_pytest_collection_error_banner_mode() {
+        // Non-quiet variant: banner + short test summary + === error summary ===
+        let output = r#"=== test session starts ===
+collected 0 items / 1 error
+
+=== ERRORS ===
+___ ERROR collecting tests/test_broken.py ___
+ImportError while importing test module 'tests/test_broken.py'.
+E   ModuleNotFoundError: No module named 'nonexistent_module'
+=== short test summary info ===
+ERROR tests/test_broken.py
+!!! Interrupted: 1 error during collection !!!
+=== 1 error in 0.12s ==="#;
+
+        let result = filter_pytest_output(output);
+        assert!(!result.contains("No tests collected"), "got: {}", result);
+        assert!(result.contains("1 error"), "got: {}", result);
+        assert!(result.contains("ModuleNotFoundError"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_pytest_version_passthrough() {
+        // `pytest --version` produces no test session at all — pass through
+        // instead of claiming "No tests collected".
+        let result = filter_pytest_output("pytest 9.0.3\n");
+        assert_eq!(result, "pytest 9.0.3");
+    }
+
+    #[test]
+    fn test_parse_summary_line_errors() {
+        let c = parse_summary_line("=== 2 passed, 1 error in 0.5s ===");
+        assert_eq!((c.passed, c.errors), (2, 1));
+
+        let c = parse_summary_line("1 error in 0.06s");
+        assert_eq!(c.errors, 1);
+
+        let c = parse_summary_line("=== 3 errors in 1.2s ===");
+        assert_eq!(c.errors, 3);
     }
 
     #[test]

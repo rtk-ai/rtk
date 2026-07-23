@@ -1,0 +1,14 @@
+
+==================================== ERRORS ====================================
+____________________ ERROR collecting tests/test_broken.py _____________________
+ImportError while importing test module '/tmp/rtkfix/tests/test_broken.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.14/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_broken.py:1: in <module>
+    import nonexistent_module
+E   ModuleNotFoundError: No module named 'nonexistent_module'
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.06s
