@@ -6,6 +6,7 @@ use regex::{Regex, RegexSet};
 use std::path::Path;
 
 use super::lexer::{split_on_operators, tokenize, TokenKind};
+use super::report::RtkStatus;
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
@@ -167,7 +168,7 @@ pub fn classify_command(cmd: &str) -> Classification {
                     .iter()
                     .find(|(s, _)| *s == subcmd)
                     .map(|(_, st)| *st)
-                    .unwrap_or(super::report::RtkStatus::Existing);
+                    .unwrap_or(RtkStatus::Existing);
 
                 // Check if this subcommand has custom savings
                 let savings = rule
@@ -179,10 +180,10 @@ pub fn classify_command(cmd: &str) -> Classification {
 
                 (savings, status)
             } else {
-                (rule.savings_pct, super::report::RtkStatus::Existing)
+                (rule.savings_pct, RtkStatus::Existing)
             }
         } else {
-            (rule.savings_pct, super::report::RtkStatus::Existing)
+            (rule.savings_pct, RtkStatus::Existing)
         };
 
         Classification::Supported {
@@ -192,6 +193,16 @@ pub fn classify_command(cmd: &str) -> Classification {
             status,
         }
     } else {
+        // Universal-passthrough parents: `rtk git <anything>` (and yadm) works
+        // via the per-parent `run_passthrough` path even when the specific
+        // subcommand has no dedicated filter. Don't flag these as unhandled
+        // (see #1897). The rewrite path picks the existing git rule via
+        // `rtk_equivalent == "rtk git"` and the per-rule `rewrite_prefixes`
+        // handles the actual rewrite.
+        if let Some(class) = passthrough_parent_classification(cmd_clean) {
+            return class;
+        }
+
         // Extract base command for unsupported
         let base = extract_base_command(cmd_clean);
         if base.is_empty() {
@@ -202,6 +213,28 @@ pub fn classify_command(cmd: &str) -> Classification {
             }
         }
     }
+}
+
+/// Returns a `Supported` classification with `RtkStatus::Passthrough` if the
+/// command's parent has a `run_passthrough` handler that covers any subcommand
+/// (e.g. `rtk git <anything>` for git and yadm). Used to keep `rtk discover`
+/// from flagging genuinely-supported commands like `git checkout`, `git clone`,
+/// `git remote` as unhandled. See #1897.
+fn passthrough_parent_classification(cmd: &str) -> Option<Classification> {
+    let first = cmd.split_whitespace().next()?;
+    let (rtk_equivalent, category) = match first {
+        "git" | "yadm" => ("rtk git", "Git"),
+        _ => return None,
+    };
+    Some(Classification::Supported {
+        rtk_equivalent,
+        category,
+        // Passthrough does no output filtering, so no per-command token savings.
+        // Tracking still has value via `rtk gain`, but reporting 0 keeps the
+        // savings totals honest.
+        estimated_savings_pct: 0.0,
+        status: RtkStatus::Passthrough,
+    })
 }
 
 /// Extract the base command (first word, or first two if it looks like a subcommand pattern).
@@ -1140,6 +1173,84 @@ mod tests {
             }
             other => panic!("expected Unsupported, got {:?}", other),
         }
+    }
+
+    // --- #1897: git passthrough subcommands ---
+
+    #[test]
+    fn test_classify_git_checkout_passthrough() {
+        // Regression test for https://github.com/rtk-ai/rtk/issues/1897:
+        // `git checkout` was being classified Unsupported because it isn't in the
+        // git rule's explicit subcommand list, even though `rtk git checkout`
+        // already works via the git run_passthrough handler. The discover report
+        // would then flag it as "TOP UNHANDLED" and prompt users to "open an
+        // issue?", causing noise and false bug reports.
+        assert_eq!(
+            classify_command("git checkout -b my-branch"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_git_clone_passthrough() {
+        assert_eq!(
+            classify_command("git clone --depth=1 https://github.com/foo/bar"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_git_remote_passthrough() {
+        assert_eq!(
+            classify_command("git remote add fork https://github.com/foo/bar"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_yadm_checkout_passthrough() {
+        // yadm shares the universal git rewrite path (rewrite_prefixes = ["git", "yadm"]).
+        assert_eq!(
+            classify_command("yadm checkout -b my-branch"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_git_status_still_uses_dedicated_filter() {
+        // Sentinel: the new passthrough fallback must NOT shadow the existing
+        // dedicated-filter rule for `git status` and friends. The matches.last()
+        // logic picks the more specific (later) match, so the existing 70%-savings
+        // Existing-status classification must still win.
+        assert_eq!(
+            classify_command("git status"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
     }
 
     #[test]
