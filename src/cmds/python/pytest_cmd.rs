@@ -89,7 +89,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         } else if trimmed.starts_with("===")
             && (trimmed.contains("passed")
                 || trimmed.contains("failed")
-                || trimmed.contains("skipped"))
+                || trimmed.contains("skipped")
+                || trimmed.contains("error"))
         {
             summary_line = trimmed.to_string();
             continue;
@@ -100,7 +101,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
             && !trimmed.starts_with("ERROR")
             && (trimmed.contains(" passed")
                 || trimmed.contains(" failed")
-                || trimmed.contains(" skipped"))
+                || trimmed.contains(" skipped")
+                || trimmed.contains(" error"))
             && trimmed.contains(" in ")
         {
             summary_line = trimmed.to_string();
@@ -156,13 +158,14 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
     build_pytest_summary(&summary_line, &test_files, &failures, &xfail_lines)
 }
 
-#[derive(Default)]
+#[derive(Default, Debug, PartialEq)]
 struct PytestCounts {
     passed: usize,
     failed: usize,
     skipped: usize,
     xfailed: usize,
     xpassed: usize,
+    errors: usize,
 }
 
 fn build_pytest_summary(
@@ -178,13 +181,14 @@ fn build_pytest_summary(
         skipped,
         xfailed,
         xpassed,
+        errors,
     } = counts;
 
-    if passed == 0 && failed == 0 && skipped == 0 && xfailed == 0 && xpassed == 0 {
+    if passed == 0 && failed == 0 && skipped == 0 && xfailed == 0 && xpassed == 0 && errors == 0 {
         return "Pytest: No tests collected".to_string();
     }
 
-    let extras_present = skipped > 0 || xfailed > 0 || xpassed > 0 || !xfail_lines.is_empty();
+    let extras_present = skipped > 0 || xfailed > 0 || xpassed > 0 || errors > 0 || !xfail_lines.is_empty();
 
     if failed == 0 && passed > 0 && !extras_present {
         return format!("Pytest: {} passed", passed);
@@ -200,6 +204,9 @@ fn build_pytest_summary(
     }
     if xpassed > 0 {
         result.push_str(&format!(", {} xpassed", xpassed));
+    }
+    if errors > 0 {
+        result.push_str(&format!(", {} error{}", errors, if errors == 1 { "" } else { "s" }));
     }
     result.push('\n');
 
@@ -309,6 +316,11 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
                 counts.failed = n;
             } else if word.contains("skipped") {
                 counts.skipped = n;
+            } else if *word == "error" || *word == "errors" {
+                // "error" (singular) or "errors" (plural) — e.g. "1 error in 0.10s"
+                // or "2 errors in 0.20s" from collection errors.
+                // Exact match to avoid false positives.
+                counts.errors = n;
             }
         }
     }
@@ -514,6 +526,53 @@ collected 3 items
             !result.contains("No tests collected"),
             "Should not say 'No tests collected' when tests were skipped. Got: {}",
             result
+        );
+    }
+
+    #[test]
+    fn test_filter_pytest_with_errors() {
+        let output = r#"=== test session starts ===
+collected 0 items / 1 error
+=== short test summary info ===
+ERROR tests/test_foo.py
+=============================== 1 error in 0.10s ===============================
+"#;
+        let result = filter_pytest_output(output);
+        assert!(
+            !result.contains("No tests collected"),
+            "Should not say 'No tests collected' when errors occurred. Got: {}",
+            result
+        );
+        assert!(result.contains("1 error"), "Should show error count. Got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_pytest_mixed_errors() {
+        let output = r#"=== test session starts ===
+collected 7 items
+tests/test_foo.py .....E.
+=== short test summary info ===
+ERROR tests/test_foo.py::test_error - ImportError
+5 passed, 2 errors in 0.50s
+"#;
+        let result = filter_pytest_output(output);
+        assert!(result.contains("5 passed") && result.contains("2 error"),
+            "Should show both passed and error counts. Got: {}", result);
+    }
+
+    #[test]
+    fn test_parse_summary_line_with_errors() {
+        assert_eq!(
+            parse_summary_line("=============================== 1 error in 0.10s ==============================="),
+            PytestCounts { passed: 0, failed: 0, skipped: 0, xfailed: 0, xpassed: 0, errors: 1 }
+        );
+        assert_eq!(
+            parse_summary_line("5 passed, 2 errors in 0.50s"),
+            PytestCounts { passed: 5, failed: 0, skipped: 0, xfailed: 0, xpassed: 0, errors: 2 }
+        );
+        assert_eq!(
+            parse_summary_line("3 passed, 1 failed, 2 errors, 1 skipped in 1.00s"),
+            PytestCounts { passed: 3, failed: 1, skipped: 1, xfailed: 0, xpassed: 0, errors: 2 }
         );
     }
 }
