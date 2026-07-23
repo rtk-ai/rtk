@@ -72,6 +72,15 @@ fn uses_compact_status_path(args: &[String]) -> bool {
     saw_branch
 }
 
+fn uses_raw_status_output(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--porcelain" | "--short" | "-s" | "-sb" | "-bs" | "-z" | "--null"
+        ) || arg.starts_with("--porcelain=")
+    })
+}
+
 fn build_status_command(args: &[String], global_args: &[String]) -> Command {
     let mut cmd = git_cmd(global_args);
     cmd.arg("status");
@@ -821,12 +830,21 @@ fn filter_status_with_args(output: &str) -> String {
     }
 }
 
+fn filter_status_for_args(args: &[String], output: &str) -> String {
+    if uses_raw_status_output(args) {
+        output.to_string()
+    } else {
+        filter_status_with_args(output)
+    }
+}
+
 fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let raw_output_requested = uses_raw_status_output(args);
 
     // Keep a narrow compact path for no-arg status and branch/short-only flags.
     // More complex explicit args still use the existing minimal-filter path.
-    if !uses_compact_status_path(args) {
+    if raw_output_requested || !uses_compact_status_path(args) {
         let mut cmd = build_status_command(args, global_args);
         let result = exec_capture(&mut cmd).context("Failed to run git status")?;
 
@@ -848,7 +866,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         }
 
         // Apply minimal filtering: strip ANSI, remove hints, empty lines
-        let filtered = filter_status_with_args(&result.stdout);
+        let filtered = filter_status_for_args(args, &result.stdout);
         let filtered = never_worse(&result.stdout, &filtered).to_string();
         print!("{}", filtered);
 
@@ -2171,6 +2189,15 @@ mod tests {
     }
 
     #[test]
+    fn test_uses_raw_status_output_for_machine_readable_flags() {
+        for flag in ["--porcelain", "--porcelain=v2", "--short", "-s", "-z", "--null"] {
+            assert!(uses_raw_status_output(&[flag.to_string()]), "{flag}");
+        }
+        assert!(uses_raw_status_output(&["-sb".to_string()]));
+        assert!(!uses_raw_status_output(&["--branch".to_string()]));
+    }
+
+    #[test]
     fn test_build_status_command_with_user_args_passthrough() {
         let args = vec!["--short".to_string(), "--branch".to_string()];
         let cmd = build_status_command(&args, &[]);
@@ -2782,6 +2809,16 @@ no changes added to commit (use "git add" and/or "git commit -a")
         let output = "nothing to commit, working tree clean\n";
         let result = filter_status_with_args(output);
         assert!(result.contains("nothing to commit"));
+    }
+
+    #[test]
+    fn test_filter_status_for_args_preserves_machine_readable_output() {
+        assert_eq!(filter_status_for_args(&["--porcelain".into()], ""), "");
+        let nul_delimited = "?? file with spaces\0";
+        assert_eq!(
+            filter_status_for_args(&["--porcelain=v1".into(), "-z".into()], nul_delimited),
+            nul_delimited
+        );
     }
 
     #[test]
