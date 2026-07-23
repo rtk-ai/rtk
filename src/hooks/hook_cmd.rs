@@ -349,7 +349,8 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         None => return PayloadAction::Ignore,
     };
 
-    let (rewritten, allow) = match decide_hook_action(cmd, permissions::Host::Claude) {
+    let (rewritten, permission_decision) = match decide_hook_action(cmd, permissions::Host::Claude)
+    {
         HookDecision::Deny => {
             return PayloadAction::Skip {
                 reason: "skip:deny_rule",
@@ -362,8 +363,8 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
                 cmd: cmd.to_string(),
             }
         }
-        HookDecision::AllowRewrite(r) => (r, true),
-        HookDecision::AskRewrite(r) => (r, false),
+        HookDecision::AllowRewrite(r) => (r, "allow"),
+        HookDecision::AskRewrite(r) => (r, "ask"),
     };
 
     let updated_input = {
@@ -374,18 +375,12 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         ti
     };
 
-    let mut hook_output = json!({
+    let hook_output = json!({
         "hookEventName": PRE_TOOL_USE_KEY,
+        "permissionDecision": permission_decision,
         "permissionDecisionReason": "RTK auto-rewrite",
         "updatedInput": updated_input
     });
-
-    if allow {
-        hook_output
-            .as_object_mut()
-            .unwrap()
-            .insert("permissionDecision".into(), json!("allow"));
-    }
 
     PayloadAction::Rewrite {
         cmd: cmd.to_string(),
@@ -1118,14 +1113,42 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_mixed_compound_rewrite_sets_ask_permission_decision() {
+        let result = run_claude_inner(&claude_input("grep -rn foo . && echo done")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert_eq!(
+            hook["updatedInput"]["command"],
+            "rtk grep -rn foo . && echo done"
+        );
+        assert_eq!(hook["permissionDecision"], "ask");
+        assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
+    }
+
+    #[test]
+    fn test_claude_default_rewrite_is_ask_not_allow() {
+        let result = run_claude_inner(&claude_input("git status && rm -rf /tmp/x")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert_eq!(
+            hook["updatedInput"]["command"],
+            "rtk git status && rm -rf /tmp/x"
+        );
+        assert_eq!(hook["permissionDecision"], "ask");
+    }
+
+    #[test]
     fn test_claude_json_output_structure() {
         let result = run_claude_inner(&claude_input("git status")).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
         let hook = &v["hookSpecificOutput"];
 
         assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
-        // permissionDecision is only set when an explicit allow rule matches;
-        // with default-to-ask semantics (no rules configured), it is absent.
+        // Default-to-ask rewrites should be explicit so Claude Code receives
+        // a complete decision alongside the updated command.
+        assert_eq!(hook["permissionDecision"], "ask");
         assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
         assert!(hook["updatedInput"].is_object());
         assert!(hook["updatedInput"]["command"].is_string());
