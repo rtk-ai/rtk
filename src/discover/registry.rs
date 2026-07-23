@@ -833,6 +833,30 @@ fn rewrite_segment_inner(
         return Some(format!("{}{}", env_prefix, rewritten));
     }
 
+    // WSL wrapper: `wsl[.exe] … bash -lc '<inner>'`. Unwrap the quoted inner,
+    // rewrite it, and re-wrap so the rewrite runs inside the distro. Requires rtk
+    // to be installed in the WSL distro (same contract as transparent_prefixes).
+    // Compound inner commands are left raw — the wins are single commands
+    // (git status, grep, ls…). See issue #2008.
+    if let Some((prefix, inner, quote)) = unwrap_wsl_c(trimmed) {
+        let inner_is_compound = inner.contains("&&")
+            || inner.contains("||")
+            || inner.contains(';')
+            || inner.contains('|')
+            || inner.contains(" & ");
+        if !inner_is_compound {
+            if let Some(rewritten) =
+                rewrite_segment_inner(inner, excluded, transparent_prefixes, depth + 1)
+            {
+                if rewritten != inner {
+                    let q = quote as char;
+                    return Some(format!("{prefix}{q}{rewritten}{q}"));
+                }
+            }
+        }
+        return None;
+    }
+
     for &prefix in BUILTIN_TRANSPARENT_PREFIXES {
         if let Some(rest) = strip_word_prefix(trimmed, prefix) {
             if rest.is_empty() {
@@ -974,6 +998,56 @@ fn rewrite_segment_inner(
 
 /// Strip a command prefix with word-boundary check.
 /// Returns the remainder of the command after the prefix, or `None` if no match.
+/// Shell `-c`/`-lc` invocation markers used inside a WSL wrapper, e.g.
+/// `wsl.exe -d Ubuntu -- bash -lc '<cmd>'`. The inner command is the single
+/// quoted argument that follows the marker.
+const WSL_C_MARKERS: &[&str] = &[
+    " bash -lc ",
+    " bash -c ",
+    " sh -lc ",
+    " sh -c ",
+    " zsh -lc ",
+    " zsh -c ",
+];
+
+/// Unwrap a `wsl[.exe] … <shell> -c '<inner>'` invocation into its
+/// re-prependable prefix (everything up to and including the shell `-c` flag and
+/// its trailing space), the unquoted inner command, and the quote byte used.
+///
+/// Returns `None` unless the command starts with `wsl`/`wsl.exe` and the inner
+/// command is a single fully-quoted argument with no nested same-quote — nested
+/// quoting is left raw so RTK never corrupts a complex script. See issue #2008.
+fn unwrap_wsl_c(cmd: &str) -> Option<(&str, &str, u8)> {
+    if !(cmd.starts_with("wsl ") || cmd.starts_with("wsl.exe ")) {
+        return None;
+    }
+
+    // Earliest shell `-c` marker wins (a command has one shell invocation).
+    let marker_end = WSL_C_MARKERS
+        .iter()
+        .filter_map(|m| cmd.find(m).map(|pos| pos + m.len()))
+        .min()?;
+
+    let prefix = &cmd[..marker_end];
+    let arg = cmd[marker_end..].trim();
+    let bytes = arg.as_bytes();
+    if bytes.len() < 2 {
+        return None;
+    }
+    let quote = bytes[0];
+    if quote != b'\'' && quote != b'"' {
+        return None;
+    }
+    if *bytes.last().unwrap() != quote {
+        return None;
+    }
+    let inner = &arg[1..arg.len() - 1];
+    if inner.as_bytes().contains(&quote) {
+        return None;
+    }
+    Some((prefix, inner, quote))
+}
+
 fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
     if cmd == prefix {
         Some("")
@@ -4163,6 +4237,84 @@ mod tests {
         assert_eq!(
             super::rewrite_command("noglob shadowenv exec -- git status", &[], &prefixes),
             Some("noglob shadowenv exec -- rtk git status".into())
+        );
+    }
+
+    // --- WSL wrapper (#2008) ---
+
+    #[test]
+    fn test_wsl_wrapper_single_quoted_inner() {
+        assert_eq!(
+            super::rewrite_command("wsl.exe -d ubuntu-24.04 -- bash -lc 'git status'", &[], &[]),
+            Some("wsl.exe -d ubuntu-24.04 -- bash -lc 'rtk git status'".into())
+        );
+    }
+
+    #[test]
+    fn test_wsl_wrapper_double_quote_preserved() {
+        assert_eq!(
+            super::rewrite_command("wsl -d Ubuntu -- bash -c \"git diff\"", &[], &[]),
+            Some("wsl -d Ubuntu -- bash -c \"rtk git diff\"".into())
+        );
+    }
+
+    #[test]
+    fn test_wsl_wrapper_no_distro_sh() {
+        assert_eq!(
+            super::rewrite_command("wsl.exe -- sh -c 'ls -la'", &[], &[]),
+            Some("wsl.exe -- sh -c 'rtk ls -la'".into())
+        );
+    }
+
+    #[test]
+    fn test_wsl_wrapper_env_prefix_composes() {
+        // Windows Git-Bash prepends `MSYS_NO_PATHCONV=1`; the env prefix is
+        // stripped then re-prepended around the rewrite.
+        assert_eq!(
+            super::rewrite_command(
+                "MSYS_NO_PATHCONV=1 wsl.exe -d ubuntu-24.04 -- bash -lc 'git status'",
+                &[],
+                &[]
+            ),
+            Some("MSYS_NO_PATHCONV=1 wsl.exe -d ubuntu-24.04 -- bash -lc 'rtk git status'".into())
+        );
+    }
+
+    #[test]
+    fn test_wsl_wrapper_unknown_inner_passthrough() {
+        assert_eq!(
+            super::rewrite_command("wsl.exe -d Ubuntu -- bash -lc 'htop'", &[], &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_wsl_wrapper_compound_inner_left_raw() {
+        // Complex scripts stay raw — RTK must not risk corrupting the quoting.
+        assert_eq!(
+            super::rewrite_command(
+                "wsl.exe -d Ubuntu -- bash -lc 'cd /x && git status'",
+                &[],
+                &[]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_wsl_wrapper_nested_quote_left_raw() {
+        assert_eq!(
+            super::rewrite_command("wsl.exe -d Ubuntu -- bash -lc 'echo 'hi''", &[], &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_wsl_wrapper_non_wsl_untouched() {
+        // A bare `bash -lc '…'` (no wsl) is not our concern here.
+        assert_eq!(
+            super::rewrite_command("bash -lc 'git status'", &[], &[]),
+            None
         );
     }
 
