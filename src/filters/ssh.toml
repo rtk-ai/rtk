@@ -1,15 +1,19 @@
 [filters.ssh]
-description = "Compact ssh output — strip connection banners, keep command output"
+description = "Compact ssh output — strip connection banners, dedup repeated lines, keep command output"
 match_command = "^ssh\\b"
 strip_ansi = true
+dedup_repeats = true
 strip_lines_matching = [
   "^\\s*$",
   "^Warning: Permanently added",
   "^Connection to .+ closed",
+  "^Shared connection to .+ closed",
   "^Authenticated to",
   "^debug1:",
   "^OpenSSH_",
   "^Pseudo-terminal",
+  "^X11 forwarding request failed",
+  "^Last login:",
 ]
 max_lines = 200
 truncate_lines_at = 120
@@ -37,6 +41,16 @@ uptime: 12:00:00 up 42 days, load average: 0.10, 0.15, 0.12
 Connection to host.example.com closed.
 """
 expected = "uptime: 12:00:00 up 42 days, load average: 0.10, 0.15, 0.12"
+
+[[tests.ssh]]
+name = "consecutive identical log lines are collapsed with a count"
+input = """
+Mar 10 12:00:01 host dockerd[812]: connection reset by peer
+Mar 10 12:00:01 host dockerd[812]: connection reset by peer
+Mar 10 12:00:01 host dockerd[812]: connection reset by peer
+Mar 10 12:00:02 host systemd[1]: docker.service: restarting
+"""
+expected = "Mar 10 12:00:01 host dockerd[812]: connection reset by peer [x3]\nMar 10 12:00:02 host systemd[1]: docker.service: restarting"
 
 [[tests.ssh]]
 name = "empty input passes through"

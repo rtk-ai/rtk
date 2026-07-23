@@ -833,6 +833,14 @@ fn rewrite_segment_inner(
         return Some(format!("{}{}", env_prefix, rewritten));
     }
 
+    // `timeout [OPTS] DURATION <cmd>` — variable-length wrapper, so it can't
+    // live in BUILTIN_TRANSPARENT_PREFIXES. Strip it, rewrite the inner
+    // command, re-prepend the wrapper verbatim.
+    if let Some((prefix, rest)) = strip_timeout_prefix(trimmed) {
+        return rewrite_segment_inner(rest, excluded, transparent_prefixes, depth + 1)
+            .map(|rewritten| format!("{} {}", prefix, rewritten));
+    }
+
     for &prefix in BUILTIN_TRANSPARENT_PREFIXES {
         if let Some(rest) = strip_word_prefix(trimmed, prefix) {
             if rest.is_empty() {
@@ -985,6 +993,66 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
     } else {
         None
     }
+}
+
+/// Strip a `timeout [OPTIONS] DURATION` wrapper (coreutils `timeout(1)`),
+/// returning `(consumed_prefix, inner_command)` as slices of `cmd`.
+///
+/// Unlike the fixed-word [`BUILTIN_TRANSPARENT_PREFIXES`], `timeout` takes a
+/// mandatory DURATION argument and optional flags (`-s SIGNAL`, `-k DURATION`,
+/// `--preserve-status`, `--foreground`, `-v`), so it needs its own parser.
+/// The consumed prefix is re-prepended verbatim by the caller, keeping the
+/// same strip/recurse/re-prepend contract as the other transparent wrappers.
+///
+/// Returns `None` when `cmd` is not a `timeout` invocation, when no DURATION
+/// is found, or when nothing follows the DURATION.
+fn strip_timeout_prefix(cmd: &str) -> Option<(&str, &str)> {
+    // `rest` stays a suffix subslice of `cmd` throughout, so byte offsets
+    // recovered via `cmd.len() - rest.len()` remain valid.
+    let mut rest = strip_word_prefix(cmd, "timeout")?;
+    if rest.is_empty() {
+        return None;
+    }
+
+    loop {
+        rest = rest.trim_start();
+        let tok_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        if tok_end == 0 {
+            return None;
+        }
+        let tok = &rest[..tok_end];
+
+        if tok.starts_with('-') {
+            // Option token. Long/`=` forms carry their own argument; the bare
+            // signal/kill-after flags take the following token.
+            let takes_separate_arg = matches!(tok, "-s" | "-k" | "--signal" | "--kill-after");
+            rest = &rest[tok_end..];
+            if takes_separate_arg {
+                let r = rest.trim_start();
+                let arg_end = r.find(char::is_whitespace).unwrap_or(r.len());
+                if arg_end == 0 {
+                    return None;
+                }
+                rest = &r[arg_end..];
+            }
+            continue;
+        }
+
+        // First non-option token must be the DURATION (digits, optional
+        // fractional part, optional s/m/h/d suffix — all start with a digit).
+        if !tok.starts_with(|c: char| c.is_ascii_digit()) {
+            return None;
+        }
+        rest = &rest[tok_end..];
+        break;
+    }
+
+    let inner = rest.trim_start();
+    if inner.is_empty() {
+        return None;
+    }
+    let prefix = cmd[..cmd.len() - inner.len()].trim_end();
+    Some((prefix, inner))
 }
 
 #[cfg(test)]
@@ -4172,6 +4240,72 @@ mod tests {
         assert_eq!(
             super::rewrite_command("RAILS_ENV=test bundle exec git status", &[], &prefixes),
             Some("RAILS_ENV=test bundle exec rtk git status".into())
+        );
+    }
+
+    // --- timeout wrapper tests ---
+
+    #[test]
+    fn test_timeout_plain_duration_rewrites_inner() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 60 ssh host uptime", &[]),
+            Some("timeout 60 rtk ssh host uptime".into())
+        );
+    }
+
+    #[test]
+    fn test_timeout_duration_suffix_rewrites_inner() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 5m git status", &[]),
+            Some("timeout 5m rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_timeout_kill_after_flag_with_arg() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout -k 5 60 ssh host uptime", &[]),
+            Some("timeout -k 5 60 rtk ssh host uptime".into())
+        );
+    }
+
+    #[test]
+    fn test_timeout_signal_and_flag_options() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout --preserve-status -s SIGKILL 30 ssh host ls", &[]),
+            Some("timeout --preserve-status -s SIGKILL 30 rtk ssh host ls".into())
+        );
+    }
+
+    #[test]
+    fn test_timeout_scp_inner() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 40 scp -q file host:/tmp/", &[]),
+            Some("timeout 40 rtk scp -q file host:/tmp/".into())
+        );
+    }
+
+    #[test]
+    fn test_timeout_unknown_inner_returns_none() {
+        assert_eq!(rewrite_command_no_prefixes("timeout 60 htop", &[]), None);
+    }
+
+    #[test]
+    fn test_timeout_without_duration_returns_none() {
+        // `timeout` with no numeric duration is not a valid wrapper to strip.
+        assert_eq!(rewrite_command_no_prefixes("timeout --help", &[]), None);
+    }
+
+    #[test]
+    fn test_timeout_no_inner_command_returns_none() {
+        assert_eq!(strip_timeout_prefix("timeout 60"), None);
+    }
+
+    #[test]
+    fn test_timeout_composed_with_env_prefix() {
+        assert_eq!(
+            rewrite_command_no_prefixes("sudo timeout 60 ssh host uptime", &[]),
+            Some("sudo timeout 60 rtk ssh host uptime".into())
         );
     }
 
