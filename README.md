@@ -193,6 +193,7 @@ rtk playwright test             # E2E results (failures only)
 rtk pytest                      # Python tests (-90%)
 rtk go test                     # Go tests (NDJSON, -90%)
 rtk cargo test                  # Cargo tests (-90%)
+rtk bazel test                  # Bazel tests (compact failures)
 rtk rake test                   # Ruby minitest (-90%)
 rtk rspec                       # RSpec tests (JSON, -60%+)
 rtk err <cmd>                   # Filter errors only from any command
@@ -208,6 +209,8 @@ rtk next build                  # Next.js build compact
 rtk prettier --check .          # Files needing formatting
 rtk cargo build                 # Cargo build (-80%)
 rtk cargo clippy                # Cargo clippy (-80%)
+rtk bazel build                 # Bazel build diagnostics
+rtk bazel lint                  # Bazel lint diagnostics
 rtk ruff check                  # Python linting (JSON, -80%)
 rtk golangci-lint run           # Go linting (JSON, -85%)
 rtk rubocop                     # Ruby linting (JSON, -60%+)
