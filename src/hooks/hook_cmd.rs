@@ -125,6 +125,134 @@ fn get_rewritten(cmd: &str) -> Option<String> {
     Some(rewritten)
 }
 
+fn get_rewritten_substitutions(cmd: &str) -> Option<String> {
+    if has_heredoc(cmd) {
+        return None;
+    }
+
+    let bytes = cmd.as_bytes();
+    let mut out = String::with_capacity(cmd.len() + 16);
+    let mut cursor = 0usize;
+    let mut changed = false;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if !in_single => {
+                i += 2;
+                continue;
+            }
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'$' if !in_single
+                && bytes.get(i + 1) == Some(&b'(')
+                && bytes.get(i + 2) != Some(&b'(') =>
+            {
+                if let Some(end) = find_command_substitution_end(cmd, i + 2) {
+                    let body = &cmd[i + 2..end];
+                    if let Some(rewritten_body) = get_rewritten_substitution_body(body) {
+                        out.push_str(&cmd[cursor..i]);
+                        out.push_str("$(");
+                        out.push_str(&rewritten_body);
+                        out.push(')');
+                        cursor = end + 1;
+                        changed = true;
+                    }
+                    i = end + 1;
+                    continue;
+                }
+            }
+            b'`' if !in_single => {
+                if let Some(end) = find_backtick_end(cmd, i + 1) {
+                    let body = &cmd[i + 1..end];
+                    if let Some(rewritten_body) = get_rewritten_substitution_body(body) {
+                        out.push_str(&cmd[cursor..i]);
+                        out.push('`');
+                        out.push_str(&rewritten_body);
+                        out.push('`');
+                        cursor = end + 1;
+                        changed = true;
+                    }
+                    i = end + 1;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    if changed {
+        out.push_str(&cmd[cursor..]);
+        Some(out)
+    } else {
+        None
+    }
+}
+
+fn get_rewritten_substitution_body(body: &str) -> Option<String> {
+    let with_nested = get_rewritten_substitutions(body).unwrap_or_else(|| body.to_string());
+    get_rewritten(&with_nested).or_else(|| {
+        if with_nested != body {
+            Some(with_nested)
+        } else {
+            None
+        }
+    })
+}
+
+fn find_command_substitution_end(cmd: &str, body_start: usize) -> Option<usize> {
+    let bytes = cmd.as_bytes();
+    let mut depth = 1usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = body_start;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if !in_single => {
+                i += 2;
+                continue;
+            }
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'`' if !in_single => {
+                i = find_backtick_end(cmd, i + 1)?;
+            }
+            b'(' if !in_single && !in_double => depth += 1,
+            b')' if !in_single && !in_double => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    None
+}
+
+fn find_backtick_end(cmd: &str, body_start: usize) -> Option<usize> {
+    let bytes = cmd.as_bytes();
+    let mut i = body_start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => {
+                i += 2;
+                continue;
+            }
+            b'`' => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+#[derive(Debug)]
 enum HookDecision {
     AllowRewrite(String),
     AskRewrite(String),
@@ -137,6 +265,9 @@ fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
         return HookDecision::Deny;
     }
     if crate::discover::lexer::contains_unattestable_construct(cmd) {
+        if let Some(r) = get_rewritten_substitutions(cmd) {
+            return HookDecision::AskRewrite(r);
+        }
         return HookDecision::Defer;
     }
     match get_rewritten(cmd) {
@@ -1051,9 +1182,26 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_substitution_not_rewritten() {
-        // A substitution payload must never be rewritten into updatedInput;
-        // RTK skips so Claude Code evaluates the original command natively.
+    fn test_claude_substitution_payload_rewritten() {
+        let result = run_claude_inner(&claude_input("echo $(grep -nE pat file)")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "echo $(rtk grep -nE pat file)");
+
+        let result = run_claude_inner(&claude_input("echo `grep -nE pat file`")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "echo `rtk grep -nE pat file`");
+    }
+
+    #[test]
+    fn test_claude_unsupported_substitution_not_rewritten() {
         assert!(run_claude_inner(&claude_input("git status `rm -rf /tmp/x`")).is_none());
         assert!(run_claude_inner(&claude_input("git status $(rm -rf /tmp/x)")).is_none());
         assert!(run_claude_inner(&claude_input("git log --pretty=\"$(rm -rf /tmp/x)\"")).is_none());
@@ -1115,6 +1263,25 @@ mod tests {
             .and_then(|c| c.as_str())
             .unwrap();
         assert_eq!(cmd, "rtk git add . && rtk cargo test");
+    }
+
+    #[test]
+    fn test_claude_xargs_runtime_command_rewritten() {
+        let result = run_claude_inner(&claude_input("ls *.js | xargs grep -nE pat")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk ls *.js | xargs rtk grep -nE pat");
+
+        let result = run_claude_inner(&claude_input("xargs grep -nE pat")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "xargs rtk grep -nE pat");
     }
 
     #[test]
@@ -1431,7 +1598,17 @@ mod tests {
     }
 
     #[test]
-    fn test_decide_defer_for_substitution_even_when_allowed() {
+    fn test_decide_ask_rewrite_for_supported_substitution_even_when_allowed() {
+        match decide_with_rules("echo $(grep -nE pat file)", &[], &[], &all_allowed()) {
+            HookDecision::AskRewrite(rewritten) => {
+                assert_eq!(rewritten, "echo $(rtk grep -nE pat file)");
+            }
+            other => panic!("expected AskRewrite for supported substitution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decide_defer_for_unsupported_substitution_even_when_allowed() {
         for cmd in [
             "git status `rm -rf /tmp/x`",
             "git status $(rm -rf /tmp/x)",
