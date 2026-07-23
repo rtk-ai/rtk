@@ -737,6 +737,19 @@ const BUILTIN_TRANSPARENT_PREFIXES: &[&str] =
 
 const MAX_PREFIX_DEPTH: usize = 10;
 
+/// RTK equivalents for discovery/search commands (`find`, `grep`, `rg`, `ls`)
+/// that must never be auto-rewritten in the hook path, because their compact/
+/// grouped/relative/truncated output and partial native-flag support can strip
+/// exact paths or produce false negatives an agent then reasons from. These
+/// commands remain fully usable when invoked explicitly as `rtk <cmd>`.
+const DISCOVERY_RTK_CMDS: &[&str] = &["rtk find", "rtk grep", "rtk rg", "rtk ls"];
+
+/// True when `rtk_cmd` is a discovery/search equivalent that should be passed
+/// through natively instead of auto-rewritten. See [`DISCOVERY_RTK_CMDS`].
+fn is_discovery_rewrite(rtk_cmd: &str) -> bool {
+    DISCOVERY_RTK_CMDS.contains(&rtk_cmd)
+}
+
 enum ExcludePattern {
     Regex(Regex),
     Prefix(String),
@@ -881,6 +894,19 @@ fn rewrite_segment_inner(
     // Use classify_command for correct ignore/prefix handling
     let rtk_equivalent = match classify_command(cmd_part) {
         Classification::Supported { rtk_equivalent, .. } => {
+            // Never auto-rewrite discovery/search commands. Their RTK equivalents
+            // change native semantics an agent relies on: `rtk find`/`rtk ls` emit
+            // compact, directory-grouped, root-relative paths (losing the exact
+            // absolute path needed for the next Read), `rtk grep`/`rtk rg` compact
+            // and truncate matches, and `rtk find` only parses a subset of native
+            // predicates (e.g. no `-path`, no `!` negation) so a valid native query
+            // can silently return no results. For these commands a false observation
+            // is more expensive than the token savings, so we pass the native command
+            // through unchanged. `rtk find`/`rtk grep`/`rtk ls` stay available for
+            // explicit manual use.
+            if is_discovery_rewrite(rtk_equivalent) {
+                return None;
+            }
             let stripped = ENV_PREFIX.replace(cmd_part, "");
             let cmd_clean = stripped.trim();
             if is_excluded(cmd_clean, excluded) {
@@ -1626,11 +1652,10 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_rg_pattern() {
-        assert_eq!(
-            rewrite_command_no_prefixes("rg \"fn main\"", &[]),
-            Some("rtk rg \"fn main\"".into())
-        );
+    fn test_rewrite_rg_not_rewritten() {
+        // Discovery/search commands keep native semantics — `rg` is never
+        // auto-rewritten because `rtk rg` compacts/truncates matches.
+        assert_eq!(rewrite_command_no_prefixes("rg \"fn main\"", &[]), None);
     }
 
     #[test]
@@ -1719,11 +1744,42 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_find_no_pipe_still_rewritten() {
-        // find WITHOUT a pipe should still be rewritten
+    fn test_rewrite_find_not_rewritten() {
+        // find is a discovery command: even a simple `-name` search is passed
+        // through natively so the agent gets exact paths, not `rtk find`'s
+        // directory-grouped, root-relative output.
+        assert_eq!(rewrite_command_no_prefixes("find . -name '*.rs'", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_discovery_commands_pass_through() {
+        // Concrete cases from the issue: discovery/search commands must keep
+        // native semantics (exact paths, native predicates, no truncation).
+        for cmd in [
+            r#"find ~/.claude -type d -name "copywriting" 2>/dev/null"#,
+            r#"find ~/.claude -path "*blog*SKILL.md" 2>/dev/null"#,
+            "find . ! -name '*.rs'",
+            "grep -rl needle .",
+            "grep -rn foo src",
+            "rg pattern",
+            "ls -d src/",
+            "ls -la",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                None,
+                "discovery command should not be auto-rewritten: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_discovery_in_compound_stays_native() {
+        // A discovery command in a chain keeps native output while a genuinely
+        // supported command in the same chain is still rewritten.
         assert_eq!(
-            rewrite_command_no_prefixes("find . -name '*.rs'", &[]),
-            Some("rtk find . -name '*.rs'".into())
+            rewrite_command_no_prefixes("find . -name x && cargo test", &[]),
+            Some("find . -name x && rtk cargo test".into())
         );
     }
 
@@ -3643,10 +3699,12 @@ mod tests {
     // --- find with native flags ---
 
     #[test]
-    fn test_rewrite_find_with_flags() {
+    fn test_rewrite_find_with_flags_not_rewritten() {
+        // Native predicates (including combinations rtk find does not parse, like
+        // `-path` or `!` negation) must reach the real `find` unchanged.
         assert_eq!(
             rewrite_command_no_prefixes("find . -name '*.rs' -type f", &[]),
-            Some("rtk find . -name '*.rs' -type f".into())
+            None
         );
     }
 

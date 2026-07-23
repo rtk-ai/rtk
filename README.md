@@ -418,6 +418,8 @@ enabled = true          # save raw output on failure (default: true)
 mode = "failures"       # "failures", "always", or "never"
 ```
 
+Discovery/search commands (`find`, `grep`, `rg`, `ls`) are **never** auto-rewritten by the hook. Their `rtk` equivalents compact, group, or truncate output and support only a subset of native flags, which can strip the exact path an agent needs or turn a valid query into a false negative. Native output is preserved so agents reason from exact results; `rtk find`/`rtk grep`/`rtk ls` remain available when you invoke them explicitly.
+
 When a command fails, RTK saves the full unfiltered output so the LLM can read it without re-executing:
 
 ```
