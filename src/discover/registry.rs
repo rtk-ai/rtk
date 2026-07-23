@@ -70,9 +70,11 @@ lazy_static! {
     // Issue #1362: each capture expects a SINGLE file argument (`\S+$`). Multi-file
     // invocations like `head -3 a b c` fail to match so the segment is passed through
     // to the native `head`/`tail` binary — which already handles multi-file with
-    // `==> name <==` banners that `rtk read --max-lines` cannot reproduce.
+    // `==> name <==` banners that `rtk read --head-lines`/`--tail-lines` cannot reproduce.
     static ref HEAD_N: Regex = Regex::new(r"^head\s+-(\d+)\s+(\S+)$").unwrap();
+    static ref HEAD_N_SPACE: Regex = Regex::new(r"^head\s+-n\s+(\d+)\s+(\S+)$").unwrap();
     static ref HEAD_LINES: Regex = Regex::new(r"^head\s+--lines=(\d+)\s+(\S+)$").unwrap();
+    static ref HEAD_LINES_SPACE: Regex = Regex::new(r"^head\s+--lines\s+(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_N: Regex = Regex::new(r"^tail\s+-(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_N_SPACE: Regex = Regex::new(r"^tail\s+-n\s+(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_LINES_EQ: Regex = Regex::new(r"^tail\s+--lines=(\d+)\s+(\S+)$").unwrap();
@@ -705,15 +707,22 @@ fn rewrite_compound(
 }
 
 fn rewrite_line_range(cmd: &str) -> Option<String> {
-    for re in [&*HEAD_N, &*HEAD_LINES] {
+    for re in [&*HEAD_N, &*HEAD_N_SPACE, &*HEAD_LINES, &*HEAD_LINES_SPACE] {
         if let Some(caps) = re.captures(cmd) {
             let n = caps.get(1)?.as_str();
             let file = caps.get(2)?.as_str();
-            return Some(format!("rtk read {} --max-lines {}", file, n));
+            return Some(format!("rtk read {} --head-lines {}", file, n));
         }
     }
     if cmd.starts_with("head -") {
         return None;
+    }
+    if let Some(file) = cmd.strip_prefix("head ") {
+        let file = file.trim();
+        if file.is_empty() || file.starts_with('-') || file.split_whitespace().count() != 1 {
+            return None;
+        }
+        return Some(format!("rtk read {} --head-lines 10", file));
     }
     for re in [
         &*TAIL_N,
@@ -864,7 +873,7 @@ fn rewrite_segment_inner(
         return Some(trimmed.to_string());
     }
 
-    if cmd_part.starts_with("head -") || cmd_part.starts_with("tail ") {
+    if cmd_part.starts_with("head ") || cmd_part.starts_with("tail ") {
         return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
     }
 
@@ -1964,10 +1973,10 @@ mod tests {
 
     #[test]
     fn test_rewrite_head_numeric_flag() {
-        // head -20 file → rtk read file --max-lines 20 (not rtk read -20 file)
+        // head -20 file → rtk read file --head-lines 20 (not rtk read -20 file)
         assert_eq!(
             rewrite_command_no_prefixes("head -20 src/main.rs", &[]),
-            Some("rtk read src/main.rs --max-lines 20".into())
+            Some("rtk read src/main.rs --head-lines 20".into())
         );
     }
 
@@ -1975,16 +1984,32 @@ mod tests {
     fn test_rewrite_head_lines_long_flag() {
         assert_eq!(
             rewrite_command_no_prefixes("head --lines=50 src/lib.rs", &[]),
-            Some("rtk read src/lib.rs --max-lines 50".into())
+            Some("rtk read src/lib.rs --head-lines 50".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_n_space_flag() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head -n 12 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --head-lines 12".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_lines_space_flag() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head --lines 7 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --head-lines 7".into())
         );
     }
 
     #[test]
     fn test_rewrite_head_no_flag_still_rewrites() {
-        // plain `head file` → `rtk read file` (no numeric flag)
+        // plain `head file` → exact default `head` width
         assert_eq!(
             rewrite_command_no_prefixes("head src/main.rs", &[]),
-            Some("rtk read src/main.rs".into())
+            Some("rtk read src/main.rs --head-lines 10".into())
         );
     }
 
@@ -2044,9 +2069,9 @@ mod tests {
 
     // --- Issue #1362: head/tail with multiple files falls back to native command ---
     //
-    // `rtk read <file> --max-lines N` only accepts a single positional file path in
+    // `rtk read <file> --head-lines/--tail-lines N` only accepts a single positional file path in
     // a shape that maps cleanly to `head -N`. Rewriting `head -N a b c` to
-    // `rtk read a b c --max-lines N` previously produced a command where `rtk read`
+    // `rtk read a b c --head-lines N` would produce a command where `rtk read`
     // would concatenate the files without the `==> name <==` banners that native
     // `head` emits, so the fix is to skip the rewrite and let the shell run the
     // real `head`/`tail` binary.
@@ -2063,6 +2088,14 @@ mod tests {
     fn test_rewrite_head_lines_long_flag_multi_file_skipped() {
         assert_eq!(
             rewrite_command_no_prefixes("head --lines=50 src/main.rs src/lib.rs", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_plain_multi_file_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head src/main.rs src/lib.rs", &[]),
             None
         );
     }

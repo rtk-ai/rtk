@@ -10,6 +10,7 @@ use std::path::Path;
 pub fn run(
     file: &Path,
     level: FilterLevel,
+    head_lines: Option<usize>,
     max_lines: Option<usize>,
     tail_lines: Option<usize>,
     line_numbers: bool,
@@ -64,7 +65,7 @@ pub fn run(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
+    filtered = apply_line_window(&filtered, head_lines, max_lines, tail_lines, &lang);
 
     let (raw, rtk_output) = if line_numbers {
         (
@@ -87,6 +88,7 @@ pub fn run(
 
 pub fn run_stdin(
     level: FilterLevel,
+    head_lines: Option<usize>,
     max_lines: Option<usize>,
     tail_lines: Option<usize>,
     line_numbers: bool,
@@ -132,7 +134,7 @@ pub fn run_stdin(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
+    filtered = apply_line_window(&filtered, head_lines, max_lines, tail_lines, &lang);
 
     let (raw, rtk_output) = if line_numbers {
         (
@@ -161,10 +163,24 @@ fn format_with_line_numbers(content: &str) -> String {
 
 fn apply_line_window(
     content: &str,
+    head_lines: Option<usize>,
     max_lines: Option<usize>,
     tail_lines: Option<usize>,
     lang: &Language,
 ) -> String {
+    if let Some(head) = head_lines {
+        if head == 0 {
+            return String::new();
+        }
+        let lines: Vec<&str> = content.lines().collect();
+        let end = lines.len().min(head);
+        let mut result = lines[..end].join("\n");
+        if !result.is_empty() && content.ends_with('\n') {
+            result.push('\n');
+        }
+        return result;
+    }
+
     if let Some(tail) = tail_lines {
         if tail == 0 {
             return String::new();
@@ -203,7 +219,7 @@ fn main() {{
         )?;
 
         // Just verify it doesn't panic
-        run(file.path(), FilterLevel::Minimal, None, None, false, 0)?;
+        run(file.path(), FilterLevel::Minimal, None, None, None, false, 0)?;
         Ok(())
     }
 
@@ -217,23 +233,37 @@ fn main() {{
     #[test]
     fn test_apply_line_window_tail_lines() {
         let input = "a\nb\nc\nd\n";
-        let output = apply_line_window(input, None, Some(2), &Language::Unknown);
+        let output = apply_line_window(input, None, None, Some(2), &Language::Unknown);
         assert_eq!(output, "c\nd\n");
     }
 
     #[test]
     fn test_apply_line_window_tail_lines_no_trailing_newline() {
         let input = "a\nb\nc\nd";
-        let output = apply_line_window(input, None, Some(2), &Language::Unknown);
+        let output = apply_line_window(input, None, None, Some(2), &Language::Unknown);
         assert_eq!(output, "c\nd");
     }
 
     #[test]
     fn test_apply_line_window_max_lines_still_works() {
         let input = "a\nb\nc\nd\n";
-        let output = apply_line_window(input, Some(2), None, &Language::Unknown);
+        let output = apply_line_window(input, None, Some(2), None, &Language::Unknown);
         assert!(output.starts_with("a\n"));
         assert!(output.contains("more lines"));
+    }
+
+    #[test]
+    fn test_apply_line_window_head_lines_exact() {
+        let input = "a\nb\nc\nd\n";
+        let output = apply_line_window(input, Some(2), None, None, &Language::Unknown);
+        assert_eq!(output, "a\nb\n");
+    }
+
+    #[test]
+    fn test_apply_line_window_head_lines_no_trailing_newline() {
+        let input = "a\nb\nc\nd";
+        let output = apply_line_window(input, Some(2), None, None, &Language::Unknown);
+        assert_eq!(output, "a\nb");
     }
 
     fn rtk_bin() -> std::path::PathBuf {

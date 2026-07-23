@@ -105,11 +105,14 @@ enum Commands {
         /// Filter: none (default, full content), minimal, aggressive
         #[arg(short, long, default_value = "none")]
         level: core::filter::FilterLevel,
+        /// Keep only first N lines exactly (internal head rewrite support)
+        #[arg(long, hide = true, conflicts_with_all = ["max_lines", "tail_lines"])]
+        head_lines: Option<usize>,
         /// Max lines
-        #[arg(short, long, conflicts_with = "tail_lines")]
+        #[arg(short, long, conflicts_with_all = ["head_lines", "tail_lines"])]
         max_lines: Option<usize>,
         /// Keep only last N lines
-        #[arg(long, conflicts_with = "max_lines")]
+        #[arg(long, conflicts_with_all = ["head_lines", "max_lines"])]
         tail_lines: Option<usize>,
         /// Show line numbers
         #[arg(short = 'n', long)]
@@ -1609,6 +1612,7 @@ fn run_cli() -> Result<i32> {
         Commands::Read {
             files,
             level,
+            head_lines,
             max_lines,
             tail_lines,
             line_numbers,
@@ -1622,11 +1626,19 @@ fn run_cli() -> Result<i32> {
                         continue;
                     }
                     stdin_seen = true;
-                    read::run_stdin(level, max_lines, tail_lines, line_numbers, cli.verbose)
+                    read::run_stdin(
+                        level,
+                        head_lines,
+                        max_lines,
+                        tail_lines,
+                        line_numbers,
+                        cli.verbose,
+                    )
                 } else {
                     read::run(
                         file,
                         level,
+                        head_lines,
                         max_lines,
                         tail_lines,
                         line_numbers,
