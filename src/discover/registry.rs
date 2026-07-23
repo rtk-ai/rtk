@@ -5,6 +5,7 @@ use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 use std::path::Path;
 
+use super::grep_rewrite;
 use super::lexer::{split_on_operators, tokenize, TokenKind};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
@@ -934,6 +935,10 @@ fn rewrite_segment_inner(
         {
             return None;
         }
+    }
+
+    if matches!(rule.rtk_cmd, "rtk grep" | "rtk rg") {
+        return grep_rewrite::rewrite(cmd_part, redirect_suffix);
     }
 
     // For the Composer-resolved php tools, normalize the leading invocation
