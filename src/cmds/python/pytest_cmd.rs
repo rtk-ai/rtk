@@ -89,6 +89,7 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         } else if trimmed.starts_with("===")
             && (trimmed.contains("passed")
                 || trimmed.contains("failed")
+                || trimmed.contains("error")
                 || trimmed.contains("skipped"))
         {
             summary_line = trimmed.to_string();
@@ -100,6 +101,7 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
             && !trimmed.starts_with("ERROR")
             && (trimmed.contains(" passed")
                 || trimmed.contains(" failed")
+                || trimmed.contains(" error")
                 || trimmed.contains(" skipped"))
             && trimmed.contains(" in ")
         {
@@ -160,6 +162,7 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
 struct PytestCounts {
     passed: usize,
     failed: usize,
+    errors: usize,
     skipped: usize,
     xfailed: usize,
     xpassed: usize,
@@ -175,12 +178,20 @@ fn build_pytest_summary(
     let PytestCounts {
         passed,
         failed,
+        errors,
         skipped,
         xfailed,
         xpassed,
     } = counts;
 
-    if passed == 0 && failed == 0 && skipped == 0 && xfailed == 0 && xpassed == 0 {
+    if passed == 0
+        && failed == 0
+        && errors == 0
+        && skipped == 0
+        && xfailed == 0
+        && xpassed == 0
+        && failures.is_empty()
+    {
         return "Pytest: No tests collected".to_string();
     }
 
@@ -192,6 +203,9 @@ fn build_pytest_summary(
 
     let mut result = String::new();
     result.push_str(&format!("Pytest: {} passed, {} failed", passed, failed));
+    if errors > 0 {
+        result.push_str(&format!(", {} {}", errors, count_label(errors, "error")));
+    }
     if skipped > 0 {
         result.push_str(&format!(", {} skipped", skipped));
     }
@@ -242,6 +256,17 @@ fn build_pytest_summary(
                 if let Some(test_path) = parts.first() {
                     let test_name = test_path.trim_start_matches("FAILED ");
                     result.push_str(&format!("{}. [FAIL] {}\n", i + 1, test_name));
+                }
+                if parts.len() > 1 {
+                    result.push_str(&format!("     {}\n", truncate(parts[1], 100)));
+                }
+                continue;
+            } else if first_line.starts_with("ERROR") {
+                // Summary format: "ERROR tests/test_foo.py - ModuleNotFoundError"
+                let parts: Vec<&str> = first_line.split(" - ").collect();
+                if let Some(test_path) = parts.first() {
+                    let test_name = test_path.trim_start_matches("ERROR ");
+                    result.push_str(&format!("{}. [ERROR] {}\n", i + 1, test_name));
                 }
                 if parts.len() > 1 {
                     result.push_str(&format!("     {}\n", truncate(parts[1], 100)));
@@ -307,6 +332,8 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
                 counts.passed = n;
             } else if word.contains("failed") {
                 counts.failed = n;
+            } else if word.contains("error") {
+                counts.errors = n;
             } else if word.contains("skipped") {
                 counts.skipped = n;
             }
@@ -314,6 +341,14 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
     }
 
     counts
+}
+
+fn count_label(count: usize, singular: &str) -> String {
+    if count == 1 {
+        singular.to_string()
+    } else {
+        format!("{singular}s")
+    }
 }
 
 #[cfg(test)]
@@ -400,15 +435,45 @@ collected 0 items
     }
 
     #[test]
+    fn test_filter_pytest_collection_error_not_no_tests() {
+        let output = r#"=== test session starts ===
+platform linux -- Python 3.12.11, pytest-8.1.0
+collected 0 items / 1 error
+
+==================================== ERRORS ====================================
+________________________ ERROR collecting tests/foo.py ________________________
+ImportError while loading conftest '/tmp/project/tests/conftest.py'.
+tests/conftest.py:34: in <module>
+    import weasyprint
+E   ModuleNotFoundError: No module named 'weasyprint'
+=========================== short test summary info ============================
+ERROR tests/foo.py - ModuleNotFoundError: No module named 'weasyprint'
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+=============================== 1 error in 0.11s ==============================="#;
+
+        let result = filter_pytest_output(output);
+        assert!(
+            !result.contains("No tests collected"),
+            "collection failures must not look benign. Got: {result}"
+        );
+        assert!(result.contains("1 error"), "got: {result}");
+        assert!(result.contains("[ERROR] tests/foo.py"), "got: {result}");
+        assert!(result.contains("No module named 'weasyprint'"), "got: {result}");
+    }
+
+    #[test]
     fn test_parse_summary_line() {
         let c = parse_summary_line("=== 5 passed in 0.50s ===");
-        assert_eq!((c.passed, c.failed, c.skipped), (5, 0, 0));
+        assert_eq!((c.passed, c.failed, c.errors, c.skipped), (5, 0, 0, 0));
 
         let c = parse_summary_line("=== 4 passed, 1 failed in 0.50s ===");
-        assert_eq!((c.passed, c.failed, c.skipped), (4, 1, 0));
+        assert_eq!((c.passed, c.failed, c.errors, c.skipped), (4, 1, 0, 0));
 
         let c = parse_summary_line("=== 3 passed, 1 failed, 2 skipped in 1.0s ===");
-        assert_eq!((c.passed, c.failed, c.skipped), (3, 1, 2));
+        assert_eq!((c.passed, c.failed, c.errors, c.skipped), (3, 1, 0, 2));
+
+        let c = parse_summary_line("=== 1 error in 0.11s ===");
+        assert_eq!((c.passed, c.failed, c.errors, c.skipped), (0, 0, 1, 0));
 
         let c = parse_summary_line("=== 2 passed, 1 failed, 2 xfailed, 1 xpassed in 1.0s ===");
         assert_eq!(
