@@ -123,13 +123,17 @@ impl ClaudeProvider {
     /// `/Users/foo/bar`          → `-Users-foo-bar`
     /// `/Users/first.last/bar`   → `-Users-first-last-bar`
     /// `/home/chris/2_project`   → `-home-chris-2-project`
-    /// `C:\Users\foo\bar`        → `C:-Users-foo-bar`
+    /// `C:\Users\foo\bar`        → `c--Users-foo-bar`
     pub fn encode_project_path(path: &str) -> String {
-        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\', ' ', '[', ']'];
+        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\', ':', ' ', '[', ']'];
+        let has_windows_drive = path.as_bytes().get(1) == Some(&b':');
 
         path.chars()
-            .map(|c| {
-                if !c.is_ascii() || SANITIZED_CHARS.contains(&c) {
+            .enumerate()
+            .map(|(index, c)| {
+                if has_windows_drive && index == 0 {
+                    c.to_ascii_lowercase()
+                } else if !c.is_ascii() || SANITIZED_CHARS.contains(&c) {
                     '-'
                 } else {
                     c
@@ -403,10 +407,10 @@ mod tests {
 
     #[test]
     fn test_encode_project_path_windows() {
-        // Windows backslashes are also replaced with '-'
+        // Claude lowercases Windows drive letters and replaces colons and backslashes with '-'.
         assert_eq!(
             ClaudeProvider::encode_project_path(r"C:\Users\foo\bar"),
-            "C:-Users-foo-bar"
+            "c--Users-foo-bar"
         );
     }
 
