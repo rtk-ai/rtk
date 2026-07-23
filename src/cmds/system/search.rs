@@ -353,6 +353,32 @@ fn has_context_flag(flags: &[String]) -> bool {
         })
 }
 
+/// Drops GNU `-h`/`--no-filename` from the engine args. rtk forces `-H --null` for
+/// robust NUL-delimited parsing, so a forwarded `-h` (last-wins) would suppress the
+/// filename *at the engine*, break parsing, and lose line numbers. We strip it here
+/// and re-apply no-filename purely at the display layer (`show_file = false`). `-h`
+/// inside a short cluster (e.g. `-hi`) is removed letter-wise, preserving the rest;
+/// a cluster that was only `-h` is dropped entirely.
+fn strip_no_filename(extra_args: &[String]) -> Vec<String> {
+    extra_args
+        .iter()
+        .filter_map(|f| {
+            if f == "--no-filename" {
+                return None;
+            }
+            if f.starts_with('-') && !f.starts_with("--") && f.contains('h') {
+                let rest: String = f[1..].chars().filter(|&c| c != 'h').collect();
+                return if rest.is_empty() {
+                    None
+                } else {
+                    Some(format!("-{rest}"))
+                };
+            }
+            Some(f.clone())
+        })
+        .collect()
+}
+
 pub fn run(
     engine: Engine,
     max_line_len: usize,
@@ -366,10 +392,8 @@ pub fn run(
     // --version / --help: pass through to the engine without filtering.
     // Note: Clap strips `--` before populating trailing_var_arg, so both
     // `rtk grep --version` and `rtk grep -- --version` land here identically.
-    if args
-        .iter()
-        .any(|a| a == "--version" || a == "--help" || a == "-h")
-    {
+    // `-h` is deliberately absent: it is GNU grep's `--no-filename`, not help.
+    if args.iter().any(|a| a == "--version" || a == "--help") {
         let mut cmd = resolved_command(engine.bin());
         cmd.args(args);
         let result = exec_capture(&mut cmd).context("search failed")?;
@@ -408,7 +432,10 @@ pub fn run(
         return passthrough(&timer, engine, &args, &real_cmd);
     }
 
-    let result = engine_capture(engine, &extra_args, &patterns, &paths)?;
+    // Strip `-h`/`--no-filename` before the engine runs (see `strip_no_filename`);
+    // no-filename is re-applied at the display layer via `show_file` below.
+    let engine_args = strip_no_filename(&extra_args);
+    let result = engine_capture(engine, &engine_args, &patterns, &paths)?;
 
     let exit_code = result.exit_code;
     let raw_output = result.stdout.clone();
@@ -456,19 +483,23 @@ pub fn run(
         .filter(|(_, is_match, _)| *is_match)
         .count();
 
-    // Mirror what the real command prints: the filename only when grep/rg would
-    // show one (multiple files, a directory, -r or -H), the line number only with
-    // -n. We force -nH--null for robust parsing, then drop what the engine itself
-    // would not have shown.
-    let show_file = by_file.len() > 1
-        || paths.len() > 1
-        || paths.iter().any(|p| std::path::Path::new(p).is_dir())
-        || has_short_flag(&extra_args, 'H')
-        || has_short_flag(&extra_args, 'r')
-        || has_short_flag(&extra_args, 'R')
-        || extra_args
-            .iter()
-            .any(|f| f == "--with-filename" || f == "--recursive");
+    // Mirror what the real command prints: we force -nH--null for robust parsing,
+    // then drop what the engine itself would not have shown. The filename shows only
+    // when grep/rg would show one (multiple files, a directory, -r/-H) — but GNU
+    // `-h`/`--no-filename` forces it off, overriding all of those, so it gates the
+    // whole `&&`.
+    let no_filename =
+        has_short_flag(&extra_args, 'h') || extra_args.iter().any(|f| f == "--no-filename");
+    let show_file = !no_filename
+        && (by_file.len() > 1
+            || paths.len() > 1
+            || paths.iter().any(|p| std::path::Path::new(p).is_dir())
+            || has_short_flag(&extra_args, 'H')
+            || has_short_flag(&extra_args, 'r')
+            || has_short_flag(&extra_args, 'R')
+            || extra_args
+                .iter()
+                .any(|f| f == "--with-filename" || f == "--recursive"));
     // Always surface the line number (the openable position) unless the agent
     // explicitly turned it off; the filename is the only conditional part.
     let show_line = !has_short_flag(&extra_args, 'N')

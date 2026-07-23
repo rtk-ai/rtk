@@ -310,7 +310,15 @@ enum Commands {
     },
 
     /// Compact grep - strips whitespace, truncates, groups by file
+    // disable_help_flag: GNU/BSD grep `-h` is `--no-filename`, NOT help. Without
+    // this, clap intercepts `-h` before run() sees it. We re-add a LONG-ONLY
+    // `--help` (ArgAction::Help) so `rtk grep --help` still shows rtk's help while
+    // `-h` is freed and forwarded to the grep arg layer as --no-filename.
+    #[command(disable_help_flag = true)]
     Grep {
+        /// Print rtk grep help (long-only; `-h` is GNU grep's --no-filename)
+        #[arg(long, action = clap::ArgAction::Help)]
+        help: Option<bool>,
         /// Max line length
         #[arg(short = 'l', long, default_value = "80")]
         max_len: usize,
@@ -1974,6 +1982,7 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Grep {
+            help: _,
             max_len,
             max,
             context_only,
