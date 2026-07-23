@@ -385,7 +385,7 @@ if command -v wget &> /dev/null; then
 }
 WGETJSONEOF
   bench "wget" "cat /tmp/rtk_bench_wget.json" "$RTK wget file:///tmp/rtk_bench_wget.json"
-  rm -f /tmp/rtk_bench_wget.json json 2>/dev/null
+  rm -f /tmp/rtk_bench_wget.json rtk_bench_wget.json json 2>/dev/null
 fi
 
 # ===================
