@@ -5,7 +5,7 @@ use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 use std::path::Path;
 
-use super::lexer::{split_on_operators, tokenize, TokenKind};
+use super::lexer::{shell_split, split_on_operators, tokenize, TokenKind};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
@@ -63,10 +63,6 @@ lazy_static! {
         let env_assign = format!(r#"[A-Z_][A-Z0-9_]*={}"#, env_value);
         Regex::new(&format!(r#"^(?:sudo\s+|env\s+|{}\s+)+"#, env_assign)).unwrap()
     };
-    // Git global options that appear before the subcommand: -C <path>, -c <key=val>,
-    // --git-dir <dir>, --work-tree <dir>, and flag-only options (#163)
-    static ref GIT_GLOBAL_OPT: Regex =
-        Regex::new(r"^(?:(?:-C\s+\S+|-c\s+\S+|--git-dir(?:=\S+|\s+\S+)|--work-tree(?:=\S+|\s+\S+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\s+)+").unwrap();
     // Issue #1362: each capture expects a SINGLE file argument (`\S+$`). Multi-file
     // invocations like `head -3 a b c` fail to match so the segment is passed through
     // to the native `head`/`tail` binary — which already handles multi-file with
@@ -326,17 +322,52 @@ fn normalize_php_tool_path(path: &str) -> String {
     normalized
 }
 
-/// Strip git global options before the subcommand (#163).
-/// `git -C /tmp status` → `git status`, preserving the rest.
-/// Returns the original string unchanged if not a git command.
+/// Strip git/yadm global options before the subcommand (#163).
+/// `git -C "/tmp/work tree" status` -> `git status`, preserving the rest.
+/// Returns the original string unchanged if the command or option sequence is incomplete.
 fn strip_git_global_opts(cmd: &str) -> String {
-    // Only applies to commands starting with "git "
-    if !cmd.starts_with("git ") {
+    let tokens = shell_split(cmd);
+    let Some(binary) = tokens.first().map(String::as_str) else {
+        return cmd.to_string();
+    };
+    if binary != "git" && binary != "yadm" {
         return cmd.to_string();
     }
-    let after_git = &cmd[4..]; // skip "git "
-    let stripped = GIT_GLOBAL_OPT.replace(after_git, "");
-    format!("git {}", stripped.trim())
+
+    let mut index = 1;
+    let mut stripped_any = false;
+    while let Some(option) = tokens.get(index).map(String::as_str) {
+        match option {
+            "-C" | "-c" | "--git-dir" | "--work-tree" => {
+                if tokens.get(index + 1).is_none() {
+                    return cmd.to_string();
+                }
+                index += 2;
+                stripped_any = true;
+            }
+            "--no-pager" | "--no-optional-locks" | "--bare" | "--literal-pathspecs" => {
+                index += 1;
+                stripped_any = true;
+            }
+            _ if option
+                .strip_prefix("--git-dir=")
+                .is_some_and(|value| !value.is_empty())
+                || option
+                    .strip_prefix("--work-tree=")
+                    .is_some_and(|value| !value.is_empty()) =>
+            {
+                index += 1;
+                stripped_any = true;
+            }
+            _ => break,
+        }
+    }
+
+    if !stripped_any || index >= tokens.len() {
+        return cmd.to_string();
+    }
+
+    format!("{} {}", binary, tokens[index..].join(" "))
 }
 
 /// Strip golangci-lint global options before the `run` subcommand.
@@ -3928,6 +3959,28 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_git_with_quoted_dash_c_path() {
+        assert_eq!(
+            classify_command(r#"git -C "/tmp/work tree" status"#),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+        assert_eq!(
+            classify_command("yadm -C '/tmp/work tree' status"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
     fn test_classify_git_no_pager_log() {
         assert_eq!(
             classify_command("git --no-pager log -5"),
@@ -3962,6 +4015,14 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_git_quoted_dash_c() {
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"git -C "/tmp/work tree" status"#, &[]),
+            Some(r#"rtk git -C "/tmp/work tree" status"#.to_string())
+        );
+    }
+
+    #[test]
     fn test_rewrite_git_no_pager() {
         assert_eq!(
             rewrite_command_no_prefixes("git --no-pager log -5", &[]),
@@ -3972,6 +4033,25 @@ mod tests {
     #[test]
     fn test_strip_git_global_opts_helper() {
         assert_eq!(strip_git_global_opts("git -C /tmp status"), "git status");
+        assert_eq!(
+            strip_git_global_opts(r#"git -C "/tmp/work tree" status"#),
+            "git status"
+        );
+        assert_eq!(
+            strip_git_global_opts("yadm -C '/tmp/work tree' status"),
+            "yadm status"
+        );
+        assert_eq!(
+            strip_git_global_opts(r#"git --git-dir="/tmp/work tree/.git" status"#),
+            "git status"
+        );
+        assert_eq!(
+            strip_git_global_opts(
+                r#"git -c "core.note=work tree" --work-tree "/tmp/work tree" --no-pager status"#
+            ),
+            "git status"
+        );
+        assert_eq!(strip_git_global_opts("git -C"), "git -C");
         assert_eq!(strip_git_global_opts("git --no-pager log"), "git log");
         assert_eq!(strip_git_global_opts("git status"), "git status");
         assert_eq!(strip_git_global_opts("cargo test"), "cargo test");
