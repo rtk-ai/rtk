@@ -5,7 +5,7 @@ use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 use std::path::Path;
 
-use super::lexer::{split_on_operators, tokenize, TokenKind};
+use super::lexer::{split_on_operators, tokenize, ParsedToken, TokenKind};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
@@ -843,6 +843,11 @@ fn rewrite_segment_inner(
         }
     }
 
+    if let Some((prefix, rest)) = strip_process_wrapper_prefix(trimmed) {
+        return rewrite_segment_inner(rest, excluded, transparent_prefixes, depth + 1)
+            .map(|rewritten| format!("{} {}", prefix, rewritten));
+    }
+
     // User-configured wrapper prefixes (e.g. `docker exec mycontainer`). Same
     // strip-recurse-reprepend contract as the builtin list above.
     for prefix in transparent_prefixes {
@@ -970,6 +975,175 @@ fn rewrite_segment_inner(
     }
 
     None
+}
+
+fn strip_process_wrapper_prefix(cmd: &str) -> Option<(&str, &str)> {
+    let tokens = tokenize(cmd);
+    let args: Vec<&ParsedToken> = tokens
+        .iter()
+        .filter(|token| token.kind == TokenKind::Arg)
+        .collect();
+    let first = args.first()?;
+    let inner_idx = match command_basename(&first.value) {
+        "timeout" => timeout_inner_command_index(&args)?,
+        "time" => time_inner_command_index(&args)?,
+        "nice" => nice_inner_command_index(&args)?,
+        "nohup" => nohup_inner_command_index(&args)?,
+        "stdbuf" => stdbuf_inner_command_index(&args)?,
+        _ => return None,
+    };
+
+    let inner = args.get(inner_idx)?;
+    let prefix = cmd[..inner.offset].trim_end();
+    let rest = cmd[inner.offset..].trim_start();
+    if rest.is_empty() {
+        None
+    } else {
+        Some((prefix, rest))
+    }
+}
+
+fn command_basename(command: &str) -> &str {
+    command.rsplit('/').next().unwrap_or(command)
+}
+
+fn timeout_inner_command_index(args: &[&ParsedToken]) -> Option<usize> {
+    let mut idx = 1;
+    while idx < args.len() {
+        let arg = args[idx].value.as_str();
+        if arg == "--" {
+            idx += 1;
+            break;
+        }
+        if !arg.starts_with('-') || arg == "-" {
+            break;
+        }
+        if timeout_option_takes_separate_value(arg) {
+            idx += 1;
+            if idx >= args.len() {
+                return None;
+            }
+        }
+        idx += 1;
+    }
+
+    // `timeout` requires a duration before the command.
+    idx += 1;
+    (idx < args.len()).then_some(idx)
+}
+
+fn timeout_option_takes_separate_value(arg: &str) -> bool {
+    matches!(arg, "-s" | "-k") || matches!(arg, "--signal" | "--kill-after")
+}
+
+fn time_inner_command_index(args: &[&ParsedToken]) -> Option<usize> {
+    let mut idx = 1;
+    while idx < args.len() {
+        let arg = args[idx].value.as_str();
+        if arg == "--" {
+            idx += 1;
+            break;
+        }
+        if !arg.starts_with('-') || arg == "-" {
+            break;
+        }
+        if time_option_takes_separate_value(arg) {
+            idx += 1;
+            if idx >= args.len() {
+                return None;
+            }
+        }
+        idx += 1;
+    }
+
+    (idx < args.len()).then_some(idx)
+}
+
+fn time_option_takes_separate_value(arg: &str) -> bool {
+    matches!(arg, "-f" | "-o") || matches!(arg, "--format" | "--output")
+}
+
+fn nice_inner_command_index(args: &[&ParsedToken]) -> Option<usize> {
+    let mut idx = 1;
+    while idx < args.len() {
+        let arg = args[idx].value.as_str();
+        if arg == "--" {
+            idx += 1;
+            break;
+        }
+        if arg == "-n" || arg == "--adjustment" {
+            idx += 2;
+            if idx > args.len() {
+                return None;
+            }
+            continue;
+        }
+        if arg.starts_with("--adjustment=") || is_nice_adjustment(arg) {
+            idx += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return None;
+        }
+        break;
+    }
+
+    (idx < args.len()).then_some(idx)
+}
+
+fn is_nice_adjustment(arg: &str) -> bool {
+    let Some(rest) = arg.strip_prefix('-').or_else(|| arg.strip_prefix('+')) else {
+        return false;
+    };
+    !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn nohup_inner_command_index(args: &[&ParsedToken]) -> Option<usize> {
+    let idx = if args.get(1).is_some_and(|arg| arg.value == "--") {
+        2
+    } else {
+        1
+    };
+    (idx < args.len()).then_some(idx)
+}
+
+fn stdbuf_inner_command_index(args: &[&ParsedToken]) -> Option<usize> {
+    let mut idx = 1;
+    while idx < args.len() {
+        let arg = args[idx].value.as_str();
+        if arg == "--" {
+            idx += 1;
+            break;
+        }
+        if !arg.starts_with('-') || arg == "-" {
+            break;
+        }
+        if stdbuf_option_takes_separate_value(arg) {
+            idx += 1;
+            if idx >= args.len() {
+                return None;
+            }
+        } else if !stdbuf_option_is_inline_or_flag(arg) {
+            return None;
+        }
+        idx += 1;
+    }
+
+    (idx < args.len()).then_some(idx)
+}
+
+fn stdbuf_option_takes_separate_value(arg: &str) -> bool {
+    matches!(arg, "-i" | "-o" | "-e") || matches!(arg, "--input" | "--output" | "--error")
+}
+
+fn stdbuf_option_is_inline_or_flag(arg: &str) -> bool {
+    let short_mode = ["-i", "-o", "-e"]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix) && arg.len() > prefix.len());
+    let long_mode = ["--input=", "--output=", "--error="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix));
+    short_mode || long_mode
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -4181,6 +4355,52 @@ mod tests {
             rewrite_command_no_prefixes("sudo noglob git status", &[]),
             Some("sudo noglob rtk git status".into())
         );
+    }
+
+    #[test]
+    fn test_process_wrapper_prefixes_rewrite_inner_command() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 300 cargo test", &[]),
+            Some("timeout 300 rtk cargo test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("time cargo build", &[]),
+            Some("time rtk cargo build".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("nice -n 10 cargo test", &[]),
+            Some("nice -n 10 rtk cargo test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("nohup cargo build", &[]),
+            Some("nohup rtk cargo build".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("stdbuf -oL cargo test", &[]),
+            Some("stdbuf -oL rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_process_wrapper_prefixes_handle_options_and_compounds() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout -k 5s 300 cargo test", &[]),
+            Some("timeout -k 5s 300 rtk cargo test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("CI=1 timeout 300 cargo test", &[]),
+            Some("CI=1 timeout 300 rtk cargo test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 300 cargo test && time git status", &[]),
+            Some("timeout 300 rtk cargo test && time rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_process_wrapper_prefix_without_inner_command_returns_none() {
+        assert_eq!(rewrite_command_no_prefixes("timeout 300", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("time", &[]), None);
     }
 
     #[test]
