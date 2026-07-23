@@ -9,7 +9,7 @@
 use crate::core::stream::{exec_capture, exec_capture_stdin, CaptureResult};
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, strip_ansi};
-use crate::core::{args_utils, config};
+use crate::core::{args_utils, config, secrets};
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
@@ -311,16 +311,55 @@ fn engine_capture<T: AsRef<str>>(
 }
 
 /// Runs the agent's command verbatim for forms RTK does not group: format/shape
-/// flags and pattern-less modes (`--files`, `--type-list`).
+/// flags and pattern-less modes (`--files`, `--type-list`). Unless the agent
+/// passed `--include-secrets`, engine-native exclusions keep credential files
+/// out of the output (#2817); prepended so a trailing `--` cannot demote them
+/// to positionals. Explicitly-named credential files (`paths`) are dropped
+/// with a stderr note instead of relying on the engine's name-glob exclusion,
+/// which would both stay silent — a plausible-but-wrong "no match" — and miss
+/// innocuously-named symlinks.
 fn passthrough<T: AsRef<str>>(
     timer: &tracking::TimedExecution,
     engine: Engine,
     args: &[T],
+    paths: &[String],
     real_cmd: &str,
+    include_secrets: bool,
 ) -> Result<i32> {
+    let mut args: Vec<&str> = args.iter().map(|a| a.as_ref()).collect();
+    if !include_secrets {
+        let mut kept_paths = paths.len();
+        for p in paths {
+            if secrets::is_secret_path(std::path::Path::new(p)) {
+                eprintln!(
+                    "rtk: {}: credential file hidden (rerun with {} to search it)",
+                    p,
+                    secrets::INCLUDE_SECRETS_FLAG
+                );
+                if let Some(pos) = args.iter().position(|a| a == p) {
+                    args.remove(pos);
+                }
+                kept_paths -= 1;
+            }
+        }
+        // Every named file was a credential file: nothing left to search.
+        // Don't run the engine — with no file operands it would read stdin.
+        // Mirror the engine's "no lines selected" exit code.
+        if kept_paths == 0 && !paths.is_empty() {
+            timer.track_passthrough(real_cmd, &format!("rtk {} (passthrough)", real_cmd));
+            return Ok(1);
+        }
+    }
+
     let mut cmd = resolved_command(engine.bin());
+    if !include_secrets {
+        cmd.args(match engine {
+            Engine::Grep => secrets::grep_exclude_flags(),
+            Engine::Rg => secrets::rg_exclude_flags(),
+        });
+    }
     for a in args {
-        cmd.arg(a.as_ref());
+        cmd.arg(a);
     }
     let result = exec_capture_stdin(&mut cmd).context("search failed")?;
 
@@ -382,13 +421,15 @@ pub fn run(
 
     // Re-insert `--` when clap's trailing_var_arg consumed it
     let args = args_utils::restore_double_dash(args);
+    // credential files are excluded by default; the flag lifts it.
+    let (args, include_secrets) = secrets::strip_include_secrets(&args);
     let real_cmd = format!("{} {}", engine.label(), args.join(" "));
     let rtk_label = format!("rtk {}", engine.label());
 
     let (patterns, paths, extra_args) = extract_pattern_path(&args);
 
     if patterns.is_empty() {
-        return passthrough(&timer, engine, &args, &real_cmd);
+        return passthrough(&timer, engine, &args, &paths, &real_cmd, include_secrets);
     }
 
     let pattern_display = if patterns.len() == 1 {
@@ -405,7 +446,7 @@ pub fn run(
 
     // format/shape flags (-c/-l/-o/...): already-minimal native output, passthrough.
     if has_format_flag(&extra_args) {
-        return passthrough(&timer, engine, &args, &real_cmd);
+        return passthrough(&timer, engine, &args, &paths, &real_cmd, include_secrets);
     }
 
     let result = engine_capture(engine, &extra_args, &patterns, &paths)?;
@@ -416,7 +457,7 @@ pub fn run(
     // Unparseable shape re-runs verbatim below (with its own stderr), so handle it
     // before surfacing this run's stderr (#2333).
     if unparsed_signal(&raw_output) > 0 {
-        return passthrough(&timer, engine, &args, &real_cmd);
+        return passthrough(&timer, engine, &args, &paths, &real_cmd, include_secrets);
     }
 
     if !result.stderr.is_empty() {
@@ -450,6 +491,23 @@ pub fn run(
             .push((line_num, is_match, cleaned));
     }
 
+    // drop matches from credential files. Done on the parsed results —
+    // not via engine flags — so it works identically for grep and rg, matches
+    // case-insensitively, and sees through innocuously-named symlinks.
+    let mut excluded_files = 0usize;
+    let mut excluded_matches = 0usize;
+    if !include_secrets {
+        by_file.retain(|file, entries| {
+            if secrets::is_secret_path(std::path::Path::new(file)) {
+                excluded_files += 1;
+                excluded_matches += entries.iter().filter(|(_, is_match, _)| *is_match).count();
+                false
+            } else {
+                true
+            }
+        });
+    }
+
     let total_matches: usize = by_file
         .values()
         .flat_map(|v| v.iter())
@@ -471,10 +529,12 @@ pub fn run(
             .any(|f| f == "--with-filename" || f == "--recursive");
     // Always surface the line number (the openable position) unless the agent
     // explicitly turned it off; the filename is the only conditional part.
-    let show_line = !has_short_flag(&extra_args, 'N')
-        && !extra_args.iter().any(|f| f == "--no-line-number");
+    let show_line =
+        !has_short_flag(&extra_args, 'N') && !extra_args.iter().any(|f| f == "--no-line-number");
 
     // Faithful baseline: exactly what the real command prints, full content.
+    // Files excluded above are absent from `by_file` and must not leak back
+    // in through this path either.
     let mut plain = String::new();
     for line in raw_output.lines() {
         let Some((file, line_num, is_match, content)) = parse_match_line(line) else {
@@ -483,6 +543,9 @@ pub fn run(
             }
             continue;
         };
+        if !by_file.contains_key(&file) {
+            continue;
+        }
         let sep = if is_match { ':' } else { '-' };
         if show_file {
             plain.push_str(&file);
@@ -583,6 +646,14 @@ pub fn run(
     };
 
     print!("{}", output);
+    if excluded_files > 0 {
+        eprintln!(
+            "rtk: {} match(es) in {} credential file(s) hidden (rerun with {} to show them)",
+            excluded_matches,
+            excluded_files,
+            secrets::INCLUDE_SECRETS_FLAG
+        );
+    }
     timer.track(&real_cmd, &rtk_label, &raw_output, &output);
 
     Ok(exit_code)

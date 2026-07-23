@@ -2,7 +2,7 @@
 
 use crate::core::filter::{self, FilterLevel, Language};
 use crate::core::guard::never_worse;
-use crate::core::tracking;
+use crate::core::{secrets, tracking};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
@@ -13,8 +13,17 @@ pub fn run(
     max_lines: Option<usize>,
     tail_lines: Option<usize>,
     line_numbers: bool,
+    include_secrets: bool,
     verbose: u8,
 ) -> Result<()> {
+    // refuse to print credential files into the transcript by default.
+    if !include_secrets && secrets::is_secret_path(file) {
+        anyhow::bail!(
+            "looks like a credential/secret file; refusing to print it (rerun with {} to override)",
+            secrets::INCLUDE_SECRETS_FLAG
+        );
+    }
+
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -203,7 +212,7 @@ fn main() {{
         )?;
 
         // Just verify it doesn't panic
-        run(file.path(), FilterLevel::Minimal, None, None, false, 0)?;
+        run(file.path(), FilterLevel::Minimal, None, None, false, false, 0)?;
         Ok(())
     }
 
