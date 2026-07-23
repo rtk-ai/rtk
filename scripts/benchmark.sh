@@ -346,8 +346,25 @@ bench "wc" "wc Cargo.toml src/main.rs" "$RTK wc Cargo.toml src/main.rs"
 # ===================
 section "curl"
 if command -v curl &> /dev/null; then
-  bench "curl json" "curl -s https://mockhttp.org/json/1" "$RTK curl https://mockhttp.org/json/1"
-  bench "curl text" "curl -s https://mockhttp.org/robots.txt" "$RTK curl https://mockhttp.org/robots.txt"
+  cat > /tmp/rtk_bench_curl.json << 'CURLJSONEOF'
+{
+  "slideshow": {
+    "title": "Sample Slide Show",
+    "author": "rtk bench fixture",
+    "slides": [
+      {"title": "Wake up to WonderWidgets!", "type": "all"},
+      {"title": "Overview", "type": "all"}
+    ]
+  }
+}
+CURLJSONEOF
+  cat > /tmp/rtk_bench_curl.txt << 'CURLTXTEOF'
+User-agent: *
+Disallow: /deny
+CURLTXTEOF
+  bench "curl json" "cat /tmp/rtk_bench_curl.json" "$RTK curl file:///tmp/rtk_bench_curl.json"
+  bench "curl text" "cat /tmp/rtk_bench_curl.txt" "$RTK curl file:///tmp/rtk_bench_curl.txt"
+  rm -f /tmp/rtk_bench_curl.json /tmp/rtk_bench_curl.txt
 fi
 
 # ===================
@@ -355,8 +372,20 @@ fi
 # ===================
 if command -v wget &> /dev/null; then
   section "wget"
-  bench "wget" "wget -qO- https://mockhttp.org/json/1" "$RTK wget https://mockhttp.org/json/1"
-  rm -f 1 2>/dev/null
+  cat > /tmp/rtk_bench_wget.json << 'WGETJSONEOF'
+{
+  "slideshow": {
+    "title": "Sample Slide Show",
+    "author": "rtk bench fixture",
+    "slides": [
+      {"title": "Wake up to WonderWidgets!", "type": "all"},
+      {"title": "Overview", "type": "all"}
+    ]
+  }
+}
+WGETJSONEOF
+  bench "wget" "cat /tmp/rtk_bench_wget.json" "$RTK wget file:///tmp/rtk_bench_wget.json"
+  rm -f /tmp/rtk_bench_wget.json rtk_bench_wget.json json 2>/dev/null
 fi
 
 # ===================
