@@ -21,6 +21,8 @@ pub struct Config {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub dedup: DedupConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -145,9 +147,55 @@ impl Default for LimitsConfig {
     }
 }
 
+fn default_dedup_min_tokens() -> usize {
+    200
+}
+
+fn default_dedup_recency_window() -> usize {
+    100
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DedupConfig {
+    /// Suppress re-emitting byte-identical command output already seen this
+    /// Claude Code session. Opt-in: suppression changes agent-visible output.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Skip dedup for outputs smaller than this many estimated tokens.
+    #[serde(default = "default_dedup_min_tokens")]
+    pub min_tokens: usize,
+    /// Suppress even when the underlying command exited non-zero. Off by
+    /// default so command failures are always shown in full.
+    #[serde(default)]
+    pub suppress_on_error: bool,
+    /// Recency backstop for compaction: only suppress if the prior emission is
+    /// within this many distinct emissions of the most recent one. Guards
+    /// against suppressing output that a context reduction may have dropped
+    /// even if no PreCompact/PostCompact signal fired. 0 = unlimited (rely on
+    /// the PostCompact ledger reset alone).
+    #[serde(default = "default_dedup_recency_window")]
+    pub recency_window: usize,
+}
+
+impl Default for DedupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_tokens: default_dedup_min_tokens(),
+            suppress_on_error: false,
+            recency_window: default_dedup_recency_window(),
+        }
+    }
+}
+
 /// Get limits config. Falls back to defaults if config can't be loaded.
 pub fn limits() -> LimitsConfig {
     Config::load().map(|c| c.limits).unwrap_or_default()
+}
+
+/// Get dedup config. Falls back to defaults if config can't be loaded.
+pub fn dedup() -> DedupConfig {
+    Config::load().map(|c| c.dedup).unwrap_or_default()
 }
 
 impl Config {
@@ -279,6 +327,42 @@ enabled = true
         let config = Config::default();
         assert!(!config.telemetry.enabled);
         assert!(config.telemetry.consent_given.is_none());
+    }
+
+    #[test]
+    fn test_dedup_defaults_and_old_toml_parses() {
+        // Config predating [dedup] (here, a config with no [dedup] section at
+        // all) must still parse, with safe defaults.
+        let config: Config = toml::from_str("").expect("valid toml");
+        assert!(!config.dedup.enabled); // opt-in
+        assert_eq!(config.dedup.min_tokens, 200);
+        assert!(!config.dedup.suppress_on_error);
+    }
+
+    #[test]
+    fn test_dedup_config_roundtrip() {
+        let toml = r#"
+[dedup]
+enabled = true
+min_tokens = 500
+suppress_on_error = true
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(config.dedup.enabled);
+        assert_eq!(config.dedup.min_tokens, 500);
+        assert!(config.dedup.suppress_on_error);
+        assert_eq!(config.dedup.recency_window, 100); // omitted -> default
+    }
+
+    #[test]
+    fn test_dedup_partial_section_uses_field_defaults() {
+        // Enabling should be a one-liner; the other fields fall back to defaults.
+        let toml = "[dedup]\nenabled = true\n";
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(config.dedup.enabled);
+        assert_eq!(config.dedup.min_tokens, 200);
+        assert!(!config.dedup.suppress_on_error);
+        assert_eq!(config.dedup.recency_window, 100);
     }
 
     #[test]

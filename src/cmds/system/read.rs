@@ -75,13 +75,16 @@ pub fn run(
         (content.clone(), filtered.clone())
     };
     let shown = never_worse(&raw, &rtk_output);
-    print!("{}", shown);
-    timer.track(
-        &format!("cat {}", file.display()),
-        "rtk read",
+    // Suppress if this exact file content was already emitted this session.
+    // Reaching here means the read succeeded, so exit_ok = true.
+    let out = crate::core::dedup::maybe_suppress(
+        &format!("read:{}", file.display()),
         &raw,
         shown,
+        true,
     );
+    print!("{}", out);
+    timer.track(&format!("cat {}", file.display()), "rtk read", &raw, shown);
     Ok(())
 }
 
@@ -143,7 +146,10 @@ pub fn run_stdin(
         (content.clone(), filtered.clone())
     };
     let shown = never_worse(&raw, &rtk_output);
-    print!("{}", shown);
+    // stdin has no path identity; key the stub on a fixed label (the content
+    // hash is what actually gates suppression).
+    let out = crate::core::dedup::maybe_suppress("read:(stdin)", &raw, shown, true);
+    print!("{}", out);
 
     timer.track("cat - (stdin)", "rtk read -", &raw, shown);
     Ok(())

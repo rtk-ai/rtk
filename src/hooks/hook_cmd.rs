@@ -339,6 +339,59 @@ enum PayloadAction {
     Ignore,
 }
 
+/// Whether a session id is safe to splice into a shell command as a bare token.
+/// Claude Code session ids are UUIDs; we accept only `[A-Za-z0-9_-]` and reject
+/// anything else rather than risk shell injection via a crafted id.
+fn session_id_is_safe(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// True if `prefix` (the text preceding a candidate `rtk`) ends at a command
+/// boundary — its last non-space byte is a shell operator (`&`, `|`, `;`).
+fn command_boundary_before(prefix: &str) -> bool {
+    matches!(
+        prefix.trim_end().as_bytes().last(),
+        Some(b'&' | b'|' | b';')
+    )
+}
+
+/// Inject `--session <id>` into a freshly rewritten command so the executed
+/// `rtk` process can scope session-only features (output dedup). The flag is
+/// inserted after the first `rtk` command word — start of string, or the first
+/// `rtk` at a command boundary (immediately after `&&`, `||`, `;`, `|`, `&`).
+/// Additional `rtk` invocations in a compound command are left untouched: they
+/// run without a session id and session-scoped features no-op there (safe
+/// degradation, never incorrect). Returns the input unchanged if the id is
+/// unsafe or no `rtk` command word is found.
+fn inject_session(rewritten: &str, session_id: &str) -> String {
+    if !session_id_is_safe(session_id) {
+        return rewritten.to_string();
+    }
+    let bytes = rewritten.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = rewritten[from..].find("rtk") {
+        let idx = from + rel;
+        let after = idx + 3;
+        // `rtk` must be a whole word (followed by a space or end of string)...
+        let right_ok = after == rewritten.len() || bytes[after] == b' ';
+        // ...at a command position (start, or after a shell operator).
+        let left_ok = idx == 0 || command_boundary_before(&rewritten[..idx]);
+        if right_ok && left_ok {
+            let mut out = String::with_capacity(rewritten.len() + session_id.len() + 12);
+            out.push_str(&rewritten[..after]);
+            out.push_str(" --session ");
+            out.push_str(session_id);
+            out.push_str(&rewritten[after..]);
+            return out;
+        }
+        from = after;
+    }
+    rewritten.to_string()
+}
+
 fn process_claude_payload(v: &Value) -> PayloadAction {
     let cmd = match v
         .pointer("/tool_input/command")
@@ -366,10 +419,19 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         HookDecision::AskRewrite(r) => (r, false),
     };
 
+    // Splice the Claude Code session id into the executed command (best-effort)
+    // so `rtk` can scope session-only features. Absent/unsafe id => the command
+    // runs without it and those features no-op. Audit still logs the clean
+    // `rewritten` form, keeping the volatile id out of the audit trail.
+    let executed = match v.get("session_id").and_then(|s| s.as_str()) {
+        Some(sid) => inject_session(&rewritten, sid),
+        None => rewritten.clone(),
+    };
+
     let updated_input = {
         let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
         if let Some(obj) = ti.as_object_mut() {
-            obj.insert("command".into(), Value::String(rewritten.clone()));
+            obj.insert("command".into(), Value::String(executed));
         }
         ti
     };
@@ -426,6 +488,39 @@ pub fn run_claude() -> Result<()> {
         PayloadAction::Ignore => {}
     }
 
+    Ok(())
+}
+
+/// Reset a session's dedup ledger from a PostCompact payload. Returns the
+/// number of ledger rows cleared. No `session_id` ⇒ no-op.
+fn compact_reset(v: &Value, tracker: &crate::core::tracking::Tracker) -> usize {
+    match v
+        .get("session_id")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        Some(sid) => tracker.dedup_reset_session(sid).unwrap_or(0),
+        None => 0,
+    }
+}
+
+/// Run the Claude Code PostCompact hook: clear this session's dedup ledger so
+/// output suppression never spans a context reduction (after compaction the
+/// earlier full emission may be gone, so the next read must re-emit it).
+/// Best-effort and silent — PostCompact is informational and always exits 0.
+pub fn run_compact() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(_) => return Ok(()), // malformed payload -> no-op
+    };
+    if let Ok(tracker) = crate::core::tracking::Tracker::new() {
+        let _ = compact_reset(&v, &tracker);
+    }
     Ok(())
 }
 
@@ -666,6 +761,97 @@ mod tests {
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         crate::discover::registry::rewrite_command(cmd, excluded, &[])
+    }
+
+    // --- Session id injection (Phase 2) ---
+
+    #[test]
+    fn session_id_safety() {
+        assert!(session_id_is_safe("abc-123_DEF"));
+        assert!(session_id_is_safe("a1b2c3d4-5e6f-7890-abcd-ef1234567890"));
+        assert!(!session_id_is_safe("")); // empty
+        assert!(!session_id_is_safe("has space"));
+        assert!(!session_id_is_safe("evil;rm -rf")); // shell metachar
+        assert!(!session_id_is_safe("$(whoami)"));
+    }
+
+    #[test]
+    fn inject_into_standalone_command() {
+        assert_eq!(
+            inject_session("rtk git status", "sid1"),
+            "rtk --session sid1 git status"
+        );
+    }
+
+    #[test]
+    fn inject_into_bare_rtk() {
+        assert_eq!(inject_session("rtk", "sid1"), "rtk --session sid1");
+    }
+
+    #[test]
+    fn inject_finds_first_rtk_after_non_rtk_segment() {
+        // `cd foo && rtk ls` -> flag lands on the rtk segment.
+        assert_eq!(
+            inject_session("cd foo && rtk ls -la", "sid1"),
+            "cd foo && rtk --session sid1 ls -la"
+        );
+    }
+
+    #[test]
+    fn inject_first_only_in_compound() {
+        // Only the first rtk gets the flag; the second safely runs session-less.
+        assert_eq!(
+            inject_session("rtk git status && rtk ls", "sid1"),
+            "rtk --session sid1 git status && rtk ls"
+        );
+    }
+
+    #[test]
+    fn inject_skips_rtk_substring_in_quotes() {
+        // `rtk` inside a quoted arg is not a command word; the real rtk is found.
+        assert_eq!(
+            inject_session("echo \"rtk\" && rtk ls", "sid1"),
+            "echo \"rtk\" && rtk --session sid1 ls"
+        );
+    }
+
+    #[test]
+    fn inject_ignores_rtkfoo_word() {
+        // `rtkfoo` is not the `rtk` command (right boundary fails); unchanged.
+        assert_eq!(inject_session("rtkfoo bar", "sid1"), "rtkfoo bar");
+    }
+
+    #[test]
+    fn inject_noop_on_unsafe_id() {
+        assert_eq!(inject_session("rtk git status", "bad id"), "rtk git status");
+    }
+
+    #[test]
+    fn inject_noop_when_no_rtk_command() {
+        assert_eq!(inject_session("git status", "sid1"), "git status");
+    }
+
+    // --- PostCompact ledger reset (Phase 8b) ---
+
+    #[test]
+    fn compact_reset_clears_only_the_named_session() {
+        let t = crate::core::tracking::Tracker::new_in_memory().expect("tracker");
+        t.dedup_insert("s1", "h1", "id", 100, 5).expect("insert");
+        t.dedup_insert("s2", "h2", "id", 100, 5).expect("insert");
+        let payload = json!({ "session_id": "s1", "hook_event_name": "PostCompact" });
+        assert_eq!(compact_reset(&payload, &t), 1);
+        assert!(t.dedup_lookup("s1", "h1").expect("lookup").is_none());
+        // Other sessions are untouched.
+        assert!(t.dedup_lookup("s2", "h2").expect("lookup").is_some());
+    }
+
+    #[test]
+    fn compact_reset_noop_without_session_id() {
+        let t = crate::core::tracking::Tracker::new_in_memory().expect("tracker");
+        t.dedup_insert("s1", "h1", "id", 100, 5).expect("insert");
+        let payload = json!({ "hook_event_name": "PostCompact" });
+        assert_eq!(compact_reset(&payload, &t), 0);
+        assert!(t.dedup_lookup("s1", "h1").expect("lookup").is_some());
     }
 
     // --- Copilot format detection ---

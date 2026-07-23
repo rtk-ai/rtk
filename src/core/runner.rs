@@ -139,10 +139,24 @@ where
         print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
     } else {
         let guarded = crate::core::guard::never_worse(raw_for_tracking, &filtered).to_string();
-        if opts.no_trailing_newline {
-            print!("{}", guarded);
-        } else {
-            println!("{}", guarded);
+        // Suppress a byte-identical re-emission within the session. The stub
+        // carries its own newline, so print it verbatim; when not suppressed,
+        // fall through to the exact original print path (byte-identical output,
+        // no snapshot churn).
+        match crate::core::dedup::maybe_suppress(
+            cmd_label,
+            raw_for_tracking,
+            &guarded,
+            exit_code == 0,
+        ) {
+            std::borrow::Cow::Owned(stub) => print!("{}", stub),
+            std::borrow::Cow::Borrowed(_) => {
+                if opts.no_trailing_newline {
+                    print!("{}", guarded);
+                } else {
+                    println!("{}", guarded);
+                }
+            }
         }
         guarded
     };

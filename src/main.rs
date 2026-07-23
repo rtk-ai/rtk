@@ -79,6 +79,11 @@ struct Cli {
     /// Set SKIP_ENV_VALIDATION=1 for child processes (Next.js, tsc, lint, prisma)
     #[arg(long = "skip-env", global = true)]
     skip_env: bool,
+
+    /// Claude Code session id (injected by the hook) — scopes session-only
+    /// features like output dedup. Absent for manual invocations.
+    #[arg(long = "session", global = true)]
+    session: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -866,6 +871,8 @@ enum HookCommands {
     Copilot,
     /// Process Factory Droid PreToolUse hook (reads JSON from stdin)
     Droid,
+    /// Process Claude Code PostCompact hook — reset the session dedup ledger (reads JSON from stdin)
+    Compact,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1586,6 +1593,11 @@ fn run_cli() -> Result<i32> {
             return run_fallback(e);
         }
     };
+
+    // Populate the process-global session context (from --session or
+    // RTK_SESSION_ID) before any command runs, so session-scoped features
+    // (output dedup) can key on it. Absent for manual invocations.
+    core::session::init(cli.session.clone());
 
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
     // Skip for Gain — it shows its own inline hook warning.
@@ -2436,6 +2448,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Droid => {
                 hooks::hook_cmd::run_droid()?;
+                0
+            }
+            HookCommands::Compact => {
+                hooks::hook_cmd::run_compact()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {

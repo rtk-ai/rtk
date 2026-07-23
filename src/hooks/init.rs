@@ -13,12 +13,13 @@ use crate::hooks::constants::{
 };
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, DROID_DIR,
-    DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR,
-    DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
-    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
-    HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
-    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    BEFORE_TOOL_KEY, CLAUDE_COMPACT_HOOK_COMMAND, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR,
+    CURSOR_HOOK_COMMAND, DROID_DIR, DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE,
+    DROID_HOOKS_SUBDIR, DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR,
+    HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE,
+    HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR,
+    PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE, POST_COMPACT_KEY, PRE_TOOL_USE_KEY,
+    REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 use super::is_claude_hook_command;
@@ -527,56 +528,113 @@ fn prompt_telemetry_consent() -> Result<()> {
     Ok(())
 }
 
-fn print_manual_instructions(hook_command: &str, include_opencode: bool) {
+fn print_manual_instructions(
+    hook_command: &str,
+    compact_command: &str,
+    pre_present: bool,
+    post_present: bool,
+    include_opencode: bool,
+) {
     let settings_path = resolve_claude_dir()
         .unwrap_or_else(|_| PathBuf::from(format!("~/{}", CLAUDE_DIR)))
         .join(SETTINGS_JSON);
-    println!("\n  MANUAL STEP: Add this to {}:", settings_path.display());
-    println!("  {{");
-    println!("    \"hooks\": {{ \"PreToolUse\": [{{");
-    println!("      \"matcher\": \"Bash\",");
-    println!("      \"hooks\": [{{ \"type\": \"command\",");
-    println!("        \"command\": \"{}\"", hook_command);
-    println!("      }}]");
-    println!("    }}]}}");
-    println!("  }}");
-    if include_opencode {
-        println!("\n  Then restart Claude Code and OpenCode. Test with: git status\n");
+    if pre_present {
+        println!(
+            "\n  MANUAL STEP: RTK's PostCompact hook (dedup ledger reset) is missing.\n  Merge this into {}:",
+            settings_path.display()
+        );
     } else {
-        println!("\n  Then restart Claude Code. Test with: git status\n");
+        println!(
+            "\n  MANUAL STEP: Merge this into {}:",
+            settings_path.display()
+        );
+    }
+    for line in
+        manual_instructions_snippet(hook_command, compact_command, pre_present, post_present)
+            .lines()
+    {
+        println!("  {}", line);
+    }
+    let restart = if include_opencode {
+        "Claude Code and OpenCode"
+    } else {
+        "Claude Code"
+    };
+    if pre_present {
+        // Only the PostCompact hook is missing — `git status` exercises nothing new.
+        println!("\n  Then restart {}.\n", restart);
+    } else {
+        println!("\n  Then restart {}. Test with: git status\n", restart);
     }
 }
 
-fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
-    let hooks = match root
+/// JSON snippet covering exactly the RTK hooks missing from settings.json, so
+/// a user following the manual step never silently drops the PostCompact hook.
+fn manual_instructions_snippet(
+    hook_command: &str,
+    compact_command: &str,
+    pre_present: bool,
+    post_present: bool,
+) -> String {
+    let mut hooks = serde_json::Map::new();
+    if !pre_present {
+        hooks.insert(
+            "PreToolUse".to_string(),
+            serde_json::json!([{
+                "matcher": "Bash",
+                "hooks": [{ "type": "command", "command": hook_command }]
+            }]),
+        );
+    }
+    if !post_present {
+        hooks.insert(
+            POST_COMPACT_KEY.to_string(),
+            serde_json::json!([{
+                "hooks": [{ "type": "command", "command": compact_command }]
+            }]),
+        );
+    }
+    serde_json::to_string_pretty(&serde_json::json!({ "hooks": hooks }))
+        .expect("JSON snippet built from string keys and literals cannot fail to serialize")
+}
+
+/// True if a settings.json hook entry carries a command matching `pred`.
+fn entry_command_matches(entry: &serde_json::Value, pred: impl Fn(&str) -> bool) -> bool {
+    entry
+        .get("hooks")
+        .and_then(|h| h.as_array())
+        .is_some_and(|arr| {
+            arr.iter()
+                .filter_map(|h| h.get("command").and_then(|c| c.as_str()))
+                .any(&pred)
+        })
+}
+
+/// Retain-out RTK entries from a named hook array; returns true if any removed.
+fn strip_rtk_entries(root: &mut serde_json::Value, key: &str, pred: impl Fn(&str) -> bool) -> bool {
+    let Some(arr) = root
         .get_mut("hooks")
-        .and_then(|h| h.get_mut(PRE_TOOL_USE_KEY))
-    {
-        Some(pre_tool_use) => pre_tool_use,
-        None => return false,
+        .and_then(|h| h.get_mut(key))
+        .and_then(|p| p.as_array_mut())
+    else {
+        return false;
     };
+    let before = arr.len();
+    arr.retain(|entry| !entry_command_matches(entry, &pred));
+    arr.len() < before
+}
 
-    let pre_tool_use_array = match hooks.as_array_mut() {
-        Some(arr) => arr,
-        None => return false,
-    };
-
-    let original_len = pre_tool_use_array.len();
-    pre_tool_use_array.retain(|entry| {
-        if let Some(hooks_array) = entry.get("hooks").and_then(|h| h.as_array()) {
-            for hook in hooks_array {
-                if let Some(command) = hook.get("command").and_then(|c| c.as_str()) {
-                    // Match both legacy script path and new binary command
-                    if command.contains(REWRITE_HOOK_FILE) || is_claude_hook_command(command) {
-                        return false;
-                    }
-                }
-            }
-        }
-        true
+fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
+    // PreToolUse: legacy script path or the native claude command
+    // (is_claude_hook_command matches both bare and absolute-path forms).
+    let pre = strip_rtk_entries(root, PRE_TOOL_USE_KEY, |cmd| {
+        cmd.contains(REWRITE_HOOK_FILE) || is_claude_hook_command(cmd)
     });
-
-    pre_tool_use_array.len() < original_len
+    // PostCompact: the dedup-reset command.
+    let post = strip_rtk_entries(root, POST_COMPACT_KEY, |cmd| {
+        cmd == CLAUDE_COMPACT_HOOK_COMMAND || cmd.ends_with("hook compact")
+    });
+    pre || post
 }
 
 /// Remove RTK hook from settings.json file
@@ -976,10 +1034,22 @@ fn patch_settings_json_command(
         serde_json::json!({})
     };
 
-    // Check idempotency
-    if hook_already_present(&root, hook_command) {
+    // The PostCompact hook (dedup ledger reset) shares the binary invocation,
+    // swapping the subcommand. Derived from hook_command so a path-prefixed
+    // command keeps its prefix; falls back to the constant.
+    let compact_command = hook_command
+        .strip_suffix("claude")
+        .map(|p| format!("{p}compact"))
+        .unwrap_or_else(|| CLAUDE_COMPACT_HOOK_COMMAND.to_string());
+
+    // Check idempotency for BOTH hooks. Existing users (installed before the
+    // PostCompact hook existed) have PreToolUse but not PostCompact — re-running
+    // init should add the missing one rather than early-return.
+    let pre_present = hook_already_present(&root, hook_command);
+    let post_present = postcompact_already_present(&root, &compact_command);
+    if pre_present && post_present {
         if verbose > 0 {
-            eprintln!("settings.json: hook already present");
+            eprintln!("settings.json: hooks already present");
         }
         return Ok(PatchResult::AlreadyPresent);
     }
@@ -987,7 +1057,13 @@ fn patch_settings_json_command(
     // Handle mode
     match mode {
         PatchMode::Skip => {
-            print_manual_instructions(hook_command, include_opencode);
+            print_manual_instructions(
+                hook_command,
+                &compact_command,
+                pre_present,
+                post_present,
+                include_opencode,
+            );
             return Ok(PatchResult::Skipped);
         }
         PatchMode::Ask => {
@@ -998,7 +1074,13 @@ fn patch_settings_json_command(
                     settings_path.display()
                 );
             } else if !prompt_user_consent(&settings_path)? {
-                print_manual_instructions(hook_command, include_opencode);
+                print_manual_instructions(
+                    hook_command,
+                    &compact_command,
+                    pre_present,
+                    post_present,
+                    include_opencode,
+                );
                 return Ok(PatchResult::Declined);
             }
         }
@@ -1007,7 +1089,12 @@ fn patch_settings_json_command(
         }
     }
 
-    insert_hook_entry(&mut root, hook_command)?;
+    if !pre_present {
+        insert_hook_entry(&mut root, hook_command)?;
+    }
+    if !post_present {
+        insert_postcompact_entry(&mut root, &compact_command)?;
+    }
 
     let serialized =
         serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
@@ -1113,6 +1200,53 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result
         }]
     }));
     Ok(())
+}
+
+/// Deep-merge the PostCompact dedup-reset hook into settings.json.
+/// No matcher, so it fires for both `auto` and `manual` compaction.
+fn insert_postcompact_entry(root: &mut serde_json::Value, compact_command: &str) -> Result<()> {
+    let root_obj = root
+        .as_object_mut()
+        .context("settings root is not an object")?;
+
+    let hooks = root_obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("hooks value is not an object")?;
+
+    let post_compact = hooks
+        .entry(POST_COMPACT_KEY)
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .context("PostCompact value is not an array")?;
+
+    post_compact.push(serde_json::json!({
+        "hooks": [{
+            "type": "command",
+            "command": compact_command
+        }]
+    }));
+    Ok(())
+}
+
+/// Whether the RTK PostCompact hook is already registered in settings.json.
+fn postcompact_already_present(root: &serde_json::Value, compact_command: &str) -> bool {
+    let post_compact_array = match root
+        .get("hooks")
+        .and_then(|h| h.get(POST_COMPACT_KEY))
+        .and_then(|p| p.as_array())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    post_compact_array
+        .iter()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .filter_map(|hook| hook.get("command")?.as_str())
+        .any(|cmd| cmd == compact_command || cmd == CLAUDE_COMPACT_HOOK_COMMAND)
 }
 
 /// Check if RTK hook is already present in settings.json
@@ -6271,6 +6405,148 @@ mod tests {
 
         let command = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(command, hook_command);
+    }
+
+    // Tests for PostCompact dedup-reset hook (Phase 8b)
+    #[test]
+    fn test_insert_postcompact_entry() {
+        let mut root = serde_json::json!({});
+        insert_postcompact_entry(&mut root, CLAUDE_COMPACT_HOOK_COMMAND).unwrap();
+        let arr = root["hooks"]["PostCompact"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert!(arr[0].get("matcher").is_none()); // no matcher -> auto + manual
+        assert_eq!(
+            arr[0]["hooks"][0]["command"].as_str().unwrap(),
+            CLAUDE_COMPACT_HOOK_COMMAND
+        );
+    }
+
+    #[test]
+    fn test_postcompact_already_present() {
+        let mut root = serde_json::json!({});
+        assert!(!postcompact_already_present(
+            &root,
+            CLAUDE_COMPACT_HOOK_COMMAND
+        ));
+        insert_postcompact_entry(&mut root, CLAUDE_COMPACT_HOOK_COMMAND).unwrap();
+        assert!(postcompact_already_present(
+            &root,
+            CLAUDE_COMPACT_HOOK_COMMAND
+        ));
+    }
+
+    #[test]
+    fn test_manual_snippet_both_missing_includes_both_hooks() {
+        let snippet = manual_instructions_snippet(
+            CLAUDE_HOOK_COMMAND,
+            CLAUDE_COMPACT_HOOK_COMMAND,
+            false,
+            false,
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&snippet).expect("snippet must be valid JSON");
+        assert_eq!(
+            parsed["hooks"]["PreToolUse"][0]["matcher"]
+                .as_str()
+                .unwrap(),
+            "Bash"
+        );
+        assert_eq!(
+            parsed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap(),
+            CLAUDE_HOOK_COMMAND
+        );
+        assert_eq!(
+            parsed["hooks"]["PostCompact"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap(),
+            CLAUDE_COMPACT_HOOK_COMMAND
+        );
+        // PostCompact entries carry no matcher.
+        assert!(parsed["hooks"]["PostCompact"][0].get("matcher").is_none());
+    }
+
+    #[test]
+    fn test_manual_snippet_only_postcompact_missing() {
+        let snippet = manual_instructions_snippet(
+            CLAUDE_HOOK_COMMAND,
+            CLAUDE_COMPACT_HOOK_COMMAND,
+            true,
+            false,
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&snippet).expect("snippet must be valid JSON");
+        assert!(parsed["hooks"].get("PreToolUse").is_none());
+        assert_eq!(
+            parsed["hooks"]["PostCompact"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap(),
+            CLAUDE_COMPACT_HOOK_COMMAND
+        );
+    }
+
+    #[test]
+    fn test_manual_snippet_only_pretooluse_missing() {
+        let snippet = manual_instructions_snippet(
+            CLAUDE_HOOK_COMMAND,
+            CLAUDE_COMPACT_HOOK_COMMAND,
+            false,
+            true,
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&snippet).expect("snippet must be valid JSON");
+        assert!(parsed["hooks"].get("PostCompact").is_none());
+        assert_eq!(
+            parsed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap(),
+            CLAUDE_HOOK_COMMAND
+        );
+    }
+
+    #[test]
+    fn test_manual_snippet_preserves_path_prefixed_compact_command() {
+        // A path-prefixed hook command must keep its prefix on the compact hook.
+        let snippet = manual_instructions_snippet(
+            "/usr/local/bin/rtk hook claude",
+            "/usr/local/bin/rtk hook compact",
+            false,
+            false,
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&snippet).expect("snippet must be valid JSON");
+        assert_eq!(
+            parsed["hooks"]["PostCompact"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap(),
+            "/usr/local/bin/rtk hook compact"
+        );
+    }
+
+    #[test]
+    fn test_remove_hook_from_json_strips_postcompact_preserving_others() {
+        let mut root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{ "type": "command", "command": CLAUDE_HOOK_COMMAND }]
+                }],
+                "PostCompact": [
+                    { "hooks": [{ "type": "command", "command": "/other/compact-hook.sh" }] },
+                    { "hooks": [{ "type": "command", "command": CLAUDE_COMPACT_HOOK_COMMAND }] }
+                ]
+            }
+        });
+        assert!(remove_hook_from_json(&mut root));
+        assert!(root["hooks"]["PreToolUse"].as_array().unwrap().is_empty());
+        // The RTK PostCompact entry is gone; the unrelated one is preserved.
+        let post = root["hooks"]["PostCompact"].as_array().unwrap();
+        assert_eq!(post.len(), 1);
+        assert_eq!(
+            post[0]["hooks"][0]["command"].as_str().unwrap(),
+            "/other/compact-hook.sh"
+        );
     }
 
     #[test]
