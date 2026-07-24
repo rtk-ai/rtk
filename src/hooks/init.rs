@@ -3727,7 +3727,13 @@ fn uninstall_devin_artifacts(global: bool, ctx: InitContext) -> Result<Vec<Strin
             let (cleaned, did_remove) = remove_rtk_block(&content);
             if did_remove {
                 if !ctx.dry_run {
-                    atomic_write(&agents_md, &cleaned)?;
+                    if cleaned.trim().is_empty() {
+                        fs::remove_file(&agents_md).with_context(|| {
+                            format!("Failed to remove AGENTS.md: {}", agents_md.display())
+                        })?;
+                    } else {
+                        atomic_write(&agents_md, &cleaned)?;
+                    }
                 }
                 removed.push(format!("AGENTS.md: {}", agents_md.display()));
             }
@@ -3840,21 +3846,26 @@ pub fn show_devin_config() -> Result<()> {
     match permissions::resolve_devin_config_dir() {
         Some(dir) => {
             let global_config = dir.join(DEVIN_SETTINGS_FILE);
-            if let Some(v) = read_optional_json(&global_config)? {
-                if devin_hook_already_present(&v, DevinLayout::Nested) {
-                    println!(
-                        "[ok] Global hook: {} in {}",
-                        DEVIN_HOOK_COMMAND,
-                        global_config.display()
-                    );
-                } else {
-                    println!(
-                        "[--] Global hook: not present in {}",
-                        global_config.display()
-                    );
+            match read_optional_json(&global_config) {
+                Ok(Some(v)) => {
+                    if devin_hook_already_present(&v, DevinLayout::Nested) {
+                        println!(
+                            "[ok] Global hook: {} in {}",
+                            DEVIN_HOOK_COMMAND,
+                            global_config.display()
+                        );
+                    } else {
+                        println!(
+                            "[--] Global hook: not present in {}",
+                            global_config.display()
+                        );
+                    }
                 }
-            } else {
-                println!("[--] Global hook: {} not found", global_config.display());
+                Ok(None) => println!("[--] Global hook: {} not found", global_config.display()),
+                Err(_) => println!(
+                    "[warn] Global hook: {} invalid JSON",
+                    global_config.display()
+                ),
             }
 
             // Global AGENTS.md
@@ -3886,18 +3897,20 @@ pub fn show_devin_config() -> Result<()> {
         } else {
             DevinLayout::Nested
         };
-        if let Some(v) = read_optional_json(&path)? {
-            if devin_hook_already_present(&v, layout) {
-                println!(
-                    "[ok] Project hook: {} in {}",
-                    DEVIN_HOOK_COMMAND,
-                    path.display()
-                );
-            } else {
-                println!("[--] Project hook: not present in {}", path.display());
+        match read_optional_json(&path) {
+            Ok(Some(v)) => {
+                if devin_hook_already_present(&v, layout) {
+                    println!(
+                        "[ok] Project hook: {} in {}",
+                        DEVIN_HOOK_COMMAND,
+                        path.display()
+                    );
+                } else {
+                    println!("[--] Project hook: not present in {}", path.display());
+                }
             }
-        } else {
-            println!("[--] Project hook: {} not found", path.display());
+            Ok(None) => println!("[--] Project hook: {} not found", path.display()),
+            Err(_) => println!("[warn] Project hook: {} invalid JSON", path.display()),
         }
     }
 
