@@ -760,13 +760,13 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^dotnet\s+build\b",
+        pattern: r"^dotnet\s+(build|test|restore|format)\b",
         rtk_cmd: "rtk dotnet",
         pipeline_final_safe: false,
         rewrite_prefixes: &["dotnet"],
         category: "Build",
         savings_pct: 70.0,
-        subcmd_savings: &[],
+        subcmd_savings: &[("test", 90.0), ("build", 70.0), ("restore", 60.0), ("format", 75.0)],
         subcmd_status: &[],
     },
     RtkRule {
