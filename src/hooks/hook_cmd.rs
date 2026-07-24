@@ -665,9 +665,8 @@ fn process_devin_payload(v: &Value) -> Option<Value> {
 
 /// Extract the shell command when the payload targets Devin CLI's `exec` tool.
 fn devin_execute_command(v: &Value) -> Option<&str> {
-    let tool_name = v.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
-    // The installed matcher is `^exec$`; tolerate a missing/ambiguous tool_name defensively.
-    if !matches!(tool_name, "exec" | "bash" | "") {
+    let tool_name = v.get("tool_name").and_then(|t| t.as_str())?;
+    if tool_name != "exec" {
         return None;
     }
 
@@ -682,31 +681,27 @@ fn devin_execute_command(v: &Value) -> Option<&str> {
 /// `hookSpecificOutput.updatedInput` for rewrites. On `Ask`/`Default` we omit
 /// `decision` so Devin runs its own permission prompt on the rewritten command.
 fn devin_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) -> Option<Value> {
-    match decision {
+    let allow = matches!(
+        decision,
+        HookDecision::AllowRewrite(_) | HookDecision::AllowOriginal(_)
+    );
+    let rewritten = match decision {
         HookDecision::Deny => {
             audit_log("deny", cmd, "");
-            Some(json!({
+            return Some(json!({
                 "decision": "block",
                 "reason": "Blocked by RTK permission rule"
-            }))
+            }));
         }
         HookDecision::AllowOriginal(_) => {
             audit_log("allow", cmd, "");
-            Some(json!({"decision": "approve"}))
+            return Some(json!({"decision": "approve"}));
         }
-        HookDecision::Defer => None,
-        HookDecision::AllowRewrite(rewritten) => {
-            audit_log("rewrite", cmd, &rewritten);
-            build_devin_rewrite_response(v, &rewritten, true)
-        }
-        HookDecision::AskRewrite(rewritten) => {
-            audit_log("ask", cmd, &rewritten);
-            build_devin_rewrite_response(v, &rewritten, false)
-        }
-    }
-}
+        HookDecision::Defer => return None,
+        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r) => r,
+    };
 
-fn build_devin_rewrite_response(v: &Value, rewritten: &str, allow: bool) -> Option<Value> {
+    audit_log(if allow { "rewrite" } else { "ask" }, cmd, &rewritten);
     let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
     if let Some(obj) = ti.as_object_mut() {
         obj.insert("command".into(), Value::String(rewritten.to_string()));

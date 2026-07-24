@@ -2952,9 +2952,9 @@ fn droid_hook_file_candidates(droid_dir: &Path) -> [DroidHookFile; 3] {
     ]
 }
 
-/// Read a Droid config file as JSON. `Ok(None)` when the file doesn't exist;
+/// Read a JSON config file. `Ok(None)` when the file doesn't exist;
 /// an empty file parses as `{}`.
-fn read_droid_json(path: &Path) -> Result<Option<serde_json::Value>> {
+fn read_optional_json(path: &Path) -> Result<Option<serde_json::Value>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -3010,7 +3010,7 @@ fn resolve_droid_install_target(droid_dir: &Path) -> Result<DroidHookFile> {
     };
 
     if let Some(path) = &live_hooks_json {
-        if let Some(json) = read_droid_json(path)? {
+        if let Some(json) = read_optional_json(path)? {
             if droid_has_pre_tool_use(&json, DroidLayout::Root) {
                 return Ok(DroidHookFile {
                     path: path.clone(),
@@ -3020,7 +3020,7 @@ fn resolve_droid_install_target(droid_dir: &Path) -> Result<DroidHookFile> {
         }
     }
 
-    if let Some(json) = read_droid_json(&settings)? {
+    if let Some(json) = read_optional_json(&settings)? {
         if droid_has_pre_tool_use(&json, DroidLayout::Nested) {
             return Ok(DroidHookFile {
                 path: settings,
@@ -3104,7 +3104,7 @@ fn run_droid_mode_at(droid_dir: &Path, global: bool, ctx: InitContext) -> Result
 fn patch_droid_hook_file(file: &DroidHookFile, ctx: InitContext) -> Result<bool> {
     let InitContext { verbose, dry_run } = ctx;
     let path = &file.path;
-    let mut root = read_droid_json(path)?.unwrap_or_else(|| serde_json::json!({}));
+    let mut root = read_optional_json(path)?.unwrap_or_else(|| serde_json::json!({}));
 
     if droid_hook_already_present(&root, file.layout) {
         if verbose > 0 {
@@ -3263,7 +3263,7 @@ fn remove_droid_hook_from_file(file: &DroidHookFile, ctx: InitContext) -> Result
     let InitContext { verbose, dry_run } = ctx;
     let path = &file.path;
 
-    let mut root = match read_droid_json(path)? {
+    let mut root = match read_optional_json(path)? {
         Some(v) => v,
         None => return Ok(false),
     };
@@ -3435,7 +3435,7 @@ fn resolve_devin_install_target(global: bool) -> Result<DevinHookFile> {
     let candidates = devin_hook_file_candidates(&devin_dir);
 
     for candidate in &candidates {
-        if let Some(json) = read_devin_json(&candidate.path)? {
+        if let Some(json) = read_optional_json(&candidate.path)? {
             if devin_hook_already_present(&json, candidate.layout) {
                 return Ok(candidate.clone());
             }
@@ -3469,20 +3469,6 @@ fn devin_hook_file_candidates(devin_dir: &Path) -> [DevinHookFile; 3] {
             layout: DevinLayout::Nested,
         },
     ]
-}
-
-fn read_devin_json(path: &Path) -> Result<Option<serde_json::Value>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let content =
-        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    if content.trim().is_empty() {
-        return Ok(Some(serde_json::json!({})));
-    }
-    serde_json::from_str(&content)
-        .map(Some)
-        .with_context(|| format!("Failed to parse {} as JSON", path.display()))
 }
 
 fn devin_events(root: &serde_json::Value, layout: DevinLayout) -> &serde_json::Value {
@@ -3569,7 +3555,7 @@ fn patch_devin_hook_file(file: &DevinHookFile, mode: PatchMode, ctx: InitContext
     let InitContext { verbose, dry_run } = ctx;
     let path = &file.path;
 
-    let mut root = read_devin_json(path)?.unwrap_or_else(|| serde_json::json!({}));
+    let mut root = read_optional_json(path)?.unwrap_or_else(|| serde_json::json!({}));
 
     if devin_hook_already_present(&root, file.layout) {
         if verbose > 0 {
@@ -3735,7 +3721,7 @@ fn remove_devin_hook_from_file(file: &DevinHookFile, ctx: InitContext) -> Result
     let InitContext { verbose, dry_run } = ctx;
     let path = &file.path;
 
-    let mut root = match read_devin_json(path)? {
+    let mut root = match read_optional_json(path)? {
         Some(v) => v,
         None => return Ok(false),
     };
@@ -3834,7 +3820,7 @@ pub fn show_devin_config() -> Result<()> {
     match permissions::resolve_devin_config_dir() {
         Some(dir) => {
             let global_config = dir.join(DEVIN_SETTINGS_FILE);
-            if let Some(v) = read_devin_json(&global_config)? {
+            if let Some(v) = read_optional_json(&global_config)? {
                 if devin_hook_already_present(&v, DevinLayout::Nested) {
                     println!(
                         "[ok] Global hook: {} in {}",
@@ -3867,7 +3853,7 @@ pub fn show_devin_config() -> Result<()> {
         } else {
             DevinLayout::Nested
         };
-        if let Some(v) = read_devin_json(&path)? {
+        if let Some(v) = read_optional_json(&path)? {
             if devin_hook_already_present(&v, layout) {
                 println!(
                     "[ok] Project hook: {} in {}",

@@ -1570,6 +1570,8 @@ where
         uninstall_hermes(ctx)
     } else if agent == Some(AgentTarget::Droid) {
         hooks::init::uninstall_droid(global, ctx)
+    } else if agent == Some(AgentTarget::Devin) {
+        hooks::init::uninstall_devin(global, ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -2016,10 +2018,15 @@ fn run_cli() -> Result<i32> {
                 verbose: cli.verbose,
                 dry_run,
             };
+            let patch_mode = if auto_patch {
+                hooks::init::PatchMode::Auto
+            } else if no_patch {
+                hooks::init::PatchMode::Skip
+            } else {
+                hooks::init::PatchMode::Ask
+            };
             if show {
                 hooks::init::show_config(codex, agent)?;
-            } else if uninstall && agent == Some(AgentTarget::Devin) {
-                hooks::init::uninstall_devin(global, ctx)?;
             } else if uninstall && copilot {
                 if global {
                     hooks::init::uninstall_copilot_global(ctx)?;
@@ -2037,13 +2044,6 @@ fn run_cli() -> Result<i32> {
                     hooks::init::uninstall,
                 )?;
             } else if gemini {
-                let patch_mode = if auto_patch {
-                    hooks::init::PatchMode::Auto
-                } else if no_patch {
-                    hooks::init::PatchMode::Skip
-                } else {
-                    hooks::init::PatchMode::Ask
-                };
                 hooks::init::run_gemini(global, hook_only, patch_mode, ctx)?;
             } else if copilot {
                 if global {
@@ -2078,13 +2078,6 @@ fn run_cli() -> Result<i32> {
                 if codex || gemini || copilot || opencode || claude_md {
                     anyhow::bail!("--agent devin cannot be combined with --codex, --gemini, --copilot, --opencode, or --claude-md");
                 }
-                let patch_mode = if auto_patch {
-                    hooks::init::PatchMode::Auto
-                } else if no_patch {
-                    hooks::init::PatchMode::Skip
-                } else {
-                    hooks::init::PatchMode::Ask
-                };
                 hooks::init::run_devin_mode(global, patch_mode, ctx)?;
             } else {
                 let install_opencode = opencode;
@@ -2093,13 +2086,6 @@ fn run_cli() -> Result<i32> {
                 let install_windsurf = agent == Some(AgentTarget::Windsurf);
                 let install_cline = agent == Some(AgentTarget::Cline);
 
-                let patch_mode = if auto_patch {
-                    hooks::init::PatchMode::Auto
-                } else if no_patch {
-                    hooks::init::PatchMode::Skip
-                } else {
-                    hooks::init::PatchMode::Ask
-                };
                 hooks::init::run(
                     global,
                     install_claude,

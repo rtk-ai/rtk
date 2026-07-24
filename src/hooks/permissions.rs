@@ -238,14 +238,12 @@ pub(crate) fn resolve_devin_config_dir() -> Option<PathBuf> {
     default_devin_config_dir()
 }
 
-#[cfg(windows)]
 fn default_devin_config_dir() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("devin"))
-}
-
-#[cfg(not(windows))]
-fn default_devin_config_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|d| d.join(".config/devin"))
+    if cfg!(windows) {
+        dirs::config_dir().map(|d| d.join("devin"))
+    } else {
+        dirs::home_dir().map(|d| d.join(".config/devin"))
+    }
 }
 
 /// Extract `Exec(<pattern>)` and tool-based `exec` rules from Devin permissions.
