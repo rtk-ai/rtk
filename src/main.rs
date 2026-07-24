@@ -1253,13 +1253,86 @@ enum GoCommands {
     Other(Vec<OsString>),
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct FallbackArgs {
+    command: Vec<String>,
+    session: Option<String>,
+    skip_env: bool,
+}
+
+/// Remove RTK-owned leading global flags before executing a command through the
+/// generic passthrough. Clap can reject a native flag that overlaps with an RTK
+/// subcommand flag (for example, native `grep -l`). In that case the fallback
+/// must execute the native command, not an injected RTK global such as
+/// `--session`.
+fn normalize_fallback_args(raw_args: Vec<String>) -> FallbackArgs {
+    let mut index = 0;
+    let mut session = None;
+    let mut skip_env = false;
+
+    while index < raw_args.len() {
+        match raw_args[index].as_str() {
+            "--session" => {
+                let Some(value) = raw_args.get(index + 1) else {
+                    index = raw_args.len();
+                    break;
+                };
+                if value.starts_with('-') {
+                    index = raw_args.len();
+                    break;
+                }
+                session = Some(value.clone());
+                index += 2;
+            }
+            arg if arg.starts_with("--session=") => {
+                session = Some(arg["--session=".len()..].to_string());
+                index += 1;
+            }
+            "--ultra-compact" => {
+                index += 1;
+            }
+            "--skip-env" => {
+                skip_env = true;
+                index += 1;
+            }
+            "--verbose" => {
+                index += 1;
+            }
+            arg if arg
+                .strip_prefix('-')
+                .is_some_and(|value| !value.is_empty() && value.chars().all(|ch| ch == 'v')) =>
+            {
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+
+    FallbackArgs {
+        command: raw_args[index..].to_vec(),
+        session,
+        skip_env,
+    }
+}
+
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
 
     // No args → show Clap's error (user ran just "rtk" with bad syntax)
+    if raw_args.is_empty() {
+        parse_error.exit();
+    }
+
+    let fallback_args = normalize_fallback_args(raw_args);
+    let args = fallback_args.command;
+
+    // A malformed global flag or globals without a command are still RTK
+    // syntax errors and must not be treated as native executables.
     if args.is_empty() {
         parse_error.exit();
     }
+
+    core::session::init(fallback_args.session.clone());
 
     // RTK meta-commands should never fall back to raw execution.
     // e.g. `rtk gain --badtypo` should show Clap's error, not try to run `gain` from $PATH.
@@ -1272,6 +1345,14 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
 
     // Start timer before execution to capture actual command runtime
     let timer = core::tracking::TimedExecution::start();
+    let build_command = || {
+        let mut command = core::utils::resolved_command(&args[0]);
+        command.args(&args[1..]);
+        if fallback_args.skip_env {
+            command.env("SKIP_ENV_VALIDATION", "1");
+        }
+        command
+    };
 
     // TOML filter lookup — bypass with RTK_NO_TOML=1
     // Use basename of args[0] so absolute paths (/usr/bin/make) still match "^make\b".
@@ -1295,15 +1376,13 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         // TOML match: capture stdout for filtering
         let result = if filter.filter_stderr {
             // Merge stderr into stdout so the filter can strip banners emitted by tools like liquibase
-            core::utils::resolved_command(&args[0])
-                .args(&args[1..])
+            build_command()
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped()) // captured for merging
                 .output()
         } else {
-            core::utils::resolved_command(&args[0])
-                .args(&args[1..])
+            build_command()
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::piped()) // capture
                 .stderr(std::process::Stdio::inherit()) // stderr always direct
@@ -1371,8 +1450,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         }
     } else {
         // No TOML match: original passthrough behaviour (Stdio::inherit, streaming)
-        let status = core::utils::resolved_command(&args[0])
-            .args(&args[1..])
+        let status = build_command()
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
@@ -2744,6 +2822,41 @@ mod tests {
     use super::*;
     use clap::Parser;
     use std::cell::Cell;
+
+    #[test]
+    fn test_fallback_args_strip_leading_rtk_globals() {
+        let normalized = normalize_fallback_args(vec![
+            "--session".into(),
+            "sid-123".into(),
+            "--ultra-compact".into(),
+            "--skip-env".into(),
+            "-vv".into(),
+            "grep".into(),
+            "-l".into(),
+            "-i".into(),
+            "win32com|pythoncom".into(),
+            "gate.py".into(),
+        ]);
+
+        assert_eq!(normalized.session.as_deref(), Some("sid-123"));
+        assert!(normalized.skip_env);
+        assert_eq!(
+            normalized.command,
+            vec!["grep", "-l", "-i", "win32com|pythoncom", "gate.py"]
+        );
+
+        let equals_form = normalize_fallback_args(vec![
+            "--session=sid-456".into(),
+            "grep".into(),
+            "--session".into(),
+            "native-value".into(),
+        ]);
+        assert_eq!(equals_form.session.as_deref(), Some("sid-456"));
+        assert_eq!(
+            equals_form.command,
+            vec!["grep", "--session", "native-value"]
+        );
+    }
 
     #[test]
     fn test_git_commit_single_message() {
