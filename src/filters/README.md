@@ -58,6 +58,8 @@ expected = "expected filtered output"
 | `match_output` | array | Short-circuit rules (`{ pattern, message }`) |
 | `truncate_lines_at` | int | Truncate lines longer than N characters |
 | `max_lines` | int | Keep only the first N lines |
+| `priority_lines_matching` | regex[] | With `max_lines`, retain matching groups in priority order while preserving source order |
+| `priority_skip_if_output_matches` | regex[] | With priority selection, skip RTK's cap when the output already has a native truncation marker |
 | `tail_lines` | int | Keep only the last N lines (applied after other filters) |
 | `on_empty` | string | Fallback message when filtered output is empty |
 
@@ -92,7 +94,7 @@ flowchart TD
         R["TomlFilterRegistry::load()\n1. .rtk/filters.toml\n2. ~/.config/rtk/filters.toml\n3. BUILTIN_TOML\n4. passthrough"] --> S
         S{"match_command\nmatches?"} -->|"no match"| T[["exec raw (passthrough)"]]
         S -->|"match"| U["exec command\ncapture stdout"]
-        U --> V["8-stage pipeline\nstrip_ansi → replace → match_output\n→ strip/keep_lines → truncate\n→ tail_lines → max_lines → on_empty"]
+        U --> V["8-stage pipeline\nstrip_ansi → replace → match_output\n→ strip/keep_lines → truncate\n→ head/tail → priority/max_lines → on_empty"]
         V --> W[["print filtered output + exit code"]]
     end
 
