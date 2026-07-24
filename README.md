@@ -269,6 +269,9 @@ rtk env -f AWS                  # Filtered env vars
 rtk log app.log                 # Deduplicated logs
 rtk curl <url>                  # Truncate + save full output
 rtk wget <url>                  # Download, strip progress bars
+rtk graphify query <keyword>    # Preserve nodes and high-signal relationships
+rtk graphify explain <keyword>  # Keep Graphify's native connection summary
+rtk graphify update .           # Strip progress; retain warning order
 rtk summary <long command>      # Heuristic summary
 rtk proxy <command>             # Raw passthrough + tracking
 ```

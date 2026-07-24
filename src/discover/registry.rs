@@ -1737,6 +1737,40 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_graphify_subcommands_as_supported() {
+        for command in [
+            "graphify query Business",
+            "graphify query Business --budget 5000",
+            "graphify explain Business",
+            "graphify update .",
+        ] {
+            assert_eq!(
+                classify_command(command),
+                Classification::Supported {
+                    rtk_equivalent: "rtk graphify",
+                    category: "Files",
+                    estimated_savings_pct: 60.0,
+                    status: RtkStatus::Existing,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_graphify_subcommands() {
+        for command in [
+            "graphify query Business",
+            "graphify explain Business",
+            "graphify update .",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(format!("rtk {command}"))
+            );
+        }
+    }
+
+    #[test]
     fn test_rewrite_toml_absolute_path() {
         assert_eq!(
             rewrite_command_no_prefixes("/usr/bin/jj log", &[]),

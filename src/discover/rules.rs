@@ -717,6 +717,13 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^graphify\s+(query|update|explain)(?:\s|$)",
+        rtk_cmd: "rtk graphify",
+        rewrite_prefixes: &["graphify"],
+        category: "Files",
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^(?:\./gradlew|gradlew\.bat|gradlew|gradle)(?:\s+(test|build|clean|assemble\w*|install\w*|check|lint\w*|dependencies))?(\s|$)",
         rtk_cmd: "rtk gradlew",
         rewrite_prefixes: &["./gradlew", "gradlew.bat", "gradlew", "gradle"],

@@ -101,6 +101,14 @@ struct TomlFilterDef {
     head_lines: Option<usize>,
     tail_lines: Option<usize>,
     max_lines: Option<usize>,
+    /// Ordered line-priority groups used before max_lines trimming. Matching
+    /// groups are retained first, while output order itself stays unchanged.
+    #[serde(default)]
+    priority_lines_matching: Vec<String>,
+    /// Skip priority trimming when the tool has already emitted its own bounded
+    /// response marker (for example, graphify's native token-budget warning).
+    #[serde(default)]
+    priority_skip_if_output_matches: Vec<String>,
     on_empty: Option<String>,
     /// When true, stderr is captured and merged with stdout before filtering.
     /// Use for tools like liquibase that emit banners/logs to stderr.
@@ -148,6 +156,8 @@ pub struct CompiledFilter {
     head_lines: Option<usize>,
     tail_lines: Option<usize>,
     pub max_lines: Option<usize>,
+    priority_lines_matching: Vec<Regex>,
+    priority_skip_if_output_matches: Vec<Regex>,
     on_empty: Option<String>,
     /// When true, the runner should capture stderr and merge it with stdout.
     pub filter_stderr: bool,
@@ -374,6 +384,28 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
         LineFilter::None
     };
 
+    let priority_lines_matching = def
+        .priority_lines_matching
+        .into_iter()
+        .map(|pattern| {
+            Regex::new(&pattern)
+                .map_err(|e| format!("invalid priority_lines_matching regex '{}': {}", pattern, e))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let priority_skip_if_output_matches = def
+        .priority_skip_if_output_matches
+        .into_iter()
+        .map(|pattern| {
+            Regex::new(&pattern).map_err(|e| {
+                format!(
+                    "invalid priority_skip_if_output_matches regex '{}': {}",
+                    pattern, e
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     Ok(CompiledFilter {
         name,
         description: def.description,
@@ -386,6 +418,8 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
         head_lines: def.head_lines,
         tail_lines: def.tail_lines,
         max_lines: def.max_lines,
+        priority_lines_matching,
+        priority_skip_if_output_matches,
         on_empty: def.on_empty,
         filter_stderr: def.filter_stderr,
     })
@@ -500,6 +534,46 @@ pub fn apply_filter(filter: &CompiledFilter, stdout: &str) -> String {
     apply_filter_with_info(filter, stdout).0
 }
 
+fn prioritize_lines(lines: &[String], groups: &[Regex], max: usize) -> Vec<String> {
+    let mut selected = vec![false; lines.len()];
+    let mut kept = 0;
+
+    for group in groups {
+        for (index, line) in lines.iter().enumerate() {
+            if kept == max {
+                break;
+            }
+            if !selected[index] && group.is_match(line) {
+                selected[index] = true;
+                kept += 1;
+            }
+        }
+        if kept == max {
+            break;
+        }
+    }
+
+    for (index, _) in lines.iter().enumerate() {
+        if kept == max {
+            break;
+        }
+        if !selected[index] {
+            selected[index] = true;
+            kept += 1;
+        }
+    }
+
+    let omitted = lines.len() - kept;
+    let mut result = lines
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| selected[*index])
+        .map(|(_, line)| line.clone())
+        .collect::<Vec<_>>();
+    result.push(format!("... ({} lines omitted)", omitted));
+    result
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Lossiness {
     None,
@@ -611,7 +685,19 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
 
     // 7. max_lines — absolute cap applied after head/tail (includes omit messages)
     let mut max_cut: Option<usize> = None;
-    if let Some(max) = filter.max_lines {
+    let priority_configured =
+        filter.max_lines.is_some() && !filter.priority_lines_matching.is_empty();
+    let priority_skip = filter
+        .priority_skip_if_output_matches
+        .iter()
+        .any(|pattern| lines.iter().any(|line| pattern.is_match(line)));
+    if priority_configured {
+        let max = filter.max_lines.unwrap_or_default();
+        if !priority_skip && lines.len() > max {
+            lines = prioritize_lines(&lines, &filter.priority_lines_matching, max);
+            noncontiguous_drop = true;
+        }
+    } else if let Some(max) = filter.max_lines {
         if lines.len() > max {
             let dropped = lines.len() - max;
             lines.truncate(max);
@@ -1845,6 +1931,9 @@ match_command = "^make\\b"
             "du",
             "fail2ban-client",
             "gcloud",
+            "graphify-explain",
+            "graphify-query",
+            "graphify-update",
             "hadolint",
             "helm",
             "iptables",
@@ -1896,11 +1985,100 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            63,
-            "Expected exactly 63 built-in filters, got {}. \
+            66,
+            "Expected exactly 66 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
+    }
+
+    #[test]
+    fn test_graphify_filters_match_only_supported_subcommands() {
+        let filters = make_filters(BUILTIN_TOML);
+
+        for (command, name) in [
+            ("graphify query Business --budget 5000", "graphify-query"),
+            ("graphify explain Business", "graphify-explain"),
+            ("graphify update .", "graphify-update"),
+        ] {
+            assert_eq!(find_filter_in(command, &filters).unwrap().name, name);
+        }
+
+        assert!(find_filter_in("graphify path Business Service", &filters).is_none());
+    }
+
+    #[test]
+    fn test_graphify_filters_preserve_native_output_contracts() {
+        let filters = make_filters(BUILTIN_TOML);
+        let find = |name: &str| filters.iter().find(|filter| filter.name == name).unwrap();
+
+        let update = find("graphify-update");
+        assert!(
+            !update.filter_stderr,
+            "graphify warnings are emitted on stderr and must not be reordered after stdout"
+        );
+
+        let explain = find("graphify-explain");
+        assert_eq!(explain.head_lines, None);
+        assert_eq!(explain.tail_lines, None);
+
+        let query = find("graphify-query");
+        assert_eq!(
+            apply_filter(
+                query,
+                "Traversal: BFS depth=2 | Start: ['BusinessController'] | 1 nodes found\n\nNODE BusinessController [src=app/Http/Controllers/BusinessController.php loc=L30 community=56]\nEDGE BusinessController --calls [INFERRED]--> ayoencrypt()"
+            ),
+            "Traversal: BFS depth=2 | Start: ['BusinessController'] | 1 nodes found\n\nNODE BusinessController [src=app/Http/Controllers/BusinessController.php loc=L30]\nEDGE BusinessController --calls [INFERRED]--> ayoencrypt()"
+        );
+    }
+
+    #[test]
+    fn test_priority_line_selection_keeps_high_signal_edges_before_low_signal_edges() {
+        let filters = make_filters(
+            r#"
+schema_version = 1
+
+[filters.graphify-query]
+match_command = "^graphify\\s+query(?:\\s|$)"
+priority_lines_matching = [
+  "^Traversal:",
+  "^NODE ",
+  "^EDGE .*--(?:calls|references)\\b",
+  "^EDGE .*\\[INFERRED(?:\\s|\\])",
+  "^EDGE .*--(?:contains|method|inherits)\\b",
+  "^EDGE ",
+]
+max_lines = 4
+"#,
+        );
+        let query = find_filter_in("graphify query BusinessController", &filters).unwrap();
+
+        assert_eq!(
+            apply_filter(
+                query,
+                "Traversal: BFS depth=2\nNODE BusinessController\nEDGE BusinessController --imports [EXTRACTED]--> Exception\nEDGE BusinessController --mixes_in [EXTRACTED]--> BusinessTrait\nEDGE .getNearby() --calls [INFERRED]--> ayoencrypt()"
+            ),
+            "Traversal: BFS depth=2\nNODE BusinessController\nEDGE BusinessController --imports [EXTRACTED]--> Exception\nEDGE .getNearby() --calls [INFERRED]--> ayoencrypt()\n... (1 lines omitted)"
+        );
+    }
+
+    #[test]
+    fn test_priority_line_selection_does_not_recrop_graphify_native_truncation() {
+        let filters = make_filters(
+            r#"
+schema_version = 1
+
+[filters.graphify-query]
+match_command = "^graphify\\s+query(?:\\s|$)"
+priority_lines_matching = ["^NODE ", "^EDGE "]
+priority_skip_if_output_matches = ["^\\[!\\] TRUNCATED:"]
+max_lines = 2
+"#,
+        );
+        let query = find_filter_in("graphify query Business", &filters).unwrap();
+        let native_truncated = "[!] TRUNCATED: showing 30 of 73 nodes\n\nNODE BusinessController\nEDGE .getNearby() --calls [INFERRED]--> ayoencrypt()";
+
+        assert_eq!(apply_filter(query, native_truncated), native_truncated);
     }
 
     /// Verify that every built-in filter has at least one inline test.
@@ -1954,11 +2132,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 63 existing filters still present + 1 new = 64
+        // All 66 existing filters still present + 1 new = 67
         assert_eq!(
             filters.len(),
-            64,
-            "Expected 64 filters after concat (63 built-in + 1 new)"
+            67,
+            "Expected 67 filters after concat (66 built-in + 1 new)"
         );
 
         // New filter is discoverable
