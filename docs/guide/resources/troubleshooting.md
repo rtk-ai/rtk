@@ -130,7 +130,7 @@ Error: program not found
 
 **Fix:** Update to RTK v0.23.1+:
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk
+cargo install --git https://github.com/rtk-ai/rtk --branch master
 rtk --version    # should be 0.23.1+
 ```
 
@@ -158,10 +158,10 @@ rtk init --show    # should show "OpenCode: plugin installed"
 
 If Rust Type Kit is published to crates.io under the name `rtk`, `cargo install rtk` may install the wrong one.
 
-Always use the explicit URL:
+Always use the explicit URL, pinned to the release branch:
 
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk
+cargo install --git https://github.com/rtk-ai/rtk --branch master
 ```
 
 ## Run the diagnostic script

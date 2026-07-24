@@ -477,6 +477,16 @@ fn prompt_telemetry_consent() -> Result<()> {
         None => {}
     }
 
+    // Explicit opt-out must short-circuit before the TTY heuristic: some
+    // non-interactive environments (devcontainer `postCreateCommand`, certain
+    // CI agents) hand rtk a pseudo-TTY, so `is_terminal()` returns true even
+    // though no human is available to answer — the prompt then hangs forever.
+    // Setting `RTK_TELEMETRY_DISABLED=1` is the documented workaround, so the
+    // init prompt has to honour it too, not only `telemetry::maybe_ping`.
+    if crate::core::telemetry_cmd::telemetry_disabled_by_env() {
+        return Ok(());
+    }
+
     if !io::stdin().is_terminal() {
         return Ok(());
     }
@@ -1907,6 +1917,41 @@ pub fn uninstall_hermes(ctx: InitContext) -> Result<()> {
 
     if dry_run {
         print_dry_run_footer();
+    }
+
+    Ok(())
+}
+
+// ─── Kimi AI support ──────────────────────────────────────────
+//
+// Kimi Code CLI has NO `.kimirules` convention — that file is never read.
+// It loads project-level instructions from `AGENTS.md` in the project root
+// (docs: kimi.com/help/kimi-code/cli-customization). Its PreToolUse hooks are
+// gate-only (allow/deny + feedback string) and cannot rewrite a command, so
+// `git status` -> `rtk git status` is impossible via a hook. We therefore
+// inject an RTK instructions block into AGENTS.md — same mechanism as Codex.
+
+pub fn run_kimi_mode(ctx: InitContext) -> Result<()> {
+    run_kimi_mode_at(&std::env::current_dir()?, ctx)
+}
+
+fn run_kimi_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
+    // Kimi reads AGENTS.md from the project root (workspace-scoped).
+    let agents_md_path = base_dir.join(AGENTS_MD);
+
+    write_rtk_block(
+        &agents_md_path,
+        RTK_INSTRUCTIONS,
+        "RTK instructions",
+        "rtk init --agent kimi",
+        ctx,
+    )?;
+
+    if !ctx.dry_run {
+        println!("\nRTK configured for Kimi AI.\n");
+        println!("  AGENTS.md: {}", agents_md_path.display());
+        println!("  Kimi AI will now use rtk commands for token savings.");
+        println!("  Test with: git status\n");
     }
 
     Ok(())
@@ -4443,7 +4488,7 @@ git status                 rtk git status
 git log -10                rtk git log -10
 cargo test                 rtk cargo test
 docker ps                  rtk docker ps
-kubectl get pods           rtk kubectl pods
+kubectl get pods           rtk kubectl get pods
 ```
 
 ## Meta commands (use directly)
@@ -4998,6 +5043,39 @@ mod tests {
 
         // Second run should not overwrite
         run_antigravity_mode_at(temp.path(), InitContext::default()).unwrap();
+        let second = fs::read_to_string(&path).unwrap();
+        assert_eq!(first, second, "Idempotent: content should not change");
+    }
+
+    #[test]
+    fn test_kimi_mode_writes_agents_md() {
+        let temp = TempDir::new().unwrap();
+        run_kimi_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        // Kimi reads AGENTS.md, NOT .kimirules (which it does not support).
+        let agents_md = temp.path().join("AGENTS.md");
+        assert!(agents_md.exists(), "AGENTS.md should be created");
+        assert!(
+            !temp.path().join(".kimirules").exists(),
+            ".kimirules must not be created (unsupported by kimi-cli)"
+        );
+        let content = fs::read_to_string(&agents_md).unwrap();
+        assert!(
+            content.contains(RTK_BLOCK_START),
+            "AGENTS.md should contain the RTK instructions block"
+        );
+    }
+
+    #[test]
+    fn test_kimi_mode_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        run_kimi_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let path = temp.path().join("AGENTS.md");
+        let first = fs::read_to_string(&path).unwrap();
+
+        // Second run is an upsert no-op.
+        run_kimi_mode_at(temp.path(), InitContext::default()).unwrap();
         let second = fs::read_to_string(&path).unwrap();
         assert_eq!(first, second, "Idempotent: content should not change");
     }
