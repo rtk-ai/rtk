@@ -48,6 +48,7 @@ fn run_status() -> Result<()> {
     };
 
     let env_override = telemetry_disabled_by_env();
+    let secure_override = super::secure::is_telemetry_forced_off();
 
     println!("Telemetry status:");
     println!("  consent:       {}", consent_str);
@@ -55,6 +56,9 @@ fn run_status() -> Result<()> {
         println!("  consent date:  {}", date);
     }
     println!("  enabled:       {}", enabled_str);
+    if secure_override {
+        println!("  secure flag:   --secure or --no-telemetry (blocked)");
+    }
     if env_override {
         println!("  env override:  RTK_TELEMETRY_DISABLED=1 (blocked)");
     }

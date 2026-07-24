@@ -25,6 +25,11 @@ pub fn maybe_ping() {
         return;
     }
 
+    // --secure or --no-telemetry → highest priority override
+    if super::secure::is_telemetry_forced_off() {
+        return;
+    }
+
     // Check opt-out: env var (single source of truth in telemetry_cmd)
     if super::telemetry_cmd::telemetry_disabled_by_env() {
         return;
@@ -35,6 +40,11 @@ pub fn maybe_ping() {
         Ok(c) => c,
         Err(_) => return,
     };
+
+    // secure=true in config.toml disables telemetry
+    if cfg.secure {
+        return;
+    }
 
     // RGPD: require explicit consent before any telemetry
     match cfg.telemetry.consent_given {

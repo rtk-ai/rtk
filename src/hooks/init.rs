@@ -470,6 +470,11 @@ pub fn save_telemetry_consent(accepted: bool) -> Result<()> {
 fn prompt_telemetry_consent() -> Result<()> {
     use std::io::{self, BufRead, IsTerminal};
 
+    // --secure or --no-telemetry → skip prompt entirely
+    if crate::core::secure::is_telemetry_forced_off() {
+        return Ok(());
+    }
+
     let config = crate::core::config::Config::load().unwrap_or_default();
     match config.telemetry.consent_given {
         Some(true) => return Ok(()),

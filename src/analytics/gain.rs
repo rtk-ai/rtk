@@ -28,7 +28,29 @@ pub fn run(
     yes: bool,
     _verbose: u8,
 ) -> Result<()> {
-    let tracker = Tracker::new().context("Failed to initialize tracking database")?;
+    if crate::core::secure::is_tracking_forced_off()
+        || std::env::var("RTK_DISABLE_TRACKING").as_deref() == Ok("1")
+    {
+        println!(
+            "{}",
+            styled(
+                "Tracking is disabled by --secure, --no-tracking, or config.toml. No data to show.",
+                true
+            )
+        );
+        return Ok(());
+    }
+    let tracker = match Tracker::new() {
+        Ok(t) => t,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("tracking disabled") {
+                println!("{}", styled(&msg, false));
+                return Ok(());
+            }
+            anyhow::bail!("Failed to initialize tracking database: {}", msg);
+        }
+    };
     let project_scope = resolve_project_scope(project)?; // added: resolve project path
 
     if reset {
