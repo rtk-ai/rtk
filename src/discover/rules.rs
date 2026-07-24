@@ -29,14 +29,21 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^gh\s+(pr|issue|run|repo|api|release)",
+        pattern: r"^gh\s+(pr|issue|run|repo|api|release|search)(?:\s|$)",
         rtk_cmd: "rtk gh",
         pipeline_final_safe: false,
         rewrite_prefixes: &["gh"],
         category: "GitHub",
         savings_pct: 82.0,
-        subcmd_savings: &[("pr", 87.0), ("run", 82.0), ("issue", 80.0)],
-        subcmd_status: &[],
+        // `search` routes through `rtk gh` but has no output filter yet (gh_cmd.rs
+        // passes it straight through), so report 0% rather than inheriting 82%.
+        subcmd_savings: &[
+            ("pr", 87.0),
+            ("run", 82.0),
+            ("issue", 80.0),
+            ("search", 0.0),
+        ],
+        subcmd_status: &[("search", RtkStatus::Passthrough)],
     },
     RtkRule {
         pattern: r"^glab\s+(mr|issue|ci|pipeline|api|release)",

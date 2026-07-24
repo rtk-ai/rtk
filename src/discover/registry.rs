@@ -2395,6 +2395,34 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_gh_search() {
+        // `gh search` routes through `rtk gh` but is currently a passthrough (no
+        // output filter), so it must report 0% savings rather than inheriting the
+        // rule's 82% — otherwise the discover projection overstates the gain.
+        for command in [
+            "gh search repos rtk",
+            "gh search issues kubectl",
+            "gh search prs claude",
+            "gh search code 'fn main'",
+            "gh search commits initial",
+        ] {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk gh",
+                        estimated_savings_pct,
+                        status: crate::discover::report::RtkStatus::Passthrough,
+                        ..
+                    } if estimated_savings_pct == 0.0
+                ),
+                "unexpected classification for {command:?}: {:?}",
+                classify_command(command)
+            );
+        }
+    }
+
+    #[test]
     fn test_classify_glab_mr() {
         assert!(matches!(
             classify_command("glab mr list"),
@@ -4123,6 +4151,45 @@ mod tests {
             rewrite_command_no_prefixes("gh pr list", &[]),
             Some("rtk gh pr list".into())
         );
+    }
+
+    #[test]
+    fn test_rewrite_gh_search() {
+        for (command, expected) in [
+            (
+                "gh search repos rtk --limit 5",
+                "rtk gh search repos rtk --limit 5",
+            ),
+            ("gh search issues kubectl", "rtk gh search issues kubectl"),
+            ("gh search prs claude", "rtk gh search prs claude"),
+            ("gh search code 'fn main'", "rtk gh search code 'fn main'"),
+            ("gh search commits initial", "rtk gh search commits initial"),
+        ] {
+            assert_eq!(rewrite_command(command, &[]), Some(expected.into()));
+        }
+    }
+
+    #[test]
+    fn test_rewrite_gh_search_structured_output_skipped() {
+        for command in [
+            "gh search repos rtk --json name,url",
+            "gh search issues kubectl --json number,title --jq '.[].number'",
+            "gh search prs claude --template '{{.title}}'",
+        ] {
+            assert_eq!(rewrite_command(command, &[]), None);
+        }
+    }
+
+    #[test]
+    fn test_rewrite_gh_subcommands_require_word_boundary() {
+        for command in [
+            "gh searching repos rtk",
+            "gh repository view owner/repo",
+            "gh apis repos/owner/repo",
+            "gh release-notes",
+        ] {
+            assert_eq!(rewrite_command(command, &[]), None);
+        }
     }
 
     // --- #508: RTK_DISABLED detection helpers ---
