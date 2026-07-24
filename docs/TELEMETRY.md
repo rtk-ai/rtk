@@ -127,6 +127,12 @@ rtk telemetry disable    # Withdraw consent
 rtk telemetry forget     # Withdraw consent + delete local data + request server erasure
 ```
 
+CLI flag override (blocks telemetry regardless of consent, per invocation):
+```bash
+rtk --no-telemetry git log -5
+rtk --secure git log -5          # also disables local tracking
+```
+
 Environment variable override (blocks telemetry regardless of consent):
 ```bash
 export RTK_TELEMETRY_DISABLED=1
