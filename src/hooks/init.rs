@@ -3361,9 +3361,7 @@ fn remove_droid_hook_from_json(root: &mut serde_json::Value, layout: DroidLayout
 
 // ─── Devin CLI support ────────────────────────────────────────────────
 
-const RTK_DEVIN_AGENTS_BLOCK: &str = r##"<!-- rtk-instructions -->
-When running shell commands, prefer `rtk <command>` (e.g. `rtk git status`, `rtk cargo test`, `rtk grep`, `rtk find`, `rtk read`). RTK compacts supported command output and passes unsupported commands through unchanged.
-<!-- /rtk-instructions -->"##;
+const RTK_DEVIN_AGENTS_BLOCK: &str = include_str!("../../hooks/devin/rtk-awareness.md");
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DevinLayout {
@@ -3397,11 +3395,22 @@ pub fn run_devin_mode(global: bool, patch_mode: PatchMode, ctx: InitContext) -> 
     let patched = patch_devin_hook_file(&target, patch_mode, ctx)?;
 
     // Project instructions and filters (local projects)
+    let agents_md_path: PathBuf;
+    let filters_path: PathBuf;
     if !global {
+        agents_md_path = PathBuf::from(AGENTS_MD);
+        filters_path = PathBuf::from(".rtk").join("filters.toml");
         generate_project_filters_template(ctx)?;
-        maybe_patch_devin_agents_md(ctx, &PathBuf::from(AGENTS_MD))?;
+        maybe_patch_devin_agents_md(ctx, &agents_md_path)?;
     } else {
         // Global instructions and filters
+        agents_md_path = permissions::resolve_devin_config_dir()
+            .map(|d| d.join(AGENTS_MD))
+            .unwrap_or_else(|| PathBuf::from(AGENTS_MD));
+        filters_path = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from(".config"))
+            .join(crate::core::constants::RTK_DATA_DIR)
+            .join("filters.toml");
         generate_global_filters_template(ctx)?;
         if let Some(dir) = permissions::resolve_devin_config_dir() {
             maybe_patch_devin_agents_md(ctx, &dir.join(AGENTS_MD))?;
@@ -3415,6 +3424,8 @@ pub fn run_devin_mode(global: bool, patch_mode: PatchMode, ctx: InitContext) -> 
         println!("\nDevin CLI hook registered ({scope}).\n");
         println!("  Command:    {}", DEVIN_HOOK_COMMAND);
         println!("  Hooks file: {}", target.path.display());
+        println!("  AGENTS.md:  {}", agents_md_path.display());
+        println!("  Filters:    {} (template)", filters_path.display());
         if patched {
             println!("  RTK PreToolUse entry added");
         } else {
