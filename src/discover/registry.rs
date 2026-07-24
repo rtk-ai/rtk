@@ -5,7 +5,10 @@ use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 use std::path::Path;
 
-use super::lexer::{shell_split, split_on_operators, tokenize, ParsedToken, PipeKind, TokenKind};
+use super::lexer::{
+    shell_split, split_on_operators, tokenize, tokenize_with_newlines, ParsedToken, PipeKind,
+    TokenKind,
+};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
@@ -580,6 +583,19 @@ pub fn rewrite_command(
     let compiled = compile_exclude_patterns(excluded);
     let normalized_prefixes = normalize_transparent_prefixes(transparent_prefixes);
 
+    if trimmed.contains('\n') {
+        return rewrite_multiline_block(trimmed, &compiled, &normalized_prefixes);
+    }
+
+    rewrite_single(trimmed, &compiled, &normalized_prefixes)
+}
+
+/// Rewrite one logical command line (no unquoted newlines).
+fn rewrite_single(
+    trimmed: &str,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+) -> Option<String> {
     // Simple (non-compound) already-RTK command — return as-is.
     // For compound commands that start with "rtk" (e.g. "rtk git add . && cargo test"),
     // fall through to rewrite_compound so the remaining segments get rewritten.
@@ -592,7 +608,103 @@ pub fn rewrite_command(
         return Some(trimmed.to_string());
     }
 
-    rewrite_compound(trimmed, &compiled, &normalized_prefixes)
+    rewrite_compound(trimmed, excluded, transparent_prefixes)
+}
+
+/// Shell keywords that open or close a multi-line construct. A line inside a
+/// loop, conditional, case arm, function body, or group is not an independent
+/// command, so the whole block passes through untouched.
+const BLOCK_KEYWORDS: &[&str] = &[
+    "for", "while", "until", "if", "then", "else", "elif", "fi", "do", "done", "case", "esac",
+    "select", "function", "coproc", "{", "}", "(", ")",
+];
+
+/// A list or pipeline that continues across a line break makes adjacent lines
+/// one logical command; grouping chars at a line edge mean a construct spans
+/// lines. Either way, per-line rewriting is unsafe.
+fn line_breaks_independence(line: &str) -> bool {
+    let first = line.split_whitespace().next().unwrap_or("");
+    if BLOCK_KEYWORDS.contains(&first) {
+        return true;
+    }
+    ["&&", "||", "|&", "|"]
+        .iter()
+        .any(|op| line.ends_with(op) || line.starts_with(op))
+        || line.ends_with('(')
+        || line.ends_with('{')
+        || line.starts_with(')')
+        || line.starts_with('}')
+}
+
+/// Rewrite each line of a multi-line block independently (issue #1243).
+///
+/// Split points are the newline tokens the quote-aware lexer emits, so a
+/// newline inside a quoted string (e.g. a multi-line commit message) never
+/// becomes a boundary. The whole block passes through unchanged unless every
+/// line is an independent command (see [`line_breaks_independence`]); blank
+/// lines and comment lines are preserved verbatim, as is indentation and the
+/// original separator bytes (`\n` vs `\r\n`).
+fn rewrite_multiline_block(
+    cmd: &str,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+) -> Option<String> {
+    let newline_offsets: Vec<usize> = tokenize_with_newlines(cmd)
+        .iter()
+        .filter(|t| t.kind == TokenKind::Operator && t.value == "\n")
+        .map(|t| t.offset)
+        .collect();
+
+    // Newlines only inside quotes — a single logical command.
+    if newline_offsets.is_empty() {
+        return rewrite_single(cmd, excluded, transparent_prefixes);
+    }
+
+    let mut segments = Vec::with_capacity(newline_offsets.len() + 1);
+    let mut start = 0;
+    for &off in &newline_offsets {
+        segments.push(&cmd[start..off]);
+        start = off + 1;
+    }
+    segments.push(&cmd[start..]);
+
+    if segments
+        .iter()
+        .map(|seg| seg.trim())
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .any(line_breaks_independence)
+    {
+        return None;
+    }
+
+    let mut any_changed = false;
+    let mut result = String::with_capacity(cmd.len() + 32);
+    for (i, seg) in segments.iter().enumerate() {
+        if i > 0 {
+            let off = newline_offsets[i - 1];
+            result.push_str(&cmd[off..off + 1]);
+        }
+        let line = seg.trim();
+        if line.is_empty() || line.starts_with('#') {
+            result.push_str(seg);
+            continue;
+        }
+        match rewrite_single(line, excluded, transparent_prefixes) {
+            Some(rewritten) if rewritten != line => {
+                any_changed = true;
+                let indent = &seg[..seg.len() - seg.trim_start().len()];
+                result.push_str(indent);
+                result.push_str(&rewritten);
+            }
+            _ => result.push_str(seg),
+        }
+    }
+
+    if any_changed {
+        Some(result)
+    } else {
+        None
+    }
 }
 
 /// Pipeline boundaries used to rewrite its final stage.
@@ -1133,6 +1245,127 @@ mod tests {
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
+    }
+
+    mod multiline_blocks {
+        use super::rewrite_command_no_prefixes;
+
+        #[test]
+        fn test_rewrites_each_line() {
+            assert_eq!(
+                rewrite_command_no_prefixes("git status\ngit log --oneline -3", &[]),
+                Some("rtk git status\nrtk git log --oneline -3".into())
+            );
+        }
+
+        #[test]
+        fn test_preserves_blank_lines_comments_and_indentation() {
+            assert_eq!(
+                rewrite_command_no_prefixes("git status\n\n# check history\n  git log -3", &[]),
+                Some("rtk git status\n\n# check history\n  rtk git log -3".into())
+            );
+        }
+
+        #[test]
+        fn test_compound_line_inside_block() {
+            assert_eq!(
+                rewrite_command_no_prefixes("cd /tmp && git status\ngrep -rn foo src", &[]),
+                Some("cd /tmp && rtk git status\nrtk grep -rn foo src".into())
+            );
+        }
+
+        #[test]
+        fn test_crlf_separators_preserved() {
+            assert_eq!(
+                rewrite_command_no_prefixes("git status\r\ngit log -3", &[]),
+                Some("rtk git status\r\nrtk git log -3".into())
+            );
+        }
+
+        #[test]
+        fn test_newline_inside_quotes_is_not_a_split_point() {
+            // The quoted body must never be treated as a command line of its own.
+            let result =
+                rewrite_command_no_prefixes("git commit -m \"subject\ngit status in body\"", &[]);
+            if let Some(rewritten) = result {
+                assert!(!rewritten.contains("rtk git status"));
+            }
+        }
+
+        #[test]
+        fn test_no_rewritable_line_passes_through() {
+            assert_eq!(rewrite_command_no_prefixes("echo one\necho two", &[]), None);
+        }
+
+        #[test]
+        fn test_already_rtk_lines_count_as_unchanged() {
+            assert_eq!(
+                rewrite_command_no_prefixes("rtk git status\necho done", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_mixed_rtk_and_rewritable_line() {
+            assert_eq!(
+                rewrite_command_no_prefixes("rtk git status\ngit log -3", &[]),
+                Some("rtk git status\nrtk git log -3".into())
+            );
+        }
+
+        #[test]
+        fn test_for_loop_block_passes_through() {
+            assert_eq!(
+                rewrite_command_no_prefixes("for f in a b; do\n  grep -n foo $f\ndone", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_if_block_passes_through() {
+            assert_eq!(
+                rewrite_command_no_prefixes("if [ -d src ]; then\n  git status\nfi", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_cross_line_and_list_passes_through() {
+            assert_eq!(
+                rewrite_command_no_prefixes("git status &&\ngit log -3", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_cross_line_pipeline_passes_through() {
+            assert_eq!(
+                rewrite_command_no_prefixes("git log |\ngrep feat", &[]),
+                None
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes("cargo test |&\ngrep FAILED", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_subshell_spanning_lines_passes_through() {
+            assert_eq!(rewrite_command_no_prefixes("(\n  git status\n)", &[]), None);
+        }
+
+        #[test]
+        fn test_group_spanning_lines_passes_through() {
+            assert_eq!(rewrite_command_no_prefixes("{\n  git status\n}", &[]), None);
+        }
+
+        #[test]
+        fn test_heredoc_block_passes_through() {
+            assert_eq!(
+                rewrite_command_no_prefixes("git status\ncat <<EOF\nhello\nEOF", &[]),
+                None
+            );
+        }
     }
 
     fn analyze_test_pipeline(cmd: &str) -> PipelineAnalysis {
