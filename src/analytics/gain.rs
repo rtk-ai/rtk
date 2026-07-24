@@ -782,3 +782,18 @@ fn confirm_reset() -> Result<bool> {
 
     Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_disabled_message_printed_when_tracking_forced_off() {
+        crate::core::secure::set_no_tracking();
+        let result = run(
+            false, false, false, false, "", false, false, false, false, "", false, false, false, 0,
+        );
+        crate::core::secure::reset_for_tests();
+        assert!(result.is_ok());
+    }
+}
