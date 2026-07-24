@@ -619,24 +619,81 @@ const BLOCK_KEYWORDS: &[&str] = &[
     "select", "function", "coproc", "{", "}", "(", ")",
 ];
 
+/// Byte offset where an unquoted `#` at the start of a word begins a trailing
+/// comment, if any. The lexer has no comment state, so the independence checks
+/// must ignore comment text themselves: `git log | # keep pipeline` continues
+/// the pipeline across the newline even though the line ends in comment text.
+fn comment_start(line: &str) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if !in_single => {
+                i += 2;
+                continue;
+            }
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'#' if !in_single && !in_double && (i == 0 || bytes[i - 1].is_ascii_whitespace()) => {
+                return Some(i)
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Unquoted `(`/`)` or `{`/`}` that don't balance within the line: an array
+/// literal (`arr=(one`), function body (`foo() {`), or group spans lines, so
+/// the lines around it are not independent commands.
+fn line_has_unbalanced_grouping(code: &str) -> bool {
+    let bytes = code.as_bytes();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut paren = 0i32;
+    let mut brace = 0i32;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if !in_single => {
+                i += 2;
+                continue;
+            }
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'(' if !in_single && !in_double => paren += 1,
+            b')' if !in_single && !in_double => paren -= 1,
+            b'{' if !in_single && !in_double => brace += 1,
+            b'}' if !in_single && !in_double => brace -= 1,
+            _ => {}
+        }
+        if paren < 0 || brace < 0 {
+            return true;
+        }
+        i += 1;
+    }
+    paren != 0 || brace != 0
+}
+
 /// A list or pipeline that continues across a line break makes adjacent lines
-/// one logical command; grouping chars at a line edge mean a construct spans
-/// lines. Either way, per-line rewriting is unsafe.
+/// one logical command; grouping that spans lines means no line stands alone.
+/// Either way, per-line rewriting is unsafe. All checks run against the line
+/// with any trailing comment stripped.
 fn line_breaks_independence(line: &str) -> bool {
-    let first = line.split_whitespace().next().unwrap_or("");
+    let code = comment_start(line).map_or(line, |i| line[..i].trim_end());
+    let first = code.split_whitespace().next().unwrap_or("");
     if BLOCK_KEYWORDS.contains(&first) {
         return true;
     }
     ["&&", "||", "|&", "|"]
         .iter()
-        .any(|op| line.ends_with(op) || line.starts_with(op))
-        || line.ends_with('(')
-        || line.ends_with('{')
-        || line.starts_with(')')
-        || line.starts_with('}')
-        || line.starts_with("((")
-        || line.ends_with("))")
-        || line.ends_with("((")
+        .any(|op| code.ends_with(op) || code.starts_with(op))
+        || code.starts_with("((")
+        || code.ends_with("))")
+        || line_has_unbalanced_grouping(code)
 }
 
 /// Rewrite each line of a multi-line block independently (issue #1243).
@@ -665,6 +722,14 @@ fn rewrite_multiline_block(
         .filter(|t| t.kind == TokenKind::Operator && t.value == "\n")
         .map(|t| t.offset)
         .collect();
+
+    // ANSI-C quoting is the inverse hazard: inside $'...' bash treats \' as a
+    // literal quote that does NOT close the string, but the lexer thinks it
+    // does — emitting a split point bash would never honor, which the
+    // swallowed-newline count check below cannot see. Forgo the rewrite.
+    if cmd.contains("$'") {
+        return None;
+    }
 
     let raw_breaks = cmd.chars().filter(|c| matches!(c, '\n' | '\r')).count();
     if raw_breaks != newline_offsets.len() {
@@ -1343,6 +1408,68 @@ mod tests {
             // `(( x = ls ))` is arithmetic evaluation; injecting `rtk` before
             // `ls` would splice a command into arithmetic context.
             assert_eq!(rewrite_command_no_prefixes("(( x =\nls ))", &[]), None);
+        }
+
+        #[test]
+        fn test_array_assignment_spanning_lines_passes_through() {
+            // The inner line is an array element, not a command; rewriting it
+            // would mutate the array's contents.
+            assert_eq!(
+                rewrite_command_no_prefixes("arr=(one\ngit status\ntwo)", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_function_definition_spanning_lines_passes_through() {
+            assert_eq!(
+                rewrite_command_no_prefixes("foo() {\n  git status\n}", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_continuation_operator_behind_comment_passes_through() {
+            // Bash continues the pipeline across the newline even though the
+            // line ends in comment text; the next line is a pipeline stage,
+            // not an independent command.
+            assert_eq!(
+                rewrite_command_no_prefixes("git log | # keep pipeline\ngrep -f patterns.txt", &[]),
+                None
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes("git status && # continue\ngit log -3", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_ansi_c_quoting_passes_through() {
+            // Inside $'...' bash treats \' as a literal quote that does not
+            // close the string, so the second line is string content — the
+            // lexer can't see that, so any $' in the block forgoes the rewrite.
+            assert_eq!(
+                rewrite_command_no_prefixes("x=$'foo\\'\ngit status\n'", &[]),
+                None
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes("echo $'a\\tb'\ngit status", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_balanced_grouping_within_a_line_still_rewrites() {
+            // `${HOME}` braces (quoted or not) must not trip the
+            // unbalanced-grouping bail.
+            assert_eq!(
+                rewrite_command_no_prefixes("echo ${HOME}\ngit status", &[]),
+                Some("echo ${HOME}\nrtk git status".into())
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes("echo \"${HOME}\"\ngit status", &[]),
+                Some("echo \"${HOME}\"\nrtk git status".into())
+            );
         }
 
         #[test]
