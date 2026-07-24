@@ -201,6 +201,9 @@ impl FilterStrategy for MinimalFilter {
             if in_docstring {
                 result.push_str(line);
                 result.push('\n');
+                if trimmed.ends_with("\"\"\"") {
+                    in_docstring = false;
+                }
                 continue;
             }
 
@@ -570,5 +573,39 @@ fn main() {
             "comment after single-line docstring must be stripped"
         );
         assert!(output.contains("return a + b"), "code must be kept");
+    }
+
+    #[test]
+    fn test_python_multiline_docstring_closing_on_content_line() {
+        let filter = MinimalFilter;
+        let input = r#"def subtract(self, a, b):
+    """Subtract b from a
+    and return result."""
+    # subtract comment
+    return a - b
+
+def multiply(self, a, b):
+    # multiply comment, no docstring before
+    return a * b
+"#;
+        let output = filter.filter(input, &Language::Python);
+        assert!(
+            output.contains("Subtract b from a"),
+            "docstring content should be kept"
+        );
+        assert!(
+            output.contains("and return result."),
+            "docstring closing line should be kept"
+        );
+        assert!(
+            !output.contains("subtract comment"),
+            "comment after multi-line docstring must be stripped"
+        );
+        assert!(
+            !output.contains("multiply comment"),
+            "comment in unrelated method must be stripped"
+        );
+        assert!(output.contains("return a - b"), "code must be kept");
+        assert!(output.contains("return a * b"), "code must be kept");
     }
 }
