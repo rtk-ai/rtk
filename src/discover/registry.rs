@@ -634,6 +634,9 @@ fn line_breaks_independence(line: &str) -> bool {
         || line.ends_with('{')
         || line.starts_with(')')
         || line.starts_with('}')
+        || line.starts_with("((")
+        || line.ends_with("))")
+        || line.ends_with("((")
 }
 
 /// Rewrite each line of a multi-line block independently (issue #1243).
@@ -644,6 +647,14 @@ fn line_breaks_independence(line: &str) -> bool {
 /// line is an independent command (see [`line_breaks_independence`]); blank
 /// lines and comment lines are preserved verbatim, as is indentation and the
 /// original separator bytes (`\n` vs `\r\n`).
+///
+/// If any newline byte was swallowed by quote state, the block passes through
+/// untouched. The lexer has no comment awareness, so an apostrophe in a `#`
+/// comment opens quote state and hides the rest of the block — rewriting (or
+/// prefixing) such a block would act on lines no permission verdict was
+/// computed for. Passthrough hands the original command to the agent's native
+/// permission handling instead. Genuine quoted newlines (multi-line commit
+/// messages) also land here; forgoing that rewrite is the safe trade.
 fn rewrite_multiline_block(
     cmd: &str,
     excluded: &[ExcludePattern],
@@ -655,9 +666,9 @@ fn rewrite_multiline_block(
         .map(|t| t.offset)
         .collect();
 
-    // Newlines only inside quotes — a single logical command.
-    if newline_offsets.is_empty() {
-        return rewrite_single(cmd, excluded, transparent_prefixes);
+    let raw_breaks = cmd.chars().filter(|c| matches!(c, '\n' | '\r')).count();
+    if raw_breaks != newline_offsets.len() {
+        return None;
     }
 
     let mut segments = Vec::with_capacity(newline_offsets.len() + 1);
@@ -1283,13 +1294,55 @@ mod tests {
         }
 
         #[test]
-        fn test_newline_inside_quotes_is_not_a_split_point() {
-            // The quoted body must never be treated as a command line of its own.
-            let result =
-                rewrite_command_no_prefixes("git commit -m \"subject\ngit status in body\"", &[]);
-            if let Some(rewritten) = result {
-                assert!(!rewritten.contains("rtk git status"));
-            }
+        fn test_newline_inside_quotes_passes_through() {
+            // A swallowed newline means the block can't be split safely —
+            // the quoted body must never be treated as a command line of its own.
+            assert_eq!(
+                rewrite_command_no_prefixes("git commit -m \"subject\ngit status in body\"", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_comment_apostrophe_swallowing_newline_passes_through() {
+            // The lexer has no comment state: the apostrophe in `don't` opens
+            // a quote that swallows the newline and hides the next line. The
+            // block must pass through so native permission handling sees the
+            // original command — never a partially rewritten one.
+            assert_eq!(
+                rewrite_command_no_prefixes("git status # don't\nrm -rf /tmp/x", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_comment_apostrophe_hidden_in_later_segment_passes_through() {
+            // Same hazard when a clean split point precedes the contaminated
+            // line: the swallowed-newline check is global, not per-segment.
+            assert_eq!(
+                rewrite_command_no_prefixes("git log -3\ngit status # don't\nrm -rf /tmp/x", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_comment_with_balanced_quotes_still_rewrites() {
+            // Both apostrophes close before the newline, so the split is safe
+            // and the trailing comment rides along untouched.
+            assert_eq!(
+                rewrite_command_no_prefixes(
+                    "git status # isn't it what's expected\ngit log -3",
+                    &[]
+                ),
+                Some("rtk git status # isn't it what's expected\nrtk git log -3".into())
+            );
+        }
+
+        #[test]
+        fn test_arithmetic_spanning_lines_passes_through() {
+            // `(( x = ls ))` is arithmetic evaluation; injecting `rtk` before
+            // `ls` would splice a command into arithmetic context.
+            assert_eq!(rewrite_command_no_prefixes("(( x =\nls ))", &[]), None);
         }
 
         #[test]
