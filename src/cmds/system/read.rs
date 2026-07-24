@@ -39,6 +39,22 @@ pub fn run(
             .with_context(|| format!("Failed to read file: {}", file.display()))?
     };
 
+    // Stateful filters (`--level minimal|aggressive`) track context (open
+    // block comments, in-progress docstrings) as they scan lines from the
+    // top of the file. `--tail-lines` only reads the tail slice, so the
+    // filter would start mid-context with no way to know it — e.g. a block
+    // comment opened before the tail window would leak its closing
+    // fragment as if it were code. Force `none` in that combination instead
+    // of risking silently corrupted output.
+    let effective_level = effective_filter_level(level, tail_lines);
+    if effective_level != level {
+        eprintln!(
+            "rtk: warning: --level {} has no effect with --tail-lines (the tail slice doesn't carry enough file context for stateful filtering)",
+            level
+        );
+    }
+    let level = effective_level;
+
     // Detect language from extension
     let lang = file
         .extension()
@@ -173,6 +189,32 @@ fn format_with_line_numbers(content: &str) -> String {
     out
 }
 
+/// `--tail-lines` reads only the tail slice of a file, so a stateful filter
+/// (`minimal`/`aggressive`) has no way to see context from earlier in the
+/// file. Returns `none` in that combination; returns `level` unchanged
+/// otherwise.
+fn effective_filter_level(level: FilterLevel, tail_lines: Option<usize>) -> FilterLevel {
+    if tail_lines.is_some() && level != FilterLevel::None {
+        FilterLevel::None
+    } else {
+        level
+    }
+}
+
+/// Splits `text` into lines like `str::lines()`, but keeps any trailing `\r`
+/// on each line intact. `str::lines()` strips `\r` before `\n`, which is
+/// exactly right for display but corrupts CRLF files when the split-and-join
+/// round trip is used to extract a byte-for-byte tail window.
+fn split_lines_preserve_cr(text: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    // split('\n') on a trailing newline yields one extra "" element that
+    // str::lines() doesn't produce; drop it to keep the same line count.
+    if text.ends_with('\n') {
+        lines.pop();
+    }
+    lines
+}
+
 /// Reads roughly the last `tail_lines` lines of `path` without loading the
 /// whole file into memory: seeks backward from the end in fixed-size chunks,
 /// stopping once enough newlines have been seen (or the start of the file is
@@ -213,7 +255,7 @@ fn read_tail_lines_bounded(path: &Path, tail_lines: usize) -> Result<String> {
     let bytes: Vec<u8> = chunks.into_iter().flatten().collect();
     let text = String::from_utf8_lossy(&bytes).into_owned();
 
-    let lines: Vec<&str> = text.lines().collect();
+    let lines = split_lines_preserve_cr(&text);
     let start = lines.len().saturating_sub(tail_lines);
     let mut result = lines[start..].join("\n");
     if text.ends_with('\n') {
@@ -232,7 +274,7 @@ fn apply_line_window(
         if tail == 0 {
             return String::new();
         }
-        let lines: Vec<&str> = content.lines().collect();
+        let lines = split_lines_preserve_cr(content);
         let start = lines.len().saturating_sub(tail);
         let mut result = lines[start..].join("\n");
         if content.ends_with('\n') {
@@ -277,6 +319,15 @@ mod tests {
         write!(file, "a\nb\nc")?;
         let bounded = read_tail_lines_bounded(file.path(), 2)?;
         assert_eq!(bounded, "b\nc");
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_tail_lines_bounded_preserves_crlf() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        write!(file, "a\r\nb\r\nc\r\n")?;
+        let bounded = read_tail_lines_bounded(file.path(), 2)?;
+        assert_eq!(bounded, "b\r\nc\r\n");
         Ok(())
     }
 
@@ -354,6 +405,37 @@ fn main() {{
         let input = "a\nb\nc\nd";
         let output = apply_line_window(input, None, Some(2), &Language::Unknown);
         assert_eq!(output, "c\nd");
+    }
+
+    #[test]
+    fn test_apply_line_window_tail_lines_preserves_crlf() {
+        let input = "a\r\nb\r\nc\r\nd\r\n";
+        let output = apply_line_window(input, None, Some(2), &Language::Unknown);
+        assert_eq!(output, "c\r\nd\r\n");
+    }
+
+    #[test]
+    fn test_effective_filter_level_forces_none_with_tail_lines() {
+        assert_eq!(
+            effective_filter_level(FilterLevel::Minimal, Some(3)),
+            FilterLevel::None
+        );
+        assert_eq!(
+            effective_filter_level(FilterLevel::Aggressive, Some(3)),
+            FilterLevel::None
+        );
+    }
+
+    #[test]
+    fn test_effective_filter_level_unchanged_without_tail_lines() {
+        assert_eq!(
+            effective_filter_level(FilterLevel::Minimal, None),
+            FilterLevel::Minimal
+        );
+        assert_eq!(
+            effective_filter_level(FilterLevel::None, Some(3)),
+            FilterLevel::None
+        );
     }
 
     #[test]
