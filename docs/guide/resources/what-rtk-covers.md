@@ -1,6 +1,6 @@
 ---
 title: What RTK Optimizes
-description: Commands and ecosystems automatically optimized by RTK with typical token savings
+description: Commands and ecosystems automatically optimized by RTK, with typical bash output reduction
 sidebar:
   order: 1
 ---
@@ -9,12 +9,16 @@ sidebar:
 
 Once RTK is installed with a hook, these commands are automatically intercepted and filtered. You run them normally — the hook rewrites them transparently before execution.
 
-Typical savings: 60-99%.
+Typical bash output reduction: 60-99%.
+
+:::note
+Every percentage below measures **bash output bytes removed** — the only thing RTK controls. Those bytes are one contributor to input tokens, and input tokens are only part of a bill that also counts output tokens. See [How RTK Savings Work](./savings-explained.md) before reading these numbers as cost figures.
+:::
 
 ## Git
 
-| Command | Savings | What changes |
-|---------|---------|--------------|
+| Command | Bash output reduction | What changes |
+|---------|----------------------|--------------|
 | `git status` | 75-93% | Compact stat format, grouped by state |
 | `git log` | 80-92% | Hash + author + subject only |
 | `git diff` | 70% | Context reduced, headers stripped |
@@ -23,8 +27,8 @@ Typical savings: 60-99%.
 
 ## GitHub CLI
 
-| Command | Savings | What changes |
-|---------|---------|--------------|
+| Command | Bash output reduction | What changes |
+|---------|----------------------|--------------|
 | `gh pr view` | 87% | Removes ASCII art and verbose metadata |
 | `gh pr checks` | 79% | Status + name only, failures highlighted |
 | `gh run list` | 82% | Compact workflow run summary |
@@ -32,15 +36,15 @@ Typical savings: 60-99%.
 
 ## Graphite (Stacked PRs)
 
-| Command | Savings | What changes |
-|---------|---------|--------------|
+| Command | Bash output reduction | What changes |
+|---------|----------------------|--------------|
 | `gt log` | 75% | Stack summary only |
 | `gt status` | 70% | Current branch context |
 
 ## Cargo / Rust
 
-| Command | Savings | What changes |
-|---------|---------|--------------|
+| Command | Bash output reduction | What changes |
+|---------|----------------------|--------------|
 | `cargo test` | 90% | Failures only, passed tests suppressed |
 | `cargo nextest` | 90% | Same as test |
 | `cargo build` | 80% | Errors and warnings only |
@@ -49,8 +53,8 @@ Typical savings: 60-99%.
 
 ## JavaScript / TypeScript
 
-| Command | Savings | What changes |
-|---------|---------|--------------|
+| Command | Bash output reduction | What changes |
+|---------|----------------------|--------------|
 | `jest` | 94-99% | Failures only |
 | `vitest` | 94-99% | Failures only |
 | `tsc` | 75% | Type errors grouped by file |
@@ -63,8 +67,8 @@ Typical savings: 60-99%.
 
 ## Python
 
-| Command | Savings | What changes |
-|---------|---------|--------------|
+| Command | Bash output reduction | What changes |
+|---------|----------------------|--------------|
 | `pytest` | 80-90% | Failures only |
 | `ruff check` | 75% | Violations grouped by file |
 | `mypy` | 75% | Type errors grouped by file |
@@ -72,32 +76,32 @@ Typical savings: 60-99%.
 
 ## Go
 
-| Command | Savings | What changes |
-|---------|---------|--------------|
+| Command | Bash output reduction | What changes |
+|---------|----------------------|--------------|
 | `go test` | 80-90% | Failures only |
 | `golangci-lint run` | 75% | Violations grouped by file |
 | `go build` | 75% | Errors only |
 
 ## Ruby
 
-| Command | Savings | What changes |
-|---------|---------|--------------|
+| Command | Bash output reduction | What changes |
+|---------|----------------------|--------------|
 | `rspec` | 80-90% | Failures only |
 | `rubocop` | 75% | Offenses grouped by file |
 | `rake` | 70% | Task output, build errors highlighted |
 
 ## .NET
 
-| Command | Savings | What changes |
-|---------|---------|--------------|
+| Command | Bash output reduction | What changes |
+|---------|----------------------|--------------|
 | `dotnet build` | 80% | Errors and warnings only |
 | `dotnet test` | 85-90% | Failures only |
 | `dotnet format` | 75% | Changed files only |
 
 ## Docker / Kubernetes
 
-| Command | Savings | What changes |
-|---------|---------|--------------|
+| Command | Bash output reduction | What changes |
+|---------|----------------------|--------------|
 | `docker ps` | 65% | Essential columns (name, image, status, port) |
 | `docker images` | 60% | Name + tag + size only |
 | `docker logs` | 70% | Deduplicated, last N lines |
@@ -107,8 +111,8 @@ Typical savings: 60-99%.
 
 ## Files and Search
 
-| Command | Savings | What changes |
-|---------|---------|--------------|
+| Command | Bash output reduction | What changes |
+|---------|----------------------|--------------|
 | `ls` | 80% | Tree format with file counts |
 | `find` | 75% | Tree format |
 | `grep` | 70% | Truncated lines, grouped by file |
@@ -119,15 +123,15 @@ Typical savings: 60-99%.
 
 ## Cloud and Data
 
-| Command | Savings | What changes |
-|---------|---------|--------------|
+| Command | Bash output reduction | What changes |
+|---------|----------------------|--------------|
 | `aws` | 70% | JSON condensed, relevant fields only |
 | `psql` | 65% | Query results without decoration |
 | `curl` | 60% | Response body only, headers stripped |
 
 ## Global flags
 
-These flags apply to all RTK commands and can push savings even higher:
+These flags apply to all RTK commands and can push the bash output reduction even higher:
 
 | Flag | Description |
 |------|-------------|
