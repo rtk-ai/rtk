@@ -3396,8 +3396,16 @@ pub fn run_devin_mode(global: bool, patch_mode: PatchMode, ctx: InitContext) -> 
 
     let patched = patch_devin_hook_file(&target, patch_mode, ctx)?;
 
-    if !global && patch_mode != PatchMode::Skip && patched {
-        maybe_patch_devin_agents_md(ctx)?;
+    // Project instructions and filters (local projects)
+    if !global {
+        generate_project_filters_template(ctx)?;
+        maybe_patch_devin_agents_md(ctx, &PathBuf::from(AGENTS_MD))?;
+    } else {
+        // Global instructions and filters
+        generate_global_filters_template(ctx)?;
+        if let Some(dir) = permissions::resolve_devin_config_dir() {
+            maybe_patch_devin_agents_md(ctx, &dir.join(AGENTS_MD))?;
+        }
     }
 
     if ctx.dry_run {
@@ -3641,13 +3649,9 @@ fn print_devin_manual_instructions(path: &Path, layout: DevinLayout) {
     }
 }
 
-fn maybe_patch_devin_agents_md(ctx: InitContext) -> Result<()> {
-    let path = PathBuf::from(AGENTS_MD);
-    if !path.exists() {
-        return Ok(());
-    }
+fn maybe_patch_devin_agents_md(ctx: InitContext, path: &Path) -> Result<()> {
     write_rtk_block(
-        &path,
+        path,
         RTK_DEVIN_AGENTS_BLOCK,
         "RTK instructions",
         "rtk init --agent devin",
@@ -3697,19 +3701,24 @@ fn uninstall_devin_artifacts(global: bool, ctx: InitContext) -> Result<Vec<Strin
         }
     }
 
-    if !global {
-        let agents_md = PathBuf::from(AGENTS_MD);
-        if agents_md.exists() {
-            let content = fs::read_to_string(&agents_md)
-                .with_context(|| format!("Failed to read AGENTS.md: {}", agents_md.display()))?;
-            if content.contains(RTK_BLOCK_START) {
-                let (cleaned, did_remove) = remove_rtk_block(&content);
-                if did_remove {
-                    if !ctx.dry_run {
-                        atomic_write(&agents_md, &cleaned)?;
-                    }
-                    removed.push(format!("AGENTS.md: {}", agents_md.display()));
+    // Remove RTK instructions from AGENTS.md
+    let agents_md = if global {
+        permissions::resolve_devin_config_dir()
+            .map(|d| d.join(AGENTS_MD))
+            .unwrap_or_else(|| PathBuf::from(AGENTS_MD))
+    } else {
+        PathBuf::from(AGENTS_MD)
+    };
+    if agents_md.exists() {
+        let content = fs::read_to_string(&agents_md)
+            .with_context(|| format!("Failed to read AGENTS.md: {}", agents_md.display()))?;
+        if content.contains(RTK_BLOCK_START) {
+            let (cleaned, did_remove) = remove_rtk_block(&content);
+            if did_remove {
+                if !ctx.dry_run {
+                    atomic_write(&agents_md, &cleaned)?;
                 }
+                removed.push(format!("AGENTS.md: {}", agents_md.display()));
             }
         }
     }
@@ -3836,6 +3845,19 @@ pub fn show_devin_config() -> Result<()> {
             } else {
                 println!("[--] Global hook: {} not found", global_config.display());
             }
+
+            // Global AGENTS.md
+            let global_agents = dir.join(AGENTS_MD);
+            if global_agents.exists() {
+                let content = fs::read_to_string(&global_agents).unwrap_or_default();
+                if content.contains(RTK_BLOCK_START) {
+                    println!("[ok] Global AGENTS.md: {}", global_agents.display());
+                } else {
+                    println!("[--] Global AGENTS.md: exists but rtk not configured");
+                }
+            } else {
+                println!("[--] Global AGENTS.md: not found");
+            }
         }
         None => println!("[--] Devin config directory not found"),
     }
@@ -3868,15 +3890,17 @@ pub fn show_devin_config() -> Result<()> {
         }
     }
 
-    let agents_md = PathBuf::from(AGENTS_MD);
-    if agents_md.exists()
-        && fs::read_to_string(&agents_md)
-            .unwrap_or_default()
-            .contains(RTK_BLOCK_START)
-    {
-        println!("[ok] AGENTS.md: RTK instructions present");
+    // Local AGENTS.md
+    let local_agents_md = PathBuf::from(AGENTS_MD);
+    if local_agents_md.exists() {
+        let content = fs::read_to_string(&local_agents_md).unwrap_or_default();
+        if content.contains(RTK_BLOCK_START) {
+            println!("[ok] Local AGENTS.md: rtk instructions present");
+        } else {
+            println!("[--] Local AGENTS.md: exists but rtk not configured");
+        }
     } else {
-        println!("[--] AGENTS.md: not found or no RTK instructions");
+        println!("[--] Local AGENTS.md: not found");
     }
 
     println!("\nUsage:");
