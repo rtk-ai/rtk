@@ -1,0 +1,39 @@
+[filters.terraform-apply]
+description = "Compact terraform apply — strip refresh noise, preserve changes and errors"
+match_command = "^terraform\\s+(apply|destroy)"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Refreshing state",
+  "^Acquiring state lock",
+  "^Releasing state lock",
+  "^\\s*#.*unchanged",
+]
+match_output = [
+  { pattern = "Apply complete! Resources: 0 added, 0 changed, 0 destroyed", message = "terraform apply: ok (no changes)", unless = "Error" },
+]
+max_lines = 80
+on_empty = "terraform apply: ok"
+
+[[tests.terraform-apply]]
+name = "no-change apply short-circuits"
+input = """
+Acquiring state lock. This may take a few moments...
+Refreshing state... [id=vpc-abc]
+Releasing state lock. This may take a few moments...
+
+Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
+"""
+expected = "terraform apply: ok (no changes)"
+
+[[tests.terraform-apply]]
+name = "changes preserved"
+input = """
+Refreshing state... [id=vpc-abc]
+
+aws_instance.web: Creating...
+aws_instance.web: Creation complete after 30s [id=i-12345]
+
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+"""
+expected = "aws_instance.web: Creating...\naws_instance.web: Creation complete after 30s [id=i-12345]\nApply complete! Resources: 1 added, 0 changed, 0 destroyed."

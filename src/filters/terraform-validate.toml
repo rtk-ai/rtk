@@ -1,0 +1,26 @@
+[filters.terraform-validate]
+description = "Compact terraform validate and fmt — short-circuit success"
+match_command = "^terraform\\s+(validate|fmt)"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+]
+match_output = [
+  { pattern = "Success! The configuration is valid", message = "terraform validate: ok", unless = "Error|Warning" },
+]
+max_lines = 40
+on_empty = "terraform validate: ok"
+
+[[tests.terraform-validate]]
+name = "valid config short-circuits"
+input = "Success! The configuration is valid.\n"
+expected = "terraform validate: ok"
+
+[[tests.terraform-validate]]
+name = "error preserved"
+input = """
+Error: Missing required argument
+
+  on main.tf line 10, in resource "aws_instance" "web":
+"""
+expected = "Error: Missing required argument\n  on main.tf line 10, in resource \"aws_instance\" \"web\":"

@@ -1,0 +1,41 @@
+[filters.terragrunt]
+description = "Compact terragrunt output — strip module discovery noise, preserve plan/apply output"
+match_command = "^terragrunt\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^INFO\\[\\d+\\]",
+  "^WARN\\[\\d+\\].*Are you sure",
+  "^Group \\d+",
+  "^- Module ",
+  "^Refreshing state",
+  "^Acquiring state lock",
+  "^Releasing state lock",
+  "^Initializing provider plugins",
+  "^- Installing ",
+  "^- Installed ",
+  "^Downloading ",
+]
+max_lines = 80
+on_empty = "terragrunt: ok"
+
+[[tests.terragrunt]]
+name = "strips INFO/module discovery noise"
+input = """
+INFO[0000] The stack at /infra will be processed in the following order:
+- Module /infra/vpc
+- Module /infra/eks
+INFO[0001] Running command: terraform init
+
+Initializing provider plugins...
+- Installing hashicorp/aws v5.0.0...
+- Installed hashicorp/aws v5.0.0
+
+Plan: 2 to add, 0 to change, 0 to destroy.
+"""
+expected = "Plan: 2 to add, 0 to change, 0 to destroy."
+
+[[tests.terragrunt]]
+name = "empty output"
+input = ""
+expected = "terragrunt: ok"

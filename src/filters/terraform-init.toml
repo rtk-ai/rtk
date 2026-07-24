@@ -1,0 +1,42 @@
+[filters.terraform-init]
+description = "Compact terraform init — strip provider download noise, show result"
+match_command = "^terraform\\s+init"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^- Installing ",
+  "^- Installed ",
+  "^Initializing provider plugins",
+  "^Initializing modules",
+  "^Downloading ",
+  "^- Downloading ",
+  "^Initializing the backend",
+  "^Successfully configured the backend",
+  "^Partner and community providers",
+  "^\\s*- hashicorp/",
+]
+match_output = [
+  { pattern = "Terraform has been successfully initialized", message = "terraform init: ok", unless = "Error|error" },
+]
+max_lines = 40
+on_empty = "terraform init: ok"
+
+[[tests.terraform-init]]
+name = "successful init short-circuits"
+input = """
+Initializing the backend...
+Initializing provider plugins...
+- Installing hashicorp/aws v5.0.0...
+- Installed hashicorp/aws v5.0.0 (signed by HashiCorp)
+
+Terraform has been successfully initialized!
+"""
+expected = "terraform init: ok"
+
+[[tests.terraform-init]]
+name = "error preserves output"
+input = """
+Initializing the backend...
+Error: Failed to get existing workspaces
+"""
+expected = "Initializing the backend...\nError: Failed to get existing workspaces"
