@@ -60,9 +60,10 @@ See [Token Savings Analytics](./analytics/gain.md) for export formats and analys
 ```bash
 rtk discover       # find commands that ran without RTK (missed savings)
 rtk session        # RTK adoption rate per Claude Code session
+rtk resume         # compact Git and persisted execution context
 ```
 
-See [Discover and Session](./analytics/discover.md) for details.
+See [Discover and Session](./analytics/discover.md) and [Resume](./analytics/resume.md) for details.
 
 ## Further reading
 

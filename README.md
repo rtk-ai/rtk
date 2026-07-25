@@ -285,6 +285,8 @@ rtk discover                    # Find missed savings opportunities
 rtk discover --all --since 7    # All projects, last 7 days
 
 rtk session                     # Show RTK adoption across recent sessions
+rtk resume                      # Compact Git + saved execution context for a new agent session
+rtk resume --save --plan docs/plans/issue-42.md --completed "tests pass" --next "request review"
 ```
 
 ## Global Flags
