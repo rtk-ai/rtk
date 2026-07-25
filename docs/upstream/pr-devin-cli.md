@@ -7,7 +7,12 @@ feat(hooks): Add first-class Devin CLI integration
 
 Adds native support for [Devin CLI](https://docs.devin.ai/get-started) via a `PreToolUse` hook and lifecycle context hooks. Devin CLI shell commands are rewritten to `rtk <command>` whenever RTK has a filter, with decisions (`approve` / `block`) synced to Devin CLI's own permission settings.
 
-Closes #3205
+Closes #3143
+
+## Related
+
+- #3143 — original feature request for Devin CLI support.
+- #2605, #1851 — earlier community attempts at Devin integration (kept open as related references).
 
 ## Changes
 
