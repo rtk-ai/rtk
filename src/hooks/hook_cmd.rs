@@ -660,7 +660,100 @@ pub fn run_droid() -> Result<()> {
 
 fn process_devin_payload(v: &Value) -> Option<Value> {
     let cmd = devin_execute_command(v)?;
-    devin_response_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::Devin))
+    let (original, decision) = devin_decide_for_command(cmd);
+    devin_response_from_decision(v, original, decision)
+}
+
+/// Decide the hook action for a Devin CLI `exec` command.
+/// If the command is already prefixed with `rtk`, evaluate the inner command
+/// so that `rtk rm -rf /` is still blocked while `rtk gain` is allowed.
+fn devin_decide_for_command(cmd: &str) -> (&str, HookDecision) {
+    if let Some(inner) = cmd.strip_prefix("rtk ") {
+        (cmd, devin_decide_explicit_rtk(cmd, inner.trim_start()))
+    } else {
+        (cmd, decide_hook_action(cmd, permissions::Host::Devin))
+    }
+}
+
+fn devin_decide_explicit_rtk(original: &str, inner: &str) -> HookDecision {
+    // Escape hatches / wrappers that execute an arbitrary command.
+    // Approve only if the wrapped command itself is allowed.
+    for wrapper in ["proxy ", "run ", "err ", "test ", "summary "] {
+        if let Some(rest) = inner.strip_prefix(wrapper) {
+            return devin_decide_wrapper(original, rest);
+        }
+    }
+
+    // Safe RTK meta subcommands that do not spawn arbitrary user-controlled shell commands.
+    if is_rtk_meta_subcommand(inner) {
+        return HookDecision::AllowOriginal(original.to_string());
+    }
+
+    // Otherwise evaluate the inner command like a normal shell command:
+    // e.g. "git status" -> "rtk git status", "cat file" -> "rtk read file".
+    devin_decide_inner_command(original, inner)
+}
+
+/// Approve an explicit `rtk <wrapper> <cmd>` only when <cmd> is allowed.
+fn devin_decide_wrapper(original: &str, inner_cmd: &str) -> HookDecision {
+    match permissions::check_command_for(inner_cmd, permissions::Host::Devin) {
+        PermissionVerdict::Deny => HookDecision::Deny,
+        PermissionVerdict::Allow => HookDecision::AllowOriginal(original.to_string()),
+        _ => HookDecision::Defer,
+    }
+}
+
+/// Evaluate `inner` as a normal shell command and, if allowed, rewrite it to `rtk <inner>`.
+fn devin_decide_inner_command(original: &str, inner: &str) -> HookDecision {
+    let verdict = permissions::check_command_for(inner, permissions::Host::Devin);
+    if verdict == PermissionVerdict::Deny {
+        return HookDecision::Deny;
+    }
+    if crate::discover::lexer::contains_unattestable_construct(inner) {
+        return HookDecision::Defer;
+    }
+    match get_rewritten(inner) {
+        Some(r) if verdict == PermissionVerdict::Allow => HookDecision::AllowRewrite(r),
+        Some(r) => HookDecision::AskRewrite(r),
+        None if verdict == PermissionVerdict::Allow => {
+            HookDecision::AllowOriginal(original.to_string())
+        }
+        None => HookDecision::Defer,
+    }
+}
+
+/// RTK subcommands that are pure RTK operations and do not spawn arbitrary shell commands.
+fn is_rtk_meta_subcommand(inner: &str) -> bool {
+    if inner.is_empty() {
+        return true; // bare `rtk` -> help
+    }
+    let first = inner.split_whitespace().next().unwrap_or("");
+    matches!(
+        first,
+        "gain"
+            | "discover"
+            | "session"
+            | "telemetry"
+            | "learn"
+            | "cc-economics"
+            | "config"
+            | "trust"
+            | "untrust"
+            | "verify"
+            | "read"
+            | "smart"
+            | "json"
+            | "deps"
+            | "env"
+            | "log"
+            | "pipe"
+            | "--version"
+            | "--help"
+            | "-V"
+            | "-h"
+            | "version"
+            | "help"
+    )
 }
 
 /// Extract the shell command when the payload targets Devin CLI's `exec` tool.

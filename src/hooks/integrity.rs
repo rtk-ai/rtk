@@ -265,6 +265,80 @@ pub fn run_verify(verbose: u8) -> Result<()> {
     Ok(())
 }
 
+/// Run Devin CLI hook integrity check and print results (for `rtk verify`).
+///
+/// Compares the installed lifecycle hook files (`rtk-devin.js` and
+/// `rtk-instructions.md`) against the source-of-truth content embedded in the
+/// RTK binary at build time. This catches tampering and version skew.
+pub fn run_verify_devin(_verbose: u8) -> Result<()> {
+    let mut any_scope = false;
+
+    // Global Devin hook directory
+    if let Some(config_dir) = super::permissions::resolve_devin_config_dir() {
+        let global_dir = config_dir.join("hooks").join("rtk");
+        if global_dir.exists() {
+            any_scope = true;
+            verify_devin_hook_dir(&global_dir, "global")?;
+        }
+    }
+
+    // Project-local Devin hook directory
+    let project_dir = PathBuf::from(".devin").join("hooks").join("rtk");
+    if project_dir.exists() {
+        any_scope = true;
+        verify_devin_hook_dir(&project_dir, "project")?;
+    }
+
+    if !any_scope {
+        println!("SKIP  Devin CLI hooks not installed");
+        println!("      Run `rtk init --agent devin` or `rtk init -g --agent devin` to install.");
+    }
+
+    Ok(())
+}
+
+fn verify_devin_hook_dir(dir: &Path, scope: &str) -> Result<()> {
+    let js_path = dir.join("rtk-devin.js");
+    let md_path = dir.join("rtk-instructions.md");
+
+    if !js_path.exists() || !md_path.exists() {
+        println!(
+            "WARN  Devin CLI {scope} hook files incomplete in {}",
+            dir.display()
+        );
+        return Ok(());
+    }
+
+    let js_actual = fs::read_to_string(&js_path)
+        .with_context(|| format!("Failed to read {}", js_path.display()))?;
+    let md_actual = fs::read_to_string(&md_path)
+        .with_context(|| format!("Failed to read {}", md_path.display()))?;
+
+    let js_expected = super::init::RTK_DEVIN_JS;
+    let md_expected = super::init::RTK_DEVIN_INSTRUCTIONS;
+
+    if js_actual != js_expected || md_actual != md_expected {
+        eprintln!("FAIL  Devin CLI {scope} hook files do not match the installed RTK binary");
+        if js_actual != js_expected {
+            eprintln!("  tampered: {}", js_path.display());
+        }
+        if md_actual != md_expected {
+            eprintln!("  tampered: {}", md_path.display());
+        }
+        eprintln!("  Run `rtk init --agent devin` or `rtk init -g --agent devin` to restore.");
+        std::process::exit(1);
+    }
+
+    let js_hash = compute_hash(&js_path)?;
+    let md_hash = compute_hash(&md_path)?;
+    println!("PASS  Devin CLI {scope} hook files verified");
+    println!("      sha256:{}  rtk-devin.js", js_hash);
+    println!("      sha256:{}  rtk-instructions.md", md_hash);
+    println!("      {}", dir.display());
+
+    Ok(())
+}
+
 /// Runtime integrity gate. Called at startup for operational commands.
 ///
 /// Behavior:

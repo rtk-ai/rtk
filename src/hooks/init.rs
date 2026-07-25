@@ -3361,7 +3361,11 @@ fn remove_droid_hook_from_json(root: &mut serde_json::Value, layout: DroidLayout
 
 // ─── Devin CLI support ────────────────────────────────────────────────
 
-const RTK_DEVIN_AGENTS_BLOCK: &str = include_str!("../../hooks/devin/rtk-awareness.md");
+pub(crate) const RTK_DEVIN_JS: &str = include_str!("../../hooks/devin/rtk-devin.js");
+pub(crate) const RTK_DEVIN_INSTRUCTIONS: &str =
+    include_str!("../../hooks/devin/rtk-instructions.md");
+const RTK_DEVIN_GITIGNORE: &str =
+    "# Runtime state created by the RTK Devin CLI lifecycle hook\n.rtk-active\n";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DevinLayout {
@@ -3377,9 +3381,10 @@ struct DevinHookFile {
     layout: DevinLayout,
 }
 
-/// Install Devin CLI PreToolUse hook.
+/// Install Devin CLI hooks (PreToolUse rewrite + lifecycle context hooks).
 pub fn run_devin_mode(global: bool, patch_mode: PatchMode, ctx: InitContext) -> Result<()> {
     let target = resolve_devin_install_target(global)?;
+    let hook_dir = devin_rtk_hook_dir(&target, global)?;
 
     if !ctx.dry_run {
         if let Some(parent) = target.path.parent() {
@@ -3390,31 +3395,29 @@ pub fn run_devin_mode(global: bool, patch_mode: PatchMode, ctx: InitContext) -> 
                 )
             })?;
         }
+        fs::create_dir_all(&hook_dir).with_context(|| {
+            format!(
+                "Failed to create RTK hook directory: {}",
+                hook_dir.display()
+            )
+        })?;
+        write_devin_hook_files(&hook_dir, ctx)?;
     }
 
-    let patched = patch_devin_hook_file(&target, patch_mode, ctx)?;
+    let patched = patch_devin_hook_file(&target, global, patch_mode, ctx)?;
 
-    // Project instructions and filters (local projects)
-    let agents_md_path: PathBuf;
-    let filters_path: PathBuf;
-    if !global {
-        agents_md_path = PathBuf::from(AGENTS_MD);
-        filters_path = PathBuf::from(".rtk").join("filters.toml");
-        generate_project_filters_template(ctx)?;
-        maybe_patch_devin_agents_md(ctx, &agents_md_path)?;
-    } else {
-        // Global instructions and filters
-        agents_md_path = permissions::resolve_devin_config_dir()
-            .map(|d| d.join(AGENTS_MD))
-            .unwrap_or_else(|| PathBuf::from(AGENTS_MD));
-        filters_path = dirs::config_dir()
+    let filters_path: PathBuf = if global {
+        dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from(".config"))
             .join(crate::core::constants::RTK_DATA_DIR)
-            .join("filters.toml");
+            .join("filters.toml")
+    } else {
+        PathBuf::from(".rtk").join("filters.toml")
+    };
+    if global {
         generate_global_filters_template(ctx)?;
-        if let Some(dir) = permissions::resolve_devin_config_dir() {
-            maybe_patch_devin_agents_md(ctx, &dir.join(AGENTS_MD))?;
-        }
+    } else {
+        generate_project_filters_template(ctx)?;
     }
 
     if ctx.dry_run {
@@ -3424,17 +3427,67 @@ pub fn run_devin_mode(global: bool, patch_mode: PatchMode, ctx: InitContext) -> 
         println!("\nDevin CLI hook registered ({scope}).\n");
         println!("  Command:    {}", DEVIN_HOOK_COMMAND);
         println!("  Hooks file: {}", target.path.display());
-        println!("  AGENTS.md:  {}", agents_md_path.display());
+        println!("  Hook dir:   {}", hook_dir.display());
         println!("  Filters:    {} (template)", filters_path.display());
         if patched {
-            println!("  RTK PreToolUse entry added");
+            println!("  RTK entries added (PreToolUse + lifecycle hooks)");
         } else {
-            println!("  RTK PreToolUse entry already present or skipped");
+            println!("  RTK entries already present or skipped");
         }
         println!("  Restart Devin CLI. Test with: git status\n");
     }
 
     Ok(())
+}
+
+fn devin_rtk_hook_dir(target: &DevinHookFile, global: bool) -> Result<PathBuf> {
+    let base = target
+        .path
+        .parent()
+        .context("Devin hook file has no parent directory")?;
+    if global {
+        Ok(base.join("hooks").join("rtk"))
+    } else {
+        // Project-level hooks live in .devin/hooks/rtk so the path is portable.
+        Ok(PathBuf::from(DEVIN_DIR).join("hooks").join("rtk"))
+    }
+}
+
+fn write_devin_hook_files(hook_dir: &Path, ctx: InitContext) -> Result<()> {
+    let js_path = hook_dir.join("rtk-devin.js");
+    let md_path = hook_dir.join("rtk-instructions.md");
+    let gitignore_path = hook_dir.join(".gitignore");
+
+    if !ctx.dry_run {
+        atomic_write(&js_path, RTK_DEVIN_JS)?;
+        atomic_write(&md_path, RTK_DEVIN_INSTRUCTIONS)?;
+        atomic_write(&gitignore_path, RTK_DEVIN_GITIGNORE)?;
+    } else {
+        println!(
+            "[dry-run] would create {}, {} and {}",
+            js_path.display(),
+            md_path.display(),
+            gitignore_path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Shell command to invoke the Node lifecycle hook for a given event.
+fn devin_node_hook_command(hook_dir: &Path, event: &str, global: bool) -> String {
+    if global {
+        format!(
+            r#"node "{}" {}"#,
+            hook_dir.join("rtk-devin.js").display(),
+            event
+        )
+    } else {
+        format!(
+            r#"node "$DEVIN_PROJECT_DIR/{}/rtk-devin.js" {}"#,
+            hook_dir.display(),
+            event
+        )
+    }
 }
 
 fn resolve_devin_install_target(global: bool) -> Result<DevinHookFile> {
@@ -3498,15 +3551,14 @@ fn devin_events(root: &serde_json::Value, layout: DevinLayout) -> &serde_json::V
 }
 
 fn devin_hook_already_present(root: &serde_json::Value, layout: DevinLayout) -> bool {
-    let pre = match devin_events(root, layout)
-        .get(PRE_TOOL_USE_KEY)
-        .and_then(|p| p.as_array())
-    {
+    let events = devin_events(root, layout);
+
+    // PreToolUse hook must be present.
+    let pre_tool_use = match events.get(PRE_TOOL_USE_KEY).and_then(|p| p.as_array()) {
         Some(arr) => arr,
         None => return false,
     };
-
-    pre.iter().any(|matcher_entry| {
+    let has_pre_tool_use = pre_tool_use.iter().any(|matcher_entry| {
         let matcher = matcher_entry
             .get("matcher")
             .and_then(|m| m.as_str())
@@ -3525,10 +3577,46 @@ fn devin_hook_already_present(root: &serde_json::Value, layout: DevinLayout) -> 
                     .and_then(|c| c.as_str())
                     .is_some_and(|cmd| cmd == DEVIN_HOOK_COMMAND)
             })
-    })
+    });
+    if !has_pre_tool_use {
+        return false;
+    }
+
+    // Lifecycle context hooks (SessionStart, UserPromptSubmit, PostCompaction) must be present.
+    for event in ["SessionStart", "UserPromptSubmit", "PostCompaction"] {
+        let has_event = events
+            .get(event)
+            .and_then(|a| a.as_array())
+            .map(|arr| {
+                arr.iter().any(|entry| {
+                    entry
+                        .get("hooks")
+                        .and_then(|h| h.as_array())
+                        .map(|hooks| {
+                            hooks.iter().any(|hook| {
+                                hook.get("command")
+                                    .and_then(|c| c.as_str())
+                                    .is_some_and(|cmd| cmd.contains("rtk-devin.js"))
+                            })
+                        })
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+        if !has_event {
+            return false;
+        }
+    }
+
+    true
 }
 
-fn insert_devin_hook_entry(root: &mut serde_json::Value, layout: DevinLayout) -> Result<()> {
+fn insert_devin_hook_entry(
+    root: &mut serde_json::Value,
+    layout: DevinLayout,
+    hook_dir: &Path,
+    global: bool,
+) -> Result<()> {
     let events = match layout {
         DevinLayout::Root => root
             .as_object_mut()
@@ -3542,64 +3630,107 @@ fn insert_devin_hook_entry(root: &mut serde_json::Value, layout: DevinLayout) ->
             .context("Devin config `hooks` key is not an object")?,
     };
 
+    // PreToolUse: rewrite exec commands via `rtk hook devin`.
     let pre_tool_use = events
         .entry(PRE_TOOL_USE_KEY)
         .or_insert_with(|| serde_json::json!([]))
         .as_array_mut()
         .context("PreToolUse value is not an array")?;
 
+    let mut rtk_pre_added = false;
     for entry in pre_tool_use.iter_mut() {
         let matcher = entry.get("matcher").and_then(|m| m.as_str()).unwrap_or("");
         if matcher == DEVIN_EXECUTE_MATCHER {
             if let Some(hook_array) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
                 hook_array.push(serde_json::json!({
                     "type": "command",
-                    "command": DEVIN_HOOK_COMMAND
+                    "command": DEVIN_HOOK_COMMAND,
+                    "timeout": 2
                 }));
-                return Ok(());
+                rtk_pre_added = true;
+                break;
             }
         }
     }
+    if !rtk_pre_added {
+        pre_tool_use.push(serde_json::json!({
+            "matcher": DEVIN_EXECUTE_MATCHER,
+            "hooks": [
+                { "type": "command", "command": DEVIN_HOOK_COMMAND, "timeout": 2 }
+            ]
+        }));
+    }
 
-    pre_tool_use.push(serde_json::json!({
-        "matcher": DEVIN_EXECUTE_MATCHER,
-        "hooks": [
-            { "type": "command", "command": DEVIN_HOOK_COMMAND }
-        ]
-    }));
+    // Lifecycle hooks: inject RTK instructions into context.
+    for event in ["SessionStart", "UserPromptSubmit", "PostCompaction"] {
+        let arr = events
+            .entry(event)
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .context(format!("{} value is not an array", event))?;
+
+        let command = devin_node_hook_command(hook_dir, event, global);
+        let already_present = arr.iter().any(|entry| {
+            entry
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|hooks| {
+                    hooks.iter().any(|hook| {
+                        hook.get("command")
+                            .and_then(|c| c.as_str())
+                            .is_some_and(|cmd| cmd == command)
+                    })
+                })
+                .unwrap_or(false)
+        });
+        if !already_present {
+            arr.push(serde_json::json!({
+                "hooks": [
+                    { "type": "command", "command": command }
+                ]
+            }));
+        }
+    }
+
     Ok(())
 }
 
-fn patch_devin_hook_file(file: &DevinHookFile, mode: PatchMode, ctx: InitContext) -> Result<bool> {
+fn patch_devin_hook_file(
+    file: &DevinHookFile,
+    global: bool,
+    mode: PatchMode,
+    ctx: InitContext,
+) -> Result<bool> {
     let InitContext { verbose, dry_run } = ctx;
     let path = &file.path;
 
+    let hook_dir = devin_rtk_hook_dir(file, global)?;
     let mut root = read_optional_json(path)?.unwrap_or_else(|| serde_json::json!({}));
 
     if devin_hook_already_present(&root, file.layout) {
         if verbose > 0 {
-            eprintln!("{}: RTK hook already present", path.display());
+            eprintln!("{}: RTK hooks already present", path.display());
         }
         return Ok(false);
     }
 
     match mode {
         PatchMode::Skip => {
-            print_devin_manual_instructions(path, file.layout);
+            print_devin_manual_instructions(path, &hook_dir, global, file.layout);
             return Ok(false);
         }
         PatchMode::Ask => {
             if dry_run {
                 println!("[dry-run] would prompt before patching {}", path.display());
             } else if !prompt_user_consent(path)? {
-                print_devin_manual_instructions(path, file.layout);
+                print_devin_manual_instructions(path, &hook_dir, global, file.layout);
                 return Ok(false);
             }
         }
         PatchMode::Auto => {}
     }
 
-    insert_devin_hook_entry(&mut root, file.layout)?;
+    insert_devin_hook_entry(&mut root, file.layout, &hook_dir, global)?;
 
     let serialized =
         serde_json::to_string_pretty(&root).context("Failed to serialize Devin hook file")?;
@@ -3625,50 +3756,61 @@ fn patch_devin_hook_file(file: &DevinHookFile, mode: PatchMode, ctx: InitContext
     Ok(true)
 }
 
-fn print_devin_manual_instructions(path: &Path, layout: DevinLayout) {
+fn print_devin_manual_instructions(
+    path: &Path,
+    hook_dir: &Path,
+    global: bool,
+    layout: DevinLayout,
+) {
     println!(
-        "To install manually, add the following to {}:",
-        path.display()
+        "To install manually, add the following to {} (and copy hooks/devin/rtk-devin.js + rtk-instructions.md to {}):",
+        path.display(),
+        hook_dir.display()
     );
-    let entry = serde_json::json!({
+
+    let pre_tool_entry = serde_json::json!({
         "matcher": DEVIN_EXECUTE_MATCHER,
         "hooks": [
-            { "type": "command", "command": DEVIN_HOOK_COMMAND }
+            { "type": "command", "command": DEVIN_HOOK_COMMAND, "timeout": 2 }
         ]
     });
-    match layout {
+
+    let mut lifecycle = serde_json::Map::new();
+    for event in ["SessionStart", "UserPromptSubmit", "PostCompaction"] {
+        let command = devin_node_hook_command(hook_dir, event, global);
+        lifecycle.insert(
+            event.to_string(),
+            serde_json::json!([
+                { "hooks": [{ "type": "command", "command": command }] }
+            ]),
+        );
+    }
+
+    let sample = match layout {
         DevinLayout::Root => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    PRE_TOOL_USE_KEY: [entry]
-                }))
-                .unwrap()
+            let mut root = serde_json::Map::new();
+            root.insert(
+                PRE_TOOL_USE_KEY.to_string(),
+                serde_json::json!([pre_tool_entry]),
             );
+            for (k, v) in lifecycle {
+                root.insert(k, v);
+            }
+            serde_json::Value::Object(root)
         }
         DevinLayout::Nested => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "hooks": {
-                        PRE_TOOL_USE_KEY: [entry]
-                    }
-                }))
-                .unwrap()
+            let mut hooks = serde_json::Map::new();
+            hooks.insert(
+                PRE_TOOL_USE_KEY.to_string(),
+                serde_json::json!([pre_tool_entry]),
             );
+            for (k, v) in lifecycle {
+                hooks.insert(k, v);
+            }
+            serde_json::json!({ "hooks": hooks })
         }
-    }
-}
-
-fn maybe_patch_devin_agents_md(ctx: InitContext, path: &Path) -> Result<()> {
-    write_rtk_block(
-        path,
-        RTK_DEVIN_AGENTS_BLOCK,
-        "RTK instructions",
-        "rtk init --agent devin",
-        ctx,
-    )?;
-    Ok(())
+    };
+    println!("{}", serde_json::to_string_pretty(&sample).unwrap());
 }
 
 pub fn uninstall_devin(global: bool, ctx: InitContext) -> Result<()> {
@@ -3712,7 +3854,22 @@ fn uninstall_devin_artifacts(global: bool, ctx: InitContext) -> Result<Vec<Strin
         }
     }
 
-    // Remove RTK instructions from AGENTS.md
+    // Remove RTK hook directory (rtk-devin.js + rtk-instructions.md).
+    let hook_dir = if global {
+        permissions::resolve_devin_config_dir()
+            .map(|d| d.join("hooks").join("rtk"))
+            .unwrap_or_else(|| PathBuf::from(".config/devin/hooks/rtk"))
+    } else {
+        PathBuf::from(DEVIN_DIR).join("hooks").join("rtk")
+    };
+    if hook_dir.exists() {
+        if !ctx.dry_run {
+            let _ = fs::remove_dir_all(&hook_dir);
+        }
+        removed.push(format!("RTK hook directory: {}", hook_dir.display()));
+    }
+
+    // Legacy: remove RTK instructions from AGENTS.md (old install method).
     let agents_md = if global {
         permissions::resolve_devin_config_dir()
             .map(|d| d.join(AGENTS_MD))
@@ -3786,44 +3943,66 @@ fn remove_devin_hook_from_json(root: &mut serde_json::Value, layout: DevinLayout
         None => return false,
     };
 
-    let pre_tool_use = match events_obj
+    let mut modified = false;
+
+    // Remove PreToolUse rtk hook entry.
+    if let Some(pre_tool_use) = events_obj
         .get_mut(PRE_TOOL_USE_KEY)
         .and_then(|p| p.as_array_mut())
     {
-        Some(arr) => arr,
-        None => return false,
-    };
-
-    let mut modified = false;
-    let mut empty_matchers = Vec::new();
-
-    for (idx, entry) in pre_tool_use.iter_mut().enumerate() {
-        let matcher = entry.get("matcher").and_then(|m| m.as_str()).unwrap_or("");
-        if matcher != DEVIN_EXECUTE_MATCHER {
-            continue;
+        let mut empty_matchers = Vec::new();
+        for (idx, entry) in pre_tool_use.iter_mut().enumerate() {
+            let matcher = entry.get("matcher").and_then(|m| m.as_str()).unwrap_or("");
+            if matcher != DEVIN_EXECUTE_MATCHER {
+                continue;
+            }
+            if let Some(hook_arr) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                let original = hook_arr.len();
+                hook_arr.retain(|hook| {
+                    hook.get("command").and_then(|c| c.as_str()) != Some(DEVIN_HOOK_COMMAND)
+                });
+                if hook_arr.len() < original {
+                    modified = true;
+                }
+                if hook_arr.is_empty() {
+                    empty_matchers.push(idx);
+                }
+            }
         }
-        if let Some(hook_arr) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
-            let original = hook_arr.len();
-            hook_arr.retain(|hook| {
-                hook.get("command").and_then(|c| c.as_str()) != Some(DEVIN_HOOK_COMMAND)
+        for idx in empty_matchers.into_iter().rev() {
+            pre_tool_use.remove(idx);
+            modified = true;
+        }
+        if pre_tool_use.is_empty() {
+            events_obj.remove(PRE_TOOL_USE_KEY);
+            modified = true;
+        }
+    }
+
+    // Remove lifecycle context hook entries.
+    for event in ["SessionStart", "UserPromptSubmit", "PostCompaction"] {
+        if let Some(arr) = events_obj.get_mut(event).and_then(|a| a.as_array_mut()) {
+            let original_len = arr.len();
+            arr.retain(|entry| {
+                !entry
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .map(|hooks| {
+                        hooks.iter().any(|hook| {
+                            hook.get("command")
+                                .and_then(|c| c.as_str())
+                                .is_some_and(|cmd| cmd.contains("rtk-devin.js"))
+                        })
+                    })
+                    .unwrap_or(false)
             });
-            if hook_arr.len() < original {
+            if arr.len() < original_len {
                 modified = true;
             }
-            if hook_arr.is_empty() {
-                empty_matchers.push(idx);
+            if arr.is_empty() {
+                events_obj.remove(event);
             }
         }
-    }
-
-    for idx in empty_matchers.into_iter().rev() {
-        pre_tool_use.remove(idx);
-        modified = true;
-    }
-
-    if pre_tool_use.is_empty() {
-        events_obj.remove(PRE_TOOL_USE_KEY);
-        modified = true;
     }
 
     if layout == DevinLayout::Nested
@@ -3850,35 +4029,33 @@ pub fn show_devin_config() -> Result<()> {
                 Ok(Some(v)) => {
                     if devin_hook_already_present(&v, DevinLayout::Nested) {
                         println!(
-                            "[ok] Global hook: {} in {}",
-                            DEVIN_HOOK_COMMAND,
+                            "[ok] Global hooks: PreToolUse + lifecycle in {}",
                             global_config.display()
                         );
                     } else {
                         println!(
-                            "[--] Global hook: not present in {}",
+                            "[--] Global hooks: not fully configured in {}",
                             global_config.display()
                         );
                     }
                 }
-                Ok(None) => println!("[--] Global hook: {} not found", global_config.display()),
+                Ok(None) => println!("[--] Global config: {} not found", global_config.display()),
                 Err(_) => println!(
-                    "[warn] Global hook: {} invalid JSON",
+                    "[warn] Global config: {} invalid JSON",
                     global_config.display()
                 ),
             }
 
-            // Global AGENTS.md
-            let global_agents = dir.join(AGENTS_MD);
-            if global_agents.exists() {
-                let content = fs::read_to_string(&global_agents).unwrap_or_default();
-                if content.contains(RTK_BLOCK_START) {
-                    println!("[ok] Global AGENTS.md: {}", global_agents.display());
-                } else {
-                    println!("[--] Global AGENTS.md: exists but rtk not configured");
-                }
+            let global_hook_dir = dir.join("hooks").join("rtk");
+            if global_hook_dir.join("rtk-devin.js").exists()
+                && global_hook_dir.join("rtk-instructions.md").exists()
+            {
+                println!("[ok] Global hook files: {}", global_hook_dir.display());
             } else {
-                println!("[--] Global AGENTS.md: not found");
+                println!(
+                    "[--] Global hook files: not found in {}",
+                    global_hook_dir.display()
+                );
             }
         }
         None => println!("[--] Devin config directory not found"),
@@ -3901,30 +4078,31 @@ pub fn show_devin_config() -> Result<()> {
             Ok(Some(v)) => {
                 if devin_hook_already_present(&v, layout) {
                     println!(
-                        "[ok] Project hook: {} in {}",
-                        DEVIN_HOOK_COMMAND,
+                        "[ok] Project hooks: PreToolUse + lifecycle in {}",
                         path.display()
                     );
                 } else {
-                    println!("[--] Project hook: not present in {}", path.display());
+                    println!(
+                        "[--] Project hooks: not fully configured in {}",
+                        path.display()
+                    );
                 }
             }
-            Ok(None) => println!("[--] Project hook: {} not found", path.display()),
-            Err(_) => println!("[warn] Project hook: {} invalid JSON", path.display()),
+            Ok(None) => println!("[--] Project config: {} not found", path.display()),
+            Err(_) => println!("[warn] Project config: {} invalid JSON", path.display()),
         }
     }
 
-    // Local AGENTS.md
-    let local_agents_md = PathBuf::from(AGENTS_MD);
-    if local_agents_md.exists() {
-        let content = fs::read_to_string(&local_agents_md).unwrap_or_default();
-        if content.contains(RTK_BLOCK_START) {
-            println!("[ok] Local AGENTS.md: rtk instructions present");
-        } else {
-            println!("[--] Local AGENTS.md: exists but rtk not configured");
-        }
+    let local_hook_dir = PathBuf::from(DEVIN_DIR).join("hooks").join("rtk");
+    if local_hook_dir.join("rtk-devin.js").exists()
+        && local_hook_dir.join("rtk-instructions.md").exists()
+    {
+        println!("[ok] Project hook files: {}", local_hook_dir.display());
     } else {
-        println!("[--] Local AGENTS.md: not found");
+        println!(
+            "[--] Project hook files: not found in {}",
+            local_hook_dir.display()
+        );
     }
 
     println!("\nUsage:");

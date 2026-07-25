@@ -2698,8 +2698,9 @@ fn run_cli() -> Result<i32> {
                 // Filter-specific mode: run only that filter's tests
                 hooks::verify_cmd::run(filter, require_all)?;
             } else {
-                // Default or --require-all: always run integrity check first
+                // Default or --require-all: always run integrity checks first
                 hooks::integrity::run_verify(cli.verbose)?;
+                hooks::integrity::run_verify_devin(cli.verbose)?;
                 hooks::verify_cmd::run(None, require_all)?;
             }
             0
