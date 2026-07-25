@@ -717,8 +717,8 @@ fn rewrite_compound(
                     any_changed = true;
                 }
                 result.push_str(&rewritten);
-                if tok.value == ";" {
-                    result.push(';');
+                if tok.value.starts_with(';') {
+                    result.push_str(&tok.value);
                     let after = tok.offset + tok.value.len();
                     if after < cmd.len() {
                         result.push(' ');
@@ -3863,6 +3863,21 @@ mod tests {
     }
 
     // --- Compound operator edge cases ---
+
+    #[test]
+    fn test_rewrite_preserves_case_terminators() {
+        // `;;` must stay atomic — `; ;` is a bash syntax error (#3197)
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "ls /tmp; case x in a) echo 1;; b) echo 2;& c) echo 3;;& *) echo 4;; esac",
+                &[]
+            ),
+            Some(
+                "rtk ls /tmp; case x in a) echo 1;; b) echo 2;& c) echo 3;;& *) echo 4;; esac"
+                    .into()
+            )
+        );
+    }
 
     #[test]
     fn test_rewrite_compound_or() {

@@ -145,12 +145,26 @@ fn tokenize_inner(input: &str, emit_newline: bool) -> Vec<ParsedToken> {
             }
             ';' => {
                 flush_arg(&mut tokens, &mut current, current_start);
+                let start = byte_pos;
+                byte_pos += char_len;
+                // `;;`, `;;&` and `;&` are case-statement terminators: atomic
+                // tokens, not two `;` separators (splitting them breaks bash).
+                let mut val = String::from(";");
+                if chars.peek() == Some(&';') {
+                    chars.next();
+                    byte_pos += 1;
+                    val.push(';');
+                }
+                if chars.peek() == Some(&'&') {
+                    chars.next();
+                    byte_pos += 1;
+                    val.push('&');
+                }
                 tokens.push(ParsedToken {
                     kind: TokenKind::Operator,
-                    value: ";".into(),
-                    offset: byte_pos,
+                    value: val,
+                    offset: start,
                 });
-                byte_pos += char_len;
                 current_start = byte_pos;
             }
             '&' => {
