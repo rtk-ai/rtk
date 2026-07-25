@@ -7,6 +7,8 @@ feat(hooks): Add first-class Devin CLI integration
 
 Adds native support for [Devin CLI](https://docs.devin.ai/get-started) via a `PreToolUse` hook and lifecycle context hooks. Devin CLI shell commands are rewritten to `rtk <command>` whenever RTK has a filter, with decisions (`approve` / `block`) synced to Devin CLI's own permission settings.
 
+Closes #3205
+
 ## Changes
 
 - `src/hooks/hook_cmd.rs`
@@ -30,6 +32,8 @@ Adds native support for [Devin CLI](https://docs.devin.ai/get-started) via a `Pr
   - Update Devin CLI docs and supported-agents table.
 - `docs/guide/devin-cli.md`
   - New dedicated Devin CLI setup and troubleshooting guide.
+- `.github/hooks/rtk-rewrite.json`
+  - Fix stale `rtk hook` command to `rtk hook copilot` and add the `preToolUse` schema used by Copilot CLI.
 
 ## Test plan
 
