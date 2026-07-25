@@ -3880,6 +3880,24 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_preserves_quoted_case_terminator() {
+        // `;;` inside quotes is data, not an operator
+        assert_eq!(
+            rewrite_command_no_prefixes("grep ';;' file.txt; ls /tmp", &[]),
+            Some("rtk grep ';;' file.txt; rtk ls /tmp".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_preserves_find_exec_escaped_semicolon() {
+        // `\;` is find's terminator word; `;` right after it is a real separator
+        assert_eq!(
+            rewrite_command_no_prefixes(r"find /tmp -type f -exec echo {} \;; git status", &[]),
+            Some(r"rtk find /tmp -type f -exec echo {} \;; rtk git status".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_compound_or() {
         // `||` fallback: left rewritten, right rewritten
         assert_eq!(
