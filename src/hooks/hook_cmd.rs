@@ -35,6 +35,10 @@ enum HookFormat {
     /// Carries the full parsed `toolArgs` object so we can rewrite `command` while preserving
     /// host-supplied metadata (description, initial_wait, mode, …) the tool requires.
     CopilotCli { command: String, args: Value },
+    /// JetBrains Copilot IDE terminal tool: camelCase `toolName=run_in_terminal`
+    /// with JSON-string `toolArgs`. The host ignores transparent rewrites, so it
+    /// needs a top-level deny-with-suggestion response.
+    CopilotIde { command: String },
     /// Non-bash tool, already uses rtk, or unknown format — pass through silently.
     PassThrough,
 }
@@ -62,8 +66,19 @@ pub fn run_copilot() -> Result<()> {
     match detect_format(&v) {
         HookFormat::VsCode { command } => handle_vscode(&command),
         HookFormat::CopilotCli { command, args } => handle_copilot_cli(&command, &args),
+        HookFormat::CopilotIde { command } => handle_copilot_ide(&command),
         HookFormat::PassThrough => Ok(()),
     }
+}
+
+fn parse_camel_case_tool_args(v: &Value) -> Option<(String, Value)> {
+    let tool_args_str = v.get("toolArgs").and_then(|t| t.as_str())?;
+    let tool_args = serde_json::from_str::<Value>(tool_args_str).ok()?;
+    let cmd = tool_args
+        .get("command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())?;
+    Some((cmd.to_string(), tool_args))
 }
 
 fn detect_format(v: &Value) -> HookFormat {
@@ -86,19 +101,13 @@ fn detect_format(v: &Value) -> HookFormat {
     // Copilot CLI: camelCase keys, toolArgs is a JSON-encoded string
     if let Some(tool_name) = v.get("toolName").and_then(|t| t.as_str()) {
         if tool_name == "bash" {
-            if let Some(tool_args_str) = v.get("toolArgs").and_then(|t| t.as_str()) {
-                if let Ok(tool_args) = serde_json::from_str::<Value>(tool_args_str) {
-                    if let Some(cmd) = tool_args
-                        .get("command")
-                        .and_then(|c| c.as_str())
-                        .filter(|c| !c.is_empty())
-                    {
-                        return HookFormat::CopilotCli {
-                            command: cmd.to_string(),
-                            args: tool_args,
-                        };
-                    }
-                }
+            if let Some((command, args)) = parse_camel_case_tool_args(v) {
+                return HookFormat::CopilotCli { command, args };
+            }
+        }
+        if tool_name == "run_in_terminal" {
+            if let Some((command, _args)) = parse_camel_case_tool_args(v) {
+                return HookFormat::CopilotIde { command };
             }
         }
         return HookFormat::PassThrough;
@@ -185,6 +194,13 @@ fn handle_copilot_cli(cmd: &str, args: &Value) -> Result<()> {
     Ok(())
 }
 
+fn handle_copilot_ide(cmd: &str) -> Result<()> {
+    if let Some(response) = copilot_ide_response(cmd) {
+        let _ = writeln!(io::stdout(), "{response}");
+    }
+    Ok(())
+}
+
 fn copilot_cli_response(cmd: &str, args: &Value) -> Option<Value> {
     copilot_cli_response_from_decision(
         args,
@@ -229,6 +245,29 @@ fn copilot_cli_response_from_decision(
         response["permissionDecision"] = json!("allow");
     }
     Some(response)
+}
+
+fn copilot_ide_response(cmd: &str) -> Option<Value> {
+    copilot_ide_response_from_decision(decide_hook_action(cmd, permissions::Host::Claude), cmd)
+}
+
+fn copilot_ide_response_from_decision(decision: HookDecision, cmd: &str) -> Option<Value> {
+    let reason = match decision {
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            "Blocked by RTK permission rule".to_string()
+        }
+        HookDecision::Defer => return None,
+        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r) => {
+            audit_log("rewrite", cmd, &r);
+            format!("RTK token optimization: re-run this command as `{r}` instead.")
+        }
+    };
+
+    Some(json!({
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason,
+    }))
 }
 
 // ── Gemini hook ───────────────────────────────────────────────
@@ -691,6 +730,24 @@ mod tests {
         json!({ "toolName": "bash", "toolArgs": args })
     }
 
+    fn copilot_ide_input(tool: &str, cmd: &str) -> Value {
+        let args = serde_json::to_string(&json!({
+            "command": cmd,
+            "explanation": "Show terminal output",
+            "isBackground": false,
+        }))
+        .unwrap();
+        json!({ "toolName": tool, "toolArgs": args })
+    }
+
+    fn copilot_response_for_test(v: &Value) -> Option<Value> {
+        match detect_format(v) {
+            HookFormat::CopilotCli { command, args } => copilot_cli_response(&command, &args),
+            HookFormat::CopilotIde { command } => copilot_ide_response(&command),
+            HookFormat::VsCode { .. } | HookFormat::PassThrough => None,
+        }
+    }
+
     #[test]
     fn test_detect_vscode_bash() {
         assert!(matches!(
@@ -712,6 +769,14 @@ mod tests {
         assert!(matches!(
             detect_format(&copilot_cli_input("git status")),
             HookFormat::CopilotCli { .. }
+        ));
+    }
+
+    #[test]
+    fn test_detect_copilot_ide_run_terminal() {
+        assert!(matches!(
+            detect_format(&copilot_ide_input("run_in_terminal", "git status")),
+            HookFormat::CopilotIde { command } if command == "git status"
         ));
     }
 
@@ -892,6 +957,42 @@ mod tests {
         assert_eq!(modified["description"], "install ripgrep");
         assert_eq!(modified["initial_wait"], 30);
         assert_eq!(modified["mode"], "sync");
+    }
+
+    #[test]
+    fn test_copilot_ide_run_terminal_denies_with_suggestion() {
+        let r = copilot_response_for_test(&copilot_ide_input("run_in_terminal", "git status"))
+            .expect("JetBrains Copilot should receive a deny-with-suggestion response");
+        assert_eq!(r["permissionDecision"], "deny");
+        assert!(r["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .contains("rtk git status"));
+        assert!(
+            r.get("modifiedArgs").is_none(),
+            "JetBrains host ignores modifiedArgs; IDE response must use top-level deny"
+        );
+        assert!(r.get("hookSpecificOutput").is_none());
+    }
+
+    #[test]
+    fn test_copilot_ide_get_terminal_output_passthrough() {
+        assert!(matches!(
+            detect_format(&copilot_ide_input("get_terminal_output", "git status")),
+            HookFormat::PassThrough
+        ));
+        assert!(
+            copilot_response_for_test(&copilot_ide_input("get_terminal_output", "git status"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_copilot_ide_already_rtk_passthrough() {
+        assert!(
+            copilot_response_for_test(&copilot_ide_input("run_in_terminal", "rtk git status"))
+                .is_none()
+        );
     }
 
     fn end_to_end(cmd: &str) -> Option<Value> {
