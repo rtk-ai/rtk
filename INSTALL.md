@@ -325,6 +325,18 @@ rtk gain --history    # With command history
 
 ## Devin CLI Setup
 
+### One-command install from a fork
+
+```bash
+git clone https://github.com/warelik/rtk.git
+cd rtk
+bash install-devin.sh
+```
+
+This builds `rtk` from source with `cargo install --path .`, then runs `rtk init -g --agent devin --auto-patch` to register the global hooks and lifecycle instructions.
+
+### Manual install (if you already have `rtk`)
+
 ```bash
 # User-scoped (all Devin projects)
 rtk init -g --agent devin

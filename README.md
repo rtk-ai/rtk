@@ -99,6 +99,18 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 
 > **Windows users**: Extract the zip and place `rtk.exe` somewhere in your PATH (e.g. `C:\Users\<you>\.local\bin`). Run RTK from **Command Prompt**, **PowerShell**, or **Windows Terminal** — do not double-click the `.exe` (it will flash and close). The full hook system works natively on Windows (and in [WSL](https://learn.microsoft.com/en-us/windows/wsl/install)). See [Windows setup](#windows) below for details.
 
+### Devin CLI (this fork)
+
+One-command install from a cloned fork — builds `rtk` from source and registers the Devin CLI hooks globally.
+
+```bash
+git clone https://github.com/warelik/rtk.git
+cd rtk
+bash install-devin.sh
+```
+
+Then restart Devin CLI and test with `git status`.
+
 ### Verify Installation
 
 ```bash
