@@ -901,7 +901,9 @@ fn pr_create(args: &[String], _verbose: u8) -> Result<i32> {
             };
             ok_confirmation("created", &detail)
         },
-        RunOptions::stdout_only().early_exit_on_failure(),
+        RunOptions::stdout_only()
+            .early_exit_on_failure()
+            .inherit_stdin(),
     )
 }
 
@@ -975,7 +977,9 @@ fn pr_action(action: &str, args: &[String], _verbose: u8) -> Result<i32> {
         "gh",
         &format!("pr {}", subcmd),
         move |_stdout| ok_confirmation(&action, &pr_num),
-        RunOptions::stdout_only().early_exit_on_failure(),
+        RunOptions::stdout_only()
+            .early_exit_on_failure()
+            .inherit_stdin(),
     )
 }
 
