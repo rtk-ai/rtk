@@ -53,6 +53,19 @@ fn base_command(cmd: &str) -> String {
     }
 }
 
+/// Split the action tally into (rewrites, suggests, skips).
+///
+/// `rewrite` counts commands rewritten transparently for the agent, while
+/// `suggest` counts IDE deny-with-suggestion outcomes the user must re-run by
+/// hand (see `copilot_ide_response_from_decision` in `hook_cmd.rs`). These are
+/// distinct outcomes, so suggestions inflate neither the rewrite nor the skip
+/// count; everything else (`deny`, `ask`, `skip:*`) falls under skips.
+fn summarize_counts(action_counts: &HashMap<&str, usize>, total: usize) -> (usize, usize, usize) {
+    let rewrites = action_counts.get("rewrite").copied().unwrap_or(0);
+    let suggests = action_counts.get("suggest").copied().unwrap_or(0);
+    (rewrites, suggests, total - rewrites - suggests)
+}
+
 /// Filter entries to those within the last N days.
 fn filter_since_days(entries: &[AuditEntry], days: u64) -> Vec<&AuditEntry> {
     if days == 0 {
@@ -108,17 +121,13 @@ pub fn run(since_days: u64, verbose: u8) -> Result<()> {
     }
 
     let total = filtered.len();
-    let rewrites = action_counts.get("rewrite").copied().unwrap_or(0);
-    let skips = total - rewrites;
-    let rewrite_pct = if total > 0 {
-        rewrites as f64 / total as f64 * 100.0
-    } else {
-        0.0
-    };
-    let skip_pct = if total > 0 {
-        skips as f64 / total as f64 * 100.0
-    } else {
-        0.0
+    let (rewrites, suggests, skips) = summarize_counts(&action_counts, total);
+    let pct = |n: usize| {
+        if total > 0 {
+            n as f64 / total as f64 * 100.0
+        } else {
+            0.0
+        }
     };
 
     // Period label
@@ -131,8 +140,13 @@ pub fn run(since_days: u64, verbose: u8) -> Result<()> {
     println!("Hook Audit ({})", period);
     println!("{}", "─".repeat(30));
     println!("Total invocations: {}", total);
-    println!("Rewrites:          {} ({:.1}%)", rewrites, rewrite_pct);
-    println!("Skips:             {} ({:.1}%)", skips, skip_pct);
+    println!("Rewrites:          {} ({:.1}%)", rewrites, pct(rewrites));
+    // IDE deny-with-suggestion outcomes are shown only when present, so the
+    // common-case output is unchanged.
+    if suggests > 0 {
+        println!("Suggestions:       {} ({:.1}%)", suggests, pct(suggests));
+    }
+    println!("Skips:             {} ({:.1}%)", skips, pct(skips));
 
     // Skip breakdown
     let skip_actions: Vec<(&str, usize)> = action_counts
@@ -226,6 +240,34 @@ mod tests {
             original_cmd: cmd.to_string(),
             _rewritten_cmd: "-".to_string(),
         }
+    }
+
+    #[test]
+    fn test_summarize_counts_separates_suggestions() {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        counts.insert("rewrite", 5);
+        counts.insert("suggest", 2);
+        counts.insert("deny", 1);
+        counts.insert("skip:no_match", 3);
+        let total = 11;
+
+        let (rewrites, suggests, skips) = summarize_counts(&counts, total);
+
+        assert_eq!(rewrites, 5);
+        assert_eq!(suggests, 2);
+        // Suggestions are excluded from both rewrites and skips: the remaining
+        // skips are deny (1) + skip:no_match (3) = 4.
+        assert_eq!(skips, 4);
+    }
+
+    #[test]
+    fn test_summarize_counts_without_suggestions_matches_legacy() {
+        // With no "suggest" entries, skips == total - rewrites, as before.
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        counts.insert("rewrite", 3);
+        counts.insert("skip:no_match", 2);
+
+        assert_eq!(summarize_counts(&counts, 5), (3, 0, 2));
     }
 
     #[test]

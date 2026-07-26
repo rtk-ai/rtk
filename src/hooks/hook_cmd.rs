@@ -212,7 +212,13 @@ fn copilot_ide_response_from_decision(decision: HookDecision, cmd: &str) -> Opti
             "Blocked by RTK permission rule".to_string()
         }
         HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite { rewritten, .. } => {
-            audit_log("rewrite", cmd, &rewritten);
+            // The IDE host ignores modifiedArgs, so a rewrite can't be applied
+            // transparently here — it surfaces as a deny-with-suggestion the user
+            // must re-run by hand. Log it as "suggest", not "rewrite": unlike the
+            // CLI/Cursor/Droid/Gemini paths (where the rewrite is applied for the
+            // user), nothing is applied here, so `rtk hook-audit` must not count it
+            // among transparent rewrites.
+            audit_log("suggest", cmd, &rewritten);
             format!("RTK token optimization: re-run this command as `{rewritten}` instead.")
         }
     };
