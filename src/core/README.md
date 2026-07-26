@@ -40,10 +40,10 @@ CREATE TABLE commands (
   original_cmd TEXT,           -- "ls -la"
   rtk_cmd TEXT,                -- "rtk ls"
   project_path TEXT,           -- cwd (for project-scoped stats)
-  input_tokens INTEGER,        -- estimated from raw output
-  output_tokens INTEGER,       -- estimated from filtered output
+  input_tokens INTEGER,        -- estimated from raw output (bytes / 4, no tokenizer)
+  output_tokens INTEGER,       -- estimated from filtered output (bytes / 4)
   saved_tokens INTEGER,        -- input - output
-  savings_pct REAL,            -- (saved / input) * 100
+  savings_pct REAL,            -- (saved / input) * 100, i.e. reduction in bash output bytes
   exec_time_ms INTEGER         -- elapsed milliseconds
 );
 
