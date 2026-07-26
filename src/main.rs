@@ -20,6 +20,7 @@ use cmds::php::{ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpunit_c
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
+use cmds::scala::sbt_cmd;
 use cmds::system::{
     deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
     summary, tree, wc_cmd,
@@ -46,10 +47,14 @@ pub enum AgentTarget {
     Kilocode,
     /// Google Antigravity
     Antigravity,
+    /// Kimi AI
+    Kimi,
     /// Pi coding agent
     Pi,
     /// Hermes CLI
     Hermes,
+    /// Factory Droid CLI
+    Droid,
 }
 
 #[derive(Parser)]
@@ -784,6 +789,12 @@ enum Commands {
         command: GoCommands,
     },
 
+    /// SBT (Scala Build Tool) commands with compact output
+    Sbt {
+        #[command(subcommand)]
+        command: SbtCommands,
+    },
+
     /// Graphite (gt) stacked PR commands with compact output
     Gt {
         #[command(subcommand)]
@@ -853,6 +864,8 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process Factory Droid PreToolUse hook (reads JSON from stdin)
+    Droid,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -899,6 +912,12 @@ enum GitCommands {
     /// Commit → "ok \<hash\>"
     Commit {
         /// Git commit arguments (supports -a, -m, --amend, --allow-empty, etc)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Checkout branch or restore paths → "ok"
+    Checkout {
+        /// Git checkout arguments (supports -b, branch names, refs, -- paths)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1236,6 +1255,31 @@ enum GoCommands {
     Other(Vec<OsString>),
 }
 
+#[derive(Debug, Subcommand)]
+enum SbtCommands {
+    /// Run tests with compact output (90% token reduction via ScalaTest filtering)
+    Test {
+        /// Additional sbt test arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compile with compact output (errors only)
+    Compile {
+        /// Additional sbt compile arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Run application with noise-stripped output
+    Run {
+        /// Additional sbt run arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported sbt subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -1520,6 +1564,8 @@ where
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
+    } else if agent == Some(AgentTarget::Droid) {
+        hooks::init::uninstall_droid(global, ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -1531,7 +1577,7 @@ fn run_cli() -> Result<i32> {
     // Fire-and-forget telemetry ping (1/day, non-blocking)
     core::telemetry::maybe_ping();
 
-    let cli = match Cli::try_parse() {
+    let cli = match Cli::try_parse_from(std::env::args_os()) {
         Ok(cli) => cli,
         Err(e) => {
             if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
@@ -1680,6 +1726,13 @@ fn run_cli() -> Result<i32> {
                 }
                 GitCommands::Commit { args } => git::run(
                     git::GitCommand::Commit,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Checkout { args } => git::run(
+                    git::GitCommand::Checkout,
                     &args,
                     None,
                     cli.verbose,
@@ -2006,8 +2059,15 @@ fn run_cli() -> Result<i32> {
                     );
                 }
                 hooks::init::run_antigravity_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Kimi) {
+                if global {
+                    anyhow::bail!("Kimi AI is project-scoped. Use: rtk init --agent kimi");
+                }
+                hooks::init::run_kimi_mode(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Droid) {
+                hooks::init::run_droid_mode(global, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2329,6 +2389,13 @@ fn run_cli() -> Result<i32> {
             GoCommands::Other(args) => go_cmd::run_other(&args, cli.verbose)?,
         },
 
+        Commands::Sbt { command } => match command {
+            SbtCommands::Test { args } => sbt_cmd::run_test(&args, cli.verbose)?,
+            SbtCommands::Compile { args } => sbt_cmd::run_compile(&args, cli.verbose)?,
+            SbtCommands::Run { args } => sbt_cmd::run_run(&args, cli.verbose)?,
+            SbtCommands::Other(args) => sbt_cmd::run_other(&args, cli.verbose)?,
+        },
+
         Commands::Gt { command } => match command {
             GtCommands::Log { args } => gt_cmd::run_log(&args, cli.verbose)?,
             GtCommands::Submit { args } => gt_cmd::run_submit(&args, cli.verbose)?,
@@ -2365,6 +2432,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::Droid => {
+                hooks::hook_cmd::run_droid()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {
@@ -2693,6 +2764,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Pip { .. }
             | Commands::Uv { .. }
             | Commands::Go { .. }
+            | Commands::Sbt { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
     )
@@ -3072,6 +3144,7 @@ mod tests {
             "golangci-lint",
             "gradlew",
             "mvn",
+            "sbt",
             "php",
             "phpunit",
             "phpstan",

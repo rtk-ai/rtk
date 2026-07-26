@@ -12,8 +12,9 @@
 //!
 //! Reference: SA-2025-RTK-001 (Finding F-01)
 
-use super::constants::{HOOKS_SUBDIR, REWRITE_HOOK_FILE};
+use super::constants::{HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE};
 use super::init::resolve_claude_dir;
+use super::is_claude_hook_command;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -211,10 +212,10 @@ pub fn run_verify(verbose: u8) -> Result<()> {
     if !hook_path.exists() && !hash_file.exists() {
         // Check if the native binary command is registered in settings.json
         let claude_dir = resolve_claude_dir().context("Cannot determine claude directory")?;
-        let settings_path = claude_dir.join("settings.json");
+        let settings_path = claude_dir.join(super::constants::SETTINGS_JSON);
         if settings_path.exists() {
             let content = fs::read_to_string(&settings_path).unwrap_or_default();
-            if content.contains("rtk hook claude") {
+            if settings_has_claude_hook(&content) {
                 println!("PASS  native binary hook registered in settings.json");
                 println!("      command: rtk hook claude");
                 println!("      (no script file — integrity check not applicable)");
@@ -321,6 +322,22 @@ pub fn runtime_check() -> Result<()> {
     Ok(())
 }
 
+fn settings_has_claude_hook(content: &str) -> bool {
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(content) else {
+        return false;
+    };
+
+    root.get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .filter_map(|hook| hook.get("command")?.as_str())
+        .any(is_claude_hook_command)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,6 +381,24 @@ mod tests {
 
         let status = verify_hook_at(&hook).unwrap();
         assert_eq!(status, IntegrityStatus::Verified);
+    }
+
+    #[test]
+    fn test_settings_has_claude_hook_accepts_absolute_rtk_path() {
+        let settings = r#"{
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/opt/homebrew/bin/rtk hook claude",
+                        "timeout": 5
+                    }]
+                }]
+            }
+        }"#;
+
+        assert!(settings_has_claude_hook(settings));
     }
 
     #[test]

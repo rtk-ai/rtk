@@ -2,6 +2,7 @@
 
 use crate::core::args_utils;
 use crate::core::guard::never_worse;
+use crate::core::runner::{self, RunOptions};
 use crate::core::stream::{
     self, exec_capture, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode,
 };
@@ -23,6 +24,7 @@ pub enum GitCommand {
     Show,
     Add,
     Commit,
+    Checkout,
     Push,
     Pull,
     Branch,
@@ -95,6 +97,7 @@ pub fn run(
         GitCommand::Show => run_show(args, max_lines, verbose, global_args),
         GitCommand::Add => run_add(args, verbose, global_args),
         GitCommand::Commit => run_commit(args, verbose, global_args),
+        GitCommand::Checkout => run_checkout(args, verbose, global_args),
         GitCommand::Push => run_push(args, verbose, global_args),
         GitCommand::Pull => run_pull(args, verbose, global_args),
         GitCommand::Branch => run_branch(args, verbose, global_args),
@@ -1077,6 +1080,183 @@ fn classify_commit_outcome(success: bool, stdout: &str, exit_code: i32) -> Commi
         CommitOutcome::Ok(compact)
     } else {
         CommitOutcome::Failed(exit_code)
+    }
+}
+
+fn run_checkout(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let args = args_utils::restore_double_dash(args);
+
+    if verbose > 0 {
+        eprintln!("git checkout");
+    }
+
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("checkout");
+    for arg in &args {
+        cmd.arg(arg);
+    }
+
+    let args_display = args.join(" ");
+    let args_for_filter = args.clone();
+    runner::run_filtered_with_exit(
+        cmd,
+        "git checkout",
+        &args_display,
+        move |raw, exit_code| format_checkout_output(&args_for_filter, raw, exit_code),
+        RunOptions::with_tee("git_checkout"),
+    )
+}
+
+fn format_checkout_output(args: &[String], raw: &str, exit_code: i32) -> String {
+    if exit_code == 0 {
+        format_checkout_success(args, raw)
+    } else {
+        filter_checkout_failure(raw)
+    }
+}
+
+fn format_checkout_success(args: &[String], raw: &str) -> String {
+    if let Some(restored) = checkout_restored_count(args) {
+        return format!("ok {} {}", restored, pluralize(restored, "file restored", "files restored"));
+    }
+    if let Some(branch) = checkout_reset_branch_arg(args) {
+        return format!("ok {}", branch);
+    }
+
+    for line in raw.lines().map(str::trim) {
+        if let Some(branch) = quoted_suffix(line, "Switched to a new branch ") {
+            return format!("ok {} (new)", branch);
+        }
+        if let Some(branch) = quoted_suffix(line, "Switched to branch ") {
+            return format!("ok {}", branch);
+        }
+        if let Some(branch) = quoted_suffix(line, "Already on ") {
+            return format!("ok {}", branch);
+        }
+        if let Some(rest) = line.strip_prefix("HEAD is now at ") {
+            let hash = rest.split_whitespace().next().unwrap_or("HEAD");
+            return format!("ok HEAD {}", hash);
+        }
+        if line.starts_with("Updated ") && line.contains(" path") {
+            return format!("ok {}", line.to_ascii_lowercase());
+        }
+    }
+
+    if let Some(branch) = checkout_new_branch_arg(args) {
+        return format!("ok {} (new)", branch);
+    }
+    if let Some(branch) = checkout_branch_arg(args) {
+        return format!("ok {}", branch);
+    }
+
+    "ok".to_string()
+}
+
+fn checkout_restored_count(args: &[String]) -> Option<usize> {
+    let separator = args.iter().position(|arg| arg == "--")?;
+    let count = args[separator + 1..]
+        .iter()
+        .filter(|arg| !arg.is_empty())
+        .count();
+    (count > 0).then_some(count)
+}
+
+fn checkout_new_branch_arg(args: &[String]) -> Option<&str> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-b" | "--orphan" => return iter.next().map(String::as_str),
+            "-B" => {
+                iter.next();
+            }
+            _ => {
+                if let Some(branch) = arg.strip_prefix("--orphan=") {
+                    return Some(branch);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn checkout_reset_branch_arg(args: &[String]) -> Option<&str> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "-B" {
+            return iter.next().map(String::as_str);
+        }
+    }
+    None
+}
+
+fn checkout_branch_arg(args: &[String]) -> Option<&str> {
+    if args.iter().any(|arg| arg == "--") {
+        return None;
+    }
+
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-b" | "-B" | "--orphan" => {
+                iter.next();
+            }
+            "-t" | "--track" | "--detach" => {}
+            _ if arg.starts_with('-') => {}
+            _ => return Some(arg),
+        }
+    }
+    None
+}
+
+fn quoted_suffix<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    line.strip_prefix(prefix)
+        .and_then(|rest| rest.strip_prefix('\''))
+        .and_then(|rest| rest.strip_suffix('\''))
+}
+
+fn pluralize<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
+    if count == 1 { singular } else { plural }
+}
+
+fn filter_checkout_failure(raw: &str) -> String {
+    let mut important = Vec::new();
+    let mut in_file_list = false;
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let is_header = trimmed.starts_with("error:")
+            || trimmed.starts_with("fatal:")
+            || trimmed.starts_with("CONFLICT");
+
+        if is_header {
+            in_file_list =
+                trimmed.contains("following") && trimmed.contains("files") && trimmed.ends_with(':');
+            important.push(trimmed.to_string());
+            continue;
+        }
+
+        if in_file_list {
+            if trimmed.starts_with("Please ") || trimmed.starts_with("Aborting") {
+                in_file_list = false;
+            } else if line.starts_with(char::is_whitespace) {
+                important.push(line.to_string());
+                continue;
+            }
+        }
+
+        if trimmed.starts_with("Aborting") {
+            important.push(trimmed.to_string());
+        }
+    }
+
+    if important.is_empty() {
+        raw.trim().to_string()
+    } else {
+        important.join("\n")
     }
 }
 

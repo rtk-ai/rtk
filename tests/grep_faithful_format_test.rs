@@ -94,6 +94,17 @@ fn context_flags_match_grep_n() {
     assert_eq_grep_n(&["-C1", "MATCH", &f]);
 }
 
+#[test]
+fn context_group_separator_matches_grep_n() {
+    let d = tempfile::tempdir().unwrap();
+    let f = write(
+        d.path(),
+        "sep.txt",
+        "match A\nfill1\nfill2\nfill3\nmatch B\n",
+    );
+    assert_eq_grep_n(&["-A1", "match", &f]);
+}
+
 // #1436: a single-file `-n` search with `::` content and a BRE pattern with
 // literal `()` must equal grep exactly — no broadened matches, and no synthetic
 // `[file]` bucket from splitting on `::`.

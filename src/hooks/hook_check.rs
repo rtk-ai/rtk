@@ -1,9 +1,8 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
-use super::constants::{
-    CLAUDE_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
-};
+use super::constants::{HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON};
 use super::init::resolve_claude_dir;
+use super::is_claude_hook_command;
 use crate::core::constants::RTK_DATA_DIR;
 use std::path::PathBuf;
 
@@ -82,7 +81,7 @@ fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
         .filter_map(|entry| entry.get("hooks")?.as_array())
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
-        .any(|cmd| cmd == CLAUDE_HOOK_COMMAND)
+        .any(is_claude_hook_command)
 }
 
 /// Check if the installed hook is missing or outdated, warn once per day.
@@ -209,6 +208,29 @@ mod tests {
         // Clone works
         let s = HookStatus::Missing;
         assert_eq!(s.clone(), HookStatus::Missing);
+    }
+
+    #[test]
+    fn test_binary_hook_registered_accepts_absolute_rtk_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join(SETTINGS_JSON),
+            r#"{
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/opt/homebrew/bin/rtk hook claude",
+                            "timeout": 5
+                        }]
+                    }]
+                }
+            }"#,
+        )
+        .expect("write settings");
+
+        assert!(binary_hook_registered(tmp.path()));
     }
 
     #[test]

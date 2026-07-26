@@ -1,4 +1,7 @@
-use super::constants::{CLAUDE_DIR, CURSOR_DIR, GEMINI_DIR, SETTINGS_JSON, SETTINGS_LOCAL_JSON};
+use super::constants::{
+    CLAUDE_DIR, CURSOR_DIR, DROID_DIR, DROID_HOME_ENV, DROID_SETTINGS_FILE, GEMINI_DIR,
+    SETTINGS_JSON, SETTINGS_LOCAL_JSON,
+};
 use crate::core::stream::exec_capture;
 use crate::discover::lexer::split_for_permissions;
 use serde_json::Value;
@@ -32,6 +35,7 @@ pub enum Host {
     Claude,
     Cursor,
     Gemini,
+    Droid,
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
@@ -39,6 +43,7 @@ pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
         Host::Claude => load_permission_rules(),
         Host::Cursor => load_cursor_rules(),
         Host::Gemini => load_gemini_rules(),
+        Host::Droid => load_droid_rules(),
     };
     check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
 }
@@ -271,6 +276,64 @@ fn load_gemini_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
     (Vec::new(), ask, allow)
 }
 
+// All four Droid settings scopes: user (honoring $FACTORY_HOME_OVERRIDE) and
+// project `.factory/`, each with settings.json + settings.local.json
+// (docs.factory.ai/cli/configuration/settings). Missing files are skipped.
+fn droid_settings_scopes() -> Vec<Value> {
+    let mut dirs_to_read = Vec::new();
+    if let Some(home) = std::env::var_os(DROID_HOME_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+    {
+        dirs_to_read.push(home.join(DROID_DIR));
+    }
+    if let Some(root) = find_project_root() {
+        dirs_to_read.push(root.join(DROID_DIR));
+    }
+
+    let mut scopes = Vec::new();
+    for dir in dirs_to_read {
+        for file in [DROID_SETTINGS_FILE, SETTINGS_LOCAL_JSON] {
+            if let Some(v) = read_json(&dir.join(file)) {
+                scopes.push(v);
+            }
+        }
+    }
+    scopes
+}
+
+/// Deny-only: `commandDenylist`/`commandBlocklist` → deny, so RTK steps aside
+/// and Droid's native confirm/block fires on the original command (rewriting
+/// first would dodge Droid's own pattern matching). Entries are unioned across
+/// scopes — a spurious step-aside is safe, a missed entry reopens the dodge.
+/// No allow rules: RTK never asserts a decision for a command it renames to
+/// `rtk …`, and Droid's built-in defaults are not mirrored (they would drift).
+fn load_droid_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
+    droid_rules_from_settings(&droid_settings_scopes())
+}
+
+pub(crate) fn droid_rules_from_settings(
+    scopes: &[Value],
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut deny = Vec::new();
+    for settings in scopes {
+        for key in ["commandBlocklist", "commandDenylist"] {
+            let Some(arr) = settings.get(key).and_then(Value::as_array) else {
+                continue;
+            };
+            deny.extend(
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|rule| !rule.is_empty())
+                    .map(String::from),
+            );
+        }
+    }
+    (deny, Vec::new(), Vec::new())
+}
+
 /// Locate the project root by walking up from CWD looking for `.claude/`.
 ///
 /// Falls back to `git rev-parse --show-toplevel` if not found via directory walk.
@@ -318,6 +381,11 @@ pub(crate) fn extract_bash_pattern(rule: &str) -> &str {
 /// - `* suffix`, `pre * suf` → glob matching where `*` matches any sequence of characters
 /// - `pattern` → exact match or prefix match (cmd must equal pattern or start with `{pattern} `)
 pub(crate) fn command_matches_pattern(cmd: &str, pattern: &str) -> bool {
+    let cmd_norm = cmd.split_whitespace().collect::<Vec<_>>().join(" ");
+    let pattern_norm = pattern.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cmd = cmd_norm.as_str();
+    let pattern = pattern_norm.as_str();
+
     // 1. Global wildcard
     if pattern == "*" {
         return true;
@@ -491,6 +559,34 @@ mod tests {
     }
 
     #[test]
+    fn test_extra_whitespace_still_matches() {
+        assert!(command_matches_pattern("git  push", "git push"));
+        assert!(command_matches_pattern("git\tpush origin", "git push"));
+        assert!(command_matches_pattern(
+            "git   push   --force",
+            "git push --force"
+        ));
+    }
+
+    #[test]
+    fn test_extra_whitespace_deny_not_evaded() {
+        let deny = vec!["git push".to_string()];
+        assert_eq!(
+            check_command_with_rules("git  push origin main", &deny, &[], &[]),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
+    fn test_extra_whitespace_preserves_word_boundary() {
+        assert!(!command_matches_pattern(
+            "git  push  --forceful",
+            "git push --force"
+        ));
+        assert!(!command_matches_pattern("sudoedit /etc/hosts", "sudo:*"));
+    }
+
+    #[test]
     fn test_compound_command_deny() {
         let deny = vec!["git push --force".to_string()];
         assert_eq!(
@@ -533,6 +629,15 @@ mod tests {
         let deny = vec!["rm -rf".to_string()];
         assert_eq!(
             check_command_with_rules("cat file | rm -rf /", &deny, &[], &[]),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
+    fn test_stderr_pipe_segments_checked() {
+        let deny = vec!["rm -rf".to_string()];
+        assert_eq!(
+            check_command_with_rules("cat file |& rm -rf /", &deny, &[], &[]),
             PermissionVerdict::Deny
         );
     }
@@ -950,6 +1055,88 @@ mod tests {
     }
 
     // --- Per-host rule extraction ---
+
+    #[test]
+    fn test_droid_no_settings_yields_no_rules() {
+        // No hardcoded defaults: without explicit settings there are no rules.
+        let (deny, ask, allow) = droid_rules_from_settings(&[]);
+        assert!(deny.is_empty(), "no built-in denylist may be mirrored");
+        assert!(ask.is_empty(), "Droid has no ask-shaped list");
+        assert!(allow.is_empty(), "RTK never asserts allow for Droid");
+    }
+
+    #[test]
+    fn test_droid_deny_lists_union_across_scopes() {
+        // Project/local deny entries must be honored, not just global ones,
+        // or the rtk-rename rewrite dodges them.
+        let user = serde_json::json!({ "commandDenylist": ["git push"] });
+        let user_local = serde_json::json!({ "commandBlocklist": ["curl:*"] });
+        let project = serde_json::json!({ "commandDenylist": ["docker *"] });
+        let (deny, ask, allow) = droid_rules_from_settings(&[user, user_local, project]);
+        assert_eq!(deny, vec!["git push", "curl:*", "docker *"]);
+        assert!(ask.is_empty());
+        assert!(allow.is_empty());
+    }
+
+    #[test]
+    fn test_droid_blocklist_and_denylist_both_deny() {
+        let settings = serde_json::json!({
+            "commandBlocklist": ["curl:*"],
+            "commandDenylist": ["git push"],
+        });
+        let (deny, ask, allow) = droid_rules_from_settings(std::slice::from_ref(&settings));
+        assert_eq!(deny, vec!["curl:*", "git push"]);
+        assert!(ask.is_empty());
+        assert!(allow.is_empty());
+    }
+
+    #[test]
+    fn test_droid_allowlist_never_read() {
+        // commandAllowlist is not consulted — the decision stays with Droid.
+        let settings = serde_json::json!({
+            "commandAllowlist": ["git status", "cargo test"],
+        });
+        let (deny, ask, allow) = droid_rules_from_settings(std::slice::from_ref(&settings));
+        assert!(deny.is_empty());
+        assert!(ask.is_empty());
+        assert!(allow.is_empty());
+    }
+
+    #[test]
+    fn test_droid_malformed_entries_filtered() {
+        let settings = serde_json::json!({
+            "commandDenylist": ["  git push  ", "", 42, null, {"nested": true}],
+        });
+        let (deny, _, _) = droid_rules_from_settings(std::slice::from_ref(&settings));
+        assert_eq!(deny, vec!["git push"]);
+    }
+
+    #[test]
+    fn test_droid_verdicts_deny_or_default_only() {
+        // Without settings everything is Default — Droid decides natively.
+        let (deny, ask, allow) = droid_rules_from_settings(&[]);
+        assert_eq!(
+            check_command_with_rules("git status --short", &deny, &ask, &allow),
+            PermissionVerdict::Default
+        );
+        assert_eq!(
+            check_command_with_rules("shutdown -h now", &deny, &ask, &allow),
+            PermissionVerdict::Default
+        );
+
+        // An explicit deny entry from any scope yields Deny (step-aside)…
+        let project = serde_json::json!({ "commandDenylist": ["git push"] });
+        let (deny, ask, allow) = droid_rules_from_settings(std::slice::from_ref(&project));
+        assert_eq!(
+            check_command_with_rules("git push origin main", &deny, &ask, &allow),
+            PermissionVerdict::Deny
+        );
+        // …while unlisted commands stay Default.
+        assert_eq!(
+            check_command_with_rules("cargo build", &deny, &ask, &allow),
+            PermissionVerdict::Default
+        );
+    }
 
     #[test]
     fn test_wrapped_rules_cursor_shell_only() {
