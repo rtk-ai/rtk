@@ -11,7 +11,7 @@ RTK supports all major AI coding agents across 3 integration tiers. Mistral Vibe
 
 ## How it works
 
-Each agent integration intercepts CLI commands before execution and rewrites them to their RTK equivalent. The agent runs `rtk cargo test` instead of `cargo test`, sees filtered output, and uses up to 90% fewer tokens — without any change to your workflow.
+Each agent integration intercepts CLI commands before execution and rewrites them to their RTK equivalent. The agent runs `rtk cargo test` instead of `cargo test`, sees filtered output, and reads up to 90% fewer bash output bytes — without any change to your workflow.
 
 All rewrite logic lives in the RTK binary (`rtk rewrite`). Agent hooks are thin delegates that parse the agent-specific JSON format and call `rtk rewrite` for the actual decision.
 
@@ -21,7 +21,7 @@ Agent runs "cargo test"
   -> Calls rtk rewrite "cargo test"
   -> Returns "rtk cargo test"
   -> Agent executes filtered command
-  -> LLM sees 90% fewer tokens
+  -> LLM reads up to 90% fewer bash output bytes
 ```
 
 ## Supported agents

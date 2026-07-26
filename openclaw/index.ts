@@ -2,7 +2,7 @@
  * RTK Rewrite Plugin for OpenClaw
  *
  * Transparently rewrites exec tool commands to RTK equivalents
- * before execution, achieving 60-90% LLM token savings.
+ * before execution, cutting up to 90% of the bash output that reaches the LLM context.
  *
  * All rewrite logic lives in `rtk rewrite` (src/discover/registry.rs).
  * This plugin is a thin delegate — to add or change rules, edit the
