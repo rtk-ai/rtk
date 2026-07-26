@@ -6,13 +6,17 @@
 //! used (see `Engine`); the compression is identical because both emit the same
 //! `file:line:content` shape.
 
-use crate::core::stream::{exec_capture, exec_capture_stdin, CaptureResult};
+use crate::core::stream::{
+    self, exec_capture, exec_capture_stdin, CaptureResult, FilterMode, StdinMode, StreamFilter,
+};
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, strip_ansi};
 use crate::core::{args_utils, config};
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
+use std::io::IsTerminal;
+use std::process::Command;
 
 /// Short single-char flags that consume one following token (or inline remainder)
 /// as their value. `-e` is handled separately — its value goes to `patterns`.
@@ -297,17 +301,137 @@ fn engine_capture<T: AsRef<str>>(
     patterns: &[String],
     paths: &[String],
 ) -> Result<CaptureResult> {
+    let mut cmd = engine_command(engine, extra_args, patterns, paths, false);
+    exec_capture_stdin(&mut cmd).context("search failed")
+}
+
+fn engine_command<T: AsRef<str>>(
+    engine: Engine,
+    extra_args: &[T],
+    patterns: &[String],
+    paths: &[String],
+    line_buffered: bool,
+) -> Command {
     let mut cmd = resolved_command(engine.bin());
     cmd.args(engine.parse_flags());
     for a in extra_args {
         cmd.arg(a.as_ref());
+    }
+    if line_buffered {
+        // The engine writes through a pipe, so flush each match immediately.
+        cmd.arg("--line-buffered");
     }
     for p in patterns {
         cmd.args(["-e", p]);
     }
     cmd.arg("--");
     cmd.args(paths);
-    exec_capture_stdin(&mut cmd).context("search failed")
+    cmd
+}
+
+fn format_match_line(line: &str, show_file: bool, show_line: bool) -> Option<String> {
+    let (file, line_num, is_match, content) = parse_match_line(line)?;
+    let sep = if is_match { ':' } else { '-' };
+    let mut output = String::new();
+    if show_file {
+        output.push_str(&file);
+        output.push(sep);
+    }
+    if show_line {
+        output.push_str(&line_num.to_string());
+        output.push(sep);
+    }
+    output.push_str(content);
+    output.push('\n');
+    Some(output)
+}
+
+/// Emits each piped match as it arrives. Buffered search waits for EOF, so
+/// `tail -f app.log | rtk grep ERROR` would otherwise show no matches.
+struct SearchStreamFilter {
+    show_file: bool,
+    show_line: bool,
+    max_results: usize,
+    shown: usize,
+    cap_reported: bool,
+}
+
+impl StreamFilter for SearchStreamFilter {
+    fn feed_line(&mut self, line: &str) -> Option<String> {
+        let Some(output) = format_match_line(line, self.show_file, self.show_line) else {
+            if line == "--" && self.shown >= self.max_results {
+                return None;
+            }
+            return Some(format!("{line}\n"));
+        };
+
+        if self.shown >= self.max_results {
+            if self.cap_reported {
+                return None;
+            }
+            self.cap_reported = true;
+            return Some(format!(
+                "[rtk] output capped at {} results\n",
+                self.max_results
+            ));
+        }
+
+        self.shown += 1;
+        Some(output)
+    }
+
+    fn flush(&mut self) -> String {
+        String::new()
+    }
+}
+
+fn show_file(paths: &[String], extra_args: &[String]) -> bool {
+    paths.len() > 1
+        || paths.iter().any(|p| std::path::Path::new(p).is_dir())
+        || has_short_flag(extra_args, 'H')
+        || has_short_flag(extra_args, 'r')
+        || has_short_flag(extra_args, 'R')
+        || extra_args
+            .iter()
+            .any(|f| f == "--with-filename" || f == "--recursive")
+}
+
+fn show_line(extra_args: &[String]) -> bool {
+    !has_short_flag(extra_args, 'N')
+        && !extra_args.iter().any(|f| f == "--no-line-number")
+}
+
+fn run_streaming_search(
+    timer: &tracking::TimedExecution,
+    engine: Engine,
+    extra_args: &[String],
+    patterns: &[String],
+    paths: &[String],
+    max_results: usize,
+    real_cmd: &str,
+) -> Result<i32> {
+    let filter = SearchStreamFilter {
+        show_file: show_file(paths, extra_args),
+        show_line: show_line(extra_args),
+        max_results,
+        shown: 0,
+        cap_reported: false,
+    };
+    let mut cmd = engine_command(engine, extra_args, patterns, paths, true);
+    let result = stream::run_streaming(
+        &mut cmd,
+        StdinMode::Inherit,
+        FilterMode::Streaming(Box::new(filter)),
+    )
+    .context("search failed")?;
+
+    timer.track(
+        real_cmd,
+        &format!("rtk {}", engine.label()),
+        &result.raw_stdout,
+        &result.filtered,
+    );
+    Ok(result.exit_code)
 }
 
 /// Runs the agent's command verbatim for forms RTK does not group: format/shape
@@ -317,20 +441,32 @@ fn passthrough<T: AsRef<str>>(
     engine: Engine,
     args: &[T],
     real_cmd: &str,
+    stream_stdin: bool,
 ) -> Result<i32> {
     let mut cmd = resolved_command(engine.bin());
+    if stream_stdin && !std::io::stdout().is_terminal() {
+        // Keep passthrough output live when stdout is piped.
+        cmd.arg("--line-buffered");
+    }
     for a in args {
         cmd.arg(a.as_ref());
     }
-    let result = exec_capture_stdin(&mut cmd).context("search failed")?;
 
-    print!("{}", strip_ansi(&result.stdout));
-    if !result.stderr.is_empty() {
-        eprint!("{}", result.stderr);
-    }
+    let exit_code = if stream_stdin {
+        stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
+            .context("search failed")?
+            .exit_code
+    } else {
+        let result = exec_capture_stdin(&mut cmd).context("search failed")?;
+        print!("{}", strip_ansi(&result.stdout));
+        if !result.stderr.is_empty() {
+            eprint!("{}", result.stderr);
+        }
+        result.exit_code
+    };
 
     timer.track_passthrough(real_cmd, &format!("rtk {} (passthrough)", real_cmd));
-    Ok(result.exit_code)
+    Ok(exit_code)
 }
 
 fn has_short_flag(flags: &[String], ch: char) -> bool {
@@ -388,7 +524,7 @@ pub fn run(
     let (patterns, paths, extra_args) = extract_pattern_path(&args);
 
     if patterns.is_empty() {
-        return passthrough(&timer, engine, &args, &real_cmd);
+        return passthrough(&timer, engine, &args, &real_cmd, false);
     }
 
     let pattern_display = if patterns.len() == 1 {
@@ -403,9 +539,24 @@ pub fn run(
         eprintln!("grep: '{}' in {}", pattern_display, path_display);
     }
 
+    let reads_piped_stdin = !std::io::stdin().is_terminal()
+        && (paths.is_empty() || paths.iter().any(|path| path == "-"));
+
     // format/shape flags (-c/-l/-o/...): already-minimal native output, passthrough.
     if has_format_flag(&extra_args) {
-        return passthrough(&timer, engine, &args, &real_cmd);
+        return passthrough(&timer, engine, &args, &real_cmd, reads_piped_stdin);
+    }
+
+    if reads_piped_stdin {
+        return run_streaming_search(
+            &timer,
+            engine,
+            &extra_args,
+            &patterns,
+            &paths,
+            max_results,
+            &real_cmd,
+        );
     }
 
     let result = engine_capture(engine, &extra_args, &patterns, &paths)?;
@@ -416,7 +567,7 @@ pub fn run(
     // Unparseable shape re-runs verbatim below (with its own stderr), so handle it
     // before surfacing this run's stderr (#2333).
     if unparsed_signal(&raw_output) > 0 {
-        return passthrough(&timer, engine, &args, &real_cmd);
+        return passthrough(&timer, engine, &args, &real_cmd, false);
     }
 
     if !result.stderr.is_empty() {
@@ -460,40 +611,21 @@ pub fn run(
     // show one (multiple files, a directory, -r or -H), the line number only with
     // -n. We force -nH--null for robust parsing, then drop what the engine itself
     // would not have shown.
-    let show_file = by_file.len() > 1
-        || paths.len() > 1
-        || paths.iter().any(|p| std::path::Path::new(p).is_dir())
-        || has_short_flag(&extra_args, 'H')
-        || has_short_flag(&extra_args, 'r')
-        || has_short_flag(&extra_args, 'R')
-        || extra_args
-            .iter()
-            .any(|f| f == "--with-filename" || f == "--recursive");
+    let show_file = by_file.len() > 1 || show_file(&paths, &extra_args);
     // Always surface the line number (the openable position) unless the agent
     // explicitly turned it off; the filename is the only conditional part.
-    let show_line = !has_short_flag(&extra_args, 'N')
-        && !extra_args.iter().any(|f| f == "--no-line-number");
+    let show_line = show_line(&extra_args);
 
     // Faithful baseline: exactly what the real command prints, full content.
     let mut plain = String::new();
     for line in raw_output.lines() {
-        let Some((file, line_num, is_match, content)) = parse_match_line(line) else {
+        let Some(output) = format_match_line(line, show_file, show_line) else {
             if line == "--" {
                 plain.push_str("--\n");
             }
             continue;
         };
-        let sep = if is_match { ':' } else { '-' };
-        if show_file {
-            plain.push_str(&file);
-            plain.push(sep);
-        }
-        if show_line {
-            plain.push_str(&line_num.to_string());
-            plain.push(sep);
-        }
-        plain.push_str(content);
-        plain.push('\n');
+        plain.push_str(&output);
     }
 
     let has_context = has_context_flag(&extra_args);
@@ -731,6 +863,51 @@ mod tests {
         let path = "/Users/patrick/dev/project/src/components/Button.tsx";
         let compact = compact_path(path);
         assert!(compact.len() <= 60);
+    }
+
+    #[test]
+    fn streaming_search_preserves_native_shape() {
+        let mut filter = SearchStreamFilter {
+            show_file: false,
+            show_line: true,
+            max_results: 10,
+            shown: 0,
+            cap_reported: false,
+        };
+
+        assert_eq!(
+            filter.feed_line("engine warning"),
+            Some("engine warning\n".to_string())
+        );
+        assert_eq!(
+            filter.feed_line(concat!("(standard input)\0", "1:match")),
+            Some("1:match\n".to_string())
+        );
+    }
+
+    #[test]
+    fn streaming_search_reports_the_cap_once() {
+        let mut filter = SearchStreamFilter {
+            show_file: false,
+            show_line: true,
+            max_results: 1,
+            shown: 0,
+            cap_reported: false,
+        };
+
+        assert_eq!(
+            filter.feed_line(concat!("(standard input)\0", "1:first")),
+            Some("1:first\n".to_string())
+        );
+        assert_eq!(
+            filter.feed_line(concat!("(standard input)\0", "2:second")),
+            Some("[rtk] output capped at 1 results\n".to_string())
+        );
+        assert_eq!(
+            filter.feed_line(concat!("(standard input)\0", "3:third")),
+            None
+        );
+        assert_eq!(filter.feed_line("--"), None);
     }
 
     #[test]

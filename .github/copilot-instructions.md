@@ -1,6 +1,6 @@
 # Copilot Instructions for rtk
 
-**rtk (Rust Token Killer)** is a CLI proxy that filters and compresses command outputs before they reach an LLM context, saving 60-90% of tokens. It wraps common tools (`git`, `cargo`, `grep`, `pnpm`, `go`, etc.) and outputs condensed summaries instead of raw output.
+**rtk (Rust Token Killer)** is a CLI proxy that filters and compresses command outputs before they reach an LLM context, cutting 60-90% of bash output. It wraps common tools (`git`, `cargo`, `grep`, `pnpm`, `go`, etc.) and outputs condensed summaries instead of raw output. Percentages measure bash output, not billed tokens; RTK ships no tokenizer (`src/core/tracking.rs` estimates `bytes / 4`).
 
 ## Using rtk in this session
 

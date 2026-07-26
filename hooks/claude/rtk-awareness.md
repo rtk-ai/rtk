@@ -1,6 +1,6 @@
 # RTK - Rust Token Killer
 
-**Usage**: Token-optimized CLI proxy (60-90% savings on dev operations)
+**Usage**: Token-optimized CLI proxy (cuts up to 90% of bash output)
 
 ## Meta Commands (always use rtk directly)
 

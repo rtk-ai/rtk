@@ -1,9 +1,16 @@
 //! Filters `uv run` output while preserving uv-managed environment semantics.
+//!
+//! `uv run` executes arbitrary programs, so on success its stdout and stderr are
+//! the signal the caller asked for and are passed through unchanged. Collapsing a
+//! successful run to a summary would discard the program's result with no way to
+//! recover it. uv is silent unless it resolves or installs, so its own chatter is
+//! left alone rather than stripped: suppressing it would also erase it from the
+//! tee file, breaking recovery.
 
 use crate::core::runner;
 use crate::core::stream::{self, FilterMode, StdinMode};
 use crate::core::tracking;
-use crate::core::truncate::CAP_WARNINGS;
+use crate::core::truncate::{CAP_INVENTORY, CAP_WARNINGS};
 use crate::core::utils::{exit_code_from_status, resolved_command, strip_ansi, truncate};
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
@@ -34,6 +41,9 @@ lazy_static! {
 const MAX_TRACEBACK_FRAMES: usize = CAP_WARNINGS;
 const MAX_ERROR_CONTINUATION_LINES: usize = CAP_WARNINGS;
 const MAX_FALLBACK_TAIL_LINES: usize = CAP_WARNINGS;
+const MAX_PROGRAM_LINE_CHARS: usize = 500;
+const TEE_SLUG_STDOUT: &str = "uv-run-stdout";
+const TEE_SLUG_STDERR: &str = "uv-run-stderr";
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
@@ -56,7 +66,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     let result = stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::CaptureOnly)
         .context("Failed to run uv")?;
-    let filtered = filter_uv_run_output(&result.raw, result.exit_code);
+    let filtered = filter_uv_run_output(
+        &result.raw,
+        &result.raw_stdout,
+        &result.raw_stderr,
+        result.exit_code,
+    );
 
     runner::print_with_hint(&filtered, &result.raw, &result.raw, "uv", result.exit_code);
     timer.track(&original_cmd, &rtk_cmd, &result.raw, &filtered);
@@ -72,8 +87,34 @@ fn display_command(prefix: &str, args_display: &str) -> String {
     }
 }
 
-fn filter_uv_run_output(output: &str, exit_code: i32) -> String {
+fn filter_uv_run_output(output: &str, stdout: &str, stderr: &str, exit_code: i32) -> String {
+    if exit_code == 0 {
+        return filter_successful_run(stdout, stderr);
+    }
+
+    // On failure the streams are scanned merged: a Python traceback interleaves
+    // stdout and stderr, and splitting it would break frame ordering.
     let clean = strip_ansi(output);
+    let extracted = extract_diagnostics(&clean);
+    if !extracted.is_empty() {
+        return extracted;
+    }
+
+    let tail: Vec<String> = clean
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| truncate(line, 200))
+        .collect();
+
+    // The exit code already carries the failure; restating it would only add
+    // tokens, so the command's own message is returned untouched.
+    let skip = tail.len().saturating_sub(MAX_FALLBACK_TAIL_LINES);
+    tail[skip..].join("\n")
+}
+
+/// Expects ANSI-stripped input.
+fn extract_diagnostics(clean: &str) -> String {
     let lines: Vec<&str> = clean.lines().collect();
     let mut selected: Vec<String> = Vec::new();
     let mut i = 0;
@@ -106,39 +147,75 @@ fn filter_uv_run_output(output: &str, exit_code: i32) -> String {
         i += 1;
     }
 
-    let filtered = selected.join("\n").trim().to_string();
-    if !filtered.is_empty() {
-        return filtered;
-    }
+    selected.join("\n").trim().to_string()
+}
 
-    if exit_code == 0 {
-        return "ok".to_string();
-    }
+fn filter_successful_run(stdout: &str, stderr: &str) -> String {
+    // Distinct slugs: both streams can need a tee in the same run, and tee
+    // filenames are second-resolution, so a shared slug would make the second
+    // write clobber the first and leave one hint pointing at the other's bytes.
+    let payload = program_output(stdout, TEE_SLUG_STDOUT);
+    let diagnostics = program_output(stderr, TEE_SLUG_STDERR);
 
-    let tail: Vec<String> = clean
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(|line| truncate(line, 200))
+    match (payload.is_empty(), diagnostics.is_empty()) {
+        (true, true) => "ok".to_string(),
+        (false, true) => payload,
+        (true, false) => diagnostics,
+        (false, false) => format!("{payload}\n{diagnostics}"),
+    }
+}
+
+fn program_output(text: &str, tee_slug: &str) -> String {
+    let clean = strip_ansi(text);
+    let lines: Vec<&str> = clean.lines().collect();
+    let last_content = lines.iter().rposition(|line| !line.trim().is_empty());
+
+    let Some(last_content) = last_content else {
+        return String::new();
+    };
+    let lines = &lines[..=last_content];
+    let capped: Vec<String> = lines
+        .iter()
+        .map(|line| truncate(line, MAX_PROGRAM_LINE_CHARS))
         .collect();
+    let line_was_cut = capped.iter().zip(lines).any(|(cut, full)| cut.len() != full.len());
 
-    if tail.is_empty() {
-        return format!("[FAIL] uv run failed (exit code: {exit_code})");
+    if capped.len() <= CAP_INVENTORY {
+        let out = capped.join("\n");
+        if line_was_cut {
+            if let Some(hint) = crate::core::tee::force_tee_hint(&clean, tee_slug) {
+                return format!("{out}\n{hint}");
+            }
+        }
+        return out;
     }
 
-    let summary = tail
-        .into_iter()
-        .rev()
-        .take(MAX_FALLBACK_TAIL_LINES)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>();
+    // A program's result is usually its last line, so keep both ends.
+    let head = CAP_INVENTORY / 2;
+    let tail = CAP_INVENTORY - head;
+    let omitted = capped.len() - CAP_INVENTORY;
 
-    format!(
-        "[FAIL] uv run failed (exit code: {exit_code})\n{}",
-        summary.join("\n")
-    )
+    let mut out = capped[..head].join("\n");
+    out.push_str(&format!("\n... ({omitted} lines omitted)\n"));
+    out.push_str(&capped[capped.len() - tail..].join("\n"));
+
+    // A cut in the head region sits before the tail offset, so `tail -n +N` skips it.
+    let head_line_was_cut = capped[..head]
+        .iter()
+        .zip(&lines[..head])
+        .any(|(cut, full)| cut != full);
+
+    let hint = if head_line_was_cut {
+        crate::core::tee::force_tee_hint(&clean, tee_slug)
+    } else {
+        crate::core::tee::force_tee_tail_hint(&clean, tee_slug, head + 1)
+    };
+
+    if let Some(hint) = hint {
+        out.push_str(&format!("\n{hint}"));
+    }
+
+    out
 }
 
 fn collect_traceback_block(lines: &[&str], start_idx: usize) -> (Vec<String>, usize) {
@@ -270,19 +347,137 @@ fn is_error_continuation(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{filter_uv_run_output, MAX_TRACEBACK_FRAMES};
+    use super::{filter_uv_run_output, CAP_INVENTORY, MAX_TRACEBACK_FRAMES};
     use crate::core::utils::count_tokens;
 
     #[test]
-    fn test_filter_uv_run_suppresses_success_noise() {
-        let output = r#"
-Using CPython 3.12.2
-Resolved 12 packages in 48ms
-Installed 1 package in 5ms
-hello from script
-"#;
+    fn test_filter_uv_run_keeps_program_output_on_success() {
+        let stdout = "hello from script\n";
 
-        assert_eq!(filter_uv_run_output(output, 0), "ok");
+        assert_eq!(
+            filter_uv_run_output(stdout, stdout, "", 0),
+            "hello from script"
+        );
+    }
+
+    #[test]
+    fn test_filter_uv_run_keeps_data_producing_stdout() {
+        let stdout = "{\n  \"users\": 42,\n  \"active\": 37\n}\n";
+        let raw = stdout.to_string();
+
+        let result = filter_uv_run_output(&raw, stdout, "", 0);
+
+        assert!(result.contains("\"users\": 42"));
+        assert!(result.contains("\"active\": 37"));
+    }
+
+    #[test]
+    fn test_filter_uv_run_keeps_non_error_stderr_on_success() {
+        // uv's own chatter is suppressed upstream by `-q`, so whatever reaches
+        // the filter on stderr belongs to the program and must survive.
+        let stderr = "INFO:root:connected to db\nINFO:root:migrated 3 tables\n";
+        let stdout = "done\n";
+        let raw = format!("{stderr}{stdout}");
+
+        let result = filter_uv_run_output(&raw, stdout, stderr, 0);
+
+        assert!(result.contains("done"));
+        assert!(result.contains("INFO:root:connected to db"));
+        assert!(result.contains("INFO:root:migrated 3 tables"));
+    }
+
+    #[test]
+    fn test_stdout_and_stderr_tee_slugs_are_distinct() {
+        // Tee filenames are `{epoch_secs}_{slug}.log`. Both streams can need a
+        // tee within the same second, so a shared slug would make the stderr
+        // write clobber the stdout one and leave the stdout hint resolving to
+        // stderr's bytes - the omitted stdout lines become unrecoverable.
+        assert_ne!(super::TEE_SLUG_STDOUT, super::TEE_SLUG_STDERR);
+    }
+
+    #[test]
+    fn test_program_output_truncates_over_line_cap_keeping_both_ends() {
+        let stdout: String = (0..120).map(|i| format!("line{i}\n")).collect();
+
+        let result = super::program_output(&stdout, super::TEE_SLUG_STDOUT);
+
+        assert!(result.contains("line0"), "head must survive");
+        assert!(result.contains("line119"), "tail must survive");
+        assert!(result.contains("lines omitted"));
+        assert!(result.lines().count() < 120);
+    }
+
+    #[test]
+    fn test_program_output_head_cut_switches_away_from_the_tail_hint() {
+        // 60 lines with a long line 4: the tail hint would start past it.
+        let stdout: String = (0..60)
+            .map(|i| {
+                if i == 3 {
+                    format!("{}\n", "x".repeat(900))
+                } else {
+                    format!("line{i}\n")
+                }
+            })
+            .collect();
+
+        let result = super::program_output(&stdout, super::TEE_SLUG_STDOUT);
+
+        assert!(result.contains("lines omitted"));
+        assert!(
+            !result.contains("see remaining"),
+            "a head-region cut must not be reported with a tail offset that skips it, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_program_output_caps_a_single_huge_line() {
+        let stdout = format!("{}\n", "x".repeat(50_000));
+
+        let result = super::program_output(&stdout, super::TEE_SLUG_STDOUT);
+
+        assert!(
+            result.len() < 2_000,
+            "one huge line must be capped, got {} bytes",
+            result.len()
+        );
+        assert!(result.contains("..."));
+    }
+
+    #[test]
+    fn test_program_output_exact_cap_is_untouched() {
+        let stdout: String = (0..CAP_INVENTORY).map(|i| format!("line{i}\n")).collect();
+
+        let result = super::program_output(&stdout, super::TEE_SLUG_STDOUT);
+
+        assert!(!result.contains("lines omitted"));
+        assert_eq!(result.lines().count(), CAP_INVENTORY);
+    }
+
+    #[test]
+    fn test_program_output_handles_multibyte_without_panic() {
+        let stdout: String = (0..80).map(|i| format!("日本語 🎉 line{i}\n")).collect();
+
+        let result = super::program_output(&stdout, super::TEE_SLUG_STDOUT);
+
+        assert!(result.contains("日本語"));
+        assert!(result.contains("lines omitted"));
+    }
+
+    #[test]
+    fn test_filter_uv_run_silent_success_is_ok() {
+        assert_eq!(filter_uv_run_output("", "", "", 0), "ok");
+    }
+
+    #[test]
+    fn test_filter_uv_run_success_keeps_stderr_warnings_with_payload() {
+        let stdout = "result: 7\n";
+        let stderr = "WARNING: deprecated api\n";
+        let raw = format!("{stderr}{stdout}");
+
+        let result = filter_uv_run_output(&raw, stdout, stderr, 0);
+
+        assert!(result.contains("result: 7"));
+        assert!(result.contains("WARNING: deprecated api"));
     }
 
     #[test]
@@ -300,7 +495,7 @@ Traceback (most recent call last):
 RuntimeError: kaboom
 "#;
 
-        let result = filter_uv_run_output(output, 1);
+        let result = filter_uv_run_output(output, "", "", 1);
         assert!(result.contains("Traceback (most recent call last):"));
         assert!(result.contains(r#"File "/tmp/project/main.py", line 10, in <module>"#));
         assert!(result.contains("RuntimeError: kaboom"));
@@ -318,7 +513,7 @@ RuntimeError: kaboom
         }
         output.push_str("RuntimeError: kaboom\n");
 
-        let result = filter_uv_run_output(&output, 1);
+        let result = filter_uv_run_output(&output, "", "", 1);
         assert!(result.contains("Traceback (most recent call last):"));
         assert!(result.contains("... +2 more frames"));
     }
@@ -332,25 +527,30 @@ FAILED tests/test_api.py::test_healthcheck - AssertionError: expected 200
 1 failed, 12 passed in 0.31s
 "#;
 
-        let result = filter_uv_run_output(output, 1);
+        let result = filter_uv_run_output(output, "", "", 1);
         assert!(result.contains("FAILED tests/test_api.py::test_healthcheck"));
         assert!(result.contains("1 failed, 12 passed in 0.31s"));
         assert!(!result.contains("Resolved 8 packages"));
     }
 
     #[test]
-    fn test_filter_uv_run_has_failure_fallback() {
+    fn test_filter_uv_run_failure_returns_message_without_added_marker() {
+        // The exit code is propagated, so the filter must not restate it.
         let output = "sync aborted by signal";
-        let result = filter_uv_run_output(output, 2);
+        let result = filter_uv_run_output(output, "", "", 2);
 
-        assert!(result.contains("[FAIL] uv run failed (exit code: 2)"));
-        assert!(result.contains("sync aborted by signal"));
+        assert_eq!(result, "sync aborted by signal");
+    }
+
+    #[test]
+    fn test_filter_uv_run_silent_failure_emits_nothing() {
+        assert_eq!(filter_uv_run_output("", "", "", 2), "");
     }
 
     #[test]
     fn test_filter_uv_run_pytest_fixture_token_savings() {
         let input = include_str!("../../../tests/fixtures/uv_run_pytest_failure.txt");
-        let output = filter_uv_run_output(input, 1);
+        let output = filter_uv_run_output(input, "", "", 1);
         let input_tokens = count_tokens(input);
         let output_tokens = count_tokens(&output);
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
