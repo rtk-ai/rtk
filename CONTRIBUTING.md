@@ -13,7 +13,9 @@
 
 ## What is rtk?
 
-**rtk (Rust Token Killer)** is a coding agent proxy that cuts noise from command outputs. It filters and compresses CLI output before it reaches your LLM context, saving 60-90% of tokens on common operations. The vision is to make AI-assisted development faster and cheaper by eliminating unnecessary token consumption.
+**rtk (Rust Token Killer)** is a coding agent proxy that cuts noise from command outputs. It filters and compresses CLI output before it reaches your LLM context, reducing bash output by 60-90% on common operations. The vision is to make AI-assisted development faster and cheaper by eliminating unnecessary token consumption.
+
+Every percentage in this repo measures **bash output**, not your bill: those bytes are one contributor to input tokens, and input tokens are only part of a cost that also counts output tokens. See [How RTK Savings Work](docs/guide/resources/savings-explained.md) before quoting any figure.
 
 ---
 
@@ -38,7 +40,7 @@ When a user or LLM explicitly requests detailed output via flags (e.g., `git log
 
 Filters should be flag-aware: default output (no flags) gets aggressively compressed, but verbose/detailed flags should pass through more content. When in doubt, preserve correctness.
 
-> Example: `rtk cargo test` shows failures only (90% savings). But `rtk cargo test -- --nocapture` preserves all output because the user explicitly asked for it.
+> Example: `rtk cargo test` shows failures only (90% less bash output). But `rtk cargo test -- --nocapture` preserves all output because the user explicitly asked for it.
 
 ### Transparency
 
@@ -71,7 +73,7 @@ If you want to submit a new core feature, this is an important point to watch.
 
 ### In Scope
 
-Commands that produce **text output** (typically 100+ tokens) and can be compressed **60%+** without losing essential information for the LLM.
+Commands that produce **text output** (typically 100+ tokens) whose bytes can be compressed **20%+** without losing essential information for the LLM. See [Correctness VS Token Savings](#correctness-vs-token-savings).
 
 - Test runners (vitest, pytest, cargo test, go test)
 - Linters and type checkers (eslint, ruff, tsc, mypy)
@@ -96,7 +98,7 @@ When implementing a new filter/cmds, be aware of the [Design Philosophy](#design
 | Use **TOML filter** when | Use **Rust module** when |
 |--------------------------|--------------------------|
 | Output is plain text with predictable line structure | Output is structured (JSON, NDJSON) |
-| Regex line filtering achieves 60%+ savings | Needs state machine parsing (e.g., pytest phases) |
+| Regex line filtering cuts 60%+ of the output bytes | Needs state machine parsing (e.g., pytest phases) |
 | No need to inject CLI flags | Needs to inject flags like `--format json` |
 | No cross-command routing | Routes to other commands (lint → ruff/mypy) |
 | Examples: brew, df, shellcheck, rsync, ping | Examples: vitest, pytest, golangci-lint, gh |
@@ -263,7 +265,7 @@ cargo fmt --all --check && cargo clippy --all-targets && cargo test
 
 - [ ] Unit tests added/updated for changed code
 - [ ] Snapshot tests for filters
-- [ ] Token savings >=60% verified
+- [ ] >=20% reduction in bash output verified (measured with RTK's token estimator, not a real tokenizer)
 - [ ] Any truncated list has a recovery hint (`force_tee_tail_hint` or `force_tee_hint`) and uses a `CAP_*` from `src/core/truncate.rs`
 - [ ] Edge cases covered
 - [ ] `cargo fmt --all --check && cargo clippy --all-targets && cargo test` passes

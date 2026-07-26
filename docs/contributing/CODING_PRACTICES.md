@@ -138,7 +138,7 @@ For the full error-handling architecture (propagation chain, exit code preservat
 See [`CONTRIBUTING.md` — Testing](../../CONTRIBUTING.md#testing) for the full strategy. In short, for a new filter you typically want:
 
 - **Unit + snapshot tests** in the same file, using the `insta` crate.
-- **A token-savings assertion** verifying the filter hits the ≥60% target on a real fixture.
+- **A savings assertion** verifying the filter hits the ≥20% target on a real fixture. The target is a reduction in bash output, measured with RTK's token estimator rather than a real tokenizer.
 
 Minimal example:
 
@@ -162,7 +162,7 @@ mod tests {
         let input = include_str!("../../../tests/fixtures/git_log_raw.txt");
         let output = filter_git_log(input);
         let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
-        assert!(savings >= 60.0, "expected ≥60% savings, got {:.1}%", savings);
+        assert!(savings >= 20.0, "expected ≥20% output reduction, got {:.1}%", savings);
     }
 }
 ```
