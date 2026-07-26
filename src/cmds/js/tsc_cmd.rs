@@ -2,15 +2,17 @@
 
 use crate::core::runner;
 use crate::core::stream::{BlockHandler, BlockStreamFilter};
-use crate::core::utils::{resolved_command, tool_exists, truncate};
+use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 
 lazy_static! {
-    static ref TSC_ERROR: Regex =
-        Regex::new(r"^(.+?)\((\d+),(\d+)\):\s+(error|warning)\s+(TS\d+):\s+(.+)$").unwrap();
+    static ref TSC_ERROR: Regex = Regex::new(
+        r"^(.+?)\((\d+),(\d+)\):\s+(error|warning)\s+(TS\d+):\s+(.+)$",
+    )
+    .unwrap();
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
@@ -60,11 +62,13 @@ impl TscHandler {
 
 impl BlockHandler for TscHandler {
     fn should_skip(&mut self, line: &str) -> bool {
-        line.starts_with("Found ")
+        let clean = strip_ansi(line);
+        clean.starts_with("Found ")
     }
 
     fn is_block_start(&mut self, line: &str) -> bool {
-        if let Some(caps) = TSC_ERROR.captures(line) {
+        let clean = strip_ansi(line);
+        if let Some(caps) = TSC_ERROR.captures(&clean) {
             self.error_count += 1;
             self.files.insert(caps[1].to_string());
             *self.code_counts.entry(caps[5].to_string()).or_insert(0) += 1;
@@ -75,7 +79,8 @@ impl BlockHandler for TscHandler {
     }
 
     fn is_block_continuation(&mut self, line: &str, _block: &[String]) -> bool {
-        line.starts_with("  ") || line.starts_with('\t')
+        let clean = strip_ansi(line);
+        clean.starts_with("  ") || clean.starts_with('\t')
     }
 
     fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
@@ -113,8 +118,9 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
         context_lines: Vec<String>,
     }
 
+    let cleaned_output = strip_ansi(output);
     let mut errors: Vec<TsError> = Vec::new();
-    let lines: Vec<&str> = output.lines().collect();
+    let lines: Vec<&str> = cleaned_output.lines().collect();
     let mut i = 0;
 
     while i < lines.len() {
@@ -287,10 +293,11 @@ src/app.tsx(20,5): error TS2345: Argument of type 'number' is not assignable to 
     }
 
     #[test]
-    fn test_filter_no_errors() {
-        let output = "Found 0 errors. Watching for file changes.";
+    fn test_ansi_color_stripping() {
+        let output = "\x1b[96msrc/server/api/auth.ts\x1b[0m(\x1b[93m12\x1b[0m,\x1b[93m5\x1b[0m): \x1b[91merror\x1b[0m \x1b[90mTS2322:\x1b[0m Type 'string' is not assignable to type 'number'.";
         let result = filter_tsc_output(output);
-        assert!(result.contains("No errors found"));
+        assert!(result.contains("TypeScript: 1 errors in 1 files"));
+        assert!(result.contains("TS2322"));
     }
 
     // --- Streaming handler tests ---
