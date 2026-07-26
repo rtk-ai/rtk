@@ -12,9 +12,11 @@ use std::io::IsTerminal;
 lazy_static! {
     /// Matches the date+time portion in `ls -la` output, which serves as a
     /// stable anchor regardless of owner/group column width.
-    /// E.g.: " Mar 31 16:18 " or " Dec 25  2024 "
+    /// Supports two formats:
+    ///   BSD/macOS: " Mar 31 16:18 " or " Dec 25  2024 "
+    ///   GNU/ISO:   " 2026-04-13 17:07 " (common with coreutils / Nix)
     static ref LS_DATE_RE: Regex = Regex::new(
-        r"\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(?:\d{4}|\d{2}:\d{2})\s+"
+        r"\s+(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(?:\d{4}|\d{2}:\d{2})|\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+"
     )
     .unwrap();
 }
@@ -624,6 +626,44 @@ mod tests {
     #[test]
     fn test_parse_ls_line_returns_none_for_total() {
         assert!(parse_ls_line("total 48").is_none());
+    }
+
+    #[test]
+    fn test_parse_ls_line_iso_date() {
+        // GNU coreutils / Nix ls uses ISO date format: YYYY-MM-DD HH:MM
+        let (ft, size, name) = parse_ls_line(
+            "-rw-r--r--  1 alice staff 48140 2026-04-13 17:07 Cargo.lock",
+        )
+        .unwrap();
+        assert_eq!(ft, '-');
+        assert_eq!(size, 48140);
+        assert_eq!(name, "Cargo.lock");
+    }
+
+    #[test]
+    fn test_parse_ls_line_iso_date_dir() {
+        let (ft, size, name) = parse_ls_line(
+            "drwxr-xr-x 33 alice staff 1056 2026-04-13 17:07 .github",
+        )
+        .unwrap();
+        assert_eq!(ft, 'd');
+        assert_eq!(size, 1056);
+        assert_eq!(name, ".github");
+    }
+
+    #[test]
+    fn test_compact_iso_dates() {
+        let input = "total 272\n\
+                     drwxr-xr-x 33 alice staff  1056 2026-04-13 17:07 .\n\
+                     drwxr-xr-x 12 alice staff   384 2026-04-10 13:49 ..\n\
+                     drwxr-xr-x  7 alice staff   224 2026-04-13 17:07 src\n\
+                     -rw-r--r--  1 alice staff  1642 2026-04-13 17:07 Cargo.toml\n\
+                     -rw-r--r--  1 alice staff 48140 2026-04-13 17:07 Cargo.lock\n";
+        let (entries, _summary) = compact_ls(input, false);
+        assert!(entries.contains("src/"), "should contain src/, got: {entries}");
+        assert!(entries.contains("Cargo.toml"), "should contain Cargo.toml, got: {entries}");
+        assert!(entries.contains("Cargo.lock"), "should contain Cargo.lock, got: {entries}");
+        assert!(!entries.contains("2026"), "date should not leak, got: {entries}");
     }
 
     #[test]
