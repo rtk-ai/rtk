@@ -23,14 +23,24 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: mypy {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_filtered_with_exit(
         cmd,
         "mypy",
         &args.join(" "),
-        |raw| filter_mypy_output(&strip_ansi(raw)),
+        |raw, exit_code| {
+            let clean = strip_ansi(raw);
+            let filtered = filter_mypy_output(&clean);
+            // Nothing recognised on a failed run means mypy never type-checked.
+            if exit_code != 0 && filtered == MYPY_CLEAN {
+                return clean.trim().to_string();
+            }
+            filtered
+        },
         runner::RunOptions::default(),
     )
 }
+
+const MYPY_CLEAN: &str = "mypy: No issues found";
 
 struct MypyError {
     file: String,
@@ -128,9 +138,9 @@ pub fn filter_mypy_output(output: &str) -> String {
     // No errors at all
     if errors.is_empty() && fileless_lines.is_empty() {
         if output.contains("Success: no issues found") || output.contains("no issues found") {
-            return "mypy: No issues found".to_string();
+            return MYPY_CLEAN.to_string();
         }
-        return "mypy: No issues found".to_string();
+        return MYPY_CLEAN.to_string();
     }
 
     // Group by file
