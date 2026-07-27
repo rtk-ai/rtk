@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, and Factory Droid
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, and Grok CLI
 sidebar:
   order: 3
 ---
@@ -38,6 +38,7 @@ Agent runs "cargo test"
 | Pi | TypeScript extension (`tool_call` event) | Yes |
 | Hermes | Python plugin (`terminal` command mutation) | Yes |
 | Factory Droid | Shell hook (`PreToolUse`, matcher `Execute`) | Yes |
+| Grok CLI (xAI) | Shell hook (`PreToolUse`, deny-with-suggestion) | No (agent retries) |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | AGENTS.md instructions | N/A |
@@ -158,6 +159,31 @@ rtk init --uninstall --agent droid
 
 Removes only RTK's hook entry; other hooks and settings are untouched.
 
+### Grok CLI (xAI)
+
+```bash
+rtk init -g --agent grok
+```
+
+Installs under `$GROK_HOME` (default `~/.grok`; multi-account profiles set `GROK_HOME`, e.g. `~/.grok-accounts/<profile>`):
+
+| Artifact | Path |
+|----------|------|
+| Hook config | `$GROK_HOME/hooks/rtk-rewrite.json` → `rtk hook grok` |
+| Awareness | `$GROK_HOME/RTK.md` + `@…/RTK.md` in `$GROK_HOME/AGENTS.md` |
+
+Grok PreToolUse does **not** apply Claude-style `updatedInput`. RTK uses **deny-with-suggestion**: the model is blocked once with a reason containing the rewritten command (e.g. `rtk git status`) and must re-run that exact command. Already-prefixed `rtk …` commands and non-shell tools are allowed.
+
+Reload hooks in Grok (`/hooks` → `r`) or restart the session after install.
+
+Uninstall:
+
+```bash
+rtk init -g --agent grok --uninstall
+```
+
+Removes only RTK-managed files (`rtk-rewrite.json`, `RTK.md`, AGENTS.md `@` reference). Other hooks under `$GROK_HOME/hooks/` are left untouched. Re-run install per account if you use multiple `GROK_HOME` profiles.
+
 ### Cline / Roo Code
 
 ```bash
@@ -207,7 +233,7 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API. Deny-with-suggestion hosts (Grok CLI, GitHub Copilot IDE path) block once and rely on the model retrying the suggested `rtk` command.
 
 ## Windows support
 

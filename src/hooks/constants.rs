@@ -58,3 +58,14 @@ pub const HERMES_PLUGINS_SUBDIR: &str = "plugins";
 pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";
 pub const HERMES_PLUGIN_INIT_FILE: &str = "__init__.py";
 pub const HERMES_PLUGIN_MANIFEST_FILE: &str = "plugin.yaml";
+
+/// Grok CLI (xAI) home override — when set, hooks/config live under this path.
+pub const GROK_HOME_ENV: &str = "GROK_HOME";
+/// Fallback Grok config directory under `$HOME` when `GROK_HOME` is unset.
+pub const GROK_DIR: &str = ".grok";
+/// Native Rust hook command for Grok CLI PreToolUse.
+pub const GROK_HOOK_COMMAND: &str = "rtk hook grok";
+/// RTK-managed hook config filename under `$GROK_HOME/hooks/`.
+pub const GROK_HOOK_JSON_FILE: &str = "rtk-rewrite.json";
+/// PreToolUse matcher: Grok shell tool + Bash alias.
+pub const GROK_SHELL_MATCHER: &str = "Bash|run_terminal_command";

@@ -9,7 +9,8 @@ use tempfile::NamedTempFile;
 
 use crate::hooks::constants::{
     CONFIG_DIR, COPILOT_HOME_ENV, COPILOT_HOOK_FILE, COPILOT_INSTRUCTIONS_FILE, COPILOT_USER_DIR,
-    CURSOR_DIR, GEMINI_DIR, GITHUB_DIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+    CURSOR_DIR, GEMINI_DIR, GITHUB_DIR, GROK_DIR, GROK_HOME_ENV, GROK_HOOK_COMMAND,
+    GROK_HOOK_JSON_FILE, GROK_SHELL_MATCHER, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
 };
 
 use super::constants::{
@@ -32,6 +33,7 @@ const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
 const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
+const RTK_SLIM_GROK: &str = include_str!("../../hooks/grok/rtk-awareness.md");
 
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
@@ -3873,7 +3875,64 @@ pub fn show_config(codex: bool) -> Result<()> {
         return show_codex_config();
     }
 
-    show_claude_config()
+    show_claude_config()?;
+    // Best-effort Grok status when GROK_HOME / ~/.grok is present
+    let _ = show_grok_config_section();
+    Ok(())
+}
+
+fn show_grok_config_section() -> Result<()> {
+    let Ok(grok_dir) = resolve_grok_dir() else {
+        return Ok(());
+    };
+    if !grok_dir.exists() {
+        return Ok(());
+    }
+
+    println!("\nrtk Configuration (Grok CLI):\n");
+
+    let hook_path = grok_dir.join(HOOKS_SUBDIR).join(GROK_HOOK_JSON_FILE);
+    if hook_path.exists() {
+        let content = fs::read_to_string(&hook_path).unwrap_or_default();
+        if content.contains(GROK_HOOK_COMMAND) {
+            println!("[ok] Hook: {} ({})", GROK_HOOK_COMMAND, hook_path.display());
+        } else {
+            println!(
+                "[warn] Hook file present but missing `{}`: {}",
+                GROK_HOOK_COMMAND,
+                hook_path.display()
+            );
+        }
+    } else {
+        println!("[--] Hook: not found ({})", hook_path.display());
+    }
+
+    let rtk_md_path = grok_dir.join(RTK_MD);
+    if rtk_md_path.exists() {
+        println!("[ok] RTK.md: {}", rtk_md_path.display());
+    } else {
+        println!("[--] RTK.md: not found");
+    }
+
+    let agents_md_path = grok_dir.join(AGENTS_MD);
+    let absolute_ref = format!("@{}", rtk_md_path.display());
+    if agents_md_path.exists() {
+        let content = fs::read_to_string(&agents_md_path)?;
+        if has_rtk_reference(&content, &[RTK_MD_REF, absolute_ref.as_str()]) {
+            println!("[ok] AGENTS.md: RTK.md reference");
+        } else {
+            println!("[--] AGENTS.md: exists but rtk not configured");
+        }
+    } else {
+        println!("[--] AGENTS.md: not found");
+    }
+
+    println!("\nUsage:");
+    println!("  rtk init -g --agent grok              # Install Grok hooks + awareness");
+    println!("  rtk init -g --agent grok --uninstall  # Remove Grok RTK artifacts");
+    println!("  # Respects $GROK_HOME (default ~/.grok)");
+
+    Ok(())
 }
 
 fn show_claude_config() -> Result<()> {
@@ -4752,6 +4811,213 @@ fn uninstall_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<V
                 ));
             }
         }
+    }
+
+    Ok(removed)
+}
+
+// ─── Grok CLI (xAI) support ───────────────────────────────────────────
+
+/// Build hook JSON for `$GROK_HOME/hooks/rtk-rewrite.json`.
+fn grok_hook_json() -> String {
+    format!(
+        r#"{{
+  "hooks": {{
+    "PreToolUse": [
+      {{
+        "matcher": "{matcher}",
+        "hooks": [
+          {{
+            "type": "command",
+            "command": "{command}",
+            "timeout": 5
+          }}
+        ]
+      }}
+    ]
+  }}
+}}
+"#,
+        matcher = GROK_SHELL_MATCHER,
+        command = GROK_HOOK_COMMAND,
+    )
+}
+
+/// Resolve Grok config directory, honouring `$GROK_HOME`.
+///
+/// Multi-account Grok installs set `GROK_HOME` (e.g. `~/.grok-accounts/acc3m`).
+/// Fallback: `$HOME/.grok`.
+pub fn resolve_grok_dir() -> Result<PathBuf> {
+    resolve_grok_dir_from_env(dirs::home_dir(), std::env::var_os(GROK_HOME_ENV))
+}
+
+fn resolve_grok_dir_from_env(
+    home_dir: Option<PathBuf>,
+    grok_home: Option<OsString>,
+) -> Result<PathBuf> {
+    if let Some(path) = grok_home.filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+
+    home_dir
+        .map(|home| home.join(GROK_DIR))
+        .context("Cannot determine Grok config directory. Set $GROK_HOME or $HOME.")
+}
+
+/// Entry point for `rtk init -g --agent grok`.
+pub fn run_grok_mode(ctx: InitContext) -> Result<()> {
+    let grok_dir = resolve_grok_dir()?;
+    run_grok_mode_at(&grok_dir, ctx)
+}
+
+/// Same as [`run_grok_mode`] but operates on an explicit directory (tests).
+fn run_grok_mode_at(grok_dir: &Path, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+
+    install_grok_hooks(grok_dir, ctx)?;
+    install_grok_awareness(grok_dir, ctx)?;
+
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        let hook_path = grok_dir.join(HOOKS_SUBDIR).join(GROK_HOOK_JSON_FILE);
+        println!("\nRTK configured for Grok CLI.\n");
+        println!("  Hook: {} → {}", hook_path.display(), GROK_HOOK_COMMAND);
+        println!("  RTK.md + AGENTS.md @ reference installed.\n");
+        println!("  Reload hooks in Grok (/hooks → r) or restart the session.");
+        println!("  Test: ask the agent to run: git status\n");
+    }
+
+    Ok(())
+}
+
+fn install_grok_hooks(grok_dir: &Path, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let hooks_dir = grok_dir.join(HOOKS_SUBDIR);
+
+    if !dry_run {
+        fs::create_dir_all(&hooks_dir).with_context(|| {
+            format!(
+                "Failed to create Grok hooks directory: {}",
+                hooks_dir.display()
+            )
+        })?;
+    }
+
+    let hook_path = hooks_dir.join(GROK_HOOK_JSON_FILE);
+    let content = grok_hook_json();
+
+    // Idempotent: already correct content → skip rewrite noise
+    if hook_path.exists() {
+        let existing = fs::read_to_string(&hook_path).unwrap_or_default();
+        if existing.trim() == content.trim() {
+            if ctx.verbose > 0 {
+                eprintln!(
+                    "Grok hook already present and up to date: {}",
+                    hook_path.display()
+                );
+            }
+            return Ok(());
+        }
+    }
+
+    write_if_changed(&hook_path, &content, "Grok hook config", ctx)?;
+    Ok(())
+}
+
+fn install_grok_awareness(grok_dir: &Path, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+
+    if !dry_run {
+        fs::create_dir_all(grok_dir).with_context(|| {
+            format!(
+                "Failed to create Grok config directory: {}",
+                grok_dir.display()
+            )
+        })?;
+    }
+
+    let rtk_md_path = grok_dir.join(RTK_MD);
+    write_if_changed(&rtk_md_path, RTK_SLIM_GROK, RTK_MD, ctx)?;
+
+    // Absolute @RTK.md so references resolve from any CWD (multi-account / worktrees)
+    let rtk_md_ref = format!("@{}", rtk_md_path.display());
+    let agents_md_path = grok_dir.join(AGENTS_MD);
+    patch_agents_md(&agents_md_path, &rtk_md_ref, ctx)?;
+
+    Ok(())
+}
+
+/// Entry point for `rtk init -g --agent grok --uninstall`.
+pub fn uninstall_grok(ctx: InitContext) -> Result<()> {
+    let grok_dir = resolve_grok_dir()?;
+    let InitContext { dry_run, .. } = ctx;
+    let removed = uninstall_grok_at(&grok_dir, ctx)?;
+
+    if removed.is_empty() {
+        println!("RTK was not installed for Grok CLI (nothing to remove)");
+    } else {
+        let header = if dry_run {
+            "[dry-run] would uninstall RTK for Grok CLI:"
+        } else {
+            "RTK uninstalled for Grok CLI:"
+        };
+        println!("{}", header);
+        for item in &removed {
+            println!("  - {}", item);
+        }
+        if !dry_run {
+            println!("\nReload hooks in Grok (/hooks → r) or restart the session.");
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    }
+    Ok(())
+}
+
+fn uninstall_grok_at(grok_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    let InitContext { dry_run, .. } = ctx;
+    let mut removed = Vec::new();
+
+    let hook_path = grok_dir.join(HOOKS_SUBDIR).join(GROK_HOOK_JSON_FILE);
+    if hook_path.exists() {
+        // Only remove RTK-owned hook file (dedicated file, not a merge target)
+        let content = fs::read_to_string(&hook_path).unwrap_or_default();
+        if content.contains(GROK_HOOK_COMMAND) || content.contains("rtk hook grok") {
+            if dry_run {
+                println!(
+                    "[dry-run] would remove Grok hook config: {}",
+                    hook_path.display()
+                );
+            } else {
+                // nosemgrep: filesystem-deletion -- Grok uninstall removes only RTK-managed hook JSON.
+                fs::remove_file(&hook_path).with_context(|| {
+                    format!("Failed to remove Grok hook: {}", hook_path.display())
+                })?;
+            }
+            removed.push(format!("Hook config: {}", hook_path.display()));
+        }
+    }
+
+    let rtk_md_path = grok_dir.join(RTK_MD);
+    if rtk_md_path.exists() {
+        if dry_run {
+            println!("[dry-run] would remove RTK.md: {}", rtk_md_path.display());
+        } else {
+            // nosemgrep: filesystem-deletion -- Grok uninstall removes RTK-owned awareness file.
+            fs::remove_file(&rtk_md_path)
+                .with_context(|| format!("Failed to remove RTK.md: {}", rtk_md_path.display()))?;
+        }
+        removed.push(format!("RTK.md: {}", rtk_md_path.display()));
+    }
+
+    let agents_md_path = grok_dir.join(AGENTS_MD);
+    let absolute_ref = format!("@{}", rtk_md_path.display());
+    if remove_rtk_reference_from_agents(&agents_md_path, &[RTK_MD_REF, absolute_ref.as_str()], ctx)?
+    {
+        removed.push("AGENTS.md: removed RTK.md reference".to_string());
     }
 
     Ok(removed)
@@ -7846,5 +8112,146 @@ mod tests {
             "Hook config must not be written when the upsert aborts: {}",
             hook_path.display()
         );
+    }
+
+    // --- Grok CLI init ---
+
+    #[test]
+    fn test_resolve_grok_dir_uses_env() {
+        let custom = PathBuf::from("/tmp/custom-grok-home");
+        let resolved = resolve_grok_dir_from_env(
+            Some(PathBuf::from("/home/user")),
+            Some(OsString::from(custom.as_os_str())),
+        )
+        .unwrap();
+        assert_eq!(resolved, custom);
+    }
+
+    #[test]
+    fn test_resolve_grok_dir_falls_back_to_home() {
+        let resolved = resolve_grok_dir_from_env(Some(PathBuf::from("/home/user")), None).unwrap();
+        assert_eq!(resolved, PathBuf::from("/home/user").join(GROK_DIR));
+    }
+
+    #[test]
+    fn test_grok_hook_json_contains_command_and_matcher() {
+        let content = grok_hook_json();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let entry = &v["hooks"]["PreToolUse"][0];
+        assert_eq!(entry["matcher"], GROK_SHELL_MATCHER);
+        assert_eq!(entry["hooks"][0]["command"], GROK_HOOK_COMMAND);
+        assert_eq!(entry["hooks"][0]["timeout"], 5);
+    }
+
+    #[test]
+    fn test_grok_install_writes_hook_and_awareness() {
+        let temp = TempDir::new().unwrap();
+        run_grok_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let hook_path = temp.path().join(HOOKS_SUBDIR).join(GROK_HOOK_JSON_FILE);
+        assert!(hook_path.exists(), "hook JSON must be written");
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&hook_path).unwrap()).unwrap();
+        assert_eq!(
+            v["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            GROK_HOOK_COMMAND
+        );
+
+        let rtk_md = temp.path().join(RTK_MD);
+        assert!(rtk_md.exists(), "RTK.md must be written");
+        assert!(fs::read_to_string(&rtk_md)
+            .unwrap()
+            .contains("rtk git status"));
+
+        let agents = temp.path().join(AGENTS_MD);
+        assert!(agents.exists(), "AGENTS.md must be written");
+        let agents_content = fs::read_to_string(&agents).unwrap();
+        assert!(
+            agents_content.contains(&format!("@{}", rtk_md.display()))
+                || agents_content.contains(RTK_MD_REF),
+            "AGENTS.md must reference RTK.md"
+        );
+    }
+
+    #[test]
+    fn test_grok_install_idempotent() {
+        let temp = TempDir::new().unwrap();
+        run_grok_mode_at(temp.path(), InitContext::default()).unwrap();
+        let hook_path = temp.path().join(HOOKS_SUBDIR).join(GROK_HOOK_JSON_FILE);
+        let before = fs::read_to_string(&hook_path).unwrap();
+        let agents_before = fs::read_to_string(temp.path().join(AGENTS_MD)).unwrap();
+
+        run_grok_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        assert_eq!(fs::read_to_string(&hook_path).unwrap(), before);
+        let agents_after = fs::read_to_string(temp.path().join(AGENTS_MD)).unwrap();
+        // Must not duplicate @RTK.md reference lines
+        let ref_count = agents_after
+            .lines()
+            .filter(|l| l.trim().contains("RTK.md"))
+            .count();
+        let ref_count_before = agents_before
+            .lines()
+            .filter(|l| l.trim().contains("RTK.md"))
+            .count();
+        assert_eq!(ref_count, ref_count_before);
+    }
+
+    #[test]
+    fn test_grok_uninstall_removes_artifacts() {
+        let temp = TempDir::new().unwrap();
+        run_grok_mode_at(temp.path(), InitContext::default()).unwrap();
+        assert!(temp
+            .path()
+            .join(HOOKS_SUBDIR)
+            .join(GROK_HOOK_JSON_FILE)
+            .exists());
+
+        let removed = uninstall_grok_at(temp.path(), InitContext::default()).unwrap();
+        assert!(!removed.is_empty());
+        assert!(!temp
+            .path()
+            .join(HOOKS_SUBDIR)
+            .join(GROK_HOOK_JSON_FILE)
+            .exists());
+        assert!(!temp.path().join(RTK_MD).exists());
+    }
+
+    #[test]
+    fn test_grok_uninstall_preserves_other_hooks() {
+        let temp = TempDir::new().unwrap();
+        run_grok_mode_at(temp.path(), InitContext::default()).unwrap();
+        let hooks_dir = temp.path().join(HOOKS_SUBDIR);
+        let other = hooks_dir.join("user-other.json");
+        let payload = r#"{"hooks":{"SessionStart":[]}}"#;
+        fs::write(&other, payload).unwrap();
+
+        uninstall_grok_at(temp.path(), InitContext::default()).unwrap();
+
+        assert!(other.exists());
+        assert_eq!(fs::read_to_string(&other).unwrap(), payload);
+    }
+
+    #[test]
+    fn test_grok_install_dry_run_writes_nothing() {
+        let temp = TempDir::new().unwrap();
+        let ctx = InitContext {
+            verbose: 0,
+            dry_run: true,
+        };
+        run_grok_mode_at(temp.path(), ctx).unwrap();
+        assert!(!temp
+            .path()
+            .join(HOOKS_SUBDIR)
+            .join(GROK_HOOK_JSON_FILE)
+            .exists());
+        assert!(!temp.path().join(RTK_MD).exists());
+    }
+
+    #[test]
+    fn test_grok_uninstall_nothing_when_absent() {
+        let temp = TempDir::new().unwrap();
+        let removed = uninstall_grok_at(temp.path(), InitContext::default()).unwrap();
+        assert!(removed.is_empty());
     }
 }
