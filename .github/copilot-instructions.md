@@ -57,7 +57,7 @@ For full details see [ARCHITECTURE.md](../docs/contributing/ARCHITECTURE.md) and
 ## Key Conventions
 
 - **Error handling**: `anyhow::Result` with `.context("description")?` — no bare `?`, no `unwrap()` in production. Filters must fall back to raw command on error.
-- **Regex**: Always `lazy_static!`, never compile inside a function body.
+- **Regex**: Use `LazyLock<Regex>` for fixed patterns reused across calls; keep runtime-dependent patterns local.
 - **Testing**: Unit tests inside modules (`#[cfg(test)] mod tests`). Fixtures in `tests/fixtures/`. Token savings assertions with `count_tokens()`.
 - **Exit codes**: Preserve the underlying command's exit code via `std::process::exit(code)`.
 - **Performance**: Startup <10ms (no async runtime), binary <5MB stripped.

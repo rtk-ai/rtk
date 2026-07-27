@@ -9,25 +9,27 @@ use crate::core::runner;
 use crate::core::truncate::{reduced, CAP_WARNINGS};
 use crate::core::utils::{fallback_tail, ruby_exec, truncate};
 use anyhow::Result;
-use lazy_static::lazy_static;
 use regex::Regex;
 use serde::Deserialize;
+use std::sync::LazyLock;
 
 // rspec failures carry full backtraces — show fewer than a generic warning list.
 const MAX_RSPEC_FAILURES: usize = reduced(CAP_WARNINGS, 5);
 
 // ── Noise-stripping regex patterns ──────────────────────────────────────────
 
-lazy_static! {
-    static ref RE_SPRING: Regex = Regex::new(r"(?i)running via spring preloader").unwrap();
-    static ref RE_SIMPLECOV: Regex =
-        Regex::new(r"(?i)(coverage report|simplecov|coverage/|\.simplecov|All Files.*Lines)")
-            .unwrap();
-    static ref RE_DEPRECATION: Regex = Regex::new(r"^DEPRECATION WARNING:").unwrap();
-    static ref RE_FINISHED_IN: Regex = Regex::new(r"^Finished in \d").unwrap();
-    static ref RE_SCREENSHOT: Regex = Regex::new(r"saved screenshot to (.+)").unwrap();
-    static ref RE_RSPEC_SUMMARY: Regex = Regex::new(r"(\d+) examples?, (\d+) failures?").unwrap();
-}
+static RE_SPRING: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)running via spring preloader").unwrap());
+static RE_SIMPLECOV: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(coverage report|simplecov|coverage/|\.simplecov|All Files.*Lines)").unwrap()
+});
+static RE_DEPRECATION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^DEPRECATION WARNING:").unwrap());
+static RE_FINISHED_IN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Finished in \d").unwrap());
+static RE_SCREENSHOT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"saved screenshot to (.+)").unwrap());
+static RE_RSPEC_SUMMARY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(\d+) examples?, (\d+) failures?").unwrap());
 
 // ── JSON structures matching RSpec's --format json output ───────────────────
 

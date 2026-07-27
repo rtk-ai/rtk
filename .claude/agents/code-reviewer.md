@@ -46,7 +46,7 @@ Raise alarms immediately when you see:
 
 | Red Flag | Why Dangerous | Fix |
 | --- | --- | --- |
-| `Regex::new()` inside function | Recompiles every call, kills startup time | `lazy_static! { static ref RE: Regex = ... }` |
+| Fixed `Regex::new()` inside hot function | Recompiles every call, kills startup time | `static RE: LazyLock<Regex> = LazyLock::new(|| ...);` |
 | `.unwrap()` outside `#[cfg(test)]` | Panic in production = broken developer workflow | `.context("description")?` |
 | `tokio`, `async-std`, `futures` in Cargo.toml | +5-10ms startup overhead | Blocking I/O only |
 | `?` without `.context()` | Error with no description = impossible to debug | `.context("what failed")?` |
@@ -61,7 +61,7 @@ Raise alarms immediately when you see:
 
 **Rust Safety:**
 - `anyhow::Result` + `.context()` chain
-- `lazy_static!` regex pattern
+- `LazyLock<Regex>` for fixed patterns reused across calls
 - Ownership: borrow over clone
 - `unwrap()` policy: never in prod, `expect("reason")` in tests
 - Silent failures: empty `catch`/`match _ => {}` patterns
@@ -122,9 +122,8 @@ fn filter_line(line: &str) -> bool {
 }
 
 // ✅ CORRECT: Compile once
-lazy_static! {
-    static ref ERROR_RE: Regex = Regex::new(r"^\s*error").unwrap();
-}
+static ERROR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s*error").unwrap());
 fn filter_line(line: &str) -> bool {
     ERROR_RE.is_match(line)
 }
@@ -198,7 +197,7 @@ fix_here
 
 | Prio | File | L | Action |
 | --- | --- | --- | --- |
-| 🔴 | file.rs | 45 | lazy_static! |
+| 🔴 | file.rs | 45 | LazyLock |
 ```
 
 ## Call-Site Analysis (🔴 MANDATORY)

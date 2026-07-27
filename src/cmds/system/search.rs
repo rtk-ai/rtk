@@ -17,6 +17,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::process::Command;
+use std::sync::LazyLock;
 
 /// Short single-char flags that consume one following token (or inline remainder)
 /// as their value. `-e` is handled separately — its value goes to `patterns`.
@@ -734,9 +735,9 @@ pub fn run(
 /// The `bool` in the tuple is `true` for match lines (`:` separator) and
 /// `false` for context lines (`-` separator, emitted by -A/-B/-C).
 fn parse_match_line(line: &str) -> Option<(String, usize, bool, &str)> {
-    lazy_static::lazy_static! {
-        static ref MATCH_LINE_RE: Regex = Regex::new(r"^([^\x00]+)\x00(\d+)([:-])(.*)$").unwrap();
-    }
+    static MATCH_LINE_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^([^\x00]+)\x00(\d+)([:-])(.*)$").unwrap());
+
     MATCH_LINE_RE.captures(line).and_then(|caps| {
         let file = caps.get(1)?.as_str().to_string();
         let line_num: usize = caps.get(2)?.as_str().parse().ok()?;
