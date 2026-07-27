@@ -13,33 +13,33 @@ keywords = ["cli", "llm", "token", "filter", "productivity"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-anyhow = "1.0"
-ignore = "0.4"
-walkdir = "2"
-regex = "1"
-lazy_static = "1.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
-colored = "2"
-dirs = "5"
-rusqlite = { version = "0.31", features = ["bundled"] }
-toml = "0.8"
-chrono = "0.4"
-tempfile = "3"
-sha2 = "0.10"
-ureq = "2"
-getrandom = "0.4"
-flate2 = "1.0"
-quick-xml = "0.37"
-which = "8"
-automod = "1"
+clap = { version = "=4.5.60", features = ["derive"] }
+anyhow = "=1.0.102"
+ignore = "=0.4.25"
+walkdir = "=2.5.0"
+regex = "=1.12.3"
+lazy_static = "=1.5.0"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.149", features = ["preserve_order"] }
+colored = "=2.2.0"
+dirs = "=5.0.1"
+rusqlite = { version = "=0.31.0", features = ["bundled"] }
+toml = "=0.8.23"
+chrono = "=0.4.44"
+tempfile = "=3.26.0"
+sha2 = "=0.10.9"
+ureq = "=2.12.1"
+getrandom = "=0.4.2"
+flate2 = "=1.1.9"
+quick-xml = "=0.37.5"
+which = "=8.0.1"
+automod = "=1.0.16"
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = "=0.2.182"
 
 [build-dependencies]
-toml = "0.8"
+toml = "=0.8.23"
 
 [dev-dependencies]
 
