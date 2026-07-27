@@ -351,10 +351,9 @@ fn sanitize_log_field(s: &str) -> String {
 }
 
 fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> {
-    let home = dirs::home_dir()?;
-    let dir = home.join(".local").join("share").join("rtk");
-    std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join("hook-audit.log");
+    let path = super::audit_log::path();
+    let dir = path.parent()?;
+    std::fs::create_dir_all(dir).ok()?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

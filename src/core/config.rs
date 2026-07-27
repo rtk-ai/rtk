@@ -183,6 +183,10 @@ impl Config {
 }
 
 fn get_config_path() -> Result<PathBuf> {
+    if let Some(config_dir) = std::env::var_os("RTK_CONFIG_DIR") {
+        return Ok(PathBuf::from(config_dir).join(CONFIG_TOML));
+    }
+
     let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
     Ok(config_dir.join(RTK_DATA_DIR).join(CONFIG_TOML))
 }

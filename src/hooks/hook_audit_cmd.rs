@@ -2,19 +2,6 @@
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::path::PathBuf;
-
-/// Default log file location (aligned with hook's $HOME/.local/share/rtk/).
-fn default_log_path() -> PathBuf {
-    if let Ok(dir) = std::env::var("RTK_AUDIT_DIR") {
-        PathBuf::from(dir).join("hook-audit.log")
-    } else {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        PathBuf::from(home)
-            .join(".local/share/rtk")
-            .join("hook-audit.log")
-    }
-}
 
 /// A single parsed audit log entry.
 struct AuditEntry {
@@ -69,7 +56,7 @@ fn filter_since_days(entries: &[AuditEntry], days: u64) -> Vec<&AuditEntry> {
 }
 
 pub fn run(since_days: u64, verbose: u8) -> Result<()> {
-    let log_path = default_log_path();
+    let log_path = super::audit_log::path();
 
     if !log_path.exists() {
         println!("No audit log found at {}", log_path.display());

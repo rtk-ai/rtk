@@ -283,11 +283,12 @@ impl Engine {
         self.bin()
     }
 
-    /// `-n -H --null` are parse aids (NUL keeps the regroup unambiguous, #1436);
-    /// `-I` skips binary noise (-a overrides).
+    /// `-n -H -Z` are broadly supported parse aids. NUL keeps regrouping
+    /// unambiguous (#1436); do not inject GNU-only `-I`/`--null` because Windows
+    /// grep replacements may reject them.
     fn parse_flags(self) -> &'static [&'static str] {
         match self {
-            Engine::Grep => &["-n", "-H", "-I", "--null"],
+            Engine::Grep => &["-n", "-H", "-Z"],
             Engine::Rg => &["-n", "--with-filename", "--null"],
         }
     }
@@ -317,12 +318,16 @@ fn engine_command<T: AsRef<str>>(
     for a in extra_args {
         cmd.arg(a.as_ref());
     }
-    if line_buffered {
+    if line_buffered && matches!(engine, Engine::Rg) {
         // The engine writes through a pipe, so flush each match immediately.
         cmd.arg("--line-buffered");
     }
-    for p in patterns {
-        cmd.args(["-e", p]);
+    if patterns.len() == 1 {
+        cmd.arg(&patterns[0]);
+    } else {
+        for p in patterns {
+            cmd.args(["-e", p]);
+        }
     }
     cmd.arg("--");
     cmd.args(paths);
@@ -444,7 +449,7 @@ fn passthrough<T: AsRef<str>>(
     stream_stdin: bool,
 ) -> Result<i32> {
     let mut cmd = resolved_command(engine.bin());
-    if stream_stdin && !std::io::stdout().is_terminal() {
+    if stream_stdin && !std::io::stdout().is_terminal() && matches!(engine, Engine::Rg) {
         // Keep passthrough output live when stdout is piped.
         cmd.arg("--line-buffered");
     }
@@ -544,6 +549,12 @@ pub fn run(
 
     // format/shape flags (-c/-l/-o/...): already-minimal native output, passthrough.
     if has_format_flag(&extra_args) {
+        return passthrough(&timer, engine, &args, &real_cmd, reads_piped_stdin);
+    }
+
+    // Multiple grep patterns require `-e`, which is not implemented by every
+    // Windows grep replacement. Preserve the user's exact engine invocation.
+    if matches!(engine, Engine::Grep) && patterns.len() > 1 {
         return passthrough(&timer, engine, &args, &real_cmd, reads_piped_stdin);
     }
 

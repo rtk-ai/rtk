@@ -557,6 +557,18 @@ pub(crate) mod tests {
     use super::*;
     use std::process::Command;
 
+    fn shell_command(posix_script: &str, windows_script: &str) -> Command {
+        if cfg!(windows) {
+            let mut command = Command::new("cmd.exe");
+            command.args(["/d", "/c", windows_script]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", posix_script]);
+            command
+        }
+    }
+
     struct LineFilter<F: FnMut(&str) -> Option<String>> {
         f: F,
     }
@@ -671,9 +683,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_run_streaming_exit_code_preserved() {
-        // nosemgrep: interpreter-execution
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "exit 42"]);
+        let mut cmd = shell_command("exit 42", "exit 42");
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough).unwrap();
         assert_eq!(result.exit_code, 42);
     }
@@ -734,6 +744,7 @@ pub(crate) mod tests {
         assert_eq!(result.exit_code, 0);
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn test_run_streaming_raw_cap_at_10mb() {
         // nosemgrep: interpreter-execution
@@ -755,6 +766,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn test_run_streaming_stderr_cap_at_10mb() {
         // nosemgrep: interpreter-execution
@@ -824,18 +836,17 @@ pub(crate) mod tests {
 
     #[test]
     fn test_exec_capture_stderr() {
-        // nosemgrep: interpreter-execution
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "echo err_msg >&2"]);
+        let mut cmd = shell_command("echo err_msg >&2", "echo err_msg 1>&2");
         let result = exec_capture(&mut cmd).unwrap();
         assert!(result.stderr.contains("err_msg"));
     }
 
     #[test]
     fn test_exec_capture_combined() {
-        // nosemgrep: interpreter-execution
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "echo out_msg; echo err_msg >&2"]);
+        let mut cmd = shell_command(
+            "echo out_msg; echo err_msg >&2",
+            "echo out_msg & echo err_msg 1>&2",
+        );
         let result = exec_capture(&mut cmd).unwrap();
         let combined = result.combined();
         assert!(combined.contains("out_msg"));

@@ -130,12 +130,17 @@ fn grep_no_match_emits_empty_not_a_message() {
     std::fs::write(dir.path().join("a.txt"), "hello world\n").expect("write");
     // Faithful grep needs -r to descend a directory; we no longer force recursion
     // by routing through rg (the engine-faithful contract).
-    let (out, code) = rtk_in_dir(dir.path(), &["grep", "-r", "zzz_no_match_xyz", "."]);
+    let (out, stderr, code) =
+        rtk_output_in_dir(dir.path(), &["grep", "-r", "zzz_no_match_xyz", "."]);
     assert!(
         out.trim().is_empty(),
         "no-match grep must emit empty, not a '0 matches' line: {out:?}"
     );
-    assert_eq!(code, Some(1), "grep no-match must preserve exit 1");
+    assert_eq!(
+        code,
+        Some(1),
+        "grep no-match must preserve exit 1; stderr: {stderr}"
+    );
 }
 
 #[test]

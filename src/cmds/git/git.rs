@@ -125,10 +125,15 @@ fn run_diff(
         .iter()
         .any(|arg| arg == "--stat" || arg == "--numstat" || arg == "--shortstat");
 
+    // These flags use exit code 1 to report a non-empty diff. Running RTK's
+    // preliminary --stat command and treating that code as an error used to
+    // discard the diff output entirely.
+    let wants_exit_semantics = diff_requires_exact_exit(args);
+
     // Check if user wants compact diff (default RTK behavior)
     let wants_compact = !args.iter().any(|arg| arg == "--no-compact");
 
-    if wants_stat || !wants_compact {
+    if wants_stat || wants_exit_semantics || !wants_compact {
         // User wants stat or explicitly no compacting - pass through directly
         let mut cmd = git_cmd(global_args);
         cmd.arg("diff");
@@ -141,12 +146,12 @@ fn run_diff(
 
         let result = exec_capture(&mut cmd).context("Failed to run git diff")?;
 
-        if !result.success() {
-            eprintln!("{}", result.stderr);
-            return Ok(result.exit_code);
+        if !result.stdout.is_empty() {
+            print!("{}", result.stdout);
         }
-
-        println!("{}", result.stdout.trim());
+        if !result.stderr.is_empty() {
+            eprint!("{}", result.stderr);
+        }
 
         timer.track(
             &format!("git diff {}", args.join(" ")),
@@ -155,7 +160,7 @@ fn run_diff(
             &result.stdout,
         );
 
-        return Ok(0);
+        return Ok(result.exit_code);
     }
 
     // Default RTK behavior: stat first, then compacted diff
@@ -213,6 +218,11 @@ fn run_diff(
     );
 
     Ok(0)
+}
+
+fn diff_requires_exact_exit(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| arg == "--exit-code" || arg == "--quiet" || arg == "-q")
 }
 
 fn run_show(
@@ -448,6 +458,28 @@ fn run_log(
             || arg.starts_with("--max-count")
     });
 
+    // An explicit format or an unbounded history selector expresses exact
+    // caller intent. Preserve both the full history and the exact formatting.
+    if log_requires_passthrough(args, has_format_flag, has_limit_flag) {
+        for arg in args {
+            cmd.arg(arg);
+        }
+        let result = exec_capture(&mut cmd).context("Failed to run git log")?;
+        if !result.stdout.is_empty() {
+            print!("{}", result.stdout);
+        }
+        if !result.stderr.is_empty() {
+            eprint!("{}", result.stderr);
+        }
+        timer.track(
+            &format!("git log {}", args.join(" ")),
+            &format!("rtk git log {} (passthrough)", args.join(" ")),
+            &result.stdout,
+            &result.stdout,
+        );
+        return Ok(result.exit_code);
+    }
+
     // Apply RTK defaults only if user didn't specify them
     // Use %b (body) to preserve first line of commit body for agent context
     // (BREAKING CHANGE, Closes #xxx, design notes)
@@ -460,10 +492,6 @@ fn run_log(
         // User explicitly passed -N / -n N / --max-count=N → respect their choice
         let n = parse_user_limit(args).unwrap_or(10);
         (n, true)
-    } else if has_format_flag {
-        // --oneline / --pretty without -N: user wants compact output, allow more
-        cmd.arg("-50");
-        (50, false)
     } else {
         // No flags at all: default to 10
         cmd.arg("-10");
@@ -508,6 +536,14 @@ fn run_log(
     );
 
     Ok(0)
+}
+
+fn log_requires_passthrough(
+    args: &[String],
+    has_format_flag: bool,
+    has_limit_flag: bool,
+) -> bool {
+    has_format_flag || (!args.is_empty() && !has_limit_flag)
 }
 
 /// Filter git log output: truncate long messages, cap lines
@@ -2940,6 +2976,32 @@ no changes added to commit (use "git add" and/or "git commit -a")
         // user_set_limit=false means cap at limit
         let result = filter_log_output(oneline_output, 3, false, true);
         assert_eq!(result.lines().count(), 3);
+    }
+
+    #[test]
+    fn test_diff_exit_semantics_force_passthrough() {
+        assert!(diff_requires_exact_exit(&["--exit-code".to_string()]));
+        assert!(diff_requires_exact_exit(&["--quiet".to_string()]));
+        assert!(diff_requires_exact_exit(&["-q".to_string()]));
+        assert!(!diff_requires_exact_exit(&["--stat".to_string()]));
+    }
+
+    #[test]
+    fn test_log_explicit_format_forces_passthrough() {
+        let args = vec!["--format=%H".to_string()];
+        assert!(log_requires_passthrough(&args, true, false));
+    }
+
+    #[test]
+    fn test_log_unbounded_query_forces_passthrough() {
+        let args = vec!["--all".to_string()];
+        assert!(log_requires_passthrough(&args, false, false));
+    }
+
+    #[test]
+    fn test_log_explicit_limit_keeps_compact_path() {
+        let args = vec!["-20".to_string()];
+        assert!(!log_requires_passthrough(&args, false, true));
     }
 
     /// Regression test: `git branch <name>` must create, not list.
