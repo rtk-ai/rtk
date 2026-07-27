@@ -73,11 +73,30 @@ lazy_static! {
     static ref USER_REJECTION_RE: Regex = Regex::new(
         r"(?i)(user (doesn't want|declined|rejected|cancelled)|operation (cancelled|aborted) by user)"
     ).unwrap();
+
+    // Claude Code emits this when the user Ctrl-Cs one branch of an N-way parallel
+    // tool call. Both the cancelled and surviving branches are usually fine commands —
+    // treating either as "wrong" or "right" yields bogus corrections. See issue #1659.
+    //
+    // Anchored with ^\s* so a build log or error message that merely echoes the
+    // phrase mid-stream is NOT matched — only outputs that ARE the cancellation
+    // event (Claude emits the marker as the entire content of the tool_result).
+    static ref PARALLEL_TOOL_CALL_CANCELLATION_RE: Regex = Regex::new(
+        r"(?i)^\s*(?:<tool_use_error>\s*)?(?:tool_use_error:\s*)?cancelled:\s*parallel tool call\b"
+    ).unwrap();
 }
 
-/// Filters out user rejections - requires actual error-indicating content
+fn is_parallel_tool_call_cancellation(output: &str) -> bool {
+    PARALLEL_TOOL_CALL_CANCELLATION_RE.is_match(output)
+}
+
+/// Filters out user rejections and parallel-tool-call cancellations - requires actual error-indicating content
 pub fn is_command_error(is_error: bool, output: &str) -> bool {
     if !is_error {
+        return false;
+    }
+
+    if is_parallel_tool_call_cancellation(output) {
         return false;
     }
 
@@ -231,8 +250,18 @@ pub fn find_corrections(commands: &[CommandExecution]) -> Vec<CorrectionPair> {
             continue;
         }
 
-        // Look ahead for correction within CORRECTION_WINDOW
-        for candidate in commands.iter().skip(i + 1).take(CORRECTION_WINDOW) {
+        // Look ahead for correction within CORRECTION_WINDOW.
+        // Filter parallel-tool-call cancellations *before* `take(N)` so they don't
+        // consume window slots and hide a valid correction immediately after them.
+        // Gate on `is_error` too — a successful command whose stdout legitimately
+        // mentions the cancellation phrase (e.g. an echo of this very issue body)
+        // must still be eligible as the correction candidate (issue #1659).
+        for candidate in commands
+            .iter()
+            .skip(i + 1)
+            .filter(|c| !(c.is_error && is_parallel_tool_call_cancellation(&c.output)))
+            .take(CORRECTION_WINDOW)
+        {
             let similarity = command_similarity(&cmd.command, &candidate.command);
 
             // Must meet minimum similarity
@@ -365,6 +394,177 @@ mod tests {
         assert!(!is_command_error(true, "The user doesn't want to proceed"));
         assert!(!is_command_error(true, "Operation cancelled by user"));
         assert!(is_command_error(true, "error: permission denied"));
+    }
+
+    #[test]
+    fn test_is_command_error_filters_parallel_tool_call_cancellation() {
+        // XML-wrapped form (most common, from Claude Code session JSONL)
+        assert!(!is_command_error(
+            true,
+            "<tool_use_error>Cancelled: parallel tool call Bash(git show abc --no-stat -p foo.py) errored</tool_use_error>"
+        ));
+        // Bare prefix form
+        assert!(!is_command_error(
+            true,
+            "tool_use_error: Cancelled: parallel tool call Bash(git show abc --no-stat -p foo.py) errored"
+        ));
+        // Case-insensitive (defensive) — both halves uppercase
+        assert!(!is_command_error(
+            true,
+            "<TOOL_USE_ERROR>CANCELLED: PARALLEL TOOL CALL Bash(...)</TOOL_USE_ERROR>"
+        ));
+        assert!(!is_command_error(
+            true,
+            "<TOOL_USE_ERROR>cancelled: PARALLEL TOOL CALL Bash(...)</TOOL_USE_ERROR>"
+        ));
+        // Real CLI errors must still pass through
+        assert!(is_command_error(true, "error: unexpected argument '--foo'"));
+        assert!(is_command_error(true, "error: permission denied"));
+        // Mid-stream mention (build log / error message that echoes the phrase)
+        // must NOT be filtered out as a cancellation. The regex is anchored with ^\s*.
+        // Codex iter 3 finding #3/#5: unanchored regex would misclassify these.
+        assert!(is_command_error(
+            true,
+            "error: build failed\nlog: <tool_use_error>Cancelled: parallel tool call Bash(...)</tool_use_error> happened earlier"
+        ));
+        assert!(is_command_error(
+            true,
+            "error: see prior cancelled: parallel tool call event for context"
+        ));
+        // Lock in matched shapes the regex currently accepts (Codex iter 4 Q3):
+        // leading newline, tab-indented tag, and the bare no-tag form. These all
+        // appear in Claude Code session logs — guard against accidental regex
+        // tightening that would let cancellations leak back through.
+        assert!(!is_command_error(
+            true,
+            "\n<tool_use_error>Cancelled: parallel tool call Bash(...)</tool_use_error>"
+        ));
+        assert!(!is_command_error(
+            true,
+            "\t<tool_use_error>Cancelled: parallel tool call Bash(...)</tool_use_error>"
+        ));
+        assert!(!is_command_error(
+            true,
+            "Cancelled: parallel tool call Bash(...)"
+        ));
+    }
+
+    #[test]
+    fn test_find_corrections_ignores_parallel_cancellation_candidate() {
+        // A real error followed by a cancelled parallel-tool-call branch with similar
+        // command shape must NOT yield a correction — the cancelled branch isn't a fix.
+        let commands = vec![
+            CommandExecution {
+                command: "git show abc --foo".to_string(),
+                is_error: true,
+                output: "error: unexpected argument '--foo'".to_string(),
+            },
+            CommandExecution {
+                command: "git show abc --no-stat -p foo.py".to_string(),
+                is_error: true,
+                output: "<tool_use_error>Cancelled: parallel tool call Bash(git show abc --no-stat -p foo.py) errored</tool_use_error>".to_string(),
+            },
+        ];
+
+        let corrections = find_corrections(&commands);
+        assert_eq!(corrections.len(), 0);
+    }
+
+    #[test]
+    fn test_find_corrections_skips_cancellation_as_wrong_side() {
+        // Mirror of the issue's repro: the cancelled command would be the "wrong" side
+        // of a bogus correction pair. With the filter, no correction should be emitted.
+        let commands = vec![
+            CommandExecution {
+                command: "git show abc --no-stat -p memory_repository.py".to_string(),
+                is_error: true,
+                output: "<tool_use_error>Cancelled: parallel tool call Bash(git show abc --no-stat -p memory_repository.py) errored</tool_use_error>".to_string(),
+            },
+            CommandExecution {
+                command: "git show abc --no-stat -p schema.py".to_string(),
+                is_error: false,
+                output: "diff --git ...".to_string(),
+            },
+        ];
+
+        let corrections = find_corrections(&commands);
+        assert_eq!(corrections.len(), 0);
+    }
+
+    #[test]
+    fn test_find_corrections_cancellations_dont_consume_window() {
+        // CORRECTION_WINDOW is 3. If three cancellations sit between a real error
+        // and the actual fix, the fix must still be found — cancellations should
+        // not consume the lookahead budget. Regression for issue #1659 (Codex pass 2).
+        let cancel_output =
+            "<tool_use_error>Cancelled: parallel tool call Bash(...) errored</tool_use_error>"
+                .to_string();
+        let commands = vec![
+            CommandExecution {
+                command: "git commit --ammend".to_string(),
+                is_error: true,
+                output: "error: unexpected argument '--ammend'".to_string(),
+            },
+            CommandExecution {
+                command: "rg foo".to_string(),
+                is_error: true,
+                output: cancel_output.clone(),
+            },
+            CommandExecution {
+                command: "rg bar".to_string(),
+                is_error: true,
+                output: cancel_output.clone(),
+            },
+            CommandExecution {
+                command: "rg baz".to_string(),
+                is_error: true,
+                output: cancel_output,
+            },
+            // Real fix sits at index 4 — 4 slots after the error. Without filtering
+            // cancellations before `take(3)`, this would never be reached.
+            CommandExecution {
+                command: "git commit --amend".to_string(),
+                is_error: false,
+                output: "[main abc123] Fix".to_string(),
+            },
+        ];
+
+        let corrections = find_corrections(&commands);
+        assert_eq!(
+            corrections.len(),
+            1,
+            "real fix must survive cancellations in the lookahead window"
+        );
+        assert_eq!(corrections[0].right_command, "git commit --amend");
+    }
+
+    #[test]
+    fn test_find_corrections_keeps_success_candidate_mentioning_phrase() {
+        // A SUCCESSFUL command (is_error=false) whose stdout happens to mention
+        // the cancellation phrase (e.g. echoing this very issue body, a grep over
+        // session logs, a test fixture) must still be eligible as the correction
+        // candidate. The filter only drops genuine cancellation events, identified
+        // by is_error=true AND matching pattern (issue #1659, Codex pass 2).
+        let commands = vec![
+            CommandExecution {
+                command: "git commit --ammend".to_string(),
+                is_error: true,
+                output: "error: unexpected argument '--ammend'".to_string(),
+            },
+            CommandExecution {
+                command: "git commit --amend".to_string(),
+                is_error: false,
+                output: "Note: <tool_use_error>Cancelled: parallel tool call Bash(...)</tool_use_error> from a prior session".to_string(),
+            },
+        ];
+
+        let corrections = find_corrections(&commands);
+        assert_eq!(
+            corrections.len(),
+            1,
+            "successful candidate that merely mentions the phrase must not be filtered"
+        );
+        assert_eq!(corrections[0].right_command, "git commit --amend");
     }
 
     #[test]
