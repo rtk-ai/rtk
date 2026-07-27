@@ -48,6 +48,56 @@ fn current_project_path_string() -> String {
         .unwrap_or_default()
 }
 
+/// Tools whose second word is a fixed subcommand (`git log`, `docker ps`) rather than a
+/// user-supplied argument. Only for these is a third word safe to report.
+const SUBCOMMAND_TOOLS: &[&str] = &[
+    "artisan", "aws", "cargo", "docker", "dotnet", "gh", "git", "glab", "go", "gradlew", "gt",
+    "kubectl", "mvn", "npm", "pip", "pnpm", "rake", "uv", "yarn",
+];
+
+/// True for a bare tool/subcommand word — letters, digits, `_`, `-`, `:` only.
+///
+/// Rejects anything carrying `/`, `.`, `=`, `@` or a leading `-`, which is how paths,
+/// URLs, DSNs, filenames and flags are excluded.
+fn is_bare_command_word(word: &str) -> bool {
+    !word.is_empty()
+        && !word.starts_with('-')
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == ':')
+}
+
+/// Reduce a stored `rtk_cmd` to a label that is safe to put in a telemetry payload.
+///
+/// `docs/TELEMETRY.md` states that full command lines, arguments, file paths and secrets
+/// are never collected. Stored `rtk_cmd` values do contain them: the proxy and fallback
+/// record sites embed the raw command line, so `rtk psql postgres://user:pass@host/db` is
+/// a real stored value. Taking a fixed number of leading words therefore leaks argument
+/// data. Keep rtk's own leading marker, then only bare subcommand words, and only take a
+/// third word when the second names a tool that actually has subcommands.
+fn telemetry_safe_label(cmd: &str) -> String {
+    let mut words = cmd.split_whitespace();
+    let Some(marker) = words.next() else {
+        return String::new();
+    };
+    // The leading marker is written by rtk itself ("rtk", "rtk:toml"), never user input.
+    let mut label = String::from(marker);
+
+    let Some(tool) = words.next().filter(|w| is_bare_command_word(w)) else {
+        return label;
+    };
+    label.push(' ');
+    label.push_str(tool);
+
+    if SUBCOMMAND_TOOLS.contains(&tool) {
+        if let Some(sub) = words.next().filter(|w| is_bare_command_word(w)) {
+            label.push(' ');
+            label.push_str(sub);
+        }
+    }
+    label
+}
+
 /// Build SQL filter params for project-scoped queries.
 /// Returns (exact_match, glob_prefix) for WHERE clause.
 /// Uses GLOB instead of LIKE to avoid `_` and `%` in paths acting as wildcards. // changed: GLOB
@@ -1061,8 +1111,7 @@ impl Tracker {
         let rows = stmt.query_map(params![limit as i64], |row| {
             let cmd: String = row.get(0)?;
             let sav: f64 = row.get(1)?;
-            let short = cmd.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
-            Ok((short, sav))
+            Ok((telemetry_safe_label(&cmd), sav))
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
@@ -1422,6 +1471,78 @@ pub fn args_display(args: &[OsString]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 0. telemetry_safe_label — no argument data may reach the telemetry payload
+    #[test]
+    fn test_telemetry_label_drops_connection_string() {
+        // Regression for #1785: the DSN (with credentials) must not survive.
+        let label = telemetry_safe_label("rtk psql postgres://user:pw@host:5432/db -c SELECT 1");
+        assert_eq!(label, "rtk psql");
+    }
+
+    #[test]
+    fn test_telemetry_label_drops_paths_flags_and_patterns() {
+        assert_eq!(
+            telemetry_safe_label("rtk ls -la /Users/someone/src"),
+            "rtk ls"
+        );
+        assert_eq!(telemetry_safe_label("rtk read /etc/passwd"), "rtk read");
+        assert_eq!(
+            telemetry_safe_label("rtk grep secret-pattern src"),
+            "rtk grep"
+        );
+        assert_eq!(
+            telemetry_safe_label("rtk tsc -p app/tsconfig.json"),
+            "rtk tsc"
+        );
+    }
+
+    #[test]
+    fn test_telemetry_label_keeps_real_subcommands() {
+        // The signal the field exists for is preserved.
+        assert_eq!(telemetry_safe_label("rtk git log --oneline"), "rtk git log");
+        assert_eq!(telemetry_safe_label("rtk docker ps -a"), "rtk docker ps");
+        assert_eq!(
+            telemetry_safe_label("rtk cargo build --release"),
+            "rtk cargo build"
+        );
+        assert_eq!(telemetry_safe_label("rtk git status"), "rtk git status");
+    }
+
+    #[test]
+    fn test_telemetry_label_handles_rtk_markers_and_edges() {
+        assert_eq!(
+            telemetry_safe_label("rtk:toml shellcheck --severity=style"),
+            "rtk:toml shellcheck"
+        );
+        assert_eq!(
+            telemetry_safe_label("rtk proxy ./node_modules/.bin/eslint"),
+            "rtk proxy"
+        );
+        assert_eq!(telemetry_safe_label("rtk"), "rtk");
+        assert_eq!(telemetry_safe_label(""), "");
+    }
+
+    #[test]
+    fn test_telemetry_label_never_emits_argument_characters() {
+        // Property: no label may contain the characters that carry user data.
+        for cmd in [
+            "rtk psql postgres://u:p@h/db",
+            "rtk ls -la /tmp/x",
+            "rtk proxy curl https://example.com/a?b=c",
+            "rtk git log --format=%H",
+            "rtk wc /private/tmp/session/task.output",
+        ] {
+            let label = telemetry_safe_label(cmd);
+            assert!(
+                !label.contains('/')
+                    && !label.contains('@')
+                    && !label.contains('=')
+                    && !label.contains('.'),
+                "label leaked argument data: {label:?} (from {cmd:?})"
+            );
+        }
+    }
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
