@@ -117,15 +117,16 @@ impl ClaudeProvider {
 
     /// Encode a filesystem path to Claude Code's directory name format.
     ///
-    /// Claude Code replaces `/`, `.`, `_`, `\`, and any non-ASCII character
+    /// Claude Code replaces `/`, `.`, `_`, `\`, `(`, `)`, and any non-ASCII character
     /// with `-` when computing the project directory slug under `~/.claude/projects/`.
     ///
-    /// `/Users/foo/bar`          → `-Users-foo-bar`
-    /// `/Users/first.last/bar`   → `-Users-first-last-bar`
-    /// `/home/chris/2_project`   → `-home-chris-2-project`
-    /// `C:\Users\foo\bar`        → `C:-Users-foo-bar`
+    /// `/Users/foo/bar`             → `-Users-foo-bar`
+    /// `/Users/first.last/bar`      → `-Users-first-last-bar`
+    /// `/home/chris/2_project`      → `-home-chris-2-project`
+    /// `/Users/dev/old projects (2024)` → `-Users-dev-old-projects--2024-`
+    /// `C:\Users\foo\bar`           → `C:-Users-foo-bar`
     pub fn encode_project_path(path: &str) -> String {
-        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\', ' ', '[', ']'];
+        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\', ' ', '[', ']', '(', ')'];
 
         path.chars()
             .map(|c| {
@@ -392,6 +393,16 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_project_path_parens() {
+        // Claude Code also replaces '(' and ')' with '-'. Verified against a real
+        // ~/.claude/projects/ directory for a path containing "(1998)" -> "--1998--".
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/Users/dev/old projects (2024)/repo"),
+            "-Users-dev-old-projects--2024--repo"
+        );
+    }
+
+    #[test]
     fn test_encode_project_path_non_ascii() {
         // Non-ASCII characters are each replaced with '-' (https://github.com/anthropics/claude-code/issues/40946)
         // '/home/user/' + '外' + '主' + '/app' -> '-home-user' + '-' + '-' + '-' + '-' + 'app'
@@ -459,6 +470,31 @@ mod tests {
         let sessions = ClaudeProvider::discover_sessions_in_projects_dir(
             projects_dir.path(),
             Some("rtk"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].file_name().and_then(|name| name.to_str()),
+            Some("matching.jsonl")
+        );
+    }
+
+    // Mirrors discover::mod.rs::run(): encode_project_path() output used as a substring match against the on-disk directory name.
+    #[test]
+    fn test_discover_sessions_applies_project_filter_with_parens() {
+        let projects_dir = tempfile::tempdir().unwrap();
+        let matching_project = projects_dir
+            .path()
+            .join("-Users-dev-old-projects--2024--repo");
+        std::fs::create_dir_all(&matching_project).unwrap();
+        std::fs::write(matching_project.join("matching.jsonl"), "").unwrap();
+
+        let filter = ClaudeProvider::encode_project_path("/Users/dev/old projects (2024)/repo");
+        let sessions = ClaudeProvider::discover_sessions_in_projects_dir(
+            projects_dir.path(),
+            Some(&filter),
             None,
         )
         .unwrap();

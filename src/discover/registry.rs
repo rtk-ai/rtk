@@ -63,10 +63,6 @@ lazy_static! {
         let env_assign = format!(r#"[A-Z_][A-Z0-9_]*={}"#, env_value);
         Regex::new(&format!(r#"^(?:sudo\s+|env\s+|{}\s+)+"#, env_assign)).unwrap()
     };
-    // Git global options that appear before the subcommand: -C <path>, -c <key=val>,
-    // --git-dir <dir>, --work-tree <dir>, and flag-only options (#163)
-    static ref GIT_GLOBAL_OPT: Regex =
-        Regex::new(r"^(?:(?:-C\s+\S+|-c\s+\S+|--git-dir(?:=\S+|\s+\S+)|--work-tree(?:=\S+|\s+\S+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\s+)+").unwrap();
     // Issue #1362: each capture expects a SINGLE file argument (`\S+$`). Multi-file
     // invocations like `head -3 a b c` fail to match so the segment is passed through
     // to the native `head`/`tail` binary — which already handles multi-file with
@@ -326,17 +322,65 @@ fn normalize_php_tool_path(path: &str) -> String {
     normalized
 }
 
+/// Git global options that take a separate value token: -C <path>, -c <key=val>,
+/// --git-dir <dir>, --work-tree <dir>.
+const GIT_GLOBAL_OPT_WITH_VALUE: &[&str] = &["-C", "-c", "--git-dir", "--work-tree"];
+
+/// Git global options that also accept `--flag=value` form.
+const GIT_GLOBAL_OPT_EQ: &[&str] = &["--git-dir", "--work-tree"];
+
+/// Git global flag-only options that take no value.
+const GIT_GLOBAL_OPT_FLAG: &[&str] = &[
+    "--no-pager",
+    "--no-optional-locks",
+    "--bare",
+    "--literal-pathspecs",
+];
+
 /// Strip git global options before the subcommand (#163).
 /// `git -C /tmp status` → `git status`, preserving the rest.
 /// Returns the original string unchanged if not a git command.
+///
+/// Uses the shared tokenizer rather than a bare-whitespace split so a quoted
+/// value (e.g. `-C "/path with spaces"`) is treated as one argument instead
+/// of being cut off at the first space inside the quotes.
 fn strip_git_global_opts(cmd: &str) -> String {
     // Only applies to commands starting with "git "
     if !cmd.starts_with("git ") {
         return cmd.to_string();
     }
     let after_git = &cmd[4..]; // skip "git "
-    let stripped = GIT_GLOBAL_OPT.replace(after_git, "");
-    format!("git {}", stripped.trim())
+    let tokens = tokenize(after_git);
+
+    let mut i = 0;
+    while let Some(tok) = tokens.get(i) {
+        if tok.kind != TokenKind::Arg {
+            break;
+        }
+        if GIT_GLOBAL_OPT_FLAG.contains(&tok.value.as_str()) {
+            i += 1;
+            continue;
+        }
+        if GIT_GLOBAL_OPT_WITH_VALUE.contains(&tok.value.as_str()) {
+            match tokens.get(i + 1) {
+                Some(value_tok) if value_tok.kind == TokenKind::Arg => {
+                    i += 2;
+                    continue;
+                }
+                _ => break,
+            }
+        }
+        if let Some(eq_pos) = tok.value.find('=') {
+            if GIT_GLOBAL_OPT_EQ.contains(&&tok.value[..eq_pos]) {
+                i += 1;
+                continue;
+            }
+        }
+        break;
+    }
+
+    let remainder_start = tokens.get(i).map(|t| t.offset).unwrap_or(after_git.len());
+    format!("git {}", after_git[remainder_start..].trim())
 }
 
 /// Strip golangci-lint global options before the `run` subcommand.
@@ -4280,6 +4324,72 @@ mod tests {
         assert_eq!(strip_git_global_opts("git --no-pager log"), "git log");
         assert_eq!(strip_git_global_opts("git status"), "git status");
         assert_eq!(strip_git_global_opts("cargo test"), "cargo test");
+    }
+
+    // A quoted -C value can contain spaces or parens (e.g. macOS folder names
+    // like "old projects (2024)"); the value must stay intact as one argument.
+    #[test]
+    fn test_strip_git_global_opts_quoted_path_with_space() {
+        assert_eq!(
+            strip_git_global_opts(r#"git -C "/Users/dev/old projects (2024)/repo" diff"#),
+            "git diff"
+        );
+        assert_eq!(
+            strip_git_global_opts("git -C '/Users/dev/old projects/repo' status"),
+            "git status"
+        );
+    }
+
+    // --git-dir/--work-tree also accept `--flag=value` (no space), a separate
+    // code path from the space-separated `-C <value>` form above.
+    #[test]
+    fn test_strip_git_global_opts_eq_form() {
+        assert_eq!(
+            strip_git_global_opts("git --git-dir=/tmp/foo.git status"),
+            "git status"
+        );
+        assert_eq!(
+            strip_git_global_opts("git --work-tree=/tmp/wt status"),
+            "git status"
+        );
+        assert_eq!(
+            strip_git_global_opts(r#"git --git-dir="/Users/dev/old projects (2024)/.git" status"#),
+            "git status"
+        );
+    }
+
+    #[test]
+    fn test_strip_git_global_opts_dash_c_key_value() {
+        assert_eq!(
+            strip_git_global_opts("git -c user.name=Dev status"),
+            "git status"
+        );
+    }
+
+    #[test]
+    fn test_strip_git_global_opts_chained() {
+        assert_eq!(
+            strip_git_global_opts("git --no-pager -C /tmp/foo status"),
+            "git status"
+        );
+    }
+
+    // A global-opt flag with no following value shouldn't be consumed or panic;
+    // the string is returned with the (incomplete) flag left in place.
+    #[test]
+    fn test_strip_git_global_opts_dangling_flag() {
+        assert_eq!(strip_git_global_opts("git -C"), "git -C");
+    }
+
+    #[test]
+    fn test_rewrite_git_dash_c_quoted_path_with_space() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"git -C "/Users/dev/old projects (2024)/repo" diff"#,
+                &[]
+            ),
+            Some(r#"rtk git -C "/Users/dev/old projects (2024)/repo" diff"#.to_string())
+        );
     }
 
     #[test]
