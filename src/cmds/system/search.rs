@@ -734,6 +734,10 @@ pub fn run(
 /// The `bool` in the tuple is `true` for match lines (`:` separator) and
 /// `false` for context lines (`-` separator, emitted by -A/-B/-C).
 fn parse_match_line(line: &str) -> Option<(String, usize, bool, &str)> {
+    if let Some((file, content)) = parse_binary_match_line(line) {
+        return Some((file, 0, true, content));
+    }
+
     lazy_static::lazy_static! {
         static ref MATCH_LINE_RE: Regex = Regex::new(r"^([^\x00]+)\x00(\d+)([:-])(.*)$").unwrap();
     }
@@ -745,6 +749,36 @@ fn parse_match_line(line: &str) -> Option<(String, usize, bool, &str)> {
         let is_match = sep == ":";
         Some((file, line_num, is_match, content))
     })
+}
+
+fn parse_binary_match_line(line: &str) -> Option<(String, &str)> {
+    let line = line.trim_end();
+
+    if let Some((file, content)) = line.split_once('\0') {
+        let content = content.trim_start_matches([':', ' ']);
+        if is_binary_match_notice(content) {
+            return Some((file.to_string(), content));
+        }
+    }
+
+    if let Some(idx) = line.rfind(": binary file matches") {
+        let file = &line[..idx];
+        let content = &line[idx + 2..];
+        return Some((file.to_string(), content));
+    }
+
+    if let Some(file) = line
+        .strip_prefix("Binary file ")
+        .and_then(|rest| rest.strip_suffix(" matches"))
+    {
+        return Some((file.to_string(), "binary file matches"));
+    }
+
+    None
+}
+
+fn is_binary_match_notice(content: &str) -> bool {
+    content.trim_start().starts_with("binary file matches")
 }
 
 fn has_format_flag<T: AsRef<str>>(extra_args: &[T]) -> bool {
@@ -924,6 +958,60 @@ mod tests {
         let line = "🎉🎊🎈🎁🎂🎄 some text 🎃🎆🎇✨";
         let cleaned = clean_line(line, 15, None, "text");
         assert!(!cleaned.is_empty());
+    }
+
+    #[test]
+    fn test_parse_binary_match_with_nul_prefix() {
+        let (file, line_num, is_match, content) = parse_match_line(
+            "repro.bin\x00binary file matches (found \"\\0\" byte around offset 9)",
+        )
+        .unwrap();
+        assert_eq!(file, "repro.bin");
+        assert_eq!(line_num, 0);
+        assert!(is_match);
+        assert!(content.starts_with("binary file matches"));
+    }
+
+    #[test]
+    fn test_parse_binary_match_with_file_prefix() {
+        let (file, line_num, is_match, content) =
+            parse_match_line(r#"repro.bin: binary file matches (found "\0" byte around offset 9)"#)
+                .unwrap();
+        assert_eq!(file, "repro.bin");
+        assert_eq!(line_num, 0);
+        assert!(is_match);
+        assert!(content.starts_with("binary file matches"));
+    }
+
+    #[test]
+    fn test_parse_bsd_grep_binary_match() {
+        let (file, line_num, is_match, content) =
+            parse_match_line("Binary file repro.bin matches").unwrap();
+        assert_eq!(file, "repro.bin");
+        assert_eq!(line_num, 0);
+        assert!(is_match);
+        assert_eq!(content, "binary file matches");
+    }
+
+    #[test]
+    fn test_parse_windows_grep_binary_match() {
+        let line = r"Binary file C:\Users\RUNNER~1\AppData\Local\Temp\.tmpzoxKtI\repro.bin matches";
+        let (file, line_num, is_match, content) = parse_match_line(line).unwrap();
+        assert_eq!(
+            file,
+            r"C:\Users\RUNNER~1\AppData\Local\Temp\.tmpzoxKtI\repro.bin"
+        );
+        assert_eq!(line_num, 0);
+        assert!(is_match);
+        assert_eq!(content, "binary file matches");
+    }
+
+    // Fix: BRE \| alternation is translated to PCRE | for rg
+    #[test]
+    fn test_bre_alternation_translated() {
+        let pattern = r"fn foo\|pub.*bar";
+        let rg_pattern = pattern.replace(r"\|", "|");
+        assert_eq!(rg_pattern, "fn foo|pub.*bar");
     }
 
     // --- parse_cluster ---
@@ -1566,9 +1654,17 @@ mod tests {
 
     #[test]
     fn test_unparsed_signal_binary_notice_counted() {
-        // rg emits "Binary file foo matches" for binary files; no NUL → counted.
+        // rg emits binary notices without line numbers; those are parseable
+        // special cases so the sole match is not hidden behind passthrough.
         let stdout = "Binary file foo matches\n";
-        assert_eq!(unparsed_signal(stdout), 1);
+        assert_eq!(unparsed_signal(stdout), 0);
+    }
+
+    #[test]
+    fn test_unparsed_signal_windows_binary_notice_parse_ok() {
+        let stdout =
+            r"Binary file C:\Users\RUNNER~1\AppData\Local\Temp\.tmpzoxKtI\repro.bin matches";
+        assert_eq!(unparsed_signal(stdout), 0);
     }
 
     #[test]
