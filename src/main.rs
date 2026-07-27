@@ -993,6 +993,14 @@ enum PnpmCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run a script with smart routing to specialized filters
+    Run {
+        /// Script name to run (omit to list available scripts, like bare `pnpm run`)
+        script: Option<String>,
+        /// Additional script arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported pnpm subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -1504,6 +1512,15 @@ fn merge_pnpm_args_os(filters: &[String], args: &[OsString]) -> Vec<OsString> {
         .collect()
 }
 
+/// Bare `rtk pnpm run` has no script to route — rebuild the native argv
+/// (`pnpm [--filter=f] run [args]`) for passthrough, like PnpmCommands::Other.
+fn pnpm_run_passthrough_args(filters: &[String], args: &[String]) -> Vec<OsString> {
+    let native: Vec<OsString> = std::iter::once(OsString::from("run"))
+        .chain(args.iter().map(OsString::from))
+        .collect();
+    merge_pnpm_args_os(filters, &native)
+}
+
 /// Validate that pnpm filters are only used in the global context, not before subcommands like tsc.
 fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<String> {
     // Check if this is a Build or Typecheck command with filters
@@ -1834,6 +1851,22 @@ fn run_cli() -> Result<i32> {
                     cli.verbose,
                 )?,
                 PnpmCommands::Typecheck { args } => tsc_cmd::run(&args, cli.verbose)?,
+                PnpmCommands::Run { script, args } => match script {
+                    Some(script) => pnpm_cmd::run(
+                        pnpm_cmd::PnpmCommand::Run {
+                            script,
+                            args,
+                            filters: filter,
+                        },
+                        &[],
+                        cli.verbose,
+                    )?,
+                    // Bare `pnpm run` lists available scripts — passthrough like Other
+                    None => pnpm_cmd::run_passthrough(
+                        &pnpm_run_passthrough_args(&filter, &args),
+                        cli.verbose,
+                    )?,
+                },
                 PnpmCommands::Other(args) => {
                     pnpm_cmd::run_passthrough(&merge_pnpm_args_os(&filter, &args), cli.verbose)?
                 }
@@ -3468,6 +3501,59 @@ mod tests {
             }
             _ => panic!("Expected Pnpm command"),
         }
+    }
+
+    #[test]
+    fn test_pnpm_run_with_filter() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "pnpm",
+            "--filter",
+            "@app1",
+            "run",
+            "test:unit",
+            "--",
+            "--watch",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Pnpm {
+                filter,
+                command: PnpmCommands::Run { script, args },
+            } => {
+                assert_eq!(filter, vec!["@app1"]);
+                assert_eq!(script.as_deref(), Some("test:unit"));
+                assert_eq!(args, vec!["--watch"]);
+            }
+            _ => panic!("Expected Pnpm Run command"),
+        }
+    }
+
+    #[test]
+    fn test_pnpm_run_bare_parses_with_no_script() {
+        let cli = Cli::try_parse_from(["rtk", "pnpm", "run"]).unwrap();
+        match cli.command {
+            Commands::Pnpm {
+                command: PnpmCommands::Run { script, args },
+                ..
+            } => {
+                assert_eq!(script, None);
+                assert!(args.is_empty());
+            }
+            _ => panic!("Expected Pnpm Run command"),
+        }
+    }
+
+    #[test]
+    fn test_pnpm_run_bare_passthrough_args() {
+        assert_eq!(
+            pnpm_run_passthrough_args(&[], &[]),
+            vec![OsString::from("run")]
+        );
+        assert_eq!(
+            pnpm_run_passthrough_args(&["@app1".to_string()], &[]),
+            vec![OsString::from("--filter=@app1"), OsString::from("run")]
+        );
     }
 
     #[test]

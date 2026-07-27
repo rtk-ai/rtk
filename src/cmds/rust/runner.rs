@@ -178,7 +178,7 @@ fn filter_errors(output: &str) -> String {
     result.join("\n")
 }
 
-fn extract_test_summary(output: &str, command: &str) -> String {
+pub fn extract_test_summary(output: &str, command: &str) -> String {
     let mut result = Vec::new();
     let lines: Vec<&str> = output.lines().collect();
 

@@ -78,8 +78,23 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[("fmt", RtkStatus::Passthrough)],
         ..RtkRule::DEFAULT
     },
+    // pnpm <script> — names with : or - are always script invocations, never subcommands.
+    // e.g. pnpm test:micro, pnpm lint-fix, pnpm ts-check, pnpm build:prod
+    // Must come BEFORE the subcommand rule so the subcommand rule (higher index = last match)
+    // wins for `run-script`. Otherwise both match and last wins incorrectly.
     RtkRule {
-        pattern: r"^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script)",
+        pattern: r"^pnpm\s+([\w][\w]*[:\-][\w:\-]*)",
+        rtk_cmd: "rtk pnpm run",
+        rewrite_prefixes: &["pnpm"],
+        category: "PackageManager",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    // Real pnpm builtins containing '-' (patch-commit, self-update, …) also match the
+    // script-name rule above; listing them here makes the last match route them to
+    // `rtk pnpm` passthrough instead of `rtk pnpm run`.
+    RtkRule {
+        pattern: r"^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script|approve-builds|cat-file|cat-index|find-hash|ignored-builds|install-completion|install-test|patch-commit|patch-remove|self-update)(\s|$)",
         rtk_cmd: "rtk pnpm",
         rewrite_prefixes: &["pnpm"],
         category: "PackageManager",

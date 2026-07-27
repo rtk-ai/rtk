@@ -67,6 +67,12 @@ lazy_static! {
     // --git-dir <dir>, --work-tree <dir>, and flag-only options (#163)
     static ref GIT_GLOBAL_OPT: Regex =
         Regex::new(r"^(?:(?:-C\s+\S+|-c\s+\S+|--git-dir(?:=\S+|\s+\S+)|--work-tree(?:=\S+|\s+\S+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\s+)+").unwrap();
+    // pnpm --filter/-F flags before the subcommand or script name.
+    // e.g. pnpm --filter wavebid-a2o-ui test:micro → pnpm test:micro (for matching)
+    // The filter is preserved in the rewritten command. Repeated flags are all
+    // consumed: pnpm --filter a --filter b test:micro → pnpm test:micro.
+    static ref PNPM_FILTER_OPT: Regex =
+        Regex::new(r"^(?:(?:-F|--filter)(?:=\S+|\s+\S+)\s+)+").unwrap();
     // Issue #1362: each capture expects a SINGLE file argument (`\S+$`). Multi-file
     // invocations like `head -3 a b c` fail to match so the segment is passed through
     // to the native `head`/`tail` binary — which already handles multi-file with
@@ -130,6 +136,8 @@ pub fn classify_command(cmd: &str) -> Classification {
     // Strip golangci-lint global options before `run` so classify/rewrite stays
     // aligned with the runtime wrapper behavior.
     let cmd_normalized = strip_golangci_global_opts(&cmd_normalized);
+    // Strip pnpm --filter/-F flags before the subcommand/script for matching.
+    let cmd_normalized = strip_pnpm_filter_opts(&cmd_normalized);
     let cmd_clean = cmd_normalized.as_str();
 
     // Exclude cat/head/tail with redirect operators — these are writes, not reads (#315)
@@ -339,6 +347,22 @@ fn strip_git_global_opts(cmd: &str) -> String {
     format!("git {}", stripped.trim())
 }
 
+/// Strip pnpm --filter/-F flags before the subcommand for pattern matching.
+/// `pnpm --filter wavebid-a2o-ui test:micro` → `pnpm test:micro`
+/// The filter flags are preserved in the actual rewritten command.
+fn strip_pnpm_filter_opts(cmd: &str) -> String {
+    if !cmd.starts_with("pnpm ") {
+        return cmd.to_string();
+    }
+    let after_pnpm = &cmd[5..]; // skip "pnpm "
+    let stripped = PNPM_FILTER_OPT.replace(after_pnpm, "");
+    // Only apply if something was actually stripped
+    if stripped.len() == after_pnpm.len() {
+        return cmd.to_string();
+    }
+    format!("pnpm {}", stripped.trim())
+}
+
 /// Strip golangci-lint global options before the `run` subcommand.
 /// `golangci-lint --color never run ./...` → `golangci-lint run ./...`
 /// Returns the original string unchanged if this is not a supported compact `run` invocation.
@@ -436,6 +460,56 @@ fn split_token_spans(cmd: &str) -> Vec<(&str, usize, usize)> {
     }
 
     tokens
+}
+
+/// Parse pnpm commands with --filter/-F flags.
+/// Returns (filter_segment, script_segment) if filter flags are present.
+/// `pnpm --filter wavebid-a2o-ui test:micro` → ("--filter wavebid-a2o-ui", "test:micro")
+/// Returns None if no filter flags found.
+fn parse_pnpm_filter_parts(cmd: &str) -> Option<(&str, &str)> {
+    let tokens = split_token_spans(cmd);
+    let first = tokens.first()?;
+    if first.0 != "pnpm" {
+        return None;
+    }
+
+    let mut i = 1;
+    while i < tokens.len() {
+        let token = tokens[i].0;
+
+        if token == "--" {
+            return None;
+        }
+
+        // Not a flag — this is the subcommand/script name
+        if !token.starts_with('-') {
+            // Everything from pnpm to here (exclusive) is the filter segment
+            let filter_end = tokens[i].1;
+            let filter_segment = cmd[tokens[1].1..filter_end].trim();
+            let script_segment = cmd[tokens[i].1..].trim();
+            if filter_segment.is_empty() || script_segment.is_empty() {
+                return None;
+            }
+            return Some((filter_segment, script_segment));
+        }
+
+        // --filter=VALUE or -F=VALUE (inline value)
+        if token.starts_with("--filter=") || token.starts_with("-F=") {
+            i += 1;
+            continue;
+        }
+
+        // --filter VALUE or -F VALUE (separate value)
+        if token == "--filter" || token == "-F" {
+            i += 2; // skip flag and value
+            continue;
+        }
+
+        // Other flags: skip
+        i += 1;
+    }
+
+    None
 }
 
 /// Normalize absolute binary paths: `/usr/bin/grep -rn foo` → `grep -rn foo` (#485)
@@ -1081,6 +1155,20 @@ fn rewrite_segment_inner(
             )
         };
         return Some(rewritten);
+    }
+
+    // pnpm --filter/-F <pkg> <script> → rtk pnpm --filter <pkg> run <script>
+    // Only applies when rtk_cmd is "rtk pnpm run" (our script-name rule).
+    if rule.rtk_cmd == "rtk pnpm run" {
+        let stripped = ENV_PREFIX.replace(cmd_part, "");
+        let clean = stripped.trim();
+        if let Some((filter_segment, script_segment)) = parse_pnpm_filter_parts(clean) {
+            let rewritten = format!(
+                "{}rtk pnpm {} run {}{}",
+                env_prefix, filter_segment, script_segment, redirect_suffix
+            );
+            return Some(rewritten);
+        }
     }
 
     // #196: gh with --json/--jq/--template produces structured output that
@@ -3578,6 +3666,180 @@ mod tests {
                 command
             );
         }
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_script_names() {
+        // Script names containing ':' or '-' rewrite to `rtk pnpm run <script>`
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm test:micro", &[]),
+            Some("rtk pnpm run test:micro".to_string()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm lint-ts", &[]),
+            Some("rtk pnpm run lint-ts".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_run_script_wins_over_script_name() {
+        // `run-script` itself contains '-', so the script-name rule matches too;
+        // the subcommand rule has the higher index and last match wins.
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm run-script test:unit", &[]),
+            Some("rtk pnpm run-script test:unit".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_dash_builtins_not_run() {
+        // Real pnpm builtins containing '-' must NOT rewrite to `rtk pnpm run`;
+        // the subcommand rule routes them to plain `rtk pnpm` passthrough.
+        let cases = vec![
+            ("pnpm patch-commit x.patch", "rtk pnpm patch-commit x.patch"),
+            ("pnpm patch-remove x", "rtk pnpm patch-remove x"),
+            ("pnpm self-update", "rtk pnpm self-update"),
+            ("pnpm approve-builds", "rtk pnpm approve-builds"),
+            ("pnpm cat-file abc123", "rtk pnpm cat-file abc123"),
+            ("pnpm cat-index abc", "rtk pnpm cat-index abc"),
+            ("pnpm find-hash abc", "rtk pnpm find-hash abc"),
+            ("pnpm ignored-builds", "rtk pnpm ignored-builds"),
+            ("pnpm install-test", "rtk pnpm install-test"),
+            ("pnpm install-completion", "rtk pnpm install-completion"),
+        ];
+        for (command, expected) in cases {
+            let rewritten = rewrite_command_no_prefixes(command, &[]);
+            assert_eq!(rewritten, Some(expected.to_string()), "for {}", command);
+            assert!(
+                !expected.starts_with("rtk pnpm run"),
+                "builtin must not route to `rtk pnpm run`: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_anchored_subcommands() {
+        // The subcommand alternation is anchored with (\s|$): builtin PREFIXES of
+        // longer script names no longer match, so those hit the script rule.
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm run:test", &[]),
+            Some("rtk pnpm run run:test".to_string()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm i-foo", &[]),
+            Some("rtk pnpm run i-foo".to_string()),
+        );
+        // Real subcommands still match, with args or bare
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm i", &[]),
+            Some("rtk pnpm i".to_string()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm install --frozen-lockfile", &[]),
+            Some("rtk pnpm install --frozen-lockfile".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_filter_forms() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter pkg test:unit", &[]),
+            Some("rtk pnpm --filter pkg run test:unit".to_string()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -F pkg test:unit", &[]),
+            Some("rtk pnpm -F pkg run test:unit".to_string()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter=pkg test:unit", &[]),
+            Some("rtk pnpm --filter=pkg run test:unit".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_multiple_filters() {
+        // Repeated --filter flags all strip for classification and are
+        // preserved verbatim in the rewrite
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter a --filter b test:unit", &[]),
+            Some("rtk pnpm --filter a --filter b run test:unit".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_quoted_filter_value_no_rewrite() {
+        // `--filter "my pkg"`: the stripper consumes `--filter "my` and leaves a
+        // mangled command that matches no rule — passthrough, never a bad rewrite.
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter \"my pkg\" test:unit", &[]),
+            None,
+        );
+    }
+
+    #[test]
+    fn test_strip_pnpm_filter_opts() {
+        assert_eq!(
+            strip_pnpm_filter_opts("pnpm --filter pkg test:unit"),
+            "pnpm test:unit"
+        );
+        assert_eq!(
+            strip_pnpm_filter_opts("pnpm -F pkg test:unit"),
+            "pnpm test:unit"
+        );
+        assert_eq!(
+            strip_pnpm_filter_opts("pnpm --filter=pkg test:unit"),
+            "pnpm test:unit"
+        );
+        // No filter flag: unchanged
+        assert_eq!(strip_pnpm_filter_opts("pnpm test:unit"), "pnpm test:unit");
+        // Not a pnpm command: unchanged
+        assert_eq!(strip_pnpm_filter_opts("git status"), "git status");
+        // Repeated filter flags are all stripped
+        assert_eq!(
+            strip_pnpm_filter_opts("pnpm --filter a --filter b test:unit"),
+            "pnpm test:unit"
+        );
+        // Quoted value with a space: the flag + `"my` are consumed, leaving a
+        // mangled remainder that no rule matches (hence passthrough above)
+        assert_eq!(
+            strip_pnpm_filter_opts("pnpm --filter \"my pkg\" test:unit"),
+            "pnpm pkg\" test:unit"
+        );
+    }
+
+    #[test]
+    fn test_parse_pnpm_filter_parts() {
+        assert_eq!(
+            parse_pnpm_filter_parts("pnpm --filter pkg test:unit"),
+            Some(("--filter pkg", "test:unit"))
+        );
+        assert_eq!(
+            parse_pnpm_filter_parts("pnpm -F pkg test:unit"),
+            Some(("-F pkg", "test:unit"))
+        );
+        assert_eq!(
+            parse_pnpm_filter_parts("pnpm --filter=pkg test:unit"),
+            Some(("--filter=pkg", "test:unit"))
+        );
+        // Multiple filters parse fine here; the rewrite gap lives in
+        // classification (strip_pnpm_filter_opts), not in this parser
+        assert_eq!(
+            parse_pnpm_filter_parts("pnpm --filter a --filter b test:unit"),
+            Some(("--filter a --filter b", "test:unit"))
+        );
+        // No filter flags: nothing to split
+        assert_eq!(parse_pnpm_filter_parts("pnpm test:unit"), None);
+        // `--` terminates flag parsing
+        assert_eq!(parse_pnpm_filter_parts("pnpm -- test:unit"), None);
+        // Not a pnpm command
+        assert_eq!(parse_pnpm_filter_parts("npm --filter pkg x"), None);
+        // Quoted value with a space: split mid-value into mangled halves.
+        // Unreachable in practice — classification rejects the command first.
+        assert_eq!(
+            parse_pnpm_filter_parts("pnpm --filter \"my pkg\" test:unit"),
+            Some(("--filter \"my", "pkg\" test:unit"))
+        );
     }
 
     #[test]

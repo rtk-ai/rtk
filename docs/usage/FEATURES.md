@@ -753,8 +753,9 @@ Detecte automatiquement : prettier, black, ruff format, rustfmt. Applique un fil
 | `rtk pnpm install` | Filtre les barres de progression | ~60% |
 | `rtk pnpm build` | Delegue au filtre Next.js | ~87% |
 | `rtk pnpm typecheck` | Delegue au filtre tsc | ~83% |
+| `rtk pnpm run <script>` | Delegue au filtre detecte (vitest, playwright, eslint, tsc, prettier) | ~90% |
 
-Les sous-commandes non reconnues sont transmises directement a pnpm (passthrough).
+`run` est intercepte : l'outil sous-jacent est detecte depuis les scripts `package.json` et route vers le filtre specialise. Vitest streame en temps reel (lignes de fichiers reussis masquees, echecs inline, resume compact `PASS (120) FAIL (2) | 45 suites (2 failed) | 30s`). `--filter`/`-F` est transmis a pnpm avant `run` (monorepos). Les scripts non reconnus ne subissent que la suppression du boilerplate pnpm ; les autres sous-commandes non reconnues sont transmises directement a pnpm (passthrough).
 
 ---
 
@@ -1219,7 +1220,7 @@ rtk verify
 | `docker ps/images/logs` | `rtk docker ...` |
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |
-| `pnpm list/outdated` | `rtk pnpm ...` |
+| `pnpm list/outdated/run/<script:sub>` | `rtk pnpm ...` |
 
 ### Exclusion de commandes
 

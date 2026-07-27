@@ -443,7 +443,13 @@ fn filter_pylint_json(output: &str) -> String {
 }
 
 /// Filter generic linter output (fallback for non-ESLint linters)
-fn filter_generic_lint(output: &str) -> String {
+pub fn filter_generic_lint(output: &str) -> String {
+    filter_generic_lint_recognized(output).unwrap_or_else(|| "Lint: No issues found".to_string())
+}
+
+/// `None` when no warning/error lines were found — on a failure path callers
+/// must show the raw output instead of a success message.
+pub fn filter_generic_lint_recognized(output: &str) -> Option<String> {
     let mut warnings = 0;
     let mut errors = 0;
     let mut issues: Vec<String> = Vec::new();
@@ -461,7 +467,7 @@ fn filter_generic_lint(output: &str) -> String {
     }
 
     if errors == 0 && warnings == 0 {
-        return "Lint: No issues found".to_string();
+        return None;
     }
 
     let mut result = String::new();
@@ -482,7 +488,7 @@ fn filter_generic_lint(output: &str) -> String {
         }
     }
 
-    result.trim().to_string()
+    Some(result.trim().to_string())
 }
 
 /// Compact file path (remove common prefixes)
