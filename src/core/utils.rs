@@ -340,6 +340,54 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
 /// # Returns
 /// A `Command` configured with the resolved binary path.
 pub fn resolved_command(name: &str) -> Command {
+    let mut cmd = resolved_command_inner(name);
+    disable_msys_argv_globbing(&mut cmd);
+    cmd
+}
+
+/// Stop MSYS/Cygwin children from re-expanding argv (Windows only).
+///
+/// Git for Windows ships MSYS builds of `grep`, `find`, `wc`, … Those binaries
+/// re-parse the Windows command line at startup and run glob expansion over
+/// argv, which consumes the backslashes of anything that merely looks like a
+/// glob. A POSIX basic-regex pattern is the common casualty:
+///
+/// ```text
+///   rtk passes  \[energia\]           MSYS grep receives  [energia]
+///   rtk passes  in_waiting\|\.read(   MSYS grep receives  in_waiting|.read(
+/// ```
+///
+/// The first turns a literal-bracket search into a character class (matches
+/// nearly every line); the second turns a valid alternation into a literal that
+/// matches nothing — reported as a plain "no match" with exit 1, indistinguishable
+/// from a legitimate empty result. An agent that greps to decide whether a symbol
+/// exists reads that as proof of absence.
+///
+/// This never showed up in CI: the search/error faithfulness suites are gated
+/// `#![cfg(unix)]`, so the Windows job compiles them away and reports green.
+///
+/// rtk receives arguments already expanded by the caller's shell, so a second
+/// expansion inside the child is never wanted. `MSYS=noglob` disables exactly
+/// that step and leaves argv verbatim. Existing options in the variable are
+/// preserved — it is a space-separated list.
+fn disable_msys_argv_globbing(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        const OPT: &str = "noglob";
+        let value = match std::env::var("MSYS") {
+            Ok(current) if current.split_whitespace().any(|o| o == OPT) => current,
+            Ok(current) if !current.trim().is_empty() => format!("{current} {OPT}"),
+            _ => OPT.to_string(),
+        };
+        cmd.env("MSYS", value);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cmd;
+    }
+}
+
+fn resolved_command_inner(name: &str) -> Command {
     match resolve_binary(name) {
         Ok(path) => Command::new(path),
         Err(e) => {
