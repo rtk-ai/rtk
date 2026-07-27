@@ -16,6 +16,9 @@ use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const MAX_ITEMS: usize = CAP_LIST;
 const JSON_COMPRESS_DEPTH: usize = 4;
@@ -189,12 +192,35 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
         "s3" if !args.is_empty() && (args[0] == "sync" || args[0] == "cp") => {
             run_s3_transfer(&args[0], &args[1..], verbose)
         }
-        "secretsmanager" if !args.is_empty() && args[0] == "get-secret-value" => run_aws_filtered(
-            &["secretsmanager", "get-secret-value"],
-            &args[1..],
-            verbose,
-            filter_secrets_get,
-        ),
+        "secretsmanager" if !args.is_empty() && args[0] == "get-secret-value" => {
+            // Strip the rtk-private --reveal-secret flag before forwarding to aws CLI;
+            // record it in REVEAL_SECRET_FLAG so filter_secrets_get can opt out of
+            // redaction for this invocation. RTK_REVEAL_SECRETS=1 has the same effect.
+            let mut forwarded: Vec<String> = Vec::with_capacity(args.len().saturating_sub(1));
+            let mut reveal_via_flag = false;
+            for a in &args[1..] {
+                if a == "--reveal-secret" {
+                    reveal_via_flag = true;
+                } else {
+                    forwarded.push(a.clone());
+                }
+            }
+            if reveal_via_flag {
+                REVEAL_SECRET_FLAG.store(true, Ordering::SeqCst);
+            }
+            let exit_code = run_aws_filtered(
+                &["secretsmanager", "get-secret-value"],
+                &forwarded,
+                verbose,
+                filter_secrets_get,
+            );
+            // Clear the per-invocation flag so subsequent process-internal calls
+            // (in tests, hooks, etc.) do not inherit it.
+            if reveal_via_flag {
+                REVEAL_SECRET_FLAG.store(false, Ordering::SeqCst);
+            }
+            exit_code
+        }
         _ => run_generic(subcommand, args, verbose, &full_sub),
     }
 }
@@ -1503,25 +1529,88 @@ fn filter_s3_transfer(output: &str) -> FilterResult {
     FilterResult::new(result_lines.join("\n"))
 }
 
+/// Process-local "reveal" flag set by the `--reveal-secret` CLI flag.
+/// Equivalent in effect to `RTK_REVEAL_SECRETS=1`. Either trigger restores
+/// the legacy verbatim-secret output of `filter_secrets_get`.
+static REVEAL_SECRET_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// One-shot stderr warning the first time we redact a SecretString in this
+/// process. Implemented with `std::sync::Once` so the message fires at most
+/// once even under parallel test execution.
+static REDACTION_WARNED: Once = Once::new();
+
+fn should_reveal_secret() -> bool {
+    if REVEAL_SECRET_FLAG.load(Ordering::SeqCst) {
+        return true;
+    }
+    matches!(
+        std::env::var("RTK_REVEAL_SECRETS").ok().as_deref(),
+        Some("1")
+    )
+}
+
+fn warn_redacted_once() {
+    REDACTION_WARNED.call_once(|| {
+        eprintln!("rtk: redacted SecretString (set RTK_REVEAL_SECRETS=1 to disable)");
+    });
+}
+
+/// Render the structural metadata of a SecretString without revealing its
+/// value: byte length plus an 8-hex-char SHA-256 prefix that is stable
+/// across runs so the agent can round-trip-verify it saw the same secret.
+fn redact_secret_string(secret_str: &str) -> String {
+    let bytes = secret_str.len();
+    let mut hasher = Sha256::new();
+    hasher.update(secret_str.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    let prefix: String = digest.chars().take(8).collect();
+    format!("<redacted; {} bytes; sha256={}>", bytes, prefix)
+}
+
 fn filter_secrets_get(json_str: &str) -> Option<FilterResult> {
     let v: Value = serde_json::from_str(json_str).ok()?;
 
+    let reveal = should_reveal_secret();
     let mut lines = Vec::new();
 
-    // Extract Name
+    // Extract Name (the lookup key the agent asked for — not sensitive).
     if let Some(name) = v["Name"].as_str() {
         lines.push(format!("Name: {}", name));
     }
 
-    // Extract SecretString
+    // Extract SecretString.
     if let Some(secret_str) = v["SecretString"].as_str() {
-        // Try to parse as JSON and compact it
-        if let Ok(secret_json) = serde_json::from_str::<Value>(secret_str) {
-            let compact =
-                serde_json::to_string(&secret_json).unwrap_or_else(|_| secret_str.to_string());
-            lines.push(format!("Secret: {}", compact));
+        // Try to parse as JSON and compact it (preserves shape detection).
+        let parsed = serde_json::from_str::<Value>(secret_str).ok();
+
+        if reveal {
+            // Legacy behaviour: emit the raw secret value verbatim.
+            if let Some(secret_json) = parsed {
+                let compact = serde_json::to_string(&secret_json)
+                    .unwrap_or_else(|_| secret_str.to_string());
+                lines.push(format!("Secret: {}", compact));
+            } else {
+                lines.push(format!("Secret: {}", secret_str));
+            }
         } else {
-            lines.push(format!("Secret: {}", secret_str));
+            // Default behaviour: emit only structural metadata.
+            warn_redacted_once();
+            lines.push(format!("SecretString: {}", redact_secret_string(secret_str)));
+
+            // For JSON-shaped secrets, expose top-level key names (not values)
+            // so the agent knows the shape (e.g. {username, password}).
+            if let Some(Value::Object(map)) = parsed {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                if !keys.is_empty() {
+                    let joined = keys
+                        .iter()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    lines.push(format!("keys: [{}]", joined));
+                }
+            }
         }
     }
 
@@ -2483,8 +2572,24 @@ upload: file10.txt to s3://bucket/file10.txt
         assert!(result.text.contains("error: failed to upload file7.txt"));
     }
 
+    // Serialises tests that touch RTK_REVEAL_SECRETS or REVEAL_SECRET_FLAG so
+    // they don't race when `cargo test` runs them in parallel.
+    fn reveal_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn ensure_redaction_default() {
+        REVEAL_SECRET_FLAG.store(false, Ordering::SeqCst);
+        std::env::remove_var("RTK_REVEAL_SECRETS");
+    }
+
     #[test]
     fn test_filter_secrets_get() {
+        let _g = reveal_env_lock();
+        ensure_redaction_default();
+
         let json = r#"{
             "Name": "my-secret",
             "SecretString": "{\"username\":\"admin\",\"password\":\"secret123\"}",
@@ -2493,28 +2598,181 @@ upload: file10.txt to s3://bucket/file10.txt
             "CreatedDate": "2024-01-01T00:00:00Z"
         }"#;
         let result = filter_secrets_get(json).unwrap();
+
+        // The lookup key the agent asked for is preserved.
         assert!(result.text.contains("Name: my-secret"));
-        assert!(result
+
+        // The secret value (and the JSON wrapper containing it) is redacted.
+        assert!(!result.text.contains("secret123"));
+        assert!(!result.text.contains("admin"));
+        assert!(!result
             .text
             .contains(r#"{"username":"admin","password":"secret123"}"#));
+
+        // The redacted line surfaces structural metadata: byte count + sha256 prefix.
+        assert!(result.text.contains("SecretString:"));
+        assert!(result.text.contains("redacted"));
+        assert!(result.text.contains("sha256="));
+
+        // ARN/VersionId still suppressed as before.
         assert!(!result.text.contains("ARN"));
         assert!(!result.text.contains("VersionId"));
     }
 
     #[test]
     fn test_filter_secrets_get_plain_text() {
+        let _g = reveal_env_lock();
+        ensure_redaction_default();
+
         let json = r#"{
             "Name": "my-secret",
             "SecretString": "plain-text-password"
         }"#;
         let result = filter_secrets_get(json).unwrap();
+
         assert!(result.text.contains("Name: my-secret"));
-        assert!(result.text.contains("Secret: plain-text-password"));
+
+        // The value must not appear in the output.
+        assert!(!result.text.contains("plain-text-password"));
+
+        // Structural metadata is emitted instead.
+        assert!(result.text.contains("SecretString:"));
+        assert!(result.text.contains("redacted"));
+        assert!(result.text.contains("sha256="));
     }
 
     #[test]
     fn test_filter_secrets_get_invalid_json() {
+        let _g = reveal_env_lock();
+        ensure_redaction_default();
         assert!(filter_secrets_get("not json").is_none());
+    }
+
+    #[test]
+    fn test_filter_secrets_get_emits_json_keys() {
+        let _g = reveal_env_lock();
+        ensure_redaction_default();
+
+        let json = r#"{
+            "Name": "my-secret",
+            "SecretString": "{\"username\":\"admin\",\"password\":\"secret123\",\"port\":5432}"
+        }"#;
+        let result = filter_secrets_get(json).unwrap();
+
+        // Top-level JSON keys are emitted (sorted) so the agent knows the shape.
+        assert!(result.text.contains("keys: ["));
+        assert!(result.text.contains("password"));
+        assert!(result.text.contains("username"));
+        assert!(result.text.contains("port"));
+
+        // But none of the values leak through.
+        assert!(!result.text.contains("admin"));
+        assert!(!result.text.contains("secret123"));
+        assert!(!result.text.contains("5432"));
+    }
+
+    #[test]
+    fn test_filter_secrets_get_reveal_via_env() {
+        let _g = reveal_env_lock();
+        ensure_redaction_default();
+
+        // Opt-in: setting RTK_REVEAL_SECRETS=1 restores the legacy behaviour.
+        std::env::set_var("RTK_REVEAL_SECRETS", "1");
+
+        let json = r#"{
+            "Name": "my-secret",
+            "SecretString": "{\"username\":\"admin\",\"password\":\"secret123\"}"
+        }"#;
+        let result = filter_secrets_get(json).unwrap();
+
+        assert!(result.text.contains("Name: my-secret"));
+        assert!(result
+            .text
+            .contains(r#"{"username":"admin","password":"secret123"}"#));
+        // Redaction metadata must NOT appear when reveal is on.
+        assert!(!result.text.contains("redacted"));
+        assert!(!result.text.contains("sha256="));
+
+        // Plain-text path also reverts.
+        let plain = r#"{"Name":"my-secret","SecretString":"plain-text-password"}"#;
+        let result = filter_secrets_get(plain).unwrap();
+        assert!(result.text.contains("Secret: plain-text-password"));
+
+        std::env::remove_var("RTK_REVEAL_SECRETS");
+    }
+
+    #[test]
+    fn test_filter_secrets_get_reveal_via_flag() {
+        let _g = reveal_env_lock();
+        ensure_redaction_default();
+
+        // Opt-in via the process-local flag set by --reveal-secret.
+        REVEAL_SECRET_FLAG.store(true, Ordering::SeqCst);
+
+        let json = r#"{
+            "Name": "my-secret",
+            "SecretString": "{\"username\":\"admin\",\"password\":\"secret123\"}"
+        }"#;
+        let result = filter_secrets_get(json).unwrap();
+
+        assert!(result
+            .text
+            .contains(r#"{"username":"admin","password":"secret123"}"#));
+        assert!(!result.text.contains("redacted"));
+
+        REVEAL_SECRET_FLAG.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn test_filter_secrets_get_token_savings() {
+        let _g = reveal_env_lock();
+        ensure_redaction_default();
+
+        // Representative raw response from `aws secretsmanager get-secret-value
+        // --output json` for an RDS credential bundle. AWS CLI emits indented
+        // multi-line JSON by default. The inner SecretString is a JSON-encoded
+        // string holding the credential map (which is what the agent would
+        // otherwise see verbatim once it decodes the JSON).
+        let raw = r#"{
+    "ARN": "arn:aws:secretsmanager:us-east-1:123456789012:secret:prod/rds/app-AbCdEf",
+    "Name": "prod/rds/app",
+    "VersionId": "EXAMPLE-1111-2222-3333-44445555aaaa",
+    "SecretString": "{\"engine\":\"postgres\",\"host\":\"prod-app.cluster-cxxxx.us-east-1.rds.amazonaws.com\",\"username\":\"app_user\",\"password\":\"S3cret!Passw0rd-with-lots-of-entropy-9af2c1\",\"dbname\":\"appdb\",\"port\":5432,\"dbInstanceIdentifier\":\"prod-app\",\"connection_url\":\"postgres://app_user:S3cret!Passw0rd-with-lots-of-entropy-9af2c1@prod-app.cluster-cxxxx.us-east-1.rds.amazonaws.com:5432/appdb?sslmode=require\"}",
+    "VersionStages": [
+        "AWSCURRENT",
+        "AWSPENDING"
+    ],
+    "CreatedDate": "2024-04-15T18:23:45.123000-04:00",
+    "ResponseMetadata": {
+        "RequestId": "00000000-1111-2222-3333-444444444444",
+        "HTTPStatusCode": 200,
+        "HTTPHeaders": {
+            "x-amzn-requestid": "00000000-1111-2222-3333-444444444444",
+            "content-type": "application/x-amz-json-1.1",
+            "content-length": "512",
+            "date": "Mon, 15 Apr 2024 22:23:45 GMT"
+        },
+        "RetryAttempts": 0
+    }
+}"#;
+        let result = filter_secrets_get(raw).unwrap();
+
+        let input_tokens = count_tokens(raw);
+        let output_tokens = count_tokens(&result.text);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens.max(1) as f64 * 100.0);
+
+        assert!(
+            savings >= 60.0,
+            "secretsmanager redaction: expected >=60% savings, got {:.1}% (in={}, out={})",
+            savings,
+            input_tokens,
+            output_tokens
+        );
+
+        // Sanity: secret value still must not appear even though the test is
+        // about token counts.
+        assert!(!result.text.contains("S3cret!Passw0rd"));
+        assert!(!result.text.contains("prod-app.cluster"));
     }
 
     #[test]
