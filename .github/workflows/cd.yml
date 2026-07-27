@@ -20,8 +20,9 @@ jobs:
 
   pre-release:
     if: >-
-      github.ref == 'refs/heads/develop'
-      || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/master')
+      github.repository_owner == 'rtk-ai'
+      && (github.ref == 'refs/heads/develop'
+      || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/master'))
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
@@ -98,7 +99,10 @@ jobs:
   # ═══════════════════════════════════════════════
 
   release-please:
-    if: github.ref == 'refs/heads/master' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    if: >-
+      github.repository_owner == 'rtk-ai'
+      && github.ref == 'refs/heads/master'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
