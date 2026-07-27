@@ -101,26 +101,11 @@ All proxy commands appear in `rtk gain --history` with 0% bash output reduction 
 
 ## Coding Rules
 
-Rust patterns, error handling, and anti-patterns are defined in `.claude/rules/rust-patterns.md` (auto-loaded into context). Key points:
-
-- **anyhow::Result** everywhere, always `.context("description")?`
-- **No unwrap()** in production code
-- **`LazyLock` statics** for all regex (never compile on every function call)
-- **Fallback pattern**: if filter fails, execute raw command unchanged
-- **No async**: single-threaded by design (startup <10ms)
-- **Exit code propagation**: `std::process::exit(code)` on child failure
-
-Testing strategy and performance targets are defined in `.claude/rules/cli-testing.md` (auto-loaded). Key targets: <10ms startup, <5MB memory, 60-90% reduction in bash output bytes.
-
-For contribution workflow and design philosophy, see [CONTRIBUTING.md](CONTRIBUTING.md). For the step-by-step filter implementation checklist, see [src/cmds/README.md](src/cmds/README.md#adding-a-new-command-filter).
+See [AGENTS.md](AGENTS.md) for Rust patterns, testing strategy, contribution workflow, and the filter implementation checklist, kept out of this file so the two can't drift out of sync.
 
 ## Build Verification (Mandatory)
 
-**CRITICAL**: After ANY Rust file edits, ALWAYS run the full quality check pipeline before committing:
-
-```bash
-cargo fmt --all && cargo clippy --all-targets && cargo test --all
-```
+**CRITICAL**: After ANY Rust file edits, ALWAYS run the full quality check pipeline before committing (see [AGENTS.md](AGENTS.md) for the exact command):
 
 **Rules**:
 - Never commit code that hasn't passed all 3 checks
