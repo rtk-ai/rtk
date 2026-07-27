@@ -520,22 +520,22 @@ fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
 }
 
 lazy_static! {
-    /// Matches a bash line-continuation: a backslash immediately followed by
-    /// `\n` or `\r\n`, *plus* any horizontal whitespace on the line before AND
-    /// after the break. This is what bash already collapses to a single space
-    /// before executing the command — rtk's hook matcher needs to do the same
-    /// so commands authored across multiple lines still hit the rewrite rules.
-    /// Consuming the trailing whitespace prevents double spaces in cases like
-    /// `git diff \<NL>HEAD~1`.
+    /// Matches a bash line-continuation: an unescaped backslash immediately
+    /// followed by `\n` or `\r\n`, plus surrounding horizontal whitespace.
+    /// A run with an odd number of backslashes is a continuation; captured
+    /// pairs are preserved because each pair represents literal backslashes.
     static ref LINE_CONTINUATION_RE: Regex =
-        Regex::new(r"(?m)[ \t\x0B\x0C]*\\\r?\n[ \t\x0B\x0C]*").unwrap();
+        Regex::new(
+            r"(?m)(^|[^\\])([ \t\x0B\x0C]*)((?:\\\\)*)\\\r?\n[ \t\x0B\x0C]*",
+        )
+        .unwrap();
 }
 
 /// Replace every bash line continuation with a single space, mirroring what
 /// bash does before dispatching the command. Returns a borrowed `&str` when the
 /// input contains no continuations, so the common fast path allocates nothing.
 fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> {
-    LINE_CONTINUATION_RE.replace_all(s, " ")
+    LINE_CONTINUATION_RE.replace_all(s, "$1$3 ")
 }
 
 /// Returns `None` if the command is unsupported or ignored (hook should pass through).
@@ -4776,6 +4776,23 @@ mod tests {
         assert_eq!(
             collapse_line_continuations("git diff HEAD~1"),
             std::borrow::Cow::<str>::Borrowed("git diff HEAD~1"),
+        );
+    }
+
+    #[test]
+    fn test_collapse_escaped_backslash_newline() {
+        let command = "git add path\\\\\ngit status";
+        assert_eq!(
+            collapse_line_continuations(command),
+            std::borrow::Cow::<str>::Borrowed(command),
+        );
+    }
+
+    #[test]
+    fn test_collapse_odd_backslash_run() {
+        assert_eq!(
+            collapse_line_continuations("git add path   \\\\\\\ngit status"),
+            "git add path\\\\ git status",
         );
     }
 
