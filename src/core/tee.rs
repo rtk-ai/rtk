@@ -271,7 +271,8 @@ fn display_shell_path(path: &std::path::Path) -> String {
     }
 
     if let Some(relative) = display.strip_prefix("~/") {
-        return format!("\"$HOME/{}\"", escape_double_quoted_path(relative));
+        let relative = relative.replace(std::path::MAIN_SEPARATOR, "/");
+        return format!("\"$HOME/{}\"", escape_double_quoted_path(&relative));
     }
 
     format!("\"{}\"", escape_double_quoted_path(&display))
