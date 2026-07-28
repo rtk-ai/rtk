@@ -22,8 +22,8 @@ use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
-    summary, tree, wc_cmd,
+    deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read,
+    retrieve_cmd, search, stash_cmd, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -653,6 +653,55 @@ enum Commands {
         /// Pass stdin through without filtering
         #[arg(long)]
         passthrough: bool,
+    },
+
+    /// Park stdin behind a content-addressed recall handle (or manage the store)
+    Stash {
+        /// List parked entries instead of reading stdin
+        #[arg(long)]
+        list: bool,
+
+        /// Garbage-collect the store (retention + LRU + missing-blob prune)
+        #[arg(long)]
+        gc: bool,
+
+        /// Max entries to show with --list
+        #[arg(long, default_value = "20")]
+        limit: usize,
+
+        /// Label for the parked content (defaults to "stdin")
+        #[arg(long)]
+        command: Option<String>,
+
+        /// Content-type hint (auto-detected when omitted)
+        #[arg(long = "type")]
+        content_type: Option<String>,
+    },
+
+    /// Pull a parked stash blob back by handle, optionally sliced or grepped
+    Retrieve {
+        /// Handle (hash prefix) from a `[recall: ...]` hint or `rtk stash`
+        handle: String,
+
+        /// Keep only lines matching this regex
+        #[arg(long)]
+        grep: Option<String>,
+
+        /// 1-indexed inclusive line range: A-B, A-, -B, or A
+        #[arg(long)]
+        lines: Option<String>,
+
+        /// Keep only the first N lines (after grep/lines)
+        #[arg(long)]
+        head: Option<usize>,
+
+        /// Keep only the last N lines (after grep/lines)
+        #[arg(long)]
+        tail: Option<usize>,
+
+        /// Print stored metadata instead of the content
+        #[arg(long)]
+        meta: bool,
     },
 
     /// Trust project-local TOML filters in current directory
@@ -2468,6 +2517,29 @@ fn run_cli() -> Result<i32> {
             passthrough,
         } => {
             pipe_cmd::run(filter.as_deref(), passthrough)?;
+            0
+        }
+
+        Commands::Stash {
+            list,
+            gc,
+            limit,
+            command,
+            content_type,
+        } => {
+            stash_cmd::run(list, gc, limit, command, content_type)?;
+            0
+        }
+
+        Commands::Retrieve {
+            handle,
+            grep,
+            lines,
+            head,
+            tail,
+            meta,
+        } => {
+            retrieve_cmd::run(&handle, lines, grep, head, tail, meta)?;
             0
         }
 

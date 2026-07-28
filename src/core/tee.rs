@@ -181,11 +181,21 @@ fn format_hint(path: &std::path::Path) -> String {
     format!("[full output: {}]", display_path(path))
 }
 
+/// Append a content-addressed recall handle to a recovery hint so the agent can
+/// re-interrogate the full output (`rtk retrieve <handle> [--grep|--lines]`)
+/// instead of only tailing a file. No-op when stash is disabled/gated.
+fn with_recall(base_hint: String, raw: &str, command_slug: &str) -> String {
+    match crate::core::stash::auto_stash(raw, command_slug) {
+        Some(handle) => format!("{base_hint} [recall: rtk retrieve {handle}]"),
+        None => base_hint,
+    }
+}
+
 /// Convenience: tee + format hint in one call.
 /// Returns hint string if file was written, None if skipped.
 pub fn tee_and_hint(raw: &str, command_slug: &str, exit_code: i32) -> Option<String> {
     let path = tee_raw(raw, command_slug, exit_code)?;
-    Some(format_hint(&path))
+    Some(with_recall(format_hint(&path), raw, command_slug))
 }
 
 fn force_tee_path(content: &str, command_slug: &str) -> Option<PathBuf> {
@@ -218,7 +228,7 @@ fn force_tee_path(content: &str, command_slug: &str) -> Option<PathBuf> {
 /// Returns `[full output: ~/path]`, or None if tee is disabled/skipped.
 pub fn force_tee_hint(raw: &str, command_slug: &str) -> Option<String> {
     let path = force_tee_path(raw, command_slug)?;
-    Some(format_hint(&path))
+    Some(with_recall(format_hint(&path), raw, command_slug))
 }
 
 /// Returns `[see remaining: tail -n +{line_offset} ~/path]`, or None if tee is disabled/skipped.
@@ -228,11 +238,12 @@ pub fn force_tee_tail_hint(
     line_offset: usize,
 ) -> Option<String> {
     let path = force_tee_path(content, command_slug)?;
-    Some(format!(
+    let base = format!(
         "[see remaining: tail -n +{} {}]",
         line_offset,
         display_path(&path)
-    ))
+    );
+    Some(with_recall(base, content, command_slug))
 }
 
 /// TeeMode controls when tee writes files.
