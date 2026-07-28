@@ -103,7 +103,7 @@ Rust patterns, error handling, and anti-patterns are defined in `.claude/rules/r
 
 - **anyhow::Result** everywhere, always `.context("description")?`
 - **No unwrap()** in production code
-- **lazy_static!** for all regex (never compile inside a function)
+- **`LazyLock` statics** for all regex (never compile on every function call)
 - **Fallback pattern**: if filter fails, execute raw command unchanged
 - **No async**: single-threaded by design (startup <10ms)
 - **Exit code propagation**: `std::process::exit(code)` on child failure

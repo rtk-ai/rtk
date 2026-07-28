@@ -2,17 +2,15 @@
 
 use super::test_output::filter_test_runner_output;
 use super::utils::{strip_ansi_and_controls, PhpTestRunner};
-use lazy_static::lazy_static;
 use regex::Regex;
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref BOX_CHARS_RE: Regex =
-        Regex::new(r"[\u{2500}-\u{257F}\u{2580}-\u{259F}\u{25A0}-\u{25FF}\u{27A0}-\u{27BF}]+")
-            .unwrap();
-    static ref DOTS_RE: Regex = Regex::new(r"\.{3,}").unwrap();
-    static ref MULTI_SPACE_RE: Regex = Regex::new(r"[ \t]{2,}").unwrap();
-    static ref MULTI_BLANK_RE: Regex = Regex::new(r"\n{3,}").unwrap();
-}
+static BOX_CHARS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[\u{2500}-\u{257F}\u{2580}-\u{259F}\u{25A0}-\u{25FF}\u{27A0}-\u{27BF}]+").unwrap()
+});
+static DOTS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.{3,}").unwrap());
+static MULTI_SPACE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t]{2,}").unwrap());
+static MULTI_BLANK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
 
 pub fn filter_artisan_output(output: &str) -> String {
     let mut cleaned = strip_ansi_and_controls(output);

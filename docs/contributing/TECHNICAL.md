@@ -370,7 +370,7 @@ Declarative filters with an 8-stage pipeline: strip ANSI, regex replace, match o
 
 Achieved through:
 - Zero async overhead (single-threaded, no tokio)
-- Lazy regex compilation (`lazy_static!`)
+- Lazy regex compilation (`LazyLock`)
 - Minimal allocations (borrow over clone)
 - No config file I/O on startup (loaded on-demand)
 

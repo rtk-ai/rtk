@@ -87,9 +87,10 @@ fn detect_format(v: &Value) -> HookFormat {
         return HookFormat::PassThrough;
     }
 
-    // Copilot CLI: camelCase keys, toolArgs is a JSON-encoded string
+    // Copilot CLI: camelCase keys, toolArgs is a JSON-encoded string.
+    // The shell tool is "bash" on Unix and "powershell" on Windows.
     if let Some(tool_name) = v.get("toolName").and_then(|t| t.as_str()) {
-        if matches!(tool_name, "bash" | "run_in_terminal") {
+        if matches!(tool_name, "bash" | "powershell" | "run_in_terminal") {
             if let Some(tool_args_str) = v.get("toolArgs").and_then(|t| t.as_str()) {
                 if let Ok(tool_args) = serde_json::from_str::<Value>(tool_args_str) {
                     if let Some(cmd) = tool_args
@@ -724,9 +725,9 @@ mod tests {
         })
     }
 
-    fn copilot_cli_input(cmd: &str) -> Value {
+    fn copilot_cli_input(tool: &str, cmd: &str) -> Value {
         let args = serde_json::to_string(&json!({ "command": cmd })).unwrap();
-        json!({ "toolName": "bash", "toolArgs": args })
+        json!({ "toolName": tool, "toolArgs": args })
     }
 
     fn copilot_ide_input(cmd: &str) -> Value {
@@ -758,7 +759,7 @@ mod tests {
     #[test]
     fn test_detect_copilot_cli_bash() {
         assert!(matches!(
-            detect_format(&copilot_cli_input("git status")),
+            detect_format(&copilot_cli_input("bash", "git status")),
             HookFormat::CopilotCli { .. }
         ));
     }
@@ -768,6 +769,15 @@ mod tests {
         assert!(matches!(
             detect_format(&copilot_ide_input("git status")),
             HookFormat::CopilotIde { .. }
+        ));
+    }
+
+    #[test]
+    fn test_detect_copilot_cli_powershell() {
+        // Copilot CLI names its shell tool "powershell" on Windows, not "bash".
+        assert!(matches!(
+            detect_format(&copilot_cli_input("powershell", "git status")),
+            HookFormat::CopilotCli { .. }
         ));
     }
 
@@ -783,8 +793,11 @@ mod tests {
         // (confirmed for Cursor). run_copilot strips them before parsing;
         // verify both Copilot formats still parse after the same handling.
         for raw in [
-            format!("\u{feff}{}", copilot_cli_input("git status")),
-            format!("\u{feff}\u{feff}{}", copilot_cli_input("git status")),
+            format!("\u{feff}{}", copilot_cli_input("bash", "git status")),
+            format!(
+                "\u{feff}\u{feff}{}",
+                copilot_cli_input("bash", "git status")
+            ),
         ] {
             let cleaned = strip_leading_bom(&raw).trim();
             let v: Value = serde_json::from_str(cleaned).expect("BOM-stripped JSON must parse");

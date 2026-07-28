@@ -177,8 +177,61 @@ fn display_path(path: &std::path::Path) -> String {
     path.display().to_string()
 }
 
+fn needs_shell_quoting(path: &str) -> bool {
+    path.chars().any(|c| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '\'' | '"'
+                    | '\\'
+                    | '$'
+                    | '`'
+                    | '!'
+                    | '#'
+                    | '&'
+                    | '('
+                    | ')'
+                    | ';'
+                    | '<'
+                    | '>'
+                    | '?'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '|'
+                    | '*'
+            )
+    })
+}
+
+fn escape_double_quoted_path(path: &str) -> String {
+    let mut escaped = String::with_capacity(path.len());
+    for c in path.chars() {
+        if matches!(c, '\\' | '"' | '$' | '`') {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
+}
+
+fn display_shell_path(path: &std::path::Path) -> String {
+    let display = display_path(path);
+    if !needs_shell_quoting(&display) {
+        return display;
+    }
+
+    if let Some(relative) = display.strip_prefix("~/") {
+        let relative = relative.replace(std::path::MAIN_SEPARATOR, "/");
+        return format!("\"$HOME/{}\"", escape_double_quoted_path(&relative));
+    }
+
+    format!("\"{}\"", escape_double_quoted_path(&display))
+}
+
 fn format_hint(path: &std::path::Path) -> String {
-    format!("[full output: {}]", display_path(path))
+    format!("[full output: {}]", display_shell_path(path))
 }
 
 /// Convenience: tee + format hint in one call.
@@ -231,7 +284,7 @@ pub fn force_tee_tail_hint(
     Some(format!(
         "[see remaining: tail -n +{} {}]",
         line_offset,
-        display_path(&path)
+        display_shell_path(&path)
     ))
 }
 
@@ -445,6 +498,71 @@ mod tests {
         assert!(hint.starts_with("[full output: "));
         assert!(hint.ends_with(']'));
         assert!(hint.contains("123_cargo_test.log"));
+    }
+
+    #[test]
+    fn test_display_shell_path_preserves_simple_paths() {
+        let path = PathBuf::from("/tmp/rtk/tee/123_cargo_test.log");
+        assert_eq!(display_shell_path(&path), "/tmp/rtk/tee/123_cargo_test.log");
+    }
+
+    #[test]
+    fn test_display_shell_path_quotes_paths_with_spaces() {
+        let path = PathBuf::from("/tmp/rtk/Application Support/123_go_test.log");
+        assert_eq!(
+            display_shell_path(&path),
+            "\"/tmp/rtk/Application Support/123_go_test.log\""
+        );
+    }
+
+    #[test]
+    fn test_display_shell_path_quotes_backslashes() {
+        let path = PathBuf::from(r"/tmp/rtk/tee/path\segment.log");
+        assert_eq!(
+            display_shell_path(&path),
+            r#""/tmp/rtk/tee/path\\segment.log""#
+        );
+    }
+
+    #[test]
+    fn test_display_shell_path_uses_home_var_for_home_paths_with_spaces() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let path = home
+            .join("Library")
+            .join("Application Support")
+            .join("rtk")
+            .join("tee")
+            .join("123_go_test.log");
+
+        assert_eq!(
+            display_shell_path(&path),
+            "\"$HOME/Library/Application Support/rtk/tee/123_go_test.log\""
+        );
+    }
+
+    #[test]
+    fn test_format_hint_avoids_backslash_escaped_whitespace() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let path = home
+            .join("Library")
+            .join("Application Support")
+            .join("rtk")
+            .join("tee")
+            .join("123_go_test.log");
+        let hint = format_hint(&path);
+
+        assert_eq!(
+            hint,
+            "[full output: \"$HOME/Library/Application Support/rtk/tee/123_go_test.log\"]"
+        );
+        assert!(
+            !hint.contains("\\ "),
+            "hint should not encourage backslash-escaped whitespace"
+        );
     }
 
     #[test]
