@@ -238,6 +238,18 @@ rtk aws iam list-roles          # Strips policy documents
 rtk aws s3 ls                   # Truncated with tee recovery
 ```
 
+### Supabase
+```bash
+rtk supabase db lint                 # Findings and summary
+rtk supabase db push --dry-run       # Planned migrations
+rtk supabase migration list          # Compact local/remote ledger
+rtk supabase db reset --local        # Applied migrations and final status
+```
+
+Interactive `db push`, terminal SQL from `db diff`, and remote or linked
+`db reset` operations remain passthrough. Commands invoked through `npx`,
+`pnpx`, or `pnpm` are discovered and rewritten to the same filter.
+
 ### Containers
 ```bash
 rtk docker ps                   # Compact container list

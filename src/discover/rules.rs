@@ -103,6 +103,21 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^(?:(?:npx|pnpx)\s+|pnpm(?:\s+(?:dlx|exec))?\s+)?supabase\s+(?:db\s+(?:lint|push|diff|reset)|migration\s+list)\b",
+        rtk_cmd: "rtk supabase",
+        rewrite_prefixes: &[
+            "pnpm dlx supabase",
+            "pnpm exec supabase",
+            "pnpm supabase",
+            "pnpx supabase",
+            "npx supabase",
+            "supabase",
+        ],
+        category: "Database",
+        savings_pct: 60.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^(cat|head|tail)\s+",
         rtk_cmd: "rtk read",
         rewrite_prefixes: &["cat", "head", "tail"],

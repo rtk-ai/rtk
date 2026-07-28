@@ -4992,4 +4992,60 @@ mod tests {
             "pest"
         );
     }
+
+    #[test]
+    fn test_classify_supabase_database_commands() {
+        for command in [
+            "supabase db lint",
+            "npx supabase db push --dry-run",
+            "pnpm dlx supabase migration list",
+            "pnpm exec supabase db reset --local",
+            "pnpx supabase db diff --file schema.sql",
+        ] {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk supabase",
+                        ..
+                    }
+                ),
+                "command: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_supabase_invocation_forms() {
+        for (command, expected) in [
+            ("supabase db lint", "rtk supabase db lint"),
+            ("npx supabase db push --yes", "rtk supabase db push --yes"),
+            (
+                "pnpm dlx supabase migration list",
+                "rtk supabase migration list",
+            ),
+            (
+                "pnpm exec supabase db reset --local",
+                "rtk supabase db reset --local",
+            ),
+            (
+                "pnpm supabase db diff -f schema.sql",
+                "rtk supabase db diff -f schema.sql",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.into()),
+                "command: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unrelated_supabase_commands_are_not_discovered() {
+        assert!(matches!(
+            classify_command("supabase projects delete example"),
+            Classification::Unsupported { .. }
+        ));
+    }
 }
