@@ -7,6 +7,7 @@ pub mod display_helpers;
 pub mod filter;
 pub mod guard;
 pub mod runner;
+pub mod stash;
 pub mod stream;
 pub mod tee;
 pub mod telemetry;

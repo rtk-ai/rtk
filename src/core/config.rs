@@ -16,6 +16,8 @@ pub struct Config {
     #[serde(default)]
     pub tee: crate::core::tee::TeeConfig,
     #[serde(default)]
+    pub stash: crate::core::stash::StashConfig,
+    #[serde(default)]
     pub telemetry: TelemetryConfig,
     #[serde(default)]
     pub hooks: HooksConfig,

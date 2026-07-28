@@ -236,9 +236,25 @@ rtk gain                # View token savings statistics
 rtk gain --history      # View command history with savings
 rtk discover            # Analyze Claude Code sessions for missed RTK usage
 rtk proxy <cmd>         # Run command without filtering (for debugging)
+rtk stash               # Park stdin behind a recall handle (prints the handle)
+rtk retrieve <handle>   # Pull parked output back (--grep, --lines, --head, --tail)
 rtk init                # Add RTK instructions to CLAUDE.md
 rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
 ```
+
+### Recovering Full Output
+When output is truncated, RTK appends `[recall: rtk retrieve <handle>]` to the
+recovery hint. The full, untruncated output is parked behind that handle — run
+`rtk retrieve <handle>` to pull it, or re-interrogate it cheaply without paying
+for the whole thing:
+```bash
+rtk retrieve a1b2c3d4               # full parked output
+rtk retrieve a1b2c3d4 --grep TS2345 # only lines matching a pattern
+rtk retrieve a1b2c3d4 --lines 40-90 # a specific line range
+rtk retrieve a1b2c3d4 --meta        # stored metadata (command, size, age)
+```
+You can also park output yourself: `some-cmd | rtk stash` prints a handle you
+retrieve later. `rtk stash --list` shows what's parked; `rtk stash --gc` prunes.
 
 ## Token Savings Overview
 
@@ -4498,6 +4514,7 @@ rtk gain              # Token savings dashboard
 rtk gain --history    # Per-command savings history
 rtk discover          # Find missed rtk opportunities
 rtk proxy <cmd>       # Run raw (no filtering) but track usage
+rtk retrieve <handle> # Pull full output parked behind a `[recall: ...]` hint
 ```
 <!-- /rtk-instructions -->
 "#;
