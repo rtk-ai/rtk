@@ -9,3 +9,4 @@
 - `curl_cmd.rs` truncates long responses, saves full output to file for recovery
 - `wget_cmd.rs` wraps wget with output filtering
 - `psql_cmd.rs` filters PostgreSQL query output
+- `netlify_cmd.rs` filters historical deploy logs and `api listSiteDeploys`. Deploys, function/streaming logs, debug and JSON modes remain passthrough; sensitive arguments are redacted from tracking and truncated lists provide tee recovery

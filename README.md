@@ -238,6 +238,16 @@ rtk aws iam list-roles          # Strips policy documents
 rtk aws s3 ls                   # Truncated with tee recovery
 ```
 
+### Netlify
+```bash
+rtk netlify logs --source deploy       # Deploy phases, warnings, and result
+rtk netlify api listSiteDeploys        # Compact deploy history
+```
+
+Deploy commands, function logs, `--follow`, `--json`, and `--debug` remain
+passthrough. Commands invoked through `npx`, `pnpx`, or `pnpm` are discovered
+and rewritten to the same filter.
+
 ### Containers
 ```bash
 rtk docker ps                   # Compact container list
