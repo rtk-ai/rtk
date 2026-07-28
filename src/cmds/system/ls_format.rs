@@ -22,11 +22,9 @@ pub fn synthesize_output(mut records: Vec<LsRecord>, options: &FormatOptions) ->
 
     let mut by_ext = HashMap::new();
 
-    // Sort to ensure stable output order on Unix if no custom sorting is requested
-    #[cfg(not(target_os = "windows"))]{
-        if !options.sort_by_time && !options.reverse {
-            records.sort_by(|a, b| a.name.cmp(&b.name));
-        }
+    // Sort to ensure stable output order if no custom sorting is requested
+    if !options.sort_by_time && !options.reverse {
+        records.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
     let mut dirs_out = String::new();
@@ -54,14 +52,14 @@ pub fn synthesize_output(mut records: Vec<LsRecord>, options: &FormatOptions) ->
                 dir_count += 1;
             }
             LsRecordType::SYMBOLINK => {
-                symlinks_out.push_str(&format!("{}{}{}  {}\n", perms_prefix, r.name, if r.name.contains(" -> ") { "" } else { "" }, human_size(r.size)));
+                symlinks_out.push_str(&format!("{}{}  {}\n", perms_prefix, r.name, human_size(r.size)));
                 sym_count += 1;
             }
             _ => {
                 if r.file_type == LsRecordType::FILE {
                     *by_ext.entry(r.extension.clone()).or_insert(0) += 1;
                 }
-                files_out.push_str(&format!("{}{}{}  {}\n", perms_prefix, r.name, if r.name.contains(" -> ") { "" } else { "" }, human_size(r.size)));
+                files_out.push_str(&format!("{}{}  {}\n", perms_prefix, r.name, human_size(r.size)));
                 file_count += 1;
             }
         }
@@ -112,5 +110,50 @@ mod tests {
         assert_eq!(human_size(1_048_576), "1.0M");
         assert_eq!(human_size(2_500_000), "2.4M");
     }
+
+    #[test]
+    fn test_token_savings_assertion() {
+        use crate::cmds::system::ls_win::generate_mock_raw_output;
+
+        let mut records = Vec::new();
+        for i in 0..8 {
+            records.push(LsRecord {
+                name: format!("module_file_{}.rs", i),
+                file_type: LsRecordType::FILE,
+                size: 1024 * (i + 1),
+                extension: "rs".to_string(),
+                timestamp: Some(1000 + i),
+                octal_permissions: Some("644".to_string()),
+            });
+        }
+        for i in 0..4 {
+            records.push(LsRecord {
+                name: format!("sub_dir_{}", i),
+                file_type: LsRecordType::DIRECTORY,
+                size: 4096,
+                extension: "".to_string(),
+                timestamp: Some(2000 + i),
+                octal_permissions: Some("755".to_string()),
+            });
+        }
+
+        let raw = generate_mock_raw_output(&records);
+        let options = FormatOptions::default();
+        let (entries, summary) = synthesize_output(records, &options);
+        let cooked = format!("{}{}", entries, summary);
+
+        assert!(!raw.is_empty());
+        assert!(!cooked.is_empty());
+        let savings = 100 - (cooked.len() * 100 / raw.len());
+        assert!(
+            savings >= 60,
+            "Expected >= 60% token savings, got {}% (raw len: {}, cooked len: {})",
+            savings,
+            raw.len(),
+            cooked.len()
+        );
+    }
 }
+
+
 

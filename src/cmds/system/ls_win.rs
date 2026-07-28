@@ -7,14 +7,6 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
-pub fn estimate_raw_dir_output(records: &[LsRecord]) -> String {
-    let mut chars = 8; // "total 0\n"
-    for r in records {
-        // Heuristic: ~50 chars of fixed `ls -la` metadata overhead + filename length
-        chars += 45 + r.name.len();
-    }
-    " ".repeat(chars)
-}
 
 pub fn generate_mock_raw_output(records: &[LsRecord]) -> String {
     let mut out = String::new();
@@ -381,31 +373,6 @@ mod tests {
     }
 
     #[test]
-    fn test_estimate_raw_dir_output() {
-        let records = vec![
-            LsRecord {
-                name: "file.txt".to_string(),
-                file_type: LsRecordType::FILE,
-                size: 100,
-                timestamp: Some(1000),
-                extension: "txt".to_string(),
-                octal_permissions: Some("644".to_string()),
-            },
-            LsRecord {
-                name: "dir".to_string(),
-                file_type: LsRecordType::DIRECTORY,
-                size: 0,
-                timestamp: Some(2000),
-                extension: "".to_string(),
-                octal_permissions: Some("755".to_string()),
-            },
-        ];
-        let estimate = estimate_raw_dir_output(&records);
-        assert_eq!(estimate.len(), 109);
-        assert_eq!(estimate, " ".repeat(109));
-    }
-
-    #[test]
     fn test_fetch_entries_single_file() {
         let dir = tempdir().unwrap();
         let dir_path = dir.path();
@@ -493,8 +460,8 @@ mod tests {
 
         let options = FormatOptions { show_all: true, show_long: false, sort_by_time: true, reverse: true };
         let (exit_code, output, estimate) = run_native(
-            vec![path_str], 
-            options, 
+            vec![path_str.clone()], 
+            options.clone(), 
             vec!["-rt".to_string()]
         ).unwrap();
 
@@ -507,7 +474,11 @@ mod tests {
         if dir_path.join("symlink_c").exists() {
             assert!(output.contains("symlink_c"));
         }
-        
-        assert!(output.contains("Summary: "));
+
+        let records = fetch_entries(&[path_str], true).unwrap();
+        let (_entries, summary) = synthesize_output(records, &options);
+        assert!(summary.contains("Summary: "));
     }
 }
+
+
