@@ -34,6 +34,50 @@ fn sanitize_slug(slug: &str) -> String {
     }
 }
 
+/// Create a directory (and parents) restricted to the current user.
+///
+/// Tee files can contain raw command output including secrets, so the
+/// directory is locked to `0700` on Unix (owner-only). Setting permissions
+/// even when the directory already exists also hardens dirs created by
+/// older versions. No-op beyond `create_dir_all` on non-Unix platforms.
+fn create_dir_private(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Write `content` to a NEW file at `path` with owner-only permissions
+/// (`0600` on Unix).
+///
+/// Uses `create_new` (O_EXCL): the open fails if `path` already exists,
+/// including when it is a symlink. This defeats a symlink pre-planted at the
+/// predictable `{epoch}_{slug}.log` name. This matters when `RTK_TEE_DIR` points
+/// at a directory that was world-writable before [`create_dir_private`] tightened
+/// it, so the `0700` chmod cannot remove an entry an attacker already planted.
+/// O_EXCL means the truncating open can never follow such a link to clobber an
+/// attacker-chosen target. Combined with the `0700` directory, recovered output
+/// that may contain credentials stays readable only by the owner. (The previous
+/// `std::fs::write` created world-readable `0644` files and followed symlinks.)
+///
+/// Filenames embed the epoch second, so a pre-existing collision is rare; when
+/// it happens the open errors and the caller skips the tee, the same fail-soft
+/// behavior as any other write error here.
+fn write_file_private(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)?.write_all(content.as_bytes())
+}
+
 /// Get the tee directory, respecting config and env overrides.
 fn get_tee_dir(config: &Config) -> Option<PathBuf> {
     // Env var override
@@ -111,15 +155,14 @@ fn write_tee_file(
     max_file_size: usize,
     max_files: usize,
 ) -> Option<PathBuf> {
-    std::fs::create_dir_all(tee_dir).ok()?;
+    create_dir_private(tee_dir).ok()?;
 
     let slug = sanitize_slug(command_slug);
     let epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_secs();
-    let filename = format!("{}_{}.log", epoch, slug);
-    let filepath = tee_dir.join(filename);
+    let base = format!("{}_{}", epoch, slug);
 
     // Truncate at max_file_size (find a safe UTF-8 char boundary)
     let content = if raw.len() > max_file_size {
@@ -138,7 +181,22 @@ fn write_tee_file(
         raw.to_string()
     };
 
-    std::fs::write(&filepath, content).ok()?;
+    // write_file_private uses O_EXCL, so two tees with the same {epoch}_{slug}
+    // (same command within the same second) would collide. Disambiguate with a
+    // suffix and retry. Each attempt is still create_new, so a pre-planted
+    // symlink at any candidate name is refused rather than followed.
+    let mut filepath = tee_dir.join(format!("{base}.log"));
+    let mut attempt = 0u32;
+    loop {
+        match write_file_private(&filepath, &content) {
+            Ok(()) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 100 => {
+                attempt += 1;
+                filepath = tee_dir.join(format!("{base}.{attempt}.log"));
+            }
+            Err(_) => return None,
+        }
+    }
 
     // Rotate old files
     cleanup_old_files(tee_dir, max_files);
@@ -204,7 +262,7 @@ fn force_tee_path(content: &str, command_slug: &str) -> Option<PathBuf> {
     }
 
     let tee_dir = get_tee_dir(&config)?;
-    let tee_dir = std::fs::create_dir_all(&tee_dir).ok().and(Some(tee_dir))?;
+    let tee_dir = create_dir_private(&tee_dir).ok().and(Some(tee_dir))?;
 
     write_tee_file(
         content,
@@ -353,6 +411,74 @@ mod tests {
         assert!(path.exists());
         let written = fs::read_to_string(&path).unwrap();
         assert!(written.contains("error: test failed"));
+    }
+
+    // Tee output can contain secrets, so the dir must be 0700 and files 0600.
+    #[cfg(unix)]
+    #[test]
+    fn test_tee_file_and_dir_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path().join("tee");
+
+        create_dir_private(&dir).unwrap();
+        let dir_mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "tee dir must be 0700, got {:o}", dir_mode);
+
+        let content = "secret token output\n".repeat(50);
+        let path = write_tee_file(&content, "curl", &dir, DEFAULT_MAX_FILE_SIZE, 20).unwrap();
+        let file_mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            file_mode, 0o600,
+            "tee file must be 0600, got {:o}",
+            file_mode
+        );
+    }
+
+    // O_EXCL must refuse a pre-planted symlink and never follow it to clobber
+    // the link's victim. This is the core of the symlink-hardening fix.
+    #[cfg(unix)]
+    #[test]
+    fn test_write_file_private_refuses_symlink() {
+        use std::os::unix::fs::symlink;
+        let tmpdir = tempfile::tempdir().unwrap();
+        let victim = tmpdir.path().join("victim.txt");
+        fs::write(&victim, "DO NOT TOUCH").unwrap();
+
+        let link = tmpdir.path().join("1234_curl.log");
+        symlink(&victim, &link).unwrap();
+
+        let err = write_file_private(&link, "attacker-redirected secrets").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        // Victim untouched: the write never followed the symlink.
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "DO NOT TOUCH");
+    }
+
+    // O_EXCL refuses an existing regular file too (no clobber).
+    #[test]
+    fn test_write_file_private_refuses_existing_file() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let path = tmpdir.path().join("1234_curl.log");
+        fs::write(&path, "original").unwrap();
+
+        let err = write_file_private(&path, "replacement").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+    }
+
+    // Two tees with the same slug must never clobber each other. The
+    // AlreadyExists retry path picks a fresh name.
+    #[test]
+    fn test_write_tee_file_never_clobbers_same_slug() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path();
+        let content = "error output\n".repeat(50);
+
+        let p1 = write_tee_file(&content, "cargo_test", dir, DEFAULT_MAX_FILE_SIZE, 50).unwrap();
+        let p2 = write_tee_file(&content, "cargo_test", dir, DEFAULT_MAX_FILE_SIZE, 50).unwrap();
+
+        assert_ne!(p1, p2, "second tee must not reuse the first file");
+        assert!(p1.exists() && p2.exists());
     }
 
     #[test]
