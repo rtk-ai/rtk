@@ -11,6 +11,7 @@ use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::LazyLock;
 use std::sync::OnceLock;
 
 /// Truncates a string to `max_len` characters, appending `...` if needed.
@@ -49,9 +50,9 @@ pub fn truncate(s: &str, max_len: usize) -> String {
 /// assert_eq!(strip_ansi(colored), "Error");
 /// ```
 pub fn strip_ansi(text: &str) -> String {
-    lazy_static::lazy_static! {
-        static ref ANSI_RE: Regex = Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap();
-    }
+    static ANSI_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap());
+
     ANSI_RE.replace_all(text, "").to_string()
 }
 
