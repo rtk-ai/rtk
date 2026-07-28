@@ -99,6 +99,8 @@ static RESTORE_DIAGNOSTIC_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("valid regex")
 });
+static XML_COMMENT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->").expect("valid regex"));
 static PROJECT_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^\s*([A-Za-z]:)?[^\r\n]*\.csproj(?:\s|$)").expect("valid regex")
 });
@@ -988,6 +990,8 @@ pub fn parse_restore_from_text(text: &str) -> RestoreSummary {
 
 pub fn parse_restore_issues_from_text(text: &str) -> (Vec<BinlogIssue>, Vec<BinlogIssue>) {
     let text = text.replace("\r\n", "\n");
+    // Binlogs embed imported project files, so exclude their comments from text fallbacks.
+    let text = XML_COMMENT_RE.replace_all(&text, "");
     let clean = strip_ansi(&text);
     let scrubbed = scrub_sensitive_env_vars(&clean);
     let mut errors = Vec::new();
@@ -1266,6 +1270,25 @@ Switch: /tmp/nonexistent.csproj
         assert!(summary.errors[0]
             .message
             .contains("Project file does not exist"));
+    }
+
+    #[test]
+    fn test_parse_build_from_text_ignores_diagnostics_in_xml_comments() {
+        let input = r#"
+<!--
+  If the resulting string is not a valid conditional compilation symbol,
+  the compiler will generate the following warning:
+    warning MSB3052: The parameter to the compiler is invalid, '/define:0BAD_DEFINE' will be ignored.
+-->
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+"#;
+
+        let summary = parse_build_from_text(input);
+        assert!(summary.succeeded);
+        assert!(summary.warnings.is_empty());
+        assert!(summary.errors.is_empty());
     }
 
     #[test]
