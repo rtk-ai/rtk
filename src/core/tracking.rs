@@ -62,6 +62,7 @@ fn project_filter_params(project_path: Option<&str>) -> (Option<String>, Option<
 }
 
 use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB, RTK_DATA_DIR};
+use super::fs_perms;
 
 /// Main tracking interface for recording and querying command history.
 ///
@@ -250,6 +251,9 @@ impl Tracker {
         let db_path = get_db_path()?;
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
+            if default_data_dir().as_deref() == Some(parent) {
+                fs_perms::restrict_dir(parent);
+            }
         }
 
         let conn = Connection::open(&db_path)?;
@@ -322,6 +326,10 @@ impl Tracker {
             "CREATE INDEX IF NOT EXISTS idx_pf_timestamp ON parse_failures(timestamp)",
             [],
         )?;
+
+        fs_perms::restrict_file(&db_path);
+        fs_perms::restrict_file(&sqlite_sidecar_path(&db_path, "-wal"));
+        fs_perms::restrict_file(&sqlite_sidecar_path(&db_path, "-shm"));
 
         Ok(Self { conn })
     }
@@ -1235,6 +1243,16 @@ fn get_db_path() -> Result<PathBuf> {
     Ok(data_dir.join(RTK_DATA_DIR).join(HISTORY_DB))
 }
 
+fn default_data_dir() -> Option<PathBuf> {
+    dirs::data_local_dir().map(|d| d.join(RTK_DATA_DIR))
+}
+
+fn sqlite_sidecar_path(db_path: &std::path::Path, suffix: &str) -> PathBuf {
+    let mut path = db_path.as_os_str().to_os_string();
+    path.push(suffix);
+    PathBuf::from(path)
+}
+
 /// Individual parse failure record.
 #[derive(Debug)]
 pub struct ParseFailureRecord {
@@ -1565,6 +1583,18 @@ mod tests {
             db_path.ends_with("rtk/history.db"),
             "expected default path ending with rtk/history.db, got: {}",
             db_path.display()
+        );
+    }
+
+    #[test]
+    fn test_sqlite_sidecar_path_appends_suffix() {
+        assert_eq!(
+            sqlite_sidecar_path(std::path::Path::new("/tmp/rtk-history"), "-wal"),
+            PathBuf::from("/tmp/rtk-history-wal")
+        );
+        assert_eq!(
+            sqlite_sidecar_path(std::path::Path::new("/tmp/history.db"), "-shm"),
+            PathBuf::from("/tmp/history.db-shm")
         );
     }
 

@@ -1,6 +1,7 @@
 //! Raw output recovery -- saves unfiltered output to disk on command failure.
 
 use super::constants::RTK_DATA_DIR;
+use super::fs_perms;
 use crate::core::config::Config;
 use std::path::PathBuf;
 
@@ -47,7 +48,15 @@ fn get_tee_dir(config: &Config) -> Option<PathBuf> {
     }
 
     // Default: ~/.local/share/rtk/tee/
+    default_tee_dir()
+}
+
+fn default_tee_dir() -> Option<PathBuf> {
     dirs::data_local_dir().map(|d| d.join(RTK_DATA_DIR).join("tee"))
+}
+
+fn default_data_dir() -> Option<PathBuf> {
+    dirs::data_local_dir().map(|d| d.join(RTK_DATA_DIR))
 }
 
 /// Rotate old tee files: keep only the last `max_files`, delete oldest.
@@ -112,6 +121,14 @@ fn write_tee_file(
     max_files: usize,
 ) -> Option<PathBuf> {
     std::fs::create_dir_all(tee_dir).ok()?;
+    if default_tee_dir().as_deref() == Some(tee_dir) {
+        if let Some(parent) = tee_dir.parent() {
+            if default_data_dir().as_deref() == Some(parent) {
+                fs_perms::restrict_dir(parent);
+            }
+        }
+        fs_perms::restrict_dir(tee_dir);
+    }
 
     let slug = sanitize_slug(command_slug);
     let epoch = std::time::SystemTime::now()
@@ -139,6 +156,7 @@ fn write_tee_file(
     };
 
     std::fs::write(&filepath, content).ok()?;
+    fs_perms::restrict_file(&filepath);
 
     // Rotate old files
     cleanup_old_files(tee_dir, max_files);
