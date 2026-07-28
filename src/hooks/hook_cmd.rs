@@ -488,7 +488,13 @@ fn run_claude_inner(input: &str) -> Option<String> {
 
 // ── Trae native hook ───────────────────────────────────────────
 
-fn process_trae_payload(v: &Value) -> Option<Value> {
+struct TraeRewrite {
+    original: String,
+    rewritten: String,
+    output: Value,
+}
+
+fn process_trae_payload(v: &Value) -> Option<TraeRewrite> {
     if v.get("tool_name").and_then(Value::as_str) != Some("RunCommand") {
         return None;
     }
@@ -497,19 +503,26 @@ fn process_trae_payload(v: &Value) -> Option<Value> {
         .pointer("/tool_input/command")
         .and_then(Value::as_str)
         .filter(|command| !command.is_empty())?;
+    if crate::discover::lexer::contains_unattestable_construct(command) {
+        return None;
+    }
     let rewritten = get_rewritten(command)?;
 
     let mut updated_input = v.get("tool_input")?.clone();
     updated_input
         .as_object_mut()?
-        .insert("command".into(), Value::String(rewritten));
+        .insert("command".into(), Value::String(rewritten.clone()));
 
-    Some(json!({
-        "hookSpecificOutput": {
-            "hookEventName": PRE_TOOL_USE_KEY,
-            "updatedInput": updated_input
-        }
-    }))
+    Some(TraeRewrite {
+        original: command.to_string(),
+        rewritten,
+        output: json!({
+            "hookSpecificOutput": {
+                "hookEventName": PRE_TOOL_USE_KEY,
+                "updatedInput": updated_input
+            }
+        }),
+    })
 }
 
 /// Run the Trae PreToolUse hook natively.
@@ -531,8 +544,9 @@ pub fn run_trae() -> Result<()> {
         }
     };
 
-    if let Some(output) = process_trae_payload(&v) {
-        let _ = writeln!(io::stdout(), "{output}");
+    if let Some(rewrite) = process_trae_payload(&v) {
+        audit_log("rewrite", &rewrite.original, &rewrite.rewritten);
+        let _ = writeln!(io::stdout(), "{}", rewrite.output);
     }
 
     Ok(())
@@ -541,7 +555,7 @@ pub fn run_trae() -> Result<()> {
 #[cfg(test)]
 fn run_trae_inner(input: &str) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;
-    process_trae_payload(&v).map(|output| output.to_string())
+    process_trae_payload(&v).map(|rewrite| rewrite.output.to_string())
 }
 
 // ── Cursor native hook ─────────────────────────────────────────

@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, and Factory Droid
+description: How to integrate RTK with Claude Code, Trae, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, and Factory Droid
 sidebar:
   order: 3
 ---
@@ -29,6 +29,7 @@ Agent runs "cargo test"
 | Agent | Integration tier | Can rewrite transparently? |
 |-------|-----------------|---------------------------|
 | Claude Code | Shell hook (`PreToolUse`) | Yes |
+| Trae | Rust binary (`PreToolUse`, matcher `RunCommand`) | Yes |
 | VS Code Copilot Chat | Shell hook (`PreToolUse`) | Yes |
 | GitHub Copilot CLI | Shell hook (`preToolUse` `modifiedArgs`) | Yes |
 | Cursor | Shell hook (`preToolUse`) | Yes |
@@ -58,6 +59,26 @@ Restart Claude Code. Verify:
 ```bash
 rtk init --show    # shows hook status
 ```
+
+### Trae
+
+```bash
+rtk init --agent trae             # project-scoped (.trae/hooks.json)
+rtk init --global --agent trae    # user-scoped (~/.trae/hooks.json)
+```
+
+Global installation also updates `~/.trae-cn/hooks.json` when the `.trae-cn` directory already exists. Both modes install the native `rtk hook trae` command as a `PreToolUse` hook for `RunCommand`.
+
+The hook returns `hookSpecificOutput.updatedInput`, preserving fields such as `description` and `timeout` while replacing only `command`. It deliberately omits `permissionDecision`, leaving command approval to Trae. Commands containing command substitution, process substitution, heredocs, or file-target redirects are left unchanged so Trae evaluates the original command natively.
+
+Uninstall:
+
+```bash
+rtk init --uninstall --agent trae
+rtk init --uninstall --global --agent trae
+```
+
+Uninstall removes only RTK-managed hook entries; unrelated Trae hooks and configuration are preserved.
 
 ### Cursor
 
@@ -207,7 +228,7 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Trae, Cursor, Gemini, Factory Droid) apply rewrites before execution whenever RTK supports and can safely attest the command. Plugin integrations (OpenCode, Pi, Hermes) use in-place mutation via the agent's extension or plugin API.
 
 ## Windows support
 
@@ -217,7 +238,7 @@ The shell hook (`rtk-rewrite.sh`) requires a Unix shell. On native Windows:
 - Filters work normally (`rtk cargo test`, `rtk git status`)
 - Auto-rewrite does not work — the AI assistant is instructed to use RTK but commands are not intercepted
 
-For full hook support on Windows, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). Inside WSL, all agents with shell hook integration (Claude Code, Cursor, Gemini) work identically to Linux.
+For full shell-hook support on Windows, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). Inside WSL, agents with shell hook integration (Claude Code, Cursor, Gemini) work identically to Linux. Native Rust hook integrations such as Trae do not depend on `rtk-rewrite.sh`.
 
 ## Graceful degradation
 
