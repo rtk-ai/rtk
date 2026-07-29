@@ -55,4 +55,3 @@ unchanged through the requested PowerShell executable.
 ## Cross-command
 
 - `format_cmd` routes to `cmds/js/prettier_cmd` and `cmds/python/ruff_cmd`
-
