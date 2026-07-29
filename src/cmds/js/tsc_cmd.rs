@@ -77,9 +77,33 @@ impl BlockHandler for TscHandler {
         line.starts_with("  ") || line.starts_with('\t')
     }
 
-    fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+    fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String> {
         if self.error_count == 0 {
-            return Some("TypeScript: No errors found\n".to_string());
+            if exit_code == 0 {
+                return Some("TypeScript: No errors found\n".to_string());
+            }
+
+            // tsc exited non-zero without emitting parseable TS errors
+            // (e.g. missing tsconfig, invalid compiler flags, fatal config
+            // errors). Claiming "No errors found" here is a false positive,
+            // so surface the failure and the raw output tail instead.
+            let tail: Vec<&str> = raw
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .rev()
+                .take(10)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let mut result = format!(
+                "TypeScript: failed (exit code {}) with no parseable TS errors\n",
+                exit_code
+            );
+            if !tail.is_empty() {
+                result.push_str(&format!("Output:\n{}\n", tail.join("\n")));
+            }
+            return Some(result);
         }
 
         let mut result = format!(
@@ -316,6 +340,31 @@ Found 3 errors in 2 files.
     #[test]
     fn test_tsc_stream_no_errors() {
         let input = "Found 0 errors. Watching for file changes.\n";
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, input, 0);
+        assert!(result.contains("No errors found"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_tsc_stream_failure_without_parseable_errors() {
+        // tsc can exit non-zero without emitting TS#### error lines
+        // (e.g. missing tsconfig, bad compiler flags). The filter must not
+        // report "No errors found" in that case.
+        let input = "error TS5058: The specified path does not exist: 'tsconfig.json'.\n";
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, input, 1);
+        assert!(
+            !result.contains("No errors found"),
+            "must not claim success on non-zero exit, got: {}",
+            result
+        );
+        assert!(result.contains("failed (exit code 1)"), "got: {}", result);
+        assert!(result.contains("TS5058"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_tsc_stream_success_still_reports_no_errors() {
+        let input = "\n";
         let mut f = BlockStreamFilter::new(TscHandler::new());
         let result = run_block_filter(&mut f, input, 0);
         assert!(result.contains("No errors found"), "got: {}", result);
