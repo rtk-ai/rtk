@@ -1017,6 +1017,15 @@ fn rewrite_segment_inner(
         return Some(trimmed.to_string());
     }
 
+    if context == RewriteContext::Normal {
+        if let Some(rewritten) = crate::cmds::system::powershell_cmd::rewrite_for_hook(cmd_part) {
+            if is_excluded(cmd_part, excluded) {
+                return None;
+            }
+            return Some(format!("{rewritten}{redirect_suffix}"));
+        }
+    }
+
     if context == RewriteContext::Normal
         && (cmd_part.starts_with("head -") || cmd_part.starts_with("tail "))
     {
@@ -1237,6 +1246,56 @@ mod tests {
 
         assert!(!search_uses_pattern_file("grep -- -f"));
         assert!(!search_uses_pattern_file("grep -F pattern"));
+    }
+
+    #[test]
+    fn test_rewrite_powershell_file_cmdlets() {
+        assert_eq!(
+            rewrite_command_no_prefixes("Get-Content README.md", &[]),
+            Some("rtk read README.md".to_string())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("Get-ChildItem -Recurse -Force src", &[]),
+            Some("rtk tree -a src".to_string())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"Select-String -Pattern "fn run" -Path src\main.rs"#,
+                &[]
+            ),
+            Some(r#"rtk grep -i "fn run" src\main.rs"#.to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_powershell_wrappers() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"powershell.exe -NoProfile -Command "Get-ChildItem src""#,
+                &[]
+            ),
+            Some(r#"rtk powershell -NoProfile -Command "Get-ChildItem src""#.to_string())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"pwsh -Command "Get-Content README.md""#, &[]),
+            Some(r#"rtk pwsh -Command "Get-Content README.md""#.to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_powershell_unsafe_forms_pass_through() {
+        assert_eq!(
+            rewrite_command_no_prefixes("Get-ChildItem | Where-Object Length -gt 0", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("Get-Content -Raw README.md", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("Select-String -Context 2,2 TODO src", &[]),
+            None
+        );
     }
 
     #[test]

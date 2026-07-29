@@ -24,7 +24,7 @@ used when the underlying binary is unavailable (detected via
   `filter_wc_output`.
 - `tree.rs` — `run_native` does a recursive `std::fs` walk, pruning `NOISE_DIRS`
   unless `-a`.
-- `grep_cmd.rs` — `native_grep` (final fallback after `rg` then `grep`) walks
+- `search.rs` — `native_grep` (final fallback after `rg` then `grep`) walks
   files with the `ignore` crate and matches with `regex`, emitting the same
   NUL-separated `path\0line:content` format the parser expects. It respects
   `.gitignore` and skips hidden files, which differs slightly from
@@ -35,8 +35,8 @@ behavior is identical to the Unix spawn path.
 
 ## PowerShell cmdlet rewrites
 
-`discover/registry.rs::try_rewrite_powershell` maps common, **non-piped**
-PowerShell cmdlets to their rtk equivalents so the hook saves tokens on Windows:
+`powershell_cmd.rs` maps common, **non-piped** PowerShell cmdlets to their rtk
+equivalents so the hook saves tokens on Windows:
 
 | Cmdlet (and aliases) | rtk equivalent |
 |---|---|
@@ -46,6 +46,11 @@ PowerShell cmdlets to their rtk equivalents so the hook saves tokens on Windows:
 
 Piped/compound cmdlet invocations are intentionally left untouched to avoid
 breaking PowerShell pipeline semantics.
+
+The `rtk powershell` and `rtk pwsh` wrappers also recognize safe `-Command`
+forms and dispatch those same cmdlets through RTK. Scripts, `-File`,
+`-EncodedCommand`, pipelines, interpolation, and unsupported parameters run
+unchanged through the requested PowerShell executable.
 
 ## Cross-command
 

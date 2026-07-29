@@ -22,8 +22,8 @@ use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
-    summary, tree, wc_cmd,
+    deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
+    powershell_cmd, read, search, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -333,6 +333,22 @@ enum Commands {
         /// Pattern, path, and any rg flags (e.g. -v, -i, -t rust, --glob)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
+    },
+
+    /// Windows PowerShell with safe cmdlet routing and transparent fallback
+    #[command(name = "powershell", disable_help_flag = true)]
+    PowerShell {
+        /// Arguments passed to powershell.exe
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// PowerShell 7+ with safe cmdlet routing and transparent fallback
+    #[command(name = "pwsh", disable_help_flag = true)]
+    Pwsh {
+        /// Arguments passed to pwsh
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     /// Initialize rtk instructions for assistant CLI usage
@@ -1991,6 +2007,10 @@ fn run_cli() -> Result<i32> {
             search::run(search::Engine::Rg, 80, 200, false, &extra_args, cli.verbose)?
         }
 
+        Commands::PowerShell { args } => powershell_cmd::run("powershell", &args, cli.verbose)?,
+
+        Commands::Pwsh { args } => powershell_cmd::run("pwsh", &args, cli.verbose)?,
+
         Commands::Init {
             global,
             opencode,
@@ -2737,6 +2757,8 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Summary { .. }
             | Commands::Grep { .. }
             | Commands::Rg { .. }
+            | Commands::PowerShell { .. }
+            | Commands::Pwsh { .. }
             | Commands::Wget { .. }
             | Commands::Vitest { .. }
             | Commands::Prisma { .. }
@@ -3099,6 +3121,8 @@ mod tests {
             "tree",
             "read",
             "rg",
+            "powershell",
+            "pwsh",
             "git",
             "gh",
             "glab",
@@ -3194,6 +3218,19 @@ mod tests {
             }
             _ => panic!("Expected Run command"),
         }
+    }
+
+    #[test]
+    fn test_powershell_commands_parse_trailing_args() {
+        assert!(Cli::try_parse_from([
+            "rtk",
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            "Get-ChildItem src"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from(["rtk", "pwsh", "-Command", "Get-Content README.md"]).is_ok());
     }
 
     #[test]
