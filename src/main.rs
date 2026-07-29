@@ -866,6 +866,12 @@ enum HookCommands {
     Copilot,
     /// Process Factory Droid PreToolUse hook (reads JSON from stdin)
     Droid,
+    /// Process Kiro CLI preToolUse hook (reads JSON from stdin). Kiro's
+    /// hook contract only supports allow (exit 0) or block-with-stderr
+    /// (exit 2) — there is no `updatedInput`-style transparent rewrite —
+    /// so this always emits a deny-with-suggestion response, structurally
+    /// identical to the JetBrains Copilot IDE integration.
+    Kiro,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -2438,6 +2444,7 @@ fn run_cli() -> Result<i32> {
                 hooks::hook_cmd::run_droid()?;
                 0
             }
+            HookCommands::Kiro => hooks::hook_cmd::run_kiro(),
             HookCommands::Check { agent: _, command } => {
                 use crate::discover::registry::rewrite_command;
                 let raw = command.join(" ");

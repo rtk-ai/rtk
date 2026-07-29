@@ -42,6 +42,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
 - **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, `isToolCallEventType` guard, in-place mutation, `~/.pi/agent/extensions/`
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
+- **[`kiro/`](kiro/README.md)** — Rust binary hook, `preToolUse` deny-with-suggestion (no transparent rewrite exists in Kiro's hook contract), manual `.kiro/agents/*.json` wiring
 
 ## Supported Agents
 
@@ -58,6 +59,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | OpenCode | TypeScript plugin (`tool.execute.before`) | In-place mutation | Yes |
 | Pi | TypeScript extension (`tool_call` event) | In-place mutation | Yes |
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
+| Kiro CLI | Rust binary (`rtk hook kiro`) | Deny-with-suggestion | No (agent retries) |
 
 ## JSON Formats by Agent
 
