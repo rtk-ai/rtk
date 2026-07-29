@@ -453,8 +453,9 @@ fn run_streaming_search(
 /// Degraded relative to a real engine: no -A/-B/-C context-line support
 /// (context lines are only extra non-match lines shown around a hit, so
 /// skipping them is a completeness gap, not a correctness bug — add if
-/// requested). Only `-i`/`--ignore-case` is honored from `extra_args`; other
-/// flags (glob/type filters, max-count, etc.) are ignored in this mode.
+/// requested). `-i`/`--ignore-case` and `-v`/`--invert-match` are honored from
+/// `extra_args`; other flags (glob/type filters, max-count, etc.) are ignored in
+/// this mode.
 fn fallback_capture<T: AsRef<str>>(
     extra_args: &[T],
     patterns: &[String],
@@ -462,6 +463,8 @@ fn fallback_capture<T: AsRef<str>>(
 ) -> Result<CaptureResult> {
     let case_insensitive =
         has_short_flag(extra_args, 'i') || extra_args.iter().any(|f| f.as_ref() == "--ignore-case");
+    let invert_match =
+        has_short_flag(extra_args, 'v') || extra_args.iter().any(|f| f.as_ref() == "--invert-match");
 
     // Multiple -e/patterns are OR'd together, same semantics as the real
     // engines' multiple -e flags.
@@ -509,7 +512,7 @@ fn fallback_capture<T: AsRef<str>>(
             let display = path.to_string_lossy();
 
             for (idx, line) in contents.lines().enumerate() {
-                if re.is_match(line) {
+                if re.is_match(line) != invert_match {
                     stdout.push_str(&display);
                     stdout.push('\0');
                     stdout.push_str(&(idx + 1).to_string());
@@ -1770,6 +1773,26 @@ mod tests {
             fallback_capture(&["-i"], &patterns, &paths).expect("fallback_capture ok");
         assert_eq!(with_flag.exit_code, 0);
         assert!(with_flag.stdout.contains("HELLO world"));
+    }
+
+    #[test]
+    fn test_fallback_capture_invert_match() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("a.txt"),
+            "matching line\nline selected by NotMatch\n",
+        )
+        .expect("write a.txt");
+
+        let patterns = vec!["matching".to_string()];
+        let paths = vec![tmp.path().to_string_lossy().to_string()];
+
+        let result =
+            fallback_capture(&["-v"], &patterns, &paths).expect("fallback_capture ok");
+
+        assert_eq!(result.exit_code, 0);
+        assert!(!result.stdout.contains("matching line"));
+        assert!(result.stdout.contains("line selected by NotMatch"));
     }
 
     #[test]
