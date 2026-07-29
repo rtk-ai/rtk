@@ -48,6 +48,10 @@ jobs:
             os: ubuntu-latest
             archive: tar.gz
             musl: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+            musl: true
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
@@ -290,7 +294,7 @@ jobs:
         run: |
           echo "mac_arm=$(grep aarch64-apple-darwin.tar.gz checksums.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
           echo "mac_intel=$(grep x86_64-apple-darwin.tar.gz checksums.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
-          echo "linux_arm=$(grep aarch64-unknown-linux-gnu.tar.gz checksums.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "linux_arm_musl=$(grep aarch64-unknown-linux-musl.tar.gz checksums.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
           echo "linux_intel=$(grep x86_64-unknown-linux-musl.tar.gz checksums.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
 
       - name: Generate formula
@@ -309,8 +313,8 @@ jobs:
               url "https://github.com/rtk-ai/rtk/releases/download/TAG_PLACEHOLDER/rtk-x86_64-apple-darwin.tar.gz"
               sha256 "SHA_MAC_INTEL_PLACEHOLDER"
             elsif OS.linux? && Hardware::CPU.arm?
-              url "https://github.com/rtk-ai/rtk/releases/download/TAG_PLACEHOLDER/rtk-aarch64-unknown-linux-gnu.tar.gz"
-              sha256 "SHA_LINUX_ARM_PLACEHOLDER"
+              url "https://github.com/rtk-ai/rtk/releases/download/TAG_PLACEHOLDER/rtk-aarch64-unknown-linux-musl.tar.gz"
+              sha256 "SHA_LINUX_ARM_MUSL_PLACEHOLDER"
             elsif OS.linux? && Hardware::CPU.intel?
               url "https://github.com/rtk-ai/rtk/releases/download/TAG_PLACEHOLDER/rtk-x86_64-unknown-linux-musl.tar.gz"
               sha256 "SHA_LINUX_INTEL_PLACEHOLDER"
@@ -347,7 +351,7 @@ jobs:
           sed -i "s/TAG_PLACEHOLDER/${{ steps.version.outputs.tag }}/g" rtk.rb
           sed -i "s/SHA_MAC_ARM_PLACEHOLDER/${{ steps.sha.outputs.mac_arm }}/g" rtk.rb
           sed -i "s/SHA_MAC_INTEL_PLACEHOLDER/${{ steps.sha.outputs.mac_intel }}/g" rtk.rb
-          sed -i "s/SHA_LINUX_ARM_PLACEHOLDER/${{ steps.sha.outputs.linux_arm }}/g" rtk.rb
+          sed -i "s/SHA_LINUX_ARM_MUSL_PLACEHOLDER/${{ steps.sha.outputs.linux_arm_musl }}/g" rtk.rb
           sed -i "s/SHA_LINUX_INTEL_PLACEHOLDER/${{ steps.sha.outputs.linux_intel }}/g" rtk.rb
           # Remove leading spaces from heredoc
           sed -i 's/^          //' rtk.rb
