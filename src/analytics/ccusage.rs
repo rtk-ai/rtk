@@ -53,6 +53,8 @@ struct DailyResponse {
 
 #[derive(Debug, Deserialize)]
 struct DailyEntry {
+    // Older ccusage emits "date"; current ccusage emits "period". Accept both.
+    #[serde(alias = "period")]
     date: String,
     #[serde(flatten)]
     metrics: CcusageMetrics,
@@ -65,6 +67,8 @@ struct WeeklyResponse {
 
 #[derive(Debug, Deserialize)]
 struct WeeklyEntry {
+    // Older ccusage emits "week"; current ccusage emits "period". Accept both.
+    #[serde(alias = "period")]
     week: String, // ISO week start (Monday)
     #[serde(flatten)]
     metrics: CcusageMetrics,
@@ -77,6 +81,8 @@ struct MonthlyResponse {
 
 #[derive(Debug, Deserialize)]
 struct MonthlyEntry {
+    // Older ccusage emits "month"; current ccusage emits "period". Accept both.
+    #[serde(alias = "period")]
     month: String,
     #[serde(flatten)]
     metrics: CcusageMetrics,
@@ -300,6 +306,71 @@ mod tests {
         }"#;
         let result = parse_json(json, Granularity::Monthly);
         assert!(result.is_err()); // Missing required fields like totalTokens
+    }
+
+    #[test]
+    fn test_parse_monthly_period_key() {
+        // Current ccusage emits "period" instead of "month" for the record key.
+        let json = r#"{
+            "monthly": [
+                {
+                    "period": "2026-01",
+                    "inputTokens": 1000,
+                    "outputTokens": 500,
+                    "totalTokens": 1800,
+                    "totalCost": 12.34
+                }
+            ]
+        }"#;
+
+        let result = parse_json(json, Granularity::Monthly);
+        assert!(result.is_ok());
+        let periods = result.unwrap();
+        assert_eq!(periods.len(), 1);
+        assert_eq!(periods[0].key, "2026-01");
+        assert_eq!(periods[0].metrics.total_cost, 12.34);
+    }
+
+    #[test]
+    fn test_parse_daily_period_key() {
+        let json = r#"{
+            "daily": [
+                {
+                    "period": "2026-01-30",
+                    "inputTokens": 100,
+                    "outputTokens": 50,
+                    "totalTokens": 150,
+                    "totalCost": 0.15
+                }
+            ]
+        }"#;
+
+        let result = parse_json(json, Granularity::Daily);
+        assert!(result.is_ok());
+        let periods = result.unwrap();
+        assert_eq!(periods.len(), 1);
+        assert_eq!(periods[0].key, "2026-01-30");
+    }
+
+    #[test]
+    fn test_parse_weekly_period_key() {
+        let json = r#"{
+            "weekly": [
+                {
+                    "period": "2026-01-20",
+                    "inputTokens": 500,
+                    "outputTokens": 250,
+                    "totalTokens": 900,
+                    "totalCost": 5.67
+                }
+            ]
+        }"#;
+
+        let result = parse_json(json, Granularity::Weekly);
+        assert!(result.is_ok());
+        let periods = result.unwrap();
+        assert_eq!(periods.len(), 1);
+        assert_eq!(periods[0].key, "2026-01-20");
     }
 
     #[test]

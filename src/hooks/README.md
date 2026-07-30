@@ -86,6 +86,7 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 |------|------------|-------------------|
 | Claude Code (rtk-rewrite.sh) | Yes | `permissionDecision: "ask"` — user prompted |
 | Copilot VS Code (rtk hook copilot) | Yes | `permissionDecision: "ask"` — user prompted |
+| Cursor (rtk hook cursor) | Ready | `permission: "ask",` — users will be prompted when Cursor enforces the permission; in the meantime, allow |
 | Gemini CLI (rtk hook gemini) | No (allow/deny only) | allow (limitation — no ask mode in Gemini) |
 | Copilot CLI (rtk hook copilot) | No updatedInput | deny-with-suggestion (unchanged) |
 | Codex | ask parsed but no-op | allow (limitation — fails open) |

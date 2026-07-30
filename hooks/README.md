@@ -12,7 +12,7 @@ Relationship to `src/hooks/`: that component **creates** these files; this direc
 
 ## Purpose
 
-LLM agent integrations that intercept CLI commands and route them through RTK for token optimization. Each hook transparently rewrites raw commands (e.g., `git status`) to their RTK equivalents (e.g., `rtk git status`), delivering 60-90% token savings without requiring the agent or user to change their workflow.
+LLM agent integrations that intercept CLI commands and route them through RTK for token optimization. Each hook transparently rewrites raw commands (e.g., `git status`) to their RTK equivalents (e.g., `rtk git status`), cutting up to 90% of the bash output that reaches the LLM context without requiring the agent or user to change their workflow.
 
 ## How It Works
 
@@ -24,7 +24,7 @@ Agent runs command (e.g., "cargo test --nocapture")
   -> Registry matches pattern, returns "rtk cargo test --nocapture"
   -> Hook sends response in agent-specific JSON format
   -> Agent executes "rtk cargo test --nocapture" instead
-  -> Filtered output reaches LLM (~90% fewer tokens)
+  -> Filtered output reaches LLM (up to 90% fewer bash output bytes)
 ```
 
 All rewrite logic lives in the Rust binary (`src/discover/registry.rs`). Hook scripts are **thin delegates** that handle agent-specific JSON formats and call `rtk rewrite` for the actual decision. This ensures a single source of truth for all 70+ rewrite patterns.
@@ -50,7 +50,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | Claude Code | Shell hook (`PreToolUse`) | Transparent rewrite | Yes (`updatedInput`) |
 | VS Code Copilot Chat | Rust binary (`rtk hook copilot`) | Transparent rewrite | Yes (`updatedInput`) |
 | GitHub Copilot CLI | Rust binary (`rtk hook copilot`) | Deny-with-suggestion | No (agent retries) |
-| Cursor | Shell hook (`preToolUse`) | Transparent rewrite | Yes (`updated_input`) |
+| Cursor | Rust binary | Transparent rewrite | Yes (`updated_input`) |
 | Gemini CLI | Rust binary (`rtk hook gemini`) | Transparent rewrite | Yes (`hookSpecificOutput`) |
 | Cline / Roo Code | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |
@@ -197,11 +197,12 @@ The registry (`src/discover/registry.rs`) handles command patterns across these 
 
 ### Compound Command Handling
 
-The registry handles `&&`, `||`, `;`, `|`, and `&` operators:
+The registry handles `&&`, `||`, `;`, `|`, `|&`, and `&` operators:
 
-- **Pipe** (`|`): Only the left side is rewritten (right side consumes output format)
+- **Pipe** (`|`): Producers and intermediate stages stay raw; only a pipeline-safe final stage is rewritten
+- **Stderr pipe** (`|&`): The complete pipeline stays raw
 - **And/Or/Semicolon** (`&&`, `||`, `;`): Both sides rewritten independently
-- **find/fd in pipes**: Never rewritten (output format incompatible with xargs/wc/grep)
+- **Pipeline-safe rules**: Initially limited to argument-safe `grep`, `rg`, and `wc` invocations; search pattern-file forms defer
 
 Example: `cargo fmt --all && cargo test` becomes `rtk cargo fmt --all && rtk cargo test`
 
