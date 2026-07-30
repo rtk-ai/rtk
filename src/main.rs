@@ -1881,9 +1881,13 @@ fn run_cli() -> Result<i32> {
         Commands::Diff { file1, file2 } => {
             if let Some(f2) = file2 {
                 diff_cmd::run(&file1, &f2, cli.verbose)?
+            } else if file1.as_os_str() == "-" {
+                // stdin unified-diff mode — preserve differ/same exit codes (#3267)
+                diff_cmd::run_stdin(cli.verbose)?
             } else {
-                diff_cmd::run_stdin(cli.verbose)?;
-                0
+                // Single path without pair: treat as error (need two files or `-` for stdin)
+                eprintln!("rtk diff: need two files, or `rtk diff -` for stdin unified diff");
+                2
             }
         }
 
