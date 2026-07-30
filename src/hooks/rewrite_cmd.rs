@@ -78,6 +78,29 @@ mod tests {
     }
 
     #[test]
+    fn test_dotnet_build_and_test_rewrite() {
+        // `rtk dotnet` filters build/test/restore/format; hook must rewrite all four (#3300).
+        assert_eq!(
+            rewrite_command_no_prefixes("dotnet build"),
+            Some("rtk dotnet build".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("dotnet test"),
+            Some("rtk dotnet test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("dotnet restore"),
+            Some("rtk dotnet restore".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("dotnet format"),
+            Some("rtk dotnet format".into())
+        );
+        // Unsupported subcommands stay unhandled.
+        assert!(rewrite_command_no_prefixes("dotnet nuget list").is_none());
+    }
+
+    #[test]
     fn test_run_unsupported_returns_none() {
         assert!(rewrite_command_no_prefixes("htop").is_none());
     }
