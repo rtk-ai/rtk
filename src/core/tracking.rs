@@ -35,6 +35,7 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::time::Instant;
 
 // ── Project path helpers ── // added: project-scoped tracking support
@@ -62,6 +63,24 @@ fn project_filter_params(project_path: Option<&str>) -> (Option<String>, Option<
 }
 
 use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB, RTK_DATA_DIR};
+
+/// Whether persistent command-history tracking is enabled.
+///
+/// `RTK_TRACK=0` is a one-shot override for automation and isolated launches.
+/// Configuration errors preserve the existing enabled-by-default behavior.
+pub(crate) fn tracking_enabled() -> bool {
+    static ENABLED: LazyLock<bool> = LazyLock::new(|| {
+        if std::env::var("RTK_TRACK").ok().as_deref() == Some("0") {
+            return false;
+        }
+
+        crate::core::config::Config::load()
+            .map(|config| config.tracking.enabled)
+            .unwrap_or(true)
+    });
+
+    *ENABLED
+}
 
 /// Main tracking interface for recording and querying command history.
 ///
@@ -407,6 +426,10 @@ impl Tracker {
         output_tokens: usize,
         exec_time_ms: u64,
     ) -> Result<()> {
+        if !tracking_enabled() {
+            return Ok(());
+        }
+
         let saved = input_tokens.saturating_sub(output_tokens);
         let pct = if input_tokens > 0 {
             (saved as f64 / input_tokens as f64) * 100.0
@@ -469,6 +492,10 @@ impl Tracker {
         error_message: &str,
         fallback_succeeded: bool,
     ) -> Result<()> {
+        if !tracking_enabled() {
+            return Ok(());
+        }
+
         self.conn.execute(
             "INSERT INTO parse_failures (timestamp, raw_command, error_message, fallback_succeeded)
              VALUES (?1, ?2, ?3, ?4)",
@@ -1257,6 +1284,10 @@ pub struct ParseFailureSummary {
 /// Record a parse failure without ever crashing.
 /// Silently ignores all errors — used in the fallback path.
 pub fn record_parse_failure_silent(raw_command: &str, error_message: &str, succeeded: bool) {
+    if !tracking_enabled() {
+        return;
+    }
+
     if let Ok(tracker) = Tracker::new() {
         let _ = tracker.record_parse_failure(raw_command, error_message, succeeded);
     }
@@ -1354,6 +1385,10 @@ impl TimedExecution {
     /// timer.track("ls -la", "rtk ls", input, output);
     /// ```
     pub fn track(&self, original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
+        if !tracking_enabled() {
+            return;
+        }
+
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
         let input_tokens = estimate_tokens(input);
         let output_tokens = estimate_tokens(output);
@@ -1390,6 +1425,10 @@ impl TimedExecution {
     /// timer.track_passthrough("git tag", "rtk git tag");
     /// ```
     pub fn track_passthrough(&self, original_cmd: &str, rtk_cmd: &str) {
+        if !tracking_enabled() {
+            return;
+        }
+
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
         // input_tokens=0, output_tokens=0 won't dilute savings statistics
         if let Ok(tracker) = Tracker::new() {
