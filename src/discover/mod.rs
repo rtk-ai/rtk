@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use provider::{ClaudeProvider, SessionProvider};
 use registry::{
     category_avg_tokens, classify_command, split_command_chain, strip_disabled_prefix,
-    Classification,
+    would_rewrite_command, Classification,
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
@@ -114,6 +114,13 @@ pub fn run(
                     continue;
                 }
 
+                // Align discover labels with the hook rewrite engine (#3292):
+                // - Supported-but-not-rewritable (flag/heredoc/JSON guards) must not
+                //   appear under MISSED SAVINGS.
+                // - Unsupported-but-TOML-rewritable (e.g. jq) must not appear as unhandled.
+                // Path-qualified tools still count when basename rewrite would succeed.
+                let hook_would_rewrite = would_rewrite_command(part);
+
                 match classify_command(part) {
                     Classification::Supported {
                         rtk_equivalent,
@@ -121,6 +128,10 @@ pub fn run(
                         estimated_savings_pct,
                         status,
                     } => {
+                        if !hook_would_rewrite {
+                            // Defect A: classifier says handled, rewrite engine refuses.
+                            continue;
+                        }
                         let bucket = supported_map.entry(rtk_equivalent).or_insert_with(|| {
                             SupportedBucket {
                                 rtk_equivalent,
@@ -160,6 +171,36 @@ pub fn run(
                         *entry += 1;
                     }
                     Classification::Unsupported { base_command } => {
+                        if hook_would_rewrite {
+                            // Defect B: TOML/builtin filter rewrites (e.g. jq) but
+                            // classify_command never learned about them.
+                            const TOML_RTK: &str = "rtk (filter)";
+                            const TOML_CAT: &str = "Filter";
+                            let bucket =
+                                supported_map.entry(TOML_RTK).or_insert_with(|| SupportedBucket {
+                                    rtk_equivalent: TOML_RTK,
+                                    category: TOML_CAT,
+                                    count: 0,
+                                    total_output_tokens: 0,
+                                    total_raw_output_tokens: 0,
+                                    command_counts: HashMap::new(),
+                                });
+                            bucket.count += 1;
+                            let output_tokens = if let Some(len) = ext_cmd.output_len {
+                                len / 4
+                            } else {
+                                category_avg_tokens(TOML_CAT, &base_command)
+                            };
+                            let savings = (output_tokens as f64 * 60.0 / 100.0) as usize;
+                            bucket.total_output_tokens += savings;
+                            bucket.total_raw_output_tokens += output_tokens;
+                            let display_name = truncate_command(part);
+                            *bucket
+                                .command_counts
+                                .entry(format!("{}:Existing", display_name))
+                                .or_insert(0) += 1;
+                            continue;
+                        }
                         let bucket = unsupported_map.entry(base_command).or_insert_with(|| {
                             UnsupportedBucket {
                                 count: 0,
