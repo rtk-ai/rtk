@@ -191,36 +191,33 @@ pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
     )
 }
 
-pub fn run(
-    pattern: &str,
+/// Walk `path` and return relative paths matching the glob pattern.
+///
+/// Dotfile patterns (names starting with `.`) include hidden entries and skip
+/// gitignore/exclude filters so gitignored configs like `.env` still match
+/// native `find` behavior (#3291).
+fn collect_matching_files(
+    effective_pattern: &str,
     path: &str,
-    max_results: usize,
     max_depth: Option<usize>,
     file_type: &str,
     case_insensitive: bool,
-    verbose: u8,
-) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    // Treat "." as match-all
-    let effective_pattern = if pattern == "." { "*" } else { pattern };
-
-    if verbose > 0 {
-        eprintln!("find: {} in {}", effective_pattern, path);
-    }
-
+) -> Vec<String> {
     let want_dirs = file_type == "d";
 
-    // When the pattern targets dotfiles (e.g. -name ".claude.json"), we must walk hidden
-    // entries; otherwise skip them to keep results tidy (#1101).
+    // When the pattern targets dotfiles (e.g. -name ".env", -name ".claude.json"), we must
+    // walk hidden entries AND stop applying gitignore/exclude filters. Dot-config files are
+    // almost always gitignored; native `find` still lists them. Leaving git_ignore on made
+    // `rtk find -name '.env'` exit 0 with empty output while `rtk proxy find` found matches
+    // (#3291, follow-up to #1101 hidden walk).
     let search_hidden = effective_pattern.starts_with('.');
 
     let mut builder = WalkBuilder::new(path);
     builder
         .hidden(!search_hidden) // skip hidden files/dirs unless pattern targets dotfiles
-        .git_ignore(true) // respect .gitignore
-        .git_global(true)
-        .git_exclude(true);
+        .git_ignore(!search_hidden) // keep tidy defaults; disable when hunting dotfiles
+        .git_global(!search_hidden)
+        .git_exclude(!search_hidden);
     if let Some(depth) = max_depth {
         builder.max_depth(Some(depth));
     }
@@ -274,6 +271,34 @@ pub fn run(
         }
     }
 
+    files
+}
+
+pub fn run(
+    pattern: &str,
+    path: &str,
+    max_results: usize,
+    max_depth: Option<usize>,
+    file_type: &str,
+    case_insensitive: bool,
+    verbose: u8,
+) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    // Treat "." as match-all
+    let effective_pattern = if pattern == "." { "*" } else { pattern };
+
+    if verbose > 0 {
+        eprintln!("find: {} in {}", effective_pattern, path);
+    }
+
+    let mut files = collect_matching_files(
+        effective_pattern,
+        path,
+        max_depth,
+        file_type,
+        case_insensitive,
+    );
     files.sort();
 
     let raw_output = files.join("\n");
@@ -571,6 +596,39 @@ mod tests {
         // .gitignore exists at the repo root — must be found when using a dotfile pattern
         let result = run(".gitignore", ".", 50, Some(1), "f", false, 0);
         assert!(result.is_ok(), "run with dotfile pattern should not error");
+    }
+
+    #[test]
+    fn find_dotfile_pattern_includes_gitignored_env() {
+        // Regression for #3291: gitignored `.env` must still match when the pattern
+        // explicitly targets a dotfile (native find does not honor .gitignore).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        std::fs::write(root.join(".gitignore"), ".env\n").expect("write gitignore");
+        std::fs::write(root.join(".env"), "SECRET=1\n").expect("write env");
+        std::fs::write(root.join("readme.txt"), "hi\n").expect("write readme");
+        // ignore crate only applies gitignore when a .git dir is present
+        std::fs::create_dir(root.join(".git")).expect("create .git");
+
+        let root_s = root.to_string_lossy();
+        let matches =
+            collect_matching_files(".env", &root_s, Some(2), "f", false);
+        assert!(
+            matches.iter().any(|p| p == ".env" || p.ends_with("/.env")),
+            "expected gitignored .env in results, got {matches:?}"
+        );
+
+        // Non-dot patterns still skip hidden/gitignored noise by default
+        let visible = collect_matching_files("readme.txt", &root_s, Some(2), "f", false);
+        assert!(
+            visible.iter().any(|p| p.ends_with("readme.txt")),
+            "expected readme.txt, got {visible:?}"
+        );
+        let still_hidden = collect_matching_files("*.env", &root_s, Some(2), "f", false);
+        assert!(
+            still_hidden.is_empty(),
+            "non-dot glob should keep gitignore/hidden filters, got {still_hidden:?}"
+        );
     }
 
     #[test]
