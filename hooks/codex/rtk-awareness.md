@@ -22,11 +22,3 @@ rtk gain            # Token savings analytics
 rtk gain --history  # Recent command savings history
 rtk proxy <cmd>     # Run raw command without filtering
 ```
-
-## Verification
-
-```bash
-rtk --version
-rtk gain
-which rtk
-```

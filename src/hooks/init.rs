@@ -4872,6 +4872,15 @@ mod tests {
     }
 
     #[test]
+    fn test_awareness_templates_omit_one_time_setup() {
+        assert!(!RTK_SLIM.contains("Installation Verification"));
+        assert!(!RTK_SLIM.contains("which rtk"));
+        assert!(!RTK_SLIM.contains("Refer to CLAUDE.md for full command reference."));
+        assert!(!RTK_SLIM_CODEX.contains("## Verification"));
+        assert!(!RTK_SLIM_CODEX.contains("which rtk"));
+    }
+
+    #[test]
     fn test_claude_md_mode_creates_full_injection() {
         // Just verify RTK_INSTRUCTIONS constant has the right content
         assert!(RTK_INSTRUCTIONS.contains(RTK_BLOCK_START));
