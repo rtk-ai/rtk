@@ -632,14 +632,41 @@ fn truncate_line(line: &str, width: usize) -> String {
 }
 
 pub(crate) fn format_status_output(porcelain: &str) -> String {
-    format_status_inner(porcelain, None)
+    let limits = crate::core::config::limits();
+    format_status_inner(
+        porcelain,
+        None,
+        limits.status_max_files,
+        limits.status_max_untracked,
+    )
 }
 
 pub(crate) fn format_status_output_detached(porcelain: &str, detached_ref: &str) -> String {
-    format_status_inner(porcelain, Some(detached_ref))
+    let limits = crate::core::config::limits();
+    format_status_inner(
+        porcelain,
+        Some(detached_ref),
+        limits.status_max_files,
+        limits.status_max_untracked,
+    )
 }
 
-fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
+/// Format porcelain status with explicit caps (tests pass custom limits).
+#[cfg(test)]
+pub(crate) fn format_status_output_with_limits(
+    porcelain: &str,
+    max_files: usize,
+    max_untracked: usize,
+) -> String {
+    format_status_inner(porcelain, None, max_files, max_untracked)
+}
+
+fn format_status_inner(
+    porcelain: &str,
+    detached: Option<&str>,
+    max_files: usize,
+    max_untracked: usize,
+) -> String {
     let lines: Vec<&str> = porcelain
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -651,18 +678,56 @@ fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
 
     let mut output = Vec::new();
 
+    let mut start = 0;
     if let Some(branch_line) = lines.first() {
         if branch_line.starts_with("##") {
             let branch = branch_line.trim_start_matches("## ");
             let display = detached.unwrap_or(branch);
             output.push(format!("* {}", display));
+            start = 1;
         } else {
             output.push((*branch_line).to_string());
+            start = 1;
         }
     }
 
-    for line in lines.iter().skip(1) {
+    // Split remaining porcelain entries into tracked changes vs untracked.
+    // Honor [limits].status_max_files / status_max_untracked (#3296).
+    let mut tracked: Vec<&str> = Vec::new();
+    let mut untracked: Vec<&str> = Vec::new();
+    for line in lines.iter().skip(start) {
+        if line.starts_with("??") || line.starts_with("!") {
+            untracked.push(*line);
+        } else {
+            tracked.push(*line);
+        }
+    }
+
+    let tracked_total = tracked.len();
+    let untracked_total = untracked.len();
+    let tracked_cap = max_files.max(1);
+    let untracked_cap = max_untracked.max(1);
+
+    for line in tracked.iter().take(tracked_cap) {
         output.push((*line).to_string());
+    }
+    if tracked_total > tracked_cap {
+        output.push(format!(
+            "... +{} more changed (status_max_files={})",
+            tracked_total - tracked_cap,
+            max_files
+        ));
+    }
+
+    for line in untracked.iter().take(untracked_cap) {
+        output.push((*line).to_string());
+    }
+    if untracked_total > untracked_cap {
+        output.push(format!(
+            "... +{} more untracked (status_max_untracked={})",
+            untracked_total - untracked_cap,
+            max_untracked
+        ));
     }
 
     if lines.len() == 1 && lines[0].starts_with("##") {
@@ -3095,12 +3160,13 @@ no changes added to commit (use "git add" and/or "git commit -a")
     // --- truncation accuracy ---
 
     #[test]
-    fn test_format_status_output_shows_every_file_when_many_are_dirty() {
+    fn test_format_status_output_shows_every_file_when_limits_disabled() {
+        // Unlimited caps keep every dirty path visible (agent recovery path).
         let mut porcelain = String::from("## main...origin/main\n");
         for i in 0..25 {
             porcelain.push_str(&format!("M  staged_file_{}.rs\n", i));
         }
-        let result = format_status_output(&porcelain);
+        let result = format_status_output_with_limits(&porcelain, usize::MAX, usize::MAX);
         assert!(
             result.contains("staged_file_24.rs"),
             "Expected the last staged file to remain visible, got:\n{}",
@@ -3113,9 +3179,30 @@ no changes added to commit (use "git add" and/or "git commit -a")
         );
         assert!(
             !result.contains("... +"),
-            "Status output must not hide dirty paths behind overflow markers:\n{}",
+            "Unlimited status output must not hide dirty paths:\n{}",
             result
         );
+    }
+
+    #[test]
+    fn test_format_status_honors_status_max_files_and_untracked() {
+        // Config limits must truncate large statuses (#3296).
+        let mut porcelain = String::from("## main...origin/main\n");
+        for i in 0..20 {
+            porcelain.push_str(&format!("M  changed_{}.rs\n", i));
+        }
+        for i in 0..15 {
+            porcelain.push_str(&format!("?? untracked_{}.txt\n", i));
+        }
+        let result = format_status_output_with_limits(&porcelain, 5, 3);
+        assert!(result.contains("changed_0.rs"));
+        assert!(result.contains("changed_4.rs"));
+        assert!(!result.contains("changed_5.rs"));
+        assert!(result.contains("... +15 more changed (status_max_files=5)"));
+        assert!(result.contains("untracked_0.txt"));
+        assert!(result.contains("untracked_2.txt"));
+        assert!(!result.contains("untracked_3.txt"));
+        assert!(result.contains("... +12 more untracked (status_max_untracked=3)"));
     }
 
     #[test]
