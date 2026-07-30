@@ -9,6 +9,9 @@ pub const DEFAULT_HISTORY_DAYS: i64 = 90;
 /// When adding a new RTK-only subcommand to `Commands`, add its clap name here.
 pub const RTK_META_COMMANDS: &[&str] = &[
     "gain",
+    // `stats` is a visible alias of `gain` (#3263). Keep it meta so `rtk stats`
+    // never falls through to spawning a bare `stats` binary from PATH.
+    "stats",
     "discover",
     "learn",
     "init",
