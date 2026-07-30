@@ -39,7 +39,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`cline/`](cline/README.md)** — Rules file (prompt-level), `.clinerules` project-local installation
 - **[`windsurf/`](windsurf/README.md)** — Rules file (prompt-level), `.windsurfrules` workspace-scoped
 - **[`codex/`](codex/README.md)** — Awareness document, `AGENTS.md` integration, `$CODEX_HOME` or `~/.codex/` location
-- **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
+- **[`opencode/`](opencode/README.md)** — TypeScript plugin, Node `execFile`, `tool.execute.before` event, in-place mutation
 - **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, `isToolCallEventType` guard, in-place mutation, `~/.pi/agent/extensions/`
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
 
@@ -159,11 +159,18 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 
 ### OpenCode (TypeScript Plugin)
 
-Mutates `args.command` in-place via the zx library:
+Mutates `args.command` in-place via Node's cross-platform `execFile` API:
 
 ```typescript
-const result = await $`rtk rewrite ${command}`.quiet().nothrow()
-const rewritten = String(result.stdout).trim()
+function runRtk(args: string[]): Promise<string> {
+  return new Promise((resolve) => {
+    execFile("rtk", args, { windowsHide: true }, (_error, stdout) => {
+      resolve(String(stdout ?? "").trim())
+    })
+  })
+}
+
+const rewritten = await runRtk(["rewrite", command])
 if (rewritten && rewritten !== command) {
   (args as Record<string, unknown>).command = rewritten
 }
