@@ -850,7 +850,13 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         // Apply minimal filtering: strip ANSI, remove hints, empty lines
         let filtered = filter_status_with_args(&result.stdout);
         let filtered = never_worse(&result.stdout, &filtered).to_string();
-        print!("{}", filtered);
+        // Preserve a trailing newline like native git --short/--porcelain so
+        // shell pipelines and `read` loops do not drop the last entry (#3303).
+        if filtered.is_empty() || filtered.ends_with('\n') {
+            print!("{}", filtered);
+        } else {
+            println!("{}", filtered);
+        }
 
         timer.track(
             &format!("git status {}", args.join(" ")),
