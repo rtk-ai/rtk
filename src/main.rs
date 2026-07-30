@@ -20,6 +20,7 @@ use cmds::php::{ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpunit_c
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
+use cmds::salesforce::sf_cmd;
 use cmds::scala::sbt_cmd;
 use cmds::system::{
     deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
@@ -195,6 +196,13 @@ enum Commands {
         /// AWS service subcommand (e.g., sts, s3, ec2, ecs, rds, cloudformation)
         subcommand: String,
         /// Additional arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Salesforce CLI with compact JSON output (deploy, retrieve, apex test)
+    Sf {
+        /// sf arguments (e.g., project deploy start --source-dir force-app)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1809,6 +1817,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Aws { subcommand, args } => aws_cmd::run(&subcommand, &args, cli.verbose)?,
 
+        Commands::Sf { args } => sf_cmd::run(&args, cli.verbose, cli.ultra_compact)?,
+
         Commands::Psql { args } => psql_cmd::run(&args, cli.verbose)?,
 
         Commands::Pnpm { filter, command } => {
@@ -2731,6 +2741,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Diff { .. }
             | Commands::Log { .. }
             | Commands::Dotnet { .. }
+            | Commands::Sf { .. }
             | Commands::Docker { .. }
             | Commands::Kubectl { .. }
             | Commands::Oc { .. }
@@ -3145,6 +3156,7 @@ mod tests {
             "gradlew",
             "mvn",
             "sbt",
+            "sf",
             "php",
             "phpunit",
             "phpstan",
