@@ -814,11 +814,17 @@ fn filter_status_with_args(output: &str) -> String {
         result.push(line.to_string());
     }
 
-    if result.is_empty() {
+    let mut filtered = if result.is_empty() {
         "ok".to_string()
     } else {
         result.join("\n")
+    };
+
+    if output.ends_with('\n') {
+        filtered.push('\n');
     }
+
+    filtered
 }
 
 fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
@@ -2184,6 +2190,13 @@ mod tests {
         let cmd = build_status_command(&args, &[]);
         let cmd_args: Vec<_> = cmd.get_args().collect();
         assert_eq!(cmd_args, vec!["status", "--porcelain", "-uno"]);
+    }
+
+    #[test]
+    fn test_filter_status_with_args_preserves_trailing_newline() {
+        let output = "?? src/new.rs\n";
+
+        assert_eq!(filter_status_with_args(output), output);
     }
 
     #[test]
