@@ -687,11 +687,14 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^dotnet\s+build\b",
+        // Match the subcommands `rtk dotnet` actually filters (build/test/restore/format).
+        // Previously only `dotnet build` rewrote, so discover listed `dotnet test` as unhandled (#3300).
+        pattern: r"^dotnet\s+(build|test|restore|format)\b",
         rtk_cmd: "rtk dotnet",
         rewrite_prefixes: &["dotnet"],
         category: "Build",
         savings_pct: 70.0,
+        subcmd_savings: &[("test", 80.0), ("build", 70.0), ("restore", 65.0), ("format", 70.0)],
         ..RtkRule::DEFAULT
     },
     RtkRule {

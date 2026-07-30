@@ -113,6 +113,22 @@ test_rewrite "cargo test" \
   "cargo test" \
   "rtk cargo test"
 
+test_rewrite "dotnet build" \
+  "dotnet build" \
+  "rtk dotnet build"
+
+test_rewrite "dotnet test" \
+  "dotnet test" \
+  "rtk dotnet test"
+
+test_rewrite "dotnet restore" \
+  "dotnet restore" \
+  "rtk dotnet restore"
+
+test_rewrite "dotnet format" \
+  "dotnet format" \
+  "rtk dotnet format"
+
 test_rewrite "npx prisma migrate" \
   "npx prisma migrate" \
   "rtk prisma migrate"
