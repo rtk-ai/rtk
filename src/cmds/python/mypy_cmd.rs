@@ -1,7 +1,7 @@
 //! Filters mypy type-checking output, grouping errors by file.
 
 use crate::core::runner;
-use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
+use crate::core::utils::{resolved_command, strip_ansi, tool_exists};
 use anyhow::Result;
 use regex::Regex;
 use std::collections::HashMap;
@@ -46,44 +46,63 @@ const MYPY_CLEAN: &str = "mypy: No issues found";
 struct MypyError {
     file: String,
     line: usize,
+    column: Option<usize>,
+    severity: String,
     code: String,
     message: String,
-    context_lines: Vec<String>,
+    context_lines: Vec<MypyNote>,
+}
+
+struct MypyNote {
+    line: usize,
+    column: Option<usize>,
+    code: String,
+    message: String,
 }
 
 pub fn filter_mypy_output(output: &str) -> String {
     // file.py:12: error: Message [error-code]
     // file.py:12:5: error: Message [error-code]
     static MYPY_DIAG: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^(.+?):(\d+)(?::\d+)?: (error|warning|note): (.+?)(?:\s+\[(.+)\])?$").unwrap()
+        Regex::new(
+            r"^(.+?):(\d+)(?::(\d+))?: (error|warning|note): (.+?)(?:\s+\[(.+)\])?$",
+        )
+        .unwrap()
     });
 
     let lines: Vec<&str> = output.lines().collect();
     let mut errors: Vec<MypyError> = Vec::new();
     let mut fileless_lines: Vec<String> = Vec::new();
+    let mut native_summary: Option<String> = None;
     let mut i = 0;
 
     while i < lines.len() {
         let line = lines[i];
 
-        // Skip mypy's own summary line
         if line.starts_with("Found ") && line.contains(" error") {
+            native_summary = Some(format!("mypy: {}", line.trim_start_matches("Found ")));
             i += 1;
             continue;
         }
-        // Skip "Success: no issues found"
         if line.starts_with("Success:") {
+            let detail = line.trim_start_matches("Success:").trim_start();
+            let detail = detail
+                .strip_prefix("no issues found")
+                .map(|rest| format!("No issues found{}", rest))
+                .unwrap_or_else(|| detail.to_string());
+            native_summary = Some(format!("mypy: {}", detail));
             i += 1;
             continue;
         }
 
         if let Some(caps) = MYPY_DIAG.captures(line) {
-            let severity = &caps[3];
+            let severity = &caps[4];
             let file = caps[1].to_string();
             let line_num: usize = caps[2].parse().unwrap_or(0);
-            let message = caps[4].to_string();
+            let column = caps.get(3).and_then(|m| m.as_str().parse().ok());
+            let message = caps[5].to_string();
             let code = caps
-                .get(5)
+                .get(6)
                 .map(|m| m.as_str().to_string())
                 .unwrap_or_default();
 
@@ -91,7 +110,12 @@ pub fn filter_mypy_output(output: &str) -> String {
                 // Attach note to preceding error if same file and line
                 if let Some(last) = errors.last_mut() {
                     if last.file == file {
-                        last.context_lines.push(message);
+                        last.context_lines.push(MypyNote {
+                            line: line_num,
+                            column,
+                            code,
+                            message,
+                        });
                         i += 1;
                         continue;
                     }
@@ -105,6 +129,8 @@ pub fn filter_mypy_output(output: &str) -> String {
             let mut err = MypyError {
                 file,
                 line: line_num,
+                column,
+                severity: severity.to_string(),
                 code,
                 message,
                 context_lines: Vec::new(),
@@ -114,9 +140,16 @@ pub fn filter_mypy_output(output: &str) -> String {
             i += 1;
             while i < lines.len() {
                 if let Some(next_caps) = MYPY_DIAG.captures(lines[i]) {
-                    if &next_caps[3] == "note" && next_caps[1] == err.file {
-                        let note_msg = next_caps[4].to_string();
-                        err.context_lines.push(note_msg);
+                    if &next_caps[4] == "note" && next_caps[1] == err.file {
+                        err.context_lines.push(MypyNote {
+                            line: next_caps[2].parse().unwrap_or(0),
+                            column: next_caps.get(3).and_then(|m| m.as_str().parse().ok()),
+                            code: next_caps
+                                .get(6)
+                                .map(|m| m.as_str().to_string())
+                                .unwrap_or_default(),
+                            message: next_caps[5].to_string(),
+                        });
                         i += 1;
                         continue;
                     }
@@ -125,8 +158,12 @@ pub fn filter_mypy_output(output: &str) -> String {
             }
 
             errors.push(err);
-        } else if line.contains("error:") && !line.trim().is_empty() {
-            // File-less error (config errors, import errors)
+        } else if ["error:", "warning:", "note:"]
+            .iter()
+            .any(|marker| line.contains(marker))
+            && !line.trim().is_empty()
+        {
+            // File-less diagnostic (config errors, import errors, global warnings)
             fileless_lines.push(line.to_string());
             i += 1;
         } else {
@@ -136,10 +173,7 @@ pub fn filter_mypy_output(output: &str) -> String {
 
     // No errors at all
     if errors.is_empty() && fileless_lines.is_empty() {
-        if output.contains("Success: no issues found") || output.contains("no issues found") {
-            return MYPY_CLEAN.to_string();
-        }
-        return MYPY_CLEAN.to_string();
+        return native_summary.unwrap_or_else(|| MYPY_CLEAN.to_string());
     }
 
     // Group by file
@@ -167,16 +201,36 @@ pub fn filter_mypy_output(output: &str) -> String {
         result.push('\n');
     }
 
+    if errors.is_empty() {
+        if let Some(summary) = native_summary {
+            result.push_str(&summary);
+        }
+        return result.trim().to_string();
+    }
+
     if !errors.is_empty() {
-        result.push_str(&format!(
-            "mypy: {} errors in {} files\n",
-            errors.len(),
-            by_file.len()
-        ));
+        let summary = native_summary.unwrap_or_else(|| {
+            let error_count = errors.iter().filter(|d| d.severity == "error").count();
+            let warning_count = errors.iter().filter(|d| d.severity == "warning").count();
+            match (error_count, warning_count) {
+                (errors, 0) => format!("mypy: {} errors in {} files", errors, by_file.len()),
+                (0, warnings) => {
+                    format!("mypy: {} warnings in {} files", warnings, by_file.len())
+                }
+                (errors, warnings) => format!(
+                    "mypy: {} errors, {} warnings in {} files",
+                    errors,
+                    warnings,
+                    by_file.len()
+                ),
+            }
+        });
+        result.push_str(&summary);
+        result.push('\n');
 
         // Top error codes summary (only when 2+ distinct codes)
         let mut code_counts: Vec<_> = by_code.iter().collect();
-        code_counts.sort_by(|a, b| b.1.cmp(a.1));
+        code_counts.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
 
         if code_counts.len() > 1 {
             let codes_str: Vec<String> = code_counts
@@ -189,28 +243,52 @@ pub fn filter_mypy_output(output: &str) -> String {
 
         // Files sorted by error count (most errors first)
         let mut files_sorted: Vec<_> = by_file.iter().collect();
-        files_sorted.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
+        files_sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(b.0)));
 
         for (file, file_errors) in &files_sorted {
-            result.push_str(&format!("{} ({} errors)\n", file, file_errors.len()));
+            let error_count = file_errors
+                .iter()
+                .filter(|d| d.severity == "error")
+                .count();
+            let warning_count = file_errors
+                .iter()
+                .filter(|d| d.severity == "warning")
+                .count();
+            let counts = match (error_count, warning_count) {
+                (errors, 0) => format!("{} errors", errors),
+                (0, warnings) => format!("{} warnings", warnings),
+                (errors, warnings) => format!("{} errors, {} warnings", errors, warnings),
+            };
+            result.push_str(&format!("{} ({})\n", file, counts));
 
             for err in *file_errors {
-                if err.code.is_empty() {
-                    result.push_str(&format!(
-                        "  L{}: {}\n",
-                        err.line,
-                        truncate(&err.message, 120)
-                    ));
+                let location = err
+                    .column
+                    .map(|column| format!("L{}:C{}", err.line, column))
+                    .unwrap_or_else(|| format!("L{}", err.line));
+                let code = if err.code.is_empty() {
+                    String::new()
                 } else {
-                    result.push_str(&format!(
-                        "  L{}: [{}] {}\n",
-                        err.line,
-                        err.code,
-                        truncate(&err.message, 120)
-                    ));
-                }
+                    format!(" [{}]", err.code)
+                };
+                result.push_str(&format!(
+                    "  {}: {}{} {}\n",
+                    location, err.severity, code, err.message
+                ));
                 for ctx in &err.context_lines {
-                    result.push_str(&format!("    {}\n", truncate(ctx, 120)));
+                    let location = ctx
+                        .column
+                        .map(|column| format!("L{}:C{}", ctx.line, column))
+                        .unwrap_or_else(|| format!("L{}", ctx.line));
+                    let code = if ctx.code.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{}]", ctx.code)
+                    };
+                    result.push_str(&format!(
+                        "    {}: note{} {}\n",
+                        location, code, ctx.message
+                    ));
                 }
             }
             result.push('\n');
@@ -236,6 +314,7 @@ Found 5 errors in 2 files (checked 10 source files)
 ";
         let result = filter_mypy_output(output);
         assert!(result.contains("mypy: 5 errors in 2 files"));
+        assert!(result.contains("checked 10 source files"));
         // user.py has 3 errors, auth.py has 2 -- user.py should come first
         let user_pos = result.find("user.py").unwrap();
         let auth_pos = result.find("auth.py").unwrap();
@@ -253,9 +332,28 @@ Found 5 errors in 2 files (checked 10 source files)
 src/api.py:10:5: error: Incompatible return value type  [return-value]
 ";
         let result = filter_mypy_output(output);
-        assert!(result.contains("L10:"));
+        assert!(result.contains("L10:C5: error"));
         assert!(result.contains("[return-value]"));
         assert!(result.contains("Incompatible return value type"));
+    }
+
+    #[test]
+    fn test_filter_mypy_preserves_diagnostic_severity_location_code_and_message() {
+        let long_message = format!("Unexpected value {}", "detail ".repeat(30));
+        let output = format!(
+            "src/api.py:10:5: warning: Deprecated call  [deprecated]\n\
+             src/api.py:11:7: error: {long_message} [assignment]\n\
+             src/api.py:11:7: note: Expected type \"int\"  [note-code]\n\
+             Found 1 error in 1 file (checked 27 source files)\n"
+        );
+
+        let result = filter_mypy_output(&output);
+
+        assert!(result.contains("L10:C5: warning [deprecated] Deprecated call"));
+        assert!(result.contains("L11:C7: error [assignment]"));
+        assert!(result.contains("L11:C7: note [note-code] Expected type \"int\""));
+        assert!(result.contains(long_message.trim()));
+        assert!(result.contains("checked 27 source files"));
     }
 
     #[test]
@@ -273,6 +371,21 @@ Found 5 errors in 3 files
         assert!(result.contains("return-value (3x)"));
         assert!(result.contains("name-defined (1x)"));
         assert!(result.contains("arg-type (1x)"));
+    }
+
+    #[test]
+    fn test_filter_mypy_equal_counts_have_stable_order() {
+        let output = "\
+zeta.py:1: error: Error one  [return-value]
+zeta.py:2: error: Error two  [assignment]
+alpha.py:1: error: Error three  [return-value]
+alpha.py:2: error: Error four  [assignment]
+Found 4 errors in 2 files
+";
+        let result = filter_mypy_output(output);
+
+        assert!(result.contains("Top codes: assignment (2x), return-value (2x)"));
+        assert!(result.find("alpha.py (2 errors)") < result.find("zeta.py (2 errors)"));
     }
 
     #[test]
@@ -326,12 +439,14 @@ src/app.py:20: error: Missing return statement  [return]
     fn test_filter_mypy_fileless_errors() {
         let output = "\
 mypy: error: No module named 'nonexistent'
+mypy: warning: Global configuration is deprecated
 src/api.py:10: error: Name \"foo\" is not defined  [name-defined]
 Found 1 error in 1 file
 ";
         let result = filter_mypy_output(output);
         // File-less error should appear verbatim before grouped output
         assert!(result.contains("mypy: error: No module named 'nonexistent'"));
+        assert!(result.contains("mypy: warning: Global configuration is deprecated"));
         assert!(result.contains("api.py (1 error"));
         let fileless_pos = result.find("No module named").unwrap();
         let grouped_pos = result.find("api.py").unwrap();
@@ -345,7 +460,7 @@ Found 1 error in 1 file
     fn test_filter_mypy_no_errors() {
         let output = "Success: no issues found in 5 source files\n";
         let result = filter_mypy_output(output);
-        assert_eq!(result, "mypy: No issues found");
+        assert_eq!(result, "mypy: No issues found in 5 source files");
     }
 
     #[test]
