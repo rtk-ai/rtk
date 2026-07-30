@@ -34,13 +34,31 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
 
 /// Renders the condensed file comparison and returns it with the
 /// diff-convention exit code (0 = identical, 1 = differences found).
+///
+/// **Raw truth:** only claim `[ok] Files are identical` when the full file
+/// bytes match. Never emit a success verdict for differing content (#3267).
 fn render_file_diff(file1: &Path, file2: &Path, content1: &str, content2: &str) -> (String, i32) {
+    // Byte equality is the only honest "identical" — line splitters drop trailing
+    // empty lines and can hide CRLF/LF-only differences.
+    if content1 == content2 {
+        return ("[ok] Files are identical\n".to_string(), 0);
+    }
+
     let lines1: Vec<&str> = content1.lines().collect();
     let lines2: Vec<&str> = content2.lines().collect();
     let diff = compute_diff(&lines1, &lines2);
 
     if diff.changes.is_empty() {
-        return ("[ok] Files are identical\n".to_string(), 0);
+        // Bytes differ but line-align saw nothing (whitespace/encoding edge).
+        // Still exit 1 — never lie with "[ok] Files are identical".
+        return (
+            format!(
+                "{} → {}\n   files differ (content bytes differ; no line-aligned hunk)\n",
+                file1.display(),
+                file2.display()
+            ),
+            1,
+        );
     }
 
     let mut rtk = String::new();
@@ -53,8 +71,17 @@ fn render_file_diff(file1: &Path, file2: &Path, content1: &str, content2: &str) 
     (rtk, 1)
 }
 
-/// Run diff from stdin (piped command output)
-pub fn run_stdin(_verbose: u8) -> Result<()> {
+/// True when unified-diff text contains real add/remove lines (not +++ / --- headers).
+fn unified_diff_has_changes(input: &str) -> bool {
+    input.lines().any(|line| {
+        (line.starts_with('+') && !line.starts_with("+++"))
+            || (line.starts_with('-') && !line.starts_with("---"))
+    })
+}
+
+/// Run diff from stdin (piped unified-diff output).
+/// Returns POSIX-ish exit: 0 no changes, 1 differences present.
+pub fn run_stdin(_verbose: u8) -> Result<i32> {
     use std::io::{self, Read};
     let timer = tracking::TimedExecution::start();
 
@@ -64,11 +91,22 @@ pub fn run_stdin(_verbose: u8) -> Result<()> {
     // Parse unified diff format
     let condensed = condense_unified_diff(&input);
     let shown = never_worse(&input, &condensed);
-    println!("{}", shown);
+    print!("{}", shown);
+    if !shown.is_empty() && !shown.ends_with('\n') {
+        println!();
+    }
+
+    // Raw truth: exit must reflect whether the streamed diff has changes.
+    // Previously always returned success (exit 0), masking failed `diff | rtk diff` chains (#3267).
+    let exit_code = if unified_diff_has_changes(&input) {
+        1
+    } else {
+        0
+    };
 
     timer.track("diff (stdin)", "rtk diff (stdin)", &input, shown);
 
-    Ok(())
+    Ok(exit_code)
 }
 
 #[derive(Debug)]
@@ -358,6 +396,29 @@ mod tests {
         );
         assert!(out.contains("[ok] Files are identical"));
         assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn test_render_never_claims_identical_when_bytes_differ() {
+        // Trailing newline-only difference: .lines() may align but bytes differ.
+        let (out, code) = render_file_diff(
+            Path::new("n1"),
+            Path::new("n2"),
+            "a\n",
+            "a\n\n",
+        );
+        assert!(
+            !out.contains("identical"),
+            "must not claim identical when bytes differ:\n{out}"
+        );
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn test_unified_diff_has_changes_truth() {
+        assert!(!unified_diff_has_changes(""));
+        assert!(!unified_diff_has_changes("--- a\n+++ b\n"));
+        assert!(unified_diff_has_changes("--- a\n+++ b\n@@ -1 +1 @@\n-a\n+b\n"));
     }
 
     #[test]
