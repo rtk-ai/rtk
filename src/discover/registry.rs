@@ -1877,6 +1877,17 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_dotnet_supported_subcommands() {
+        for subcommand in ["build", "test", "restore", "format"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("dotnet {subcommand}"), &[]),
+                Some(format!("rtk dotnet {subcommand}")),
+                "dotnet {subcommand} should use the dotnet filter"
+            );
+        }
+    }
+
+    #[test]
     fn test_rewrite_playwright() {
         let commands = vec![
             "npm exec playwright",
