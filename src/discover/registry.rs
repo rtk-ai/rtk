@@ -557,6 +557,31 @@ fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> {
 /// built-in [`ROUTABLE_WRAPPER_PREFIXES`] and [`SHELL_KEYWORD_PREFIXES`] are
 /// always applied in addition to user-configured prefixes.
 ///
+/// Whether the hook rewrite path would rewrite this command (#3292).
+///
+/// Discover must use this (not bare [`classify_command`]) so reports match the
+/// PreToolUse engine: flag/heredoc/JSON guards suppress rewrite, while TOML-only
+/// tools (e.g. `jq`) still count as handled.
+///
+/// Path-qualified binaries (`.venv/bin/ruff`, `/usr/bin/grep`) retry after
+/// basename normalization so #1699 blast radius still shows as missed savings.
+pub fn would_rewrite_command(cmd: &str) -> bool {
+    if rewrite_command(cmd, &[], &[]).is_some() {
+        return true;
+    }
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let stripped = ENV_PREFIX.replace(trimmed, "");
+    let cmd_clean = stripped.trim();
+    let normalized = strip_absolute_path(cmd_clean);
+    if normalized != cmd_clean && rewrite_command(&normalized, &[], &[]).is_some() {
+        return true;
+    }
+    false
+}
+
 /// Matching is strict: a configured prefix `"foo bar"` matches a command that
 /// starts with `"foo bar "` (or strictly equals `"foo bar"`), not anything
 /// else. Matching is literal, not pattern-based: configure the exact concrete
@@ -1157,6 +1182,28 @@ mod tests {
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
+    }
+
+    #[test]
+    fn test_would_rewrite_matches_hook_for_discover_3292() {
+        // Defect A: classified support but rewrite refuses (flag / JSON guards).
+        assert!(
+            !would_rewrite_command("head -c 100 f.txt"),
+            "head -c must not count as missed savings"
+        );
+        assert!(
+            !would_rewrite_command("gh pr view 1 --json title"),
+            "gh --json must not count as missed savings"
+        );
+        // Still rewritable normals remain true.
+        assert!(would_rewrite_command("git status"));
+        // Defect B: TOML-only tools rewrite but classify as unsupported.
+        if crate::core::toml_filter::command_matches_filter("jq -r '.x' file.json") {
+            assert!(
+                would_rewrite_command("jq -r '.x' file.json"),
+                "jq filter rewrite must count as handled"
+            );
+        }
     }
 
     fn analyze_test_pipeline(cmd: &str) -> PipelineAnalysis {
