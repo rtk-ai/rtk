@@ -830,7 +830,7 @@ const ROUTABLE_WRAPPER_PREFIXES: &[&str] = &["uv run"];
 
 /// Shell keywords that wrap a command without changing which one runs. They are
 /// not spawnable, so they must never fall through: `rtk exec foo` cannot run.
-const SHELL_KEYWORD_PREFIXES: &[&str] = &["noglob", "command", "builtin", "exec", "nocorrect"];
+const SHELL_KEYWORD_PREFIXES: &[&str] = &["noglob", "builtin", "exec", "nocorrect"];
 
 /// Every built-in transparent wrapper, paired with whether it may fall through.
 /// Derived from the two lists above so they cannot drift apart.
@@ -975,6 +975,12 @@ fn rewrite_segment_inner(
             depth + 1,
         )?;
         return Some(format!("{}{}", env_prefix, rewritten));
+    }
+
+    // The POSIX `command` builtin explicitly bypasses shell functions and aliases.
+    // Rewriting its operand would invert that escape-hatch behavior.
+    if strip_word_prefix(trimmed, "command").is_some() {
+        return None;
     }
 
     for (prefix, routable) in builtin_transparent_prefixes() {
@@ -1601,6 +1607,27 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("git log -10", &[]),
             Some("rtk git log -10".into())
+        );
+    }
+
+    #[test]
+    fn test_command_builtin_bypasses_rewrite() {
+        assert_eq!(
+            rewrite_command_no_prefixes("command grep -rn X src", &[]),
+            None
+        );
+        assert_eq!(rewrite_command_no_prefixes("command git status", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("command find . -print0 | xargs -0 tool", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_command_builtin_only_bypasses_its_compound_segment() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status && command grep X file", &[]),
+            Some("rtk git status && command grep X file".into())
         );
     }
 
@@ -4395,11 +4422,8 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_prefix_command() {
-        assert_eq!(
-            rewrite_command_no_prefixes("command git status", &[]),
-            Some("command rtk git status".into())
-        );
+    fn test_shell_command_builtin_bypasses_rewrite() {
+        assert_eq!(rewrite_command_no_prefixes("command git status", &[]), None);
     }
 
     #[test]
@@ -4680,11 +4704,15 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_pipeline_final_normalizes_prefixes() {
+    fn test_rewrite_pipeline_final_respects_command_bypass() {
         assert_eq!(
             rewrite_command_no_prefixes("cargo test | FOO=1 command grep FAILED", &[]),
-            Some("cargo test | FOO=1 command rtk grep FAILED".into())
+            None
         );
+    }
+
+    #[test]
+    fn test_rewrite_pipeline_final_normalizes_configured_prefixes() {
         assert_eq!(
             super::rewrite_command(
                 "cargo test | docker exec tools grep FAILED",
