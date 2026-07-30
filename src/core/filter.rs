@@ -353,6 +353,35 @@ fn is_assignment(trimmed: &str) -> bool {
     false
 }
 
+/// The triple-quote delimiter a line leaves open, if any. The two quote kinds
+/// are tracked separately: a `'''` inside a `"""` block is text, not a close.
+fn unterminated_triple_quote(line: &str) -> Option<&'static str> {
+    let bytes = line.as_bytes();
+    let mut open: Option<&'static str> = None;
+    let mut i = 0;
+
+    while i + 3 <= bytes.len() {
+        let delim = match &bytes[i..i + 3] {
+            b"\"\"\"" => Some("\"\"\""),
+            b"'''" => Some("'''"),
+            _ => None,
+        };
+
+        match (open, delim) {
+            (Some(current), Some(found)) if current == found => {
+                open = None;
+                i += 3;
+            }
+            (None, Some(found)) => {
+                open = Some(found);
+                i += 3;
+            }
+            _ => i += 1,
+        }
+    }
+    open
+}
+
 /// Skeletonizes an indentation-scoped language: keeps imports, `class`/`def`
 /// signatures, decorators and every module- or class-level binding, and elides
 /// only the statements nested inside a function body.
@@ -365,7 +394,9 @@ fn filter_indentation_based(minimal: &str, lang: &Language) -> String {
     let mut def_indent: Option<usize> = None;
     let mut body_elided = false;
     let mut open_brackets = 0i32;
-    let mut in_docstring = false;
+    // Delimiter of the multi-line string being consumed, and whether its
+    // contents belong to a line we kept.
+    let mut open_string: Option<(&'static str, bool)> = None;
 
     for line in minimal.lines() {
         let trimmed = line.trim();
@@ -373,62 +404,62 @@ fn filter_indentation_based(minimal: &str, lang: &Language) -> String {
             continue;
         }
 
-        // A kept statement that left brackets open continues here; dropping the
-        // remainder would emit syntactically invalid output.
+        // Inside a multi-line string every line is opaque text. Examining it as
+        // code would let a docstring sentence be mistaken for a declaration.
+        if let Some((delim, keep_contents)) = open_string {
+            if keep_contents {
+                result.push_str(line);
+                result.push('\n');
+            }
+            if line.contains(delim) {
+                open_string = None;
+            }
+            continue;
+        }
+
+        let keep;
+
         if open_brackets > 0 {
+            // A kept statement left brackets open; dropping the remainder would
+            // emit syntactically invalid output.
+            keep = true;
+            open_brackets += bracket_delta(trimmed);
+        } else {
+            let indent = line.len() - line.trim_start().len();
+
+            if let Some(body_indent) = def_indent {
+                if indent > body_indent {
+                    if !body_elided {
+                        result.push_str(&elision_marker(lang, body_indent + 4));
+                        body_elided = true;
+                    }
+                    open_string = unterminated_triple_quote(line).map(|d| (d, false));
+                    continue;
+                }
+                def_indent = None;
+            }
+
+            let is_def = PY_DEF.is_match(trimmed);
+            keep = is_def
+                || IMPORT_PATTERN.is_match(trimmed)
+                || PY_CLASS.is_match(trimmed)
+                || trimmed.starts_with('@')
+                || is_assignment(trimmed);
+
+            if keep {
+                open_brackets = bracket_delta(trimmed).max(0);
+                if is_def {
+                    def_indent = Some(indent);
+                    body_elided = false;
+                }
+            }
+        }
+
+        if keep {
             result.push_str(line);
             result.push('\n');
-            open_brackets += bracket_delta(trimmed);
-            continue;
         }
-
-        // Docstrings survive MinimalFilter, but aggressive output is a skeleton.
-        if in_docstring {
-            if trimmed.contains("\"\"\"") || trimmed.contains("'''") {
-                in_docstring = false;
-            }
-            continue;
-        }
-        if trimmed.starts_with("\"\"\"") || trimmed.starts_with("'''") {
-            let quote = &trimmed[..3];
-            if !trimmed[3..].contains(quote) {
-                in_docstring = true;
-            }
-            continue;
-        }
-
-        let indent = line.len() - line.trim_start().len();
-
-        if let Some(body_indent) = def_indent {
-            if indent > body_indent {
-                if !body_elided {
-                    result.push_str(&elision_marker(lang, body_indent + 4));
-                    body_elided = true;
-                }
-                continue;
-            }
-            def_indent = None;
-        }
-
-        let is_def = PY_DEF.is_match(trimmed);
-        let keep = is_def
-            || IMPORT_PATTERN.is_match(trimmed)
-            || PY_CLASS.is_match(trimmed)
-            || trimmed.starts_with('@')
-            || is_assignment(trimmed);
-
-        if !keep {
-            continue;
-        }
-
-        result.push_str(line);
-        result.push('\n');
-        open_brackets = bracket_delta(trimmed).max(0);
-
-        if is_def {
-            def_indent = Some(indent);
-            body_elided = false;
-        }
+        open_string = unterminated_triple_quote(line).map(|d| (d, keep));
     }
 
     result.trim().to_string()
@@ -878,6 +909,50 @@ class ReportBuilder:
         assert!(!is_assignment("check(threshold=3)"));
         assert!(!is_assignment("while count <= limit:"));
         assert!(!is_assignment(r#"raise ValueError("x = 1")"#));
+    }
+
+    #[test]
+    fn test_python_aggressive_docstring_does_not_swallow_following_code() {
+        // A ''' inside a """ block is text. Closing on either delimiter made the
+        // filter lose track and eat the class that followed.
+        let module = r#""""Module docstring.
+
+Example: value = compute('''x''')
+"""
+
+class Config:
+    name = "x"
+"#;
+        let result = AggressiveFilter.filter(module, &Language::Python);
+
+        assert!(
+            result.contains("class Config:"),
+            "class after docstring was swallowed:\n{}",
+            result
+        );
+        assert!(
+            result.contains(r#"name = "x""#),
+            "class body after docstring was swallowed:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("Example:"),
+            "docstring prose leaked into the skeleton:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_unterminated_triple_quote() {
+        assert_eq!(unterminated_triple_quote(r#"x = """"#), Some("\"\"\""));
+        assert_eq!(unterminated_triple_quote("x = '''"), Some("'''"));
+        assert_eq!(unterminated_triple_quote(r#"x = """one line""""#), None);
+        // The inner delimiter is text, so the outer string is still open.
+        assert_eq!(
+            unterminated_triple_quote(r#""""outer '''inner'''"#),
+            Some("\"\"\"")
+        );
+        assert_eq!(unterminated_triple_quote("plain = 1"), None);
     }
 
     #[test]
