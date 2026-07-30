@@ -417,6 +417,7 @@ enum Commands {
     },
 
     /// Show token savings summary and history
+    #[command(visible_alias = "stats")]
     Gain {
         /// Filter statistics to current project (current working directory) // added
         #[arg(short, long)]
@@ -3066,6 +3067,19 @@ mod tests {
             match cli.command {
                 Commands::Gain { failures, .. } => assert!(failures),
                 _ => panic!("Expected Gain command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_stats_alias_routes_to_gain() {
+        // #3263: `rtk stats` must not fall through to spawning a PATH binary named `stats`.
+        let result = Cli::try_parse_from(["rtk", "stats", "--daily"]);
+        assert!(result.is_ok(), "stats alias should parse as gain");
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Gain { daily, .. } => assert!(daily),
+                _ => panic!("Expected Gain via stats alias"),
             }
         }
     }
