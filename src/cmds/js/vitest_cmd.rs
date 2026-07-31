@@ -253,12 +253,24 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
     let rendered = render_test_output(&filtered, &combined, &tee_label, result.exit_code);
     let shown = crate::core::runner::emit_guarded(&rendered, None, &combined);
 
-    timer.track(
-        format!("{} run", framework).as_str(),
-        format!("rtk {} run", framework).as_str(),
-        &combined,
-        &shown,
-    );
+    let cmd_label = format!("{} run", framework);
+    if filtered.is_parse_failure {
+        // Genuine Tier-3 parse failure — not token savings — record it as
+        // such instead of feeding it into the savings timer.
+        tracking::record_parse_failure_silent(
+            &cmd_label,
+            "All parsing tiers failed",
+            !shown.trim().is_empty(),
+        );
+        timer.track_passthrough(&cmd_label, &format!("rtk {} (passthrough)", cmd_label));
+    } else {
+        timer.track(
+            cmd_label.as_str(),
+            format!("rtk {} run", framework).as_str(),
+            &combined,
+            &shown,
+        );
+    }
 
     if !result.success() {
         return Ok(result.exit_code);
@@ -274,6 +286,7 @@ struct EffectiveVitestArgs {
 struct FormattedTestOutput {
     text: String,
     truncated: bool,
+    is_parse_failure: bool,
 }
 
 impl FormattedTestOutput {
@@ -281,6 +294,7 @@ impl FormattedTestOutput {
         Self {
             text,
             truncated: false,
+            is_parse_failure: false,
         }
     }
 
@@ -288,7 +302,16 @@ impl FormattedTestOutput {
         Self {
             text,
             truncated: true,
+            is_parse_failure: false,
         }
+    }
+
+    /// Marks this output as originating from a genuine Tier-3 parse failure
+    /// (all parsing tiers failed), as opposed to an explicit user-requested
+    /// passthrough (e.g. `--reporter=verbose`) which is not a failure.
+    fn parse_failure(mut self) -> Self {
+        self.is_parse_failure = true;
+        self
     }
 }
 
@@ -350,7 +373,10 @@ fn format_test_output(
         }
         ParseResult::Passthrough(_) => {
             emit_passthrough_warning(framework, "All parsing tiers failed");
-            format_passthrough_output(stdout)
+            // Build from the combined stdout+stderr, not stdout alone —
+            // otherwise a stderr-only failure (empty/near-empty stdout)
+            // produces no visible output at all.
+            format_passthrough_output(combined).parse_failure()
         }
     }
 }
@@ -602,5 +628,73 @@ Scope: all 6 workspace projects
         assert!(rendered.contains("[RTK:PASSTHROUGH] Output truncated"));
         assert!(rendered.contains("[full output: /tmp/vitest_run.log]"));
         assert!(!rendered.contains("wrong-path.log"));
+    }
+
+    // --- Tier 3 (Passthrough) content-loss + tracking regression tests ---
+
+    #[test]
+    fn test_genuine_parse_failure_with_stdout_marks_parse_failure_and_keeps_content() {
+        let stdout = "random output with no structure that fails all parse tiers";
+        let combined = stdout.to_string();
+
+        let filtered = format_test_output("vitest", stdout, &combined, false, 0);
+
+        assert!(filtered.is_parse_failure);
+        assert!(filtered.text.contains("random output with no structure"));
+    }
+
+    #[test]
+    fn test_genuine_parse_failure_empty_stdout_uses_combined_stderr() {
+        // Regression: previously format_passthrough_output(stdout) was called
+        // with an empty stdout, producing empty/near-empty output even though
+        // stderr (part of `combined`) had real failure content.
+        let stdout = "";
+        let combined = "Error: could not resolve entry module 'src/index.ts'".to_string();
+
+        let filtered = format_test_output("vitest", stdout, &combined, false, 0);
+
+        assert!(filtered.is_parse_failure);
+        assert!(filtered
+            .text
+            .contains("Error: could not resolve entry module"));
+    }
+
+    #[test]
+    fn test_explicit_passthrough_requested_is_not_a_parse_failure() {
+        let output = " ✓ some.test.ts > case\n Tests  1 passed (1)\n";
+
+        let filtered = format_test_output("vitest", output, output, true, 0);
+
+        assert!(!filtered.is_parse_failure);
+        assert!(filtered.text.contains("Tests  1 passed"));
+    }
+
+    #[test]
+    fn test_full_json_parse_is_not_a_parse_failure() {
+        let json = r#"{
+            "numTotalTests": 1,
+            "numPassedTests": 1,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "testResults": [],
+            "startTime": 1000
+        }"#;
+
+        let filtered = format_test_output("vitest", json, json, false, 0);
+
+        assert!(!filtered.is_parse_failure);
+    }
+
+    #[test]
+    fn test_degraded_regex_fallback_is_not_a_parse_failure() {
+        let text = r#"
+ Test Files  1 passed (1)
+      Tests  5 passed (5)
+   Duration  10ms
+        "#;
+
+        let filtered = format_test_output("vitest", text, text, false, 0);
+
+        assert!(!filtered.is_parse_failure);
     }
 }
