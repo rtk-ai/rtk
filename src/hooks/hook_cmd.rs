@@ -35,6 +35,9 @@ enum HookFormat {
     /// Carries the full parsed `toolArgs` object so we can rewrite `command` while preserving
     /// host-supplied metadata (description, initial_wait, mode, …) the tool requires.
     CopilotCli { command: String, args: Value },
+    /// JetBrains Copilot IDE: only top-level deny decisions are honored, so
+    /// rewrites must be returned as deny-with-suggestion responses.
+    CopilotIde { command: String },
     /// Non-bash tool, already uses rtk, or unknown format — pass through silently.
     PassThrough,
 }
@@ -62,6 +65,7 @@ pub fn run_copilot() -> Result<()> {
     match detect_format(&v) {
         HookFormat::VsCode { command } => handle_vscode(&command),
         HookFormat::CopilotCli { command, args } => handle_copilot_cli(&command, &args),
+        HookFormat::CopilotIde { command } => handle_copilot_ide(&command),
         HookFormat::PassThrough => Ok(()),
     }
 }
@@ -83,9 +87,10 @@ fn detect_format(v: &Value) -> HookFormat {
         return HookFormat::PassThrough;
     }
 
-    // Copilot CLI: camelCase keys, toolArgs is a JSON-encoded string
+    // Copilot CLI: camelCase keys, toolArgs is a JSON-encoded string.
+    // The shell tool is "bash" on Unix and "powershell" on Windows.
     if let Some(tool_name) = v.get("toolName").and_then(|t| t.as_str()) {
-        if tool_name == "bash" {
+        if matches!(tool_name, "bash" | "powershell" | "run_in_terminal") {
             if let Some(tool_args_str) = v.get("toolArgs").and_then(|t| t.as_str()) {
                 if let Ok(tool_args) = serde_json::from_str::<Value>(tool_args_str) {
                     if let Some(cmd) = tool_args
@@ -93,9 +98,15 @@ fn detect_format(v: &Value) -> HookFormat {
                         .and_then(|c| c.as_str())
                         .filter(|c| !c.is_empty())
                     {
-                        return HookFormat::CopilotCli {
-                            command: cmd.to_string(),
-                            args: tool_args,
+                        return if tool_name == "run_in_terminal" {
+                            HookFormat::CopilotIde {
+                                command: cmd.to_string(),
+                            }
+                        } else {
+                            HookFormat::CopilotCli {
+                                command: cmd.to_string(),
+                                args: tool_args,
+                            }
                         };
                     }
                 }
@@ -127,7 +138,7 @@ fn get_rewritten(cmd: &str) -> Option<String> {
 
 enum HookDecision {
     AllowRewrite(String),
-    AskRewrite(String),
+    AskRewrite { rewritten: String, explicit: bool },
     Defer,
     Deny,
 }
@@ -141,7 +152,10 @@ fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
     }
     match get_rewritten(cmd) {
         Some(r) if verdict == PermissionVerdict::Allow => HookDecision::AllowRewrite(r),
-        Some(r) => HookDecision::AskRewrite(r),
+        Some(r) => HookDecision::AskRewrite {
+            rewritten: r,
+            explicit: verdict == PermissionVerdict::Ask,
+        },
         None => HookDecision::Defer,
     }
 }
@@ -158,7 +172,7 @@ fn handle_vscode(cmd: &str) -> Result<()> {
         }
         HookDecision::Defer => return Ok(()),
         HookDecision::AllowRewrite(r) => ("allow", r),
-        HookDecision::AskRewrite(r) => ("ask", r),
+        HookDecision::AskRewrite { rewritten: r, .. } => ("ask", r),
     };
 
     audit_log("rewrite", cmd, &rewritten);
@@ -182,6 +196,34 @@ fn handle_copilot_cli(cmd: &str, args: &Value) -> Result<()> {
     Ok(())
 }
 
+fn handle_copilot_ide(cmd: &str) -> Result<()> {
+    if let Some(response) =
+        copilot_ide_response_from_decision(decide_hook_action(cmd, permissions::Host::Claude), cmd)
+    {
+        let _ = writeln!(io::stdout(), "{response}");
+    }
+    Ok(())
+}
+
+fn copilot_ide_response_from_decision(decision: HookDecision, cmd: &str) -> Option<Value> {
+    let reason = match decision {
+        HookDecision::Defer => return None,
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            "Blocked by RTK permission rule".to_string()
+        }
+        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite { rewritten, .. } => {
+            audit_log("rewrite", cmd, &rewritten);
+            format!("RTK token optimization: re-run this command as `{rewritten}` instead.")
+        }
+    };
+
+    Some(json!({
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason,
+    }))
+}
+
 fn copilot_cli_response(cmd: &str, args: &Value) -> Option<Value> {
     copilot_cli_response_from_decision(
         args,
@@ -202,7 +244,13 @@ fn copilot_cli_response_from_decision(
         }
         HookDecision::Defer => return None,
         HookDecision::AllowRewrite(r) => (r, true),
-        HookDecision::AskRewrite(r) => (r, false),
+        HookDecision::AskRewrite {
+            rewritten: r,
+            explicit,
+        } => {
+            let is_simple = crate::discover::lexer::split_for_permissions(cmd).len() <= 1;
+            (r, !explicit && is_simple)
+        }
     };
 
     audit_log("rewrite", cmd, &rewritten);
@@ -258,7 +306,7 @@ pub fn run_gemini() -> Result<()> {
             audit_log("rewrite", cmd, rewritten);
             print_gemini("allow", Some(rewritten));
         }
-        HookDecision::AskRewrite(ref rewritten) => {
+        HookDecision::AskRewrite { ref rewritten, .. } => {
             audit_log("ask", cmd, rewritten);
             print_gemini("ask_user", Some(rewritten));
         }
@@ -363,7 +411,7 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
             }
         }
         HookDecision::AllowRewrite(r) => (r, true),
-        HookDecision::AskRewrite(r) => (r, false),
+        HookDecision::AskRewrite { rewritten: r, .. } => (r, false),
     };
 
     let updated_input = {
@@ -487,7 +535,7 @@ pub fn run_cursor() -> Result<()> {
             audit_log("rewrite", &cmd, &rewritten);
             cursor_allow(&rewritten)
         }
-        HookDecision::AskRewrite(rewritten) => {
+        HookDecision::AskRewrite { rewritten, .. } => {
             audit_log("ask", &cmd, &rewritten);
             cursor_ask(&rewritten)
         }
@@ -550,7 +598,7 @@ fn run_cursor_inner_with_rules(
     let verdict = permissions::check_command_with_rules(&cmd, deny_rules, ask_rules, allow_rules);
     match decide_from_verdict(&cmd, verdict) {
         HookDecision::AllowRewrite(rewritten) => cursor_allow(&rewritten),
-        HookDecision::AskRewrite(rewritten) => cursor_ask(&rewritten),
+        HookDecision::AskRewrite { rewritten, .. } => cursor_ask(&rewritten),
         _ => "{}".to_string(),
     }
 }
@@ -596,7 +644,7 @@ fn droid_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) ->
             return None;
         }
         HookDecision::Defer => return None,
-        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r) => r,
+        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite { rewritten: r, .. } => r,
     };
 
     audit_log("rewrite", cmd, &rewritten);
@@ -677,9 +725,19 @@ mod tests {
         })
     }
 
-    fn copilot_cli_input(cmd: &str) -> Value {
+    fn copilot_cli_input(tool: &str, cmd: &str) -> Value {
         let args = serde_json::to_string(&json!({ "command": cmd })).unwrap();
-        json!({ "toolName": "bash", "toolArgs": args })
+        json!({ "toolName": tool, "toolArgs": args })
+    }
+
+    fn copilot_ide_input(cmd: &str) -> Value {
+        let args = serde_json::to_string(&json!({
+            "command": cmd,
+            "explanation": "Run command",
+            "isBackground": false
+        }))
+        .unwrap();
+        json!({ "toolName": "run_in_terminal", "toolArgs": args })
     }
 
     #[test]
@@ -701,7 +759,24 @@ mod tests {
     #[test]
     fn test_detect_copilot_cli_bash() {
         assert!(matches!(
-            detect_format(&copilot_cli_input("git status")),
+            detect_format(&copilot_cli_input("bash", "git status")),
+            HookFormat::CopilotCli { .. }
+        ));
+    }
+
+    #[test]
+    fn test_detect_copilot_ide_run_in_terminal() {
+        assert!(matches!(
+            detect_format(&copilot_ide_input("git status")),
+            HookFormat::CopilotIde { .. }
+        ));
+    }
+
+    #[test]
+    fn test_detect_copilot_cli_powershell() {
+        // Copilot CLI names its shell tool "powershell" on Windows, not "bash".
+        assert!(matches!(
+            detect_format(&copilot_cli_input("powershell", "git status")),
             HookFormat::CopilotCli { .. }
         ));
     }
@@ -718,8 +793,11 @@ mod tests {
         // (confirmed for Cursor). run_copilot strips them before parsing;
         // verify both Copilot formats still parse after the same handling.
         for raw in [
-            format!("\u{feff}{}", copilot_cli_input("git status")),
-            format!("\u{feff}\u{feff}{}", copilot_cli_input("git status")),
+            format!("\u{feff}{}", copilot_cli_input("bash", "git status")),
+            format!(
+                "\u{feff}\u{feff}{}",
+                copilot_cli_input("bash", "git status")
+            ),
         ] {
             let cleaned = strip_leading_bom(&raw).trim();
             let v: Value = serde_json::from_str(cleaned).expect("BOM-stripped JSON must parse");
@@ -763,16 +841,37 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_cli_ask_rewrite_omits_permission_decision() {
+    fn test_copilot_cli_default_ask_rewrite_sets_permission_allow() {
         let r = copilot_cli_response_from_decision(
             &cli_args("cargo test"),
-            HookDecision::AskRewrite("rtk cargo test".into()),
+            HookDecision::AskRewrite {
+                rewritten: "rtk cargo test".into(),
+                explicit: false,
+            },
+            "cargo test",
+        )
+        .unwrap();
+        assert_eq!(
+            r["permissionDecision"], "allow",
+            "Default AskRewrite must set permissionDecision to allow — Copilot CLI 1.0.66+ prompts on every command without it"
+        );
+        assert_eq!(r["modifiedArgs"]["command"], "rtk cargo test");
+    }
+
+    #[test]
+    fn test_copilot_cli_explicit_ask_rewrite_omits_permission_decision() {
+        let r = copilot_cli_response_from_decision(
+            &cli_args("cargo test"),
+            HookDecision::AskRewrite {
+                rewritten: "rtk cargo test".into(),
+                explicit: true,
+            },
             "cargo test",
         )
         .unwrap();
         assert!(
             r.get("permissionDecision").is_none(),
-            "AskRewrite must NOT set permissionDecision — Copilot then runs its normal prompt flow on the rewritten command"
+            "Explicit AskRewrite must NOT auto-allow — user deliberately configured ask for this command"
         );
         assert_eq!(r["modifiedArgs"]["command"], "rtk cargo test");
     }
@@ -809,6 +908,57 @@ mod tests {
             "git status & rm -rf /tmp/x",
         )
         .is_none());
+    }
+
+    #[test]
+    fn test_copilot_ide_rewrite_returns_deny_with_suggestion() {
+        let response = copilot_ide_response_from_decision(
+            HookDecision::AskRewrite {
+                rewritten: "rtk git status".into(),
+                explicit: false,
+            },
+            "git status",
+        )
+        .unwrap();
+        assert_eq!(response["permissionDecision"], "deny");
+        assert!(response["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .contains("rtk git status"));
+        assert!(response.get("modifiedArgs").is_none());
+    }
+
+    #[test]
+    fn test_copilot_ide_allow_rewrite_returns_deny_with_suggestion() {
+        // The IDE host ignores modifiedArgs, so an Allow-with-rewrite decision
+        // must still surface as a deny-with-suggestion, exactly like AskRewrite.
+        let response = copilot_ide_response_from_decision(
+            HookDecision::AllowRewrite("rtk git status".into()),
+            "git status",
+        )
+        .unwrap();
+        assert_eq!(response["permissionDecision"], "deny");
+        assert!(response["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .contains("rtk git status"));
+        assert!(response.get("modifiedArgs").is_none());
+    }
+
+    #[test]
+    fn test_copilot_ide_permission_deny_is_enforced() {
+        let response =
+            copilot_ide_response_from_decision(HookDecision::Deny, "rm -rf /protected").unwrap();
+        assert_eq!(response["permissionDecision"], "deny");
+        assert_eq!(
+            response["permissionDecisionReason"],
+            "Blocked by RTK permission rule"
+        );
+    }
+
+    #[test]
+    fn test_copilot_ide_defer_is_silent() {
+        assert!(copilot_ide_response_from_decision(HookDecision::Defer, "htop").is_none());
     }
 
     #[test]
@@ -850,7 +1000,10 @@ mod tests {
         });
         let r = copilot_cli_response_from_decision(
             &args,
-            HookDecision::AskRewrite("rtk cargo install ripgrep".into()),
+            HookDecision::AskRewrite {
+                rewritten: "rtk cargo install ripgrep".into(),
+                explicit: false,
+            },
             "cargo install ripgrep",
         )
         .unwrap();
@@ -1115,6 +1268,17 @@ mod tests {
             .and_then(|c| c.as_str())
             .unwrap();
         assert_eq!(cmd, "rtk git add . && rtk cargo test");
+    }
+
+    #[test]
+    fn test_claude_pipeline_rewrites_only_safe_final_stage() {
+        let result = run_claude_inner(&claude_input("cargo test | grep FAILED")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "cargo test | rtk grep FAILED");
     }
 
     #[test]
@@ -1413,7 +1577,7 @@ mod tests {
     fn test_decide_ask_for_default_verdict() {
         assert!(matches!(
             decide_with_rules("git status", &[], &[], &[]),
-            HookDecision::AskRewrite(_)
+            HookDecision::AskRewrite { .. }
         ));
     }
 
@@ -1471,7 +1635,7 @@ mod tests {
                 r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string()
             }
             HookDecision::AllowRewrite(r) => gemini_json("allow", Some(&r)),
-            HookDecision::AskRewrite(r) => gemini_json("ask_user", Some(&r)),
+            HookDecision::AskRewrite { rewritten: r, .. } => gemini_json("ask_user", Some(&r)),
             HookDecision::Defer => gemini_json("ask_user", None),
         }
     }

@@ -23,10 +23,10 @@
 ///   7. max_lines            — absolute line cap
 ///   8. on_empty             — message if result is empty
 use super::constants::RTK_META_COMMANDS;
-use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::sync::LazyLock;
 
 // Built-in filters: concatenated from src/filters/*.toml by build.rs at compile time.
 const BUILTIN_TOML: &str = include_str!(concat!(env!("OUT_DIR"), "/builtin_filters.toml"));
@@ -395,9 +395,7 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
 // Singleton (lazy-loaded, one-time cost)
 // ---------------------------------------------------------------------------
 
-lazy_static! {
-    static ref REGISTRY: TomlFilterRegistry = TomlFilterRegistry::load();
-}
+static REGISTRY: LazyLock<TomlFilterRegistry> = LazyLock::new(TomlFilterRegistry::load);
 
 pub fn toml_disabled() -> bool {
     std::env::var("RTK_NO_TOML").ok().as_deref() == Some("1")
@@ -420,9 +418,7 @@ pub fn filter_parse_error(content: &str) -> Option<String> {
         .map(|e| e.to_string())
 }
 
-lazy_static! {
-    static ref MATCH_SET: RegexSet = build_match_set();
-}
+static MATCH_SET: LazyLock<RegexSet> = LazyLock::new(build_match_set);
 
 pub fn command_matches_filter(command: &str) -> bool {
     MATCH_SET.is_match(command)
@@ -810,7 +806,7 @@ mod tests {
     use super::*;
 
     // Helper: build a CompiledFilter from inline TOML for tests.
-    // Never touches the lazy_static registry.
+    // Never touches the lazy registry.
     fn make_filters(toml: &str) -> Vec<CompiledFilter> {
         TomlFilterRegistry::parse_and_compile(toml, "test").expect("test TOML should be valid")
     }

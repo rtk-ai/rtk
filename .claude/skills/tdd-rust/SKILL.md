@@ -110,12 +110,11 @@ Run: `cargo test` → should fail (function doesn't exist yet).
 // src/mycmd_cmd.rs
 
 use anyhow::{Context, Result};
-use lazy_static::lazy_static;
 use regex::Regex;
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref ERROR_RE: Regex = Regex::new(r"^error").unwrap();
-}
+static ERROR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^error").unwrap());
 
 pub fn filter_mycmd(input: &str) -> Result<String> {
     if input.is_empty() {
