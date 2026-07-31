@@ -12,6 +12,7 @@ else
 fi
 BENCH_DIR="$(pwd)/scripts/benchmark"
 RTK_ROOT="$(pwd)"
+CURL_JSON_FIXTURE="file://$RTK_ROOT/tests/fixtures/oc_pods.json"
 
 if [ -z "$CI" ]; then
   rm -rf "$BENCH_DIR"
@@ -346,7 +347,7 @@ bench "wc" "wc Cargo.toml src/main.rs" "$RTK wc Cargo.toml src/main.rs"
 # ===================
 section "curl"
 if command -v curl &> /dev/null; then
-  bench "curl json" "curl -s https://mockhttp.org/json/1" "$RTK curl https://mockhttp.org/json/1"
+  bench "curl json" "curl -s '$CURL_JSON_FIXTURE'" "$RTK curl '$CURL_JSON_FIXTURE'"
   bench "curl text" "curl -s https://mockhttp.org/robots.txt" "$RTK curl https://mockhttp.org/robots.txt"
 fi
 
