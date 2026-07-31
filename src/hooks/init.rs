@@ -3383,7 +3383,7 @@ fn pi_plugin_path(pi_dir: &Path) -> PathBuf {
 
 /// Return the Pi extension install path for the given scope.
 /// global=true  → `$PI_CODING_AGENT_DIR/extensions/rtk.ts`
-/// global=false → `./.pi/extensions/rtk.ts`
+/// global=false → `./.omp/extensions/rtk.ts`
 fn pi_plugin_path_for_scope(global: bool) -> Result<PathBuf> {
     if global {
         Ok(pi_plugin_path(&resolve_pi_dir()?))
@@ -3457,7 +3457,7 @@ fn uninstall_pi(global: bool, ctx: InitContext) -> Result<()> {
 /// Install the Pi extension (hook-only; no AGENTS.md injection).
 ///
 /// global=true  → `$PI_CODING_AGENT_DIR/extensions/rtk.ts`
-/// global=false → `.pi/extensions/rtk.ts`
+/// global=false → `.omp/extensions/rtk.ts`
 pub fn run_pi_mode(global: bool, ctx: InitContext) -> Result<()> {
     let InitContext {
         verbose: _,
@@ -7183,7 +7183,7 @@ mod tests {
 
         let plugin = tmp
             .path()
-            .join(".pi")
+            .join(".omp")
             .join(PI_EXTENSIONS_SUBDIR)
             .join(PI_PLUGIN_FILE);
         assert!(plugin.exists(), "local Pi extension must be created");
@@ -7256,7 +7256,7 @@ mod tests {
 
         let plugin = tmp
             .path()
-            .join(".pi")
+            .join(".omp")
             .join(PI_EXTENSIONS_SUBDIR)
             .join(PI_PLUGIN_FILE);
         assert!(!plugin.exists(), "local plugin must be removed");
@@ -7327,8 +7327,8 @@ mod tests {
         result.unwrap();
 
         assert!(
-            !tmp.path().join(".pi").join(PI_EXTENSIONS_SUBDIR).exists(),
-            "dry-run must not create .pi/extensions/"
+            !tmp.path().join(".omp").join(PI_EXTENSIONS_SUBDIR).exists(),
+            "dry-run must not create .omp/extensions/"
         );
     }
 
@@ -7373,7 +7373,7 @@ mod tests {
         run_pi_mode(false, InitContext::default()).unwrap();
         let plugin = tmp
             .path()
-            .join(".pi")
+            .join(".omp")
             .join(PI_EXTENSIONS_SUBDIR)
             .join(PI_PLUGIN_FILE);
         assert!(

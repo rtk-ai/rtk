@@ -109,7 +109,7 @@ rtk init --agent pi
 rtk init --agent pi --global
 ```
 
-Creates `.pi/extensions/rtk.ts` (local) or `~/.pi/agent/extensions/rtk.ts` (global). Pi auto-discovers extensions from both paths on startup.
+Creates `.omp/extensions/rtk.ts` (local) or `~/.omp/agent/extensions/rtk.ts` (global). OMP auto-discovers extensions from both paths on startup.
 
 Uninstall:
 

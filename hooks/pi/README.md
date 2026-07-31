@@ -19,18 +19,18 @@ with other Pi extensions.
 - Calls `rtk rewrite` via `pi.exec`; mutates `event.input.command` in-place if rewrite differs
 - All error paths return `undefined` (pass through); RTK never blocks execution
 - Version guard at load time: checks `rtk >= 0.23.0`; warns and registers no-op if too old or missing
-- Installed to `.pi/extensions/rtk.ts` by `rtk init --agent pi` (project-local) or `~/.pi/agent/extensions/rtk.ts` by `rtk init --agent pi --global`
+- Installed to `.omp/extensions/rtk.ts` by `rtk init --agent pi` (project-local) or `~/.omp/agent/extensions/rtk.ts` by `rtk init --agent pi --global`
 
 ## Uninstall
 
 ```bash
 # Remove project-local install (run from the project root)
 rtk init --uninstall --agent pi
-# → removes .pi/extensions/rtk.ts
+# → removes .omp/extensions/rtk.ts
 
 # Remove global install
 rtk init --uninstall --agent pi --global
-# → removes ~/.pi/agent/extensions/rtk.ts
+# → removes ~/.omp/agent/extensions/rtk.ts
 ```
 
 Uninstall is idempotent — re-running when nothing is installed is a no-op.
