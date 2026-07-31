@@ -1,5 +1,6 @@
 //! Inspects JSON structure without showing values, saving tokens on large payloads.
 
+use crate::core::guard::never_worse;
 use crate::core::tracking;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -52,12 +53,13 @@ pub fn run(file: &Path, max_depth: usize, schema_only: bool, verbose: u8) -> Res
     } else {
         filter_json_compact(&content, max_depth)?
     };
-    println!("{}", output);
+    let shown = never_worse(&content, &output);
+    println!("{}", shown);
     timer.track(
         &format!("cat {}", file.display()),
         "rtk json",
         &content,
-        &output,
+        shown,
     );
     Ok(())
 }
@@ -81,8 +83,9 @@ pub fn run_stdin(max_depth: usize, schema_only: bool, verbose: u8) -> Result<()>
     } else {
         filter_json_compact(&content, max_depth)?
     };
-    println!("{}", output);
-    timer.track("cat - (stdin)", "rtk json -", &content, &output);
+    let shown = never_worse(&content, &output);
+    println!("{}", shown);
+    timer.track("cat - (stdin)", "rtk json -", &content, shown);
     Ok(())
 }
 
@@ -106,7 +109,8 @@ fn compact_json(value: &Value, depth: usize, max_depth: usize) -> String {
         Value::Number(n) => format!("{}{}", indent, n),
         Value::String(s) => {
             if s.len() > 80 {
-                format!("{}\"{}...\"", indent, &s[..77])
+                let end = s.floor_char_boundary(77);
+                format!("{}\"{}...\"", indent, &s[..end])
             } else {
                 format!("{}\"{}\"", indent, s)
             }
@@ -327,5 +331,37 @@ mod tests {
         let schema = extract_schema(&json, 0, 5);
         assert!(schema.contains("items"));
         assert!(schema.contains("(3)"));
+    }
+
+    fn assert_value_truncated(payload: &str) {
+        let json = format!(r#"{{"key": "{}"}}"#, payload);
+        let output = filter_json_compact(&json, 5)
+            .expect("filter_json_compact must not error on valid JSON");
+
+        assert!(output.contains("key"));
+        assert!(
+            output.contains("..."),
+            "long string should be truncated, got: {output}"
+        );
+
+        let value = output
+            .split('"')
+            .nth(1)
+            .expect("output should contain a quoted string value");
+        assert!(
+            value.len() <= 80,
+            "truncated value is {} bytes: {value}",
+            value.len()
+        );
+    }
+
+    #[test]
+    fn test_compact_truncates_pure_multibyte_string() {
+        assert_value_truncated(&"日本語テスト".repeat(85));
+    }
+
+    #[test]
+    fn test_compact_truncates_mixed_ascii_multibyte_string() {
+        assert_value_truncated(&("a".repeat(76) + &"日本語".repeat(5)));
     }
 }

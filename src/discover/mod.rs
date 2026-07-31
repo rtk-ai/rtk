@@ -11,18 +11,25 @@ use std::collections::HashMap;
 
 use provider::{ClaudeProvider, SessionProvider};
 use registry::{
-    category_avg_tokens, classify_command, has_rtk_disabled_prefix, split_command_chain,
-    strip_disabled_prefix, Classification,
+    category_avg_tokens, classify_command, split_command_chain, strip_disabled_prefix,
+    Classification,
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
+
+use crate::discover::registry::prefix_contains_rtk_disabled;
 
 /// Aggregation bucket for supported commands.
 struct SupportedBucket {
     rtk_equivalent: &'static str,
     category: &'static str,
     count: usize,
+    /// Total estimated tokens *saved* (post-filter). Used for the "Est. Savings" column.
     total_output_tokens: usize,
-    savings_pct: f64,
+    /// Total estimated tokens *before* filtering (raw output). Accumulated alongside
+    /// `total_output_tokens` so the bucket's effective savings rate can be derived as
+    /// `total_output_tokens / total_raw_output_tokens` — a weighted average across
+    /// all sub-commands, regardless of which sub-command was seen first.
+    total_raw_output_tokens: usize,
     // For display: the most common raw command
     command_counts: HashMap<String, usize>,
 }
@@ -91,8 +98,8 @@ pub fn run(
                 total_commands += 1;
 
                 // Detect RTK_DISABLED= bypass before classification
-                if has_rtk_disabled_prefix(part) {
-                    let actual_cmd = strip_disabled_prefix(part);
+                let (env_prefix, actual_cmd) = strip_disabled_prefix(part);
+                if prefix_contains_rtk_disabled(env_prefix) {
                     // Only count if the underlying command is one RTK supports
                     match classify_command(actual_cmd) {
                         Classification::Supported { .. } => {
@@ -120,7 +127,7 @@ pub fn run(
                                 category,
                                 count: 0,
                                 total_output_tokens: 0,
-                                savings_pct: estimated_savings_pct,
+                                total_raw_output_tokens: 0,
                                 command_counts: HashMap::new(),
                             }
                         });
@@ -140,6 +147,9 @@ pub fn run(
                         let savings =
                             (output_tokens as f64 * estimated_savings_pct / 100.0) as usize;
                         bucket.total_output_tokens += savings;
+                        // Accumulate pre-savings tokens so we can compute a weighted effective
+                        // savings rate across all sub-commands in this bucket later.
+                        bucket.total_raw_output_tokens += output_tokens;
 
                         // Track the display name with status
                         let display_name = truncate_command(part);
@@ -196,20 +206,29 @@ pub fn run(
                 })
                 .unwrap_or_else(|| (String::new(), report::RtkStatus::Existing));
 
+            // Derive the effective savings rate from accumulated totals rather than
+            // using the first-seen sub-command's rate. This gives a weighted average
+            // across all sub-commands that fell in this bucket.
+            let effective_savings_pct = if bucket.total_raw_output_tokens > 0 {
+                bucket.total_output_tokens as f64 * 100.0 / bucket.total_raw_output_tokens as f64
+            } else {
+                0.0
+            };
+
             SupportedEntry {
                 command: command_with_status,
                 count: bucket.count,
                 rtk_equivalent: bucket.rtk_equivalent,
                 category: bucket.category,
                 estimated_savings_tokens: bucket.total_output_tokens,
-                estimated_savings_pct: bucket.savings_pct,
+                estimated_savings_pct: effective_savings_pct,
                 rtk_status: status,
             }
         })
         .collect();
 
     // Sort by estimated savings descending
-    supported.sort_by(|a, b| b.estimated_savings_tokens.cmp(&a.estimated_savings_tokens));
+    supported.sort_by_key(|b| std::cmp::Reverse(b.estimated_savings_tokens));
 
     let mut unsupported: Vec<UnsupportedEntry> = unsupported_map
         .into_iter()
@@ -221,7 +240,7 @@ pub fn run(
         .collect();
 
     // Sort by count descending
-    unsupported.sort_by(|a, b| b.count.cmp(&a.count));
+    unsupported.sort_by_key(|b| std::cmp::Reverse(b.count));
 
     // Build RTK_DISABLED examples sorted by frequency (top 5)
     let rtk_disabled_examples: Vec<String> = {
@@ -244,6 +263,7 @@ pub fn run(
         parse_errors,
         rtk_disabled_count,
         rtk_disabled_examples,
+        agent_status: report::AgentIntegrationStatus::detect(),
     };
 
     match format {

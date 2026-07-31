@@ -168,19 +168,70 @@ pub fn tee_raw(raw: &str, command_slug: &str, exit_code: i32) -> Option<PathBuf>
     )
 }
 
-/// Format the hint line with ~ shorthand for home directory.
-fn format_hint(path: &std::path::Path) -> String {
-    let display = if let Some(home) = dirs::home_dir() {
+fn display_path(path: &std::path::Path) -> String {
+    if let Some(home) = dirs::home_dir() {
         if let Ok(relative) = path.strip_prefix(&home) {
-            format!("~/{}", relative.display())
-        } else {
-            path.display().to_string()
+            return format!("~/{}", relative.display());
         }
-    } else {
-        path.display().to_string()
-    };
+    }
+    path.display().to_string()
+}
 
-    format!("[full output: {}]", display)
+fn needs_shell_quoting(path: &str) -> bool {
+    path.chars().any(|c| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '\'' | '"'
+                    | '\\'
+                    | '$'
+                    | '`'
+                    | '!'
+                    | '#'
+                    | '&'
+                    | '('
+                    | ')'
+                    | ';'
+                    | '<'
+                    | '>'
+                    | '?'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '|'
+                    | '*'
+            )
+    })
+}
+
+fn escape_double_quoted_path(path: &str) -> String {
+    let mut escaped = String::with_capacity(path.len());
+    for c in path.chars() {
+        if matches!(c, '\\' | '"' | '$' | '`') {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
+}
+
+fn display_shell_path(path: &std::path::Path) -> String {
+    let display = display_path(path);
+    if !needs_shell_quoting(&display) {
+        return display;
+    }
+
+    if let Some(relative) = display.strip_prefix("~/") {
+        let relative = relative.replace(std::path::MAIN_SEPARATOR, "/");
+        return format!("\"$HOME/{}\"", escape_double_quoted_path(&relative));
+    }
+
+    format!("\"{}\"", escape_double_quoted_path(&display))
+}
+
+fn format_hint(path: &std::path::Path) -> String {
+    format!("[full output: {}]", display_shell_path(path))
 }
 
 /// Convenience: tee + format hint in one call.
@@ -190,26 +241,17 @@ pub fn tee_and_hint(raw: &str, command_slug: &str, exit_code: i32) -> Option<Str
     Some(format_hint(&path))
 }
 
-/// Force tee output regardless of exit code (used when filters truncate).
-/// Always writes file if size >= MIN_TEE_SIZE and tee is enabled.
-/// Returns hint string if file was written, None if skipped/disabled.
-///
-/// Used by AWS filters when FilterResult.truncated = true, ensuring
-/// the LLM has access to full untruncated output via the hint path.
-pub fn force_tee_hint(raw: &str, command_slug: &str) -> Option<String> {
-    // Check RTK_TEE=0 env override (disable)
+fn force_tee_path(content: &str, command_slug: &str) -> Option<PathBuf> {
     if std::env::var("RTK_TEE").ok().as_deref() == Some("0") {
         return None;
     }
 
-    // Skip if output too small
-    if raw.len() < MIN_TEE_SIZE {
+    if content.is_empty() {
         return None;
     }
 
     let config = Config::load().ok()?;
 
-    // Respect enabled flag but ignore mode (force tee)
     if !config.tee.enabled {
         return None;
     }
@@ -217,15 +259,33 @@ pub fn force_tee_hint(raw: &str, command_slug: &str) -> Option<String> {
     let tee_dir = get_tee_dir(&config)?;
     let tee_dir = std::fs::create_dir_all(&tee_dir).ok().and(Some(tee_dir))?;
 
-    let path = write_tee_file(
-        raw,
+    write_tee_file(
+        content,
         command_slug,
         &tee_dir,
         config.tee.max_file_size,
         config.tee.max_files,
-    )?;
+    )
+}
 
+/// Returns `[full output: ~/path]`, or None if tee is disabled/skipped.
+pub fn force_tee_hint(raw: &str, command_slug: &str) -> Option<String> {
+    let path = force_tee_path(raw, command_slug)?;
     Some(format_hint(&path))
+}
+
+/// Returns `[see remaining: tail -n +{line_offset} ~/path]`, or None if tee is disabled/skipped.
+pub fn force_tee_tail_hint(
+    content: &str,
+    command_slug: &str,
+    line_offset: usize,
+) -> Option<String> {
+    let path = force_tee_path(content, command_slug)?;
+    Some(format!(
+        "[see remaining: tail -n +{} {}]",
+        line_offset,
+        display_shell_path(&path)
+    ))
 }
 
 /// TeeMode controls when tee writes files.
@@ -441,6 +501,71 @@ mod tests {
     }
 
     #[test]
+    fn test_display_shell_path_preserves_simple_paths() {
+        let path = PathBuf::from("/tmp/rtk/tee/123_cargo_test.log");
+        assert_eq!(display_shell_path(&path), "/tmp/rtk/tee/123_cargo_test.log");
+    }
+
+    #[test]
+    fn test_display_shell_path_quotes_paths_with_spaces() {
+        let path = PathBuf::from("/tmp/rtk/Application Support/123_go_test.log");
+        assert_eq!(
+            display_shell_path(&path),
+            "\"/tmp/rtk/Application Support/123_go_test.log\""
+        );
+    }
+
+    #[test]
+    fn test_display_shell_path_quotes_backslashes() {
+        let path = PathBuf::from(r"/tmp/rtk/tee/path\segment.log");
+        assert_eq!(
+            display_shell_path(&path),
+            r#""/tmp/rtk/tee/path\\segment.log""#
+        );
+    }
+
+    #[test]
+    fn test_display_shell_path_uses_home_var_for_home_paths_with_spaces() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let path = home
+            .join("Library")
+            .join("Application Support")
+            .join("rtk")
+            .join("tee")
+            .join("123_go_test.log");
+
+        assert_eq!(
+            display_shell_path(&path),
+            "\"$HOME/Library/Application Support/rtk/tee/123_go_test.log\""
+        );
+    }
+
+    #[test]
+    fn test_format_hint_avoids_backslash_escaped_whitespace() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let path = home
+            .join("Library")
+            .join("Application Support")
+            .join("rtk")
+            .join("tee")
+            .join("123_go_test.log");
+        let hint = format_hint(&path);
+
+        assert_eq!(
+            hint,
+            "[full output: \"$HOME/Library/Application Support/rtk/tee/123_go_test.log\"]"
+        );
+        assert!(
+            !hint.contains("\\ "),
+            "hint should not encourage backslash-escaped whitespace"
+        );
+    }
+
+    #[test]
     fn test_tee_config_default() {
         let config = TeeConfig::default();
         assert!(config.enabled);
@@ -487,11 +612,9 @@ directory = "/tmp/rtk-tee"
     }
 
     #[test]
-    fn test_force_tee_hint_skip_small_output() {
-        // force_tee_hint should respect MIN_TEE_SIZE
-        let small_output = "short error";
-        let hint = force_tee_hint(small_output, "test_cmd");
-        assert!(hint.is_none(), "Should skip output < MIN_TEE_SIZE");
+    fn test_force_tee_hint_skip_empty() {
+        let hint = force_tee_hint("", "test_cmd");
+        assert!(hint.is_none(), "Should skip empty content");
     }
 
     #[test]
@@ -502,5 +625,21 @@ directory = "/tmp/rtk-tee"
         let hint = force_tee_hint(&large_output, "test_cmd");
         std::env::remove_var("RTK_TEE");
         assert!(hint.is_none(), "Should respect RTK_TEE=0");
+    }
+
+    #[test]
+    fn test_force_tee_tail_hint_skip_empty() {
+        let hint = force_tee_tail_hint("", "test_cmd", 22);
+        assert!(hint.is_none(), "Should skip empty content");
+    }
+
+    #[test]
+    fn test_force_tee_tail_hint_format() {
+        let path = std::path::PathBuf::from("/tmp/rtk/tee/123_docker_images.log");
+        let display = display_path(&path);
+        let hint = format!("[see remaining: tail -n +{} {}]", 22, display);
+        assert!(hint.starts_with("[see remaining: tail -n +22 "));
+        assert!(hint.ends_with(']'));
+        assert!(hint.contains("123_docker_images.log"));
     }
 }

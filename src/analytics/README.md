@@ -4,7 +4,7 @@
 
 ## Scope
 
-**Read-only dashboards** over the tracking database. Queries token savings, correlates with external spending data, and surfaces adoption metrics. Never modifies the tracking DB.
+**Read-only dashboards** over the tracking database. Queries the recorded bash output reduction, correlates with external spending data, and surfaces adoption metrics. Never modifies the tracking DB.
 
 Owns: `rtk gain` (savings dashboard), `rtk cc-economics` (cost reduction), `rtk session` (adoption analysis), and Claude Code usage data parsing.
 
@@ -13,7 +13,7 @@ Does **not** own: recording token savings (that's `core/tracking` called by `cmd
 Boundary rule: if a new module writes to the DB, it belongs in `core/` or `cmds/`, not here. Tool-specific analytics (like `cc_economics` reading Claude Code data) are fine — the boundary is "read-only presentation", not "tool-agnostic".
 
 ## Purpose
-Token savings analytics, economic modeling, and adoption metrics.
+Bash output reduction analytics, economic modeling, and adoption metrics. The stored percentages measure output bytes; token counts are `bytes / 4` estimates, not billed tokens.
 
 These modules read from the SQLite tracking database to produce dashboards, spending estimates, and session-level adoption reports.
 

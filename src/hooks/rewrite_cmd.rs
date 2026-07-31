@@ -16,36 +16,51 @@ use std::io::Write;
 /// | 2    | (none)   | Deny rule matched — hook defers to Claude Code native deny.  |
 /// | 3    | rewritten| Ask rule matched — hook rewrites but lets Claude Code prompt.|
 pub fn run(cmd: &str) -> anyhow::Result<()> {
-    let excluded = crate::core::config::Config::load()
-        .map(|c| c.hooks.exclude_commands)
+    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
+        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
         .unwrap_or_default();
 
-    // SECURITY: check deny/ask BEFORE rewrite so non-RTK commands are also covered.
+    match evaluate(cmd, &excluded, &transparent_prefixes) {
+        RewriteOutcome::Allow(rewritten) => {
+            print!("{}", rewritten);
+            let _ = std::io::stdout().flush();
+            Ok(())
+        }
+        RewriteOutcome::Ask(rewritten) => {
+            print!("{}", rewritten);
+            let _ = std::io::stdout().flush();
+            std::process::exit(3);
+        }
+        RewriteOutcome::Deny => std::process::exit(2),
+        RewriteOutcome::Passthrough => std::process::exit(1),
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum RewriteOutcome {
+    Allow(String),
+    Passthrough,
+    Deny,
+    Ask(String),
+}
+
+fn evaluate(cmd: &str, excluded: &[String], transparent_prefixes: &[String]) -> RewriteOutcome {
     let verdict = check_command(cmd);
 
     if verdict == PermissionVerdict::Deny {
-        std::process::exit(2);
+        return RewriteOutcome::Deny;
     }
 
-    match registry::rewrite_command(cmd, &excluded) {
+    if crate::discover::lexer::contains_unattestable_construct(cmd) {
+        return RewriteOutcome::Passthrough;
+    }
+
+    match registry::rewrite_command(cmd, excluded, transparent_prefixes) {
         Some(rewritten) => match verdict {
-            PermissionVerdict::Allow => {
-                print!("{}", rewritten);
-                let _ = std::io::stdout().flush();
-                Ok(())
-            }
-            PermissionVerdict::Ask | PermissionVerdict::Default => {
-                print!("{}", rewritten);
-                let _ = std::io::stdout().flush();
-                std::process::exit(3);
-            }
-            PermissionVerdict::Deny => unreachable!(),
+            PermissionVerdict::Allow => RewriteOutcome::Allow(rewritten),
+            _ => RewriteOutcome::Ask(rewritten),
         },
-        None => {
-            // No RTK equivalent. Exit 1 = passthrough.
-            // Claude Code independently evaluates its own ask rules on the original cmd.
-            std::process::exit(1);
-        }
+        None => RewriteOutcome::Passthrough,
     }
 }
 
@@ -53,22 +68,78 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    fn rewrite_command_no_prefixes(cmd: &str) -> Option<String> {
+        registry::rewrite_command(cmd, &[], &[])
+    }
+
     #[test]
     fn test_run_supported_command_succeeds() {
-        assert!(registry::rewrite_command("git status", &[]).is_some());
+        assert!(rewrite_command_no_prefixes("git status").is_some());
     }
 
     #[test]
     fn test_run_unsupported_returns_none() {
-        assert!(registry::rewrite_command("htop", &[]).is_none());
+        assert!(rewrite_command_no_prefixes("htop").is_none());
     }
 
     #[test]
     fn test_run_already_rtk_returns_some() {
         assert_eq!(
-            registry::rewrite_command("rtk git status", &[]),
+            rewrite_command_no_prefixes("rtk git status"),
             Some("rtk git status".into())
         );
+    }
+
+    mod unattestable_passthrough {
+        use super::super::{evaluate, RewriteOutcome};
+
+        #[test]
+        fn test_backtick_substitution_passthrough() {
+            assert_eq!(
+                evaluate("git status `rm -rf /tmp/x`", &[], &[]),
+                RewriteOutcome::Passthrough
+            );
+        }
+
+        #[test]
+        fn test_dollar_substitution_passthrough() {
+            assert_eq!(
+                evaluate("git status $(rm -rf /tmp/x)", &[], &[]),
+                RewriteOutcome::Passthrough
+            );
+        }
+
+        #[test]
+        fn test_double_quoted_substitution_passthrough() {
+            assert_eq!(
+                evaluate("git log --pretty=\"$(rm -rf /tmp/x)\"", &[], &[]),
+                RewriteOutcome::Passthrough
+            );
+        }
+
+        #[test]
+        fn test_file_redirect_passthrough() {
+            assert_eq!(
+                evaluate("git log > /tmp/out.txt", &[], &[]),
+                RewriteOutcome::Passthrough
+            );
+        }
+
+        #[test]
+        fn test_fd_dup_redirect_still_rewrites() {
+            assert!(matches!(
+                evaluate("git status 2>&1", &[], &[]),
+                RewriteOutcome::Ask(_)
+            ));
+        }
+
+        #[test]
+        fn test_plain_command_still_rewrites() {
+            assert!(matches!(
+                evaluate("git status", &[], &[]),
+                RewriteOutcome::Ask(_)
+            ));
+        }
     }
 
     /// SECURITY: Verify the exit code protocol for permission verdicts.
@@ -148,7 +219,7 @@ mod tests {
 
             // Verify the rewrite exists (so the hook would output it),
             // but the exit code forces user confirmation.
-            assert!(registry::rewrite_command("git status", &[]).is_some());
+            assert!(registry::rewrite_command("git status", &[], &[]).is_some());
             assert_eq!(expected_exit_code(&verdict), 3);
         }
 

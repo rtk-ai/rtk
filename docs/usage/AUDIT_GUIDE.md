@@ -29,6 +29,10 @@ rtk gain --all --format csv > savings.csv
 # Combined flags
 rtk gain --graph --history --quota    # Classic view with extras
 rtk gain --daily --weekly --monthly   # Multiple breakdowns
+
+# Reset all tracking data
+rtk gain --reset          # prompts [y/N] before deleting
+rtk gain --reset --yes    # skip prompt (CI/scripts)
 ```
 
 ## Command Options
@@ -50,6 +54,15 @@ rtk gain --daily --weekly --monthly   # Multiple breakdowns
 | `--history` | Recent 10 commands |
 | `--quota` | Monthly quota analysis (Pro/5x/20x tiers) |
 | `--tier <TIER>` | Quota tier: pro, 5x, 20x (default: 20x) |
+
+### Reset Flag
+
+| Flag | Description |
+|------|-------------|
+| `--reset` | Permanently delete all tracking data (commands + parse failures) |
+| `--yes` | Skip the confirmation prompt (for CI/scripts) |
+
+> **Warning**: `--reset` is irreversible. It clears both the `commands` and `parse_failures` tables atomically. A `[y/N]` confirmation prompt is shown by default. In non-interactive environments (piped stdin), it defaults to `N` unless `--yes` is passed.
 
 ### Export Formats
 
@@ -248,9 +261,7 @@ EOF
 
 ### Token Estimation
 
-rtk estimates tokens using `text.len() / 4` (4 characters per token average).
-
-**Accuracy**: ±10% compared to actual LLM tokenization (sufficient for trends).
+`rtk gain` estimates tokens as `bytes / 4` (`src/core/tracking.rs:1284`). RTK ships no real tokenizer by design: embedding one would cost startup time and would require a tokenizer per model, or a per-session model lookup, which RTK does not implement. The same estimator is applied to raw and filtered output, so the percentage is reliable; the absolute token counts are approximate and will not match your provider's billing.
 
 ### Savings Calculation
 
@@ -261,10 +272,12 @@ Saved Tokens    = Input - Output
 Savings %       = (Saved / Input) × 100
 ```
 
+`Savings %` is a bash output byte ratio. Those bytes are one contributor to input tokens, and input tokens are only part of a bill that also counts output tokens.
+
 ### Typical Savings by Command
 
-| Command | Typical Savings | Mechanism |
-|---------|----------------|-----------|
+| Command | Bash output reduction | Mechanism |
+|---------|----------------------|-----------|
 | `rtk git status` | 77-93% | Compact stat format |
 | `rtk eslint` | 84% | Group by rule |
 | `rtk jest` | 94-99% | Show failures only |

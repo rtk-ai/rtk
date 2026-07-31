@@ -3,13 +3,13 @@
 </p>
 
 <p align="center">
-  <strong>LLM トークン消費を 60-90% 削減する高性能 CLI プロキシ</strong>
+  <strong>エージェントが読む bash 出力を最大 90% 削減する高性能 CLI プロキシ</strong>
 </p>
 
 <p align="center">
   <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://github.com/rtk-ai/rtk/workflows/Security%20Check/badge.svg" alt="CI"></a>
   <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk" alt="Release"></a>
-  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
   <a href="https://discord.gg/RySmvNF5kF"><img src="https://img.shields.io/discord/1478373640461488159?label=Discord&logo=discord" alt="Discord"></a>
   <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk" alt="Homebrew"></a>
 </p>
@@ -35,16 +35,34 @@
 
 rtk はコマンド出力を LLM コンテキストに届く前にフィルタリング・圧縮します。単一の Rust バイナリ、依存関係ゼロ、オーバーヘッド 10ms 未満。
 
-## トークン節約（30分の Claude Code セッション）
+## RTK がすること
 
-| 操作 | 頻度 | 標準 | rtk | 節約 |
-|------|------|------|-----|------|
-| `ls` / `tree` | 10x | 2,000 | 400 | -80% |
-| `cat` / `read` | 20x | 40,000 | 12,000 | -70% |
-| `grep` / `rg` | 8x | 16,000 | 3,200 | -80% |
-| `git status` | 10x | 3,000 | 600 | -80% |
-| `cargo test` / `npm test` | 5x | 25,000 | 2,500 | -90% |
-| **合計** | | **~118,000** | **~23,900** | **-80%** |
+RTK はシェルコマンドを横取りし、エージェントが読む前にその出力を圧縮します。
+
+| 操作 | RTK が出力に対して行うこと |
+|------|----------------------------|
+| `ls` / `tree` | 1 エントリ 1 行ではなく、ファイル数付きのツリー形式 |
+| `cat` / `read` | スマートなファイル読み取り：本文全体ではなくシグネチャと構造 |
+| `grep` / `rg` | 長い行を切り詰め、マッチをファイル単位でグループ化 |
+| `git status` | コンパクトな stat 形式、状態ごとにグループ化 |
+| `git diff` | コンテキストを削減、ヘッダーを除去 |
+| `git log` | ハッシュ、作者、件名のみ |
+| `git add/commit/push` | 進捗出力全体の代わりに確認行 1 行 |
+| `cargo test` / `npm test` | 失敗のみ、成功したテストは件数に集約 |
+| `ruff check` | ルールとファイルごとにグループ化 |
+| `pytest` | 失敗のみ、トレースバックを短縮 |
+| `go test` | NDJSON をパースし、失敗のみ |
+| `docker ps` | 必須フィールドのみ |
+
+## 節約の仕組み
+
+RTK はエージェントが読む **bash 出力を最大 90% 削減**します。これが RTK の測定対象であり、請求額が 90% 減ることと同じではありません。
+
+bash 出力は、あなたのプロンプト、システムプロンプト、会話履歴と並ぶ**入力トークンの構成要素のひとつ**にすぎません。そして入力トークン自体も、出力トークンを含む**請求額の一部**でしかありません。削減効果は各段階で薄まります。
+
+RTK が報告するトークン数は `バイト数 / 4` で見積もられています。RTK はトークナイザーを同梱していないため、**割合は信頼できますが、トークンの絶対値はあくまで概算**です。
+
+> 詳しい解説：[RTK の節約の仕組み](docs/guide/resources/savings-explained.md)
 
 ## インストール
 
@@ -103,6 +121,8 @@ git status  # 自動的に rtk git status に書き換え
 
 ## コマンド
 
+> 以下の割合は **bash 出力バイト数の削減率**であり、RTK の `バイト数 / 4` 推定器で測定しています。[節約の仕組み](#節約の仕組み)を参照してください。
+
 ### ファイル
 ```bash
 rtk ls .                        # 最適化されたディレクトリツリー
@@ -157,7 +177,7 @@ rtk discover                    # 見逃した節約機会を発見
 
 ## ライセンス
 
-MIT ライセンス - 詳細は [LICENSE](LICENSE) を参照。
+Apache 2.0 ライセンス - 詳細は [LICENSE](LICENSE) を参照。
 
 ## 免責事項
 

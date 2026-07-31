@@ -25,7 +25,7 @@ rtk config --create   # create config file with defaults
 [tracking]
 enabled = true              # enable/disable token tracking
 history_days = 90           # retention in days (auto-cleanup)
-database_path = "/custom/path/tracking.db"  # optional override
+database_path = "/custom/path/history.db"   # optional override
 
 [display]
 colors = true               # colored output
@@ -33,6 +33,8 @@ emoji = true                # use emojis in output
 max_width = 120             # maximum output width
 
 [filters]
+# These apply to file-reading commands (ls, find, grep, cat/rtk read).
+# Paths matching these patterns are excluded from output, keeping noise low.
 ignore_dirs = [".git", "node_modules", "target", "__pycache__", ".venv", "vendor"]
 ignore_files = ["*.lock", "*.min.js", "*.min.css"]
 
@@ -43,11 +45,13 @@ max_files = 20              # rotation: keep last N files
 # directory = "/custom/tee/path"  # optional override
 
 [telemetry]
-enabled = true              # anonymous daily ping (opt-out below)
+enabled = true              # anonymous daily ping — see Telemetry & Privacy for full details
 
 [hooks]
 exclude_commands = []       # commands to never auto-rewrite
 ```
+
+For full details on what is collected, opt-out options, and GDPR rights, see [Telemetry & Privacy](../resources/telemetry.md).
 
 ## Environment variables
 
@@ -87,6 +91,19 @@ Prevent specific commands from being rewritten by the hook:
 exclude_commands = ["git rebase", "git cherry-pick", "docker exec"]
 ```
 
+Patterns match against the full command after stripping env prefixes (`sudo`, `VAR=val`), so `"psql"` excludes both `psql -h localhost` and `PGPASSWORD=x psql -h localhost`.
+
+Subcommand patterns work too: `"git push"` excludes `git push origin main` but not `git status`.
+
+Patterns starting with `^` are treated as regex:
+
+```toml
+[hooks]
+exclude_commands = ["^curl", "^wget", "git rebase"]
+```
+
+Invalid regex patterns fall back to prefix matching.
+
 Or for a single invocation:
 
 ```bash
@@ -110,6 +127,24 @@ export RTK_TELEMETRY_DISABLED=1
 enabled = false
 ```
 
-## Per-project filters
+## Custom filters
 
-Create `.rtk/filters.toml` in your project root to add custom filters or override built-ins. See [`src/filters/README.md`](https://github.com/rtk-ai/rtk/blob/master/src/filters/README.md) for the full TOML DSL reference.
+Add your own filters (or override built-ins) in either location:
+
+- **Project-local** — `.rtk/filters.toml` in your project root (committed with the repo)
+- **User-global** — `~/.config/rtk/filters.toml` (applies to every project)
+
+See [`src/filters/README.md`](https://github.com/rtk-ai/rtk/blob/master/src/filters/README.md) for the full TOML DSL reference.
+
+### Trusting custom filters
+
+Because a filter can rewrite what your AI assistant sees, custom filter files are **not applied until you trust them**. An untrusted (or edited) filter file is skipped silently on the command path. You review and manage trust with explicit commands:
+
+```bash
+rtk trust      # shows each filter and asks to confirm (--yes to skip the prompt)
+rtk untrust    # revokes trust
+```
+
+`rtk init` also detects existing filters and lets you enable them — interactively, or non-interactively with `--trust-filters` / `--no-trust-filters`. Trust is tied to the file's contents (SHA-256), so editing a trusted file requires re-running `rtk trust`.
+
+> **Upgrading:** earlier versions applied `~/.config/rtk/filters.toml` without trust. After upgrading, the user-global file is gated like project filters — if you already relied on a global filter, run `rtk trust` once to re-enable it.
