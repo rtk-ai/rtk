@@ -546,7 +546,11 @@ pub fn run(
         && (paths.is_empty() || paths.iter().any(|path| path == "-"));
 
     // format/shape flags (-c/-l/-o/...): already-minimal native output, passthrough.
-    if has_format_flag(&extra_args) {
+    // Check both the raw argv and the parsed flag slice. -o/--only-matching must
+    // never reach the grouping path (which injects -nH--null for parse aids) —
+    // some greps emit empty or unparseable output under that combo, and agents
+    // treat silent empty stdout + exit 0 as "no matches" (rtk-ai/rtk#3338).
+    if has_format_flag(&extra_args) || has_format_flag(&args) {
         return passthrough(&timer, engine, &args, &real_cmd, reads_piped_stdin);
     }
 
