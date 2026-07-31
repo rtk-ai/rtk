@@ -163,6 +163,22 @@ fn case_insensitive_and_invert_match_grep() {
     assert_eq_grep_with_and_without_n(&["-v", "apple", &f]);
 }
 
+/// #3338: `-o` / `-oE` must never silently discard matches (agents treat empty
+/// stdout + exit 0 as "no matches"). Passthrough to system grep.
+#[test]
+fn only_matching_matches_system_grep() {
+    let d = tempfile::tempdir().unwrap();
+    let f = write(
+        d.path(),
+        "routes.tsx",
+        "path=\"/\"\npath=\"/login\"\npath=\"/register\"\nother\n",
+    );
+    assert_eq_grep(&["-o", r#"path="[^"]*""#, &f]);
+    assert_eq_grep(&["-oE", r#"path="[^"]*""#, &f]);
+    // Cluster form used by many agent shells
+    assert_eq_grep(&["-on", r#"path="[^"]*""#, &f]);
+}
+
 #[test]
 fn piped_stdin_matches_grep() {
     let input = "apple\nzebra\napple pie\n";
