@@ -535,9 +535,16 @@ pub fn run_cursor() -> Result<()> {
             audit_log("rewrite", &cmd, &rewritten);
             cursor_allow(&rewritten)
         }
-        HookDecision::AskRewrite { rewritten, .. } => {
+        HookDecision::AskRewrite {
+            rewritten,
+            explicit,
+        } => {
             audit_log("ask", &cmd, &rewritten);
-            cursor_ask(&rewritten)
+            if !explicit && crate::discover::lexer::split_for_permissions(&cmd).len() <= 1 {
+                cursor_allow(&rewritten)
+            } else {
+                cursor_ask(&rewritten)
+            }
         }
         other => {
             if matches!(other, HookDecision::Deny) {
@@ -598,7 +605,16 @@ fn run_cursor_inner_with_rules(
     let verdict = permissions::check_command_with_rules(&cmd, deny_rules, ask_rules, allow_rules);
     match decide_from_verdict(&cmd, verdict) {
         HookDecision::AllowRewrite(rewritten) => cursor_allow(&rewritten),
-        HookDecision::AskRewrite { rewritten, .. } => cursor_ask(&rewritten),
+        HookDecision::AskRewrite {
+            rewritten,
+            explicit,
+        } => {
+            if !explicit && crate::discover::lexer::split_for_permissions(&cmd).len() <= 1 {
+                cursor_allow(&rewritten)
+            } else {
+                cursor_ask(&rewritten)
+            }
+        }
         _ => "{}".to_string(),
     }
 }
@@ -1329,13 +1345,13 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_default_verdict_rewrites() {
+    fn test_cursor_default_verdict_allows_simple_rewrite() {
         let result = run_cursor_inner(&cursor_input("git status"));
         let v: Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(v["permission"], "ask");
+        assert_eq!(v["permission"], "allow");
         assert_eq!(v["updated_input"]["command"], "rtk git status");
-        // `continue: true` keeps the Cursor preToolUse panel from collapsing
-        // to `Output: {}`; without it the rewrite is invisible to users.
+        // Cursor only applies `updated_input` for allow/deny hook decisions;
+        // emitting allow for a simple default rewrite preserves the rewrite.
         assert_eq!(v["continue"], true);
     }
 
