@@ -191,7 +191,19 @@ fn split_handler_command(command: &str) -> Option<(String, Vec<String>)> {
     }
     let mut parts = shell_split(command).into_iter();
     let program = parts.next()?;
+    if is_shell_assignment(&program) {
+        return None;
+    }
     Some((program, parts.collect()))
+}
+
+fn is_shell_assignment(program: &str) -> bool {
+    let Some((name, _)) = program.split_once('=') else {
+        return false;
+    };
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b'_' | b'a'..=b'z' | b'A'..=b'Z'))
+        && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
 }
 
 fn matcher_contains_bash(matcher: &str) -> bool {
@@ -640,6 +652,21 @@ mod tests {
             "hooks": [{"type": "command", "command": "/bin/echo ok | /bin/cat"}]
         }]}});
         write_json(&path, &value);
+        assert_eq!(patch_plugin_caches(tmp.path(), 0).unwrap(), 0);
+        let after: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after, value);
+    }
+
+    #[test]
+    fn environment_assignment_handler_does_not_patch_cache_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = hook_file(tmp.path());
+        let value = json!({"hooks": {"PreToolUse": [{
+            "matcher": "Bash|Edit",
+            "hooks": [{"type": "command", "command": "PLUGIN_MODE=1 /bin/echo ok"}]
+        }]}});
+        write_json(&path, &value);
+
         assert_eq!(patch_plugin_caches(tmp.path(), 0).unwrap(), 0);
         let after: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(after, value);
