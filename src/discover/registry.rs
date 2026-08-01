@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use super::lexer::{
+    contains_compound_boundary_tokens, contains_shell_block, contains_shell_block_tokens,
     shell_split, split_on_operators, tokenize, tokenize_with_newlines, ParsedToken, PipeKind,
     TokenKind,
 };
@@ -244,9 +245,13 @@ fn extract_base_command(cmd: &str) -> &str {
 
 /// Quote-aware heredoc detection — `<<` inside quotes is not a heredoc.
 pub fn has_heredoc(cmd: &str) -> bool {
-    tokenize(cmd)
+    has_heredoc_tokens(&tokenize(cmd))
+}
+
+fn has_heredoc_tokens(tokens: &[ParsedToken]) -> bool {
+    tokens
         .iter()
-        .any(|t| t.kind == TokenKind::Redirect && t.value.starts_with("<<"))
+        .any(|token| token.kind == TokenKind::Redirect && token.value.starts_with("<<"))
 }
 
 pub fn split_command_chain(cmd: &str) -> Vec<&str> {
@@ -256,7 +261,7 @@ pub fn split_command_chain(cmd: &str) -> Vec<&str> {
     }
 
     // Lexer-based for `<<`; string-based for `$((` (lexer splits it across tokens).
-    if has_heredoc(trimmed) || trimmed.contains("$((") {
+    if has_heredoc(trimmed) || contains_shell_block(trimmed) || trimmed.contains("$((") {
         return vec![trimmed];
     }
 
@@ -590,7 +595,11 @@ pub fn rewrite_command(
         return None;
     }
 
-    if has_heredoc(trimmed) || trimmed.contains("$((") {
+    let tokens = tokenize_with_newlines(trimmed);
+    if has_heredoc_tokens(&tokens)
+        || contains_shell_block_tokens(&tokens)
+        || trimmed.contains("$((")
+    {
         return None;
     }
 
@@ -598,10 +607,16 @@ pub fn rewrite_command(
     let normalized_prefixes = normalize_transparent_prefixes(transparent_prefixes);
 
     if trimmed.contains('\n') {
-        return rewrite_multiline_block(trimmed, &compiled, &normalized_prefixes);
+        return rewrite_multiline_block(trimmed, &tokens, &compiled, &normalized_prefixes);
     }
 
-    rewrite_single(trimmed, &compiled, &normalized_prefixes)
+    if !contains_compound_boundary_tokens(&tokens)
+        && (trimmed.starts_with("rtk ") || trimmed == "rtk")
+    {
+        return Some(trimmed.to_string());
+    }
+
+    rewrite_compound(trimmed, &tokens, &compiled, &normalized_prefixes)
 }
 
 /// Rewrite one logical command line (no unquoted newlines).
@@ -613,16 +628,14 @@ fn rewrite_single(
     // Simple (non-compound) already-RTK command — return as-is.
     // For compound commands that start with "rtk" (e.g. "rtk git add . && cargo test"),
     // fall through to rewrite_compound so the remaining segments get rewritten.
-    let has_compound = trimmed.contains("&&")
-        || trimmed.contains("||")
-        || trimmed.contains(';')
-        || trimmed.contains('|')
-        || trimmed.contains(" & ");
-    if !has_compound && (trimmed.starts_with("rtk ") || trimmed == "rtk") {
+    let tokens = tokenize_with_newlines(trimmed);
+    if !contains_compound_boundary_tokens(&tokens)
+        && (trimmed.starts_with("rtk ") || trimmed == "rtk")
+    {
         return Some(trimmed.to_string());
     }
 
-    rewrite_compound(trimmed, excluded, transparent_prefixes)
+    rewrite_compound(trimmed, &tokens, excluded, transparent_prefixes)
 }
 
 /// Shell keywords that open or close a multi-line construct. A line inside a
@@ -839,10 +852,11 @@ fn classify_line(line: &str) -> LineRole {
 /// messages) also land here; forgoing that rewrite is the safe trade.
 fn rewrite_multiline_block(
     cmd: &str,
+    tokens: &[ParsedToken],
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
 ) -> Option<String> {
-    let newline_offsets: Vec<usize> = tokenize_with_newlines(cmd)
+    let newline_offsets: Vec<usize> = tokens
         .iter()
         .filter(|t| t.kind == TokenKind::Operator && t.value == "\n")
         .map(|t| t.offset)
@@ -1034,10 +1048,10 @@ fn rewrite_pipeline_final_stage(
 /// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each segment.
 fn rewrite_compound(
     cmd: &str,
+    tokens: &[ParsedToken],
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
 ) -> Option<String> {
-    let tokens = tokenize(cmd);
     let has_pipe = tokens
         .iter()
         .any(|token| matches!(token.kind, TokenKind::Pipe(_)));
@@ -1052,7 +1066,7 @@ fn rewrite_compound(
     let mut any_changed = false;
     let mut seg_start: usize = 0;
 
-    for tok in &tokens {
+    for tok in tokens {
         if tok.offset < seg_start {
             continue;
         }
@@ -1082,7 +1096,7 @@ fn rewrite_compound(
                 }
             }
             TokenKind::Pipe(_) => {
-                let analysis = analyze_pipeline(cmd, &tokens, seg_start, tok.offset);
+                let analysis = analyze_pipeline(cmd, tokens, seg_start, tok.offset);
                 let pipeline = cmd[seg_start..analysis.end_offset].trim();
                 let rewritten_pipeline = rewrite_pipeline_final_stage(
                     cmd,
