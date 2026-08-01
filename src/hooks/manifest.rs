@@ -14,8 +14,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::discover::lexer::{shell_split, tokenize, TokenKind};
-
 const MANIFEST_FILE: &str = "rtk-bash-manifest.json";
 const FALLTHROUGH_GUARD: &str = "RTK_MANIFEST_FALLTHROUGH";
 
@@ -30,11 +28,26 @@ struct ManifestEntry {
     cache_path: String,
     original_entries: Vec<Value>,
     patched_entries: Vec<Value>,
-    commands: Vec<String>,
+    commands: Vec<ManifestCommand>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     plugin_root: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     plugin_data: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+enum ManifestCommand {
+    /// Claude executes a command without `args` through the platform shell.
+    Shell(String),
+    /// Claude executes a command with the supplied arguments as exact argv.
+    Exec(ExecCommand),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+struct ExecCommand {
+    command: String,
+    args: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -97,7 +110,6 @@ pub(crate) fn run_manifest_handlers(claude_dir: &Path, payload: &str) -> Manifes
         return ManifestResult::NoBlock;
     };
 
-    let _guard = FallthroughGuard::new();
     let mut first_block: Option<String> = None;
     let mut stderr = Vec::new();
 
@@ -105,14 +117,12 @@ pub(crate) fn run_manifest_handlers(claude_dir: &Path, payload: &str) -> Manifes
         if !Path::new(&entry.cache_path).exists() || !entry_is_active(&entry) {
             continue;
         }
-        for command in entry.commands {
-            let Some((program, args)) = split_handler_command(&command) else {
-                continue;
-            };
+        for handler in entry.commands {
             if let Some(plugin_data) = entry.plugin_data.as_deref() {
                 let _ = fs::create_dir_all(plugin_data);
             }
-            let mut command = command_for_program(&program);
+            let mut command = handler.process();
+            command.env(FALLTHROUGH_GUARD, "1");
             if let Some(plugin_root) = entry.plugin_root.as_deref() {
                 command
                     .env("CLAUDE_PLUGIN_ROOT", plugin_root)
@@ -124,7 +134,6 @@ pub(crate) fn run_manifest_handlers(claude_dir: &Path, payload: &str) -> Manifes
                     .env("PLUGIN_DATA", plugin_data);
             }
             let mut child = match command
-                .args(args)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -165,45 +174,32 @@ fn command_for_program(program: &str) -> Command {
     }
 }
 
-struct FallthroughGuard(Option<std::ffi::OsString>);
-
-impl FallthroughGuard {
-    fn new() -> Self {
-        let previous = std::env::var_os(FALLTHROUGH_GUARD);
-        std::env::set_var(FALLTHROUGH_GUARD, "1");
-        Self(previous)
+fn build_shell_command(command: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let mut process = Command::new("cmd");
+        process.args(["/C", command]);
+        process
+    }
+    #[cfg(not(windows))]
+    {
+        let mut process = Command::new("sh");
+        process.args(["-c", command]);
+        process
     }
 }
 
-impl Drop for FallthroughGuard {
-    fn drop(&mut self) {
-        match self.0.take() {
-            Some(value) => std::env::set_var(FALLTHROUGH_GUARD, value),
-            None => std::env::remove_var(FALLTHROUGH_GUARD),
+impl ManifestCommand {
+    fn process(&self) -> Command {
+        match self {
+            Self::Shell(command) => build_shell_command(command),
+            Self::Exec(command) => {
+                let mut process = command_for_program(&command.command);
+                process.args(&command.args);
+                process
+            }
         }
     }
-}
-
-fn split_handler_command(command: &str) -> Option<(String, Vec<String>)> {
-    let tokens = tokenize(command);
-    if tokens.is_empty() || tokens.iter().any(|token| token.kind != TokenKind::Arg) {
-        return None;
-    }
-    let mut parts = shell_split(command).into_iter();
-    let program = parts.next()?;
-    if is_shell_assignment(&program) {
-        return None;
-    }
-    Some((program, parts.collect()))
-}
-
-fn is_shell_assignment(program: &str) -> bool {
-    let Some((name, _)) = program.split_once('=') else {
-        return false;
-    };
-    let mut bytes = name.bytes();
-    matches!(bytes.next(), Some(b'_' | b'a'..=b'z' | b'A'..=b'Z'))
-        && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
 }
 
 fn matcher_contains_bash(matcher: &str) -> bool {
@@ -285,17 +281,47 @@ fn plugin_data_path(claude_dir: &Path, vendor: &str, plugin: &str) -> PathBuf {
     claude_dir.join("plugins").join("data").join(id)
 }
 
-fn resolved_commands(entry: &Value, plugin_root: &Path, plugin_data: &Path) -> Option<Vec<String>> {
+fn resolved_commands(
+    entry: &Value,
+    plugin_root: &Path,
+    plugin_data: &Path,
+) -> Option<Vec<ManifestCommand>> {
     let hooks = entry.get("hooks")?.as_array()?;
     let mut commands = Vec::new();
-    for command in hooks
-        .iter()
-        .filter_map(|hook| hook.get("command"))
-        .filter_map(Value::as_str)
-    {
-        let command = resolve_plugin_placeholders(command, plugin_root, plugin_data);
-        split_handler_command(&command)?;
-        commands.push(command);
+    for hook in hooks {
+        // Leave hooks with execution semantics that RTK cannot reproduce in
+        // the plugin cache so Claude remains their sole dispatcher.
+        if hook
+            .get("type")
+            .is_some_and(|kind| kind.as_str() != Some("command"))
+            || hook.get("timeout").is_some()
+            || hook.get("shell").is_some()
+            || hook
+                .get("async")
+                .is_some_and(|value| value.as_bool() != Some(false))
+            || hook
+                .get("asyncRewake")
+                .is_some_and(|value| value.as_bool() != Some(false))
+        {
+            return None;
+        }
+        let command =
+            resolve_plugin_placeholders(hook.get("command")?.as_str()?, plugin_root, plugin_data);
+        let handler = match hook.get("args") {
+            Some(args) => ManifestCommand::Exec(ExecCommand {
+                command,
+                args: args
+                    .as_array()?
+                    .iter()
+                    .map(|arg| {
+                        arg.as_str()
+                            .map(|arg| resolve_plugin_placeholders(arg, plugin_root, plugin_data))
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            }),
+            None => ManifestCommand::Shell(command),
+        };
+        commands.push(handler);
     }
     (!commands.is_empty()).then_some(commands)
 }
@@ -548,21 +574,27 @@ mod tests {
         })
     }
 
+    fn cache_with_hook(hook: Value) -> Value {
+        json!({
+            "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook]}]}
+        })
+    }
+
+    fn assert_patch_skipped(value: Value) {
+        let tmp = TempDir::new().unwrap();
+        let path = hook_file(tmp.path());
+        write_json(&path, &value);
+        assert_eq!(patch_plugin_caches(tmp.path(), 0).unwrap(), 0);
+        let after: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(after, value);
+    }
+
     #[test]
     fn matcher_removal_keeps_non_bash_tokens_and_rejects_substrings() {
         assert!(matcher_contains_bash("Write | Bash | Edit"));
         assert!(!matcher_contains_bash("BashPipeline|Edit"));
         assert_eq!(remove_bash("Write|Bash|Edit"), "Write|Edit");
         assert_eq!(remove_bash("Bash"), "");
-    }
-
-    #[test]
-    fn handler_commands_accept_quoted_args_but_not_shell_operators() {
-        assert_eq!(
-            split_handler_command("/bin/echo 'hello world'").unwrap(),
-            ("/bin/echo".to_string(), vec!["hello world".to_string()])
-        );
-        assert!(split_handler_command("/bin/echo ok | /bin/cat").is_none());
     }
 
     #[test]
@@ -574,9 +606,9 @@ mod tests {
         );
         assert_eq!(
             commands,
-            Some(vec![
-                "/plugins/cache/vendor/plugin/1.0.0/run /plugins/data/plugin-vendor".to_string()
-            ])
+            Some(vec![ManifestCommand::Shell(
+                "/plugins/cache/vendor/plugin/1.0.0/run /plugins/data/plugin-vendor".to_string(),
+            )])
         );
         assert_eq!(
             plugin_data_path(Path::new("/home/user/.claude"), "vendor", "plugin"),
@@ -644,32 +676,79 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_shell_command_does_not_patch_cache_file() {
-        let tmp = TempDir::new().unwrap();
-        let path = hook_file(tmp.path());
-        let value = json!({"hooks": {"PreToolUse": [{
-            "matcher": "Bash|Edit",
-            "hooks": [{"type": "command", "command": "/bin/echo ok | /bin/cat"}]
-        }]}});
-        write_json(&path, &value);
-        assert_eq!(patch_plugin_caches(tmp.path(), 0).unwrap(), 0);
-        let after: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(after, value);
+    fn unsupported_execution_metadata_does_not_patch_cache_file() {
+        for hook in [
+            json!({"type": "command", "command": "/bin/echo ok", "timeout": 5}),
+            json!({"type": "command", "command": "/bin/echo ok", "async": true}),
+            json!({"type": "command", "command": "/bin/echo ok", "shell": "bash"}),
+        ] {
+            assert_patch_skipped(cache_with_hook(hook));
+        }
     }
 
     #[test]
-    fn environment_assignment_handler_does_not_patch_cache_file() {
+    fn manifest_preserves_exact_arguments_for_exec_form_hooks() {
         let tmp = TempDir::new().unwrap();
         let path = hook_file(tmp.path());
-        let value = json!({"hooks": {"PreToolUse": [{
-            "matcher": "Bash|Edit",
-            "hooks": [{"type": "command", "command": "PLUGIN_MODE=1 /bin/echo ok"}]
-        }]}});
+        write_json(
+            &path,
+            &cache_with_hook(json!({
+                "type": "command",
+                "command": "/bin/printf",
+                "args": ["%s", "hello world"]
+            })),
+        );
+
+        assert_eq!(patch_plugin_caches(tmp.path(), 0).unwrap(), 1);
+        let manifest: Value =
+            serde_json::from_str(&fs::read_to_string(manifest_path(tmp.path())).unwrap()).unwrap();
+        assert_eq!(
+            manifest["entries"][0]["commands"][0],
+            json!({"command": "/bin/printf", "args": ["%s", "hello world"]})
+        );
+
+        let direct_tmp = TempDir::new().unwrap();
+        let direct_path = hook_file(direct_tmp.path());
+        let direct = cache_with_hook(json!({
+            "type": "command",
+            "command": "/bin/sh",
+            "args": [
+                "-c",
+                "test \"$1\" = \"hello world\" && exit 2",
+                "handler",
+                "hello world"
+            ]
+        }));
+        write_json(&direct_path, &direct);
+        assert_eq!(patch_plugin_caches(direct_tmp.path(), 0).unwrap(), 1);
+        assert_eq!(
+            run_manifest_handlers(direct_tmp.path(), "{\"tool_name\":\"Bash\"}"),
+            ManifestResult::Blocked {
+                stdout: String::new(),
+                stderr: Vec::new(),
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_form_hook_keeps_shell_pipeline_behavior() {
+        let tmp = TempDir::new().unwrap();
+        let path = hook_file(tmp.path());
+        let value = cache_with_hook(json!({
+            "type": "command",
+            "command": "test \"$RTK_MANIFEST_FALLTHROUGH\" = 1 && printf '{\"decision\":\"deny\",\"reason\":\"shell-form\"}' | cat"
+        }));
         write_json(&path, &value);
 
-        assert_eq!(patch_plugin_caches(tmp.path(), 0).unwrap(), 0);
-        let after: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(after, value);
+        assert_eq!(patch_plugin_caches(tmp.path(), 0).unwrap(), 1);
+        assert_eq!(
+            run_manifest_handlers(tmp.path(), "{\"tool_name\":\"Bash\"}"),
+            ManifestResult::Blocked {
+                stdout: "{\"decision\":\"deny\",\"reason\":\"shell-form\"}".into(),
+                stderr: Vec::new(),
+            }
+        );
     }
 
     #[test]
@@ -709,7 +788,9 @@ mod tests {
                     cache_path: cache.to_string_lossy().into_owned(),
                     original_entries: Vec::new(),
                     patched_entries: Vec::new(),
-                    commands: vec![handler.to_string_lossy().into_owned()],
+                    commands: vec![ManifestCommand::Shell(
+                        handler.to_string_lossy().into_owned(),
+                    )],
                     plugin_root: Some("/plugin/root".into()),
                     plugin_data: Some(tmp.path().join("data").to_string_lossy().into_owned()),
                 }],
