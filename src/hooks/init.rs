@@ -3598,6 +3598,7 @@ fn uninstall_kiro(global: bool, ctx: InitContext) -> Result<()> {
             return Ok(());
         }
 
+        // nosemgrep: filesystem-deletion -- Kiro uninstall removes only the RTK-managed steering file.
         fs::remove_file(&steering_path).with_context(|| {
             format!(
                 "Failed to remove Kiro steering file: {}",
