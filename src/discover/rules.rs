@@ -3,8 +3,6 @@ use super::report::RtkStatus;
 pub struct RtkRule {
     pub pattern: &'static str,
     pub rtk_cmd: &'static str,
-    /// Whether this command may be rewritten as the final pipeline stage.
-    pub pipeline_final_safe: bool,
     pub rewrite_prefixes: &'static [&'static str],
     pub category: &'static str,
     pub savings_pct: f64,
@@ -20,7 +18,6 @@ impl RtkRule {
     pub const DEFAULT: RtkRule = RtkRule {
         pattern: "",
         rtk_cmd: "",
-        pipeline_final_safe: false,
         rewrite_prefixes: &[],
         category: "",
         savings_pct: 60.0,
@@ -76,7 +73,6 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 80.0,
         subcmd_savings: &[("test", 90.0), ("check", 80.0)],
         subcmd_status: &[("fmt", RtkStatus::Passthrough)],
-        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script)",
@@ -112,7 +108,6 @@ pub const RULES: &[RtkRule] = &[
     RtkRule {
         pattern: r"^grep\s+",
         rtk_cmd: "rtk grep",
-        pipeline_final_safe: true,
         rewrite_prefixes: &["grep"],
         category: "Files",
         savings_pct: 75.0,
@@ -121,7 +116,6 @@ pub const RULES: &[RtkRule] = &[
     RtkRule {
         pattern: r"^rg\s+",
         rtk_cmd: "rtk rg",
-        pipeline_final_safe: true,
         rewrite_prefixes: &["rg"],
         category: "Files",
         savings_pct: 75.0,

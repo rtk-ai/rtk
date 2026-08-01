@@ -543,19 +543,32 @@ fn is_shell_control_keyword(value: &str) -> bool {
     )
 }
 
-/// True for constructs the permission gate can't decompose, so they must never
-/// be auto-allowed: command/process substitution, or a real file-target redirect
-/// (fd-dup like `2>&1` and `/dev/null` are exempt). Separators and subshells are
-/// handled by [`split_for_permissions`], not flagged here.
-pub fn contains_unattestable_construct(cmd: &str) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnattestableConstruct {
+    Substitution,
+    FileTargetRedirect,
+}
+
+/// Returns the first construct the permission gate cannot decompose. These
+/// constructs must never be auto-allowed: command/process substitution, or a
+/// real file-target redirect. Separators and subshells are handled by
+/// [`split_for_permissions`].
+pub(crate) fn first_unattestable_construct(cmd: &str) -> Option<UnattestableConstruct> {
     if contains_substitution(cmd) {
-        return true;
+        return Some(UnattestableConstruct::Substitution);
     }
     let tokens = tokenize(cmd);
     tokens
         .iter()
         .enumerate()
         .any(|(i, tok)| tok.kind == TokenKind::Redirect && redirect_has_file_target(&tokens, i))
+        .then_some(UnattestableConstruct::FileTargetRedirect)
+}
+
+/// True for constructs the permission gate cannot decompose, so they must never
+/// be auto-allowed.
+pub fn contains_unattestable_construct(cmd: &str) -> bool {
+    first_unattestable_construct(cmd).is_some()
 }
 
 /// Quote-aware: bash runs backtick/`$(...)` unquoted and inside double quotes,
@@ -612,13 +625,18 @@ fn contains_substitution(cmd: &str) -> bool {
 
 // `>&N`/`>&-` (and `N>&M`) is fd-dup/close; bare `>&` before a word is
 // `>word 2>&1` — a file target.
+pub(super) fn redirect_is_fd_dup_or_close(value: &str) -> bool {
+    let Some(pos) = value.find(">&") else {
+        return false;
+    };
+    let tail = &value[pos + 2..];
+    !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit() || c == '-')
+}
+
 fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool {
     let value = &tokens[i].value;
-    if let Some(pos) = value.find(">&") {
-        let tail = &value[pos + 2..];
-        if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit() || c == '-') {
-            return false;
-        }
+    if redirect_is_fd_dup_or_close(value) {
+        return false;
     }
     match tokens.get(i + 1) {
         Some(next) if next.kind == TokenKind::Arg => next.value != "/dev/null",
