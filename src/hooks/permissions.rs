@@ -33,6 +33,9 @@ pub fn check_command(cmd: &str) -> PermissionVerdict {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Host {
     Claude,
+    /// Codex applies its own approval and execpolicy rules. RTK does not
+    /// reuse Claude settings for this host.
+    Codex,
     Cursor,
     Gemini,
     Droid,
@@ -41,6 +44,7 @@ pub enum Host {
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
     let (deny_rules, ask_rules, allow_rules) = match host {
         Host::Claude => load_permission_rules(),
+        Host::Codex => (Vec::new(), Vec::new(), Vec::new()),
         Host::Cursor => load_cursor_rules(),
         Host::Gemini => load_gemini_rules(),
         Host::Droid => load_droid_rules(),

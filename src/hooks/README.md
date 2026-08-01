@@ -89,7 +89,7 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 | Cursor (rtk hook cursor) | Ready | `permission: "ask",` — users will be prompted when Cursor enforces the permission; in the meantime, allow |
 | Gemini CLI (rtk hook gemini) | No (allow/deny only) | allow (limitation — no ask mode in Gemini) |
 | Copilot CLI (rtk hook copilot) | No updatedInput | deny-with-suggestion (unchanged) |
-| Codex | ask parsed but no-op | allow (limitation — fails open) |
+| Codex | Codex owns approval and execpolicy rules | no-op in default/ask modes; safe rewrites are allowed only in `bypassPermissions` |
 
 ### Implementation
 
