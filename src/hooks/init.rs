@@ -978,8 +978,10 @@ fn patch_settings_json_command(
         serde_json::json!({})
     };
 
-    // Check idempotency
-    if hook_already_present(&root, hook_command) {
+    // Check idempotency, but still clean up stale versioned entries left by
+    // an older install when the current hook is already present.
+    let hook_present = hook_already_present(&root, hook_command);
+    if hook_present && !has_older_rtk_hook(&root) {
         if verbose > 0 {
             eprintln!("settings.json: hook already present");
         }
@@ -1114,6 +1116,21 @@ fn older_rtk_hook(command: &str, current: RtkVersion) -> bool {
         && parse_rtk_version(command).is_some_and(|version| version < current)
 }
 
+fn has_older_rtk_hook(root: &serde_json::Value) -> bool {
+    let current = current_rtk_version();
+    root.get("hooks")
+        .and_then(|hooks| hooks.get(PRE_TOOL_USE_KEY))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("hooks"))
+        .filter_map(serde_json::Value::as_array)
+        .flatten()
+        .filter_map(|hook| hook.get("command"))
+        .filter_map(serde_json::Value::as_str)
+        .any(|command| older_rtk_hook(command, current))
+}
+
 /// Deep-merge RTK hook entry into settings.json while removing only older RTK
 /// hook commands from existing entries.
 fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result<()> {
@@ -1151,6 +1168,10 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result
         !inner_hooks.is_empty()
     });
 
+    if hook_command_present(pre_tool_use, hook_command) {
+        return Ok(());
+    }
+
     pre_tool_use.push(serde_json::json!({
         "matcher": "Bash",
         "hooks": [{
@@ -1173,8 +1194,12 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         None => return false,
     };
 
+    hook_command_present(pre_tool_use_array, hook_command)
+}
+
+fn hook_command_present(pre_tool_use: &[serde_json::Value], hook_command: &str) -> bool {
     let current = current_rtk_version();
-    pre_tool_use_array
+    pre_tool_use
         .iter()
         .filter_map(|entry| entry.get("hooks")?.as_array())
         .flatten()
@@ -6375,6 +6400,34 @@ mod tests {
             .collect();
         assert_eq!(first_commands, vec!["/usr/local/bin/foreign-hook"]);
         assert_eq!(entries[1]["hooks"][0]["command"], CLAUDE_HOOK_COMMAND);
+    }
+
+    #[test]
+    fn test_insert_hook_entry_prunes_older_hook_without_duplicate_current_hook() {
+        let mut json_content = serde_json::json!({
+            "hooks": {"PreToolUse": [
+                {"matcher": "Bash", "hooks": [{
+                    "type": "command",
+                    "command": "/opt/rtk-0.31.0/bin/rtk hook claude"
+                }]},
+                {"matcher": "Bash", "hooks": [{
+                    "type": "command",
+                    "command": "/opt/homebrew/bin/rtk hook claude"
+                }]}
+            ]}
+        });
+
+        assert!(has_older_rtk_hook(&json_content));
+        insert_hook_entry(&mut json_content, CLAUDE_HOOK_COMMAND).unwrap();
+
+        let commands: Vec<_> = json_content["hooks"][PRE_TOOL_USE_KEY]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|entry| entry["hooks"].as_array().unwrap())
+            .filter_map(|hook| hook["command"].as_str())
+            .collect();
+        assert_eq!(commands, vec!["/opt/homebrew/bin/rtk hook claude"]);
     }
 
     #[test]
