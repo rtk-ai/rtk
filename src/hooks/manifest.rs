@@ -13,9 +13,12 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 const MANIFEST_FILE: &str = "rtk-bash-manifest.json";
 const FALLTHROUGH_GUARD: &str = "RTK_MANIFEST_FALLTHROUGH";
+const CLAUDE_DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(10);
+const HOOK_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 struct Manifest {
@@ -101,6 +104,31 @@ pub(crate) fn deny_reason(output: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn wait_for_output(
+    mut child: std::process::Child,
+    timeout: Duration,
+) -> Result<Option<std::process::Output>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child
+            .try_wait()
+            .context("Failed to poll plugin hook")?
+            .is_some()
+        {
+            return child
+                .wait_with_output()
+                .map(Some)
+                .context("Failed to capture plugin hook output");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        std::thread::sleep(HOOK_POLL_INTERVAL);
+    }
+}
+
 pub(crate) fn run_manifest_handlers(claude_dir: &Path, payload: &str) -> ManifestResult {
     if std::env::var_os(FALLTHROUGH_GUARD).is_some() {
         return ManifestResult::NoBlock;
@@ -148,7 +176,7 @@ pub(crate) fn run_manifest_handlers(claude_dir: &Path, payload: &str) -> Manifes
                 .take()
                 .map(|mut stdin| stdin.write_all(payload.as_bytes()).is_ok())
                 .unwrap_or(false);
-            let Ok(output) = child.wait_with_output() else {
+            let Ok(Some(output)) = wait_for_output(child, CLAUDE_DEFAULT_HOOK_TIMEOUT) else {
                 continue;
             };
 
@@ -762,6 +790,24 @@ mod tests {
             Some("blocked".into())
         );
         assert!(!is_json_deny("not json"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timed_out_handler_is_killed_without_blocking_dispatch() {
+        let child = Command::new("sh")
+            .args(["-c", "sleep 1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+
+        assert!(wait_for_output(child, Duration::from_millis(25))
+            .unwrap()
+            .is_none());
+        assert!(started.elapsed() < Duration::from_millis(500));
     }
 
     #[cfg(unix)]
