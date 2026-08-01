@@ -31,6 +31,10 @@ struct ManifestEntry {
     original_entries: Vec<Value>,
     patched_entries: Vec<Value>,
     commands: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plugin_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plugin_data: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -105,7 +109,21 @@ pub(crate) fn run_manifest_handlers(claude_dir: &Path, payload: &str) -> Manifes
             let Some((program, args)) = split_handler_command(&command) else {
                 continue;
             };
-            let mut child = match command_for_program(&program)
+            if let Some(plugin_data) = entry.plugin_data.as_deref() {
+                let _ = fs::create_dir_all(plugin_data);
+            }
+            let mut command = command_for_program(&program);
+            if let Some(plugin_root) = entry.plugin_root.as_deref() {
+                command
+                    .env("CLAUDE_PLUGIN_ROOT", plugin_root)
+                    .env("PLUGIN_ROOT", plugin_root);
+            }
+            if let Some(plugin_data) = entry.plugin_data.as_deref() {
+                command
+                    .env("CLAUDE_PLUGIN_DATA", plugin_data)
+                    .env("PLUGIN_DATA", plugin_data);
+            }
+            let mut child = match command
                 .args(args)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -230,51 +248,32 @@ fn entry_is_active(entry: &ManifestEntry) -> bool {
         .is_none_or(|active| active == version_dir)
 }
 
-fn resolve_plugin_root(
-    command: &str,
-    vendor: &str,
-    plugin: &str,
-    settings: &Value,
-    claude_dir: &Path,
-) -> String {
-    const PLACEHOLDER: &str = "${CLAUDE_PLUGIN_ROOT}";
-    if !command.contains(PLACEHOLDER) {
-        return command.to_owned();
-    }
-
-    let marketplace = settings
-        .get("extraKnownMarketplaces")
-        .and_then(|value| value.get(vendor))
-        .and_then(|value| value.get("source"))
-        .and_then(|value| value.get("path"))
-        .and_then(Value::as_str)
-        .map(PathBuf::from);
-    let candidates = marketplace
-        .into_iter()
-        .flat_map(|root| {
-            [
-                root.join("plugins").join(plugin),
-                root.join("plugins").join(vendor),
-            ]
-        })
-        .chain(std::iter::once(
-            claude_dir.join("plugins").join(vendor).join(plugin),
-        ));
-
-    candidates
-        .filter(|path| path.exists())
-        .map(|path| command.replace(PLACEHOLDER, &path.to_string_lossy()))
-        .next()
-        .unwrap_or_else(|| command.to_owned())
+fn resolve_plugin_placeholders(command: &str, plugin_root: &Path, plugin_data: &Path) -> String {
+    let root = plugin_root.to_string_lossy();
+    let data = plugin_data.to_string_lossy();
+    command
+        .replace("${CLAUDE_PLUGIN_ROOT}", &root)
+        .replace("${PLUGIN_ROOT}", &root)
+        .replace("${CLAUDE_PLUGIN_DATA}", &data)
+        .replace("${PLUGIN_DATA}", &data)
 }
 
-fn resolved_commands(
-    entry: &Value,
-    vendor: &str,
-    plugin: &str,
-    settings: &Value,
-    claude_dir: &Path,
-) -> Option<Vec<String>> {
+fn plugin_data_path(claude_dir: &Path, vendor: &str, plugin: &str) -> PathBuf {
+    let id = format!("{plugin}@{vendor}");
+    let id = id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    claude_dir.join("plugins").join("data").join(id)
+}
+
+fn resolved_commands(entry: &Value, plugin_root: &Path, plugin_data: &Path) -> Option<Vec<String>> {
     let hooks = entry.get("hooks")?.as_array()?;
     let mut commands = Vec::new();
     for command in hooks
@@ -282,7 +281,7 @@ fn resolved_commands(
         .filter_map(|hook| hook.get("command"))
         .filter_map(Value::as_str)
     {
-        let command = resolve_plugin_root(command, vendor, plugin, settings, claude_dir);
+        let command = resolve_plugin_placeholders(command, plugin_root, plugin_data);
         split_handler_command(&command)?;
         commands.push(command);
     }
@@ -310,7 +309,6 @@ fn patch_hook_file(
     path: &Path,
     vendor: &str,
     plugin: &str,
-    settings: &Value,
     claude_dir: &Path,
 ) -> Result<Option<ManifestEntry>> {
     let content = fs::read_to_string(path)
@@ -329,6 +327,10 @@ fn patch_hook_file(
     let mut patched_entries = Vec::with_capacity(entries.len());
     let mut commands = Vec::new();
     let mut changed = false;
+    let Some(plugin_root) = path.parent().and_then(Path::parent).map(Path::to_path_buf) else {
+        return Ok(None);
+    };
+    let plugin_data = plugin_data_path(claude_dir, vendor, plugin);
 
     for entry in &original_entries {
         let matcher = entry
@@ -339,8 +341,7 @@ fn patch_hook_file(
             patched_entries.push(entry.clone());
             continue;
         }
-        let Some(entry_commands) = resolved_commands(entry, vendor, plugin, settings, claude_dir)
-        else {
+        let Some(entry_commands) = resolved_commands(entry, &plugin_root, &plugin_data) else {
             return Ok(None);
         };
         commands.extend(entry_commands);
@@ -367,6 +368,8 @@ fn patch_hook_file(
         original_entries,
         patched_entries,
         commands,
+        plugin_root: Some(plugin_root.to_string_lossy().into_owned()),
+        plugin_data: Some(plugin_data.to_string_lossy().into_owned()),
     }))
 }
 
@@ -377,10 +380,6 @@ pub(crate) fn patch_plugin_caches(claude_dir: &Path, verbose: u8) -> Result<usiz
     }
     let path = manifest_path(claude_dir);
     let mut manifest = read_manifest(&path)?.unwrap_or_default();
-    let settings = fs::read_to_string(claude_dir.join("settings.json"))
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
     let mut patched_count = 0;
 
     let Ok(vendors) = fs::read_dir(&cache_root) else {
@@ -418,7 +417,7 @@ pub(crate) fn patch_plugin_caches(claude_dir: &Path, verbose: u8) -> Result<usiz
                 {
                     continue;
                 }
-                match patch_hook_file(&hook_path, vendor, plugin, &settings, claude_dir) {
+                match patch_hook_file(&hook_path, vendor, plugin, claude_dir) {
                     Ok(Some(entry)) => {
                         manifest.entries.push(entry);
                         patched_count += 1;
@@ -555,6 +554,25 @@ mod tests {
     }
 
     #[test]
+    fn resolves_plugin_root_and_data_placeholders() {
+        let commands = resolved_commands(
+            &json!({"hooks": [{"command": "${CLAUDE_PLUGIN_ROOT}/run ${CLAUDE_PLUGIN_DATA}"}]}),
+            Path::new("/plugins/cache/vendor/plugin/1.0.0"),
+            Path::new("/plugins/data/plugin-vendor"),
+        );
+        assert_eq!(
+            commands,
+            Some(vec![
+                "/plugins/cache/vendor/plugin/1.0.0/run /plugins/data/plugin-vendor".to_string()
+            ])
+        );
+        assert_eq!(
+            plugin_data_path(Path::new("/home/user/.claude"), "vendor", "plugin"),
+            PathBuf::from("/home/user/.claude/plugins/data/plugin-vendor")
+        );
+    }
+
+    #[test]
     fn patch_is_idempotent_and_restore_is_conditional() {
         let tmp = TempDir::new().unwrap();
         let path = hook_file(tmp.path());
@@ -651,7 +669,7 @@ mod tests {
         let handler = tmp.path().join("handler");
         fs::write(
             &handler,
-            "#!/bin/sh\nprintf '{\"decision\":\"deny\",\"reason\":\"blocked by test\"}'\n",
+            "#!/bin/sh\nprintf '{\"decision\":\"deny\",\"reason\":\"%s\"}' \"$CLAUDE_PLUGIN_ROOT\"\n",
         )
         .unwrap();
         let mut permissions = fs::metadata(&handler).unwrap().permissions();
@@ -665,6 +683,8 @@ mod tests {
                     original_entries: Vec::new(),
                     patched_entries: Vec::new(),
                     commands: vec![handler.to_string_lossy().into_owned()],
+                    plugin_root: Some("/plugin/root".into()),
+                    plugin_data: Some(tmp.path().join("data").to_string_lossy().into_owned()),
                 }],
             },
         )
@@ -673,9 +693,10 @@ mod tests {
         assert_eq!(
             run_manifest_handlers(tmp.path(), "{\"tool_name\":\"Bash\"}"),
             ManifestResult::Blocked {
-                stdout: "{\"decision\":\"deny\",\"reason\":\"blocked by test\"}".into(),
+                stdout: "{\"decision\":\"deny\",\"reason\":\"/plugin/root\"}".into(),
                 stderr: Vec::new(),
             }
         );
+        assert!(tmp.path().join("data").is_dir());
     }
 }
