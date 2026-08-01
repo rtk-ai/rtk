@@ -2833,6 +2833,14 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_cd_then_uv_run_pytest() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cd backend && uv run pytest tests/", &[]),
+            Some("cd backend && uv run rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_env_uv_run_pytest() {
         assert_eq!(
             rewrite_command_no_prefixes("PYTHONPATH=. uv run pytest tests/", &[]),
