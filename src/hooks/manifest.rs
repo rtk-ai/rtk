@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -108,25 +108,49 @@ fn wait_for_output(
     mut child: std::process::Child,
     timeout: Duration,
 ) -> Result<Option<std::process::Output>> {
+    let stdout = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut output = Vec::new();
+            pipe.read_to_end(&mut output).map(|_| output)
+        })
+    });
+    let stderr = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut output = Vec::new();
+            pipe.read_to_end(&mut output).map(|_| output)
+        })
+    });
     let deadline = Instant::now() + timeout;
     loop {
-        if child
-            .try_wait()
-            .context("Failed to poll plugin hook")?
-            .is_some()
-        {
-            return child
-                .wait_with_output()
-                .map(Some)
-                .context("Failed to capture plugin hook output");
+        if let Some(status) = child.try_wait().context("Failed to poll plugin hook")? {
+            let stdout = join_pipe(stdout).context("Failed to capture plugin hook stdout")?;
+            let stderr = join_pipe(stderr).context("Failed to capture plugin hook stderr")?;
+            return Ok(Some(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            }));
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
+            // A timed-out hook may have left descendants holding the pipes open. Dropping
+            // these handles avoids waiting for those descendants while their readers finish
+            // naturally when the inherited descriptors close.
             return Ok(None);
         }
         std::thread::sleep(HOOK_POLL_INTERVAL);
     }
+}
+
+fn join_pipe(pipe: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>) -> Result<Vec<u8>> {
+    pipe.map(|pipe| {
+        pipe.join()
+            .map_err(|_| anyhow::anyhow!("plugin hook output reader panicked"))?
+            .context("failed to read plugin hook output")
+    })
+    .transpose()
+    .map(|output| output.unwrap_or_default())
 }
 
 pub(crate) fn run_manifest_handlers(claude_dir: &Path, payload: &str) -> ManifestResult {
@@ -808,6 +832,25 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completed_handler_with_large_output_is_not_killed_for_pipe_backpressure() {
+        let child = Command::new("sh")
+            .args(["-c", "yes x | head -n 100000"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+
+        let output = wait_for_output(child, Duration::from_secs(2))
+            .unwrap()
+            .expect("large output must be drained while the child runs");
+        assert!(output.stdout.len() > 100_000);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[cfg(unix)]
