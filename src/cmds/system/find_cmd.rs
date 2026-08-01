@@ -7,7 +7,7 @@ use ignore::WalkBuilder;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Match a filename against a glob pattern (supports `*` and `?`).
+/// Match a filename against a find-style glob pattern.
 fn glob_match(pattern: &str, name: &str) -> bool {
     glob_match_inner(pattern.as_bytes(), name.as_bytes())
 }
@@ -21,9 +21,57 @@ fn glob_match_inner(pat: &[u8], name: &[u8]) -> bool {
                 || (!name.is_empty() && glob_match_inner(pat, &name[1..]))
         }
         (Some(b'?'), Some(_)) => glob_match_inner(&pat[1..], &name[1..]),
+        (Some(b'['), Some(&character)) => match match_bracket_class(pat, character) {
+            Some((true, consumed)) => glob_match_inner(&pat[consumed..], &name[1..]),
+            Some((false, _)) => false,
+            None => character == b'[' && glob_match_inner(&pat[1..], &name[1..]),
+        },
         (Some(&p), Some(&n)) if p == n => glob_match_inner(&pat[1..], &name[1..]),
         _ => false,
     }
+}
+
+/// Match a find-style bracket class such as `[abc]` or `[0-9]`.
+/// Returns whether the character matched and the number of consumed pattern bytes.
+fn match_bracket_class(pattern: &[u8], character: u8) -> Option<(bool, usize)> {
+    let negated = pattern
+        .get(1)
+        .is_some_and(|byte| *byte == b'!' || *byte == b'^');
+    let first_member = if negated { 2 } else { 1 };
+
+    // In find/fnmatch syntax, a closing bracket in the first member position
+    // is a literal class member. Search for the terminator after it.
+    let closing_search = if pattern.get(first_member) == Some(&b']') {
+        first_member + 1
+    } else {
+        first_member
+    };
+    let closing = pattern
+        .iter()
+        .enumerate()
+        .skip(closing_search)
+        .find_map(|(index, byte)| (*byte == b']').then_some(index))?;
+
+    let class = &pattern[1..closing];
+    let class = if negated { &class[1..] } else { class };
+
+    let mut index = 0;
+    let mut matched = false;
+    while index < class.len() {
+        if index + 2 < class.len() && class[index + 1] == b'-' {
+            if (class[index]..=class[index + 2]).contains(&character) {
+                matched = true;
+            }
+            index += 3;
+        } else {
+            if class[index] == character {
+                matched = true;
+            }
+            index += 1;
+        }
+    }
+
+    Some((matched != negated, closing + 1))
 }
 
 /// Parsed arguments from either native find or RTK find syntax.
@@ -179,6 +227,7 @@ fn parse_rtk_find_args(args: &[String]) -> Result<FindArgs> {
 
 /// Entry point from main.rs — parses raw args then delegates to run().
 pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
+    let native_syntax = has_native_find_flags(args);
     let parsed = parse_find_args(args)?;
     run(
         &parsed.pattern,
@@ -187,10 +236,12 @@ pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
         parsed.max_depth,
         &parsed.file_type,
         parsed.case_insensitive,
+        native_syntax,
         verbose,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     pattern: &str,
     path: &str,
@@ -198,6 +249,7 @@ pub fn run(
     max_depth: Option<usize>,
     file_type: &str,
     case_insensitive: bool,
+    native_syntax: bool,
     verbose: u8,
 ) -> Result<()> {
     let timer = tracking::TimedExecution::start();
@@ -211,16 +263,18 @@ pub fn run(
 
     let want_dirs = file_type == "d";
 
-    // When the pattern targets dotfiles (e.g. -name ".claude.json"), we must walk hidden
-    // entries; otherwise skip them to keep results tidy (#1101).
-    let search_hidden = effective_pattern.starts_with('.');
+    // Native find syntax promises native visibility. Compact RTK syntax keeps its
+    // ignore-aware defaults unless the pattern explicitly targets dotfiles.
+    let prune_ignored = !native_syntax;
+    let search_hidden = native_syntax || effective_pattern.starts_with('.');
 
     let mut builder = WalkBuilder::new(path);
     builder
-        .hidden(!search_hidden) // skip hidden files/dirs unless pattern targets dotfiles
-        .git_ignore(true) // respect .gitignore
-        .git_global(true)
-        .git_exclude(true);
+        .hidden(!search_hidden)
+        .ignore(prune_ignored)
+        .git_ignore(prune_ignored)
+        .git_global(prune_ignored)
+        .git_exclude(prune_ignored);
     if let Some(depth) = max_depth {
         builder.max_depth(Some(depth));
     }
@@ -429,6 +483,12 @@ mod tests {
         assert!(!glob_match("test_*", "test"));
     }
 
+    #[test]
+    fn glob_match_unclosed_bracket_is_literal() {
+        assert!(glob_match("file[.txt", "file[.txt"));
+        assert!(!glob_match("file[.txt", "file1.txt"));
+    }
+
     // --- dot pattern treated as star ---
 
     #[test]
@@ -569,14 +629,14 @@ mod tests {
     #[test]
     fn find_dotfile_pattern_includes_hidden() {
         // .gitignore exists at the repo root — must be found when using a dotfile pattern
-        let result = run(".gitignore", ".", 50, Some(1), "f", false, 0);
+        let result = run(".gitignore", ".", 50, Some(1), "f", false, false, 0);
         assert!(result.is_ok(), "run with dotfile pattern should not error");
     }
 
     #[test]
     fn find_regular_pattern_skips_hidden() {
         // Non-dot pattern should not error (hidden dirs remain skipped)
-        let result = run("*.rs", "src", 5, None, "f", false, 0);
+        let result = run("*.rs", "src", 5, None, "f", false, false, 0);
         assert!(result.is_ok());
     }
 
@@ -585,34 +645,34 @@ mod tests {
     #[test]
     fn find_rs_files_in_src() {
         // Should find .rs files without error
-        let result = run("*.rs", "src", 100, None, "f", false, 0);
+        let result = run("*.rs", "src", 100, None, "f", false, false, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_dot_pattern_works() {
         // "." pattern should not error (was broken before)
-        let result = run(".", "src", 10, None, "f", false, 0);
+        let result = run(".", "src", 10, None, "f", false, false, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_no_matches() {
-        let result = run("*.xyz_nonexistent", "src", 50, None, "f", false, 0);
+        let result = run("*.xyz_nonexistent", "src", 50, None, "f", false, false, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_respects_max() {
         // With max=2, should not error
-        let result = run("*.rs", "src", 2, None, "f", false, 0);
+        let result = run("*.rs", "src", 2, None, "f", false, false, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_gitignored_excluded() {
         // target/ is in .gitignore — files inside should not appear
-        let result = run("*", ".", 1000, None, "f", false, 0);
+        let result = run("*", ".", 1000, None, "f", false, false, 0);
         assert!(result.is_ok());
         // We can't easily capture stdout in unit tests, but at least
         // verify it runs without error. The smoke tests verify content.

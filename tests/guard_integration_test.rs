@@ -150,6 +150,67 @@ fn find_no_results_emits_empty() {
 }
 
 #[test]
+fn find_native_syntax_includes_hidden_and_gitignored_matches() {
+    let dir = init_git_repo();
+    std::fs::create_dir_all(dir.path().join(".hidden")).expect("create hidden directory");
+    std::fs::create_dir_all(dir.path().join("ignored")).expect("create ignored directory");
+    std::fs::write(dir.path().join("visible.txt"), "visible\n").expect("write visible file");
+    std::fs::write(dir.path().join(".hidden/secret.txt"), "hidden\n").expect("write hidden file");
+    std::fs::write(dir.path().join("ignored/note.txt"), "ignored\n").expect("write ignored file");
+    std::fs::write(dir.path().join(".gitignore"), "ignored/\n").expect("write gitignore");
+
+    let (out, code) = rtk_in_dir(dir.path(), &["find", ".", "-name", "*.txt"]);
+    let mut matches: Vec<_> = out.lines().collect();
+    matches.sort_unstable();
+
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        matches,
+        vec![".hidden/secret.txt", "ignored/note.txt", "visible.txt"],
+        "native find syntax must not silently prune hidden or gitignored files"
+    );
+}
+
+#[test]
+fn find_native_syntax_supports_bracket_character_classes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for name in [
+        "file1.txt",
+        "file2.txt",
+        "fileA.txt",
+        "file].txt",
+        "report9.log",
+    ] {
+        std::fs::write(dir.path().join(name), "x\n").expect("write fixture file");
+    }
+
+    let (out, code) = rtk_in_dir(dir.path(), &["find", ".", "-name", "file[0-9].txt"]);
+    let mut matches: Vec<_> = out.lines().collect();
+    matches.sort_unstable();
+
+    assert_eq!(code, Some(0));
+    assert_eq!(matches, vec!["file1.txt", "file2.txt"]);
+
+    let (out, code) = rtk_in_dir(dir.path(), &["find", ".", "-name", "file[!0-9].txt"]);
+    assert_eq!(code, Some(0));
+    let mut matches: Vec<_> = out.lines().collect();
+    matches.sort_unstable();
+    assert_eq!(matches, vec!["fileA.txt", "file].txt"]);
+
+    let (out, code) = rtk_in_dir(dir.path(), &["find", ".", "-name", "file[]A].txt"]);
+    let mut matches: Vec<_> = out.lines().collect();
+    matches.sort_unstable();
+    assert_eq!(code, Some(0));
+    assert_eq!(matches, vec!["fileA.txt", "file].txt"]);
+
+    let (out, code) = rtk_in_dir(dir.path(), &["find", ".", "-name", "file[!]].txt"]);
+    let mut matches: Vec<_> = out.lines().collect();
+    matches.sort_unstable();
+    assert_eq!(code, Some(0));
+    assert_eq!(matches, vec!["file1.txt", "file2.txt", "fileA.txt"]);
+}
+
+#[test]
 fn git_stash_list_no_stashes_emits_empty() {
     let dir = init_git_repo();
     let (out, code) = rtk_in_dir(dir.path(), &["git", "stash", "list"]);
