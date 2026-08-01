@@ -4,6 +4,7 @@
 //! corrupts the JSON protocol (Claude Code bug #4669 silently disables the hook).
 
 use super::constants::PRE_TOOL_USE_KEY;
+use super::manifest::{deny_reason, run_manifest_handlers, ManifestResult};
 use super::permissions::{self, PermissionVerdict};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -494,6 +495,27 @@ pub fn run_claude() -> Result<()> {
             return Ok(());
         }
     };
+
+    // Run displaced plugin handlers against the original payload before RTK
+    // emits a rewrite. A handler deny must win, while a non-deny response is
+    // intentionally discarded so RTK remains the single rewrite producer.
+    if let Ok(claude_dir) = super::init::resolve_claude_dir() {
+        if let ManifestResult::Blocked { stdout, stderr } =
+            run_manifest_handlers(&claude_dir, input)
+        {
+            if !stdout.trim().is_empty() {
+                let _ = writeln!(io::stdout(), "{stdout}");
+            }
+            if stderr.is_empty() {
+                let reason = deny_reason(&stdout)
+                    .unwrap_or_else(|| "Command blocked by registered hook".to_owned());
+                let _ = writeln!(io::stderr(), "{reason}");
+            } else {
+                let _ = io::stderr().write_all(&stderr);
+            }
+            std::process::exit(2);
+        }
+    }
 
     match process_claude_payload(&v) {
         PayloadAction::Rewrite {
