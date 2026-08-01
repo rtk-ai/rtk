@@ -17,7 +17,7 @@ use super::constants::{
     DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR,
     DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
     HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
-    HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
+    HOOKS_SUBDIR, KIRO_DIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
     PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
@@ -32,6 +32,7 @@ const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
 const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
+const RTK_SLIM_KIRO: &str = include_str!("../../hooks/kiro/rtk-steering.md");
 
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
@@ -69,6 +70,8 @@ const CLAUDE_MD: &str = "CLAUDE.md";
 const AGENTS_MD: &str = "AGENTS.md";
 const RTK_MD_REF: &str = "@RTK.md";
 const GEMINI_MD: &str = "GEMINI.md";
+const KIRO_STEERING_SUBDIR: &str = "steering";
+const KIRO_STEERING_FILE: &str = "rtk.md";
 
 const RTK_BLOCK_START: &str = "<!-- rtk-instructions";
 const RTK_BLOCK_END: &str = "<!-- /rtk-instructions -->";
@@ -643,6 +646,7 @@ pub fn uninstall(
     gemini: bool,
     codex: bool,
     cursor: bool,
+    kiro: bool,
     pi: bool,
     ctx: InitContext,
 ) -> Result<()> {
@@ -652,6 +656,11 @@ pub fn uninstall(
         if dry_run {
             print_dry_run_footer();
         }
+        return Ok(());
+    }
+
+    if kiro {
+        uninstall_kiro(global, ctx)?;
         return Ok(());
     }
 
@@ -1629,6 +1638,9 @@ const WINDSURF_RULES: &str = include_str!("../../hooks/windsurf/rules.md");
 /// Embedded Cline RTK rules
 const CLINE_RULES: &str = include_str!("../../hooks/cline/rules.md");
 
+/// Embedded Kiro RTK steering file
+const KIRO_RULES: &str = RTK_SLIM_KIRO;
+
 // ─── Cline / Roo Code support ─────────────────────────────────
 
 fn run_cline_mode(ctx: InitContext) -> Result<()> {
@@ -1716,6 +1728,33 @@ fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
         println!("  Cascade will now use rtk commands for token savings.");
         println!("  Restart Windsurf. Test with: git status\n");
     }
+
+    Ok(())
+}
+
+pub fn run_kiro_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let steering_path = prepare_kiro_steering_path(global, ctx)?;
+    let changed = ensure_kiro_steering_installed(&steering_path, ctx)?;
+
+    if dry_run {
+        print_dry_run_footer();
+        return Ok(());
+    }
+
+    println!("\nRTK configured for Kiro CLI.\n");
+    println!("  Steering: {}", steering_path.display());
+    if changed {
+        println!("  Mode:     installed/updated");
+    } else {
+        println!("  Mode:     already up to date");
+    }
+    if global {
+        println!("  Scope:    global (~/.kiro/steering)");
+    } else {
+        println!("  Scope:    workspace (./.kiro/steering)");
+    }
+    println!("  Restart Kiro if it is already running. Test with: git status\n");
 
     Ok(())
 }
@@ -2873,6 +2912,10 @@ fn resolve_codex_dir_from(
         .context("Cannot determine Codex config directory. Set $CODEX_HOME or $HOME.")
 }
 
+fn resolve_kiro_dir() -> Result<PathBuf> {
+    resolve_home_subdir(KIRO_DIR)
+}
+
 fn resolve_hermes_home() -> Result<PathBuf> {
     resolve_hermes_home_from_env(dirs::home_dir(), std::env::var_os("HERMES_HOME"))
 }
@@ -3502,6 +3545,80 @@ fn print_pi_result(plugin_path: &Path, installed: bool) {
     println!("Verify: pi -e {} --no-session", plugin_path.display());
 }
 
+fn kiro_steering_path(global: bool) -> Result<PathBuf> {
+    if global {
+        Ok(resolve_kiro_dir()?
+            .join(KIRO_STEERING_SUBDIR)
+            .join(KIRO_STEERING_FILE))
+    } else {
+        Ok(PathBuf::from(KIRO_DIR)
+            .join(KIRO_STEERING_SUBDIR)
+            .join(KIRO_STEERING_FILE))
+    }
+}
+
+fn prepare_kiro_steering_path(global: bool, ctx: InitContext) -> Result<PathBuf> {
+    let InitContext { dry_run, .. } = ctx;
+    let path = kiro_steering_path(global)?;
+    if let Some(parent) = path.parent() {
+        if dry_run {
+            if !parent.exists() {
+                println!(
+                    "[dry-run] would create Kiro steering directory: {}",
+                    parent.display()
+                );
+            }
+        } else {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create Kiro steering directory: {}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+    Ok(path)
+}
+
+fn ensure_kiro_steering_installed(path: &Path, ctx: InitContext) -> Result<bool> {
+    write_if_changed(path, KIRO_RULES, "Kiro steering", ctx)
+}
+
+fn uninstall_kiro(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+    let steering_path = kiro_steering_path(global)?;
+
+    if steering_path.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove Kiro steering file: {}",
+                steering_path.display()
+            );
+            print_dry_run_footer();
+            return Ok(());
+        }
+
+        fs::remove_file(&steering_path).with_context(|| {
+            format!(
+                "Failed to remove Kiro steering file: {}",
+                steering_path.display()
+            )
+        })?;
+        if verbose > 0 {
+            eprintln!("Removed Kiro steering file: {}", steering_path.display());
+        }
+        println!("RTK uninstalled (Kiro CLI):");
+        println!("  - Steering: {}", steering_path.display());
+        println!("\nRestart Kiro if it is already running.");
+    } else if dry_run {
+        print_dry_run_footer();
+    } else {
+        println!("RTK Kiro support was not installed (nothing to remove)");
+    }
+
+    Ok(())
+}
+
 /// Return OpenCode plugin path: ~/.config/opencode/plugins/rtk.ts
 fn opencode_plugin_path(opencode_dir: &Path) -> PathBuf {
     opencode_dir.join(PLUGIN_SUBDIR).join(OPENCODE_PLUGIN_FILE)
@@ -3868,9 +3985,13 @@ fn remove_cursor_hook_from_json(root: &mut serde_json::Value) -> bool {
 }
 
 /// Show current rtk configuration
-pub fn show_config(codex: bool) -> Result<()> {
+pub fn show_config(codex: bool, kiro: bool) -> Result<()> {
     if codex {
         return show_codex_config();
+    }
+
+    if kiro {
+        return show_kiro_config();
     }
 
     show_claude_config()
@@ -4101,8 +4222,38 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --hook-only     # Hook only, no RTK.md");
     println!("  rtk init --codex            # Configure local AGENTS.md + RTK.md");
     println!("  rtk init -g --codex         # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
+    println!("  rtk init --agent kiro       # Configure ./.kiro/steering/rtk.md");
+    println!("  rtk init -g --agent kiro    # Configure ~/.kiro/steering/rtk.md");
     println!("  rtk init -g --opencode      # OpenCode plugin only");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
+
+    Ok(())
+}
+
+fn show_kiro_config() -> Result<()> {
+    let global_steering = kiro_steering_path(true)?;
+    let local_steering = kiro_steering_path(false)?;
+
+    println!("rtk Configuration (Kiro CLI):\n");
+
+    if global_steering.exists() {
+        println!("[ok] Global steering: {}", global_steering.display());
+    } else {
+        println!("[--] Global steering: not found");
+    }
+
+    if local_steering.exists() {
+        println!("[ok] Local steering: {}", local_steering.display());
+    } else {
+        println!("[--] Local steering: not found");
+    }
+
+    println!("\nUsage:");
+    println!("  rtk init --agent kiro                  # Configure ./.kiro/steering/rtk.md");
+    println!("  rtk init -g --agent kiro               # Configure ~/.kiro/steering/rtk.md");
+    println!("  rtk init --agent kiro --show           # Show Kiro configuration");
+    println!("  rtk init --agent kiro --uninstall      # Remove local Kiro steering");
+    println!("  rtk init -g --agent kiro --uninstall   # Remove global Kiro steering");
 
     Ok(())
 }
@@ -6152,6 +6303,25 @@ mod tests {
         assert!(content.contains(RTK_BLOCK_START));
     }
 
+    #[test]
+    fn test_kiro_steering_install_and_update() {
+        let temp = TempDir::new().unwrap();
+        let steering_path = temp.path().join("rtk.md");
+
+        let changed =
+            ensure_kiro_steering_installed(&steering_path, InitContext::default()).unwrap();
+        assert!(changed);
+        let content = fs::read_to_string(&steering_path).unwrap();
+        assert_eq!(content, KIRO_RULES);
+
+        fs::write(&steering_path, "old").unwrap();
+        let changed_again =
+            ensure_kiro_steering_installed(&steering_path, InitContext::default()).unwrap();
+        assert!(changed_again);
+        let updated = fs::read_to_string(&steering_path).unwrap();
+        assert_eq!(updated, KIRO_RULES);
+    }
+
     // Tests for hook_already_present()
     #[test]
     fn test_hook_already_present_exact_match() {
@@ -6882,7 +7052,16 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
-            uninstall(true, false, false, false, false, InitContext::default()).unwrap();
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                InitContext::default(),
+            )
+            .unwrap();
 
             assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
             let settings_content =
@@ -7010,7 +7189,7 @@ mod tests {
                 dry_run: true,
                 ..Default::default()
             };
-            uninstall(true, false, false, false, false, dry).unwrap();
+            uninstall(true, false, false, false, false, false, dry).unwrap();
 
             // Files must still exist with identical content
             assert!(
@@ -7236,7 +7415,16 @@ mod tests {
             let plugin = pi_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
             assert!(plugin.exists());
 
-            uninstall(true, false, false, false, true, InitContext::default()).unwrap();
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                InitContext::default(),
+            )
+            .unwrap();
 
             assert!(!plugin.exists(), "plugin must be removed");
         });
@@ -7250,7 +7438,15 @@ mod tests {
         std::env::set_current_dir(tmp.path()).unwrap();
 
         run_pi_mode(false, InitContext::default()).unwrap();
-        let result = uninstall(false, false, false, false, true, InitContext::default());
+        let result = uninstall(
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            InitContext::default(),
+        );
         std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
@@ -7348,6 +7544,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 true,
                 InitContext {
                     verbose: 0,
@@ -7382,6 +7579,7 @@ mod tests {
         );
 
         let result = uninstall(
+            false,
             false,
             false,
             false,

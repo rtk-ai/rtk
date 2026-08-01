@@ -23,6 +23,7 @@ pub const OPENCODE_PLUGIN_FILE: &str = "rtk.ts";
 pub const CURSOR_DIR: &str = ".cursor";
 pub const CODEX_DIR: &str = ".codex";
 pub const GEMINI_DIR: &str = ".gemini";
+pub const KIRO_DIR: &str = ".kiro";
 
 pub const GITHUB_DIR: &str = ".github";
 pub const COPILOT_HOOK_FILE: &str = "rtk-rewrite.json";
