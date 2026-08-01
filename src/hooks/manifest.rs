@@ -13,6 +13,10 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 const MANIFEST_FILE: &str = "rtk-bash-manifest.json";
@@ -153,6 +157,19 @@ fn join_pipe(pipe: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>) ->
     .map(|output| output.unwrap_or_default())
 }
 
+fn write_stdin_in_background(child: &mut std::process::Child, payload: &str) -> Arc<AtomicBool> {
+    let write_ok = Arc::new(AtomicBool::new(false));
+    let Some(mut stdin) = child.stdin.take() else {
+        return write_ok;
+    };
+    let payload = payload.as_bytes().to_owned();
+    let completed = Arc::clone(&write_ok);
+    std::thread::spawn(move || {
+        completed.store(stdin.write_all(&payload).is_ok(), Ordering::Release);
+    });
+    write_ok
+}
+
 pub(crate) fn run_manifest_handlers(claude_dir: &Path, payload: &str) -> ManifestResult {
     if std::env::var_os(FALLTHROUGH_GUARD).is_some() {
         return ManifestResult::NoBlock;
@@ -195,17 +212,14 @@ pub(crate) fn run_manifest_handlers(claude_dir: &Path, payload: &str) -> Manifes
                 Err(_) => continue,
             };
 
-            let write_ok = child
-                .stdin
-                .take()
-                .map(|mut stdin| stdin.write_all(payload.as_bytes()).is_ok())
-                .unwrap_or(false);
+            let write_ok = write_stdin_in_background(&mut child, payload);
             let Ok(Some(output)) = wait_for_output(child, CLAUDE_DEFAULT_HOOK_TIMEOUT) else {
                 continue;
             };
 
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let blocked = (output.status.code() == Some(2) && write_ok) || is_json_deny(&stdout);
+            let blocked = (output.status.code() == Some(2) && write_ok.load(Ordering::Acquire))
+                || is_json_deny(&stdout);
             if blocked && first_block.is_none() {
                 first_block = Some(stdout.into_owned());
                 stderr.extend_from_slice(&output.stderr);
@@ -828,6 +842,25 @@ mod tests {
             .unwrap();
         let started = Instant::now();
 
+        assert!(wait_for_output(child, Duration::from_millis(25))
+            .unwrap()
+            .is_none());
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_reading_handler_cannot_block_before_timeout() {
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+
+        write_stdin_in_background(&mut child, &"x".repeat(1_048_576));
         assert!(wait_for_output(child, Duration::from_millis(25))
             .unwrap()
             .is_none());
