@@ -90,10 +90,10 @@ Glob pattern="src/cmds/**/*_cmd.rs"
 # Also: src/cmds/git/git.rs, src/cmds/rust/runner.rs, src/cmds/cloud/container.rs
 ```
 
-### "Find all lazy_static regex definitions"
+### "Find all LazyLock regex definitions"
 
 ```
-Grep pattern="lazy_static!" type="rust" output_mode="content"
+Grep pattern="LazyLock" type="rust" output_mode="content"
 ```
 
 ### "Find unwrap() outside tests"
@@ -134,7 +134,7 @@ Glob pattern="tests/fixtures/*.txt"
 
 1. Start with `src/cmds/<ecosystem>/<cmd>_cmd.rs` → find `run()` function
 2. Trace filter function (usually `filter_<cmd>()`)
-3. Check `lazy_static!` regex patterns in same file
+3. Check `LazyLock` regex patterns in same file
 4. Check `src/core/utils.rs::strip_ansi()` if ANSI codes involved
 
 ### Tracking/metrics issues

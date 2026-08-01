@@ -263,7 +263,7 @@ fn warn_marker_is_fresh(marker: &std::path::Path) -> bool {
 
 fn refresh_warn_marker(marker: &std::path::Path) -> std::io::Result<()> {
     if let Some(parent) = marker.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::core::utils::create_private_dir(parent)?;
     }
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

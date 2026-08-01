@@ -1,13 +1,15 @@
 ---
 title: Token Savings Analytics
-description: Measure and analyze your RTK token savings with rtk gain
+description: Measure and analyze the bash output reduction RTK achieves with rtk gain
 sidebar:
   order: 1
 ---
 
 # Token Savings Analytics
 
-`rtk gain` shows how many tokens RTK has saved across all your commands, with daily, weekly, and monthly breakdowns.
+`rtk gain` shows how much bash output RTK has removed across all your commands, with daily, weekly, and monthly breakdowns.
+
+What `rtk gain` measures is the reduction in **bash output bytes**, converted to estimated tokens. Bash output is one contributor to input tokens, alongside your prompt, the system prompt and conversation history, and input tokens are in turn only part of the bill, which also counts output tokens. See [How RTK Savings Work](../resources/savings-explained.md) for the full picture.
 
 ## Quick reference
 
@@ -38,6 +40,8 @@ rtk gain --all --format csv  > savings.csv
 rtk gain --daily
 ```
 
+**Example output** (illustrative numbers from one machine, not typical results — yours depend entirely on which commands you run):
+
 ```
 📅 Daily Breakdown (3 days)
 ════════════════════════════════════════════════════════════════
@@ -51,10 +55,10 @@ TOTAL            196       1.3M      59.2K       1.2M   95.6%
 ```
 
 - **Cmds**: RTK commands executed
-- **Input**: Estimated tokens from raw command output
-- **Output**: Actual tokens after filtering
-- **Saved**: Input - Output (tokens that never reached the LLM)
-- **Save%**: Saved / Input × 100
+- **Input**: Estimated tokens from raw command output (`bytes / 4`)
+- **Output**: Estimated tokens after filtering (`bytes / 4`)
+- **Saved**: Input - Output, in estimated tokens
+- **Save%**: Saved / Input × 100 — a **bash output byte ratio**, not a share of your bill
 
 ## Weekly and monthly breakdowns
 
@@ -91,8 +95,8 @@ Same columns as daily, aggregated by Sunday-Saturday week or calendar month.
 
 ## Typical savings by command
 
-| Command | Typical savings | Mechanism |
-|---------|----------------|-----------|
+| Command | Bash output reduction | Mechanism |
+|---------|----------------------|-----------|
 | `git status` | 77-93% | Compact stat format |
 | `eslint` | 84% | Group by rule |
 | `jest` | 94-99% | Show failures only |
@@ -101,9 +105,11 @@ Same columns as daily, aggregated by Sunday-Saturday week or calendar month.
 | `pnpm list` | 70-90% | Compact dependencies |
 | `grep` | 70% | Truncate + group |
 
+These percentages measure bash output bytes removed, not cost reduction.
+
 ## How token estimation works
 
-RTK estimates tokens using `text.len() / 4` (4 characters per token average). This is accurate to ±10% compared to actual LLM tokenization — sufficient for trend analysis.
+`rtk gain` estimates tokens as `bytes / 4` (`src/core/tracking.rs:1284`). RTK ships no real tokenizer by design: embedding one would cost startup time and would require a tokenizer per model, or a per-session model lookup, which RTK does not implement. The same estimator is applied to raw and filtered output, so the percentage is reliable; the absolute token counts are approximate and will not match your provider's billing.
 
 ```
 Input Tokens  = estimate_tokens(raw_command_output)
@@ -179,7 +185,7 @@ jobs:
 
 ## Quota estimate
 
-`--quota` estimates how many tokens RTK has saved relative to your monthly subscription budget, so you can see the cost impact of those savings.
+`--quota` expresses the estimated tokens saved as a fraction of a monthly subscription budget. Like every other figure in `rtk gain`, it is derived from the `bytes / 4` estimate of bash output, so treat it as an order of magnitude rather than a billing forecast.
 
 ```bash
 rtk gain --quota          # uses 20x tier by default

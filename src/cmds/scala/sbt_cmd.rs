@@ -1,55 +1,53 @@
 use crate::core::runner::{self, RunOptions};
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
-use lazy_static::lazy_static;
 use regex::Regex;
 use std::ffi::OsString;
+use std::sync::LazyLock;
 
-lazy_static! {
-    /// Matches the ScalaTest summary line:
-    /// Tests: succeeded N, failed N, canceled N, ignored N, pending N
-    static ref TEST_SUMMARY_RE: Regex = Regex::new(
-        r"Tests: succeeded (\d+), failed (\d+), canceled (\d+), ignored (\d+), pending (\d+)"
-    ).unwrap();
+/// Matches the ScalaTest summary line:
+/// Tests: succeeded N, failed N, canceled N, ignored N, pending N
+static TEST_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"Tests: succeeded (\d+), failed (\d+), canceled (\d+), ignored (\d+), pending (\d+)",
+    )
+    .unwrap()
+});
 
-    /// Matches the munit summary line (also used by discipline-munit / ZIO Test):
-    /// [info] Passed: Total N, Failed N, Errors N, Passed N
-    /// [info] Failed: Total N, Failed N, Errors N, Passed N
-    static ref MUNIT_SUMMARY_RE: Regex = Regex::new(
-        r"^\[info\] (?:Passed|Failed): Total \d+, Failed (\d+), Errors (\d+), Passed (\d+)"
-    ).unwrap();
+/// Matches the munit summary line (also used by discipline-munit / ZIO Test):
+/// [info] Passed: Total N, Failed N, Errors N, Passed N
+/// [info] Failed: Total N, Failed N, Errors N, Passed N
+static MUNIT_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\[info\] (?:Passed|Failed): Total \d+, Failed (\d+), Errors (\d+), Passed (\d+)")
+        .unwrap()
+});
 
-    /// Matches suite count line:
-    /// Suites: completed N, aborted N
-    static ref SUITE_SUMMARY_RE: Regex = Regex::new(
-        r"Suites: completed (\d+), aborted (\d+)"
-    ).unwrap();
+/// Matches suite count line:
+/// Suites: completed N, aborted N
+static SUITE_SUMMARY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"Suites: completed (\d+), aborted (\d+)").unwrap());
 
-    /// Matches the "Run completed in" timing line
-    static ref RUN_TIME_RE: Regex = Regex::new(
-        r"Run completed in (\d+) seconds?"
-    ).unwrap();
+/// Matches the "Run completed in" timing line
+static RUN_TIME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"Run completed in (\d+) seconds?").unwrap());
 
-    /// Matches [info] Compiling N Scala source(s)
-    static ref COMPILE_COUNT_RE: Regex = Regex::new(
-        r"\[info\] Compiling (\d+) Scala source"
-    ).unwrap();
+/// Matches [info] Compiling N Scala source(s)
+static COMPILE_COUNT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[info\] Compiling (\d+) Scala source").unwrap());
 
-    /// Matches [success] Total time: Ns
-    static ref SUCCESS_TIME_RE: Regex = Regex::new(
-        r"\[success\] Total time: (\d+) s"
-    ).unwrap();
+/// Matches [success] Total time: Ns
+static SUCCESS_TIME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[success\] Total time: (\d+) s").unwrap());
 
-    /// Matches [error] lines
-    static ref ERROR_RE: Regex = Regex::new(
-        r"^\[error\]"
-    ).unwrap();
+/// Matches [error] lines
+static ERROR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[error\]").unwrap());
 
-    /// Lines that are SBT noise (loading, resolving, downloading, etc.)
-    static ref NOISE_RE: Regex = Regex::new(
+/// Lines that are SBT noise (loading, resolving, downloading, etc.)
+static NOISE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
         r"^\[info\] (welcome to sbt|loading |set current project|Updating |Resolved |Fetching |downloading |Done )"
-    ).unwrap();
-}
+    ).unwrap()
+});
 
 /// Integration test subcommand patterns (sbt configuration/task notation).
 /// These produce ScalaTest output and should use the same filtering as `sbt test`.
@@ -58,6 +56,12 @@ fn is_integration_test_cmd(subcommand: &str) -> bool {
         subcommand,
         "it:test" | "IntegrationTest/test" | "integration-test/test"
     ) || (subcommand.ends_with(":test") || subcommand.ends_with("/test"))
+}
+
+fn is_test_task(subcommand: &str) -> bool {
+    let task = subcommand.split_whitespace().next().unwrap_or(subcommand);
+    let task = task.rsplit(['/', ':']).next().unwrap_or(task);
+    matches!(task, "testOnly" | "testQuick")
 }
 
 /// Returns true if `s` is a scoped SBT task (e.g. `Test/test`, `it/Test/compile`).
@@ -130,7 +134,7 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
     // ScalaTest output — filter them like `sbt test`, through the shared runner so the
     // never_worse cap and tee hint apply (an unrecognized output would otherwise be
     // reprinted verbatim plus the hint, i.e. more than the raw command produced).
-    if is_integration_test_cmd(&subcommand) {
+    if is_integration_test_cmd(&subcommand) || is_test_task(&subcommand) {
         let mut cmd = resolved_command("sbt");
         cmd.arg(&subcommand);
         for arg in &args[1..] {
@@ -140,6 +144,12 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
         if verbose > 0 {
             eprintln!("Running: sbt {} ...", subcommand);
         }
+
+        let tee_label = if is_integration_test_cmd(&subcommand) {
+            "sbt_it_test"
+        } else {
+            "sbt_test"
+        };
 
         let rest: Vec<String> = args[1..]
             .iter()
@@ -156,7 +166,7 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
             "sbt",
             &args_display,
             filter_sbt_test,
-            RunOptions::with_tee("sbt_it_test"),
+            RunOptions::with_tee(tee_label),
         );
     }
 
@@ -692,6 +702,23 @@ mod tests {
         assert!(!is_integration_test_cmd("test"));
         assert!(!is_integration_test_cmd("compile"));
         assert!(!is_integration_test_cmd("assembly"));
+    }
+
+    #[test]
+    fn test_is_test_task() {
+        assert!(is_test_task("testOnly"));
+        assert!(is_test_task("testQuick"));
+        assert!(is_test_task("Test/testOnly"));
+        assert!(is_test_task("core/testOnly"));
+        assert!(is_test_task("it:testOnly"));
+        assert!(is_test_task("testOnly com.example.MySpec"));
+        assert!(is_test_task("testOnly *CalcSpec"));
+        assert!(is_test_task("core/testOnly com.example.MySpec"));
+        assert!(!is_test_task("test"));
+        assert!(!is_test_task("Test/test"));
+        assert!(!is_test_task("testOnlyFoo"));
+        assert!(!is_test_task("compile"));
+        assert!(!is_test_task("clean; testOnly com.example.MySpec"));
     }
 
     // --- sbt test: munit format ---
