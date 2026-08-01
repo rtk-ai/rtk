@@ -1270,6 +1270,15 @@ const GIT_PUSH_NOISE_PREFIXES: &[&str] = &[
     "Total ",
 ];
 
+const GIT_PUSH_REJECTION_MARKERS: &[&str] = &[
+    "[remote rejected]",
+    "[rejected]",
+    "gh013",
+    "push declined",
+    "pre-receive hook declined",
+    "error: failed to push",
+];
+
 #[derive(Default)]
 struct GitPushLineHandler {
     up_to_date: bool,
@@ -1301,8 +1310,8 @@ impl LineHandler for GitPushLineHandler {
         }
     }
 
-    fn format_summary(&self, exit_code: i32, _raw: &str) -> Option<String> {
-        if exit_code != 0 {
+    fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String> {
+        if exit_code != 0 || push_output_indicates_rejection(raw) {
             return None;
         }
         let summary = if self.up_to_date {
@@ -1345,7 +1354,18 @@ fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
         &result.filtered,
     );
 
+    if result.exit_code == 0 && push_output_indicates_rejection(&result.raw) {
+        return Ok(1);
+    }
+
     Ok(result.exit_code)
+}
+
+fn push_output_indicates_rejection(raw: &str) -> bool {
+    let raw = raw.to_ascii_lowercase();
+    GIT_PUSH_REJECTION_MARKERS
+        .iter()
+        .any(|marker| raw.contains(marker))
 }
 
 fn run_pull(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
@@ -3283,6 +3303,37 @@ error: failed to push some refs to 'https://github.com/foo/bar.git'
             "summary leaked on failure, got: {}",
             result
         );
+    }
+
+    #[test]
+    fn test_push_filter_no_summary_when_rejection_is_reported_with_zero_exit() {
+        let input = "\
+To https://github.com/foo/bar.git
+ ! [remote rejected] main -> main (push declined due to repository rule violations)
+";
+        let result = run_push_filter(input, 0);
+        assert!(result.contains("[remote rejected]"), "rejection must remain visible: {result}");
+        assert!(
+            !result.lines().any(|line| line == "ok" || line.starts_with("ok ")),
+            "rejected push must not report success: {result}"
+        );
+    }
+
+    #[test]
+    fn test_push_rejection_classifier_handles_server_variants_without_false_positive() {
+        for (output, rejected) in [
+            ("remote: error: GH013: ruleset violation", true),
+            (" ! [REMOTE REJECTED] main -> main (push declined)", true),
+            ("error: failed to push some refs", true),
+            ("Everything up-to-date", false),
+            ("remote: resolving deltas", false),
+        ] {
+            assert_eq!(
+                push_output_indicates_rejection(output),
+                rejected,
+                "unexpected classification for {output:?}"
+            );
+        }
     }
 
     #[test]
