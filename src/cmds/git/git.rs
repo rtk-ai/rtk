@@ -9,12 +9,11 @@ use crate::core::stream::{
 use crate::core::tracking;
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{
-    exit_code_from_output, exit_code_from_status, join_with_overflow, resolved_command, strip_ansi,
+    exit_code_from_status, join_with_overflow, resolved_command, strip_ansi,
 };
 use anyhow::{Context, Result};
 use std::ffi::OsString;
 use std::process::Command;
-use std::process::Stdio;
 
 #[derive(Debug, Clone)]
 pub enum GitCommand {
@@ -1009,18 +1008,35 @@ fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
 /// Handles: `[main abc1234def] message`, `[main (root-commit) abc1234def] msg`,
 /// localized variants, and multibyte branch names.
 fn parse_commit_output(line: &str) -> String {
-    if let Some(bracket_end) = line.find(']') {
-        let bracket_content = &line[1..bracket_end];
-        let hash = bracket_content.split_whitespace().next_back().unwrap_or("");
-        if !hash.is_empty() && hash.len() >= 7 {
-            let short_hash: String = hash.chars().take(7).collect();
-            format!("ok {}", short_hash)
-        } else {
-            "ok".to_string()
-        }
-    } else {
-        "ok".to_string()
+    commit_summary_from_line(line).unwrap_or_else(|| "ok".to_string())
+}
+
+fn commit_summary_from_line(line: &str) -> Option<String> {
+    let bracket_end = line.strip_prefix('[')?.find(']')? + 1;
+    let hash = line[1..bracket_end]
+        .split_whitespace()
+        .next_back()
+        .filter(|hash| hash.len() >= 7 && hash.chars().all(|c| c.is_ascii_hexdigit()))?;
+    Some(format!("ok {}", hash.chars().take(7).collect::<String>()))
+}
+
+struct GitCommitLineHandler;
+
+impl LineHandler for GitCommitLineHandler {
+    fn should_skip(&mut self, line: &str) -> bool {
+        commit_summary_from_line(line.trim_end_matches(['\r', '\n'])).is_some()
     }
+
+    fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+        None
+    }
+}
+
+fn compact_commit_summary(stdout: &str) -> String {
+    stdout
+        .lines()
+        .find_map(|line| commit_summary_from_line(line).map(|_| parse_commit_output(line)))
+        .unwrap_or_else(|| "ok".to_string())
 }
 
 fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
@@ -1032,29 +1048,20 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         eprintln!("{}", original_cmd);
     }
 
-    let output = build_commit_command(args, global_args)
-        .stdin(Stdio::inherit())
-        .output()
-        .context("Failed to run git commit")?;
+    let result = stream::run_streaming(
+        &mut build_commit_command(args, global_args),
+        StdinMode::Inherit,
+        FilterMode::Streaming(Box::new(LineStreamFilter::new(GitCommitLineHandler))),
+    )?;
+    let raw_output = result.raw.clone();
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let exit_code = exit_code_from_output(&output, "git commit");
-    let raw_output = format!("{}\n{}", stdout, stderr);
-
-    match classify_commit_outcome(output.status.success(), &stdout, exit_code) {
+    match classify_commit_outcome(result.exit_code == 0, &result.raw_stdout, result.exit_code) {
         CommitOutcome::Ok(compact) => {
             println!("{}", compact);
             timer.track(&original_cmd, "rtk git commit", &raw_output, &compact);
             Ok(0)
         }
         CommitOutcome::Failed(code) => {
-            if !stderr.trim().is_empty() {
-                eprint!("{}", stderr);
-            }
-            if !stdout.trim().is_empty() {
-                eprint!("{}", stdout);
-            }
             timer.track(&original_cmd, "rtk git commit", &raw_output, &raw_output);
             Ok(code)
         }
@@ -1071,13 +1078,7 @@ enum CommitOutcome {
 /// Classify a `git commit` result.
 fn classify_commit_outcome(success: bool, stdout: &str, exit_code: i32) -> CommitOutcome {
     if success {
-        // Extract commit hash from output
-        let compact = stdout
-            .lines()
-            .next()
-            .map(parse_commit_output)
-            .unwrap_or_else(|| "ok".to_string());
-        CommitOutcome::Ok(compact)
+        CommitOutcome::Ok(compact_commit_summary(stdout))
     } else {
         CommitOutcome::Failed(exit_code)
     }
@@ -2071,6 +2072,7 @@ pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -
 
 #[cfg(test)]
 mod tests {
+    use crate::core::stream::StreamFilter;
     use super::*;
 
     #[test]
@@ -2862,6 +2864,41 @@ no changes added to commit (use "git add" and/or "git commit -a")
         // Hash shorter than 7 chars — treat as "ok" (no hash shown)
         let line = "[main abc12] message";
         assert_eq!(parse_commit_output(line), "ok");
+    }
+
+    #[test]
+    fn test_parse_commit_output_does_not_hide_bracketed_hook_output() {
+        assert_eq!(
+            parse_commit_output("[hook not-a-hash] validation output"),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn test_commit_stream_preserves_hooks_and_drops_git_summary() {
+        let mut filter = LineStreamFilter::new(GitCommitLineHandler);
+        let mut output = String::new();
+        for line in [
+            "hook before",
+            "[main abc1234def] add feature",
+            "hook after",
+        ] {
+            if let Some(line) = filter.feed_line(line) {
+                output.push_str(&line);
+            }
+        }
+        assert_eq!(output, "hook before\nhook after\n");
+    }
+
+    #[test]
+    fn test_commit_stream_keeps_non_git_bracketed_output() {
+        let mut filter = LineStreamFilter::new(GitCommitLineHandler);
+        for line in [
+            "[hook not-a-hash] validation output",
+            "[hook prompt: answer",
+        ] {
+            assert_eq!(filter.feed_line(line), Some(format!("{line}\n")));
+        }
     }
 
     #[test]
