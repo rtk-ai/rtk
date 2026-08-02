@@ -1710,7 +1710,7 @@ mod tests {
         let command = "grep -rn foo src\nf=$(whoami)";
         assert!(matches!(
             decide_with_rules(command, &[], &[], &all_allowed()),
-            HookDecision::AskRewrite { rewritten, .. }
+            HookDecision::AskRewrite(rewritten)
                 if rewritten == "rtk grep -rn foo src\nf=$(whoami)"
         ));
     }
@@ -1720,10 +1720,7 @@ mod tests {
         let decision = decide_with_rules("git log > /tmp/out.txt", &[], &[], &all_allowed());
         assert!(matches!(
             decision,
-            HookDecision::AskRewrite {
-                rewritten,
-                explicit: true
-            } if rewritten == "rtk git log > /tmp/out.txt"
+            HookDecision::AskRewrite(rewritten) if rewritten == "rtk git log > /tmp/out.txt"
         ));
     }
 
