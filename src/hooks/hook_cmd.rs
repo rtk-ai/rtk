@@ -539,24 +539,23 @@ fn process_codex_payload(v: &Value) -> PayloadAction {
         None => return PayloadAction::Ignore,
     };
 
-    let decision = decide_hook_action(cmd, permissions::Host::Codex);
-    process_codex_payload_with_decision(v, cmd, decision)
+    let verdict = permissions::check_command_for(cmd, permissions::Host::Codex);
+    process_codex_payload_with_verdict(v, cmd, verdict)
 }
 
-fn process_codex_payload_with_decision(
+fn process_codex_payload_with_verdict(
     v: &Value,
     cmd: &str,
-    decision: HookDecision,
+    verdict: permissions::PermissionVerdict,
 ) -> PayloadAction {
-    let decision = if v.get("permission_mode").and_then(Value::as_str) == Some("bypassPermissions")
+    let mut decision = decide_from_verdict(cmd, verdict.clone());
+    if v.get("permission_mode").and_then(Value::as_str) == Some("bypassPermissions")
+        && verdict == permissions::PermissionVerdict::Default
     {
-        match decision {
-            HookDecision::AskRewrite(rewritten) => HookDecision::AllowRewrite(rewritten),
-            decision => decision,
+        if let HookDecision::AskRewrite(rewritten) = decision {
+            decision = HookDecision::AllowRewrite(rewritten);
         }
-    } else {
-        decision
-    };
+    }
 
     process_pre_tool_use_payload_with_decision(
         v,
@@ -731,8 +730,7 @@ fn run_codex_inner_with_rules(
         .and_then(|c| c.as_str())
         .filter(|c| !c.is_empty())?;
     let verdict = permissions::check_command_with_rules(cmd, deny, ask, allow);
-    let decision = decide_from_verdict(cmd, verdict);
-    match process_codex_payload_with_decision(&v, cmd, decision) {
+    match process_codex_payload_with_verdict(&v, cmd, verdict) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
         PayloadAction::Deny { reason, .. } => Some(pre_tool_use_deny_output(&reason).to_string()),
         _ => None,
@@ -1674,23 +1672,22 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_bypass_mode_keeps_file_redirect_ask_only() {
-        let input: Value = serde_json::from_str(&codex_input_with_mode(
-            "git log > /tmp/out.txt",
-            "bypassPermissions",
-        ))
-        .unwrap();
-        assert!(matches!(
-            process_codex_payload_with_decision(
-                &input,
-                "git log > /tmp/out.txt",
-                HookDecision::AskRewrite {
-                    rewritten: "rtk git log > /tmp/out.txt".into(),
-                    explicit: true,
-                },
-            ),
-            PayloadAction::Skip { .. }
-        ));
+    fn test_codex_bypass_mode_keeps_ask_verdict_out_of_allow() {
+        for command in ["git status", "git log > /tmp/out.txt"] {
+            let input: Value =
+                serde_json::from_str(&codex_input_with_mode(command, "bypassPermissions")).unwrap();
+            assert!(
+                matches!(
+                    process_codex_payload_with_verdict(
+                        &input,
+                        command,
+                        permissions::PermissionVerdict::Ask,
+                    ),
+                    PayloadAction::Skip { .. }
+                ),
+                "explicit Ask must not become an allow rewrite: {command}"
+            );
+        }
     }
 
     #[test]
