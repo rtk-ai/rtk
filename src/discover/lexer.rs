@@ -436,6 +436,83 @@ pub fn split_on_operators(cmd: &str, stop_at_pipe: bool) -> Vec<&str> {
     results
 }
 
+/// Byte spans of statements separated by top-level newlines. A newline inside
+/// quotes/backticks/`$( )`/`( )`, or after a trailing `|`/`&` continuation, is
+/// not a separator.
+pub fn split_top_level_newlines(cmd: &str) -> Vec<(usize, usize)> {
+    let bytes = cmd.as_bytes();
+    let mut spans = Vec::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_backtick = false;
+    let mut depth: usize = 0;
+    let mut seg_start = 0usize;
+    let mut last_nonspace: Option<u8> = None;
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'\\' if !in_single => {
+                if let Some(&next) = bytes.get(i + 1) {
+                    if !next.is_ascii_whitespace() {
+                        last_nonspace = Some(next);
+                    }
+                    i += 2;
+                    continue;
+                }
+            }
+            b'\'' if !in_double && !in_backtick => {
+                in_single = !in_single;
+                last_nonspace = Some(b);
+            }
+            b'"' if !in_single && !in_backtick => {
+                in_double = !in_double;
+                last_nonspace = Some(b);
+            }
+            b'`' if !in_single && !in_double => {
+                in_backtick = !in_backtick;
+                last_nonspace = Some(b);
+            }
+            b'(' if !in_single && !in_double && !in_backtick => {
+                depth += 1;
+                last_nonspace = Some(b);
+            }
+            b')' if !in_single && !in_double && !in_backtick => {
+                depth = depth.saturating_sub(1);
+                last_nonspace = Some(b);
+            }
+            b'\n' if !in_single && !in_double && !in_backtick && depth == 0 => {
+                let continuation = matches!(last_nonspace, Some(b'|') | Some(b'&'));
+                if !continuation {
+                    push_trimmed_span(cmd, seg_start, i, &mut spans);
+                    seg_start = i + 1;
+                    last_nonspace = None;
+                }
+            }
+            _ => {
+                if !b.is_ascii_whitespace() {
+                    last_nonspace = Some(b);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    push_trimmed_span(cmd, seg_start, bytes.len(), &mut spans);
+    spans
+}
+
+fn push_trimmed_span(cmd: &str, start: usize, end: usize, spans: &mut Vec<(usize, usize)>) {
+    let raw = &cmd[start..end];
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let span_start = start + (raw.len() - raw.trim_start().len());
+    spans.push((span_start, span_start + trimmed.len()));
+}
+
 #[cfg(test)]
 pub fn strip_quotes(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
@@ -489,6 +566,43 @@ pub fn shell_split(input: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn newline_segments(cmd: &str) -> Vec<&str> {
+        split_top_level_newlines(cmd)
+            .iter()
+            .map(|&(s, e)| &cmd[s..e])
+            .collect()
+    }
+
+    #[test]
+    fn test_split_top_level_newlines_basic() {
+        assert_eq!(newline_segments("ls\ngrep foo"), vec!["ls", "grep foo"]);
+    }
+
+    #[test]
+    fn test_split_top_level_newlines_skips_blank_lines() {
+        assert_eq!(newline_segments("ls\n\n\ngrep foo"), vec!["ls", "grep foo"]);
+    }
+
+    #[test]
+    fn test_split_top_level_newlines_quoted_newline_not_split() {
+        assert_eq!(split_top_level_newlines("echo \"a\nb\"").len(), 1);
+    }
+
+    #[test]
+    fn test_split_top_level_newlines_substitution_newline_not_split() {
+        assert_eq!(split_top_level_newlines("x=$(echo a\necho b)").len(), 1);
+    }
+
+    #[test]
+    fn test_split_top_level_newlines_pipe_continuation_not_split() {
+        assert_eq!(split_top_level_newlines("git log |\ngrep x").len(), 1);
+    }
+
+    #[test]
+    fn test_split_top_level_newlines_single_statement() {
+        assert_eq!(newline_segments("git status"), vec!["git status"]);
+    }
 
     #[test]
     fn test_simple_command() {

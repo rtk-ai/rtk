@@ -174,11 +174,11 @@ fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
     }
-    if crate::discover::lexer::contains_unattestable_construct(cmd) {
-        return HookDecision::Defer;
-    }
+    let attestable = !crate::discover::lexer::contains_unattestable_construct(cmd);
     match get_rewritten(cmd) {
-        Some(r) if verdict == PermissionVerdict::Allow => HookDecision::AllowRewrite(r),
+        Some(r) if attestable && verdict == PermissionVerdict::Allow => {
+            HookDecision::AllowRewrite(r)
+        }
         Some(r) => HookDecision::AskRewrite(r),
         None => HookDecision::Defer,
     }

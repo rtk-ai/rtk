@@ -51,15 +51,15 @@ fn evaluate(cmd: &str, excluded: &[String], transparent_prefixes: &[String]) -> 
         return RewriteOutcome::Deny;
     }
 
-    if crate::discover::lexer::contains_unattestable_construct(cmd) {
-        return RewriteOutcome::Passthrough;
-    }
+    // Unattestable commands may still be rewritten (clean statements compressed)
+    // but must never auto-allow, so exit 0 requires attestable + Allow (#1155).
+    let attestable = !crate::discover::lexer::contains_unattestable_construct(cmd);
 
     match registry::rewrite_command(cmd, excluded, transparent_prefixes) {
-        Some(rewritten) => match verdict {
-            PermissionVerdict::Allow => RewriteOutcome::Allow(rewritten),
-            _ => RewriteOutcome::Ask(rewritten),
-        },
+        Some(rewritten) if attestable && verdict == PermissionVerdict::Allow => {
+            RewriteOutcome::Allow(rewritten)
+        }
+        Some(rewritten) => RewriteOutcome::Ask(rewritten),
         None => RewriteOutcome::Passthrough,
     }
 }
@@ -139,6 +139,20 @@ mod tests {
                 evaluate("git status", &[], &[]),
                 RewriteOutcome::Ask(_)
             ));
+        }
+
+        #[test]
+        fn test_bundle_with_substitution_rewrites_clean_and_asks() {
+            match evaluate("grep -rn foo src\nf=$(whoami)", &[], &[]) {
+                RewriteOutcome::Ask(r) => {
+                    assert!(
+                        r.contains("rtk grep -rn foo src"),
+                        "clean grep rewritten: {r}"
+                    );
+                    assert!(r.contains("f=$(whoami)"), "substitution preserved: {r}");
+                }
+                other => panic!("expected Ask(rewritten), got {other:?}"),
+            }
         }
     }
 

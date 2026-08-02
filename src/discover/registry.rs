@@ -5,7 +5,10 @@ use regex::{Regex, RegexSet};
 use std::path::Path;
 use std::sync::LazyLock;
 
-use super::lexer::{shell_split, split_on_operators, tokenize, ParsedToken, PipeKind, TokenKind};
+use super::lexer::{
+    contains_unattestable_construct, shell_split, split_on_operators, split_top_level_newlines,
+    tokenize, ParsedToken, PipeKind, TokenKind,
+};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
@@ -576,16 +579,53 @@ pub fn rewrite_command(
         return None;
     }
 
-    if has_heredoc(trimmed) || trimmed.contains("$((") {
+    if has_heredoc(trimmed) {
         return None;
     }
 
     let compiled = compile_exclude_patterns(excluded);
     let normalized_prefixes = normalize_transparent_prefixes(transparent_prefixes);
 
-    // Simple (non-compound) already-RTK command — return as-is.
-    // For compound commands that start with "rtk" (e.g. "rtk git add . && cargo test"),
-    // fall through to rewrite_compound so the remaining segments get rewritten.
+    let statements = split_top_level_newlines(trimmed);
+    if statements.len() <= 1 {
+        return rewrite_logical_line(trimmed, &compiled, &normalized_prefixes);
+    }
+
+    let mut result = String::with_capacity(trimmed.len() + 32);
+    let mut any_changed = false;
+    let mut prev_end = 0;
+    for &(start, end) in &statements {
+        result.push_str(&trimmed[prev_end..start]);
+        let statement = &trimmed[start..end];
+        let rewritten = match rewrite_logical_line(statement, &compiled, &normalized_prefixes) {
+            Some(r) if r != statement => {
+                any_changed = true;
+                r
+            }
+            _ => statement.to_string(),
+        };
+        result.push_str(&rewritten);
+        prev_end = end;
+    }
+    result.push_str(&trimmed[prev_end..]);
+
+    if any_changed {
+        Some(result)
+    } else {
+        None
+    }
+}
+
+fn rewrite_logical_line(
+    line: &str,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
     let has_compound = trimmed.contains("&&")
         || trimmed.contains("||")
         || trimmed.contains(';')
@@ -595,7 +635,19 @@ pub fn rewrite_command(
         return Some(trimmed.to_string());
     }
 
-    rewrite_compound(trimmed, &compiled, &normalized_prefixes)
+    // Data-bound output, and the tokenizer can't safely split a substitution
+    // interior — keep verbatim so the hook never auto-allows it (#1155).
+    if contains_unattestable_construct(trimmed) {
+        return None;
+    }
+
+    // case terminators (`;;` `;&` `;;&`) tokenize as `;` + `;`/`&`, so
+    // rewrite_compound would emit invalid bash.
+    if trimmed.contains(";;") || trimmed.contains(";&") {
+        return None;
+    }
+
+    rewrite_compound(trimmed, excluded, transparent_prefixes)
 }
 
 /// Pipeline boundaries used to rewrite its final stage.
@@ -2033,6 +2085,120 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("rtk git add . && cargo test", &[]),
             Some("rtk git add . && rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bundle_all_clean_statements() {
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -rn foo src\nls -la src", &[]),
+            Some("rtk grep -rn foo src\nrtk ls -la src".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bundle_preserves_blank_lines() {
+        assert_eq!(
+            rewrite_command_no_prefixes("grep foo src\n\nls src", &[]),
+            Some("rtk grep foo src\n\nrtk ls src".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bundle_recovers_clean_statement_alongside_substitution() {
+        let bundle = "cd /repo\necho hi\nls -la src\ngrep -rn foo src 2>/dev/null | head\nf=$(grep -rl bar src | head -1); echo \"$f\"";
+        let out =
+            rewrite_command_no_prefixes(bundle, &[]).expect("clean ls statement should rewrite");
+        assert!(
+            out.contains("rtk ls -la src"),
+            "ls statement rewritten: {out}"
+        );
+        assert!(
+            out.contains("grep -rn foo src 2>/dev/null | head") && !out.contains("rtk grep -rn"),
+            "pipeline producer stays raw (#3128): {out}"
+        );
+        assert!(
+            out.contains("f=$(grep -rl bar src | head -1); echo \"$f\""),
+            "substitution statement preserved verbatim: {out}"
+        );
+        assert!(
+            out.starts_with("cd /repo\necho hi\n"),
+            "prefix preserved: {out}"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bundle_no_supported_statement_returns_none() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cd /repo\necho hi\nf=$(whoami)", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_single_substitution_statement_returns_none() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status $(whoami)", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_multiline_pipeline_target_stays_raw() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git log -50 |\ngrep fix |\nhead", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bundle_in_for_loop_compresses_body_leaf() {
+        let bundle = "for f in a b\ndo\ngrep foo \"$f\"\ndone";
+        let out = rewrite_command_no_prefixes(bundle, &[]).expect("loop body leaf should rewrite");
+        assert!(
+            out.contains("rtk grep foo \"$f\""),
+            "loop body grep rewritten: {out}"
+        );
+        assert!(
+            out.starts_with("for f in a b\ndo\n"),
+            "loop header preserved: {out}"
+        );
+        assert!(out.ends_with("\ndone"), "loop terminator preserved: {out}");
+    }
+
+    #[test]
+    fn test_rewrite_case_terminator_kept_verbatim() {
+        assert_eq!(
+            rewrite_command_no_prefixes("case $x in\na)\ngrep foo ;;\nesac", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_case_fallthrough_terminator_kept_verbatim() {
+        assert_eq!(
+            rewrite_command_no_prefixes("case $x in\na)\ngrep foo ;&\nb)\nls ;;\nesac", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_both_streams_kept_verbatim() {
+        assert_eq!(rewrite_command_no_prefixes("grep foo |& head", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_clean_leaf_before_case_still_rewrites() {
+        let out = rewrite_command_no_prefixes("grep foo src\ncase $x in\na) ls ;;\nesac", &[])
+            .expect("leading grep should rewrite");
+        assert!(
+            out.contains("rtk grep foo src"),
+            "leading grep rewritten: {out}"
+        );
+        assert!(out.contains("a) ls ;;"), "case clause kept verbatim: {out}");
+        assert!(
+            !out.contains("rtk ls"),
+            "case-clause ls NOT rewritten: {out}"
         );
     }
 
@@ -4374,7 +4540,7 @@ mod tests {
     fn test_rewrite_command_substitution_passthrough() {
         assert_eq!(
             rewrite_command_no_prefixes("git log $(git rev-parse HEAD~1)", &[]),
-            Some("rtk git log $(git rev-parse HEAD~1)".into())
+            None
         );
     }
 
