@@ -671,14 +671,29 @@ pub fn run_docker_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
     crate::core::runner::run_passthrough("docker", args, verbose)
 }
 
-/// Run `docker compose ps` (or `docker compose ps -a`) with compact output
-pub fn run_compose_ps(all: bool, verbose: u8) -> Result<i32> {
+/// Run `docker compose ps` (or `docker compose ps -a`) with compact output.
+/// `extra_args` carries any additional flags/positionals the user passed
+/// (service name filters, `--format`, etc.) so they're never silently dropped.
+pub fn run_compose_ps(all: bool, extra_args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+
+    let has_user_format = extra_args
+        .iter()
+        .any(|a| a == "--format" || a.starts_with("--format="));
 
     let mut raw_args: Vec<&str> = vec!["compose", "ps"];
     if all {
         raw_args.push("-a");
     }
+    raw_args.extend(extra_args.iter().map(String::as_str));
+
+    if has_user_format {
+        // The user asked for a specific docker format — that's exact output they
+        // likely parse downstream, so forward it verbatim instead of compacting.
+        let os_args: Vec<OsString> = raw_args.iter().map(OsString::from).collect();
+        return crate::core::runner::run_passthrough("docker", &os_args, verbose);
+    }
+
     let raw_result = exec_capture(resolved_command("docker").args(&raw_args))
         .context("Failed to run docker compose ps")?;
 
@@ -692,6 +707,7 @@ pub fn run_compose_ps(all: bool, verbose: u8) -> Result<i32> {
     if all {
         format_args.push("-a");
     }
+    format_args.extend(extra_args.iter().map(String::as_str));
     format_args.extend(["--format", "{{.Name}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"]);
     let result = exec_capture(resolved_command("docker").args(&format_args))
         .context("Failed to run docker compose ps --format")?;
@@ -715,13 +731,20 @@ pub fn run_compose_ps(all: bool, verbose: u8) -> Result<i32> {
     Ok(0)
 }
 
-pub fn run_compose_logs(service: Option<&str>, tail: u32, verbose: u8) -> Result<i32> {
+pub fn run_compose_logs(service: Option<&str>, extra_args: &[String], verbose: u8) -> Result<i32> {
+    let has_user_tail = extra_args
+        .iter()
+        .any(|a| a == "--tail" || a.starts_with("--tail="));
+
     let mut cmd = resolved_command("docker");
-    let tail_str = tail.to_string();
-    cmd.args(["compose", "logs", "--tail", &tail_str]);
+    cmd.args(["compose", "logs"]);
+    if !has_user_tail {
+        cmd.args(["--tail", "100"]);
+    }
     if let Some(svc) = service {
         cmd.arg(svc);
     }
+    cmd.args(extra_args);
 
     let svc_label = service.unwrap_or("all");
     runner::run_filtered(
@@ -738,18 +761,20 @@ pub fn run_compose_logs(service: Option<&str>, tail: u32, verbose: u8) -> Result
     )
 }
 
-pub fn run_compose_build(service: Option<&str>, verbose: u8) -> Result<i32> {
+pub fn run_compose_build(extra_args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("docker");
     cmd.args(["compose", "build"]);
-    if let Some(svc) = service {
-        cmd.arg(svc);
-    }
+    cmd.args(extra_args);
 
-    let svc_label = service.unwrap_or("all");
+    let label = if extra_args.is_empty() {
+        "all".to_string()
+    } else {
+        extra_args.join(" ")
+    };
     runner::run_filtered(
         cmd,
         "docker",
-        &format!("compose build {}", svc_label),
+        &format!("compose build {}", label),
         |raw| {
             if verbose > 0 {
                 eprintln!("raw docker compose build:\n{}", raw);
