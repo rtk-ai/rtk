@@ -3098,6 +3098,45 @@ mod tests {
         );
     }
 
+    // --- .NET tooling ---
+
+    #[test]
+    fn test_classify_dotnet_supported_subcommands() {
+        for command in [
+            "dotnet build App.sln",
+            "dotnet test --no-build",
+            "dotnet restore App.sln",
+            "dotnet format --verify-no-changes",
+        ] {
+            assert!(matches!(
+                classify_command(command),
+                Classification::Supported {
+                    rtk_equivalent: "rtk dotnet",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn test_rewrite_dotnet_supported_subcommands() {
+        for (command, expected) in [
+            ("dotnet build App.sln", "rtk dotnet build App.sln"),
+            ("dotnet test --no-build", "rtk dotnet test --no-build"),
+            ("dotnet restore App.sln", "rtk dotnet restore App.sln"),
+            (
+                "dotnet format --verify-no-changes",
+                "rtk dotnet format --verify-no-changes",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.into()),
+                "Failed for command: {command}"
+            );
+        }
+    }
+
     #[test]
     fn test_rewrite_golangci_lint() {
         assert_eq!(
