@@ -1319,6 +1319,15 @@ fn rewrite_segment_inner(
         return None;
     }
 
+    // Keep substitution-bearing segments verbatim. Their nested shell code
+    // cannot be safely routed through a command rule at this level.
+    if matches!(
+        first_unattestable_construct(trimmed),
+        Some(UnattestableConstruct::Substitution)
+    ) {
+        return None;
+    }
+
     if depth >= MAX_PREFIX_DEPTH {
         return None;
     }
@@ -5041,7 +5050,7 @@ mod tests {
     fn test_rewrite_command_substitution_passthrough() {
         assert_eq!(
             rewrite_command_no_prefixes("git log $(git rev-parse HEAD~1)", &[]),
-            Some("rtk git log $(git rev-parse HEAD~1)".into())
+            None
         );
     }
 

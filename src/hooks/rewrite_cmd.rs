@@ -1,7 +1,6 @@
 //! Translates a raw shell command into its RTK-optimized equivalent.
 
 use super::permissions::{check_command, PermissionVerdict};
-use crate::discover::lexer::{first_unattestable_construct, UnattestableConstruct};
 use crate::discover::registry::rewrite_command_with_policy;
 use std::io::Write;
 
@@ -60,12 +59,12 @@ fn evaluate_with_verdict(
         return RewriteOutcome::Deny;
     }
 
-    if first_unattestable_construct(cmd) == Some(UnattestableConstruct::Substitution) {
-        return RewriteOutcome::Passthrough;
-    }
+    let attestable = crate::discover::lexer::first_unattestable_construct(cmd).is_none();
 
     match rewrite_command_with_policy(cmd, excluded, transparent_prefixes) {
-        Some(rewritten) if !rewritten.requires_ask && verdict == PermissionVerdict::Allow => {
+        Some(rewritten)
+            if attestable && !rewritten.requires_ask && verdict == PermissionVerdict::Allow =>
+        {
             RewriteOutcome::Allow(rewritten.command)
         }
         Some(rewritten) => RewriteOutcome::Ask(rewritten.command),
@@ -75,6 +74,8 @@ fn evaluate_with_verdict(
 
 #[cfg(test)]
 mod tests {
+    use super::{evaluate_with_verdict, PermissionVerdict, RewriteOutcome};
+
     fn rewrite_command_no_prefixes(cmd: &str) -> Option<String> {
         crate::discover::registry::rewrite_command(cmd, &[], &[])
     }
@@ -95,6 +96,17 @@ mod tests {
             rewrite_command_no_prefixes("rtk git status"),
             Some("rtk git status".into())
         );
+    }
+
+    #[test]
+    fn test_bundle_with_substitution_rewrites_clean_statement_and_asks() {
+        let command = "grep -rn foo src\nf=$(whoami)";
+        match evaluate_with_verdict(command, &[], &[], PermissionVerdict::Allow) {
+            RewriteOutcome::Ask(rewritten) => {
+                assert_eq!(rewritten, "rtk grep -rn foo src\nf=$(whoami)");
+            }
+            other => panic!("expected an ask rewrite for an unattestable bundle, got {other:?}"),
+        }
     }
 
     mod unattestable_passthrough {

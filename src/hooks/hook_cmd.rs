@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::{self, Read, Write};
 
-use crate::discover::lexer::{first_unattestable_construct, UnattestableConstruct};
+use crate::discover::lexer::first_unattestable_construct;
 use crate::discover::registry::{has_heredoc, rewrite_command_with_policy, RewriteResult};
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
@@ -180,11 +180,9 @@ fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
     }
-    if first_unattestable_construct(cmd) == Some(UnattestableConstruct::Substitution) {
-        return HookDecision::Defer;
-    }
+    let attestable = first_unattestable_construct(cmd).is_none();
     match get_rewrite_result(cmd) {
-        Some(r) if !r.requires_ask && verdict == PermissionVerdict::Allow => {
+        Some(r) if attestable && !r.requires_ask && verdict == PermissionVerdict::Allow => {
             HookDecision::AllowRewrite(r.command)
         }
         Some(r) => HookDecision::AskRewrite(r.command),
@@ -1705,6 +1703,16 @@ mod tests {
                 "expected Defer for {cmd}"
             );
         }
+    }
+
+    #[test]
+    fn test_decide_ask_for_bundle_with_substitution_even_when_allowed() {
+        let command = "grep -rn foo src\nf=$(whoami)";
+        assert!(matches!(
+            decide_with_rules(command, &[], &[], &all_allowed()),
+            HookDecision::AskRewrite { rewritten, .. }
+                if rewritten == "rtk grep -rn foo src\nf=$(whoami)"
+        ));
     }
 
     #[test]
