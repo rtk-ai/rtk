@@ -1361,9 +1361,14 @@ fn rewrite_segment_inner(
         return Some(trimmed.to_string());
     }
 
+    // head/tail short-circuit (flag reordering for `rtk read`) must still honor
+    // exclude_commands — otherwise `head`/`tail` exclusions are silently ignored (#3371).
     if context == RewriteContext::Normal
         && (cmd_part.starts_with("head -") || cmd_part.starts_with("tail "))
     {
+        if is_excluded(cmd_part, excluded) {
+            return None;
+        }
         return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
     }
 
@@ -4650,6 +4655,46 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("curl https://api.example.com/health", &excluded),
             None
+        );
+    }
+
+    #[test]
+    fn test_exclude_head_and_tail_short_circuit() {
+        // #3371: head/tail take a rewrite_line_range short-circuit that used to
+        // skip exclude_commands, while cat (classify path) honored them.
+        let excluded = vec!["cat".to_string(), "head".to_string(), "tail".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("cat x.txt", &excluded),
+            None,
+            "cat exclusion must still be honored"
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("head -50 big.log", &excluded),
+            None,
+            "head exclusion must suppress rewrite_line_range"
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -100 app.log", &excluded),
+            None,
+            "tail -N exclusion must suppress rewrite"
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -n 100 app.log", &excluded),
+            None,
+            "tail -n N exclusion must suppress rewrite"
+        );
+        // Unrelated commands keep rewriting.
+        assert_eq!(
+            rewrite_command_no_prefixes("git status", &excluded),
+            Some("rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_head_rewrites_when_not_excluded() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head -50 big.log", &[]),
+            Some("rtk read big.log --max-lines 50".into())
         );
     }
 
