@@ -8,7 +8,7 @@ use crate::hooks::init::resolve_claude_dir;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as FmtWrite;
 use std::io::Write as IoWrite;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 static CACHED_SALT: OnceLock<String> = OnceLock::new();
@@ -156,6 +156,10 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
 
 pub fn generate_device_hash() -> String {
     let salt = get_or_create_salt();
+    hash_salt(&salt)
+}
+
+fn hash_salt(salt: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(salt.as_bytes());
     format!("{:x}", hasher.finalize())
@@ -163,32 +167,32 @@ pub fn generate_device_hash() -> String {
 
 fn get_or_create_salt() -> String {
     CACHED_SALT
-        .get_or_init(|| {
-            let salt_path = salt_file_path();
-
-            if let Ok(contents) = std::fs::read_to_string(&salt_path) {
-                let trimmed = contents.trim().to_string();
-                if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
-                    return trimmed;
-                }
-            }
-
-            let salt = random_salt();
-            if let Some(parent) = salt_path.parent() {
-                let _ = crate::core::utils::create_private_dir(parent);
-            }
-            if let Ok(mut f) = crate::core::utils::open_private(
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true),
-                &salt_path,
-            ) {
-                let _ = f.write_all(salt.as_bytes());
-            }
-            salt
-        })
+        .get_or_init(|| get_or_create_salt_at(&salt_file_path()))
         .clone()
+}
+
+fn get_or_create_salt_at(salt_path: &Path) -> String {
+    if let Ok(contents) = std::fs::read_to_string(salt_path) {
+        let trimmed = contents.trim().to_string();
+        if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+            return trimmed;
+        }
+    }
+
+    let salt = random_salt();
+    if let Some(parent) = salt_path.parent() {
+        let _ = crate::core::utils::create_private_dir(parent);
+    }
+    if let Ok(mut f) = crate::core::utils::open_private(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true),
+        salt_path,
+    ) {
+        let _ = f.write_all(salt.as_bytes());
+    }
+    salt
 }
 
 fn random_salt() -> String {
@@ -452,27 +456,50 @@ fn touch_marker(path: &PathBuf) {
 mod tests {
     use super::*;
 
+    fn fixed_test_salt() -> String {
+        "a".repeat(64)
+    }
+
     #[test]
     fn test_device_hash_is_stable() {
-        let h1 = generate_device_hash();
-        let h2 = generate_device_hash();
+        let salt = fixed_test_salt();
+        let h1 = hash_salt(&salt);
+        let h2 = hash_salt(&salt);
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 64);
     }
 
     #[test]
     fn test_device_hash_is_valid_hex() {
-        let hash = generate_device_hash();
+        let hash = hash_salt(&fixed_test_salt());
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
     fn test_salt_is_persisted() {
-        let s1 = get_or_create_salt();
-        let s2 = get_or_create_salt();
+        let temp = tempfile::tempdir().unwrap();
+        let salt_path = temp.path().join(".device_salt");
+
+        let s1 = get_or_create_salt_at(&salt_path);
+        let s2 = get_or_create_salt_at(&salt_path);
+
         assert_eq!(s1, s2);
         assert_eq!(s1.len(), 64);
         assert!(s1.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(std::fs::read_to_string(&salt_path).unwrap(), s1);
+    }
+
+    #[test]
+    fn test_invalid_salt_is_replaced_in_supplied_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let salt_path = temp.path().join(".device_salt");
+        std::fs::write(&salt_path, "not-a-valid-salt").unwrap();
+
+        let salt = get_or_create_salt_at(&salt_path);
+
+        assert_eq!(salt.len(), 64);
+        assert!(salt.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(std::fs::read_to_string(&salt_path).unwrap(), salt);
     }
 
     #[test]
