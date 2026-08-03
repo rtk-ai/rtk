@@ -266,6 +266,80 @@ fn copilot_ide_response_from_decision(decision: HookDecision, cmd: &str) -> Opti
     }))
 }
 
+// ── Kiro CLI hook ──────────────────────────────────────────────
+//
+// Kiro's documented `preToolUse` hook contract (kiro-cli docs, "Hooks
+// System" + "Agent Configuration"):
+//   Input (stdin):  {"hook_event_name":"preToolUse","cwd":"...",
+//                    "tool_name":"shell","tool_input":{"command":"..."}}
+//   Exit 0:  allow tool execution, unchanged
+//   Exit 2:  block tool execution, STDERR returned to the LLM
+//   other:   warn to user, allow tool execution (command runs unmodified)
+//
+// Critically, there is NO documented `updatedInput`/transparent-rewrite
+// mechanism for Kiro (unlike Claude Code/Cursor/VS Code Copilot Chat) —
+// a preToolUse hook can only allow or block, never silently substitute a
+// different command. This makes Kiro structurally identical to the
+// JetBrains Copilot IDE integration above: the only honest option is
+// deny-with-suggestion (exit 2, put the `rtk`-prefixed command in
+// stderr so the calling LLM sees it and can retry with the rewritten
+// form itself). "Tool name" for the shell tool is `shell` per Kiro's
+// tool-naming docs, with `execute_bash`/`execute_cmd` as legacy aliases
+// that also appear in older tool_input payloads — all three are matched.
+//
+// Per the hooks README's Exit Code Contract, a hook must never exit
+// nonzero on infrastructure failure (missing binary, bad JSON, etc.) —
+// only exit 2 for an ACTUAL rewrite suggestion, since that's the one
+// case Kiro's contract defines as "block and surface stderr to the LLM"
+// rather than "warn the human and proceed anyway."
+pub fn run_kiro() -> i32 {
+    let input = match read_stdin_limited() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let input = strip_leading_bom(&input).trim();
+    if input.is_empty() {
+        return 0;
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
+
+    let is_shell_tool = v
+        .get("tool_name")
+        .and_then(|t| t.as_str())
+        .map(|name| matches!(name, "shell" | "execute_bash" | "execute_cmd"))
+        .unwrap_or(false);
+    if !is_shell_tool {
+        return 0;
+    }
+
+    let Some(cmd) = v
+        .pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+    else {
+        return 0;
+    };
+
+    match decide_hook_action(cmd, permissions::Host::Kiro) {
+        HookDecision::Defer | HookDecision::Deny => 0,
+        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite { rewritten, .. } => {
+            audit_log("rewrite", cmd, &rewritten);
+            // Exit 2: Kiro blocks execution and returns this stderr text to
+            // the LLM (me), which sees the suggestion and can retry with
+            // `rtk <original command>` itself on the next turn.
+            let _ = writeln!(
+                io::stderr(),
+                "[rtk] Use `{rewritten}` instead for reduced token usage."
+            );
+            2
+        }
+    }
+}
+
 fn copilot_cli_response(cmd: &str, args: &Value) -> Option<Value> {
     copilot_cli_response_from_decision(
         args,

@@ -36,6 +36,13 @@ pub enum Host {
     Cursor,
     Gemini,
     Droid,
+    /// Kiro CLI. Reuses Claude's permission rule files — Kiro has no
+    /// separate rule-file convention of its own (no `.kiro/settings/rtk*`
+    /// equivalent exists yet), and its shell-command permission model
+    /// (`toolsSettings.shell.allowedCommands`/`deniedCommands` in
+    /// `.kiro/agents/*.json`) is enforced by Kiro itself independently of
+    /// this hook, so there's nothing Kiro-specific to load here.
+    Kiro,
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
@@ -44,6 +51,7 @@ pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
         Host::Cursor => load_cursor_rules(),
         Host::Gemini => load_gemini_rules(),
         Host::Droid => load_droid_rules(),
+        Host::Kiro => load_permission_rules(),
     };
     check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
 }
