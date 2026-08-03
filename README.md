@@ -90,6 +90,19 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 cargo install --git https://github.com/rtk-ai/rtk
 ```
 
+### Nix
+
+```bash
+# Run directly
+nix run github:rtk-ai/rtk
+
+# Or add to your flake inputs
+# inputs.rtk.url = "github:rtk-ai/rtk";
+# Then use: rtk.packages.${system}.default
+```
+
+An overlay is also available as `overlays.default`.
+
 ### Pre-built Binaries
 
 Download from [releases](https://github.com/rtk-ai/rtk/releases):

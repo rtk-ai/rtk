@@ -84,6 +84,19 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 cargo install --git https://github.com/rtk-ai/rtk
 ```
 
+### Nix
+
+```bash
+# 直接运行
+nix run github:rtk-ai/rtk
+
+# 或添加为 flake input
+# inputs.rtk.url = "github:rtk-ai/rtk";
+# 使用: rtk.packages.${system}.default
+```
+
+也可通过 `overlays.default` 使用 overlay。
+
 ### 验证
 
 ```bash

@@ -1,6 +1,7 @@
 //! Sets up RTK hooks so AI coding agents automatically route commands through RTK.
 
 use anyhow::{Context, Result};
+use serde::Serialize;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
@@ -72,6 +73,23 @@ const GEMINI_MD: &str = "GEMINI.md";
 
 const RTK_BLOCK_START: &str = "<!-- rtk-instructions";
 const RTK_BLOCK_END: &str = "<!-- /rtk-instructions -->";
+
+/// A single file in the dry-run manifest.
+#[derive(Debug, Clone, Serialize)]
+pub struct FileManifestEntry {
+    /// Path relative to $HOME (no ~/ prefix)
+    pub path: String,
+    /// Final file content after all transforms
+    pub content: String,
+    /// Unix permission mode as octal string (e.g. "755")
+    pub mode: String,
+}
+
+/// Complete dry-run manifest output.
+#[derive(Debug, Clone, Serialize)]
+pub struct FileManifest {
+    pub files: Vec<FileManifestEntry>,
+}
 
 /// Control flow for settings.json patching
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -4755,6 +4773,95 @@ fn uninstall_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<V
     Ok(removed)
 }
 
+/// Generate a file manifest without writing to disk.
+///
+/// Pure function: all content comes from embedded constants and the provided
+/// seed values. No filesystem I/O is performed.
+///
+/// Used by `--dry-run --json` for declarative config managers (Nix, Ansible, etc.)
+pub fn generate_manifest(
+    install_opencode: bool,
+    base_claude_md: Option<String>,
+    base_settings: Option<String>,
+) -> Result<FileManifest> {
+    let mut files = Vec::new();
+
+    // 1. RTK.md (slim awareness instructions)
+    files.push(FileManifestEntry {
+        path: ".claude/RTK.md".to_string(),
+        content: RTK_SLIM.to_string(),
+        mode: "644".to_string(),
+    });
+
+    // 2. CLAUDE.md — apply same transform as patch_claude_md (pure)
+    let claude_md_content = {
+        let mut content = base_claude_md.unwrap_or_default();
+        if !content.contains(RTK_MD_REF) {
+            content.push_str("\n\n");
+            content.push_str(RTK_MD_REF);
+            content.push('\n');
+        }
+        content
+    };
+
+    files.push(FileManifestEntry {
+        path: ".claude/CLAUDE.md".to_string(),
+        content: claude_md_content,
+        mode: "644".to_string(),
+    });
+
+    // 3. settings.json — wire `rtk hook claude` into PreToolUse (pure)
+    let settings_content = {
+        let base = base_settings.unwrap_or_else(|| "{}".to_string());
+        let mut json: serde_json::Value =
+            serde_json::from_str(&base).context("Failed to parse base settings.json")?;
+
+        if json.get("hooks").is_none() {
+            json["hooks"] = serde_json::json!({});
+        }
+
+        let hooks = json["hooks"].as_object_mut().unwrap();
+        if hooks.get(PRE_TOOL_USE_KEY).is_none() {
+            hooks.insert(
+                PRE_TOOL_USE_KEY.to_string(),
+                serde_json::json!([{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": CLAUDE_HOOK_COMMAND
+                    }]
+                }]),
+            );
+        }
+
+        serde_json::to_string_pretty(&json).context("Failed to serialize settings.json")?
+    };
+
+    files.push(FileManifestEntry {
+        path: ".claude/settings.json".to_string(),
+        content: settings_content,
+        mode: "644".to_string(),
+    });
+
+    // 4. filters.toml (project-local template)
+    files.push(FileManifestEntry {
+        path: ".config/rtk/filters.toml".to_string(),
+        content: FILTERS_TEMPLATE.to_string(),
+        mode: "644".to_string(),
+    });
+
+    // 5. OpenCode plugin (optional)
+    if install_opencode {
+        files.push(FileManifestEntry {
+            path: ".config/opencode/plugins/rtk.ts".to_string(),
+            content: OPENCODE_PLUGIN.to_string(),
+            mode: "644".to_string(),
+        });
+    }
+
+    Ok(FileManifest { files })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7911,5 +8018,146 @@ mod tests {
             "Hook config must not be written when the upsert aborts: {}",
             hook_path.display()
         );
+    }
+
+    // Tests for generate_manifest()
+
+    #[test]
+    fn test_generate_manifest_default() {
+        let manifest = generate_manifest(false, None, None).unwrap();
+
+        assert_eq!(manifest.files.len(), 4);
+
+        let paths: Vec<&str> = manifest.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&".claude/RTK.md"));
+        assert!(paths.contains(&".claude/CLAUDE.md"));
+        assert!(paths.contains(&".claude/settings.json"));
+        assert!(paths.contains(&".config/rtk/filters.toml"));
+
+        // CLAUDE.md should contain @RTK.md (empty base)
+        let claude_md = manifest
+            .files
+            .iter()
+            .find(|f| f.path == ".claude/CLAUDE.md")
+            .unwrap();
+        assert!(claude_md.content.contains(RTK_MD_REF));
+
+        // settings.json should wire `rtk hook claude` into PreToolUse
+        let settings = manifest
+            .files
+            .iter()
+            .find(|f| f.path == ".claude/settings.json")
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&settings.content).unwrap();
+        let pre_tool_use = json["hooks"][PRE_TOOL_USE_KEY].as_array().unwrap();
+        assert_eq!(pre_tool_use.len(), 1);
+        assert_eq!(pre_tool_use[0]["matcher"], "Bash");
+        assert_eq!(pre_tool_use[0]["hooks"][0]["command"], CLAUDE_HOOK_COMMAND);
+    }
+
+    #[test]
+    fn test_generate_manifest_with_opencode() {
+        let manifest = generate_manifest(true, None, None).unwrap();
+
+        assert_eq!(manifest.files.len(), 5);
+
+        let paths: Vec<&str> = manifest.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&".config/opencode/plugins/rtk.ts"));
+
+        let opencode_plugin = manifest
+            .files
+            .iter()
+            .find(|f| f.path == ".config/opencode/plugins/rtk.ts")
+            .unwrap();
+        assert_eq!(opencode_plugin.content, OPENCODE_PLUGIN);
+        assert_eq!(opencode_plugin.mode, "644");
+    }
+
+    #[test]
+    fn test_generate_manifest_with_base_claude() {
+        let base_claude = "# My Project\n\nCustom instructions.".to_string();
+        let manifest = generate_manifest(false, Some(base_claude.clone()), None).unwrap();
+
+        let claude_md = manifest
+            .files
+            .iter()
+            .find(|f| f.path == ".claude/CLAUDE.md")
+            .unwrap();
+
+        // Should preserve base content
+        assert!(claude_md.content.contains("# My Project"));
+        assert!(claude_md.content.contains("Custom instructions."));
+        // Should append @RTK.md reference
+        assert!(claude_md.content.contains(RTK_MD_REF));
+    }
+
+    #[test]
+    fn test_generate_manifest_with_base_settings() {
+        let base_settings = r#"{
+            "tools": {
+                "bash": {
+                    "timeout": 120000
+                }
+            }
+        }"#
+        .to_string();
+        let manifest = generate_manifest(false, None, Some(base_settings)).unwrap();
+
+        let settings = manifest
+            .files
+            .iter()
+            .find(|f| f.path == ".claude/settings.json")
+            .unwrap();
+
+        let json: serde_json::Value = serde_json::from_str(&settings.content).unwrap();
+
+        // Should preserve existing fields
+        assert_eq!(json["tools"]["bash"]["timeout"], 120000);
+        // Should add PreToolUse hook
+        assert!(json["hooks"][PRE_TOOL_USE_KEY].is_array());
+    }
+
+    #[test]
+    fn test_generate_manifest_preserves_existing_hooks() {
+        let base_settings = format!(
+            r#"{{
+                "hooks": {{
+                    "{}": [
+                        {{"matcher": "Bash", "hooks": [{{"type": "command", "command": "./hooks/other.sh"}}]}}
+                    ]
+                }}
+            }}"#,
+            PRE_TOOL_USE_KEY
+        );
+        let manifest = generate_manifest(false, None, Some(base_settings)).unwrap();
+
+        let settings = manifest
+            .files
+            .iter()
+            .find(|f| f.path == ".claude/settings.json")
+            .unwrap();
+
+        let json: serde_json::Value = serde_json::from_str(&settings.content).unwrap();
+
+        // Should preserve existing hook (not add RTK hook again in this pure implementation)
+        let hooks = json["hooks"][PRE_TOOL_USE_KEY].as_array().unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0]["hooks"][0]["command"], "./hooks/other.sh");
+    }
+
+    #[test]
+    fn test_generate_manifest_claude_md_already_has_ref() {
+        let base_claude = format!("# My Project\n\n{}\n", RTK_MD_REF);
+        let manifest = generate_manifest(false, Some(base_claude.clone()), None).unwrap();
+
+        let claude_md = manifest
+            .files
+            .iter()
+            .find(|f| f.path == ".claude/CLAUDE.md")
+            .unwrap();
+
+        // Should not duplicate @RTK.md reference
+        let ref_count = claude_md.content.matches(RTK_MD_REF).count();
+        assert_eq!(ref_count, 1, "Should have exactly one @RTK.md reference");
     }
 }

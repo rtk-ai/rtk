@@ -395,6 +395,18 @@ enum Commands {
         /// Preview changes without writing any files (combine with -v to show content)
         #[arg(long = "dry-run", conflicts_with = "show")]
         dry_run: bool,
+
+        /// Emit dry-run manifest as JSON for declarative config managers (requires --dry-run)
+        #[arg(long, requires = "dry_run")]
+        json: bool,
+
+        /// Seed CLAUDE.md content from file (requires --dry-run)
+        #[arg(long = "base-claude-md", requires = "dry_run")]
+        base_claude_md: Option<PathBuf>,
+
+        /// Seed settings.json content from file (requires --dry-run)
+        #[arg(long = "base-settings", requires = "dry_run")]
+        base_settings: Option<PathBuf>,
     },
 
     /// Download with compact output (strips progress bars)
@@ -2007,12 +2019,30 @@ fn run_cli() -> Result<i32> {
             codex,
             copilot,
             dry_run,
+            json,
+            base_claude_md,
+            base_settings,
         } => {
             let ctx = hooks::init::InitContext {
                 verbose: cli.verbose,
                 dry_run,
             };
-            if show {
+            if json {
+                let base_claude = base_claude_md
+                    .map(|p| std::fs::read_to_string(&p))
+                    .transpose()
+                    .context("Failed to read --base-claude-md file")?;
+                let base_set = base_settings
+                    .map(|p| std::fs::read_to_string(&p))
+                    .transpose()
+                    .context("Failed to read --base-settings file")?;
+                let manifest = hooks::init::generate_manifest(opencode, base_claude, base_set)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&manifest)
+                        .context("Failed to serialize manifest")?
+                );
+            } else if show {
                 hooks::init::show_config(codex)?;
             } else if uninstall && copilot {
                 if global {

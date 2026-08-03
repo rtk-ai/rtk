@@ -52,6 +52,22 @@ After installation, **verify you have the correct rtk**:
 rtk gain  # Must show the savings dashboard (not "command not found")
 ```
 
+### Nix
+
+```bash
+# Run directly without installing
+nix run github:rtk-ai/rtk
+
+# Install into a profile
+nix profile install github:rtk-ai/rtk
+
+# Or add to your flake as an input:
+# inputs.rtk.url = "github:rtk-ai/rtk";
+# Then use: rtk.packages.${system}.default
+```
+
+An overlay is also available as `overlays.default`.
+
 ### Alternative: Manual Installation
 
 ```bash
