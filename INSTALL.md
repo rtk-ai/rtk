@@ -55,8 +55,9 @@ rtk gain  # Must show the savings dashboard (not "command not found")
 ### Alternative: Manual Installation
 
 ```bash
-# From rtk-ai repository (NOT reachingforthejack!)
-cargo install --git https://github.com/rtk-ai/rtk
+# Pin the moving latest release tag. The default develop branch may carry
+# pre-release package metadata instead of the current stable version.
+cargo install --git https://github.com/rtk-ai/rtk --tag latest
 
 # OR (if published and correct on crates.io)
 cargo install rtk
@@ -178,8 +179,8 @@ rtk init --show
 
 ### First-Time User (Recommended)
 ```bash
-# 1. Install RTK
-cargo install --git https://github.com/rtk-ai/rtk
+# 1. Install the latest stable RTK release
+cargo install --git https://github.com/rtk-ai/rtk --tag latest
 rtk gain  # Verify (must show the savings dashboard)
 
 # 2. Setup with prompts
