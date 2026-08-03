@@ -1065,21 +1065,49 @@ impl Tracker {
     }
 
     /// Count commands with low savings (<30%) — filters that need improvement.
+    ///
+    /// Labels are reduced with [`telemetry_label`] before being returned, so the
+    /// result never carries user-supplied arguments (see that function's docs).
+    /// Several stored commands collapse onto the same reduced label, so averages
+    /// are re-computed weighted by occurrence count.
     pub fn low_savings_commands(&self, limit: usize) -> Result<Vec<(String, f64)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT rtk_cmd, AVG(savings_pct) as avg_sav FROM commands
+            "SELECT rtk_cmd, AVG(savings_pct) as avg_sav, COUNT(*) as cnt FROM commands
              WHERE input_tokens > 0
              GROUP BY rtk_cmd
              HAVING avg_sav < 30.0 AND avg_sav > 0.0
-             ORDER BY COUNT(*) DESC LIMIT ?1",
+             ORDER BY cnt DESC LIMIT ?1",
         )?;
-        let rows = stmt.query_map(params![limit as i64], |row| {
+        let rows = stmt.query_map(params![LOW_SAVINGS_SCAN_LIMIT], |row| {
             let cmd: String = row.get(0)?;
             let sav: f64 = row.get(1)?;
-            let short = cmd.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
-            Ok((short, sav))
+            let count: i64 = row.get(2)?;
+            Ok((cmd, sav, count))
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+
+        let mut totals: std::collections::HashMap<String, (f64, i64)> =
+            std::collections::HashMap::new();
+        for (cmd, sav, count) in rows.filter_map(|r| r.ok()) {
+            if count <= 0 {
+                continue;
+            }
+            let entry = totals.entry(telemetry_label(&cmd)).or_insert((0.0, 0));
+            entry.0 += sav * count as f64;
+            entry.1 += count;
+        }
+
+        let mut aggregated: Vec<(String, f64, i64)> = totals
+            .into_iter()
+            .map(|(label, (sum, count))| (label, sum / count as f64, count))
+            .collect();
+        // Most-used first; ties broken by label so the payload is deterministic.
+        aggregated.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+        aggregated.truncate(limit);
+
+        Ok(aggregated
+            .into_iter()
+            .map(|(label, avg, _)| (label, avg))
+            .collect())
     }
 
     /// Average savings percentage per command (unweighted — each command name counts once).
@@ -1209,6 +1237,72 @@ impl Tracker {
         )?;
         Ok(count)
     }
+}
+
+/// Distinct stored labels scanned before telemetry reduction. Reduction collapses
+/// many stored labels into one, so the scan window must be wider than the caller's
+/// limit; the cap keeps the query bounded on long-lived databases.
+const LOW_SAVINGS_SCAN_LIMIT: i64 = 500;
+
+/// Longest token accepted as a tool name in a telemetry label.
+const MAX_TELEMETRY_TOOL_LEN: usize = 32;
+
+/// Route markers RTK itself prepends to a stored label. These are literals from
+/// RTK's own source (`src/main.rs`), never user input, so they are safe to keep.
+const TELEMETRY_ROUTE_MARKERS: &[&str] = &["proxy", "fallback:"];
+
+/// True if `word` looks like a plain command name rather than an argument.
+///
+/// Deliberately strict: anything holding `/`, `=`, `:`, `@`, quotes, `-` in
+/// leading position or non-ASCII is rejected, which excludes paths, URLs, flags,
+/// `KEY=value` env prefixes and credential-shaped strings.
+fn is_plain_tool_name(word: &str) -> bool {
+    !word.is_empty()
+        && word.len() <= MAX_TELEMETRY_TOOL_LEN
+        && word.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
+}
+
+/// Reduce a stored `rtk_cmd` to a telemetry-safe label.
+///
+/// Stored labels embed raw user arguments — `rtk proxy curl <url>`,
+/// `rtk fallback: <raw command>`, `rtk grep <pattern>`, `rtk:toml <raw command>` —
+/// so telemetry must never forward them verbatim. Only the route marker (an RTK
+/// literal) and the tool name survive; everything past the tool name is dropped.
+/// A tool token that does not look like a plain command name becomes `<other>`,
+/// which keeps the "some filter underperforms" signal without transmitting the
+/// value itself.
+///
+/// This is the same tool-name-only reduction [`Tracker::top_commands`] and
+/// [`Tracker::top_passthrough`] apply, and it upholds the guarantee documented in
+/// `docs/TELEMETRY.md` that arguments, paths and secrets are never collected.
+fn telemetry_label(rtk_cmd: &str) -> String {
+    let mut words = rtk_cmd.split_whitespace();
+    let mut label = match words.next() {
+        // `rtk:toml <raw command>` — the prefix is an RTK literal, the rest is raw input.
+        Some(first) if first == "rtk" || first == "rtk:toml" => first.to_string(),
+        // No recognizable prefix: treat the whole label as untrusted.
+        Some(_) => "rtk".to_string(),
+        None => return "rtk <other>".to_string(),
+    };
+
+    let mut next = words.next();
+    if let Some(marker) = next {
+        if TELEMETRY_ROUTE_MARKERS.contains(&marker) {
+            label.push(' ');
+            label.push_str(marker);
+            next = words.next();
+        }
+    }
+
+    label.push(' ');
+    match next {
+        Some(tool) if is_plain_tool_name(tool) => label.push_str(tool),
+        _ => label.push_str("<other>"),
+    }
+    label
 }
 
 /// Map an rtk_cmd to an ecosystem category for telemetry.
@@ -1756,5 +1850,149 @@ mod tests {
             let mode = std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "expected 0600 on {}", p.display());
         }
+    }
+
+    // ── Telemetry label reduction (issue #1785) ──
+    // Stored labels embed raw arguments; telemetry must only ever see the tool name.
+
+    #[test]
+    fn test_telemetry_label_keeps_tool_only() {
+        assert_eq!(telemetry_label("rtk git log --oneline -20"), "rtk git");
+        assert_eq!(telemetry_label("rtk cargo test --all"), "rtk cargo");
+        assert_eq!(telemetry_label("rtk docker ps"), "rtk docker");
+        assert_eq!(telemetry_label("rtk npx eslint . (passthrough)"), "rtk npx");
+        assert_eq!(telemetry_label("rtk git"), "rtk git");
+    }
+
+    #[test]
+    fn test_telemetry_label_keeps_route_markers() {
+        assert_eq!(
+            telemetry_label("rtk proxy psql --dbname=prod"),
+            "rtk proxy psql"
+        );
+        assert_eq!(
+            telemetry_label("rtk fallback: ssh admin@host"),
+            "rtk fallback: ssh"
+        );
+        assert_eq!(
+            telemetry_label("rtk:toml eslint src/app.ts"),
+            "rtk:toml eslint"
+        );
+    }
+
+    #[test]
+    fn test_telemetry_label_drops_arguments() {
+        // Each stored label below carries something a user would not expect to
+        // leave their machine: a credential, a URL, a path, an env assignment.
+        let leaky = [
+            ("rtk proxy mysql -pS3cr3t-passw0rd", "S3cr3t-passw0rd"),
+            (
+                "rtk fallback: curl https://api.example.com/?token=abcd1234",
+                "abcd1234",
+            ),
+            (
+                "rtk grep AWS_SECRET_ACCESS_KEY .env",
+                "AWS_SECRET_ACCESS_KEY",
+            ),
+            ("rtk read /home/alice/.ssh/id_ed25519", "alice"),
+            ("rtk:toml DB_PASSWORD=hunter2 psql", "hunter2"),
+            ("rtk playwright test tests/login.spec.ts", "login"),
+        ];
+
+        for (stored, secret) in leaky {
+            let label = telemetry_label(stored);
+            assert!(
+                !label.contains(secret),
+                "telemetry label {label:?} leaked {secret:?} from {stored:?}"
+            );
+            assert!(
+                label.split_whitespace().count() <= 3,
+                "telemetry label {label:?} kept more than a route marker + tool name"
+            );
+        }
+    }
+
+    #[test]
+    fn test_telemetry_label_rejects_argument_shaped_tools() {
+        // An argument sitting where a tool name is expected must not be echoed.
+        assert_eq!(
+            telemetry_label("rtk:toml ./scripts/deploy.sh"),
+            "rtk:toml <other>"
+        );
+        assert_eq!(
+            telemetry_label("rtk proxy https://user:pw@host/path"),
+            "rtk proxy <other>"
+        );
+        assert_eq!(telemetry_label("rtk --version"), "rtk <other>");
+        assert_eq!(telemetry_label(""), "rtk <other>");
+        // Length-capped so a long opaque blob can never ride along.
+        let blob = "a".repeat(MAX_TELEMETRY_TOOL_LEN + 1);
+        assert_eq!(telemetry_label(&format!("rtk {blob}")), "rtk <other>");
+    }
+
+    #[test]
+    fn test_low_savings_commands_never_reports_arguments() {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+
+        // Low-savings rows (0 < avg < 30) so they qualify for the telemetry field.
+        tracker
+            .record("mysql", "rtk proxy mysql -pS3cr3t-passw0rd", 100, 90, 1)
+            .expect("record proxy");
+        tracker
+            .record("grep", "rtk grep AWS_SECRET_ACCESS_KEY .env", 100, 85, 1)
+            .expect("record grep");
+
+        let reported = tracker
+            .low_savings_commands(5)
+            .expect("low savings commands");
+        let labels: Vec<&str> = reported.iter().map(|(c, _)| c.as_str()).collect();
+
+        for secret in ["S3cr3t-passw0rd", "AWS_SECRET_ACCESS_KEY", ".env"] {
+            assert!(
+                !labels.iter().any(|l| l.contains(secret)),
+                "telemetry payload {labels:?} leaked {secret:?}"
+            );
+        }
+        assert!(labels.contains(&"rtk proxy mysql"), "got {labels:?}");
+        assert!(labels.contains(&"rtk grep"), "got {labels:?}");
+    }
+
+    #[test]
+    fn test_low_savings_commands_aggregates_reduced_labels() {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+
+        // Three stored labels that all reduce to "rtk git": the payload must carry
+        // one weighted entry, not three near-duplicates competing for the top 5.
+        for (cmd, input, output) in [
+            ("rtk git log --oneline", 100, 90),
+            ("rtk git log -20", 100, 80),
+            ("rtk git status --short", 100, 90),
+        ] {
+            tracker
+                .record("git", cmd, input, output, 1)
+                .expect("record git");
+        }
+        tracker
+            .record("cargo", "rtk cargo build --release", 100, 90, 1)
+            .expect("record cargo");
+
+        let reported = tracker
+            .low_savings_commands(5)
+            .expect("low savings commands");
+
+        let git: Vec<&(String, f64)> = reported.iter().filter(|(c, _)| c == "rtk git").collect();
+        assert_eq!(
+            git.len(),
+            1,
+            "expected one aggregated git entry: {reported:?}"
+        );
+        // Weighted mean of 10%, 20%, 10%.
+        assert!(
+            (git[0].1 - 40.0 / 3.0).abs() < 1e-6,
+            "expected weighted average, got {}",
+            git[0].1
+        );
+        // Most-used label first: git has 3 rows, cargo 1.
+        assert_eq!(reported[0].0, "rtk git", "got {reported:?}");
     }
 }

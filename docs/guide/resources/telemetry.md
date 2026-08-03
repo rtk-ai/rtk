@@ -67,7 +67,7 @@ This data directly drives our roadmap. For example, if telemetry shows that 40% 
 |-------|---------|---------|
 | `passthrough_top` | `["git:15", "npm:8"]` | Top 5 commands with 0% bash output reduction — these need filters |
 | `parse_failures_24h` | `3` | Filter fragility — high count means filters are breaking |
-| `low_savings_commands` | `["rtk <cmd>:25%"]` | Commands averaging <30% bash output reduction — filters to improve. The example is a placeholder, not a measured value |
+| `low_savings_commands` | `["rtk <cmd>:25%"]` | Commands averaging <30% bash output reduction — filters to improve. Reduced to the tool name only (arguments are dropped, never sent). The example is a placeholder, not a measured value |
 | `avg_savings_per_command` | `68.5` | Unweighted average (vs global which is volume-biased) |
 
 ### Ecosystem distribution
