@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, and Factory Droid
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, Kimi, OpenCode, Hermes, Kilo Code, Antigravity, and Factory Droid
 sidebar:
   order: 3
 ---
@@ -41,6 +41,7 @@ Agent runs "cargo test"
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | AGENTS.md instructions | N/A |
+| Kimi AI | AGENTS.md instructions | N/A |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
 | Mistral Vibe | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Pending upstream |
@@ -181,6 +182,15 @@ rtk init --codex           # project-scoped (AGENTS.md)
 rtk init --global --codex  # user-global (~/.codex/AGENTS.md)
 ```
 
+### Kimi AI
+
+```bash
+rtk init --agent kimi              # project-scoped (AGENTS.md)
+rtk init --agent kimi --uninstall  # removes the RTK block from AGENTS.md
+```
+
+Kimi Code CLI loads project-level instructions from `AGENTS.md` in the project root — the same mechanism as Codex, so both agents share the file and its single RTK block (uninstalling either removes the shared block; re-running `rtk init` for the other re-adds it). Kimi has no global scope and no command-rewriting hook, so integration is prompt-level only. Verified end-to-end against Kimi Code CLI 0.29.1 (install → instructions honored → uninstall).
+
 ### Kilo Code
 
 ```bash
@@ -209,7 +219,7 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Codex, Kimi, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
 
 ## Windows support
 

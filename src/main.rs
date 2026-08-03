@@ -1560,7 +1560,8 @@ fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
-    UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
+    UninstallStandard:
+        FnOnce(bool, bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
@@ -1569,7 +1570,8 @@ where
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
-        uninstall_standard(global, gemini, codex, cursor, pi, ctx)
+        let kimi = agent == Some(AgentTarget::Kimi);
+        uninstall_standard(global, gemini, codex, cursor, pi, kimi, ctx)
     }
 }
 
@@ -2991,7 +2993,7 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
-            |_, _, _, _, _, _| {
+            |_, _, _, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
             },
@@ -3000,6 +3002,32 @@ mod tests {
         assert!(result.is_ok());
         assert!(hermes_called.get());
         assert!(!standard_called.get());
+    }
+
+    #[test]
+    fn test_init_uninstall_dispatch_routes_kimi_to_standard_with_kimi_flag() {
+        let kimi_flag = Cell::new(false);
+        let ctx = hooks::init::InitContext {
+            verbose: 0,
+            dry_run: true,
+        };
+
+        let result = uninstall_init_dispatch(
+            Some(AgentTarget::Kimi),
+            false,
+            false,
+            false,
+            ctx,
+            |_| panic!("kimi must not route to hermes cleanup"),
+            |global, gemini, codex, cursor, pi, kimi, _| {
+                assert!(!global && !gemini && !codex && !cursor && !pi);
+                kimi_flag.set(kimi);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(kimi_flag.get());
     }
 
     #[test]
