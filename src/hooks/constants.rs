@@ -58,3 +58,8 @@ pub const HERMES_PLUGINS_SUBDIR: &str = "plugins";
 pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";
 pub const HERMES_PLUGIN_INIT_FILE: &str = "__init__.py";
 pub const HERMES_PLUGIN_MANIFEST_FILE: &str = "plugin.yaml";
+
+/// Kimi Code CLI config directory, joined onto the resolved home directory.
+pub const KIMI_DIR: &str = ".kimi-code";
+/// Kimi Code CLI AGENTS.md file. RTK writes awareness instructions here.
+pub const KIMI_AGENTS_FILE: &str = "AGENTS.md";

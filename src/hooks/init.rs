@@ -9,7 +9,8 @@ use tempfile::NamedTempFile;
 
 use crate::hooks::constants::{
     CONFIG_DIR, COPILOT_HOME_ENV, COPILOT_HOOK_FILE, COPILOT_INSTRUCTIONS_FILE, COPILOT_USER_DIR,
-    CURSOR_DIR, GEMINI_DIR, GITHUB_DIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+    CURSOR_DIR, GEMINI_DIR, GITHUB_DIR, KIMI_AGENTS_FILE, KIMI_DIR, OPENCODE_PLUGIN_FILE,
+    OPENCODE_SUBDIR, PLUGIN_SUBDIR,
 };
 
 use super::constants::{
@@ -32,6 +33,7 @@ const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
 const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
+const RTK_SLIM_KIMI: &str = include_str!("../../hooks/kimi/rtk-awareness.md");
 
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
@@ -2888,6 +2890,199 @@ fn resolve_hermes_home_from_env(
     home_dir
         .map(|home| home.join(HERMES_DIR))
         .context("Cannot determine Hermes home directory. Set $HERMES_HOME or $HOME.")
+}
+
+// ─── Kimi Code CLI support ───────────────────────────────────────────
+
+const KIMI_AGENTS_START_MARKER: &str = "<!-- RTK-AWARENESS-START -->";
+const KIMI_AGENTS_END_MARKER: &str = "<!-- RTK-AWARENESS-END -->";
+
+/// Resolve Kimi config directory, honouring `KIMI_CODE_CONFIG_DIR` override.
+pub fn resolve_kimi_dir() -> Result<PathBuf> {
+    resolve_kimi_dir_from(
+        std::env::var_os("KIMI_CODE_CONFIG_DIR").map(PathBuf::from),
+        dirs::home_dir(),
+    )
+}
+
+fn resolve_kimi_dir_from(kimi_dir: Option<PathBuf>, home_dir: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = kimi_dir.filter(|path| !path.as_os_str().is_empty()) {
+        return Ok(path);
+    }
+    home_dir
+        .map(|home| home.join(KIMI_DIR))
+        .context("Cannot determine Kimi config directory. Set $KIMI_CODE_CONFIG_DIR or $HOME.")
+}
+
+/// Entry point for `rtk init -g --agent kimi`.
+pub fn run_kimi_mode(ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let kimi_dir = resolve_kimi_dir()?;
+
+    if !dry_run {
+        fs::create_dir_all(&kimi_dir).with_context(|| {
+            format!(
+                "Failed to create Kimi config directory: {}",
+                kimi_dir.display()
+            )
+        })?;
+    }
+
+    let agents_path = kimi_dir.join(KIMI_AGENTS_FILE);
+    write_kimi_agents(&agents_path, RTK_SLIM_KIMI, ctx)?;
+
+    generate_global_filters_template(ctx)?;
+
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        println!("\nRTK configured for Kimi Code CLI (global).\n");
+        println!("  AGENTS.md:   {}", agents_path.display());
+        println!("  Restart Kimi Code CLI. Test with: git status\n");
+    }
+
+    Ok(())
+}
+
+/// Write or append a delimited RTK awareness section to Kimi AGENTS.md.
+fn write_kimi_agents(path: &Path, content: &str, ctx: InitContext) -> Result<bool> {
+    let InitContext { verbose, dry_run } = ctx;
+
+    let existing = if path.exists() {
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?
+    } else {
+        String::new()
+    };
+
+    if existing.contains(KIMI_AGENTS_START_MARKER) {
+        if verbose > 0 {
+            eprintln!("RTK awareness already present in {}", path.display());
+        }
+        return Ok(false);
+    }
+
+    let section = format!(
+        "{}\n{}\n{}\n",
+        KIMI_AGENTS_START_MARKER,
+        content.trim(),
+        KIMI_AGENTS_END_MARKER
+    );
+
+    let new_content = if existing.trim().is_empty() {
+        section
+    } else {
+        format!("{}\n\n{}", existing.trim_end(), section)
+    };
+
+    if dry_run {
+        println!(
+            "[dry-run] would write RTK awareness to {}: {}",
+            KIMI_AGENTS_FILE,
+            path.display()
+        );
+        return Ok(true);
+    }
+
+    atomic_write(path, &new_content)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+
+    if verbose > 0 {
+        eprintln!("Wrote RTK awareness to {}", path.display());
+    }
+
+    Ok(true)
+}
+
+/// Remove Kimi Code CLI RTK awareness section from AGENTS.md.
+pub fn uninstall_kimi(ctx: InitContext) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+    let kimi_dir = match resolve_kimi_dir() {
+        Ok(d) => d,
+        Err(_) => {
+            println!("Kimi Code CLI config directory not found (nothing to remove)");
+            return Ok(());
+        }
+    };
+
+    let agents_path = kimi_dir.join(KIMI_AGENTS_FILE);
+    if !agents_path.exists() {
+        println!("RTK Kimi Code CLI support was not installed (nothing to remove)");
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&agents_path)
+        .with_context(|| format!("Failed to read {}", agents_path.display()))?;
+
+    if !content.contains(KIMI_AGENTS_START_MARKER) {
+        println!(
+            "RTK awareness not found in {} (nothing to remove)",
+            KIMI_AGENTS_FILE
+        );
+        return Ok(());
+    }
+
+    let cleaned =
+        remove_delimited_section(&content, KIMI_AGENTS_START_MARKER, KIMI_AGENTS_END_MARKER);
+
+    if dry_run {
+        println!(
+            "[dry-run] would remove RTK awareness from {}: {}",
+            KIMI_AGENTS_FILE,
+            agents_path.display()
+        );
+        print_dry_run_footer();
+        return Ok(());
+    }
+
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        fs::remove_file(&agents_path)
+            .with_context(|| format!("Failed to remove {}", agents_path.display()))?;
+        println!("Removed {}: {}", KIMI_AGENTS_FILE, agents_path.display());
+    } else {
+        atomic_write(&agents_path, trimmed)
+            .with_context(|| format!("Failed to write {}", agents_path.display()))?;
+        println!(
+            "Removed RTK awareness from {}: {}",
+            KIMI_AGENTS_FILE,
+            agents_path.display()
+        );
+    }
+
+    println!("\nRestart Kimi Code CLI to apply changes.");
+
+    if verbose > 0 {
+        eprintln!("Kimi Code CLI artifacts removed");
+    }
+
+    Ok(())
+}
+
+fn remove_delimited_section(content: &str, start: &str, end: &str) -> String {
+    let mut result = String::new();
+    let mut lines = content.lines().peekable();
+    let mut skip = false;
+
+    while let Some(line) = lines.next() {
+        if line.trim() == start {
+            skip = true;
+            continue;
+        }
+        if line.trim() == end {
+            skip = false;
+            // swallow a single following blank line if present
+            if lines.peek().map(|l| l.trim().is_empty()).unwrap_or(false) {
+                lines.next();
+            }
+            continue;
+        }
+        if !skip {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    result
 }
 
 // ─── Factory Droid support ──────────────────────────────────────────
@@ -7911,5 +8106,109 @@ mod tests {
             "Hook config must not be written when the upsert aborts: {}",
             hook_path.display()
         );
+    }
+
+    // --- Kimi Code CLI support tests ---
+
+    #[test]
+    fn test_resolve_kimi_dir_prefers_env() {
+        let temp = TempDir::new().unwrap();
+        let env_dir = temp.path().join("kimi-env");
+        let result = resolve_kimi_dir_from(Some(env_dir.clone()), Some(temp.path().to_path_buf()));
+        assert_eq!(result.unwrap(), env_dir);
+    }
+
+    #[test]
+    fn test_resolve_kimi_dir_falls_back_to_home() {
+        let temp = TempDir::new().unwrap();
+        let result = resolve_kimi_dir_from(None, Some(temp.path().to_path_buf()));
+        assert_eq!(result.unwrap(), temp.path().join(KIMI_DIR));
+    }
+
+    fn run_kimi_mode_at(kimi_dir: &Path, ctx: InitContext) {
+        std::env::set_var("KIMI_CODE_CONFIG_DIR", kimi_dir.as_os_str());
+        let result = run_kimi_mode(ctx);
+        std::env::remove_var("KIMI_CODE_CONFIG_DIR");
+        result.unwrap();
+    }
+
+    #[test]
+    fn test_kimi_mode_creates_artifacts() {
+        let temp = TempDir::new().unwrap();
+        let kimi_dir = temp.path().join(".kimi-code");
+
+        run_kimi_mode_at(&kimi_dir, InitContext::default());
+
+        let agents_path = kimi_dir.join(KIMI_AGENTS_FILE);
+        assert!(agents_path.exists());
+
+        let content = fs::read_to_string(&agents_path).unwrap();
+        assert!(content.contains(KIMI_AGENTS_START_MARKER));
+        assert!(content.contains("Rust Token Killer"));
+        assert!(content.contains("rtk git status"));
+    }
+
+    #[test]
+    fn test_kimi_mode_dry_run_writes_nothing() {
+        let temp = TempDir::new().unwrap();
+        let kimi_dir = temp.path().join(".kimi-code");
+
+        let ctx = InitContext {
+            verbose: 0,
+            dry_run: true,
+        };
+        run_kimi_mode_at(&kimi_dir, ctx);
+
+        assert!(!kimi_dir.exists());
+    }
+
+    #[test]
+    fn test_kimi_mode_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let kimi_dir = temp.path().join(".kimi-code");
+
+        run_kimi_mode_at(&kimi_dir, InitContext::default());
+        run_kimi_mode_at(&kimi_dir, InitContext::default());
+
+        let content = fs::read_to_string(kimi_dir.join(KIMI_AGENTS_FILE)).unwrap();
+        let count = content.matches(KIMI_AGENTS_START_MARKER).count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_kimi_uninstall_removes_artifacts() {
+        let temp = TempDir::new().unwrap();
+        let kimi_dir = temp.path().join(".kimi-code");
+
+        run_kimi_mode_at(&kimi_dir, InitContext::default());
+        assert!(kimi_dir.join(KIMI_AGENTS_FILE).exists());
+
+        std::env::set_var("KIMI_CODE_CONFIG_DIR", kimi_dir.as_os_str());
+        uninstall_kimi(InitContext::default()).unwrap();
+        std::env::remove_var("KIMI_CODE_CONFIG_DIR");
+
+        assert!(!kimi_dir.join(KIMI_AGENTS_FILE).exists());
+    }
+
+    #[test]
+    fn test_kimi_uninstall_preserves_other_content() {
+        let temp = TempDir::new().unwrap();
+        let kimi_dir = temp.path().join(".kimi-code");
+        fs::create_dir_all(&kimi_dir).unwrap();
+        let agents_path = kimi_dir.join(KIMI_AGENTS_FILE);
+        fs::write(&agents_path, "# User instructions\n\nKeep this line.\n").unwrap();
+
+        run_kimi_mode_at(&kimi_dir, InitContext::default());
+        assert!(fs::read_to_string(&agents_path)
+            .unwrap()
+            .contains("Keep this line."));
+
+        std::env::set_var("KIMI_CODE_CONFIG_DIR", kimi_dir.as_os_str());
+        uninstall_kimi(InitContext::default()).unwrap();
+        std::env::remove_var("KIMI_CODE_CONFIG_DIR");
+
+        let content = fs::read_to_string(&agents_path).unwrap();
+        assert!(content.contains("Keep this line."));
+        assert!(!content.contains(KIMI_AGENTS_START_MARKER));
     }
 }

@@ -5,6 +5,14 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Features
+
+* **kimi:** add Kimi Code CLI awareness integration
+  * New `rtk init -g --agent kimi` writes RTK awareness into `~/.kimi-code/AGENTS.md`
+  * Uses prompt-level awareness because Kimi Code CLI 0.20.1 ignores `updatedInput` in `PreToolUse` hooks
+
 ## [0.42.4](https://github.com/rtk-ai/rtk/compare/v0.42.3...v0.42.4) (2026-06-12)
 
 

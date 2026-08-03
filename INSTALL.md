@@ -174,6 +174,28 @@ rtk init --show
 # Should show: ✅ Hook: ... (thin delegator, up to date)
 ```
 
+## Other AI Agents
+
+### Kimi Code CLI
+
+```bash
+rtk init -g --agent kimi
+```
+
+Installs global awareness instructions for Kimi Code CLI by creating or patching:
+
+- `~/.kimi-code/AGENTS.md` — instructions telling Kimi to prefix shell commands with `rtk`
+
+Restart Kimi Code CLI. Kimi will then emit commands such as `rtk git status` directly.
+
+> **Note:** Kimi Code CLI 0.20.1 ignores the `updatedInput` field of `PreToolUse` hooks, and references between Markdown files (`@RTK.md`) are not loaded. RTK therefore writes awareness instructions directly into `AGENTS.md`.
+
+Uninstall:
+
+```bash
+rtk init -g --uninstall --agent kimi
+```
+
 ## Common User Flows
 
 ### First-Time User (Recommended)

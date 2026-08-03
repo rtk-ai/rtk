@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, and Factory Droid
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, and Kimi Code CLI
 sidebar:
   order: 3
 ---
@@ -43,6 +43,7 @@ Agent runs "cargo test"
 | Codex CLI | AGENTS.md instructions | N/A |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
+| Kimi Code CLI | AGENTS.md instructions | N/A |
 | Mistral Vibe | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Pending upstream |
 
 ## Installation by agent
@@ -197,6 +198,27 @@ rtk init --agent antigravity    # creates .agents/rules/antigravity-rtk-rules.md
 
 Antigravity reads `.agents/rules/` as custom instructions. RTK adds guidance telling Antigravity to prefer `rtk <cmd>` over raw commands.
 
+### Kimi Code CLI
+
+```bash
+rtk init -g --agent kimi
+```
+
+RTK installs awareness instructions directly into `~/.kimi-code/AGENTS.md`, the file Kimi Code CLI consumes:
+
+- Explains that shell commands should be prefixed with `rtk`
+- Provides examples (`rtk git status`, `rtk cargo test`, etc.)
+
+Restart Kimi Code CLI after installation. The model is then expected to emit `rtk ...` commands on its own.
+
+> **Limitation:** Kimi Code CLI 0.20.1 does not consume the `updatedInput` field returned by `PreToolUse` hooks, and `@RTK.md` references inside `instructions.md` are not loaded. RTK therefore uses prompt-level awareness written directly to `AGENTS.md`.
+
+Uninstall:
+
+```bash
+rtk init -g --uninstall --agent kimi
+```
+
 ### Mistral Vibe (planned)
 
 Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://github.com/mistralai/mistral-vibe/issues/531)). Tracked in [#800](https://github.com/rtk-ai/rtk/issues/800).
@@ -209,7 +231,7 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity, Kimi Code CLI) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
 
 ## Windows support
 
