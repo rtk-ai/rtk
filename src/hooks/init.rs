@@ -4459,12 +4459,12 @@ fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
 const COPILOT_HOOK_JSON: &str = r#"{
   "version": 1,
   "hooks": {
-    "PreToolUse": [
+    "preToolUse": [
       {
         "type": "command",
-        "command": "rtk hook copilot",
+        "bash": "rtk hook copilot",
         "cwd": ".",
-        "timeout": 5
+        "timeoutSec": 5
       }
     ]
   }
