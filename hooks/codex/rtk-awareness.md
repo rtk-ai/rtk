@@ -4,7 +4,7 @@
 
 ## Rule
 
-Always prefix shell commands with `rtk`.
+Supported shell commands are rewritten automatically by the RTK hook. Use `rtk` explicitly for RTK meta commands or when you want to opt in manually.
 
 Examples:
 

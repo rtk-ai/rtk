@@ -522,6 +522,101 @@ fn run_claude_inner(input: &str) -> Option<String> {
     }
 }
 
+// Codex native hook
+
+fn process_codex_payload(v: &Value) -> PayloadAction {
+    if v.get("tool_name").and_then(Value::as_str) != Some("Bash") {
+        return PayloadAction::Ignore;
+    }
+
+    let cmd = match v
+        .pointer("/tool_input/command")
+        .and_then(Value::as_str)
+        .filter(|cmd| !cmd.is_empty())
+    {
+        Some(cmd) => cmd,
+        None => return PayloadAction::Ignore,
+    };
+
+    if crate::discover::lexer::contains_unattestable_construct(cmd) {
+        return PayloadAction::Skip {
+            reason: "skip:defer",
+            cmd: cmd.to_string(),
+        };
+    }
+
+    let Some(rewritten) = get_rewritten(cmd) else {
+        return PayloadAction::Skip {
+            reason: "skip:defer",
+            cmd: cmd.to_string(),
+        };
+    };
+
+    let mut updated_input = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+    if let Some(input) = updated_input.as_object_mut() {
+        input.insert("command".into(), Value::String(rewritten.clone()));
+    }
+
+    // Codex requires `permissionDecision: allow` whenever updatedInput is
+    // returned. This accepts the hook rewrite; Codex still applies its normal
+    // sandbox and approval policy to the rewritten tool invocation.
+    let output = json!({
+        "hookSpecificOutput": {
+            "hookEventName": PRE_TOOL_USE_KEY,
+            "permissionDecision": "allow",
+            "permissionDecisionReason": "RTK auto-rewrite",
+            "updatedInput": updated_input
+        }
+    });
+
+    PayloadAction::Rewrite {
+        cmd: cmd.to_string(),
+        rewritten,
+        output,
+    }
+}
+
+/// Run the Codex PreToolUse hook natively.
+pub fn run_codex() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let input = strip_leading_bom(&input).trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    match process_codex_payload(&v) {
+        PayloadAction::Rewrite {
+            cmd,
+            rewritten,
+            output,
+        } => {
+            audit_log("rewrite", &cmd, &rewritten);
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        PayloadAction::Skip { reason, cmd } => audit_log(reason, &cmd, ""),
+        PayloadAction::Ignore => {}
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_codex_inner(input: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(strip_leading_bom(input)).ok()?;
+    match process_codex_payload(&v) {
+        PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        _ => None,
+    }
+}
+
 // ── Cursor native hook ─────────────────────────────────────────
 
 /// Cursor on Windows ships hook payloads with one or more leading
@@ -1377,6 +1472,63 @@ mod tests {
     fn test_claude_no_tool_input_passthrough() {
         let input = json!({ "tool_name": "Bash" }).to_string();
         assert!(run_claude_inner(&input).is_none());
+    }
+
+    // --- Codex handler ---
+
+    fn codex_input(cmd: &str) -> String {
+        json!({
+            "hook_event_name": "PreToolUse",
+            "permission_mode": "default",
+            "tool_name": "Bash",
+            "tool_input": { "command": cmd }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_codex_rewrites_bash_command() {
+        let result = run_codex_inner(&codex_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(hook["permissionDecision"], "allow");
+        assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
+        assert_eq!(hook["updatedInput"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_codex_preserves_tool_input_fields() {
+        let input = json!({
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "cargo test",
+                "description": "Run the test suite"
+            }
+        })
+        .to_string();
+        let result = run_codex_inner(&input).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let updated = &v["hookSpecificOutput"]["updatedInput"];
+
+        assert_eq!(updated["command"], "rtk cargo test");
+        assert_eq!(updated["description"], "Run the test suite");
+    }
+
+    #[test]
+    fn test_codex_passthrough_cases_emit_no_output() {
+        assert!(run_codex_inner(&codex_input("htop")).is_none());
+        assert!(run_codex_inner(&codex_input("rtk git status")).is_none());
+        assert!(run_codex_inner(&codex_input("git status $(rm -rf /tmp/x)")).is_none());
+        assert!(run_codex_inner("not valid json {{{").is_none());
+
+        let non_bash = json!({
+            "tool_name": "apply_patch",
+            "tool_input": { "command": "git status" }
+        })
+        .to_string();
+        assert!(run_codex_inner(&non_bash).is_none());
     }
 
     // --- Cursor handler ---
