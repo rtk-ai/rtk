@@ -668,9 +668,10 @@ impl Iterator for QuoteScan<'_> {
 }
 
 /// Byte offset where an unquoted `#` at the start of a word begins a trailing
-/// comment, if any. The lexer has no comment state, so the independence checks
-/// must ignore comment text themselves: `git log | # keep pipeline` continues
-/// the pipeline across the newline even though the line ends in comment text.
+/// comment, if any. Comments are deliberately omitted from the token stream,
+/// so the independence checks must ignore comment text themselves: `git log |
+/// # keep pipeline` continues the pipeline across the newline even though the
+/// line ends in comment text.
 fn comment_start(line: &str) -> Option<usize> {
     let bytes = line.as_bytes();
     // `#` starts a comment at any word start, incl. after an operator
@@ -815,32 +816,37 @@ fn classify_line(line: &str) -> LineRole {
 /// and the original separator bytes (`\n` vs `\r\n`).
 ///
 /// If any newline byte was swallowed by quote state, the block passes through
-/// untouched. The lexer has no comment awareness, so an apostrophe in a `#`
-/// comment opens quote state and hides the rest of the block — rewriting (or
-/// prefixing) such a block would act on lines no permission verdict was
-/// computed for. Passthrough hands the original command to the agent's native
-/// permission handling instead. Genuine quoted newlines (multi-line commit
-/// messages) also land here; forgoing that rewrite is the safe trade.
+/// untouched. Comment text is excluded from quote tracking by the lexer, so an
+/// apostrophe in a `#` comment does not hide following commands; the original
+/// comment bytes remain attached to the rewritten line. Genuine quoted
+/// newlines (multi-line commit messages) still land here; forgoing that rewrite
+/// is the safe trade.
 fn rewrite_multiline_block(
     cmd: &str,
     tokens: &[ParsedToken],
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
 ) -> Option<String> {
-    let newline_offsets: Vec<usize> = tokens
+    let newline_offsets: Vec<(usize, usize)> = tokens
         .iter()
-        .filter(|t| t.kind == TokenKind::Operator && t.value == "\n")
-        .map(|t| t.offset)
+        .filter(|token| {
+            token.kind == TokenKind::Operator && matches!(token.value.as_str(), "\n" | "\r\n")
+        })
+        .map(|token| (token.offset, token.value.len()))
         .collect();
 
     if ansi_c_quote_defeats_lexer(cmd) {
         return None;
     }
 
-    // The lexer emits one newline token per `\r` and per `\n` (CRLF = two
-    // tokens), so the parity check must count both bytes individually.
-    let raw_breaks = cmd.chars().filter(|c| matches!(c, '\n' | '\r')).count();
-    if raw_breaks != newline_offsets.len() {
+    // Compare byte lengths rather than token counts: a CRLF is one token with
+    // two bytes, while a newline inside an unmatched quote emits no token.
+    let raw_break_bytes = cmd
+        .bytes()
+        .filter(|byte| matches!(byte, b'\n' | b'\r'))
+        .count();
+    let token_break_bytes: usize = newline_offsets.iter().map(|(_, len)| *len).sum();
+    if raw_break_bytes != token_break_bytes {
         // Every newline swallowed by quote state with quotes balanced at EOF
         // is one logical command (a multi-line commit message), not a hidden
         // extra line; rewrite it whole, as develop always did (#3319 fuzz).
@@ -852,9 +858,9 @@ fn rewrite_multiline_block(
 
     let mut segments = Vec::with_capacity(newline_offsets.len() + 1);
     let mut start = 0;
-    for &off in &newline_offsets {
+    for &(off, len) in &newline_offsets {
         segments.push((start, &cmd[start..off]));
-        start = off + 1;
+        start = off + len;
     }
     segments.push((start, &cmd[start..]));
 
@@ -871,8 +877,8 @@ fn rewrite_multiline_block(
     let mut i = 0;
     while i < segments.len() {
         if i > 0 {
-            let off = newline_offsets[i - 1];
-            result.push_str(&cmd[off..off + 1]);
+            let (off, len) = newline_offsets[i - 1];
+            result.push_str(&cmd[off..off + len]);
         }
         let (seg_off, seg) = segments[i];
 
@@ -907,14 +913,30 @@ fn rewrite_multiline_block(
             let (last_off, last_seg) = segments[end];
             &cmd[seg_off..last_off + last_seg.len()]
         };
-        let line = unit.trim();
-        match rewrite_single(line, excluded, transparent_prefixes) {
-            Some(rewritten) if rewritten != line => {
+        let line = if end == i {
+            std::borrow::Cow::Borrowed(seg.trim())
+        } else {
+            let mut joined = String::new();
+            for (_, segment) in &segments[i..=end] {
+                let segment = segment.trim();
+                if segment.is_empty() {
+                    continue;
+                }
+                if !joined.is_empty() {
+                    joined.push(' ');
+                }
+                joined.push_str(segment);
+            }
+            std::borrow::Cow::Owned(joined)
+        };
+        match rewrite_single(line.as_ref(), excluded, transparent_prefixes) {
+            Some(rewritten) if rewritten != line.as_ref() => {
                 any_changed = true;
                 let indent = &seg[..seg.len() - seg.trim_start().len()];
                 result.push_str(indent);
                 result.push_str(&rewritten);
             }
+            None if end > i => return None,
             _ => result.push_str(unit),
         }
         i = end + 1;
@@ -1581,24 +1603,22 @@ mod tests {
         }
 
         #[test]
-        fn test_comment_apostrophe_swallowing_newline_passes_through() {
-            // The lexer has no comment state: the apostrophe in `don't` opens
-            // a quote that swallows the newline and hides the next line. The
-            // block must pass through so native permission handling sees the
-            // original command — never a partially rewritten one.
+        fn test_comment_apostrophe_is_ignored_and_preserved() {
+            // An apostrophe in a comment is not shell syntax. The lexer must
+            // rewrite executable text while preserving the comment verbatim.
             assert_eq!(
                 rewrite_command_no_prefixes("git status # don't\nrm -rf /tmp/x", &[]),
-                None
+                Some("rtk git status # don't\nrm -rf /tmp/x".into())
             );
         }
 
         #[test]
-        fn test_comment_apostrophe_hidden_in_later_segment_passes_through() {
-            // Same hazard when a clean split point precedes the contaminated
-            // line: the swallowed-newline check is global, not per-segment.
+        fn test_comment_apostrophe_is_preserved_after_prior_rewrite() {
+            // A comment later in the block must not prevent safe earlier or
+            // same-line rewrites, and its bytes must remain unchanged.
             assert_eq!(
                 rewrite_command_no_prefixes("git log -3\ngit status # don't\nrm -rf /tmp/x", &[]),
-                None
+                Some("rtk git log -3\nrtk git status # don't\nrm -rf /tmp/x".into())
             );
         }
 
@@ -1734,14 +1754,18 @@ mod tests {
         }
 
         #[test]
-        fn test_cross_line_pipeline_joins_and_rewrites() {
+        fn test_cross_line_pipeline_preserves_raw_consumer() {
             assert_eq!(
                 rewrite_command_no_prefixes("git log |\ngrep feat", &[]),
-                Some("git log | rtk grep feat".into())
+                None
             );
             assert_eq!(
                 rewrite_command_no_prefixes("cargo test |&\ngrep FAILED", &[]),
                 None
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes("git log |\nhead -5", &[]),
+                Some("rtk git log | head -5".into())
             );
         }
 
