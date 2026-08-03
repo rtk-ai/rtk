@@ -4448,7 +4448,14 @@ fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
 
 // ── Copilot integration ─────────────────────────────────────
 
-// PreToolUse = VS Code schema, preToolUse = Copilot CLI schema (same file, both hosts).
+// Single PascalCase `PreToolUse` entry, shared by VS Code Copilot Chat and
+// Copilot CLI. Previously this file also declared a camelCase `preToolUse`
+// entry for Copilot CLI's native schema, but Copilot CLI registers BOTH keys
+// as independent hooks and runs them sequentially, chaining the camelCase
+// hook's rewrite into the PascalCase hook's input — a redundant second
+// process spawn per tool call for no behavioral benefit (confirmed live:
+// Copilot CLI honors the PascalCase-only schema on its own, receiving the
+// same `tool_name`/`tool_input.command` shape either way).
 const COPILOT_HOOK_JSON: &str = r#"{
   "version": 1,
   "hooks": {
@@ -4458,15 +4465,6 @@ const COPILOT_HOOK_JSON: &str = r#"{
         "command": "rtk hook copilot",
         "cwd": ".",
         "timeout": 5
-      }
-    ],
-    "preToolUse": [
-      {
-        "type": "command",
-        "bash": "rtk hook copilot",
-        "powershell": "rtk hook copilot",
-        "cwd": ".",
-        "timeoutSec": 5
       }
     ]
   }
@@ -7534,25 +7532,23 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_hook_json_serves_both_vscode_and_cli_schemas() {
+    fn test_copilot_hook_json_serves_single_pascalcase_schema() {
         let v: serde_json::Value = serde_json::from_str(COPILOT_HOOK_JSON).unwrap();
 
         let vscode = &v["hooks"]["PreToolUse"][0];
         assert_eq!(vscode["command"], "rtk hook copilot");
         assert!(vscode["timeout"].is_number(), "VS Code uses `timeout`");
+        assert_eq!(v["version"], 1);
 
-        assert_eq!(v["version"], 1, "Copilot CLI requires top-level version");
-        let cli = &v["hooks"]["preToolUse"][0];
-        assert_eq!(cli["bash"], "rtk hook copilot");
-        assert_eq!(cli["powershell"], "rtk hook copilot");
         assert!(
-            cli["timeoutSec"].is_number(),
-            "Copilot CLI uses `timeoutSec`"
+            v["hooks"].get("preToolUse").is_none(),
+            "must not register a second, redundant camelCase hook — Copilot CLI treats \
+             PreToolUse and preToolUse as independent hooks and runs both sequentially"
         );
     }
 
     #[test]
-    fn test_copilot_init_writes_dual_schema_to_disk() {
+    fn test_copilot_init_writes_single_schema_to_disk() {
         let temp = TempDir::new().unwrap();
         run_copilot_at(temp.path(), InitContext::default()).unwrap();
 
@@ -7566,7 +7562,44 @@ mod tests {
 
         assert_eq!(v["hooks"]["PreToolUse"][0]["command"], "rtk hook copilot");
         assert_eq!(v["version"], 1);
-        assert_eq!(v["hooks"]["preToolUse"][0]["bash"], "rtk hook copilot");
+        assert!(v["hooks"].get("preToolUse").is_none());
+    }
+
+    #[test]
+    fn test_copilot_init_upgrades_old_dual_schema_install() {
+        // Simulates a pre-existing install from before this fix, which wrote
+        // both a PascalCase PreToolUse and a camelCase preToolUse entry.
+        // Re-running `rtk init --copilot` must overwrite it with the current
+        // single-schema config, not leave the stale camelCase entry in place.
+        let old_dual_schema_json = r#"{
+  "version": 1,
+  "hooks": {
+    "PreToolUse": [
+      { "type": "command", "command": "rtk hook copilot", "cwd": ".", "timeout": 5 }
+    ],
+    "preToolUse": [
+      { "type": "command", "bash": "rtk hook copilot", "powershell": "rtk hook copilot", "cwd": ".", "timeoutSec": 5 }
+    ]
+  }
+}
+"#;
+
+        let temp = TempDir::new().unwrap();
+        let hooks_dir = temp.path().join(".github").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let hook_path = hooks_dir.join("rtk-rewrite.json");
+        fs::write(&hook_path, old_dual_schema_json).unwrap();
+
+        run_copilot_at(temp.path(), InitContext::default()).unwrap();
+
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&hook_path).unwrap()).unwrap();
+        assert_eq!(v["hooks"]["PreToolUse"][0]["command"], "rtk hook copilot");
+        assert!(
+            v["hooks"].get("preToolUse").is_none(),
+            "re-running init must upgrade an old dual-schema install, dropping the \
+             redundant camelCase preToolUse entry"
+        );
     }
 
     #[test]
@@ -7694,7 +7727,39 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&hook_path).unwrap()).unwrap();
         assert_eq!(v["version"], 1);
         assert_eq!(v["hooks"]["PreToolUse"][0]["command"], "rtk hook copilot");
-        assert_eq!(v["hooks"]["preToolUse"][0]["bash"], "rtk hook copilot");
+        assert!(v["hooks"].get("preToolUse").is_none());
+    }
+
+    #[test]
+    fn test_copilot_global_install_upgrades_old_dual_schema_install() {
+        let old_dual_schema_json = r#"{
+  "version": 1,
+  "hooks": {
+    "PreToolUse": [
+      { "type": "command", "command": "rtk hook copilot", "cwd": ".", "timeout": 5 }
+    ],
+    "preToolUse": [
+      { "type": "command", "bash": "rtk hook copilot", "powershell": "rtk hook copilot", "cwd": ".", "timeoutSec": 5 }
+    ]
+  }
+}
+"#;
+
+        let temp = TempDir::new().unwrap();
+        let hooks_dir = temp.path().join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let hook_path = hooks_dir.join("rtk-rewrite.json");
+        fs::write(&hook_path, old_dual_schema_json).unwrap();
+
+        run_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&hook_path).unwrap()).unwrap();
+        assert_eq!(v["hooks"]["PreToolUse"][0]["command"], "rtk hook copilot");
+        assert!(
+            v["hooks"].get("preToolUse").is_none(),
+            "re-running global init must upgrade an old dual-schema install"
+        );
     }
 
     #[test]

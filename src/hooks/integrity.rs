@@ -200,6 +200,12 @@ pub fn resolve_hook_path() -> Result<PathBuf> {
 
 /// Run integrity check and print results (for `rtk verify` subcommand)
 pub fn run_verify(verbose: u8) -> Result<()> {
+    let result = report_hook_status(verbose);
+    report_data_dir_privacy();
+    result
+}
+
+fn report_hook_status(verbose: u8) -> Result<()> {
     let hook_path = resolve_hook_path()?;
     let hash_file = hash_path(&hook_path);
 
@@ -264,6 +270,41 @@ pub fn run_verify(verbose: u8) -> Result<()> {
 
     Ok(())
 }
+
+/// Report a data directory other local users can reach. RTK tightens it to 0700
+/// on every run, but that chmod fails silently when the directory belongs to
+/// another user — `rtk verify` is where that surfaces, never the command path.
+///
+/// Checks the parent of the actual resolved DB path (honoring `RTK_DB_PATH` and
+/// `config.tracking.database_path` overrides), not just the default location.
+#[cfg(unix)]
+fn report_data_dir_privacy() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(db_path) = crate::core::tracking::get_db_path() else {
+        return;
+    };
+    let Some(dir) = db_path.parent() else {
+        return;
+    };
+    let Ok(meta) = std::fs::metadata(dir) else {
+        return;
+    };
+
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o077 == 0 {
+        println!("PASS  data directory is owner-only");
+        return;
+    }
+
+    eprintln!("WARN  data directory is reachable by other local users");
+    eprintln!("      mode: {:o}  {}", mode, dir.display());
+    eprintln!("      It holds command history and raw command output.");
+    eprintln!("      To restore: chmod 700 {}", dir.display());
+}
+
+#[cfg(not(unix))]
+fn report_data_dir_privacy() {}
 
 /// Runtime integrity gate. Called at startup for operational commands.
 ///

@@ -30,8 +30,22 @@ fn read_stdin_limited() -> Result<String> {
 /// Format detected from the preToolUse JSON input.
 enum HookFormat {
     /// VS Code Copilot Chat / Claude Code: `tool_name` + `tool_input.command`, supports `updatedInput`.
+    /// If using the PreToolUse pascal case form, Copilot CLI also remaps its native `bash`/`powershell`
+    /// runtime tool to `tool_name: "Bash"` for this schema and honors its `updatedInput`, live-verified
+    /// on Linux+Windows 11 with Copilot CLI 1.0.73+ by rewriting a marker command end-to-end
+    /// see <https://github.com/rtk-ai/rtk/pull/3179#issuecomment-5088268495>.
     VsCode { command: String },
-    /// GitHub Copilot CLI: camelCase `toolName` + `toolArgs` (JSON string), supports `modifiedArgs` for transparent rewrite.
+    /// GitHub Copilot CLI's native schema: camelCase `toolName` + `toolArgs` (JSON string),
+    /// supports `modifiedArgs` for transparent rewrite. `rtk init --copilot` no longer
+    /// registers this schema (Copilot CLI honors the PascalCase `VsCode` schema on its
+    /// own — registering both caused a redundant second hook invocation per tool call,
+    /// see git history). Kept for installs that haven't re-run `rtk init --copilot` since
+    /// upgrading, and as the schema JetBrains/IntelliJ's Copilot plugin uses under a
+    /// different `toolName` value (`run_in_terminal`, not `bash` — see #2443/#3093).
+    /// On Windows, Copilot CLI reports this schema's `toolName` as the unmapped runtime
+    /// name `"powershell"` (#3178/#3179) — but since the `VsCode` schema above already
+    /// works standalone there, that arm is legacy-only: relevant for un-upgraded installs,
+    /// not exercised by a fresh `rtk init --copilot` on any platform.
     /// Carries the full parsed `toolArgs` object so we can rewrite `command` while preserving
     /// host-supplied metadata (description, initial_wait, mode, …) the tool requires.
     CopilotCli { command: String, args: Value },
@@ -71,9 +85,18 @@ pub fn run_copilot() -> Result<()> {
 }
 
 fn detect_format(v: &Value) -> HookFormat {
-    // VS Code Copilot Chat / Claude Code: snake_case keys
+    // VS Code Copilot Chat / Claude Code: snake_case keys.
+    // "run_in_terminal" is VS Code Copilot Chat's actual terminal tool name
+    // (confirmed via live payload capture) — without it, detect_format falls
+    // through to PassThrough and the hook never fires for VS Code Copilot Chat.
+    // No separate Windows/"powershell" case is needed: Copilot CLI remaps both
+    // `bash` and `powershell` to `tool_name: "Bash"` for this schema — already
+    // handled below, live-confirmed (see the VsCode variant doc).
     if let Some(tool_name) = v.get("tool_name").and_then(|t| t.as_str()) {
-        if matches!(tool_name, "runTerminalCommand" | "Bash" | "bash") {
+        if matches!(
+            tool_name,
+            "runTerminalCommand" | "run_in_terminal" | "Bash" | "bash"
+        ) {
             if let Some(cmd) = v
                 .pointer("/tool_input/command")
                 .and_then(|c| c.as_str())
@@ -87,8 +110,12 @@ fn detect_format(v: &Value) -> HookFormat {
         return HookFormat::PassThrough;
     }
 
-    // Copilot CLI: camelCase keys, toolArgs is a JSON-encoded string.
+    // Copilot CLI's native camelCase schema: toolName + toolArgs (JSON-encoded string).
     // The shell tool is "bash" on Unix and "powershell" on Windows.
+    // Only reachable today via a not-yet-upgraded install's leftover camelCase
+    // preToolUse registration (see the CopilotCli variant doc) or a host that
+    // registers this schema itself, like JetBrains/IntelliJ's Copilot plugin
+    // (toolName "run_in_terminal").
     if let Some(tool_name) = v.get("toolName").and_then(|t| t.as_str()) {
         if matches!(tool_name, "bash" | "powershell" | "run_in_terminal") {
             if let Some(tool_args_str) = v.get("toolArgs").and_then(|t| t.as_str()) {
@@ -138,7 +165,7 @@ fn get_rewritten(cmd: &str) -> Option<String> {
 
 enum HookDecision {
     AllowRewrite(String),
-    AskRewrite { rewritten: String, explicit: bool },
+    AskRewrite(String),
     Defer,
     Deny,
 }
@@ -152,10 +179,7 @@ fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
     }
     match get_rewritten(cmd) {
         Some(r) if verdict == PermissionVerdict::Allow => HookDecision::AllowRewrite(r),
-        Some(r) => HookDecision::AskRewrite {
-            rewritten: r,
-            explicit: verdict == PermissionVerdict::Ask,
-        },
+        Some(r) => HookDecision::AskRewrite(r),
         None => HookDecision::Defer,
     }
 }
@@ -165,28 +189,46 @@ fn decide_hook_action(cmd: &str, host: permissions::Host) -> HookDecision {
 }
 
 fn handle_vscode(cmd: &str) -> Result<()> {
-    let (decision, rewritten) = match decide_hook_action(cmd, permissions::Host::Claude) {
+    if let Some(output) = vscode_response(cmd) {
+        let _ = writeln!(io::stdout(), "{output}");
+    }
+    Ok(())
+}
+
+fn vscode_response(cmd: &str) -> Option<Value> {
+    vscode_response_from_decision(decide_hook_action(cmd, permissions::Host::Claude), cmd)
+}
+
+/// Build the VS Code Copilot Chat / Copilot CLI (PascalCase compat) hook response.
+///
+/// Mirrors `process_claude_payload`: `permissionDecision: "allow"` is only ever
+/// asserted for an explicit, user-configured Allow rule. Every other rewrite
+/// (Default verdict or an explicit Ask rule) omits the field entirely, leaving
+/// the host's own native prompt/allowlist flow in control — see #3037, where
+/// asserting `"ask"` here made Copilot CLI 1.0.66+ force a blocking dialog with
+/// no "remember" option on every rewritten command.
+fn vscode_response_from_decision(decision: HookDecision, cmd: &str) -> Option<Value> {
+    let (rewritten, allow) = match decision {
         HookDecision::Deny => {
             audit_log("deny", cmd, "");
-            return Ok(());
+            return None;
         }
-        HookDecision::Defer => return Ok(()),
-        HookDecision::AllowRewrite(r) => ("allow", r),
-        HookDecision::AskRewrite { rewritten: r, .. } => ("ask", r),
+        HookDecision::Defer => return None,
+        HookDecision::AllowRewrite(r) => (r, true),
+        HookDecision::AskRewrite(r) => (r, false),
     };
 
     audit_log("rewrite", cmd, &rewritten);
 
-    let output = json!({
-        "hookSpecificOutput": {
-            "hookEventName": PRE_TOOL_USE_KEY,
-            "permissionDecision": decision,
-            "permissionDecisionReason": "RTK auto-rewrite",
-            "updatedInput": { "command": rewritten }
-        }
+    let mut hook_output = json!({
+        "hookEventName": PRE_TOOL_USE_KEY,
+        "permissionDecisionReason": "RTK auto-rewrite",
+        "updatedInput": { "command": rewritten }
     });
-    let _ = writeln!(io::stdout(), "{output}");
-    Ok(())
+    if allow {
+        hook_output["permissionDecision"] = json!("allow");
+    }
+    Some(json!({ "hookSpecificOutput": hook_output }))
 }
 
 fn handle_copilot_cli(cmd: &str, args: &Value) -> Result<()> {
@@ -212,7 +254,7 @@ fn copilot_ide_response_from_decision(decision: HookDecision, cmd: &str) -> Opti
             audit_log("deny", cmd, "");
             "Blocked by RTK permission rule".to_string()
         }
-        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite { rewritten, .. } => {
+        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => {
             audit_log("rewrite", cmd, &rewritten);
             format!("RTK token optimization: re-run this command as `{rewritten}` instead.")
         }
@@ -244,13 +286,7 @@ fn copilot_cli_response_from_decision(
         }
         HookDecision::Defer => return None,
         HookDecision::AllowRewrite(r) => (r, true),
-        HookDecision::AskRewrite {
-            rewritten: r,
-            explicit,
-        } => {
-            let is_simple = crate::discover::lexer::split_for_permissions(cmd).len() <= 1;
-            (r, !explicit && is_simple)
-        }
+        HookDecision::AskRewrite(r) => (r, false),
     };
 
     audit_log("rewrite", cmd, &rewritten);
@@ -306,7 +342,7 @@ pub fn run_gemini() -> Result<()> {
             audit_log("rewrite", cmd, rewritten);
             print_gemini("allow", Some(rewritten));
         }
-        HookDecision::AskRewrite { ref rewritten, .. } => {
+        HookDecision::AskRewrite(ref rewritten) => {
             audit_log("ask", cmd, rewritten);
             print_gemini("ask_user", Some(rewritten));
         }
@@ -353,13 +389,13 @@ fn sanitize_log_field(s: &str) -> String {
 fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> {
     let home = dirs::home_dir()?;
     let dir = home.join(".local").join("share").join("rtk");
-    std::fs::create_dir_all(&dir).ok()?;
+    crate::core::utils::create_private_dir(&dir).ok()?;
     let path = dir.join("hook-audit.log");
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .ok()?;
+    let mut file = crate::core::utils::open_private(
+        std::fs::OpenOptions::new().create(true).append(true),
+        &path,
+    )
+    .ok()?;
     let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S");
     writeln!(
         file,
@@ -411,7 +447,7 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
             }
         }
         HookDecision::AllowRewrite(r) => (r, true),
-        HookDecision::AskRewrite { rewritten: r, .. } => (r, false),
+        HookDecision::AskRewrite(r) => (r, false),
     };
 
     let updated_input = {
@@ -535,7 +571,7 @@ pub fn run_cursor() -> Result<()> {
             audit_log("rewrite", &cmd, &rewritten);
             cursor_allow(&rewritten)
         }
-        HookDecision::AskRewrite { rewritten, .. } => {
+        HookDecision::AskRewrite(rewritten) => {
             audit_log("ask", &cmd, &rewritten);
             cursor_ask(&rewritten)
         }
@@ -598,7 +634,7 @@ fn run_cursor_inner_with_rules(
     let verdict = permissions::check_command_with_rules(&cmd, deny_rules, ask_rules, allow_rules);
     match decide_from_verdict(&cmd, verdict) {
         HookDecision::AllowRewrite(rewritten) => cursor_allow(&rewritten),
-        HookDecision::AskRewrite { rewritten, .. } => cursor_ask(&rewritten),
+        HookDecision::AskRewrite(rewritten) => cursor_ask(&rewritten),
         _ => "{}".to_string(),
     }
 }
@@ -644,7 +680,7 @@ fn droid_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) ->
             return None;
         }
         HookDecision::Defer => return None,
-        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite { rewritten: r, .. } => r,
+        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r) => r,
     };
 
     audit_log("rewrite", cmd, &rewritten);
@@ -757,6 +793,16 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_vscode_run_in_terminal() {
+        // VS Code Copilot Chat's actual terminal tool name, confirmed via
+        // live payload capture — distinct from "runTerminalCommand".
+        assert!(matches!(
+            detect_format(&vscode_input("run_in_terminal", "cargo test")),
+            HookFormat::VsCode { .. }
+        ));
+    }
+
+    #[test]
     fn test_detect_copilot_cli_bash() {
         assert!(matches!(
             detect_format(&copilot_cli_input("bash", "git status")),
@@ -834,6 +880,61 @@ mod tests {
         assert!(get_rewritten("cat <<'EOF'\nhello\nEOF").is_none());
     }
 
+    // --- VS Code Copilot Chat / Copilot CLI (PascalCase) handler ---
+    // Serves both VS Code Copilot Chat's PreToolUse hook and Copilot CLI's
+    // PascalCase-compat entry (#3037): the same `rtk hook copilot` call
+    // answers both from one JSON schema.
+
+    #[test]
+    fn test_vscode_allow_rewrite_sets_permission_allow() {
+        let r = vscode_response_from_decision(
+            HookDecision::AllowRewrite("rtk git status".into()),
+            "git status",
+        )
+        .unwrap();
+        assert_eq!(r["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(
+            r["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk git status"
+        );
+    }
+
+    #[test]
+    fn test_vscode_ask_rewrite_omits_permission_decision() {
+        // Default (unconfigured) and explicit-Ask verdicts both land here as
+        // AskRewrite — neither must assert a decision, matching Claude's own
+        // hook (process_claude_payload). Asserting "ask" is what caused #3037:
+        // Copilot CLI 1.0.66+ treats it as authoritative and forces a blocking
+        // dialog with no "remember" option on every rewritten command.
+        let r = vscode_response_from_decision(
+            HookDecision::AskRewrite("rtk cargo test".into()),
+            "cargo test",
+        )
+        .unwrap();
+        assert!(
+            r["hookSpecificOutput"]
+                .as_object()
+                .unwrap()
+                .get("permissionDecision")
+                .is_none(),
+            "AskRewrite must NOT set permissionDecision"
+        );
+        assert_eq!(
+            r["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk cargo test"
+        );
+    }
+
+    #[test]
+    fn test_vscode_deny_returns_none() {
+        assert!(vscode_response_from_decision(HookDecision::Deny, "cargo test").is_none());
+    }
+
+    #[test]
+    fn test_vscode_defer_returns_none() {
+        assert!(vscode_response_from_decision(HookDecision::Defer, "cargo test").is_none());
+    }
+
     // --- Copilot CLI handler: transparent rewrite via modifiedArgs ---
 
     fn cli_args(cmd: &str) -> Value {
@@ -841,37 +942,20 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_cli_default_ask_rewrite_sets_permission_allow() {
+    fn test_copilot_cli_ask_rewrite_omits_permission_decision() {
+        // Whether the Ask verdict came from an explicit rule or the Default
+        // (unconfigured) fallback, RTK must never assert a decision here —
+        // matches Claude's own hook (process_claude_payload) and avoids the
+        // Copilot CLI 1.0.66+ forced-prompt bug from #3037.
         let r = copilot_cli_response_from_decision(
             &cli_args("cargo test"),
-            HookDecision::AskRewrite {
-                rewritten: "rtk cargo test".into(),
-                explicit: false,
-            },
-            "cargo test",
-        )
-        .unwrap();
-        assert_eq!(
-            r["permissionDecision"], "allow",
-            "Default AskRewrite must set permissionDecision to allow — Copilot CLI 1.0.66+ prompts on every command without it"
-        );
-        assert_eq!(r["modifiedArgs"]["command"], "rtk cargo test");
-    }
-
-    #[test]
-    fn test_copilot_cli_explicit_ask_rewrite_omits_permission_decision() {
-        let r = copilot_cli_response_from_decision(
-            &cli_args("cargo test"),
-            HookDecision::AskRewrite {
-                rewritten: "rtk cargo test".into(),
-                explicit: true,
-            },
+            HookDecision::AskRewrite("rtk cargo test".into()),
             "cargo test",
         )
         .unwrap();
         assert!(
             r.get("permissionDecision").is_none(),
-            "Explicit AskRewrite must NOT auto-allow — user deliberately configured ask for this command"
+            "AskRewrite must NOT set permissionDecision — the host's native prompt/allowlist stays in control"
         );
         assert_eq!(r["modifiedArgs"]["command"], "rtk cargo test");
     }
@@ -913,10 +997,7 @@ mod tests {
     #[test]
     fn test_copilot_ide_rewrite_returns_deny_with_suggestion() {
         let response = copilot_ide_response_from_decision(
-            HookDecision::AskRewrite {
-                rewritten: "rtk git status".into(),
-                explicit: false,
-            },
+            HookDecision::AskRewrite("rtk git status".into()),
             "git status",
         )
         .unwrap();
@@ -1000,10 +1081,7 @@ mod tests {
         });
         let r = copilot_cli_response_from_decision(
             &args,
-            HookDecision::AskRewrite {
-                rewritten: "rtk cargo install ripgrep".into(),
-                explicit: false,
-            },
+            HookDecision::AskRewrite("rtk cargo install ripgrep".into()),
             "cargo install ripgrep",
         )
         .unwrap();
@@ -1577,7 +1655,7 @@ mod tests {
     fn test_decide_ask_for_default_verdict() {
         assert!(matches!(
             decide_with_rules("git status", &[], &[], &[]),
-            HookDecision::AskRewrite { .. }
+            HookDecision::AskRewrite(_)
         ));
     }
 
@@ -1635,7 +1713,7 @@ mod tests {
                 r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string()
             }
             HookDecision::AllowRewrite(r) => gemini_json("allow", Some(&r)),
-            HookDecision::AskRewrite { rewritten: r, .. } => gemini_json("ask_user", Some(&r)),
+            HookDecision::AskRewrite(r) => gemini_json("ask_user", Some(&r)),
             HookDecision::Defer => gemini_json("ask_user", None),
         }
     }
