@@ -120,6 +120,10 @@ pub struct TelemetryConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+// Without this, every field is mandatory: a config that sets only one limit
+// fails to deserialize, which fails the WHOLE Config::load() and silently
+// reverts every other section (hooks, filters, ...) to its default.
+#[serde(default)]
 pub struct LimitsConfig {
     /// Max total grep results to show (default: 200)
     pub grep_max_results: usize,
@@ -295,5 +299,37 @@ consent_date = "2026-04-10T12:00:00Z"
             config.telemetry.consent_date.as_deref(),
             Some("2026-04-10T12:00:00Z")
         );
+    }
+
+    #[test]
+    fn test_partial_limits_section_keeps_other_defaults() {
+        // A [limits] section that sets only one field must deserialize. Before
+        // #[serde(default)] this failed, which failed the WHOLE Config::load()
+        // and silently reverted every other section to its default.
+        let toml = r#"
+[limits]
+grep_max_results = 5000
+"#;
+        let config: Config = toml::from_str(toml).expect("partial [limits] must parse");
+        assert_eq!(config.limits.grep_max_results, 5000);
+        assert_eq!(
+            config.limits.grep_max_per_file, 25,
+            "unset field keeps default"
+        );
+        assert_eq!(config.limits.status_max_files, 15);
+    }
+
+    #[test]
+    fn test_partial_limits_does_not_clobber_other_sections() {
+        let toml = r#"
+[hooks]
+transparent_prefixes = ["rg"]
+
+[limits]
+grep_max_results = 5000
+"#;
+        let config: Config = toml::from_str(toml).expect("must parse");
+        assert_eq!(config.hooks.transparent_prefixes, vec!["rg".to_string()]);
+        assert_eq!(config.limits.grep_max_results, 5000);
     }
 }

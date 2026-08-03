@@ -30,7 +30,7 @@ Agent runs "cargo test"
 |-------|-----------------|---------------------------|
 | Claude Code | Shell hook (`PreToolUse`) | Yes |
 | VS Code Copilot Chat | Shell hook (`PreToolUse`) | Yes |
-| GitHub Copilot CLI | Shell hook (`preToolUse` `modifiedArgs`) | Yes |
+| GitHub Copilot CLI | Shell hook (`PreToolUse`) | Yes |
 | Cursor | Shell hook (`preToolUse`) | Yes |
 | Gemini CLI | Rust binary (`BeforeTool`) | Yes |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | Yes |
@@ -74,7 +74,9 @@ rtk init --copilot            # project-scoped (.github/hooks/)
 rtk init --global --copilot   # user-scoped (~/.copilot/hooks/, respects $COPILOT_HOME)
 ```
 
-Project-scoped writes `.github/hooks/rtk-rewrite.json` (both hosts get transparent rewrite — VS Code Chat via `updatedInput`, Copilot CLI via `modifiedArgs`) plus the RTK block in `.github/copilot-instructions.md`. User-scoped writes the same hook config to `~/.copilot/hooks/rtk-rewrite.json` and the RTK block to `~/.copilot/copilot-instructions.md` (both respect `$COPILOT_HOME` if set).
+Project-scoped writes `.github/hooks/rtk-rewrite.json` — a single `PreToolUse` entry shared by both hosts, each getting transparent rewrite via `updatedInput` — plus the RTK block in `.github/copilot-instructions.md`. User-scoped writes the same hook config to `~/.copilot/hooks/rtk-rewrite.json` and the RTK block to `~/.copilot/copilot-instructions.md` (both respect `$COPILOT_HOME` if set).
+
+Earlier `rtk` versions also registered a second, camelCase `preToolUse` entry for Copilot CLI's native schema. Copilot CLI treats `PreToolUse`/`preToolUse` as independent hooks and runs both sequentially for the same tool call — a redundant process spawn with no behavioral benefit, since Copilot CLI honors the single `PreToolUse` schema on its own. Re-run `rtk init --copilot` (or `--global --copilot`) to upgrade an existing install to the single-hook config.
 
 Uninstall:
 

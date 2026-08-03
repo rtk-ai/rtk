@@ -314,9 +314,9 @@ enum Commands {
         /// Max line length
         #[arg(short = 'l', long, default_value = "80")]
         max_len: usize,
-        /// Max results to show
-        #[arg(short, long, default_value = "200")]
-        max: usize,
+        /// Max results to show [default: limits.grep_max_results, or 200]
+        #[arg(short, long)]
+        max: Option<usize>,
         /// Show only match context (not full line)
         #[arg(long)]
         context_only: bool,
@@ -1982,14 +1982,19 @@ fn run_cli() -> Result<i32> {
         } => search::run(
             search::Engine::Grep,
             max_len,
-            max,
+            max.unwrap_or_else(|| core::config::limits().grep_max_results),
             context_only,
             &extra_args,
             cli.verbose,
         )?,
-        Commands::Rg { extra_args } => {
-            search::run(search::Engine::Rg, 80, 200, false, &extra_args, cli.verbose)?
-        }
+        Commands::Rg { extra_args } => search::run(
+            search::Engine::Rg,
+            80,
+            core::config::limits().grep_max_results,
+            false,
+            &extra_args,
+            cli.verbose,
+        )?,
 
         Commands::Init {
             global,
