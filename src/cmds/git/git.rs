@@ -497,7 +497,28 @@ fn run_log(
 
     // Post-process: truncate long messages, cap lines only if RTK set the default
     let filtered = filter_log_output(&result.stdout, limit, user_set_limit, has_format_flag);
-    let filtered = never_worse(&result.stdout, &filtered).to_string();
+    let mut filtered = never_worse(&result.stdout, &filtered).to_string();
+    // RTK injected its own -N cap above. When it plausibly bit, say so —
+    // otherwise a truncated history reads as the full one and misleads the
+    // caller about repo state. Appended after never_worse on purpose: the
+    // few extra tokens are the cost of not lying. Entry counting is exact
+    // for the RTK default format (---END--- terminator) and a line-count
+    // heuristic for user formats (multi-line formats may fire it early; the
+    // notice is then merely a hint, never wrong about content).
+    if !user_set_limit {
+        let entries = if has_format_flag {
+            result.stdout.lines().filter(|l| !l.trim().is_empty()).count()
+        } else {
+            result.stdout.matches("---END---").count()
+        };
+        if entries >= limit {
+            let merges_note = if !wants_merges { ", merges hidden" } else { "" };
+            filtered.push_str(&format!(
+                "\n... (capped at {} commits by rtk{}; pass -n <N> for full history)",
+                limit, merges_note
+            ));
+        }
+    }
     println!("{}", filtered);
 
     timer.track(
