@@ -1987,16 +1987,14 @@ fn run_cli() -> Result<i32> {
             &extra_args,
             cli.verbose,
         )?,
-        Commands::Rg { extra_args } => {
-            search::run(
-                search::Engine::Rg,
-                80,
-                core::config::limits().grep_max_results,
-                false,
-                &extra_args,
-                cli.verbose,
-            )?
-        }
+        Commands::Rg { extra_args } => search::run(
+            search::Engine::Rg,
+            80,
+            core::config::limits().grep_max_results,
+            false,
+            &extra_args,
+            cli.verbose,
+        )?,
 
         Commands::Init {
             global,

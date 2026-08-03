@@ -312,7 +312,10 @@ grep_max_results = 5000
 "#;
         let config: Config = toml::from_str(toml).expect("partial [limits] must parse");
         assert_eq!(config.limits.grep_max_results, 5000);
-        assert_eq!(config.limits.grep_max_per_file, 25, "unset field keeps default");
+        assert_eq!(
+            config.limits.grep_max_per_file, 25,
+            "unset field keeps default"
+        );
         assert_eq!(config.limits.status_max_files, 15);
     }
 
