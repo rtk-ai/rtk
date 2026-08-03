@@ -3265,6 +3265,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_classify_xcodebuild() {
+        assert_eq!(
+            classify_command("xcodebuild build -project Foo.xcodeproj"),
+            Classification::Supported {
+                rtk_equivalent: "rtk xcodebuild",
+                category: "Build",
+                estimated_savings_pct: 85.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_xcodebuild_actions() {
+        for (command, expected) in [
+            (
+                "xcodebuild build -project Foo.xcodeproj",
+                "rtk xcodebuild build -project Foo.xcodeproj",
+            ),
+            (
+                "xcodebuild test -scheme MyApp -destination 'platform=iOS Simulator,name=iPhone 15'",
+                "rtk xcodebuild test -scheme MyApp -destination 'platform=iOS Simulator,name=iPhone 15'",
+            ),
+            (
+                "xcodebuild archive -workspace MyApp.xcworkspace",
+                "rtk xcodebuild archive -workspace MyApp.xcworkspace",
+            ),
+            ("xcodebuild clean", "rtk xcodebuild clean"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.into()),
+                "unexpected rewrite for {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_xcodebuild_rule_requires_word_boundary() {
+        assert!(matches!(
+            classify_command("xcodebuilder build"),
+            Classification::Unsupported { .. }
+        ));
+        assert_eq!(rewrite_command_no_prefixes("xcodebuilder build", &[]), None);
+    }
+
     // --- #336: docker compose supported subcommands rewritten, unsupported skipped ---
 
     #[test]
