@@ -235,7 +235,11 @@ pub(crate) fn run_manifest_handlers(claude_dir: &Path, payload: &str) -> Manifes
 
 fn command_for_program(program: &str) -> Command {
     match crate::core::utils::resolve_binary(program) {
+        // This executable comes from an existing Claude plugin hook. Replaying its
+        // exact argv is the compatibility contract of manifest fallthrough.
+        // nosemgrep: dynamic-command-execution -- trusted Claude plugin command replay
         Ok(path) => Command::new(path),
+        // nosemgrep: dynamic-command-execution -- trusted Claude plugin command replay
         Err(_) => Command::new(program),
     }
 }
@@ -249,6 +253,9 @@ fn build_shell_command(command: &str) -> Command {
     }
     #[cfg(not(windows))]
     {
+        // Claude's shell-form hook is already an explicitly configured command;
+        // this preserves its POSIX shell semantics during fallthrough.
+        // nosemgrep: interpreter-execution -- replay configured Claude shell hook
         let mut process = Command::new("sh");
         process.args(["-c", command]);
         process
@@ -542,6 +549,7 @@ pub(crate) fn patch_plugin_caches(claude_dir: &Path, verbose: u8) -> Result<usiz
 
     if manifest.entries.is_empty() {
         if path.exists() {
+            // nosemgrep: filesystem-deletion -- remove only RTK's empty manifest
             fs::remove_file(&path)
                 .with_context(|| format!("Failed to remove empty manifest {}", path.display()))?;
         }
@@ -602,6 +610,7 @@ pub(crate) fn restore_plugin_caches(
 
     if !dry_run {
         if remaining.is_empty() {
+            // nosemgrep: filesystem-deletion -- remove only RTK's consumed manifest
             fs::remove_file(&path)
                 .with_context(|| format!("Failed to remove manifest {}", path.display()))?;
         } else {
@@ -833,6 +842,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn timed_out_handler_is_killed_without_blocking_dispatch() {
+        // nosemgrep: interpreter-execution -- test-only timeout fixture
         let child = Command::new("sh")
             .args(["-c", "sleep 1"])
             .stdin(Stdio::null())
@@ -851,6 +861,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn non_reading_handler_cannot_block_before_timeout() {
+        // nosemgrep: interpreter-execution -- test-only pipe-backpressure fixture
         let mut child = Command::new("sh")
             .args(["-c", "sleep 1"])
             .stdin(Stdio::piped())
@@ -870,6 +881,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn completed_handler_with_large_output_is_not_killed_for_pipe_backpressure() {
+        // nosemgrep: interpreter-execution -- test-only pipe-drain fixture
         let child = Command::new("sh")
             .args(["-c", "yes x | head -n 100000"])
             .stdin(Stdio::null())
