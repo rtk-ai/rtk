@@ -498,7 +498,11 @@ fn run_log(
     // Post-process: truncate long messages, cap lines only if RTK set the default
     let filtered = filter_log_output(&result.stdout, limit, user_set_limit, has_format_flag);
     let filtered = never_worse(&result.stdout, &filtered).to_string();
-    println!("{}", filtered);
+    // Empty range (e.g. HEAD..HEAD) must produce empty output, not a bare
+    // newline — `println!` on an empty string still breaks `| wc -l` (#3365).
+    if !filtered.is_empty() {
+        println!("{}", filtered);
+    }
 
     timer.track(
         &format!("git log {}", args.join(" ")),
@@ -3087,6 +3091,55 @@ no changes added to commit (use "git add" and/or "git commit -a")
             "Expected 'not a git repository' on stderr, got stderr={:?}, stdout={:?}",
             stderr,
             stdout
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Regression test for #3365: an empty commit range (e.g. HEAD..HEAD) must
+    // produce empty stdout, not a bare newline, or `| wc -l` reports 1 instead of 0.
+    #[test]
+    #[ignore] // Requires `cargo build` first — run with `cargo test --ignored`
+    fn test_git_log_empty_range_produces_no_output() {
+        let bin_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("debug")
+            .join("rtk");
+        assert!(
+            bin_path.exists(),
+            "Debug binary not found at {:?} — run `cargo build` first",
+            bin_path
+        );
+
+        let tmp = std::env::temp_dir().join("rtk_test_empty_log_range");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&tmp)
+                .output()
+                .expect("git command should run")
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(tmp.join("file.txt"), "content").expect("write file");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "initial commit"]);
+
+        let output = std::process::Command::new(&bin_path)
+            .args(["git", "log", "--oneline", "HEAD..HEAD"])
+            .current_dir(&tmp)
+            .output()
+            .expect("Failed to run rtk");
+
+        assert!(output.status.success());
+        assert!(
+            output.stdout.is_empty(),
+            "Expected empty stdout for an empty commit range, got {:?}",
+            String::from_utf8_lossy(&output.stdout)
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
