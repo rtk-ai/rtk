@@ -47,6 +47,8 @@ pub enum AgentTarget {
     Kilocode,
     /// Google Antigravity
     Antigravity,
+    /// Continue.dev
+    Continue,
     /// Kimi AI
     Kimi,
     /// Pi coding agent
@@ -2059,6 +2061,8 @@ fn run_cli() -> Result<i32> {
                     );
                 }
                 hooks::init::run_antigravity_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Continue) {
+                hooks::init::run_continue_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Kimi) {
                 if global {
                     anyhow::bail!("Kimi AI is project-scoped. Use: rtk init --agent kimi");
@@ -3595,6 +3599,18 @@ mod tests {
                     Some(AgentTarget::Pi),
                     "--agent pi must set Pi variant"
                 );
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_init_agent_continue_parses_with_global_scope() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "continue", "--global"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, global, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Continue));
+                assert!(global);
             }
             _ => panic!("Expected Init command"),
         }

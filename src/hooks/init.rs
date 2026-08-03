@@ -13,12 +13,13 @@ use crate::hooks::constants::{
 };
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, DROID_DIR,
-    DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR,
-    DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
-    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
-    HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
-    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CONTINUE_DIR,
+    CONTINUE_RULES_SUBDIR, CURSOR_HOOK_COMMAND, DROID_DIR, DROID_EXECUTE_MATCHER, DROID_HOME_ENV,
+    DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR, DROID_HOOK_COMMAND, DROID_SETTINGS_FILE,
+    GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
+    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
+    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 use super::is_claude_hook_command;
@@ -1831,6 +1832,60 @@ fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
         println!("  Antigravity will now use rtk commands for token savings.");
         println!("  Test with: git status\n");
     }
+
+    Ok(())
+}
+
+// ─── Continue.dev support ─────────────────────────────────────
+
+const CONTINUE_RULES: &str = include_str!("../../hooks/continue/rules.md");
+
+pub fn run_continue_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let base_dir = if global {
+        dirs::home_dir().context("could not determine home directory")?
+    } else {
+        std::env::current_dir()?
+    };
+    run_continue_mode_at(&base_dir, global, ctx)
+}
+
+fn run_continue_mode_at(base_dir: &Path, global: bool, ctx: InitContext) -> Result<()> {
+    let target_dir = base_dir.join(CONTINUE_DIR).join(CONTINUE_RULES_SUBDIR);
+    let rules_path = target_dir.join("rtk.md");
+
+    if !ctx.dry_run {
+        fs::create_dir_all(&target_dir).with_context(|| {
+            format!(
+                "Failed to create Continue rules directory: {}",
+                target_dir.display()
+            )
+        })?;
+    }
+
+    let changed = write_if_changed(&rules_path, CONTINUE_RULES, "Continue RTK rules", ctx)?;
+
+    if ctx.dry_run {
+        print_dry_run_footer();
+        return Ok(());
+    }
+
+    let scope = if global {
+        "globally"
+    } else {
+        "in this project"
+    };
+    println!("\nRTK configured for Continue.dev {scope}.\n");
+    println!(
+        "  Rules: {} ({})",
+        rules_path.display(),
+        if changed {
+            "installed"
+        } else {
+            "already present"
+        }
+    );
+    println!("  Continue will now prefer rtk commands for token savings.");
+    println!("  Restart Continue. Test with: git status\n");
 
     Ok(())
 }
@@ -5043,6 +5098,54 @@ mod tests {
         run_antigravity_mode_at(temp.path(), InitContext::default()).unwrap();
         let second = fs::read_to_string(&path).unwrap();
         assert_eq!(first, second, "Idempotent: content should not change");
+    }
+
+    #[test]
+    fn test_continue_mode_creates_project_rules_file() {
+        let temp = TempDir::new().unwrap();
+        run_continue_mode_at(temp.path(), false, InitContext::default()).unwrap();
+
+        let rules_path = temp.path().join(".continue/rules/rtk.md");
+        let content = fs::read_to_string(rules_path).unwrap();
+        assert!(content.contains("alwaysApply: true"));
+        assert!(content.contains("RTK - Rust Token Killer"));
+    }
+
+    #[test]
+    fn test_continue_mode_supports_global_scope() {
+        let temp = TempDir::new().unwrap();
+        run_continue_mode_at(temp.path(), true, InitContext::default()).unwrap();
+
+        assert!(temp.path().join(".continue/rules/rtk.md").exists());
+    }
+
+    #[test]
+    fn test_continue_mode_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        run_continue_mode_at(temp.path(), false, InitContext::default()).unwrap();
+
+        let path = temp.path().join(".continue/rules/rtk.md");
+        let first = fs::read_to_string(&path).unwrap();
+        run_continue_mode_at(temp.path(), false, InitContext::default()).unwrap();
+        let second = fs::read_to_string(&path).unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_continue_mode_dry_run_does_not_write() {
+        let temp = TempDir::new().unwrap();
+        run_continue_mode_at(
+            temp.path(),
+            false,
+            InitContext {
+                dry_run: true,
+                ..InitContext::default()
+            },
+        )
+        .unwrap();
+
+        assert!(!temp.path().join(".continue").exists());
     }
 
     #[test]
