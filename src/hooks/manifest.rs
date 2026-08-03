@@ -765,25 +765,35 @@ mod tests {
     fn manifest_preserves_exact_arguments_for_exec_form_hooks() {
         let tmp = TempDir::new().unwrap();
         let path = hook_file(tmp.path());
-        write_json(
-            &path,
-            &cache_with_hook(json!({
-                "type": "command",
-                "command": "/bin/printf",
-                "args": ["%s", "hello world"]
-            })),
-        );
+        #[cfg(unix)]
+        let exec_hook = json!({
+            "type": "command",
+            "command": "/bin/printf",
+            "args": ["%s", "hello world"]
+        });
+        #[cfg(windows)]
+        let exec_hook = json!({
+            "type": "command",
+            "command": "cmd.exe",
+            "args": ["/C", "echo hello world"]
+        });
+        write_json(&path, &cache_with_hook(exec_hook));
 
         assert_eq!(patch_plugin_caches(tmp.path(), 0).unwrap(), 1);
         let manifest: Value =
             serde_json::from_str(&fs::read_to_string(manifest_path(tmp.path())).unwrap()).unwrap();
+        #[cfg(unix)]
+        let expected_exec = json!({"command": "/bin/printf", "args": ["%s", "hello world"]});
+        #[cfg(windows)]
+        let expected_exec = json!({"command": "cmd.exe", "args": ["/C", "echo hello world"]});
         assert_eq!(
-            manifest["entries"][0]["commands"][0],
-            json!({"command": "/bin/printf", "args": ["%s", "hello world"]})
+            manifest["entries"][0]["commands"][0], expected_exec,
+            "exec-form hook arguments must be preserved"
         );
 
         let direct_tmp = TempDir::new().unwrap();
         let direct_path = hook_file(direct_tmp.path());
+        #[cfg(unix)]
         let direct = cache_with_hook(json!({
             "type": "command",
             "command": "/bin/sh",
@@ -793,6 +803,12 @@ mod tests {
                 "handler",
                 "hello world"
             ]
+        }));
+        #[cfg(windows)]
+        let direct = cache_with_hook(json!({
+            "type": "command",
+            "command": "cmd.exe",
+            "args": ["/C", "exit /b 2", "handler", "hello world"]
         }));
         write_json(&direct_path, &direct);
         assert_eq!(patch_plugin_caches(direct_tmp.path(), 0).unwrap(), 1);
