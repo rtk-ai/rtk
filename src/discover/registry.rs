@@ -224,13 +224,19 @@ fn ps_get_content(args: &[String]) -> Option<String> {
 
 /// `Get-ChildItem src -Recurse -Force` → `rtk ls -R -a src`
 ///
-/// `-Filter`, `-Include`, `-File` and friends are rejected: `rtk ls` proxies
-/// native `ls`, which has no equivalent, and approximating them with a recursive
-/// listing would return a different set of files than the caller asked for.
+/// A name filter or a type constraint is a search rather than a listing, so it
+/// routes to `rtk find` instead:
+///
+/// `Get-ChildItem src -Recurse -Filter *.rs` → `rtk find src -name '*.rs'`
+///
+/// Without `-Recurse` the search is depth-limited, because `Get-ChildItem` only
+/// descends when asked while `find` recurses by default.
 fn ps_get_childitem(args: &[String]) -> Option<String> {
     let mut path: Option<&str> = None;
     let mut recurse = false;
     let mut force = false;
+    let mut name_filter: Option<&str> = None;
+    let mut type_flag: Option<&str> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -242,6 +248,24 @@ fn ps_get_childitem(args: &[String]) -> Option<String> {
             } else if ps_is(name, "Force") {
                 force = true;
                 i += 1;
+            } else if ps_is(name, "File") {
+                if type_flag.replace("f").is_some() {
+                    return None;
+                }
+                i += 1;
+            } else if ps_is(name, "Directory") {
+                if type_flag.replace("d").is_some() {
+                    return None;
+                }
+                i += 1;
+            } else if ps_is(name, "Filter") || ps_is(name, "Include") {
+                let value = args.get(i + 1)?.as_str();
+                // `-Include *.rs,*.toml` needs `find ( -name a -o -name b )`;
+                // not worth the bracket handling, so let it pass through.
+                if value.contains(',') || name_filter.replace(value).is_some() {
+                    return None;
+                }
+                i += 2;
             } else if ps_is(name, "Path") || ps_is(name, "LiteralPath") {
                 let value = args.get(i + 1)?.as_str();
                 if path.replace(value).is_some() {
@@ -259,16 +283,42 @@ fn ps_get_childitem(args: &[String]) -> Option<String> {
         }
     }
 
-    let mut out = String::from("rtk ls");
-    if recurse {
-        out.push_str(" -R");
+    if name_filter.is_none() && type_flag.is_none() {
+        let mut out = String::from("rtk ls");
+        if recurse {
+            out.push_str(" -R");
+        }
+        if force {
+            out.push_str(" -a");
+        }
+        if let Some(p) = path {
+            out.push(' ');
+            out.push_str(p);
+        }
+        return Some(out);
     }
-    if force {
-        out.push_str(" -a");
+
+    // `-Force` is dropped here rather than translated: it makes Get-ChildItem
+    // include hidden entries, which is already find's default.
+    let mut out = String::from("rtk find ");
+    out.push_str(path.unwrap_or("."));
+    if !recurse {
+        out.push_str(" -maxdepth 1");
     }
-    if let Some(p) = path {
-        out.push(' ');
-        out.push_str(p);
+    if let Some(t) = type_flag {
+        out.push_str(" -type ");
+        out.push_str(t);
+    }
+    if let Some(f) = name_filter {
+        out.push_str(" -name ");
+        // The pattern must reach find unexpanded.
+        if f.starts_with('\'') || f.starts_with('"') {
+            out.push_str(f);
+        } else {
+            out.push('\'');
+            out.push_str(f);
+            out.push('\'');
+        }
     }
     Some(out)
 }
@@ -2136,12 +2186,33 @@ mod tests {
     }
 
     #[test]
+    fn test_ps_get_childitem_search_routes_to_find() {
+        assert_eq!(
+            ps("Get-ChildItem src -Recurse -Filter *.rs"),
+            Some("rtk find src -name '*.rs'".into())
+        );
+        // Get-ChildItem only descends when asked; find recurses by default.
+        assert_eq!(
+            ps("Get-ChildItem -Filter *.rs"),
+            Some("rtk find . -maxdepth 1 -name '*.rs'".into())
+        );
+        assert_eq!(
+            ps("Get-ChildItem src -Recurse -File"),
+            Some("rtk find src -type f".into())
+        );
+        assert_eq!(
+            ps("Get-ChildItem -Recurse -Directory"),
+            Some("rtk find . -type d".into())
+        );
+    }
+
+    #[test]
     fn test_ps_get_childitem_unmappable_params_pass_through() {
-        // Native ls has no -Filter/-Include; approximating them would list a
-        // different set of files than the caller asked for.
-        assert_eq!(ps("Get-ChildItem -Recurse -Filter *.rs"), None);
-        assert_eq!(ps("Get-ChildItem -File"), None);
         assert_eq!(ps("Get-ChildItem -ErrorAction SilentlyContinue"), None);
+        // `-Include a,b` needs `find ( -name a -o -name b )`.
+        assert_eq!(ps("Get-ChildItem -Recurse -Include *.rs,*.toml"), None);
+        // -File and -Directory are mutually exclusive.
+        assert_eq!(ps("Get-ChildItem -Recurse -File -Directory"), None);
     }
 
     #[test]
