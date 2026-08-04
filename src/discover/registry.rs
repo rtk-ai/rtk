@@ -1915,13 +1915,12 @@ mod tests {
 
     #[test]
     fn test_classify_yadm_status() {
+        // yadm manages a separate dotfiles repository; it must never be
+        // rewritten to `rtk git`, which would act on the current project.
         assert_eq!(
             classify_command("yadm status"),
-            Classification::Supported {
-                rtk_equivalent: "rtk git",
-                category: "Git",
-                estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+            Classification::Unsupported {
+                base_command: "yadm status".to_string(),
             }
         );
     }
@@ -1930,20 +1929,35 @@ mod tests {
     fn test_classify_yadm_diff() {
         assert_eq!(
             classify_command("yadm diff"),
-            Classification::Supported {
-                rtk_equivalent: "rtk git",
-                category: "Git",
-                estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+            Classification::Unsupported {
+                base_command: "yadm diff".to_string(),
             }
         );
     }
 
     #[test]
     fn test_rewrite_yadm_status() {
+        // Regression for #3408: yadm subcommands must route through the yadm
+        // filter to the yadm binary, never to git in the current directory.
         assert_eq!(
             rewrite_command_no_prefixes("yadm status", &[]),
-            Some("rtk git status".to_string())
+            Some("rtk yadm status".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_yadm_commit() {
+        assert_eq!(
+            rewrite_command_no_prefixes("yadm commit -m x", &[]),
+            Some("rtk yadm commit -m x".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_yadm_add() {
+        assert_eq!(
+            rewrite_command_no_prefixes("yadm add .", &[]),
+            Some("rtk yadm add .".to_string())
         );
     }
 

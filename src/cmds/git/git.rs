@@ -43,6 +43,18 @@ fn git_cmd(global_args: &[String]) -> Command {
     cmd
 }
 
+/// Append pathspecs to a `git add` invocation.
+///
+/// A bare `git add` gets no pathspec at all: real git treats it as a
+/// deliberate no-op ("Nothing specified, nothing added."). Adding `.`
+/// implicitly would stage the whole working tree from a command the user
+/// aimed at nothing in particular. Regression test for rtk issue #3408.
+fn append_add_pathspecs(cmd: &mut Command, args: &[String]) {
+    for arg in args {
+        cmd.arg(arg);
+    }
+}
+
 /// Create a git Command for internal parsing that must be locale-stable.
 ///
 /// We only use this for non-user-facing parses where RTK depends on git's
@@ -934,14 +946,11 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
     let mut cmd = git_cmd(global_args);
     cmd.arg("add");
 
-    // Pass all arguments directly to git (flags like -A, -p, --all, etc.)
-    if args.is_empty() {
-        cmd.arg(".");
-    } else {
-        for arg in args {
-            cmd.arg(arg);
-        }
-    }
+    // Pass all arguments directly to git (flags like -A, -p, --all, etc.).
+    // A bare `git add` receives no pathspec: real git treats it as a
+    // deliberate no-op ("Nothing specified, nothing added."), and staging '.'
+    // implicitly would stage the whole worktree. See rtk issue #3408.
+    append_add_pathspecs(&mut cmd, args);
 
     let result = exec_capture(&mut cmd).context("Failed to run git add")?;
 
@@ -2086,6 +2095,27 @@ mod tests {
         assert_eq!(basename, "git");
         let args: Vec<_> = cmd.get_args().collect();
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_add_with_no_args_gets_no_pathspec() {
+        // Regression for #3408: a bare `git add` must stay a no-op and must
+        // never implicitly stage '.'.
+        let mut cmd = git_cmd(&[]);
+        cmd.arg("add");
+        append_add_pathspecs(&mut cmd, &[]);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, vec!["add"]);
+    }
+
+    #[test]
+    fn test_add_with_args_passes_them_through() {
+        let mut cmd = git_cmd(&[]);
+        cmd.arg("add");
+        let args = vec!["-A".to_string(), "src/main.rs".to_string()];
+        append_add_pathspecs(&mut cmd, &args);
+        let collected: Vec<_> = cmd.get_args().collect();
+        assert_eq!(collected, vec!["add", "-A", "src/main.rs"]);
     }
 
     #[test]
