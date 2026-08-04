@@ -1562,14 +1562,33 @@ where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
     UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
-    if agent == Some(AgentTarget::Hermes) {
-        uninstall_hermes(ctx)
-    } else if agent == Some(AgentTarget::Droid) {
-        hooks::init::uninstall_droid(global, ctx)
-    } else {
-        let cursor = agent == Some(AgentTarget::Cursor);
-        let pi = agent == Some(AgentTarget::Pi);
-        uninstall_standard(global, gemini, codex, cursor, pi, ctx)
+    match agent {
+        Some(AgentTarget::Hermes) => uninstall_hermes(ctx),
+        Some(AgentTarget::Droid) => hooks::init::uninstall_droid(global, ctx),
+        Some(AgentTarget::Claude) => uninstall_standard(global, gemini, codex, false, false, ctx),
+        Some(AgentTarget::Cursor) => uninstall_standard(global, gemini, codex, true, false, ctx),
+        Some(AgentTarget::Pi) => uninstall_standard(global, gemini, codex, false, true, ctx),
+        // These agents have install paths that write rules blocks, but no
+        // uninstall counterpart. Fail closed instead of falling through to
+        // the Claude uninstaller, which would delete Claude's config and
+        // leave the named agent untouched. See issue #3404.
+        Some(
+            AgentTarget::Windsurf
+            | AgentTarget::Cline
+            | AgentTarget::Kilocode
+            | AgentTarget::Antigravity
+            | AgentTarget::Kimi,
+        ) => {
+            let name = agent
+                .and_then(|target| target.to_possible_value())
+                .map(|value| value.get_name().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            Err(anyhow::anyhow!(
+                "uninstall is not supported for --agent {name}; \
+                 remove the RTK block from the agent's rules file manually"
+            ))
+        }
+        None => uninstall_standard(global, gemini, codex, false, false, ctx),
     }
 }
 
@@ -3000,6 +3019,124 @@ mod tests {
         assert!(result.is_ok());
         assert!(hermes_called.get());
         assert!(!standard_called.get());
+    }
+
+    #[test]
+    fn test_init_uninstall_dispatch_routes_cursor_with_flag() {
+        let standard_called = Cell::new(false);
+        let ctx = hooks::init::InitContext {
+            verbose: 0,
+            dry_run: true,
+        };
+
+        let result = uninstall_init_dispatch(
+            Some(AgentTarget::Cursor),
+            false,
+            false,
+            false,
+            ctx,
+            |_| Ok(()),
+            |global, gemini, codex, cursor, pi, _| {
+                standard_called.set(true);
+                assert!(!global && !gemini && !codex);
+                assert!(cursor && !pi);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(standard_called.get());
+    }
+
+    #[test]
+    fn test_init_uninstall_dispatch_routes_pi_with_flag() {
+        let standard_called = Cell::new(false);
+        let ctx = hooks::init::InitContext {
+            verbose: 0,
+            dry_run: true,
+        };
+
+        let result = uninstall_init_dispatch(
+            Some(AgentTarget::Pi),
+            false,
+            false,
+            false,
+            ctx,
+            |_| Ok(()),
+            |global, gemini, codex, cursor, pi, _| {
+                standard_called.set(true);
+                assert!(!global && !gemini && !codex);
+                assert!(!cursor && pi);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(standard_called.get());
+    }
+
+    #[test]
+    fn test_init_uninstall_dispatch_defaults_to_claude() {
+        let standard_called = Cell::new(false);
+        let ctx = hooks::init::InitContext {
+            verbose: 0,
+            dry_run: true,
+        };
+
+        let result = uninstall_init_dispatch(
+            None,
+            true,
+            true,
+            true,
+            ctx,
+            |_| Ok(()),
+            |global, gemini, codex, cursor, pi, _| {
+                standard_called.set(true);
+                assert!(global && gemini && codex);
+                assert!(!cursor && !pi);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(standard_called.get());
+    }
+
+    #[test]
+    fn test_init_uninstall_dispatch_fails_closed_for_unwired_agents() {
+        for agent in [
+            AgentTarget::Windsurf,
+            AgentTarget::Cline,
+            AgentTarget::Kilocode,
+            AgentTarget::Antigravity,
+            AgentTarget::Kimi,
+        ] {
+            let standard_called = Cell::new(false);
+            let ctx = hooks::init::InitContext {
+                verbose: 0,
+                dry_run: true,
+            };
+
+            let result = uninstall_init_dispatch(
+                Some(agent),
+                false,
+                false,
+                false,
+                ctx,
+                |_| Ok(()),
+                |_, _, _, _, _, _| {
+                    standard_called.set(true);
+                    Ok(())
+                },
+            );
+
+            let message = format!("{}", result.expect_err("expected an error"));
+            assert!(
+                message.contains("uninstall is not supported for --agent"),
+                "unexpected message: {message}"
+            );
+            assert!(!standard_called.get());
+        }
     }
 
     #[test]
