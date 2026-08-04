@@ -2316,6 +2316,22 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_cargo_toolchain_selector() {
+        for (input, expected) in [
+            ("cargo +stable check", "rtk cargo +stable check"),
+            ("cargo +nightly test", "rtk cargo +nightly test"),
+            ("cargo +1.75.0 clippy", "rtk cargo +1.75.0 clippy"),
+            ("cargo +beta build", "rtk cargo +beta build"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                Some(expected.into()),
+                "toolchain selector should be preserved for {input}"
+            );
+        }
+    }
+
+    #[test]
     fn test_rewrite_compound_and() {
         assert_eq!(
             rewrite_command_no_prefixes("git add . && cargo test", &[]),
