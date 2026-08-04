@@ -2093,7 +2093,6 @@ mod tests {
             .to_string_lossy()
             .to_string();
         assert_eq!(basename, "git");
-        assert_eq!(basename, "git");
         let args: Vec<_> = cmd.get_args().collect();
         assert!(args.is_empty());
     }
