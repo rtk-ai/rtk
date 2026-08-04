@@ -290,8 +290,8 @@ rtk session                     # Show RTK adoption across recent sessions
 ## Global Flags
 
 ```bash
--u, --ultra-compact    # ASCII icons, inline format (further output reduction)
--v, --verbose          # Increase verbosity (-v, -vv, -vvv)
+--ultra-compact    # ASCII icons, inline format (further output reduction)
+--verbose          # Increase verbosity (-v, -vv, -vvv)
 ```
 
 ## Examples

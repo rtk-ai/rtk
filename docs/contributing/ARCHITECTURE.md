@@ -769,7 +769,7 @@ if verbose > 0 {
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                       Ultra-Compact Mode (-u)                          │
+│                       Ultra-Compact Mode                               │
 └────────────────────────────────────────────────────────────────────────┘
 
 main.rs:51-53
@@ -1028,7 +1028,7 @@ Overhead Sources:
 - **Derive Macros**: Less boilerplate (declarative CLI definition)
 - **Auto-Generated Help**: `--help` generated automatically
 - **Type Safety**: Parse arguments directly into typed structs
-- **Global Flags**: `-v` and `-u` work across all commands
+- **Global Flags**: `-v` works across all commands
 
 ---
 
@@ -1052,7 +1052,7 @@ Overhead Sources:
 | **Exit Code Preservation** | Passing through tool's exit code for CI/CD reliability |
 | **Package Manager Detection** | Identifying pnpm/yarn/npm to execute JS/TS tools correctly |
 | **Verbosity Levels** | `-v/-vv/-vvv` for progressively more debug output |
-| **Ultra-Compact** | `-u` flag for maximum compression (ASCII icons, inline format) |
+| **Ultra-Compact** | `--ultra-compact` flag for maximum compression (ASCII icons, inline format) |
 
 ---
 
