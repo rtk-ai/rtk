@@ -88,6 +88,268 @@ static TAIL_LINES_EQ: LazyLock<Regex> =
 static TAIL_LINES_SPACE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^tail\s+--lines\s+(\d+)\s+(\S+)$").unwrap());
 
+/// Splits a PowerShell argument list on whitespace, honouring single and double
+/// quotes. Unlike [`shell_split`] a backslash is a literal character, not an
+/// escape — on Windows it is a path separator, and consuming it would turn
+/// `D:\Code\x` into `D:Codex`. Quotes are kept in the returned tokens so a
+/// rewrite can re-emit the argument exactly as the caller wrote it.
+fn ps_split(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+
+    for c in input.chars() {
+        match quote {
+            Some(q) => {
+                current.push(c);
+                if c == q {
+                    quote = None;
+                }
+            }
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                current.push(c);
+            }
+            None if c.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            None => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn ps_unquote(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2
+        && (bytes[0] == b'"' || bytes[0] == b'\'')
+        && bytes[bytes.len() - 1] == bytes[0]
+    {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+/// PowerShell parameter names are case-insensitive.
+fn ps_is(token: &str, name: &str) -> bool {
+    token.eq_ignore_ascii_case(name)
+}
+
+/// Translates the PowerShell cmdlets whose semantics map cleanly onto an rtk
+/// subcommand. The [`RULES`] table keys off the command word, so cmdlets — which
+/// share no name with their GNU counterparts — never match it and every
+/// `Get-ChildItem` / `Get-Content` / `Select-String` call reaches the model as
+/// unfiltered output.
+///
+/// Deliberately narrow: a cmdlet carrying any parameter without a faithful rtk
+/// equivalent returns `None` and runs unrewritten. Silently dropping `-Raw` or
+/// mistranslating `-Filter` would change what the command *means*, which is
+/// worse than forgoing the token saving.
+///
+/// Only ever called for [`RewriteContext::Normal`]. As a pipeline stage a cmdlet
+/// emits .NET objects for the next stage to consume, and rtk's text output would
+/// not survive the hand-off.
+fn rewrite_powershell(cmd: &str) -> Option<String> {
+    let (head, rest) = match cmd.split_once(char::is_whitespace) {
+        Some((h, r)) => (h, r.trim()),
+        None => (cmd, ""),
+    };
+    let args = ps_split(rest);
+
+    if ps_is(head, "get-content") || ps_is(head, "gc") {
+        return ps_get_content(&args);
+    }
+    if ps_is(head, "get-childitem") || ps_is(head, "gci") || ps_is(head, "dir") {
+        return ps_get_childitem(&args);
+    }
+    if ps_is(head, "select-string") || ps_is(head, "sls") {
+        return ps_select_string(&args);
+    }
+    None
+}
+
+/// `Get-Content file -TotalCount 5` → `rtk read file --max-lines 5`
+fn ps_get_content(args: &[String]) -> Option<String> {
+    let mut path: Option<&str> = None;
+    let mut max_lines: Option<&str> = None;
+    let mut tail_lines: Option<&str> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if let Some(name) = a.strip_prefix('-') {
+            let value = args.get(i + 1)?.as_str();
+            if ps_is(name, "Path") || ps_is(name, "LiteralPath") {
+                if path.replace(value).is_some() {
+                    return None;
+                }
+            } else if ps_is(name, "TotalCount") || ps_is(name, "First") || ps_is(name, "Head") {
+                max_lines = Some(ps_unquote(value));
+            } else if ps_is(name, "Tail") || ps_is(name, "Last") {
+                tail_lines = Some(ps_unquote(value));
+            } else {
+                return None;
+            }
+            i += 2;
+        } else {
+            if path.replace(a).is_some() {
+                return None;
+            }
+            i += 1;
+        }
+    }
+
+    // `rtk read --max-lines`/`--tail-lines` take a single positional file, and the
+    // two are mutually exclusive.
+    let path = path?;
+    if max_lines.is_some() && tail_lines.is_some() {
+        return None;
+    }
+    if let Some(n) = max_lines {
+        n.parse::<u32>().ok()?;
+        return Some(format!("rtk read {} --max-lines {}", path, n));
+    }
+    if let Some(n) = tail_lines {
+        n.parse::<u32>().ok()?;
+        return Some(format!("rtk read {} --tail-lines {}", path, n));
+    }
+    Some(format!("rtk read {}", path))
+}
+
+/// `Get-ChildItem src -Recurse -Force` → `rtk ls -R -a src`
+///
+/// `-Filter`, `-Include`, `-File` and friends are rejected: `rtk ls` proxies
+/// native `ls`, which has no equivalent, and approximating them with a recursive
+/// listing would return a different set of files than the caller asked for.
+fn ps_get_childitem(args: &[String]) -> Option<String> {
+    let mut path: Option<&str> = None;
+    let mut recurse = false;
+    let mut force = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if let Some(name) = a.strip_prefix('-') {
+            if ps_is(name, "Recurse") {
+                recurse = true;
+                i += 1;
+            } else if ps_is(name, "Force") {
+                force = true;
+                i += 1;
+            } else if ps_is(name, "Path") || ps_is(name, "LiteralPath") {
+                let value = args.get(i + 1)?.as_str();
+                if path.replace(value).is_some() {
+                    return None;
+                }
+                i += 2;
+            } else {
+                return None;
+            }
+        } else {
+            if path.replace(a).is_some() {
+                return None;
+            }
+            i += 1;
+        }
+    }
+
+    let mut out = String::from("rtk ls");
+    if recurse {
+        out.push_str(" -R");
+    }
+    if force {
+        out.push_str(" -a");
+    }
+    if let Some(p) = path {
+        out.push(' ');
+        out.push_str(p);
+    }
+    Some(out)
+}
+
+/// `Select-String -Path f -Pattern x` → `rtk grep -i x f`
+///
+/// `-i` is not cosmetic: `Select-String` matches case-insensitively by default
+/// while `grep` does not, so omitting it would silently narrow the result set.
+fn ps_select_string(args: &[String]) -> Option<String> {
+    let mut pattern: Option<&str> = None;
+    let mut paths: Vec<&str> = Vec::new();
+    let mut simple = false;
+    let mut case_sensitive = false;
+    let mut context: Option<&str> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if let Some(name) = a.strip_prefix('-') {
+            if ps_is(name, "SimpleMatch") {
+                simple = true;
+                i += 1;
+            } else if ps_is(name, "CaseSensitive") {
+                case_sensitive = true;
+                i += 1;
+            } else if ps_is(name, "Pattern") {
+                if pattern.replace(args.get(i + 1)?.as_str()).is_some() {
+                    return None;
+                }
+                i += 2;
+            } else if ps_is(name, "Path") || ps_is(name, "LiteralPath") {
+                paths.push(args.get(i + 1)?.as_str());
+                i += 2;
+            } else if ps_is(name, "Context") {
+                let value = ps_unquote(args.get(i + 1)?.as_str());
+                // `-Context 2,4` is asymmetric; `grep -C` is not.
+                if value.contains(',') {
+                    return None;
+                }
+                value.parse::<u32>().ok()?;
+                context = Some(value);
+                i += 2;
+            } else {
+                return None;
+            }
+        } else {
+            // Positional order is -Pattern then -Path.
+            if pattern.is_none() {
+                pattern = Some(a);
+            } else {
+                paths.push(a);
+            }
+            i += 1;
+        }
+    }
+
+    let pattern = pattern?;
+    if paths.is_empty() {
+        return None;
+    }
+
+    let mut out = String::from("rtk grep");
+    if !case_sensitive {
+        out.push_str(" -i");
+    }
+    if simple {
+        out.push_str(" -F");
+    }
+    if let Some(n) = context {
+        out.push_str(" -C ");
+        out.push_str(n);
+    }
+    out.push(' ');
+    out.push_str(pattern);
+    for p in paths {
+        out.push(' ');
+        out.push_str(p);
+    }
+    Some(out)
+}
+
 const GOLANGCI_GLOBAL_OPT_WITH_VALUE: &[&str] = &[
     "-c",
     "--color",
@@ -1367,6 +1629,17 @@ fn rewrite_segment_inner(
         return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
     }
 
+    // PowerShell cmdlets share no command word with their GNU counterparts, so
+    // they must be translated before classify_command() gives up on them.
+    if context == RewriteContext::Normal {
+        if let Some(rewritten) = rewrite_powershell(cmd_part) {
+            if is_excluded(&rewritten, excluded) {
+                return None;
+            }
+            return Some(format!("{}{}", rewritten, redirect_suffix));
+        }
+    }
+
     // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
     // semantics than rtk read or no equivalent at all. Only `-n` (line numbers)
     // maps correctly to `rtk read -n`. Skip rewrite for any other flag.
@@ -1818,6 +2091,107 @@ mod tests {
                 None
             );
         }
+    }
+
+    fn ps(cmd: &str) -> Option<String> {
+        rewrite_command_no_prefixes(cmd, &[])
+    }
+
+    #[test]
+    fn test_ps_get_content() {
+        assert_eq!(ps("Get-Content foo.txt"), Some("rtk read foo.txt".into()));
+        assert_eq!(
+            ps("Get-Content foo.txt -TotalCount 5"),
+            Some("rtk read foo.txt --max-lines 5".into())
+        );
+        assert_eq!(
+            ps("Get-Content -Tail 20 -Path foo.txt"),
+            Some("rtk read foo.txt --tail-lines 20".into())
+        );
+        // Cmdlet names are case-insensitive in PowerShell.
+        assert_eq!(ps("get-content foo.txt"), Some("rtk read foo.txt".into()));
+        assert_eq!(ps("gc foo.txt"), Some("rtk read foo.txt".into()));
+    }
+
+    #[test]
+    fn test_ps_get_content_unmappable_params_pass_through() {
+        // -Raw returns one string instead of lines; rtk read cannot reproduce it.
+        assert_eq!(ps("Get-Content foo.txt -Raw"), None);
+        assert_eq!(ps("Get-Content foo.txt -Encoding utf8"), None);
+        // Head and tail at once has no single rtk read invocation.
+        assert_eq!(ps("Get-Content foo.txt -TotalCount 5 -Tail 5"), None);
+        // Multiple files: --max-lines takes one positional path.
+        assert_eq!(ps("Get-Content a.txt b.txt"), None);
+    }
+
+    #[test]
+    fn test_ps_get_childitem() {
+        assert_eq!(ps("Get-ChildItem"), Some("rtk ls".into()));
+        assert_eq!(ps("Get-ChildItem src"), Some("rtk ls src".into()));
+        assert_eq!(
+            ps("Get-ChildItem src -Recurse -Force"),
+            Some("rtk ls -R -a src".into())
+        );
+        assert_eq!(ps("gci -Recurse"), Some("rtk ls -R".into()));
+    }
+
+    #[test]
+    fn test_ps_get_childitem_unmappable_params_pass_through() {
+        // Native ls has no -Filter/-Include; approximating them would list a
+        // different set of files than the caller asked for.
+        assert_eq!(ps("Get-ChildItem -Recurse -Filter *.rs"), None);
+        assert_eq!(ps("Get-ChildItem -File"), None);
+        assert_eq!(ps("Get-ChildItem -ErrorAction SilentlyContinue"), None);
+    }
+
+    #[test]
+    fn test_ps_select_string() {
+        // -i is required: Select-String is case-insensitive, grep is not.
+        assert_eq!(
+            ps("Select-String -Path foo.txt -Pattern bar"),
+            Some("rtk grep -i bar foo.txt".into())
+        );
+        assert_eq!(
+            ps("Select-String -Pattern bar -Path foo.txt -CaseSensitive"),
+            Some("rtk grep bar foo.txt".into())
+        );
+        assert_eq!(
+            ps("Select-String -Pattern bar -Path foo.txt -SimpleMatch"),
+            Some("rtk grep -i -F bar foo.txt".into())
+        );
+        assert_eq!(
+            ps("sls bar foo.txt"),
+            Some("rtk grep -i bar foo.txt".into())
+        );
+    }
+
+    #[test]
+    fn test_ps_select_string_unmappable_params_pass_through() {
+        // Reading from the pipeline rather than a path: nothing for grep to open.
+        assert_eq!(ps("Select-String -Pattern bar"), None);
+        // grep -C is symmetric, -Context 2,4 is not.
+        assert_eq!(ps("Select-String bar foo.txt -Context 2,4"), None);
+        assert_eq!(ps("Select-String bar foo.txt -List"), None);
+    }
+
+    #[test]
+    fn test_ps_windows_paths_keep_backslashes() {
+        assert_eq!(
+            ps(r"Get-Content D:\Code\foo.txt"),
+            Some(r"rtk read D:\Code\foo.txt".into())
+        );
+        assert_eq!(
+            ps(r#"Get-Content "D:\My Code\foo.txt""#),
+            Some(r#"rtk read "D:\My Code\foo.txt""#.into())
+        );
+    }
+
+    #[test]
+    fn test_ps_cmdlet_in_pipeline_is_not_rewritten() {
+        // A cmdlet stage hands .NET objects to the next stage; rtk's text output
+        // would not survive that hand-off.
+        assert_eq!(ps("Get-ChildItem | Measure-Object"), None);
+        assert_eq!(ps("Get-Content foo.txt | Select-Object -First 3"), None);
     }
 
     fn analyze_test_pipeline(cmd: &str) -> PipelineAnalysis {
