@@ -1,6 +1,6 @@
 [filters.gcc]
 description = "Compact gcc/g++ compiler output — strip notes, keep errors and warnings"
-match_command = "^g(cc|\\+\\+)\\b"
+match_command = "^(gcc|g\\+\\+)(\\s|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",
@@ -15,6 +15,7 @@ on_empty = "gcc: ok"
 
 [[tests.gcc]]
 name = "strips include chain, keeps errors and warnings"
+command = "gcc -c main.c"
 input = """
 In file included from /usr/include/stdio.h:42:
                  from main.c:1:
@@ -28,6 +29,14 @@ main.c:15:12: warning: unused variable 'x' [-Wunused-variable]
 1 error generated.
 """
 expected = "main.c:10:5: error: use of undeclared identifier 'foo'\n    foo();\n    ^\nmain.c:15:12: warning: unused variable 'x' [-Wunused-variable]\n    int x = 42;\n        ^"
+
+[[tests.gcc]]
+name = "gpp invocation matches"
+command = "g++ -o main main.cpp"
+input = """
+main.cpp:3:5: error: 'missing' was not declared in this scope
+"""
+expected = "main.cpp:3:5: error: 'missing' was not declared in this scope"
 
 [[tests.gcc]]
 name = "clean compilation"

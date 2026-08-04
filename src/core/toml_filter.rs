@@ -67,6 +67,12 @@ pub struct TomlFilterTestDef {
     pub name: String,
     pub input: String,
     pub expected: String,
+    /// Optional sample command the filter's `match_command` must match.
+    /// When present, the test harness asserts `match_command` actually fires
+    /// for this command, so a filter whose pattern can never activate is
+    /// caught instead of reporting green on transform-only tests. See #3402.
+    #[serde(default)]
+    pub command: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -247,13 +253,14 @@ impl TomlFilterRegistry {
 /// Commands already handled by dedicated Rust modules (routed by Clap before TOML).
 /// A TOML filter whose match_command matches one of these will never activate —
 /// Clap routes the command before `run_fallback()` is reached.
-const RUST_HANDLED_COMMANDS: &[&str] = &[
+pub const RUST_HANDLED_COMMANDS: &[&str] = &[
     "ls",
     "tree",
     "read",
     "smart",
     "git",
     "gh",
+    "glab",
     "aws",
     "psql",
     "pnpm",
@@ -265,15 +272,20 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "find",
     "diff",
     "log",
+    "dotnet",
     "docker",
     "kubectl",
+    "oc",
     "summary",
     "grep",
+    "rg",
     "init",
     "wget",
     "wc",
     "gain",
+    "cc-economics",
     "config",
+    "jest",
     "vitest",
     "prisma",
     "tsc",
@@ -287,16 +299,39 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "npx",
     "curl",
     "discover",
+    "session",
+    "telemetry",
+    "learn",
+    "run",
+    "proxy",
+    "pipe",
+    "trust",
+    "untrust",
+    "verify",
     "ruff",
     "pytest",
     "mypy",
+    "php",
+    "phpunit",
+    "phpstan",
+    "pest",
+    "paratest",
+    "ecs",
+    "pint",
+    "rake",
+    "rubocop",
+    "rspec",
     "pip",
+    "uv",
     "go",
+    "sbt",
+    "gt",
     "golangci-lint",
+    "gradlew",
+    "mvn",
+    "hook",
+    "hook-audit",
     "rewrite",
-    "proxy",
-    "verify",
-    "learn",
 ];
 
 pub fn is_rtk_reserved_command(name: &str) -> bool {
@@ -758,6 +793,15 @@ fn collect_test_outcomes(
         };
 
         for test in tests {
+            // Activation check: when a test carries a sample `command`, the
+            // filter's match_command must match it. Without this, a filter
+            // whose pattern can never fire against a real command still
+            // reports every transform test green (issue #3402).
+            let command_matches = test
+                .command
+                .as_ref()
+                .map(|cmd| compiled.match_regex.is_match(cmd))
+                .unwrap_or(true);
             let actual = apply_filter(compiled, &test.input);
             // Trim trailing newlines: TOML multiline strings end with a newline
             let actual_cmp = actual.trim_end_matches('\n').to_string();
@@ -765,8 +809,15 @@ fn collect_test_outcomes(
             outcomes.push(TestOutcome {
                 filter_name: filter_name.clone(),
                 test_name: test.name,
-                passed: actual_cmp == expected_cmp,
-                actual: actual_cmp,
+                passed: command_matches && actual_cmp == expected_cmp,
+                actual: if command_matches {
+                    actual_cmp
+                } else {
+                    format!(
+                        "match_command does not match the sample command {:?}",
+                        test.command.as_deref().unwrap_or("")
+                    )
+                },
                 expected: expected_cmp,
             });
         }
@@ -1837,7 +1888,6 @@ match_command = "^make\\b"
             "brew-install",
             "composer-install",
             "df",
-            "dotnet-build",
             "du",
             "fail2ban-client",
             "gcloud",
@@ -1872,7 +1922,6 @@ match_command = "^make\\b"
             "tofu-plan",
             "tofu-validate",
             "trunk-build",
-            "uv-sync",
             "yamllint",
         ];
 
@@ -1892,8 +1941,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            63,
-            "Expected exactly 63 built-in filters, got {}. \
+            61,
+            "Expected exactly 61 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -1950,11 +1999,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 63 existing filters still present + 1 new = 64
+        // All 61 existing filters still present + 1 new = 62
         assert_eq!(
             filters.len(),
-            64,
-            "Expected 64 filters after concat (63 built-in + 1 new)"
+            62,
+            "Expected 62 filters after concat (61 built-in + 1 new)"
         );
 
         // New filter is discoverable

@@ -1,6 +1,9 @@
 [filters.gradle]
 description = "Compact Gradle build output — strip progress, keep tasks and errors"
-match_command = "^(gradle|gradlew|\\./)gradlew?\\b"
+# `gradle` reaches the TOML fallback. `gradlew` is routed to the Rust
+# Gradlew module by clap before fallback, so this filter only serves plain
+# `gradle` invocations (./gradle is normalized by file_name()).
+match_command = "^gradle\\b"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",
@@ -21,11 +24,13 @@ on_empty = "gradle: ok"
 
 [[tests.gradle]]
 name = "strips UP-TO-DATE tasks, keeps build result"
+command = "gradle build"
 input = "> Configuring project :app\n> Task :app:compileJava UP-TO-DATE\n> Task :app:compileKotlin UP-TO-DATE\n> Task :app:test\n\n3 tests completed, 1 failed\n\nBUILD FAILED in 12s"
 expected = "> Task :app:test\n3 tests completed, 1 failed\nBUILD FAILED in 12s"
 
 [[tests.gradle]]
 name = "clean build preserved"
+command = "gradle build"
 input = "BUILD SUCCESSFUL in 8s\n7 actionable tasks: 7 executed"
 expected = "BUILD SUCCESSFUL in 8s\n7 actionable tasks: 7 executed"
 

@@ -2792,6 +2792,24 @@ fn is_operational_command(cmd: &Commands) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::toml_filter::RUST_HANDLED_COMMANDS;
+
+    #[test]
+    fn every_clap_subcommand_is_reserved() {
+        use clap::CommandFactory;
+        // Guard against RUST_HANDLED_COMMANDS drifting from the clap enum: a
+        // TOML filter shadowed by a Rust-routed command would never activate,
+        // silently (issue #3402). Derived from clap itself, so a new Commands
+        // variant is flagged the moment it is added.
+        for subcommand in Cli::command().get_subcommands() {
+            let name = subcommand.get_name();
+            assert!(
+                RUST_HANDLED_COMMANDS.contains(&name),
+                "Commands variant '{name}' is missing from RUST_HANDLED_COMMANDS; \
+                 add it so TOML filters shadowed by it are flagged"
+            );
+        }
+    }
     use clap::Parser;
     use std::cell::Cell;
 
