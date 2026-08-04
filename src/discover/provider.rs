@@ -123,9 +123,14 @@ impl ClaudeProvider {
     /// `/Users/foo/bar`          → `-Users-foo-bar`
     /// `/Users/first.last/bar`   → `-Users-first-last-bar`
     /// `/home/chris/2_project`   → `-home-chris-2-project`
-    /// `C:\Users\foo\bar`        → `C:-Users-foo-bar`
+    /// `C:\Users\foo\bar`        → `C--Users-foo-bar`
+    ///
+    /// The drive-letter colon is sanitized too — Windows forbids `:` in a
+    /// directory name, so Claude Code cannot have left it in the slug. Omitting
+    /// it made every Windows lookup miss (`D:-Code-…` searched for, `D--Code-…`
+    /// on disk), which is why `rtk discover` and `rtk session` always reported 0.
     pub fn encode_project_path(path: &str) -> String {
-        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\', ' ', '[', ']'];
+        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\', ' ', '[', ']', ':'];
 
         path.chars()
             .map(|c| {
@@ -187,13 +192,18 @@ impl SessionProvider for ClaudeProvider {
 
             match entry_type {
                 "assistant" => {
-                    // Look for tool_use Bash blocks in message.content
+                    // Look for tool_use shell blocks in message.content. On Windows
+                    // the agent runs most commands through the PowerShell tool, so
+                    // matching only "Bash" hid the majority of the transcript.
                     if let Some(content) =
                         entry.pointer("/message/content").and_then(|c| c.as_array())
                     {
                         for block in content {
                             if block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
-                                && block.get("name").and_then(|n| n.as_str()) == Some("Bash")
+                                && matches!(
+                                    block.get("name").and_then(|n| n.as_str()),
+                                    Some("Bash") | Some("PowerShell")
+                                )
                             {
                                 if let (Some(id), Some(cmd)) = (
                                     block.get("id").and_then(|i| i.as_str()),
@@ -403,10 +413,15 @@ mod tests {
 
     #[test]
     fn test_encode_project_path_windows() {
-        // Windows backslashes are also replaced with '-'
+        // Windows backslashes are also replaced with '-', and so is the
+        // drive-letter colon: `:` is not a legal character in a directory name,
+        // so the slug Claude Code actually creates on disk cannot contain one.
+        // Verified against a real transcript directory:
+        // `D:\Code\Claude\Projects\lakopark_project`
+        //   → `D--Code-Claude-Projects-lakopark-project`
         assert_eq!(
             ClaudeProvider::encode_project_path(r"C:\Users\foo\bar"),
-            "C:-Users-foo-bar"
+            "C--Users-foo-bar"
         );
     }
 
