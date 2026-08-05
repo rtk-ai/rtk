@@ -1,0 +1,21 @@
+[filters.yadm]
+description = "Compact yadm (git wrapper) output — same filtering as git"
+match_command = "^yadm\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*\\(use \"git ",
+  "^\\s*\\(use \"yadm ",
+]
+truncate_lines_at = 120
+max_lines = 40
+
+[[tests.yadm]]
+name = "strips hint lines"
+input = "On branch main\nYour branch is up to date with 'origin/main'.\n\n  (use \"yadm add\" to update what will be committed)\n\nChanges not staged for commit:\n  modified:   .bashrc"
+expected = "On branch main\nYour branch is up to date with 'origin/main'.\nChanges not staged for commit:\n  modified:   .bashrc"
+
+[[tests.yadm]]
+name = "short output preserved"
+input = "Already up to date."
+expected = "Already up to date."

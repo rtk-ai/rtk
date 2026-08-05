@@ -1,0 +1,10 @@
+{
+  "packages": {
+    ".": {
+      "release-type": "rust",
+      "package-name": "rtk",
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true
+    }
+  }
+}

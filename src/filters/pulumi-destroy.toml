@@ -1,0 +1,60 @@
+[filters.pulumi-destroy]
+description = "Compact Pulumi destroy output"
+match_command = "^pulumi\\s+destroy(\\s|$)"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Destroying \\(",
+  "^Previewing (update|destroy)",
+  "^View in Browser",
+  "^View Live:",
+  "^Duration:",
+  "^Permalink:",
+  "^\\s*Type\\s+Name\\s+",
+  "^Loading policy packs",
+  "^@ (Previewing (update|destroy)|Destroying)",
+  "^More information at:",
+  "^Use `pulumi ",
+  "^The resources in the stack have been deleted",
+  "^If you want to remove the stack completely",
+  "^\\s+-\\s+.*\\bdeleting\\s+\\(",
+  "^\\s{4,}at\\s+\\S+\\s*\\(",
+  "^\\s{4,}at\\s+/",
+  "^\\s+at\\s+processTicksAndRejections",
+  "^\\s+promise:\\s+Promise",
+  "^\\s+\\[Circular",
+  "^\\s*<ref\\s+\\*\\d",
+]
+on_empty = "pulumi destroy: nothing to destroy"
+
+[[tests.pulumi-destroy]]
+name = "strips destroy header and url banner"
+input = """
+Destroying (dev)
+
+View in Browser (Ctrl+O): https://app.pulumi.com/org/my-proj/dev/updates/43
+
+     Type                          Name              Status
+ -   pulumi:pulumi:Stack           my-proj-dev       deleted
+ -   └─ aws:s3:Bucket              my-bucket         deleted
+
+Resources:
+    - 2 deleted
+
+Duration: 7s
+"""
+expected = """ -   pulumi:pulumi:Stack           my-proj-dev       deleted
+ -   └─ aws:s3:Bucket              my-bucket         deleted
+Resources:
+    - 2 deleted"""
+
+[[tests.pulumi-destroy]]
+name = "on_empty when nothing to destroy"
+input = """
+Destroying (dev)
+
+View in Browser (Ctrl+O): https://app.pulumi.com/org/my-proj/dev/updates/43
+
+Duration: 1s
+"""
+expected = "pulumi destroy: nothing to destroy"
