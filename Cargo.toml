@@ -22,7 +22,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 colored = "3"
 dirs = "5"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31" }
 toml = "0.8"
 chrono = "0.4"
 tempfile = "3"
@@ -33,6 +33,14 @@ flate2 = "1.0"
 quick-xml = "0.37"
 which = "8"
 automod = "1"
+
+[features]
+default = ["bundled-sqlite"]
+# Compile and statically link SQLite from the copy vendored in
+# libsqlite3-sys. Distribution packages build with
+# --no-default-features so the binary links the system SQLite and is
+# covered by the distribution's SQLite security updates.
+bundled-sqlite = ["rusqlite/bundled"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
