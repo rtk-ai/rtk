@@ -1009,12 +1009,18 @@ fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
 /// Handles: `[main abc1234def] message`, `[main (root-commit) abc1234def] msg`,
 /// localized variants, and multibyte branch names.
 fn parse_commit_output(line: &str) -> String {
-    if let Some(bracket_end) = line.find(']') {
-        let bracket_content = &line[1..bracket_end];
-        let hash = bracket_content.split_whitespace().next_back().unwrap_or("");
-        if !hash.is_empty() && hash.len() >= 7 {
-            let short_hash: String = hash.chars().take(7).collect();
-            format!("ok {}", short_hash)
+    // `strip_prefix` (rather than `&line[1..]`) guarantees the leading `[` is
+    // really there and that byte 1 is a char boundary for multibyte prefixes.
+    if let Some(rest) = line.strip_prefix('[') {
+        if let Some(bracket_end) = rest.find(']') {
+            let bracket_content = &rest[..bracket_end];
+            let hash = bracket_content.split_whitespace().next_back().unwrap_or("");
+            if !hash.is_empty() && hash.len() >= 7 {
+                let short_hash: String = hash.chars().take(7).collect();
+                format!("ok {}", short_hash)
+            } else {
+                "ok".to_string()
+            }
         } else {
             "ok".to_string()
         }
@@ -2867,6 +2873,20 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     fn test_parse_commit_output_empty() {
         assert_eq!(parse_commit_output(""), "ok");
+    }
+
+    /// Regression test (#3415): a line beginning with `]` made `&line[1..0]`
+    /// an empty backwards range and panicked.
+    #[test]
+    fn test_parse_commit_output_starts_with_closing_bracket() {
+        assert_eq!(parse_commit_output("] done"), "ok");
+    }
+
+    /// Regression test (#3415): a multi-byte first character made byte 1 not
+    /// a char boundary, so `&line[1..]` panicked.
+    #[test]
+    fn test_parse_commit_output_multibyte_first_char() {
+        assert_eq!(parse_commit_output("日本] x"), "ok");
     }
 
     // --- commit outcome classification (issue #2494) ---

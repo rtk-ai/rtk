@@ -452,6 +452,16 @@ fn shorten_path(path: &str) -> String {
     }
 }
 
+/// Shorten an ISO day stamp to its month-day portion (chars 5..10), rounding
+/// down to char boundaries so multi-byte input can never panic.
+fn short_month_day(date: &str) -> &str {
+    if date.len() >= 10 {
+        &date[date.floor_char_boundary(5)..date.floor_char_boundary(10)]
+    } else {
+        date
+    }
+}
+
 fn print_ascii_graph(data: &[(String, usize)]) {
     if data.is_empty() {
         return;
@@ -461,7 +471,7 @@ fn print_ascii_graph(data: &[(String, usize)]) {
     let width = 40;
 
     for (date, value) in data {
-        let date_short = if date.len() >= 10 { &date[5..10] } else { date };
+        let date_short = short_month_day(date);
 
         let bar_len = if max_val > 0 {
             ((*value as f64 / max_val as f64) * width as f64) as usize
@@ -759,4 +769,29 @@ fn confirm_reset() -> Result<bool> {
         .context("Failed to read confirmation")?;
 
     Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_month_day_ascii() {
+        assert_eq!(short_month_day("2026-08-05"), "08-05");
+    }
+
+    #[test]
+    fn short_month_day_short_input_untouched() {
+        assert_eq!(short_month_day("x"), "x");
+    }
+
+    /// Regression test (#3415 class): a multi-byte character straddling byte 5
+    /// made `&date[5..10]` slice mid-character and panic; the slice now rounds
+    /// down to char boundaries.
+    #[test]
+    fn short_month_day_multibyte_never_panics() {
+        let s = "2024\u{00e9}1-20"; // 'é' occupies bytes 4..6
+        let result = short_month_day(s);
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
 }

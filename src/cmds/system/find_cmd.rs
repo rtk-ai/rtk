@@ -177,6 +177,16 @@ fn parse_rtk_find_args(args: &[String]) -> Result<FindArgs> {
     Ok(parsed)
 }
 
+/// Shorten a directory for display: keep the trailing 47 bytes (rounded down
+/// to a char boundary) with a "..." prefix when the path exceeds 50 bytes.
+fn shorten_dir_display(dir: &str) -> String {
+    if dir.len() > 50 {
+        format!("...{}", &dir[dir.floor_char_boundary(dir.len() - 47)..])
+    } else {
+        dir.to_string()
+    }
+}
+
 /// Entry point from main.rs — parses raw args then delegates to run().
 pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
     let parsed = parse_find_args(args)?;
@@ -322,11 +332,7 @@ pub fn run(
         }
 
         let files_in_dir = &by_dir[dir];
-        let dir_display = if dir.len() > 50 {
-            format!("...{}", &dir[dir.len() - 47..])
-        } else {
-            dir.clone()
-        };
+        let dir_display = shorten_dir_display(dir);
 
         let remaining_budget = max_results - displayed;
         if files_in_dir.len() <= remaining_budget {
@@ -616,5 +622,29 @@ mod tests {
         assert!(result.is_ok());
         // We can't easily capture stdout in unit tests, but at least
         // verify it runs without error. The smoke tests verify content.
+    }
+
+    // --- shorten_dir_display (issue #3415) ---
+
+    /// Regression test (#3415): a path longer than 50 bytes whose byte at
+    /// `len - 47` falls inside a multi-byte character (20 Thai chars = 60
+    /// bytes) panicked; the tail must start on a char boundary.
+    #[test]
+    fn shorten_dir_display_multibyte_never_panics() {
+        let cjk = "ก".repeat(20);
+        let result = shorten_dir_display(&cjk);
+        assert!(result.starts_with("..."));
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn shorten_dir_display_keeps_last_47_bytes_ascii() {
+        let ascii = "a".repeat(60);
+        assert_eq!(shorten_dir_display(&ascii), format!("...{}", "a".repeat(47)));
+    }
+
+    #[test]
+    fn shorten_dir_display_short_path_untouched() {
+        assert_eq!(shorten_dir_display("src/cmds"), "src/cmds");
     }
 }

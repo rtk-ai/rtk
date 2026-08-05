@@ -316,7 +316,10 @@ fn filter_migrate_status(output: &str) -> String {
             applied_count += 1;
             if latest_migration.is_empty() && line.contains("202") {
                 if let Some(pos) = line.find("202") {
-                    let end = line[pos..].find(|c: char| c.is_whitespace()).unwrap_or(20);
+                    // Same fallback as the migrate-dev path above: when the
+                    // migration token is line-final, the span is the rest of
+                    // the line, never a fixed 20 bytes (issue #3445).
+                    let end = line[pos..].find(|c: char| c.is_whitespace()).unwrap_or(line.len() - pos);
                     latest_migration = line[pos..pos + end].to_string();
                 }
             }
@@ -487,5 +490,15 @@ CREATE INDEX "session_status_idx" ON "Session"("status");
     fn test_extract_number() {
         assert_eq!(extract_number("42 models generated"), Some(42));
         assert_eq!(extract_number("no numbers here"), None);
+    }
+
+    /// Regression test (#3445): a migration token at end-of-line shorter than
+    /// 20 bytes used the `.unwrap_or(20)` fallback and sliced past the end of
+    /// the string.
+    #[test]
+    fn test_filter_migrate_status_line_final_migration_never_panics() {
+        let output = "applied 20240115_x";
+        let result = filter_migrate_status(output);
+        assert!(result.contains("Latest: 20240115_x"), "got: {result}");
     }
 }
