@@ -210,6 +210,11 @@ rtk next build                  # Next.js build compact
 rtk prettier --check .          # Files needing formatting
 rtk cargo build                 # Cargo build (-80%)
 rtk cargo clippy                # Cargo clippy (-80%)
+rtk cmake --build build         # CMake diagnostics only
+rtk ctest --test-dir build      # CTest failures and summaries
+rtk make -j8                    # Make diagnostics only
+rtk ninja -C build              # Ninja diagnostics only
+rtk msbuild app.sln             # MSVC, linker, RC, and MSBuild diagnostics
 rtk ruff check                  # Python linting (JSON, -80%)
 rtk golangci-lint run           # Go linting (JSON, -85%)
 rtk rubocop                     # Ruby linting (JSON, -60%+)

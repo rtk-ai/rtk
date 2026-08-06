@@ -1032,6 +1032,42 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 65.0,
         ..RtkRule::DEFAULT
     },
+    RtkRule {
+        pattern: r"^cmake\s+(?:--build(?:\s|$)|(?:.*\s)?-B(?:\s|$))",
+        rtk_cmd: "rtk cmake",
+        rewrite_prefixes: &["cmake"],
+        category: "Build",
+        pipeline_final_safe: false,
+        savings_pct: 80.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^make(?:\s|$)",
+        rtk_cmd: "rtk make",
+        rewrite_prefixes: &["make"],
+        category: "Build",
+        pipeline_final_safe: false,
+        savings_pct: 80.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^ninja(?:\s|$)",
+        rtk_cmd: "rtk ninja",
+        rewrite_prefixes: &["ninja"],
+        category: "Build",
+        pipeline_final_safe: false,
+        savings_pct: 80.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^msbuild(?:\s|$)",
+        rtk_cmd: "rtk msbuild",
+        rewrite_prefixes: &["msbuild"],
+        category: "Build",
+        pipeline_final_safe: false,
+        savings_pct: 80.0,
+        ..RtkRule::DEFAULT
+    },
 ];
 
 pub const IGNORED_PREFIXES: &[&str] = &[
