@@ -44,9 +44,16 @@ enum RewriteOutcome {
     Ask(String),
 }
 
-fn evaluate(cmd: &str, excluded: &[String], transparent_prefixes: &[String]) -> RewriteOutcome {
-    let verdict = check_command(cmd);
-
+/// Evaluate with a caller-supplied verdict.
+///
+/// Kept free of file I/O so unit tests can exercise the rewrite path without
+/// reading the host's permission settings — mirrors `check_command_with_rules`.
+fn evaluate_with_verdict(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+) -> RewriteOutcome {
     if verdict == PermissionVerdict::Deny {
         return RewriteOutcome::Deny;
     }
@@ -62,6 +69,11 @@ fn evaluate(cmd: &str, excluded: &[String], transparent_prefixes: &[String]) -> 
         },
         None => RewriteOutcome::Passthrough,
     }
+}
+
+/// Load the host's permission verdict for `cmd`, then evaluate.
+fn evaluate(cmd: &str, excluded: &[String], transparent_prefixes: &[String]) -> RewriteOutcome {
+    evaluate_with_verdict(cmd, check_command(cmd), excluded, transparent_prefixes)
 }
 
 #[cfg(test)]
@@ -91,7 +103,25 @@ mod tests {
     }
 
     mod unattestable_passthrough {
-        use super::super::{evaluate, RewriteOutcome};
+        use super::super::{evaluate_with_verdict, PermissionVerdict, RewriteOutcome};
+
+        /// Evaluate with the default verdict and no exclusions.
+        ///
+        /// The real `evaluate` reads the host's permission settings
+        /// (`~/.claude/settings.json`), so these tests failed on any machine with
+        /// a matching deny rule while passing in CI, which has none.
+        fn evaluate(
+            cmd: &str,
+            excluded: &[String],
+            transparent_prefixes: &[String],
+        ) -> RewriteOutcome {
+            evaluate_with_verdict(
+                cmd,
+                PermissionVerdict::Default,
+                excluded,
+                transparent_prefixes,
+            )
+        }
 
         #[test]
         fn test_backtick_substitution_passthrough() {
