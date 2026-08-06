@@ -412,6 +412,7 @@ For per-agent setup details, override controls, and graceful degradation, see th
 ```toml
 [hooks]
 exclude_commands = ["curl", "playwright"]  # skip rewrite for these
+allow_ask_commands = ["jest", "vitest"]    # auto-allow ask-level rewrites
 
 [tee]
 enabled = true          # save raw output on failure (default: true)

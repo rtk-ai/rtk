@@ -3,7 +3,7 @@ use super::constants::{
     SETTINGS_JSON, SETTINGS_LOCAL_JSON,
 };
 use crate::core::stream::exec_capture;
-use crate::discover::lexer::split_for_permissions;
+use crate::discover::lexer::{split_for_permissions, tokenize, TokenKind};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -119,6 +119,61 @@ pub(crate) fn check_command_with_rules(
     } else {
         PermissionVerdict::Default
     }
+}
+
+/// Return true when every command segment in an ask-level rewrite is explicitly
+/// opted into auto-allow by `[hooks].allow_ask_commands`.
+pub(crate) fn ask_rewrite_is_allowed(rewritten: &str, allow_ask_commands: &[String]) -> bool {
+    let allowed: Vec<String> = allow_ask_commands
+        .iter()
+        .filter_map(|entry| command_name_from_segment(entry))
+        .collect();
+    if allowed.is_empty() {
+        return false;
+    }
+
+    let segments = split_for_permissions(rewritten);
+    !segments.is_empty()
+        && segments.iter().all(|segment| {
+            command_name_from_segment(segment)
+                .as_ref()
+                .is_some_and(|name| allowed.iter().any(|allowed| allowed == name))
+        })
+}
+
+fn command_name_from_segment(segment: &str) -> Option<String> {
+    let mut args = tokenize(segment)
+        .into_iter()
+        .filter(|token| token.kind == TokenKind::Arg)
+        .map(|token| token.value);
+
+    while let Some(arg) = args.next() {
+        if is_env_assignment(&arg) || is_shell_wrapper(&arg) {
+            continue;
+        }
+        if arg == "rtk" {
+            return args.next();
+        }
+        return Some(arg);
+    }
+
+    None
+}
+
+fn is_env_assignment(arg: &str) -> bool {
+    let Some((name, _value)) = arg.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn is_shell_wrapper(arg: &str) -> bool {
+    matches!(arg, "noglob" | "command" | "builtin" | "exec" | "nocorrect")
 }
 
 /// Load deny, ask, and allow Bash rules from all Claude Code settings files.
@@ -1182,5 +1237,35 @@ mod tests {
             check_command_with_rules("rm -rf /", &[], &[], &allow),
             PermissionVerdict::Default
         );
+    }
+
+    #[test]
+    fn test_ask_rewrite_is_allowed_for_configured_command_name() {
+        let allow = vec!["vitest".to_string()];
+        assert!(ask_rewrite_is_allowed("rtk vitest --run", &allow));
+    }
+
+    #[test]
+    fn test_ask_rewrite_allowlist_accepts_rtk_prefixed_entry() {
+        let allow = vec!["rtk vitest".to_string()];
+        assert!(ask_rewrite_is_allowed("rtk vitest --run", &allow));
+    }
+
+    #[test]
+    fn test_ask_rewrite_allowlist_requires_all_segments() {
+        let allow = vec!["vitest".to_string()];
+        assert!(!ask_rewrite_is_allowed(
+            "rtk vitest --run && rtk git status",
+            &allow
+        ));
+    }
+
+    #[test]
+    fn test_ask_rewrite_allowlist_skips_env_and_rtk_prefixes() {
+        let allow = vec!["cargo".to_string()];
+        assert!(ask_rewrite_is_allowed(
+            "RUST_LOG=debug rtk cargo test",
+            &allow
+        ));
     }
 }

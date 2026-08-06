@@ -49,6 +49,7 @@ enabled = true              # anonymous daily ping — see Telemetry & Privacy f
 
 [hooks]
 exclude_commands = []       # commands to never auto-rewrite
+allow_ask_commands = []     # ask-level rewrites to auto-allow by command name
 ```
 
 For full details on what is collected, opt-out options, and GDPR rights, see [Telemetry & Privacy](../resources/telemetry.md).
@@ -103,6 +104,15 @@ exclude_commands = ["^curl", "^wget", "git rebase"]
 ```
 
 Invalid regex patterns fall back to prefix matching.
+
+Allow specific ask-level rewrites without disabling RTK for those commands:
+
+```toml
+[hooks]
+allow_ask_commands = ["jest", "vitest"]
+```
+
+This only applies after RTK finds a rewrite for that command; deny rules and unsafe shell constructs still take precedence.
 
 Or for a single invocation:
 

@@ -4,7 +4,7 @@
 //! corrupts the JSON protocol (Claude Code bug #4669 silently disables the hook).
 
 use super::constants::PRE_TOOL_USE_KEY;
-use super::permissions::{self, PermissionVerdict};
+use super::permissions::{self, ask_rewrite_is_allowed, PermissionVerdict};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::{self, Read, Write};
@@ -145,16 +145,34 @@ fn detect_format(v: &Value) -> HookFormat {
     HookFormat::PassThrough
 }
 
+#[cfg(test)]
 fn get_rewritten(cmd: &str) -> Option<String> {
+    let (excluded, transparent_prefixes, _allow_ask_commands) = load_hook_rewrite_config();
+    get_rewritten_with_config(cmd, &excluded, &transparent_prefixes)
+}
+
+fn load_hook_rewrite_config() -> (Vec<String>, Vec<String>, Vec<String>) {
+    crate::core::config::Config::load()
+        .map(|c| {
+            (
+                c.hooks.exclude_commands,
+                c.hooks.transparent_prefixes,
+                c.hooks.allow_ask_commands,
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn get_rewritten_with_config(
+    cmd: &str,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+) -> Option<String> {
     if has_heredoc(cmd) {
         return None;
     }
 
-    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
-        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
-        .unwrap_or_default();
-
-    let rewritten = rewrite_command(cmd, &excluded, &transparent_prefixes)?;
+    let rewritten = rewrite_command(cmd, excluded, transparent_prefixes)?;
 
     if rewritten == cmd {
         return None;
@@ -171,14 +189,32 @@ enum HookDecision {
 }
 
 fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
+    let (excluded, transparent_prefixes, allow_ask_commands) = load_hook_rewrite_config();
+    decide_from_verdict_with_config(
+        cmd,
+        verdict,
+        &excluded,
+        &transparent_prefixes,
+        &allow_ask_commands,
+    )
+}
+
+fn decide_from_verdict_with_config(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+    allow_ask_commands: &[String],
+) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
     }
     if crate::discover::lexer::contains_unattestable_construct(cmd) {
         return HookDecision::Defer;
     }
-    match get_rewritten(cmd) {
+    match get_rewritten_with_config(cmd, excluded, transparent_prefixes) {
         Some(r) if verdict == PermissionVerdict::Allow => HookDecision::AllowRewrite(r),
+        Some(r) if ask_rewrite_is_allowed(&r, allow_ask_commands) => HookDecision::AllowRewrite(r),
         Some(r) => HookDecision::AskRewrite(r),
         None => HookDecision::Defer,
     }
@@ -694,7 +730,7 @@ fn run_cursor_inner_with_rules(
     };
 
     let verdict = permissions::check_command_with_rules(&cmd, deny_rules, ask_rules, allow_rules);
-    match decide_from_verdict(&cmd, verdict) {
+    match decide_from_verdict_with_config(&cmd, verdict, &[], &[], &[]) {
         HookDecision::AllowRewrite(rewritten) => cursor_allow(&rewritten),
         HookDecision::AskRewrite(rewritten) => cursor_ask(&rewritten),
         _ => "{}".to_string(),
@@ -1161,7 +1197,11 @@ mod tests {
             &[],
             &["Bash(git:*)".to_string()],
         );
-        copilot_cli_response_from_decision(&cli_args(cmd), decide_from_verdict(cmd, verdict), cmd)
+        copilot_cli_response_from_decision(
+            &cli_args(cmd),
+            decide_from_verdict_with_config(cmd, verdict, &[], &[], &[]),
+            cmd,
+        )
     }
 
     #[test]
@@ -1698,7 +1738,7 @@ mod tests {
         allow: &[String],
     ) -> HookDecision {
         let verdict = permissions::check_command_with_rules(cmd, deny, ask, allow);
-        decide_from_verdict(cmd, verdict)
+        decide_from_verdict_with_config(cmd, verdict, &[], &[], &[])
     }
 
     fn all_allowed() -> Vec<String> {
@@ -1717,6 +1757,30 @@ mod tests {
     fn test_decide_ask_for_default_verdict() {
         assert!(matches!(
             decide_with_rules("git status", &[], &[], &[]),
+            HookDecision::AskRewrite(_)
+        ));
+    }
+
+    #[test]
+    fn test_decide_allow_for_configured_ask_rewrite() {
+        let verdict = permissions::check_command_with_rules("git status", &[], &[], &[]);
+        assert!(matches!(
+            decide_from_verdict_with_config("git status", verdict, &[], &[], &["git".to_string()]),
+            HookDecision::AllowRewrite(_)
+        ));
+    }
+
+    #[test]
+    fn test_decide_ask_when_allow_ask_commands_misses() {
+        let verdict = permissions::check_command_with_rules("git status", &[], &[], &[]);
+        assert!(matches!(
+            decide_from_verdict_with_config(
+                "git status",
+                verdict,
+                &[],
+                &[],
+                &["vitest".to_string()]
+            ),
             HookDecision::AskRewrite(_)
         ));
     }
