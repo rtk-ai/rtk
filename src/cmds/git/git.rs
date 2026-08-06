@@ -436,53 +436,8 @@ fn run_log(
     let mut cmd = git_cmd(global_args);
     cmd.arg("log");
 
-    // Check if user provided format flags
-    let has_format_flag = args.iter().any(|arg| {
-        arg.starts_with("--oneline") || arg.starts_with("--pretty") || arg.starts_with("--format")
-    });
-
-    // Check if user provided limit flag (-N, -n N, --max-count=N, --max-count N)
-    let has_limit_flag = args.iter().any(|arg| {
-        (arg.starts_with('-') && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit()))
-            || arg == "-n"
-            || arg.starts_with("--max-count")
-    });
-
-    // Apply RTK defaults only if user didn't specify them
-    // Use %b (body) to preserve first line of commit body for agent context
-    // (BREAKING CHANGE, Closes #xxx, design notes)
-    if !has_format_flag {
-        cmd.args(["--pretty=format:%h %s (%ar) <%an>%n%b%n---END---"]);
-    }
-
-    // Determine limit: respect user's explicit -N flag, use sensible defaults otherwise
-    let (limit, user_set_limit) = if has_limit_flag {
-        // User explicitly passed -N / -n N / --max-count=N → respect their choice
-        let n = parse_user_limit(args).unwrap_or(10);
-        (n, true)
-    } else if has_format_flag {
-        // --oneline / --pretty without -N: user wants compact output, allow more
-        cmd.arg("-50");
-        (50, false)
-    } else {
-        // No flags at all: default to 10
-        cmd.arg("-10");
-        (10, false)
-    };
-
-    // Only add --no-merges if user didn't explicitly request merge commits
-    let wants_merges = args
-        .iter()
-        .any(|arg| arg == "--merges" || arg == "--min-parents=2" || arg == "--no-merges");
-    // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
-    if !wants_merges && !has_limit_flag {
-        cmd.arg("--no-merges");
-    }
-
-    // Pass all user arguments
-    for arg in args {
-        cmd.arg(arg);
-    }
+    let (log_args, limit, user_set_limit, has_format_flag) = build_log_args(args);
+    cmd.args(log_args);
 
     let result = exec_capture(&mut cmd).context("Failed to run git log")?;
 
@@ -508,6 +463,54 @@ fn run_log(
     );
 
     Ok(0)
+}
+
+/// Build the arguments that RTK adds around the user's git log arguments.
+///
+/// Merge commits are deliberately left in the history. They carry topology and
+/// often identify the repository's actual integration state, so silently adding
+/// --no-merges would make the compact output semantically incorrect.
+fn build_log_args(args: &[String]) -> (Vec<String>, usize, bool, bool) {
+    let mut log_args = Vec::new();
+
+    // Check if user provided format flags
+    let has_format_flag = args.iter().any(|arg| {
+        arg.starts_with("--oneline") || arg.starts_with("--pretty") || arg.starts_with("--format")
+    });
+
+    // Check if user provided limit flag (-N, -n N, --max-count=N, --max-count N)
+    let has_limit_flag = args.iter().any(|arg| {
+        (arg.starts_with('-') && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit()))
+            || arg == "-n"
+            || arg.starts_with("--max-count")
+    });
+
+    // Apply RTK defaults only if user didn't specify them
+    // Use %b (body) to preserve first line of commit body for agent context
+    // (BREAKING CHANGE, Closes #xxx, design notes)
+    if !has_format_flag {
+        log_args.push("--pretty=format:%h %s (%ar) <%an>%n%b%n---END---".to_string());
+    }
+
+    // Determine limit: respect user's explicit -N flag, use sensible defaults otherwise
+    let (limit, user_set_limit) = if has_limit_flag {
+        // User explicitly passed -N / -n N / --max-count=N → respect their choice
+        let n = parse_user_limit(args).unwrap_or(10);
+        (n, true)
+    } else if has_format_flag {
+        // --oneline / --pretty without -N: user wants compact output, allow more
+        log_args.push("-50".to_string());
+        (50, false)
+    } else {
+        // No flags at all: default to 10
+        log_args.push("-10".to_string());
+        (10, false)
+    };
+
+    // Pass all user arguments
+    log_args.extend(args.iter().cloned());
+
+    (log_args, limit, user_set_limit, has_format_flag)
 }
 
 /// Filter git log output: truncate long messages, cap lines
@@ -2729,6 +2732,23 @@ A  added.rs
     fn test_parse_user_limit_none() {
         let args: Vec<String> = vec!["--oneline".into()];
         assert_eq!(parse_user_limit(&args), None);
+    }
+
+    #[test]
+    fn test_build_log_args_preserves_merge_commits() {
+        let (args, limit, user_set_limit, user_format) = build_log_args(&[]);
+
+        assert_eq!(limit, 10);
+        assert!(!user_set_limit);
+        assert!(!user_format);
+        assert!(
+            !args.iter().any(|arg| arg == "--no-merges"),
+            "default git log must not hide merge commits"
+        );
+        assert!(
+            args.iter().any(|arg| arg.starts_with("--pretty=format:")),
+            "default git log should still use RTK's compact format"
+        );
     }
 
     #[test]
