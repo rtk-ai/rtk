@@ -16,7 +16,7 @@ with other Pi extensions.
 
 - TypeScript extension using Pi's `ExtensionAPI` (not a shell hook, no `zx` dependency)
 - Subscribes to `tool_call` event, narrows to `bash` tool via `isToolCallEventType`
-- Calls `rtk rewrite` via `pi.exec`; mutates `event.input.command` in-place if rewrite differs
+- Calls `rtk rewrite` via `pi.exec`; returns a revised `{ input }` (not an in-place mutation of `event.input`) when the rewrite differs, per `ToolCallEventResult`
 - All error paths return `undefined` (pass through); RTK never blocks execution
 - Version guard at load time: checks `rtk >= 0.23.0`; warns and registers no-op if too old or missing
 - Installed to `.pi/extensions/rtk.ts` by `rtk init --agent pi` (project-local) or `~/.pi/agent/extensions/rtk.ts` by `rtk init --agent pi --global`

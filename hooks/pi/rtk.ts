@@ -6,9 +6,9 @@
 // To add or change rewrite rules, edit the Rust registry — not this file.
 //
 // Exit code contract for `rtk rewrite`:
-//   0 + stdout  Rewrite found → mutate command
+//   0 + stdout  Rewrite found → revised command returned to the caller
 //   1           No RTK equivalent → pass through unchanged
-//   3 + stdout  Rewrite (advisory) → mutate command
+//   3 + stdout  Rewrite (advisory) → revised command returned to the caller
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent"
@@ -68,9 +68,14 @@ export default async function (pi: ExtensionAPI) {
 
       // Delegate to RTK.
       const rewritten = await rewriteCommand(pi, cmd, ctx.signal)
-      if (rewritten && rewritten !== cmd) {
-        event.input.command = rewritten
-      }
+      if (!rewritten || rewritten === cmd) return
+
+      // The Pi/OMP dispatcher builds the args a tool actually executes with
+      // from a separate copy of `event.input`; it only substitutes a handler's
+      // RETURNED `{ input }` (see ToolCallEventResult), so mutating
+      // `event.input.command` here has no effect on execution — it silently
+      // rewrites a value nothing reads.
+      return { input: { ...event.input, command: rewritten } }
     } catch (err) {
       // Fail open: never block execution on an unexpected error.
       console.warn("[rtk] unexpected error in tool_call handler; passing through command", err)

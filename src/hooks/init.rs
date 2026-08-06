@@ -7169,6 +7169,25 @@ mod tests {
     }
 
     #[test]
+    fn test_pi_plugin_returns_revised_input_instead_of_mutating_in_place() {
+        // Regression test: the Pi/OMP `tool_call` dispatcher builds the args a
+        // tool actually executes with from a separate copy of `event.input`;
+        // it only substitutes a handler's RETURNED `{ input }`. A handler that
+        // mutates `event.input.command` and returns nothing silently rewrites
+        // a value nothing reads, so the bash command never actually changes.
+        assert!(
+            PI_PLUGIN.contains("return { input:"),
+            "tool_call handler must return the revised input (ToolCallEventResult), \
+             not just mutate event.input in place"
+        );
+        assert!(
+            !PI_PLUGIN.contains("event.input.command = rewritten"),
+            "tool_call handler must not rely on mutating event.input in place; \
+             the dispatcher never observes it"
+        );
+    }
+
+    #[test]
     fn test_run_pi_mode_local_installs_plugin() {
         let tmp = TempDir::new().unwrap();
         let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
