@@ -316,6 +316,9 @@ enum Commands {
     },
 
     /// Compact grep - strips whitespace, truncates, groups by file
+    #[command(
+        after_help = "RTK options: --files-only, --count-by-file, --top-files N, --max-matches N, --max-per-file N, --max-line-chars N, --full-lines, --all, --agent-safe, --json. These may appear before or after pattern/path; after -- they are native operands."
+    )]
     Grep {
         // rtk's own options here are long-only: a short form shadows the native
         // grep/rg flag of the same letter and captures it before it can reach
@@ -2167,14 +2170,7 @@ fn run_cli() -> Result<i32> {
             max,
             context_only,
             extra_args,
-        } => search::run(
-            search::Engine::Grep,
-            max_len,
-            max,
-            context_only,
-            &extra_args,
-            cli.verbose,
-        )?,
+        } => search::run_grep(max_len, max, context_only, &extra_args, cli.verbose)?,
         Commands::Rg { extra_args } => {
             search::run(search::Engine::Rg, 80, 200, false, &extra_args, cli.verbose)?
         }

@@ -21,6 +21,14 @@ pub struct Config {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct AgentConfig {
+    #[serde(default)]
+    pub safe_mode: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -329,5 +337,37 @@ consent_date = "2026-04-10T12:00:00Z"
             config.telemetry.consent_date.as_deref(),
             Some("2026-04-10T12:00:00Z")
         );
+    }
+
+    #[test]
+    fn test_agent_safe_mode_defaults_false_when_absent() {
+        let config: Config =
+            toml::from_str("[tracking]\nenabled = true\nhistory_days = 90\n").expect("valid toml");
+        assert!(config.agent.is_none());
+    }
+
+    #[test]
+    fn test_agent_safe_mode_false_is_preserved() {
+        let config: Config = toml::from_str("[agent]\nsafe_mode = false\n").expect("valid toml");
+        assert_eq!(
+            config.agent.as_ref().map(|agent| agent.safe_mode),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_agent_safe_mode_true_is_read() {
+        let config: Config = toml::from_str("[agent]\nsafe_mode = true\n").expect("valid toml");
+        assert_eq!(
+            config.agent.as_ref().map(|agent| agent.safe_mode),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_agent_absent_is_not_serialized() {
+        let config = Config::default();
+        let serialized = toml::to_string(&config).expect("serializable");
+        assert!(!serialized.contains("[agent]"));
     }
 }

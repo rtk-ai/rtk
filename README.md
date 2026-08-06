@@ -164,8 +164,30 @@ rtk read file.rs -l aggressive  # Signatures only (strips bodies)
 rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
 rtk grep "pattern" .            # Grouped search results
+rtk grep "pattern" . --agent-safe --max-per-file 30
+rtk grep "pattern" . --files-only
+rtk grep "pattern" . --count-by-file
+rtk grep "pattern" . --top-files 10
+rtk grep "pattern" . --json
 rtk diff file1 file2            # Condensed diff (exit 1 if files differ)
 ```
+
+`rtk grep` preserves legacy output unless agent-safe mode, a structured mode, or
+an explicit limit is selected. `--agent-safe` uses 80 total matches, 5 matches
+per file, and 240 Unicode scalar values per line; explicit limits override that
+preset. `RTK_AGENT_SAFE=1` and `[agent] safe_mode = true` opt in for `rtk grep`
+only. `--all` disables match caps; `--full-lines` independently disables line
+clipping.
+
+`--json` emits one newline-terminated `rtk.grep.v1` object with stable fields:
+engine, patterns, searched paths, true/displayed/omitted counts, clipped-line
+count, displayed/omitted context-row counts, per-file results, match/context
+rows, recovery hints, and structured recovery argv. Paths remain
+machine-openable. Structured modes emit after EOF; default piped match grep
+remains streaming. Structured capture is bounded at 10 MiB and fails closed
+with a partial-result error if exceeded. `--context-only` remains available
+with match output; context rows obey the same caps. `rtk rg --json` remains
+native ripgrep JSON.
 
 ### Git
 ```bash
