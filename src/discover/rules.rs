@@ -191,6 +191,7 @@ pub const RULES: &[RtkRule] = &[
             "pnpm dlx biome",
             "pnpm exec biome",
             "pnpx biome",
+            "bunx biome"
         ],
         category: "Build",
         savings_pct: 70.0,
