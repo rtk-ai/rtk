@@ -231,22 +231,46 @@ fn heal_legacy_hook_file(path: &std::path::Path) -> bool {
         .is_ok()
 }
 
-fn get_rewritten(cmd: &str) -> Option<String> {
+/// Rewrite `cmd` using caller-supplied hook exclusions.
+///
+/// Kept free of file I/O so unit tests can exercise the decision path without
+/// reading the developer's `config.toml` — mirrors `check_command_with_rules`.
+fn get_rewritten_with(
+    cmd: &str,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+) -> Option<String> {
     if has_heredoc(cmd) {
         return None;
     }
 
-    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
-        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
-        .unwrap_or_default();
-
-    let rewritten = rewrite_command(cmd, &excluded, &transparent_prefixes)?;
+    let rewritten = rewrite_command(cmd, excluded, transparent_prefixes)?;
 
     if rewritten == cmd {
         return None;
     }
 
     Some(rewritten)
+}
+
+/// The user's `[hooks]` exclusions and transparent prefixes.
+#[cfg(not(test))]
+fn hook_exclusions() -> (Vec<String>, Vec<String>) {
+    crate::core::config::Config::load()
+        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
+        .unwrap_or_default()
+}
+
+/// Unit tests never read the developer's `config.toml`.
+///
+/// Reading it made `cargo test` environment-dependent: on a machine with
+/// `[hooks] exclude_commands = ["git", ...]`, 23 of the 108 tests in this module
+/// failed, because commands the tests expect to be rewritten were excluded. CI
+/// stayed green only because CI has no user config. Tests that need exclusions
+/// pass them explicitly via the `*_with` entry points.
+#[cfg(test)]
+fn hook_exclusions() -> (Vec<String>, Vec<String>) {
+    (Vec::new(), Vec::new())
 }
 
 enum HookDecision {
@@ -256,18 +280,30 @@ enum HookDecision {
     Deny,
 }
 
-fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
+/// Decide using caller-supplied hook exclusions. File-I/O-free; see
+/// `get_rewritten_with`.
+fn decide_from_verdict_with(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
     }
     if crate::discover::lexer::contains_unattestable_construct(cmd) {
         return HookDecision::Defer;
     }
-    match get_rewritten(cmd) {
+    match get_rewritten_with(cmd, excluded, transparent_prefixes) {
         Some(r) if verdict == PermissionVerdict::Allow => HookDecision::AllowRewrite(r),
         Some(r) => HookDecision::AskRewrite(r),
         None => HookDecision::Defer,
     }
+}
+
+fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
+    let (excluded, transparent_prefixes) = hook_exclusions();
+    decide_from_verdict_with(cmd, verdict, &excluded, &transparent_prefixes)
 }
 
 fn decide_hook_action(cmd: &str, host: permissions::Host) -> HookDecision {
@@ -896,6 +932,13 @@ fn run_droid_inner_with_rules(
 mod tests {
     use super::*;
 
+    /// Rewrite with no exclusions. Tests must not inherit the developer's
+    /// `config.toml`; exclusion behavior is covered explicitly by the
+    /// `rewrite_command_no_prefixes` tests below.
+    fn get_rewritten(cmd: &str) -> Option<String> {
+        get_rewritten_with(cmd, &[], &[])
+    }
+
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         crate::discover::registry::rewrite_command(cmd, excluded, &[])
     }
@@ -1011,6 +1054,15 @@ mod tests {
     #[test]
     fn test_get_rewritten_supported() {
         assert!(get_rewritten("git status").is_some());
+    }
+
+    /// The rest of this module deliberately runs with no exclusions, so pin the
+    /// production behavior here: a configured `[hooks] exclude_commands` entry
+    /// must still suppress the rewrite.
+    #[test]
+    fn test_get_rewritten_with_honors_exclusions() {
+        assert!(get_rewritten_with("git status", &[], &[]).is_some());
+        assert!(get_rewritten_with("git status", &["git".to_string()], &[]).is_none());
     }
 
     #[test]
@@ -1784,7 +1836,8 @@ mod tests {
         allow: &[String],
     ) -> HookDecision {
         let verdict = permissions::check_command_with_rules(cmd, deny, ask, allow);
-        decide_from_verdict(cmd, verdict)
+        // No exclusions: tests must not inherit the developer's config.toml.
+        decide_from_verdict_with(cmd, verdict, &[], &[])
     }
 
     fn all_allowed() -> Vec<String> {
