@@ -246,6 +246,14 @@ rtk diff <fichier1> <fichier2>
 rtk diff <fichier1>              # Stdin comme second fichier
 ```
 
+**Options :**
+
+| Option | Defaut | Description |
+|--------|--------|-------------|
+| `--ignore-whitespace` | non | Ignore les espaces en fin de ligne, les fins de ligne (CRLF/LF) et le saut de ligne final |
+
+La comparaison se fait au niveau des octets : deux fichiers ne sont declares identiques (code de sortie 0) que si leur contenu est strictement egal. Toute difference renvoie le code 1.
+
 ---
 
 ### `rtk wc` -- Comptage compact

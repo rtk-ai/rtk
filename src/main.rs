@@ -272,6 +272,9 @@ enum Commands {
         file1: PathBuf,
         /// Second file (optional if stdin)
         file2: Option<PathBuf>,
+        /// Treat trailing whitespace, line endings and the final newline as equal
+        #[arg(long)]
+        ignore_whitespace: bool,
     },
 
     /// Filter and deduplicate log output
@@ -1884,9 +1887,13 @@ fn run_cli() -> Result<i32> {
             0
         }
 
-        Commands::Diff { file1, file2 } => {
+        Commands::Diff {
+            file1,
+            file2,
+            ignore_whitespace,
+        } => {
             if let Some(f2) = file2 {
-                diff_cmd::run(&file1, &f2, cli.verbose)?
+                diff_cmd::run(&file1, &f2, ignore_whitespace, cli.verbose)?
             } else {
                 diff_cmd::run_stdin(cli.verbose)?;
                 0

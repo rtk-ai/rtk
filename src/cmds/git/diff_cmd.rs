@@ -8,7 +8,7 @@ use std::path::Path;
 
 /// Ultra-condensed diff - only changed lines, no context.
 /// Returns the diff-convention exit code: 0 if identical, 1 if files differ.
-pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
+pub fn run(file1: &Path, file2: &Path, ignore_whitespace: bool, verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -19,7 +19,7 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
     let content2 = fs::read_to_string(file2)?;
     let raw = format!("{}\n---\n{}", content1, content2);
 
-    let (rtk, exit_code) = render_file_diff(file1, file2, &content1, &content2);
+    let (rtk, exit_code) = render_file_diff(file1, file2, &content1, &content2, ignore_whitespace);
 
     let shown = never_worse(&raw, &rtk);
     print!("{}", shown);
@@ -32,15 +32,45 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
     Ok(exit_code)
 }
 
+/// Splits into comparable lines. Line terminators are always dropped, so byte
+/// equality is checked separately by the caller.
+fn split_lines(content: &str, ignore_whitespace: bool) -> Vec<&str> {
+    if ignore_whitespace {
+        content.lines().map(str::trim_end).collect()
+    } else {
+        content.lines().collect()
+    }
+}
+
 /// Renders the condensed file comparison and returns it with the
 /// diff-convention exit code (0 = identical, 1 = differences found).
-fn render_file_diff(file1: &Path, file2: &Path, content1: &str, content2: &str) -> (String, i32) {
-    let lines1: Vec<&str> = content1.lines().collect();
-    let lines2: Vec<&str> = content2.lines().collect();
+fn render_file_diff(
+    file1: &Path,
+    file2: &Path,
+    content1: &str,
+    content2: &str,
+    ignore_whitespace: bool,
+) -> (String, i32) {
+    if content1 == content2 {
+        return ("[ok] Files are identical\n".to_string(), 0);
+    }
+
+    let lines1 = split_lines(content1, ignore_whitespace);
+    let lines2 = split_lines(content2, ignore_whitespace);
     let diff = compute_diff(&lines1, &lines2);
 
     if diff.changes.is_empty() {
-        return ("[ok] Files are identical\n".to_string(), 0);
+        if ignore_whitespace {
+            return ("[ok] Files are identical (ignoring whitespace)\n".to_string(), 0);
+        }
+        // Bytes differ but every line matches: only the line terminators can
+        // be responsible, and those never survive into the change list.
+        let rtk = format!(
+            "{} → {}\n   identical line content; files differ in line endings or the final newline\n",
+            file1.display(),
+            file2.display()
+        );
+        return (rtk, 1);
     }
 
     let mut rtk = String::new();
@@ -320,6 +350,7 @@ mod tests {
             Path::new("two.yaml"),
             "a: 1\n",
             "a: 2\n",
+            false,
         );
         assert!(
             !out.contains("identical"),
@@ -339,6 +370,7 @@ mod tests {
             Path::new("j2.json"),
             "{\"a\": 1}\n",
             "{\"a\": 2}\n",
+            false,
         );
         assert!(
             !out.contains("identical"),
@@ -355,6 +387,7 @@ mod tests {
             Path::new("b.yaml"),
             "a: 1\nb: 2\n",
             "a: 1\nb: 2\n",
+            false,
         );
         assert!(out.contains("[ok] Files are identical"));
         assert_eq!(code, 0);
@@ -362,9 +395,110 @@ mod tests {
 
     #[test]
     fn test_render_added_removed_exit_one() {
-        let (out, code) = render_file_diff(Path::new("t1.txt"), Path::new("t2.txt"), "x\n", "y\n");
+        let (out, code) = render_file_diff(
+            Path::new("t1.txt"),
+            Path::new("t2.txt"),
+            "x\n",
+            "y\n",
+            false,
+        );
         assert!(out.contains("+1 added, -1 removed"));
         assert_eq!(code, 1);
+    }
+
+    // --- byte accuracy (issue #3469) ---
+
+    #[test]
+    fn test_render_crlf_vs_lf_not_identical() {
+        let (out, code) = render_file_diff(
+            Path::new("crlf.txt"),
+            Path::new("lf.txt"),
+            "a\r\nb\r\n",
+            "a\nb\n",
+            false,
+        );
+        assert!(
+            !out.contains("[ok] Files are identical"),
+            "CRLF vs LF reported as identical:\n{}",
+            out
+        );
+        assert!(out.contains("line endings"));
+        assert_eq!(code, 1, "byte-different files must exit 1");
+    }
+
+    #[test]
+    fn test_render_missing_final_newline_not_identical() {
+        let (out, code) = render_file_diff(
+            Path::new("nl.txt"),
+            Path::new("no_nl.txt"),
+            "a\nb\n",
+            "a\nb",
+            false,
+        );
+        assert!(
+            !out.contains("[ok] Files are identical"),
+            "missing final newline reported as identical:\n{}",
+            out
+        );
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn test_render_trailing_space_not_identical() {
+        let (out, code) = render_file_diff(
+            Path::new("sp.txt"),
+            Path::new("no_sp.txt"),
+            "a   \n",
+            "a\n",
+            false,
+        );
+        assert!(!out.contains("[ok] Files are identical"));
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn test_render_ignore_whitespace_matches_trailing_space() {
+        let (out, code) = render_file_diff(
+            Path::new("sp.txt"),
+            Path::new("no_sp.txt"),
+            "a   \nb\t\n",
+            "a\nb\n",
+            true,
+        );
+        assert!(out.contains("[ok] Files are identical (ignoring whitespace)"));
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn test_render_ignore_whitespace_still_reports_content_changes() {
+        let (out, code) = render_file_diff(
+            Path::new("one.yaml"),
+            Path::new("two.yaml"),
+            "a: 1 \n",
+            "a: 2\n",
+            true,
+        );
+        assert!(!out.contains("identical"));
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn test_render_byte_identical_exit_zero_with_crlf() {
+        let (out, code) = render_file_diff(
+            Path::new("a.txt"),
+            Path::new("b.txt"),
+            "a\r\nb\r\n",
+            "a\r\nb\r\n",
+            false,
+        );
+        assert!(out.contains("[ok] Files are identical"));
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn test_split_lines_ignore_whitespace_trims_line_ends() {
+        assert_eq!(split_lines("a  \nb\t\n", true), vec!["a", "b"]);
+        assert_eq!(split_lines("a  \nb\t\n", false), vec!["a  ", "b\t"]);
     }
 
     // --- condense_unified_diff ---
