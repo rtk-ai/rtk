@@ -1,11 +1,16 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
+use crate::core::args_utils;
+use crate::core::guard::never_worse;
+use crate::core::runner::{self, RunOptions};
 use crate::core::stream::{
     self, exec_capture, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode,
 };
 use crate::core::tracking;
-use crate::core::truncate::CAP_WARNINGS;
-use crate::core::utils::{exit_code_from_output, exit_code_from_status, resolved_command};
+use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
+use crate::core::utils::{
+    exit_code_from_output, exit_code_from_status, join_with_overflow, resolved_command, strip_ansi,
+};
 use anyhow::{Context, Result};
 use std::ffi::OsString;
 use std::process::Command;
@@ -19,6 +24,7 @@ pub enum GitCommand {
     Show,
     Add,
     Commit,
+    Checkout,
     Push,
     Pull,
     Branch,
@@ -91,6 +97,7 @@ pub fn run(
         GitCommand::Show => run_show(args, max_lines, verbose, global_args),
         GitCommand::Add => run_add(args, verbose, global_args),
         GitCommand::Commit => run_commit(args, verbose, global_args),
+        GitCommand::Checkout => run_checkout(args, verbose, global_args),
         GitCommand::Push => run_push(args, verbose, global_args),
         GitCommand::Pull => run_pull(args, verbose, global_args),
         GitCommand::Branch => run_branch(args, verbose, global_args),
@@ -99,65 +106,6 @@ pub fn run(
             run_stash(subcommand.as_deref(), args, verbose, global_args)
         }
         GitCommand::Worktree => run_worktree(args, verbose, global_args),
-    }
-}
-
-/// Re-insert `--` before the first path-like argument when clap has consumed it.
-///
-/// clap's `trailing_var_arg = true` silently drops `--` when it appears as the
-/// first positional argument (before any other positional).  This means:
-///   `rtk git diff -- file` → args = ["file"]   (clap ate `--`)
-///   `rtk git diff HEAD -- file` → args = ["HEAD", "--", "file"]  (preserved)
-///
-/// Without the `--` separator git may treat an unambiguous path as a revision and
-/// emit "fatal: ambiguous argument".  We re-insert `--` before the first path-like
-/// argument; see `normalize_diff_args_impl` for the detection rules.
-fn normalize_diff_args(args: &[String]) -> Vec<String> {
-    normalize_diff_args_impl(args, |p| std::path::Path::new(p).exists())
-}
-
-/// Testable core of `normalize_diff_args` — accepts an injectable filesystem existence checker.
-///
-/// The path-detection logic is:
-/// 1. Explicit path prefixes (`.`, `~`) → always a path, no filesystem check needed.
-/// 2. Contains path separator (`/`, `\`) → use `path_exists` to distinguish branch names
-///    (e.g. `feature/auth`) from real paths (e.g. `src/main.rs`).
-/// 3. Bare word with no separator → never a path (avoids injecting `--` when a file
-///    happens to share a name with a branch or ref, e.g. a file named `main`).
-fn normalize_diff_args_impl<F>(args: &[String], path_exists: F) -> Vec<String>
-where
-    F: Fn(&str) -> bool,
-{
-    // Already has `--` — nothing to do
-    if args.iter().any(|a| a == "--") {
-        return args.to_vec();
-    }
-    let path_start = args.iter().position(|arg| {
-        if arg.starts_with('-') {
-            return false;
-        }
-        // Explicit path prefixes — always treat as path regardless of existence
-        if arg.starts_with('.') || arg.starts_with('~') {
-            return true;
-        }
-        // Contains path separator — use filesystem check to distinguish
-        // branch names (feature/auth) from real paths (src/main.rs)
-        if arg.contains('/') || arg.contains('\\') {
-            return path_exists(arg);
-        }
-        // Bare word (no separator, no special prefix) — never inject `--`
-        // This avoids misidentifying a ref/branch as a path even if a same-named
-        // file happens to exist on disk.
-        false
-    });
-    match path_start {
-        Some(idx) => {
-            let mut out = args[..idx].to_vec();
-            out.push("--".to_string());
-            out.extend_from_slice(&args[idx..]);
-            out
-        }
-        None => args.to_vec(),
     }
 }
 
@@ -170,7 +118,7 @@ fn run_diff(
     let timer = tracking::TimedExecution::start();
 
     // Re-insert `--` when clap's trailing_var_arg consumed it (issue #1215)
-    let args = &normalize_diff_args(args);
+    let args = &args_utils::restore_double_dash(args);
 
     // Check if user wants stat output
     let wants_stat = args
@@ -237,9 +185,6 @@ fn run_diff(
         eprintln!("Git diff summary:");
     }
 
-    // Print stat summary first
-    println!("{}", result.stdout.trim());
-
     // Now get actual diff but compact it
     let mut diff_cmd = git_cmd(global_args);
     diff_cmd.arg("diff");
@@ -249,20 +194,22 @@ fn run_diff(
 
     let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git diff")?;
 
-    let mut final_output = result.stdout.clone();
-    if !diff_result.stdout.is_empty() {
-        println!("\n--- Changes ---");
+    let printed = if !diff_result.stdout.is_empty() {
         let compacted = compact_diff(&diff_result.stdout, max_lines.unwrap_or(500));
-        println!("{}", compacted);
-        final_output.push_str("\n--- Changes ---\n");
-        final_output.push_str(&compacted);
-    }
+        format!("{}\n\nChanges:\n{}", result.stdout.trim(), compacted)
+    } else {
+        result.stdout.trim().to_string()
+    };
+
+    let raw = format!("{}\n{}", result.stdout, diff_result.stdout);
+    let shown = never_worse(&raw, &printed);
+    println!("{}", shown);
 
     timer.track(
         &format!("git diff {}", args.join(" ")),
         &format!("rtk git diff {}", args.join(" ")),
-        &format!("{}\n{}", result.stdout, diff_result.stdout),
-        &final_output,
+        &raw,
+        shown,
     );
 
     Ok(0)
@@ -337,7 +284,7 @@ fn run_show(
         eprintln!("{}", summary_result.stderr);
         return Ok(summary_result.exit_code);
     }
-    println!("{}", summary_result.stdout.trim());
+    let mut printed = summary_result.stdout.trim().to_string();
 
     // Step 2: --stat summary
     let mut stat_cmd = git_cmd(global_args);
@@ -348,7 +295,8 @@ fn run_show(
     let stat_result = exec_capture(&mut stat_cmd).context("Failed to run git show --stat")?;
     let stat_text = stat_result.stdout.trim();
     if !stat_text.is_empty() {
-        println!("{}", stat_text);
+        printed.push('\n');
+        printed.push_str(stat_text);
     }
 
     // Step 3: compacted diff
@@ -360,21 +308,23 @@ fn run_show(
     let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git show (diff)")?;
     let diff_text = diff_result.stdout.trim();
 
-    let mut final_output = summary_result.stdout.clone();
     if !diff_text.is_empty() {
         if verbose > 0 {
-            println!("\n--- Changes ---");
+            printed.push_str("\n\nChanges:");
         }
         let compacted = compact_diff(diff_text, max_lines.unwrap_or(500));
-        println!("{}", compacted);
-        final_output.push_str(&format!("\n{}", compacted));
+        printed.push('\n');
+        printed.push_str(&compacted);
     }
+
+    let shown = never_worse(&raw_output, &printed);
+    println!("{}", shown);
 
     timer.track(
         &format!("git show {}", args.join(" ")),
         &format!("rtk git show {}", args.join(" ")),
         &raw_output,
-        &final_output,
+        shown,
     );
 
     Ok(0)
@@ -547,6 +497,7 @@ fn run_log(
 
     // Post-process: truncate long messages, cap lines only if RTK set the default
     let filtered = filter_log_output(&result.stdout, limit, user_set_limit, has_format_flag);
+    let filtered = never_worse(&result.stdout, &filtered).to_string();
     println!("{}", filtered);
 
     timer.track(
@@ -898,6 +849,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 
         // Apply minimal filtering: strip ANSI, remove hints, empty lines
         let filtered = filter_status_with_args(&result.stdout);
+        let filtered = never_worse(&result.stdout, &filtered).to_string();
         print!("{}", filtered);
 
         timer.track(
@@ -920,9 +872,15 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     let mut cmd = build_status_command(args, global_args);
     let result = exec_capture(&mut cmd).context("Failed to run git status")?;
 
-    if !result.stderr.is_empty() && result.stderr.contains("not a git repository") {
-        let message = "Not a git repository".to_string();
-        eprintln!("{}", message);
+    if !result.success() {
+        let message = if result.stderr.contains("not a git repository") {
+            "Not a git repository".to_string()
+        } else {
+            result.stderr.trim().to_string()
+        };
+        if !message.is_empty() {
+            eprintln!("{}", message);
+        }
         let original_cmd = if args.is_empty() {
             "git status".to_string()
         } else {
@@ -933,7 +891,8 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         } else {
             format!("rtk git status {}", args.join(" "))
         };
-        timer.track(&original_cmd, &rtk_cmd, &raw_output, &message);
+        let shown = never_worse(&raw_output, &message);
+        timer.track(&original_cmd, &rtk_cmd, &raw_output, shown);
         return Ok(result.exit_code);
     }
 
@@ -950,7 +909,8 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         None => formatted,
     };
 
-    println!("{}", final_output);
+    let shown = never_worse(&raw_output, &final_output);
+    println!("{}", shown);
 
     let original_cmd = if args.is_empty() {
         "git status".to_string()
@@ -963,7 +923,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         format!("rtk git status {}", args.join(" "))
     };
 
-    timer.track(&original_cmd, &rtk_cmd, &raw_output, &final_output);
+    timer.track(&original_cmd, &rtk_cmd, &raw_output, shown);
 
     Ok(0)
 }
@@ -1045,6 +1005,24 @@ fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
     cmd
 }
 
+/// Parse the first line of `git commit` success output and return a compact token.
+/// Handles: `[main abc1234def] message`, `[main (root-commit) abc1234def] msg`,
+/// localized variants, and multibyte branch names.
+fn parse_commit_output(line: &str) -> String {
+    if let Some(bracket_end) = line.find(']') {
+        let bracket_content = &line[1..bracket_end];
+        let hash = bracket_content.split_whitespace().next_back().unwrap_or("");
+        if !hash.is_empty() && hash.len() >= 7 {
+            let short_hash: String = hash.chars().take(7).collect();
+            format!("ok {}", short_hash)
+        } else {
+            "ok".to_string()
+        }
+    } else {
+        "ok".to_string()
+    }
+}
+
 fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -1064,46 +1042,222 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     let exit_code = exit_code_from_output(&output, "git commit");
     let raw_output = format!("{}\n{}", stdout, stderr);
 
-    if output.status.success() {
-        // Extract commit hash from output like "[main abc1234] message"
-        let compact = if let Some(line) = stdout.lines().next() {
-            if let Some(hash_start) = line.find(' ') {
-                let hash = line[1..hash_start].split(' ').next_back().unwrap_or("");
-                if !hash.is_empty() && hash.len() >= 7 {
-                    format!("ok {}", &hash[..7.min(hash.len())])
-                } else {
-                    "ok".to_string()
-                }
-            } else {
-                "ok".to_string()
+    match classify_commit_outcome(output.status.success(), &stdout, exit_code) {
+        CommitOutcome::Ok(compact) => {
+            println!("{}", compact);
+            timer.track(&original_cmd, "rtk git commit", &raw_output, &compact);
+            Ok(0)
+        }
+        CommitOutcome::Failed(code) => {
+            if !stderr.trim().is_empty() {
+                eprint!("{}", stderr);
             }
-        } else {
-            "ok".to_string()
-        };
+            if !stdout.trim().is_empty() {
+                eprint!("{}", stdout);
+            }
+            timer.track(&original_cmd, "rtk git commit", &raw_output, &raw_output);
+            Ok(code)
+        }
+    }
+}
 
-        println!("{}", compact);
+/// Outcome of a `git commit`: a non-success status propagates the exit code
+/// rather than being reported as "ok" (#2494).
+enum CommitOutcome {
+    Ok(String),
+    Failed(i32),
+}
 
-        timer.track(&original_cmd, "rtk git commit", &raw_output, &compact);
-    } else if stderr.contains("nothing to commit") || stdout.contains("nothing to commit") {
-        println!("ok (nothing to commit)");
-        timer.track(
-            &original_cmd,
-            "rtk git commit",
-            &raw_output,
-            "ok (nothing to commit)",
-        );
+/// Classify a `git commit` result.
+fn classify_commit_outcome(success: bool, stdout: &str, exit_code: i32) -> CommitOutcome {
+    if success {
+        // Extract commit hash from output
+        let compact = stdout
+            .lines()
+            .next()
+            .map(parse_commit_output)
+            .unwrap_or_else(|| "ok".to_string());
+        CommitOutcome::Ok(compact)
     } else {
-        if !stderr.trim().is_empty() {
-            eprint!("{}", stderr);
-        }
-        if !stdout.trim().is_empty() {
-            eprint!("{}", stdout);
-        }
-        timer.track(&original_cmd, "rtk git commit", &raw_output, &raw_output);
-        return Ok(exit_code);
+        CommitOutcome::Failed(exit_code)
+    }
+}
+
+fn run_checkout(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let args = args_utils::restore_double_dash(args);
+
+    if verbose > 0 {
+        eprintln!("git checkout");
     }
 
-    Ok(0)
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("checkout");
+    for arg in &args {
+        cmd.arg(arg);
+    }
+
+    let args_display = args.join(" ");
+    let args_for_filter = args.clone();
+    runner::run_filtered_with_exit(
+        cmd,
+        "git checkout",
+        &args_display,
+        move |raw, exit_code| format_checkout_output(&args_for_filter, raw, exit_code),
+        RunOptions::with_tee("git_checkout"),
+    )
+}
+
+fn format_checkout_output(args: &[String], raw: &str, exit_code: i32) -> String {
+    if exit_code == 0 {
+        format_checkout_success(args, raw)
+    } else {
+        filter_checkout_failure(raw)
+    }
+}
+
+fn format_checkout_success(args: &[String], raw: &str) -> String {
+    if let Some(restored) = checkout_restored_count(args) {
+        return format!("ok {} {}", restored, pluralize(restored, "file restored", "files restored"));
+    }
+    if let Some(branch) = checkout_reset_branch_arg(args) {
+        return format!("ok {}", branch);
+    }
+
+    for line in raw.lines().map(str::trim) {
+        if let Some(branch) = quoted_suffix(line, "Switched to a new branch ") {
+            return format!("ok {} (new)", branch);
+        }
+        if let Some(branch) = quoted_suffix(line, "Switched to branch ") {
+            return format!("ok {}", branch);
+        }
+        if let Some(branch) = quoted_suffix(line, "Already on ") {
+            return format!("ok {}", branch);
+        }
+        if let Some(rest) = line.strip_prefix("HEAD is now at ") {
+            let hash = rest.split_whitespace().next().unwrap_or("HEAD");
+            return format!("ok HEAD {}", hash);
+        }
+        if line.starts_with("Updated ") && line.contains(" path") {
+            return format!("ok {}", line.to_ascii_lowercase());
+        }
+    }
+
+    if let Some(branch) = checkout_new_branch_arg(args) {
+        return format!("ok {} (new)", branch);
+    }
+    if let Some(branch) = checkout_branch_arg(args) {
+        return format!("ok {}", branch);
+    }
+
+    "ok".to_string()
+}
+
+fn checkout_restored_count(args: &[String]) -> Option<usize> {
+    let separator = args.iter().position(|arg| arg == "--")?;
+    let count = args[separator + 1..]
+        .iter()
+        .filter(|arg| !arg.is_empty())
+        .count();
+    (count > 0).then_some(count)
+}
+
+fn checkout_new_branch_arg(args: &[String]) -> Option<&str> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-b" | "--orphan" => return iter.next().map(String::as_str),
+            "-B" => {
+                iter.next();
+            }
+            _ => {
+                if let Some(branch) = arg.strip_prefix("--orphan=") {
+                    return Some(branch);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn checkout_reset_branch_arg(args: &[String]) -> Option<&str> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "-B" {
+            return iter.next().map(String::as_str);
+        }
+    }
+    None
+}
+
+fn checkout_branch_arg(args: &[String]) -> Option<&str> {
+    if args.iter().any(|arg| arg == "--") {
+        return None;
+    }
+
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-b" | "-B" | "--orphan" => {
+                iter.next();
+            }
+            "-t" | "--track" | "--detach" => {}
+            _ if arg.starts_with('-') => {}
+            _ => return Some(arg),
+        }
+    }
+    None
+}
+
+fn quoted_suffix<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    line.strip_prefix(prefix)
+        .and_then(|rest| rest.strip_prefix('\''))
+        .and_then(|rest| rest.strip_suffix('\''))
+}
+
+fn pluralize<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
+    if count == 1 { singular } else { plural }
+}
+
+fn filter_checkout_failure(raw: &str) -> String {
+    let mut important = Vec::new();
+    let mut in_file_list = false;
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let is_header = trimmed.starts_with("error:")
+            || trimmed.starts_with("fatal:")
+            || trimmed.starts_with("CONFLICT");
+
+        if is_header {
+            in_file_list =
+                trimmed.contains("following") && trimmed.contains("files") && trimmed.ends_with(':');
+            important.push(trimmed.to_string());
+            continue;
+        }
+
+        if in_file_list {
+            if trimmed.starts_with("Please ") || trimmed.starts_with("Aborting") {
+                in_file_list = false;
+            } else if line.starts_with(char::is_whitespace) {
+                important.push(line.to_string());
+                continue;
+            }
+        }
+
+        if trimmed.starts_with("Aborting") {
+            important.push(trimmed.to_string());
+        }
+    }
+
+    if important.is_empty() {
+        raw.trim().to_string()
+    } else {
+        important.join("\n")
+    }
 }
 
 // Git push progress prefixes (stderr) — dropped from the stream.
@@ -1417,6 +1571,7 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     }
 
     let filtered = filter_branch_output(&result.stdout);
+    let filtered = never_worse(&result.stdout, &filtered).to_string();
     println!("{}", filtered);
 
     timer.track(
@@ -1572,13 +1727,15 @@ fn run_stash(
             let result = exec_capture(&mut cmd).context("Failed to run git stash list")?;
 
             if result.stdout.trim().is_empty() {
-                let msg = "No stashes";
-                println!("{}", msg);
-                timer.track("git stash list", "rtk git stash list", &result.stdout, msg);
-                return Ok(0);
+                if !result.success() && !result.stderr.trim().is_empty() {
+                    eprintln!("{}", result.stderr.trim());
+                }
+                timer.track("git stash list", "rtk git stash list", &result.stdout, "");
+                return Ok(result.exit_code);
             }
 
             let filtered = filter_stash_list(&result.stdout);
+            let filtered = never_worse(&result.stdout, &filtered).to_string();
             println!("{}", filtered);
             timer.track(
                 "git stash list",
@@ -1588,29 +1745,30 @@ fn run_stash(
             );
         }
         Some("show") => {
+            let patch_mode = args.iter().any(|a| a == "-p" || a == "--patch");
+
             let mut cmd = git_cmd(global_args);
-            cmd.args(["stash", "show", "-p"]);
+            cmd.args(["stash", "show"]);
             for arg in args {
                 cmd.arg(arg);
             }
             let result = exec_capture(&mut cmd).context("Failed to run git stash show")?;
 
-            let filtered = if result.stdout.trim().is_empty() {
-                let msg = "Empty stash";
-                println!("{}", msg);
-                msg.to_string()
-            } else {
-                let compacted = compact_diff(&result.stdout, 100);
-                println!("{}", compacted);
-                compacted
-            };
+            if result.stdout.trim().is_empty() {
+                if !result.success() && !result.stderr.trim().is_empty() {
+                    eprintln!("{}", result.stderr.trim());
+                }
+                timer.track("git stash show", "rtk git stash show", &result.stdout, "");
+                return Ok(result.exit_code);
+            }
 
-            timer.track(
-                "git stash show",
-                "rtk git stash show",
-                &result.stdout,
-                &filtered,
-            );
+            let filtered = if patch_mode {
+                compact_diff(&result.stdout, 100)
+            } else {
+                compact_stash_stat(&result.stdout)
+            };
+            let shown = crate::core::runner::emit_guarded(&filtered, None, &result.stdout);
+            timer.track("git stash show", "rtk git stash show", &result.stdout, &shown);
         }
         Some("apply") | Some("branch") | Some("clear") | Some("create") | Some("drop")
         | Some("export") | Some("import") | Some("pop") | Some("store") => {
@@ -1714,6 +1872,79 @@ fn filter_stash_list(output: &str) -> String {
     result.join("\n")
 }
 
+fn compact_stash_stat(raw: &str) -> String {
+    let (files, summary) = parse_stash_stat(raw);
+    if files.is_empty() {
+        return raw.trim_end().to_string();
+    }
+    let total = files.len();
+    let mut out = join_with_overflow(&files[..total.min(CAP_LIST)], total, CAP_LIST, "files");
+    if total > CAP_LIST {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&files.join("\n"), "git-stash-show", CAP_LIST + 1)
+        {
+            out.push(' ');
+            out.push_str(&hint);
+        }
+    }
+    if !summary.is_empty() {
+        out.push('\n');
+        out.push_str(&compress_stat_summary(&summary));
+    }
+    out
+}
+
+fn compress_stat_summary(summary: &str) -> String {
+    summary
+        .replace("insertions(+)", "+")
+        .replace("insertion(+)", "+")
+        .replace("deletions(-)", "-")
+        .replace("deletion(-)", "-")
+        .replace("files changed", "changed")
+        .replace("file changed", "changed")
+		.replace(",", "")
+}
+
+fn parse_stash_stat(stat: &str) -> (Vec<String>, String) {
+    let stat = strip_ansi(stat);
+    let mut files = Vec::new();
+    let mut summary = String::new();
+
+    for line in stat.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match diffstat_row(line) {
+            Some(row) => files.push(row),
+            None => summary = line.to_string(),
+        }
+    }
+
+    (files, summary)
+}
+
+fn diffstat_row(line: &str) -> Option<String> {
+    let bar = line.rfind('|')?;
+    let path = line[..bar].trim();
+    let rhs = line[bar + 1..].trim();
+    let is_diffstat_row = rhs.starts_with("Bin") || rhs.starts_with(|c: char| c.is_ascii_digit());
+    if path.is_empty() || !is_diffstat_row {
+        return None;
+    }
+    if rhs.starts_with("Bin") {
+        return Some(format!("{} (binary)", path));
+    }
+    let count = rhs.split_whitespace().next().unwrap_or("");
+    let sign = match (rhs.contains('+'), rhs.contains('-')) {
+        (true, true) => " +-",
+        (true, false) => " +",
+        (false, true) => " -",
+        (false, false) => "",
+    };
+    Some(format!("{} {}{}", path, count, sign))
+}
+
 fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -1761,7 +1992,21 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
     cmd.args(["worktree", "list"]);
     let result = exec_capture(&mut cmd).context("Failed to run git worktree list")?;
 
+    if !result.success() {
+        if !result.stderr.trim().is_empty() {
+            eprintln!("{}", result.stderr);
+        }
+        timer.track(
+            "git worktree list",
+            "rtk git worktree",
+            &result.stdout,
+            &result.stderr,
+        );
+        return Ok(result.exit_code);
+    }
+
     let filtered = filter_worktree_list(&result.stdout);
+    let filtered = never_worse(&result.stdout, &filtered).to_string();
     println!("{}", filtered);
     timer.track(
         "git worktree list",
@@ -1911,8 +2156,14 @@ mod tests {
         assert!(uses_compact_status_path(&["-b".to_string()]));
         assert!(uses_compact_status_path(&["--branch".to_string()]));
         assert!(uses_compact_status_path(&["-sb".to_string()]));
-        assert!(uses_compact_status_path(&["-s".to_string(), "-b".to_string()]));
-        assert!(uses_compact_status_path(&["--short".to_string(), "--branch".to_string()]));
+        assert!(uses_compact_status_path(&[
+            "-s".to_string(),
+            "-b".to_string()
+        ]));
+        assert!(uses_compact_status_path(&[
+            "--short".to_string(),
+            "--branch".to_string()
+        ]));
         assert!(!uses_compact_status_path(&["-s".to_string()]));
         assert!(!uses_compact_status_path(&["--short".to_string()]));
         assert!(!uses_compact_status_path(&["--porcelain".to_string()]));
@@ -1933,6 +2184,30 @@ mod tests {
         let cmd = build_status_command(&args, &[]);
         let cmd_args: Vec<_> = cmd.get_args().collect();
         assert_eq!(cmd_args, vec!["status", "--porcelain", "-uno"]);
+    }
+
+    #[test]
+    fn test_run_status_compact_propagates_non_repo_failure() {
+        // #2497: a `git status` failure other than "not a git repository"
+        // (here: a corrupt index) must propagate a non-zero exit, not be
+        // flattened into "Clean working tree" + exit 0.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().to_string_lossy().into_owned();
+        assert!(
+            Command::new("git")
+                .args(["-C", &p, "init", "-q"])
+                .status()
+                .expect("git init")
+                .success(),
+            "git init should succeed"
+        );
+        std::fs::write(dir.path().join(".git/index"), "corrupt-index").expect("corrupt index");
+        let global = vec!["-C".to_string(), p];
+        let code = run_status(&[], 0, &global).expect("run_status");
+        assert_ne!(
+            code, 0,
+            "corrupt-index git status must not be reported as success"
+        );
     }
 
     #[test]
@@ -1999,134 +2274,6 @@ mod tests {
         assert!(
             !result.contains("more changes truncated"),
             "5 files × 20 lines should not exceed max_lines=500"
-        );
-    }
-
-    // ----- normalize_diff_args (issue #1215 + branch-name fix #1431) -----
-    //
-    // Tests use normalize_diff_args_impl with a mock path-existence checker so
-    // they don't depend on the real filesystem.
-
-    fn exists_mock<'a>(existing: &'a [&'a str]) -> impl Fn(&str) -> bool + 'a {
-        move |p| existing.contains(&p)
-    }
-
-    /// Baseline: `--` already present → no-op, args unchanged.
-    #[test]
-    fn test_normalize_diff_args_noop_when_separator_present() {
-        let args = vec![
-            "HEAD".to_string(),
-            "--".to_string(),
-            "src/main.rs".to_string(),
-        ];
-        assert_eq!(normalize_diff_args_impl(&args, exists_mock(&[])), args);
-    }
-
-    /// Core regression (issue #1215): clap ate `--` before a real file path.
-    /// When the path exists on disk, `--` must be re-inserted.
-    #[test]
-    fn test_normalize_diff_args_reinserts_separator_before_existing_path() {
-        let args = vec!["apps/client/frontend/src/MyComponent.tsx".to_string()];
-        let normalized = normalize_diff_args_impl(
-            &args,
-            exists_mock(&["apps/client/frontend/src/MyComponent.tsx"]),
-        );
-        assert_eq!(
-            normalized,
-            vec![
-                "--".to_string(),
-                "apps/client/frontend/src/MyComponent.tsx".to_string()
-            ],
-            "-- must be injected before an existing path"
-        );
-    }
-
-    /// Ref before path: ["HEAD", "src/foo.rs"] where src/foo.rs exists → inject after HEAD.
-    #[test]
-    fn test_normalize_diff_args_reinserts_separator_after_ref() {
-        let args = vec!["HEAD".to_string(), "src/foo.rs".to_string()];
-        let normalized = normalize_diff_args_impl(&args, exists_mock(&["src/foo.rs"]));
-        assert_eq!(
-            normalized,
-            vec![
-                "HEAD".to_string(),
-                "--".to_string(),
-                "src/foo.rs".to_string()
-            ]
-        );
-    }
-
-    /// Flags before path: ["--cached", "src/foo.rs"] where src/foo.rs exists.
-    #[test]
-    fn test_normalize_diff_args_reinserts_separator_after_flag() {
-        let args = vec!["--cached".to_string(), "src/foo.rs".to_string()];
-        let normalized = normalize_diff_args_impl(&args, exists_mock(&["src/foo.rs"]));
-        assert_eq!(
-            normalized,
-            vec![
-                "--cached".to_string(),
-                "--".to_string(),
-                "src/foo.rs".to_string()
-            ]
-        );
-    }
-
-    /// Pure flags (no paths) → no injection.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_pure_flags() {
-        let args = vec!["--stat".to_string(), "--cached".to_string()];
-        assert_eq!(normalize_diff_args_impl(&args, exists_mock(&[])), args);
-    }
-
-    /// Dotfile that exists on disk → inject `--`.
-    #[test]
-    fn test_normalize_diff_args_dotfile_is_path() {
-        let args = vec![".gitignore".to_string()];
-        let normalized = normalize_diff_args_impl(&args, exists_mock(&[".gitignore"]));
-        assert_eq!(normalized, vec!["--".to_string(), ".gitignore".to_string()]);
-    }
-
-    /// A bare ref (HEAD) that doesn't exist as a file → no injection.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_bare_ref() {
-        let args = vec!["HEAD".to_string()];
-        assert_eq!(normalize_diff_args_impl(&args, exists_mock(&[])), args);
-    }
-
-    /// Branch name with `/` that does NOT exist as a file → no injection.
-    /// Regression for issue #1431: `rtk git diff feature/user-auth` must not inject `--`.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_branch_with_slash() {
-        let args = vec!["feature/user-auth".to_string()];
-        assert_eq!(
-            normalize_diff_args_impl(&args, exists_mock(&[])),
-            args,
-            "branch names containing '/' must not trigger -- injection"
-        );
-    }
-
-    /// Range syntax with `/` → no injection.
-    /// Regression: `rtk git diff main...feature/user-auth` produced no output.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_range_with_slash() {
-        let args = vec!["main...feature/user-auth".to_string()];
-        assert_eq!(
-            normalize_diff_args_impl(&args, exists_mock(&[])),
-            args,
-            "revision ranges like main...feature/user-auth must not trigger -- injection"
-        );
-    }
-
-    /// Bare word that happens to exist as a file on disk → still no injection.
-    /// A file named "main" must not cause `--` to be injected when the user
-    /// intends `rtk git diff main` as a branch comparison.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_bare_word_even_if_file_exists() {
-        let args = vec!["main".to_string()];
-        assert_eq!(
-            normalize_diff_args_impl(&args, exists_mock(&["main"])),
-            args,
-            "bare words must never trigger -- injection even when a same-named file exists"
         );
     }
 
@@ -2205,6 +2352,120 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_stash_stat_strips_decorations() {
+        let raw = " del.md   |   2 --\n keep.md  |   5 ++++-\n logo.bin | Bin 0 -> 1024 bytes\n \
+                   new.rs   |  40 ++++++++\n 4 files changed, 44 insertions(+), 3 deletions(-)\n";
+        let (files, summary) = parse_stash_stat(raw);
+        assert_eq!(
+            files,
+            vec!["del.md 2 -", "keep.md 5 +-", "logo.bin (binary)", "new.rs 40 +"]
+        );
+        assert_eq!(summary, "4 files changed, 44 insertions(+), 3 deletions(-)");
+    }
+
+    #[test]
+    fn test_parse_stash_stat_collapsed_bar() {
+        let (files, _) = parse_stash_stat(" .claude/CLAUDE.md | 234 +-\n");
+        assert_eq!(files, vec![".claude/CLAUDE.md 234 +-"]);
+    }
+
+    #[test]
+    fn test_compact_stash_stat_passthrough_numstat() {
+        let raw = "0\t1\tdel.md\n3\t2\tkeep.md\n1\t0\tn1.rs\n";
+        assert_eq!(compact_stash_stat(raw), "0\t1\tdel.md\n3\t2\tkeep.md\n1\t0\tn1.rs");
+    }
+
+    #[test]
+    fn test_compact_stash_stat_passthrough_name_only() {
+        let raw = "del.md\nkeep.md\nn1.rs\n";
+        assert_eq!(compact_stash_stat(raw), "del.md\nkeep.md\nn1.rs");
+    }
+
+    #[test]
+    fn test_compress_stat_summary_variants() {
+        assert_eq!(
+            compress_stat_summary("4 files changed, 60 insertions(+), 313 deletions(-)"),
+            "4 changed 60 + 313 -"
+        );
+        assert_eq!(
+            compress_stat_summary("1 file changed, 1 insertion(+)"),
+            "1 changed 1 +"
+        );
+        assert_eq!(
+            compress_stat_summary("1 file changed, 1 deletion(-)"),
+            "1 changed 1 -"
+        );
+        assert_eq!(
+            compress_stat_summary("2 files changed, 4 insertions(+), 1 deletion(-)"),
+            "2 changed 4 + 1 -"
+        );
+    }
+
+    #[test]
+    fn test_compact_stash_stat_compresses_summary() {
+        let raw = " a.txt | 2 ++\n 1 file changed, 2 insertions(+)\n";
+        assert_eq!(compact_stash_stat(raw), "a.txt 2 +\n1 changed 2 +");
+    }
+
+    #[test]
+    fn test_parse_stash_stat_last_pipe_is_separator() {
+        let (files, _) = parse_stash_stat(" weird|name.txt | 3 +++\n");
+        assert_eq!(files, vec!["weird|name.txt 3 +"]);
+    }
+
+    #[test]
+    fn test_parse_stash_stat_strips_ansi() {
+        let (files, _) = parse_stash_stat(" a.txt | 2 \x1b[32m++\x1b[m\n");
+        assert_eq!(files, vec!["a.txt 2 +"]);
+    }
+
+    #[test]
+    fn test_parse_stash_stat_empty() {
+        let (files, summary) = parse_stash_stat("");
+        assert!(files.is_empty());
+        assert!(summary.is_empty());
+    }
+
+    #[test]
+    fn test_parse_stash_stat_unicode_and_malformed_never_panic() {
+        let _ = parse_stash_stat("not a diffstat at all");
+        let _ = parse_stash_stat("| | |");
+        let (files, _) = parse_stash_stat(" 日本語.md | 5 +++--\n");
+        assert_eq!(files, vec!["日本語.md 5 +-"]);
+    }
+
+    #[test]
+    fn test_parse_stash_stat_savings() {
+        use crate::core::tracking::estimate_tokens;
+        let raw = " CONTRIBUTING.md | 305 \
+                   ----------------------------------------------------------\n \
+                   README.md       |  28 ++++--\n logo.bin        | Bin 0 -> 2048 bytes\n \
+                   newfeature.rs   |  40 ++++++++\n \
+                   4 files changed, 60 insertions(+), 313 deletions(-)\n";
+        let (files, summary) = parse_stash_stat(raw);
+        let compact = format!("{}\n{}", files.join("\n"), summary);
+        let savings =
+            100.0 - (estimate_tokens(&compact) as f64 / estimate_tokens(raw) as f64 * 100.0);
+        assert!(savings >= 40.0, "expected >=40% savings, got {:.1}%", savings);
+    }
+
+    #[test]
+    fn test_run_stash_list_propagates_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global = vec!["-C".to_string(), dir.path().to_string_lossy().into_owned()];
+        let code = run_stash(Some("list"), &[], 0, &global).expect("run_stash list");
+        assert_ne!(code, 0, "git stash list failure must propagate");
+    }
+
+    #[test]
+    fn test_run_stash_show_propagates_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global = vec!["-C".to_string(), dir.path().to_string_lossy().into_owned()];
+        let code = run_stash(Some("show"), &[], 0, &global).expect("run_stash show");
+        assert_ne!(code, 0, "git stash show failure must propagate");
+    }
+
+    #[test]
     fn test_filter_worktree_list() {
         let output =
             "/home/user/project  abc1234 [main]\n/home/user/worktrees/feat  def5678 [feature]\n";
@@ -2212,6 +2473,16 @@ mod tests {
         assert!(result.contains("abc1234"));
         assert!(result.contains("[main]"));
         assert!(result.contains("[feature]"));
+    }
+
+    #[test]
+    fn test_run_worktree_list_propagates_failure() {
+        // #2497: `git worktree list` outside a repo exits non-zero; rtk must not
+        // report success (empty output + exit 0).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global = vec!["-C".to_string(), dir.path().to_string_lossy().into_owned()];
+        let code = run_worktree(&[], 0, &global).expect("run_worktree");
+        assert_ne!(code, 0, "git worktree list failure must propagate");
     }
 
     #[test]
@@ -2550,6 +2821,90 @@ no changes added to commit (use "git add" and/or "git commit -a")
         let porcelain = "## main\nA  🎉-party.txt\n M 日本語ファイル.rs\n";
         let result = format_status_output(porcelain);
         assert!(result.contains("* main"));
+    }
+
+    // --- commit output parsing ---
+
+    #[test]
+    fn test_parse_commit_output_normal() {
+        let line = "[main abc1234def] add feature";
+        assert_eq!(parse_commit_output(line), "ok abc1234");
+    }
+
+    #[test]
+    fn test_parse_commit_output_root_commit() {
+        let line = "[main (root-commit) abc1234def] initial commit";
+        assert_eq!(parse_commit_output(line), "ok abc1234");
+    }
+
+    /// Regression test: multibyte branch name must not panic (was byte-slicing before fix)
+    #[test]
+    fn test_parse_commit_output_multibyte_branch() {
+        let line = "[分支名 abc1234def] 提交消息";
+        assert_eq!(parse_commit_output(line), "ok abc1234");
+    }
+
+    /// Regression test: Thai branch name (3 bytes per char)
+    #[test]
+    fn test_parse_commit_output_thai_branch() {
+        let line = "[สาขา abc1234def] commit message";
+        assert_eq!(parse_commit_output(line), "ok abc1234");
+    }
+
+    #[test]
+    fn test_parse_commit_output_no_bracket() {
+        let line = "some other output";
+        assert_eq!(parse_commit_output(line), "ok");
+    }
+
+    #[test]
+    fn test_parse_commit_output_short_hash() {
+        // Hash shorter than 7 chars — treat as "ok" (no hash shown)
+        let line = "[main abc12] message";
+        assert_eq!(parse_commit_output(line), "ok");
+    }
+
+    #[test]
+    fn test_parse_commit_output_empty() {
+        assert_eq!(parse_commit_output(""), "ok");
+    }
+
+    // --- commit outcome classification (issue #2494) ---
+
+    #[test]
+    fn test_classify_commit_success_extracts_hash() {
+        match classify_commit_outcome(true, "[main abc1234def] add feature", 0) {
+            CommitOutcome::Ok(s) => assert_eq!(s, "ok abc1234"),
+            CommitOutcome::Failed(_) => panic!("successful commit must be Ok"),
+        }
+    }
+
+    #[test]
+    fn test_classify_commit_success_empty_stdout() {
+        match classify_commit_outcome(true, "", 0) {
+            CommitOutcome::Ok(s) => assert_eq!(s, "ok"),
+            CommitOutcome::Failed(_) => panic!("successful commit must be Ok"),
+        }
+    }
+
+    #[test]
+    fn test_classify_commit_nothing_to_commit_is_failure() {
+        match classify_commit_outcome(
+            false,
+            "On branch main\nnothing to commit, working tree clean",
+            1,
+        ) {
+            CommitOutcome::Failed(code) => assert_eq!(code, 1),
+            CommitOutcome::Ok(s) => panic!("nothing-to-commit must not be ok: {}", s),
+        }
+    }
+
+    #[test]
+    fn test_classify_commit_hook_abort_propagates_exit_code() {
+        match classify_commit_outcome(false, "pre-commit hook failed", 2) {
+            CommitOutcome::Failed(code) => assert_eq!(code, 2),
+            CommitOutcome::Ok(_) => panic!("hook abort must be a failure"),
+        }
     }
 
     /// Regression test: --oneline and other user format flags must preserve all commits.

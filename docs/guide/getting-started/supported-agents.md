@@ -1,17 +1,17 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, and Antigravity
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, and Mistral Vibe
 sidebar:
   order: 3
 ---
 
 # Supported Agents
 
-RTK supports all major AI coding agents across 3 integration tiers. Mistral Vibe support is planned.
+RTK supports all major AI coding agents across 3 integration tiers.
 
 ## How it works
 
-Each agent integration intercepts CLI commands before execution and rewrites them to their RTK equivalent. The agent runs `rtk cargo test` instead of `cargo test`, sees filtered output, and uses up to 90% fewer tokens — without any change to your workflow.
+Each agent integration intercepts CLI commands before execution and rewrites them to their RTK equivalent. The agent runs `rtk cargo test` instead of `cargo test`, sees filtered output, and reads up to 90% fewer bash output bytes — without any change to your workflow.
 
 All rewrite logic lives in the RTK binary (`rtk rewrite`). Agent hooks are thin delegates that parse the agent-specific JSON format and call `rtk rewrite` for the actual decision.
 
@@ -21,7 +21,7 @@ Agent runs "cargo test"
   -> Calls rtk rewrite "cargo test"
   -> Returns "rtk cargo test"
   -> Agent executes filtered command
-  -> LLM sees 90% fewer tokens
+  -> LLM reads up to 90% fewer bash output bytes
 ```
 
 ## Supported agents
@@ -30,19 +30,20 @@ Agent runs "cargo test"
 |-------|-----------------|---------------------------|
 | Claude Code | Shell hook (`PreToolUse`) | Yes |
 | VS Code Copilot Chat | Shell hook (`PreToolUse`) | Yes |
-| GitHub Copilot CLI | Shell hook (deny-with-suggestion) | No (agent retries) |
+| GitHub Copilot CLI | Shell hook (`PreToolUse`) | Yes |
 | Cursor | Shell hook (`preToolUse`) | Yes |
 | Gemini CLI | Rust binary (`BeforeTool`) | Yes |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | Yes |
 | OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
 | Pi | TypeScript extension (`tool_call` event) | Yes |
 | Hermes | Python plugin (`terminal` command mutation) | Yes |
+| Factory Droid | Shell hook (`PreToolUse`, matcher `Execute`) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | AGENTS.md instructions | N/A |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
-| Mistral Vibe | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Pending upstream |
+| Mistral Vibe | Rust binary (`pre_tool`) | Yes |
 
 ## Installation by agent
 
@@ -61,16 +62,30 @@ rtk init --show    # shows hook status
 ### Cursor
 
 ```bash
-rtk init --global --cursor
+rtk init --global --agent cursor
 ```
 
 Restart Cursor. The hook uses `preToolUse` with Cursor's `updated_input` format.
 
-### VS Code Copilot Chat
+### GitHub Copilot (VS Code Chat + CLI)
 
 ```bash
-rtk init --global --copilot
+rtk init --copilot            # project-scoped (.github/hooks/)
+rtk init --global --copilot   # user-scoped (~/.copilot/hooks/, respects $COPILOT_HOME)
 ```
+
+Project-scoped writes `.github/hooks/rtk-rewrite.json` — a single `PreToolUse` entry shared by both hosts, each getting transparent rewrite via `updatedInput` — plus the RTK block in `.github/copilot-instructions.md`. User-scoped writes the same hook config to `~/.copilot/hooks/rtk-rewrite.json` and the RTK block to `~/.copilot/copilot-instructions.md` (both respect `$COPILOT_HOME` if set).
+
+Earlier `rtk` versions also registered a second, camelCase `preToolUse` entry for Copilot CLI's native schema. Copilot CLI treats `PreToolUse`/`preToolUse` as independent hooks and runs both sequentially for the same tool call — a redundant process spawn with no behavioral benefit, since Copilot CLI honors the single `PreToolUse` schema on its own. Re-run `rtk init --copilot` (or `--global --copilot`) to upgrade an existing install to the single-hook config.
+
+Uninstall:
+
+```bash
+rtk init --uninstall --copilot
+rtk init --uninstall --global --copilot
+```
+
+Removes only RTK's hook file (and, for project, the RTK block in `copilot-instructions.md`). Other files in `.github/hooks/` or `~/.copilot/hooks/` and your own instruction content are untouched.
 
 ### Gemini CLI
 
@@ -125,10 +140,30 @@ Creates `~/.hermes/plugins/rtk-rewrite/` and enables it through `plugins.enabled
 
 The plugin fails open. If `rtk` is missing at load time, the hook is not registered. If `rtk rewrite` errors, the tool is not `terminal`, the payload has no string `command`, or the plugin raises an exception, Hermes runs the original command unchanged. The same `rtk rewrite` limitations apply: already-prefixed `rtk` commands, compound shell commands, heredocs, and commands without filters are not rewritten.
 
+### Factory Droid
+
+```bash
+rtk init -g --agent droid    # user-scoped (~/.factory/hooks.json)
+rtk init --agent droid       # project-scoped (.factory/hooks.json, commit to share)
+```
+
+Installs a `PreToolUse` hook (matcher `Execute`) into Droid's canonical `hooks.json` — falling back to the `hooks` key of `settings.json` only when that file already carries live `PreToolUse` hooks. Respects `$FACTORY_HOME_OVERRIDE`.
+
+RTK honors Droid's own permission lists, never another agent's settings. Commands matching an explicit `commandDenylist` or `commandBlocklist` entry — read from all four settings scopes (`~/.factory/settings.json`, `~/.factory/settings.local.json`, `.factory/settings.json`, `.factory/settings.local.json`) — are left untouched so Droid's native confirmation or block fires on the original command. Every other command is rewritten via `updatedInput` with **no** permission decision: Droid's native flow (allowlist, autonomy level, other hooks) decides on the rewritten command. To auto-run rewritten read-only commands, add `rtk`-prefixed entries (e.g. `rtk git status`) to your `commandAllowlist`.
+
+Uninstall:
+
+```bash
+rtk init --uninstall -g --agent droid
+rtk init --uninstall --agent droid
+```
+
+Removes only RTK's hook entry; other hooks and settings are untouched.
+
 ### Cline / Roo Code
 
 ```bash
-rtk init --cline    # creates .clinerules in current project
+rtk init --agent cline    # creates .clinerules in current project
 ```
 
 Cline reads `.clinerules` as custom instructions. RTK adds guidance telling Cline to prefer `rtk <cmd>` over raw commands.
@@ -136,13 +171,14 @@ Cline reads `.clinerules` as custom instructions. RTK adds guidance telling Clin
 ### Windsurf
 
 ```bash
-rtk init --windsurf    # creates .windsurfrules in current project
+rtk init --global --agent windsurf    # creates .windsurfrules in current project
 ```
 
 ### Codex CLI
 
 ```bash
-rtk init --codex    # creates AGENTS.md or patches existing one
+rtk init --codex           # project-scoped (AGENTS.md)
+rtk init --global --codex  # user-global (~/.codex/AGENTS.md)
 ```
 
 ### Kilo Code
@@ -161,9 +197,28 @@ rtk init --agent antigravity    # creates .agents/rules/antigravity-rtk-rules.md
 
 Antigravity reads `.agents/rules/` as custom instructions. RTK adds guidance telling Antigravity to prefer `rtk <cmd>` over raw commands.
 
-### Mistral Vibe (planned)
+### Mistral Vibe
 
-Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://github.com/mistralai/mistral-vibe/issues/531)). Tracked in [#800](https://github.com/rtk-ai/rtk/issues/800).
+```bash
+rtk init -g --agent vibe                # user-scoped (~/.vibe/hooks.toml)
+rtk init -g --agent vibe --hook-only    # skip the ~/.vibe/prompts/rtk.md prompt file
+```
+
+Installs a `pre_tool` hook entry (`match = "bash"`, `command = "rtk hook vibe"`, `strict = false`) into `~/.vibe/hooks.toml`, following the contract at [docs.mistral.ai/vibe/code/cli/hooks](https://docs.mistral.ai/vibe/code/cli/hooks). Vibe invokes the native `rtk hook vibe` binary before every bash tool call; RTK reads Vibe's stdin JSON payload and emits `{"hook_specific_output": {"tool_input": {"command": "rtk ..."}}}` to rewrite the command in place. The Vibe UI surfaces `[rtk-rewrite] rtk: rewrote to \`…\`` via RTK's `system_message` field so the rewrite is visible.
+
+Unlike Droid, Vibe does not yet expose a denylist / allowlist surface in `hooks.toml` for RTK to honor. RTK therefore rewrites every bash command it knows how to compress and defers to Vibe's own permission prompt on the rewritten command; commands RTK doesn't handle pass through unchanged. `strict = false` ensures a hook crash degrades to a warning rather than blocking the tool call.
+
+Alongside the hook, RTK drops a system prompt at `~/.vibe/prompts/rtk.md` describing the RTK conventions to Vibe as a belt-and-suspenders fallback. Use `--hook-only` to skip it.
+
+Install is global-only (Vibe's hook registry is user-scoped). Re-running the installer is a no-op; the RTK entry is detected by its `name = "rtk-rewrite"` field and never duplicated.
+
+Uninstall:
+
+```bash
+rtk init -g --agent vibe --uninstall
+```
+
+Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any other user-declared hooks in `hooks.toml` are preserved byte-for-byte. `hooks.toml` is removed only when the RTK entry was the sole content.
 
 ## Integration tiers explained
 

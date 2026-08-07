@@ -1,5 +1,6 @@
 //! Summarizes project dependencies from lock files and manifests.
 
+use crate::core::guard::never_worse;
 use crate::core::tracking;
 use crate::core::truncate::{reduced, CAP_WARNINGS};
 use anyhow::Result;
@@ -73,8 +74,9 @@ pub fn run(path: &Path, verbose: u8) -> Result<()> {
         rtk.push_str(&format!("No dependency files found in {}", dir.display()));
     }
 
-    print!("{}", rtk);
-    timer.track("cat */deps", "rtk deps", &raw, &rtk);
+    let shown = never_worse(&raw, &rtk);
+    print!("{}", shown);
+    timer.track("cat */deps", "rtk deps", &raw, shown);
     Ok(())
 }
 

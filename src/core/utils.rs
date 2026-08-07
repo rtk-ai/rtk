@@ -7,8 +7,12 @@
 
 use anyhow::{Context, Result};
 use regex::Regex;
+use serde_json::Value;
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::LazyLock;
+use std::sync::OnceLock;
 
 /// Truncates a string to `max_len` characters, appending `...` if needed.
 ///
@@ -46,9 +50,9 @@ pub fn truncate(s: &str, max_len: usize) -> String {
 /// assert_eq!(strip_ansi(colored), "Error");
 /// ```
 pub fn strip_ansi(text: &str) -> String {
-    lazy_static::lazy_static! {
-        static ref ANSI_RE: Regex = Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap();
-    }
+    static ANSI_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap());
+
     ANSI_RE.replace_all(text, "").to_string()
 }
 
@@ -240,6 +244,44 @@ pub fn fallback_tail(output: &str, label: &str, n: usize) -> String {
     lines[start..].join("\n")
 }
 
+/// Create a directory owner-only (0700 on Unix), tightening one that already exists.
+pub fn create_private_dir(path: &std::path::Path) -> std::io::Result<()> {
+    fs::create_dir_all(path)?;
+    set_owner_only(path, 0o700);
+    Ok(())
+}
+
+/// Restrict an existing file to owner-only access (0600 on Unix).
+pub fn restrict_file(path: &std::path::Path) {
+    set_owner_only(path, 0o600);
+}
+
+/// Open a file owner-only (0600 on Unix), applied at creation so content is
+/// never briefly readable under a permissive umask. `mode` is ignored for a
+/// file that already exists, so an older one is still tightened afterwards.
+pub fn open_private(
+    opts: &mut fs::OpenOptions,
+    path: &std::path::Path,
+) -> std::io::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let file = opts.open(path)?;
+    set_owner_only(path, 0o600);
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn set_owner_only(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
+}
+
+#[cfg(not(unix))]
+fn set_owner_only(_path: &std::path::Path, _mode: u32) {}
+
 /// Build a Command for Ruby tools, auto-detecting bundle exec.
 /// Uses `bundle exec <tool>` when a Gemfile exists (transitive deps like rake
 /// won't appear in the Gemfile but still need bundler for version isolation).
@@ -355,6 +397,62 @@ pub fn resolved_command(name: &str) -> Command {
     }
 }
 
+/// Return Composer bin directories in precedence order.
+///
+/// Composer allows overriding the default `vendor/bin` via `COMPOSER_BIN_DIR`
+/// or `composer.json` `config.bin-dir`. Keep the default as a fallback so we
+/// continue recognizing the common layout even when the repo is not configured.
+pub fn composer_bin_dirs() -> Vec<PathBuf> {
+    // Resolution depends only on the process's env + cwd composer.json, both
+    // constant for a single rtk invocation. The rewrite hot path queries this
+    // several times per command segment, so read the file once and cache.
+    static CACHE: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let env_bin_dir = std::env::var("COMPOSER_BIN_DIR").ok();
+            let composer_json = fs::read_to_string("composer.json").ok();
+            composer_bin_dirs_from(env_bin_dir.as_deref(), composer_json.as_deref())
+        })
+        .clone()
+}
+
+pub fn composer_tool_paths(tool: &str) -> Vec<PathBuf> {
+    composer_bin_dirs()
+        .into_iter()
+        .map(|dir| dir.join(tool))
+        .collect()
+}
+
+fn composer_bin_dirs_from(env_bin_dir: Option<&str>, composer_json: Option<&str>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Some(dir) = env_bin_dir
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| composer_json.and_then(read_composer_bin_dir))
+    {
+        dirs.push(dir);
+    }
+
+    let default_dir = PathBuf::from("vendor/bin");
+    if !dirs.iter().any(|dir| dir == &default_dir) {
+        dirs.push(default_dir);
+    }
+
+    dirs
+}
+
+fn read_composer_bin_dir(composer_json: &str) -> Option<PathBuf> {
+    let parsed: Value = serde_json::from_str(composer_json).ok()?;
+    let bin_dir = parsed.get("config")?.get("bin-dir")?.as_str()?.trim();
+    if bin_dir.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(bin_dir))
+    }
+}
+
 /// Check if a tool exists on PATH (PATHEXT-aware on Windows).
 ///
 /// Replaces manual `Command::new("which").arg(tool)` checks that fail on Windows.
@@ -426,6 +524,32 @@ mod tests {
         assert_eq!(truncate("abc", 3), "abc");
         // When string is longer and max_len is exactly 3, return "..."
         assert_eq!(truncate("hello world", 3), "...");
+    }
+
+    #[test]
+    fn test_composer_bin_dirs_use_default_when_unconfigured() {
+        assert_eq!(
+            composer_bin_dirs_from(None, None),
+            vec![PathBuf::from("vendor/bin")]
+        );
+    }
+
+    #[test]
+    fn test_composer_bin_dirs_prefer_env_override() {
+        let composer_json = r#"{"config":{"bin-dir":"tools/bin"}}"#;
+        assert_eq!(
+            composer_bin_dirs_from(Some("custom/bin"), Some(composer_json)),
+            vec![PathBuf::from("custom/bin"), PathBuf::from("vendor/bin")]
+        );
+    }
+
+    #[test]
+    fn test_composer_bin_dirs_read_composer_config() {
+        let composer_json = r#"{"config":{"bin-dir":"tools/bin"}}"#;
+        assert_eq!(
+            composer_bin_dirs_from(None, Some(composer_json)),
+            vec![PathBuf::from("tools/bin"), PathBuf::from("vendor/bin")]
+        );
     }
 
     #[test]
@@ -552,6 +676,17 @@ mod tests {
         let cjk = "你好世界测试字符串";
         let result = truncate(cjk, 6);
         assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_multibyte_cyrillic_issue_2787() {
+        // Regression: `rtk gain --history` panicked slicing this at byte 22,
+        // which falls inside 'н' (Cyrillic chars are 2 bytes each)
+        let cmd = "rtk ls -la Ародинамический расчёт Новый";
+        let result = truncate(cmd, 25);
+        assert_eq!(result.chars().count(), 25);
+        assert!(result.ends_with("..."));
+        assert_eq!(result, "rtk ls -la Ародинамиче...");
     }
 
     // ===== resolve_binary tests (issue #212) =====
@@ -855,5 +990,59 @@ mod tests {
     fn test_count_tokens_multiple_spaces() {
         assert_eq!(count_tokens("hello    world"), 2);
         assert_eq!(count_tokens("  hello   world  "), 2);
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_create_private_dir_is_owner_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("rtk").join("tee");
+        create_private_dir(&nested).unwrap();
+        assert_eq!(mode_of(&nested), 0o700);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_create_private_dir_tightens_existing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("legacy");
+        fs::create_dir_all(&dir).unwrap();
+        set_owner_only(&dir, 0o755);
+
+        create_private_dir(&dir).unwrap();
+        assert_eq!(mode_of(&dir), 0o700);
+    }
+
+    #[test]
+    fn test_create_private_dir_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("a").join("b");
+        create_private_dir(&dir).unwrap();
+        create_private_dir(&dir).expect("second call must succeed");
+        assert!(dir.is_dir());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_restrict_file_is_owner_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("history.db");
+        fs::write(&file, b"x").unwrap();
+        set_owner_only(&file, 0o644);
+
+        restrict_file(&file);
+        assert_eq!(mode_of(&file), 0o600);
+    }
+
+    #[test]
+    fn test_restrict_file_ignores_missing_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        restrict_file(&tmp.path().join("absent.db-wal"));
     }
 }

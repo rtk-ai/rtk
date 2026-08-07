@@ -13,7 +13,9 @@
 
 ## What is rtk?
 
-**rtk (Rust Token Killer)** is a coding agent proxy that cuts noise from command outputs. It filters and compresses CLI output before it reaches your LLM context, saving 60-90% of tokens on common operations. The vision is to make AI-assisted development faster and cheaper by eliminating unnecessary token consumption.
+**rtk (Rust Token Killer)** is a coding agent proxy that cuts noise from command outputs. It filters and compresses CLI output before it reaches your LLM context, reducing bash output by 60-90% on common operations. The vision is to make AI-assisted development faster and cheaper by eliminating unnecessary token consumption.
+
+Every percentage in this repo measures **bash output**, not your bill: those bytes are one contributor to input tokens, and input tokens are only part of a cost that also counts output tokens. See [How RTK Savings Work](docs/guide/resources/savings-explained.md) before quoting any figure.
 
 ---
 
@@ -38,13 +40,15 @@ When a user or LLM explicitly requests detailed output via flags (e.g., `git log
 
 Filters should be flag-aware: default output (no flags) gets aggressively compressed, but verbose/detailed flags should pass through more content. When in doubt, preserve correctness.
 
-> Example: `rtk cargo test` shows failures only (90% savings). But `rtk cargo test -- --nocapture` preserves all output because the user explicitly asked for it.
+> Example: `rtk cargo test` shows failures only (90% less bash output). But `rtk cargo test -- --nocapture` preserves all output because the user explicitly asked for it.
 
 ### Transparency
 
 The LLM doesn't know RTK is involved for which commands, hooks rewrite commands silently. RTK's output must be a valid, useful subset of the original tool's output, not a different format the LLM wouldn't expect. If an LLM parses `git diff` output, RTK's filtered version must still look like `git diff` output.
 
 Don't invent new output formats. Don't add RTK-specific headers or markers in the default output. The filtered output should be indistinguishable from "a shorter version of the real command."
+
+Enforce it with `guard::never_worse(raw, filtered)` — print and track the value it returns (use `runner::emit_guarded(filtered, hint, raw)` when appending a tee hint). It guarantees RTK never emits more tokens than the raw command, down to emitting nothing when the command produced nothing.
 
 ### Never Block
 
@@ -56,7 +60,7 @@ Every filter needs a fallback path. Every hook must handle malformed input grace
 
 <10ms startup. No async runtime. No config file I/O on the critical path. If developers perceive any delay, they'll disable RTK. Speed is the difference between adoption and abandonment.
 
-`lazy_static!` for all regex. No network calls. No disk reads in the hot path. Benchmark before/after with `hyperfine`.
+Use `LazyLock` statics for all regex. No network calls. No disk reads in the hot path. Benchmark before/after with `hyperfine`.
 
 ### Extensibility
 
@@ -69,7 +73,7 @@ If you want to submit a new core feature, this is an important point to watch.
 
 ### In Scope
 
-Commands that produce **text output** (typically 100+ tokens) and can be compressed **60%+** without losing essential information for the LLM.
+Commands that produce **text output** (typically 100+ tokens) whose bytes can be compressed **20%+** without losing essential information for the LLM. See [Correctness VS Token Savings](#correctness-vs-token-savings).
 
 - Test runners (vitest, pytest, cargo test, go test)
 - Linters and type checkers (eslint, ruff, tsc, mypy)
@@ -94,7 +98,7 @@ When implementing a new filter/cmds, be aware of the [Design Philosophy](#design
 | Use **TOML filter** when | Use **Rust module** when |
 |--------------------------|--------------------------|
 | Output is plain text with predictable line structure | Output is structured (JSON, NDJSON) |
-| Regex line filtering achieves 60%+ savings | Needs state machine parsing (e.g., pytest phases) |
+| Regex line filtering cuts 60%+ of the output bytes | Needs state machine parsing (e.g., pytest phases) |
 | No need to inject CLI flags | Needs to inject flags like `--format json` |
 | No cross-command routing | Routes to other commands (lint → ruff/mypy) |
 | Examples: brew, df, shellcheck, rsync, ping | Examples: vitest, pytest, golangci-lint, gh |
@@ -205,7 +209,7 @@ Documentation updates are required for new filters, new features, and changes th
 
 ### Contributor License Agreement (CLA)
 
-All contributions require signing our [Contributor License Agreement (CLA)](CLA.md) before being merged.
+All contributions require signing our **Contributor License Agreement (CLA)** before being merged.
 
 By signing, you certify that:
 - You have authored 100% of the contribution, or have the necessary rights to submit it.
@@ -245,8 +249,8 @@ For how to write tests (fixtures, snapshots, token savings verification), see [d
 | Type | Where | Run With |
 |------|-------|----------|
 | **Unit tests** | `#[cfg(test)] mod tests` in each module | `cargo test` |
-| **Snapshot tests** | `assert_snapshot!()` via `insta` crate | `cargo test` + `cargo insta review` |
-| **Smoke tests** | `scripts/test-all.sh` (69 assertions) | `bash scripts/test-all.sh` |
+| **Snapshot tests** | `#[cfg(test)]` create snapshots for filters modules | `cargo test` |
+| **Smoke tests** | `scripts/test-all.sh` | `bash scripts/test-all.sh` |
 | **Integration tests** | `#[ignore]` tests requiring installed binary | `cargo test --ignored` |
 
 ### Pre-Commit Gate (mandatory)
@@ -260,8 +264,8 @@ cargo fmt --all --check && cargo clippy --all-targets && cargo test
 ### PR Testing Checklist
 
 - [ ] Unit tests added/updated for changed code
-- [ ] Snapshot tests reviewed (`cargo insta review`)
-- [ ] Token savings >=60% verified
+- [ ] Snapshot tests for filters
+- [ ] >=20% reduction in bash output verified (measured with RTK's token estimator, not a real tokenizer)
 - [ ] Any truncated list has a recovery hint (`force_tee_tail_hint` or `force_tee_hint`) and uses a `CAP_*` from `src/core/truncate.rs`
 - [ ] Edge cases covered
 - [ ] `cargo fmt --all --check && cargo clippy --all-targets && cargo test` passes

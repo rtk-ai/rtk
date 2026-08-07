@@ -310,7 +310,6 @@ pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
         "golangci-lint: {} issues in {} files\n",
         total_issues, total_files
     ));
-    result.push_str("═══════════════════════════════════════\n");
 
     // Show top linters
     let mut linter_counts: Vec<_> = by_linter.iter().collect();

@@ -1,5 +1,6 @@
 //! Runs a command and produces a heuristic summary of its output.
 
+use crate::core::guard::never_worse;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::CAP_WARNINGS;
@@ -33,8 +34,9 @@ pub fn run(command: &str, verbose: u8) -> Result<i32> {
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 
     let summary = summarize_output(&raw, command, result.success());
-    println!("{}", summary);
-    timer.track(command, "rtk summary", &raw, &summary);
+    let shown = never_worse(&raw, &summary);
+    println!("{}", shown);
+    timer.track(command, "rtk summary", &raw, shown);
     Ok(result.exit_code)
 }
 

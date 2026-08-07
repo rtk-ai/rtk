@@ -182,10 +182,13 @@ jobs:
 
       - name: Get version
         id: version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          TAG="${{ inputs.tag }}"
+          TAG="$INPUT_TAG"
           if [ -z "$TAG" ]; then
-            TAG="${{ github.event.release.tag_name }}"
+            TAG="$RELEASE_TAG"
           fi
           echo "version=$TAG" >> $GITHUB_OUTPUT
 
@@ -225,10 +228,13 @@ jobs:
     steps:
       - name: Get version
         id: version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          TAG="${{ inputs.tag }}"
+          TAG="$INPUT_TAG"
           if [ -z "$TAG" ]; then
-            TAG="${{ github.event.release.tag_name }}"
+            TAG="$RELEASE_TAG"
           fi
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
@@ -259,10 +265,13 @@ jobs:
     steps:
       - name: Get version
         id: version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          TAG="${{ inputs.tag }}"
+          TAG="$INPUT_TAG"
           if [ -z "$TAG" ]; then
-            TAG="${{ github.event.release.tag_name }}"
+            TAG="$RELEASE_TAG"
           fi
           VERSION="${TAG#v}"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
@@ -291,7 +300,7 @@ jobs:
             desc "Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption"
             homepage "https://www.rtk-ai.app"
             version "VERSION_PLACEHOLDER"
-            license "MIT"
+            license "Apache 2.0"
 
             if OS.mac? && Hardware::CPU.arm?
               url "https://github.com/rtk-ai/rtk/releases/download/TAG_PLACEHOLDER/rtk-aarch64-apple-darwin.tar.gz"

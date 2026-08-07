@@ -313,7 +313,7 @@ class InstalledRtkRewritePluginTest(unittest.TestCase):
                 env["RUSTUP_HOME"] = str(real_home / ".rustup")
             if "CARGO_HOME" not in env and (real_home / ".cargo").exists():
                 env["CARGO_HOME"] = str(real_home / ".cargo")
-            env.pop("RTK_CLAUDE_DIR", None)
+            env.pop("CLAUDE_CONFIG_DIR", None)
 
             result = subprocess.run(
                 ["cargo", "run", "--quiet", "--", "init", "--agent", "hermes"],

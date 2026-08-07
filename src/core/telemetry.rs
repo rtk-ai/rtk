@@ -3,6 +3,8 @@
 use super::constants::RTK_DATA_DIR;
 use crate::core::config;
 use crate::core::tracking;
+use crate::hooks::constants::CLAUDE_DIR;
+use crate::hooks::init::resolve_claude_dir;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as FmtWrite;
 use std::io::Write as IoWrite;
@@ -23,8 +25,8 @@ pub fn maybe_ping() {
         return;
     }
 
-    // Check opt-out: env var
-    if std::env::var("RTK_TELEMETRY_DISABLED").unwrap_or_default() == "1" {
+    // Check opt-out: env var (single source of truth in telemetry_cmd)
+    if super::telemetry_cmd::telemetry_disabled_by_env() {
         return;
     }
 
@@ -173,18 +175,16 @@ fn get_or_create_salt() -> String {
 
             let salt = random_salt();
             if let Some(parent) = salt_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                let _ = crate::core::utils::create_private_dir(parent);
             }
-            if let Ok(mut f) = std::fs::File::create(&salt_path) {
+            if let Ok(mut f) = crate::core::utils::open_private(
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true),
+                &salt_path,
+            ) {
                 let _ = f.write_all(salt.as_bytes());
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        &salt_path,
-                        std::fs::Permissions::from_mode(0o600),
-                    );
-                }
             }
             salt
         })
@@ -353,13 +353,16 @@ fn detect_hook_type() -> String {
         None => return "unknown".to_string(),
     };
 
+    let claude_dir = resolve_claude_dir().unwrap_or_else(|_| home.join(CLAUDE_DIR));
+
     // Check in order of popularity
     let checks = [
-        (home.join(".claude/hooks/rtk-rewrite.sh"), "claude"),
-        (home.join(".claude/hooks/rtk-rewrite.json"), "claude"),
+        (claude_dir.join("hooks/rtk-rewrite.sh"), "claude"),
+        (claude_dir.join("hooks/rtk-rewrite.json"), "claude"),
         (home.join(".gemini/hooks/rtk-hook.sh"), "gemini"),
         (home.join(".codex/AGENTS.md"), "codex"),
         (home.join(".cursor/hooks/rtk-rewrite.json"), "cursor"),
+        (home.join(".vibe/hooks.toml"), "vibe"),
     ];
 
     for (path, name) in &checks {
@@ -368,10 +371,13 @@ fn detect_hook_type() -> String {
         }
     }
 
-    // Check project-level hooks
+    // Check project-level hooks (Claude script + project-scoped Copilot config)
     if let Ok(cwd) = std::env::current_dir() {
         if cwd.join(".claude/hooks/rtk-rewrite.sh").exists() {
             return "claude".to_string();
+        }
+        if cwd.join(".github/hooks/rtk-rewrite.json").exists() {
+            return "copilot".to_string();
         }
     }
 
@@ -435,7 +441,7 @@ pub fn telemetry_marker_path() -> PathBuf {
     let data_dir = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(RTK_DATA_DIR);
-    let _ = std::fs::create_dir_all(&data_dir);
+    let _ = crate::core::utils::create_private_dir(&data_dir);
     data_dir.join(".telemetry_last_ping")
 }
 
@@ -571,7 +577,7 @@ mod tests {
         assert!(stats.low_savings_commands.len() <= 5);
         assert!((0.0..=100.0).contains(&stats.avg_savings_per_command));
         assert!(
-            ["claude", "gemini", "codex", "cursor", "none", "unknown"]
+            ["claude", "gemini", "codex", "cursor", "copilot", "vibe", "none", "unknown"]
                 .iter()
                 .any(|&h| stats.hook_type.starts_with(h)),
             "Unexpected hook type: {}",
@@ -583,7 +589,8 @@ mod tests {
     fn test_detect_hook_type_returns_known() {
         let ht = detect_hook_type();
         assert!(
-            ["claude", "gemini", "codex", "cursor", "none", "unknown"].contains(&ht.as_str()),
+            ["claude", "gemini", "codex", "cursor", "copilot", "vibe", "none", "unknown"]
+                .contains(&ht.as_str()),
             "Unexpected hook type: {}",
             ht
         );

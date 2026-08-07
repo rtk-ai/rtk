@@ -1,8 +1,8 @@
 //! Data types for reporting which commands RTK can and cannot optimize.
 
 use crate::hooks::constants::{
-    CURSOR_DIR, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
-    HOOKS_SUBDIR, REWRITE_HOOK_FILE,
+    COPILOT_HOOK_FILE, CURSOR_DIR, GITHUB_DIR, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
+    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_SUBDIR, REWRITE_HOOK_FILE,
 };
 use serde::Serialize;
 use std::path::Path;
@@ -52,13 +52,19 @@ pub struct UnsupportedEntry {
 pub struct AgentIntegrationStatus {
     pub cursor_hook_installed: bool,
     pub hermes_plugin_installed: bool,
+    pub copilot_hook_installed: bool,
 }
 
 impl AgentIntegrationStatus {
     pub fn detect() -> Self {
-        dirs::home_dir()
+        let mut status = dirs::home_dir()
             .map(|home| Self::detect_from_home(&home))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Copilot is project-scoped (.github/hooks/), unlike the home-based agents.
+        status.copilot_hook_installed = std::env::current_dir()
+            .map(|cwd| Self::copilot_hook_installed_in(&cwd))
+            .unwrap_or(false);
+        status
     }
 
     fn detect_from_home(home: &Path) -> Self {
@@ -74,7 +80,15 @@ impl AgentIntegrationStatus {
                 .join(HERMES_PLUGIN_NAME)
                 .join(HERMES_PLUGIN_MANIFEST_FILE)
                 .is_file(),
+            copilot_hook_installed: false,
         }
+    }
+
+    fn copilot_hook_installed_in(dir: &Path) -> bool {
+        dir.join(GITHUB_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(COPILOT_HOOK_FILE)
+            .exists()
     }
 }
 
@@ -221,6 +235,10 @@ fn append_agent_notes(out: &mut String, status: AgentIntegrationStatus) {
     if status.hermes_plugin_installed {
         out.push_str("\nNote: Hermes plugin is installed; Hermes sessions are tracked via `rtk gain` (discover scans Claude Code only)\n");
     }
+
+    if status.copilot_hook_installed {
+        out.push_str("\nNote: GitHub Copilot sessions are tracked via `rtk gain` (discover scans Claude Code only)\n");
+    }
 }
 
 /// Format report as JSON.
@@ -362,6 +380,7 @@ mod tests {
         report.agent_status = AgentIntegrationStatus {
             cursor_hook_installed: true,
             hermes_plugin_installed: true,
+            copilot_hook_installed: true,
         };
 
         let output = format_json(&report);
@@ -369,5 +388,42 @@ mod tests {
 
         assert_eq!(json["agent_status"]["cursor_hook_installed"], true);
         assert_eq!(json["agent_status"]["hermes_plugin_installed"], true);
+        assert_eq!(json["agent_status"]["copilot_hook_installed"], true);
+    }
+
+    #[test]
+    fn test_agent_status_detects_copilot_hook_in_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let hook = temp
+            .path()
+            .join(GITHUB_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(COPILOT_HOOK_FILE);
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "{}").unwrap();
+
+        assert!(AgentIntegrationStatus::copilot_hook_installed_in(
+            temp.path()
+        ));
+        assert!(!AgentIntegrationStatus::copilot_hook_installed_in(
+            tempfile::tempdir().unwrap().path()
+        ));
+    }
+
+    #[test]
+    fn test_format_text_reports_copilot_detected() {
+        let mut report = make_report(0, 0);
+        report.agent_status = AgentIntegrationStatus {
+            copilot_hook_installed: true,
+            ..AgentIntegrationStatus::default()
+        };
+
+        let output = format_text(&report, 10, false);
+
+        assert!(
+            output.contains("GitHub Copilot sessions are tracked via `rtk gain`"),
+            "Expected Copilot note in output but got:\n{}",
+            output
+        );
     }
 }
