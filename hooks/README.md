@@ -187,7 +187,7 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 
 ### OpenCode (TypeScript Plugin)
 
-Mutates `args.command` in-place via the zx library:
+**v1 (default)**: Mutates `args.command` in-place via the zx `$` helper:
 
 ```typescript
 const result = await $`rtk rewrite ${command}`.quiet().nothrow()
@@ -196,6 +196,16 @@ if (rewritten && rewritten !== command) {
   (args as Record<string, unknown>).command = rewritten
 }
 ```
+
+**v2**: Uses `Plugin.define` + `ctx.tool.hook("execute.before", ...)` — spawns `rtk rewrite` directly since v2 context does not provide `$`:
+
+```typescript
+const proc = spawn("rtk", ["rewrite", command])
+proc.stdout.on("data", (d) => { out += d })
+proc.on("close", () => resolve(out.trim()))
+```
+
+Installed with `rtk init -g --opencode` (v1) or `rtk init -g --opencode-v2` (v2).
 
 ### Hermes (Python Plugin)
 
