@@ -2680,6 +2680,7 @@ mod tests {
             "pnpm dlx biome",
             "pnpm exec biome",
             "pnpx biome",
+            "bunx biome"
         ];
         for command in commands {
             assert_eq!(
