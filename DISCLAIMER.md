@@ -22,7 +22,7 @@ This software interacts with your development environment, file system, and exte
 
 ## Telemetry
 
-This software collects anonymous, aggregate usage metrics by default and can be disabled at any time. No personally identifiable information, source code, file paths, command arguments, or secrets are collected. See the README for full details and opt-out instructions.
+This software can collect anonymous, aggregate usage metrics only after explicit opt-in consent. Telemetry is disabled by default and can be disabled at any time. No personally identifiable information, source code, file paths, command arguments, or secrets are collected. See the README and docs/TELEMETRY.md for full details and consent management instructions.
 
 ---
 
