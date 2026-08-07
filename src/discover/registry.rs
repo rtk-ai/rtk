@@ -63,8 +63,11 @@ static COMPILED: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 static ENV_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
     let double_quoted = r#""(?:[^"\\]|\\.)*""#;
     let single_quoted = r#"'(?:[^'\\]|\\.)*'"#;
-    let unquoted = r#"[^\s]*"#;
-    let env_value = format!("(?:{}|{}|{})", double_quoted, single_quoted, unquoted);
+    // Quotes must be handled by the complete quoted alternatives above.
+    // Otherwise regex backtracking can reinterpret a quoted assignment as a
+    // partial unquoted value and expose literal data as a command (#3262).
+    let unquoted = r#"[^\s'"]+"#;
+    let env_value = format!("(?:{}|{}|{})*", double_quoted, single_quoted, unquoted);
     let env_assign = format!(r#"[A-Z_][A-Z0-9_]*={}"#, env_value);
     Regex::new(&format!(r#"^(?:sudo\s+|env\s+|{}\s+)+"#, env_assign)).unwrap()
 });
@@ -2894,6 +2897,14 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_env_concatenated_quoted_and_unquoted_value() {
+        assert_eq!(
+            rewrite_command_no_prefixes("FOO='bar baz'qux git status", &[]),
+            Some("FOO='bar baz'qux rtk git status".into())
+        );
+    }
+
+    #[test]
     fn test_classify_env_quoted_value_stripped() {
         assert_eq!(
             classify_command(r#"GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no" git push"#),
@@ -4668,6 +4679,33 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("git status; cargo test", &[]),
             Some("rtk git status; rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_quoted_assignment_data() {
+        let command = r#"D='# shellcheck disable=SC2034  # comment'; for f in hooks/*.sh; do sed -i '' -e "s|^TS_BACKUP=|${D}\nTS_BACKUP=|" "$f"; done"#;
+
+        assert_eq!(rewrite_command_no_prefixes(command, &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_compound_only_rewrites_commands_outside_assignment_quotes() {
+        let command = "D='# shellcheck | git status; $(whoami)' ; cargo test";
+
+        assert_eq!(
+            rewrite_command_no_prefixes(command, &[]),
+            Some("D='# shellcheck | git status; $(whoami)'; rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_double_quoted_assignment_data() {
+        let command = r#"D="run shellcheck later"; git status"#;
+
+        assert_eq!(
+            rewrite_command_no_prefixes(command, &[]),
+            Some(r#"D="run shellcheck later"; rtk git status"#.into())
         );
     }
 
