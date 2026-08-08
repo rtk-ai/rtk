@@ -1646,6 +1646,43 @@ Remove-Item -LiteralPath $temporaryScreenshots -Force -ErrorAction SilentlyConti
     }
 
     #[test]
+    fn test_codex_host_policy_candidates_remain_native() {
+        let cases = [
+            (
+                "PowerShell",
+                r#"Remove-Item -LiteralPath 'D:\AI\workspace\runtime\probe.tmp' -Force"#,
+            ),
+            (
+                "PowerShell",
+                r#"Start-Process -WindowStyle Hidden 'D:\AI\workspace\app.exe'"#,
+            ),
+            (
+                "PowerShell",
+                r#"Invoke-WebRequest -Uri 'https://example.com/app.apk' -OutFile 'D:\AI\workspace\runtime\app.tmp'"#,
+            ),
+            (
+                "PowerShell",
+                r#"Get-FileHash -LiteralPath 'D:\AI\workspace\fixture.json' -Algorithm SHA256"#,
+            ),
+            (
+                "Shell",
+                "adb shell am start -a android.intent.action.VIEW -d https://example.com/plan?new=1 com.example/.MainActivity",
+            ),
+        ];
+
+        for (tool, command) in cases {
+            let input: Value = serde_json::from_str(&agent_input(tool, command)).unwrap();
+            let PayloadAction::Skip { reason, cmd } =
+                process_codex_payload_for_verdict(&input, PermissionVerdict::Allow)
+            else {
+                panic!("host-policy candidate must remain native: {command}");
+            };
+            assert_eq!(reason, "skip:defer");
+            assert_eq!(cmd, command, "RTK must preserve the exact command string");
+        }
+    }
+
+    #[test]
     fn test_claude_rewrite_preserves_tool_input_fields() {
         let input = claude_input_with_fields("git status", 30000, "Check repo status");
         let result = run_claude_inner(&input).unwrap();

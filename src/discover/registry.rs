@@ -1970,7 +1970,15 @@ mod tests {
     }
 
     mod multiline_blocks {
-        use super::rewrite_command_no_prefixes;
+        // Exercise the Bash-aware multiline parser directly. The public
+        // cross-shell rewrite entry point intentionally keeps physical
+        // newlines native because it cannot distinguish Bash from PowerShell.
+        fn rewrite_command_no_prefixes(cmd: &str, _excluded: &[String]) -> Option<String> {
+            if super::super::has_heredoc(cmd) {
+                return None;
+            }
+            super::super::rewrite_multiline_block(cmd, &[], &[])
+        }
 
         #[test]
         fn test_rewrites_each_line() {
@@ -4981,6 +4989,45 @@ mod tests {
                 Some(format!("rtk pnpm {command}")),
                 "Failed for command: pnpm {}",
                 command
+            );
+        }
+    }
+
+    #[test]
+    fn test_pnpm_lifecycle_commands_never_become_install() {
+        let passthrough = [
+            "pnpm check",
+            "pnpm test",
+            "pnpm build",
+            "pnpm scope:check",
+            "pnpm --filter @wiseteacher/web test -- sample.test.ts",
+            "pnpm --filter @wiseteacher/api typecheck",
+            "pnpm --dir apps/web typecheck",
+        ];
+        for command in passthrough {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "unsupported lifecycle command must stay native: {command}"
+            );
+        }
+
+        let specialized = [
+            (
+                "pnpm exec tsc -p tsconfig.json --noEmit",
+                "rtk tsc -p tsconfig.json --noEmit",
+            ),
+            (
+                "pnpm exec vitest run sample.test.ts",
+                "rtk vitest sample.test.ts",
+            ),
+            ("pnpm install --production", "rtk pnpm install --production"),
+        ];
+        for (command, expected) in specialized {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.to_string()),
+                "supported pnpm rewrite must preserve its operation: {command}"
             );
         }
     }

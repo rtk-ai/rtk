@@ -143,6 +143,17 @@ git branch  # Verify correct branch (main, feature/*, etc.)
 
 **Never assume** which project to work in. Always verify before file operations.
 
+## RTK Bug Maintenance Contract
+
+For RTK bug-fix requests, treat `D:\AI\RTK\RTK_run_log` as evidence, not as proof of RTK ownership. Use the active Windows feature worktree and follow this sequence:
+
+1. Merge the latest `origin/develop` while preserving Windows-native hook behavior, with a backup ref before non-trivial conflict resolution.
+2. Reproduce with both the installed `rtk.exe` and the updated source binary, capturing binary path/version/SHA256, original command, rewrite output, exit code, and host-hook output.
+3. Add a regression test before changing RTK. If direct/bypass evidence shows the fault belongs to Codex host policy, pnpm, the shell, or the environment, classify it under `RTK_run_log/archive/not-rtk/` rather than changing RTK safety semantics.
+4. Prioritize Windows correctness: PowerShell quoting, PATHEXT resolution, lifecycle `PATH`, exact argv, permission deferral, and native exit codes must be preserved without regressing Linux/macOS.
+5. Validate focused tests, formatting, Clippy with warnings denied, serial full tests on Windows, `git diff --check`, release build, and installed Claude/Codex hook smoke separately.
+6. Keep this contract synchronized with `AGENTS.md`, then publish scoped changes to the existing Windows branch/PR with the root cause and exact verification results.
+
 ## Avoiding Rabbit Holes
 
 **Stay focused on the task**. Do not make excessive operations to verify external APIs, documentation, or edge cases unless explicitly asked.
