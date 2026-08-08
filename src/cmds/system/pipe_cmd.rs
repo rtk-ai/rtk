@@ -1,8 +1,10 @@
 use anyhow::Result;
 use std::io::Read;
+use std::path::Path;
 
 use crate::core::guard::never_worse;
 use crate::core::stream::RAW_CAP;
+use crate::core::toml_filter::{self, CompiledFilter};
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 
 const MAX_PIPE_MATCHES: usize = CAP_WARNINGS;
@@ -235,7 +237,7 @@ fn identity_filter(input: &str) -> String {
     input.to_string()
 }
 
-fn apply_filter(filter_fn: fn(&str) -> String, input: &str) -> String {
+fn apply_rust_filter(filter_fn: fn(&str) -> String, input: &str) -> String {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| filter_fn(input)))
         .unwrap_or_else(|_| {
             eprintln!("[rtk] warning: filter panicked — passing through raw output");
@@ -243,7 +245,22 @@ fn apply_filter(filter_fn: fn(&str) -> String, input: &str) -> String {
         })
 }
 
-pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
+fn apply_toml_filter(filter: &CompiledFilter, input: &str) -> String {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        toml_filter::apply_filter(filter, input)
+    }))
+    .unwrap_or_else(|_| {
+        eprintln!("[rtk] warning: filter panicked — passing through raw output");
+        input.to_string()
+    })
+}
+
+/// Apply a filter to stdin and print the result.
+///
+/// - `toml_path`: when set, compile that TOML file (no trust gate) and apply.
+///   `filter_name` then selects among filters in the file.
+/// - otherwise: existing `-f` Rust filter / auto-detect behavior.
+pub fn run(filter_name: Option<&str>, passthrough: bool, toml_path: Option<&Path>) -> Result<()> {
     if passthrough {
         std::io::copy(&mut std::io::stdin(), &mut std::io::stdout())
             .map_err(|e| anyhow::anyhow!("Failed to relay stdin: {}", e))?;
@@ -259,20 +276,29 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
         anyhow::bail!("stdin exceeds {} byte limit", RAW_CAP);
     }
 
-    let filter_fn = match filter_name {
-        Some(name) => resolve_filter(name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Unknown filter '{}'. Available: cargo-test, pytest, go-test, go-build, \
-                 tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
-                 log, mypy, ruff-check, ruff-format, prettier, phpunit, pest, \
-                 paratest, php-test, ecs, phpstan, pint",
-                name
-            )
-        })?,
-        None => auto_detect_filter(&buf),
+    let output = if let Some(path) = toml_path {
+        let filters =
+            toml_filter::compile_filters_from_path(path).map_err(|e| anyhow::anyhow!(e))?;
+        let filter =
+            toml_filter::select_compiled_filter(&filters, filter_name)
+                .map_err(|e| anyhow::anyhow!(e))?;
+        apply_toml_filter(filter, &buf)
+    } else {
+        let filter_fn = match filter_name {
+            Some(name) => resolve_filter(name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unknown filter '{}'. Available: cargo-test, pytest, go-test, go-build, \
+                     tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
+                     log, mypy, ruff-check, ruff-format, prettier, phpunit, pest, \
+                     paratest, php-test, ecs, phpstan, pint",
+                    name
+                )
+            })?,
+            None => auto_detect_filter(&buf),
+        };
+        apply_rust_filter(filter_fn, &buf)
     };
 
-    let output = apply_filter(filter_fn, &buf);
     let shown = never_worse(&buf, &output);
     print!("{}", shown);
     Ok(())
@@ -548,7 +574,7 @@ mod tests {
             panic!("filter bug");
         }
         let input = "some output\n";
-        let result = super::apply_filter(panicking_filter, input);
+        let result = super::apply_rust_filter(panicking_filter, input);
         assert_eq!(result, input);
     }
 
