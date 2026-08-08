@@ -8,8 +8,11 @@ pub const HOOKS_JSON: &str = "hooks.json";
 pub const PRE_TOOL_USE_KEY: &str = "PreToolUse";
 pub const BEFORE_TOOL_KEY: &str = "BeforeTool";
 
-/// Native Rust hook command for Claude Code (replaces rtk-rewrite.sh).
+/// Human-readable command and the exact shell form emitted by older RTK versions.
 pub const CLAUDE_HOOK_COMMAND: &str = "rtk hook claude";
+/// Shell-free Claude Code registration written to `command` and `args`.
+pub const CLAUDE_HOOK_BINARY: &str = "rtk";
+pub const CLAUDE_HOOK_ARGS: [&str; 2] = ["hook", "claude"];
 /// Native Rust hook command for Cursor (replaces rtk-rewrite.sh).
 pub const CURSOR_HOOK_COMMAND: &str = "rtk hook cursor";
 /// Native Rust hook command for Factory Droid.

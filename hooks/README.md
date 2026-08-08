@@ -33,7 +33,7 @@ All rewrite logic lives in the Rust binary (`src/discover/registry.rs`). Hook sc
 
 Each agent subdirectory has its own README with hook-specific details:
 
-- **[`claude/`](claude/README.md)** — Shell hook, `PreToolUse` JSON format, `settings.json` patching, test script
+- **[`claude/`](claude/README.md)** — Awareness file plus the legacy shell hook and its compatibility tests; current installs use `rtk hook claude`
 - **[`copilot/`](copilot/README.md)** — Rust binary hook, dual format (VS Code Chat vs Copilot CLI), deny-with-suggestion fallback
 - **[`cursor/`](cursor/README.md)** — Shell hook, Cursor JSON format, empty `{}` response requirement
 - **[`cline/`](cline/README.md)** — Rules file (prompt-level), `.clinerules` project-local installation
@@ -48,7 +48,7 @@ Each agent subdirectory has its own README with hook-specific details:
 
 | Agent | Mechanism | Hook Type | Can Modify Command? |
 |-------|-----------|-----------|---------------------|
-| Claude Code | Shell hook (`PreToolUse`) | Transparent rewrite | Yes (`updatedInput`) |
+| Claude Code | Rust binary (`rtk hook claude`, `PreToolUse`) | Transparent rewrite | Yes (`updatedInput`) |
 | VS Code Copilot Chat | Rust binary (`rtk hook copilot`) | Transparent rewrite | Yes (`updatedInput`) |
 | GitHub Copilot CLI | Rust binary (`rtk hook copilot`) | Deny-with-suggestion | No (agent retries) |
 | Cursor | Rust binary | Transparent rewrite | Yes (`updated_input`) |
@@ -63,7 +63,15 @@ Each agent subdirectory has its own README with hook-specific details:
 
 ## JSON Formats by Agent
 
-### Claude Code (Shell Hook)
+### Claude Code (Rust Binary Hook)
+
+`rtk init -g` registers the hook as a shell-free executable plus argument array:
+
+```json
+{ "type": "command", "command": "rtk", "args": ["hook", "claude"] }
+```
+
+Legacy combined command strings remain detectable for compatibility.
 
 **Input** (stdin):
 

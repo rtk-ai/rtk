@@ -72,12 +72,11 @@ This is the full lifecycle of a command through RTK, from LLM agent to filtered 
 
 The user runs `rtk init` to set up hooks for their LLM agent. This:
 
-1. Writes a thin shell hook script (e.g., `~/.claude/hooks/rtk-rewrite.sh`)
-2. Stores its SHA-256 hash for integrity verification
-3. Patches the agent's settings file (e.g., `settings.json`) to register the hook
-4. Writes RTK awareness instructions (e.g., `RTK.md`) for prompt-level guidance
+1. Patches the agent's settings file (e.g., `settings.json`) to register the hook
+2. Registers the RTK binary directly when the agent supports it; other integrations install their required script or plugin
+3. Writes RTK awareness instructions (e.g., `RTK.md`) for prompt-level guidance
 
-RTK supports 7 agents, each with its own installation mode. The hook scripts are embedded in the binary and written at install time.
+Claude Code uses the shell-free `rtk hook claude` binary entry. Other agents use the installation mode described in their hook documentation.
 
 > **Details**: [`src/hooks/README.md`](../src/hooks/README.md) covers all installation modes, configuration files, and the uninstall flow.
 
@@ -86,11 +85,11 @@ RTK supports 7 agents, each with its own installation mode. The hook scripts are
 When an LLM agent runs a command (e.g., `git status`):
 
 1. The agent fires a `PreToolUse` event (or equivalent) containing the command as JSON
-2. The hook script reads the JSON, extracts the command string
-3. The hook calls `rtk rewrite "git status"` as a subprocess
-4. `rtk rewrite` consults the command registry and returns `rtk git status`
+2. The agent-specific hook reads the JSON and extracts the command string
+3. The native hook or delegate calls RTK's rewrite logic
+4. The command registry returns `rtk git status` when a rewrite applies
 5. The hook sends a response telling the agent to use the rewritten command
-6. If anything fails (jq missing, rtk not found, no match), the hook exits silently -- the raw command runs unchanged
+6. If parsing or rewriting fails, or no rule matches, the hook exits silently -- the raw command runs unchanged
 
 All rewrite logic lives in Rust (`src/discover/registry.rs`). Hooks are thin delegates that handle agent-specific JSON formats.
 
@@ -101,7 +100,7 @@ All rewrite logic lives in Rust (`src/discover/registry.rs`). Hooks are thin del
 The rewrite pipeline is how RTK intercepts and rewrites commands. The call chain is:
 
 ```
-hook shell → rewrite_cmd.rs → rewrite_command() → rewrite_compound() → rewrite_segment() → classify_command()
+rtk hook claude → hook_cmd.rs → rewrite_command() → rewrite_compound() → rewrite_segment() → classify_command()
 ```
 
 Traced step by step for `cargo fmt --all && cargo test 2>&1 | tail -20`:
@@ -109,29 +108,27 @@ Traced step by step for `cargo fmt --all && cargo test 2>&1 | tail -20`:
 ```
 LLM Agent: "cargo fmt --all && cargo test 2>&1 | tail -20"
   |
-  |  Hook shell (hooks/claude/rtk-rewrite.sh)
-  |  Reads JSON from agent, extracts command, calls `rtk rewrite "$CMD"`
-  |  On failure (jq missing, rtk missing, old version): exit 0 (passthrough)
+  |  Native hook (`rtk hook claude`)
+  |  Reads JSON from the agent
+  |  On failure: exit 0 (passthrough)
   |
   v
-rewrite_cmd::run(cmd)                              [src/hooks/rewrite_cmd.rs]
-  |  1. Load config → hooks.exclude_commands
-  |  2. check_command(cmd) → Deny → exit(2)
-  |  3. registry::rewrite_command(cmd, excluded)
-  |     → None → exit(1)          (no RTK equivalent, passthrough)
-  |     → Some + Allow → print, exit(0)
-  |     → Some + Ask   → print, exit(3)
+hook_cmd::run_claude()                             [src/hooks/hook_cmd.rs]
+  |  1. Parse the bounded stdin payload
+  |  2. Check hook permissions
+  |  3. Call registry::rewrite_command(cmd, excluded, transparent_prefixes)
+  |  4. Emit Claude Code's updatedInput JSON, or pass through silently
   |
   v
-rewrite_command(cmd, excluded)                     [src/discover/registry.rs]
+rewrite_command(...)                               [src/discover/registry.rs]
   |  Early exits:
   |  - Empty → None
   |  - Contains "<<" or "$((" (heredoc/arithmetic) → None
   |  - Simple "rtk ..." (no operators) → return as-is
-  |  - Otherwise → rewrite_compound(cmd, excluded)
+  |  - Otherwise → rewrite_compound(...)
   |
   v
-rewrite_compound(cmd, excluded)                    [src/discover/registry.rs]
+rewrite_compound(...)                              [src/discover/registry.rs]
   |
   |  Step 1 — Tokenize (lexer.rs)
   |  tokenize() produces typed tokens with byte offsets:
@@ -313,7 +310,7 @@ Start here, then drill down into each README for file-level details.
 | Directory | Agent | What you'll find in its README |
 |-----------|-------|-------------------------------|
 | [`hooks/`](../hooks/README.md) | _(parent)_ | **All JSON formats**, rewrite registry overview, exit code contract, override controls |
-| [`claude/`](../hooks/claude/README.md) | Claude Code | Shell hook mechanism, `PreToolUse` JSON, test script |
+| [`claude/`](../hooks/claude/README.md) | Claude Code | Awareness file, legacy shell hook, and compatibility tests |
 | [`copilot/`](../hooks/copilot/README.md) | GitHub Copilot | Rust binary hook, single `PreToolUse` schema shared by VS Code Chat and Copilot CLI |
 | [`cursor/`](../hooks/cursor/README.md) | Cursor IDE | Shell hook, empty JSON response requirement |
 | [`cline/`](../hooks/cline/README.md) | Cline / Roo Code | Rules file (prompt-level, no programmatic hook) |
@@ -329,7 +326,7 @@ RTK supports the following LLM agents through hook integrations:
 
 | Agent | Hook Type | Mechanism | Can Modify Command? |
 |-------|-----------|-----------|---------------------|
-| Claude Code | Shell hook | `PreToolUse` in `settings.json` | Yes (`updatedInput`) |
+| Claude Code | Rust binary | `rtk hook claude` via `PreToolUse` | Yes (`updatedInput`) |
 | GitHub Copilot (VS Code) | Rust binary | `rtk hook copilot` reads JSON | Yes (`updatedInput`) |
 | GitHub Copilot CLI | Rust binary | `rtk hook copilot` reads JSON | Yes (`updatedInput`) |
 | Cursor | Rust binary | `rtk hook cursor` reads JSON | Yes (`updated_input`) |
