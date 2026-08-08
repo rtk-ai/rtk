@@ -57,9 +57,38 @@ expected = "expected filtered output"
 | `replace` | array | Regex substitutions (`{ pattern, replacement }`) |
 | `match_output` | array | Short-circuit rules (`{ pattern, message }`) |
 | `truncate_lines_at` | int | Truncate lines longer than N characters |
+| `collapse_repeats` | table | Opt-in: collapse repeated identical lines (see below) |
 | `max_lines` | int | Keep only the first N lines |
 | `tail_lines` | int | Keep only the last N lines (applied after other filters) |
 | `on_empty` | string | Fallback message when filtered output is empty |
+
+## Collapsing repeated lines
+
+Some commands emit the same line hundreds of times — a Lua test suite that
+`print()`s from the code under test is the usual case. `collapse_repeats` keeps
+the first occurrence of every distinct line, in order, and renders the repeat
+count back in:
+
+```toml
+[filters.lua]
+match_command = "^(luajit|lua)[0-9.]*\\s+\\S"
+collapse_repeats = { keep_tail = 5 }
+```
+
+```
+[trace] gc cycle (×802)
+loading fixtures
+3211 assertions, 0 failures
+```
+
+Duplicates in this kind of output are scattered rather than consecutive, so the
+count is global (first occurrence wins), not per run. The last `keep_tail` lines
+are exempt — they are emitted verbatim and do not feed the counts, so a trailing
+summary survives even when it repeats an earlier line.
+
+The field is **opt-in**: a filter that doesn't set it behaves exactly as before.
+Only enable it for commands whose output is program chatter. Tools that repeat
+lines on purpose (per-row results, a diff, a table) must not use it.
 
 ## Naming convention
 
@@ -92,7 +121,7 @@ flowchart TD
         R["TomlFilterRegistry::load()\n1. .rtk/filters.toml\n2. ~/.config/rtk/filters.toml\n3. BUILTIN_TOML\n4. passthrough"] --> S
         S{"match_command\nmatches?"} -->|"no match"| T[["exec raw (passthrough)"]]
         S -->|"match"| U["exec command\ncapture stdout"]
-        U --> V["8-stage pipeline\nstrip_ansi → replace → match_output\n→ strip/keep_lines → truncate\n→ tail_lines → max_lines → on_empty"]
+        U --> V["9-stage pipeline\nstrip_ansi → replace → match_output\n→ strip/keep_lines → truncate\n→ collapse_repeats → tail_lines\n→ max_lines → on_empty"]
         V --> W[["print filtered output + exit code"]]
     end
 

@@ -19,13 +19,14 @@
 ///   3. match_output         — short-circuit: if blob matches a pattern, return message immediately
 ///   4. strip/keep_lines     — filter lines by regex
 ///   5. truncate_lines_at    — truncate each line to N chars
-///   6. head/tail_lines      — keep first/last N lines
-///   7. max_lines            — absolute line cap
-///   8. on_empty             — message if result is empty
+///   6. collapse_repeats     — collapse repeated identical lines, rendering the count back in
+///   7. head/tail_lines      — keep first/last N lines
+///   8. max_lines            — absolute line cap
+///   9. on_empty             — message if result is empty
 use super::constants::RTK_META_COMMANDS;
 use regex::{Regex, RegexSet};
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::LazyLock;
 
 // Built-in filters: concatenated from src/filters/*.toml by build.rs at compile time.
@@ -57,6 +58,16 @@ struct MatchOutputRule {
 struct ReplaceRule {
     pattern: String,
     replacement: String,
+}
+
+/// Opt-in repeated-line collapse. Absent means disabled, so existing filters
+/// keep their behaviour. `keep_tail` trailing lines are exempt and emitted
+/// verbatim — test runners put their summary last.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CollapseRepeats {
+    #[serde(default)]
+    keep_tail: usize,
 }
 
 /// An inline test case attached to a filter in the TOML.
@@ -98,6 +109,7 @@ struct TomlFilterDef {
     #[serde(default)]
     keep_lines_matching: Vec<String>,
     truncate_lines_at: Option<usize>,
+    collapse_repeats: Option<CollapseRepeats>,
     head_lines: Option<usize>,
     tail_lines: Option<usize>,
     max_lines: Option<usize>,
@@ -145,6 +157,7 @@ pub struct CompiledFilter {
     match_output: Vec<CompiledMatchOutputRule>,
     line_filter: LineFilter,
     truncate_lines_at: Option<usize>,
+    collapse_repeats: Option<CollapseRepeats>,
     head_lines: Option<usize>,
     tail_lines: Option<usize>,
     pub max_lines: Option<usize>,
@@ -383,6 +396,7 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
         match_output,
         line_filter,
         truncate_lines_at: def.truncate_lines_at,
+        collapse_repeats: def.collapse_repeats,
         head_lines: def.head_lines,
         tail_lines: def.tail_lines,
         max_lines: def.max_lines,
@@ -489,9 +503,10 @@ pub fn find_filter_in<'a>(
 ///   3. match_output         — short-circuit if blob matches a pattern
 ///   4. strip/keep_lines     — filter lines by regex
 ///   5. truncate_lines_at    — truncate each line to N chars
-///   6. head/tail_lines      — keep first/last N lines
-///   7. max_lines            — absolute line cap
-///   8. on_empty             — message if result is empty
+///   6. collapse_repeats     — collapse repeated identical lines with a count
+///   7. head/tail_lines      — keep first/last N lines
+///   8. max_lines            — absolute line cap
+///   9. on_empty             — message if result is empty
 pub fn apply_filter(filter: &CompiledFilter, stdout: &str) -> String {
     apply_filter_with_info(filter, stdout).0
 }
@@ -573,12 +588,17 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
             .collect();
     }
 
+    // 6. collapse_repeats — opt-in; distinct lines all survive, so nothing is lost
+    if let Some(collapse) = &filter.collapse_repeats {
+        lines = collapse_repeated_lines(lines, collapse.keep_tail);
+    }
+
     let snapshot_for_tail = !intra_line_loss
         && filter.tail_lines.is_none()
         && (filter.head_lines.is_some() || filter.max_lines.is_some());
     let pre_cut = snapshot_for_tail.then(|| lines.clone());
 
-    // 6. head + tail
+    // 7. head + tail
     let total = lines.len();
     let mut noncontiguous_drop = false;
     let mut head_cut: Option<usize> = None;
@@ -605,7 +625,7 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
         }
     }
 
-    // 7. max_lines — absolute cap applied after head/tail (includes omit messages)
+    // 8. max_lines — absolute cap applied after head/tail (includes omit messages)
     let mut max_cut: Option<usize> = None;
     if let Some(max) = filter.max_lines {
         if lines.len() > max {
@@ -616,7 +636,7 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
         }
     }
 
-    // 8. on_empty
+    // 9. on_empty
     let result = lines.join("\n");
     if result.trim().is_empty() {
         if let Some(ref msg) = filter.on_empty {
@@ -644,6 +664,40 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
     };
 
     (result, loss)
+}
+
+/// Keep the first occurrence of every distinct line and append `(×N)` to the
+/// ones that repeat. Duplicates in this kind of output are scattered rather than
+/// consecutive, so collapsing per run barely helps; collapsing globally keeps
+/// every distinct line, in first-occurrence order, and only drops exact repeats.
+///
+/// The last `keep_tail` lines are exempt: they are emitted verbatim, and they do
+/// not feed the counts, so a trailing summary survives untouched.
+fn collapse_repeated_lines(lines: Vec<String>, keep_tail: usize) -> Vec<String> {
+    if lines.len() <= keep_tail {
+        return lines;
+    }
+    let (head, tail) = lines.split_at(lines.len() - keep_tail);
+
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for line in head {
+        *counts.entry(line.as_str()).or_insert(0) += 1;
+    }
+
+    let mut seen: HashSet<&str> = HashSet::with_capacity(counts.len());
+    let mut out = Vec::with_capacity(counts.len() + keep_tail);
+    for line in head {
+        if !seen.insert(line.as_str()) {
+            continue;
+        }
+        // A count on an invisible line is noise — blank lines just collapse.
+        match counts[line.as_str()] {
+            n if n > 1 && !line.trim().is_empty() => out.push(format!("{} (×{})", line, n)),
+            _ => out.push(line.clone()),
+        }
+    }
+    out.extend_from_slice(tail);
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -816,6 +870,78 @@ mod tests {
             .into_iter()
             .next()
             .expect("expected at least one filter")
+    }
+
+    // --- collapse_repeats (stage 6) ---
+
+    fn collapsing_filter(keep_tail: usize) -> CompiledFilter {
+        first_filter(&format!(
+            "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\ncollapse_repeats = {{ keep_tail = {keep_tail} }}\n"
+        ))
+    }
+
+    #[test]
+    fn collapse_repeats_is_off_unless_configured() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\n";
+        assert_eq!(apply_filter(&first_filter(toml), "a\na\nb"), "a\na\nb");
+    }
+
+    #[test]
+    fn collapse_repeats_counts_globally_not_per_run() {
+        // Duplicates are scattered, so a consecutive-run collapse would change nothing.
+        let out = apply_filter(&collapsing_filter(0), "a\nb\na\nc\na\nb");
+        assert_eq!(out, "a (×3)\nb (×2)\nc");
+    }
+
+    #[test]
+    fn collapse_repeats_keeps_tail_verbatim() {
+        let out = apply_filter(&collapsing_filter(2), "ok\nok\nok\nok");
+        assert_eq!(out, "ok (×2)\nok\nok");
+    }
+
+    #[test]
+    fn collapse_repeats_leaves_blank_lines_uncounted() {
+        let out = apply_filter(&collapsing_filter(0), "a\n\nb\n\na");
+        assert_eq!(out, "a (×2)\n\nb");
+    }
+
+    #[test]
+    fn collapse_repeats_reports_no_loss() {
+        let (_, loss) = apply_filter_with_info(&collapsing_filter(0), "a\na\nb");
+        assert_eq!(loss, Lossiness::None);
+    }
+
+    #[test]
+    fn collapse_repeats_saves_tokens_on_repetitive_output() {
+        let mut input = String::new();
+        for i in 0..300 {
+            input.push_str("[trace] gc cycle\n");
+            input.push_str("[trace] allocating buffer\n");
+            if i % 100 == 0 {
+                input.push_str(&format!("checkpoint {i}\n"));
+            }
+        }
+        input.push_str("3211 assertions, 0 failures\n");
+
+        let output = apply_filter(&collapsing_filter(5), &input);
+        let count_tokens = |s: &str| s.split_whitespace().count();
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(&input) as f64 * 100.0);
+        assert!(savings >= 60.0, "expected >=60% savings, got {savings:.1}%");
+        assert!(output.ends_with("3211 assertions, 0 failures"));
+    }
+
+    #[test]
+    fn builtin_lua_filters_route_by_command() {
+        let filters = make_filters(BUILTIN_TOML);
+        let name_of = |cmd: &str| find_filter_in(cmd, &filters).map(|f| f.name.as_str());
+
+        assert_eq!(name_of("luajit tests/run.lua"), Some("lua"));
+        assert_eq!(name_of("lua5.4 tests/run.lua"), Some("lua"));
+        assert_eq!(name_of("luac -p src/init.lua"), Some("luac-p"));
+        assert_eq!(name_of("luacheck ."), Some("luacheck"));
+        // Bare REPL and non-syntax-check luac stay on the raw passthrough path.
+        assert_eq!(name_of("lua"), None);
+        assert_eq!(name_of("luac -o out.luac src/init.lua"), None);
     }
 
     #[test]
@@ -1845,6 +1971,9 @@ match_command = "^make\\b"
             "helm",
             "iptables",
             "liquibase",
+            "lua",
+            "luac-p",
+            "luacheck",
             "make",
             "markdownlint",
             "mix-compile",
@@ -1892,8 +2021,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            63,
-            "Expected exactly 63 built-in filters, got {}. \
+            66,
+            "Expected exactly 66 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -1950,11 +2079,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 63 existing filters still present + 1 new = 64
+        // All 66 existing filters still present + 1 new = 67
         assert_eq!(
             filters.len(),
-            64,
-            "Expected 64 filters after concat (63 built-in + 1 new)"
+            67,
+            "Expected 67 filters after concat (66 built-in + 1 new)"
         );
 
         // New filter is discoverable
