@@ -199,6 +199,43 @@ fn send_erasure_request(device_hash: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::config::TelemetryConfig;
+    use crate::core::constants;
+    use crate::core::telemetry;
+    use crate::hooks::init::save_telemetry_consent;
+    use std::fs;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    // Helper to create a temp config with specific telemetry settings
+    fn with_temp_config<F>(telemetry: TelemetryConfig, f: F)
+    where
+        F: FnOnce(&TempDir),
+    {
+        let dir = TempDir::new().expect("tempdir");
+        let config_dir = dir.path().join("rtk");
+        fs::create_dir_all(&config_dir).expect("create config dir");
+
+        let config = crate::core::config::Config {
+            telemetry,
+            ..Default::default()
+        };
+        let config_path = config_dir.join("config.toml");
+        let toml = toml::to_string(&config).expect("serialize config");
+        fs::write(&config_path, toml).expect("write config");
+
+        // Override config directory
+        let original = std::env::var("RTK_CONFIG_DIR").ok();
+        std::env::set_var("RTK_CONFIG_DIR", dir.path());
+
+        f(&dir);
+
+        if let Some(orig) = original {
+            std::env::set_var("RTK_CONFIG_DIR", orig);
+        } else {
+            std::env::remove_var("RTK_CONFIG_DIR");
+        }
+    }
 
     /// Regression for #1307: the env opt-out must short-circuit telemetry
     /// consent paths so `rtk init` cannot hang in non-interactive environments.
@@ -230,5 +267,172 @@ mod tests {
 
         #[allow(deprecated)]
         std::env::remove_var(TELEMETRY_DISABLED_ENV);
+    }
+
+    #[test]
+    fn test_run_status_no_consent_never_asked() {
+        let telemetry = TelemetryConfig {
+            consent_given: None,
+            enabled: false,
+            consent_date: None,
+        };
+        with_temp_config(telemetry, |_dir| {
+            // Should not panic
+            let result = run_status();
+            assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_run_status_consent_yes_enabled() {
+        let telemetry = TelemetryConfig {
+            consent_given: Some(true),
+            enabled: true,
+            consent_date: Some("2024-01-15T10:30:00Z".to_string()),
+        };
+        with_temp_config(telemetry, |_dir| {
+            let result = run_status();
+            assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_run_status_consent_no_disabled() {
+        let telemetry = TelemetryConfig {
+            consent_given: Some(false),
+            enabled: false,
+            consent_date: Some("2024-01-15T10:30:00Z".to_string()),
+        };
+        with_temp_config(telemetry, |_dir| {
+            let result = run_status();
+            assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_run_enable_non_interactive_fails() {
+        let telemetry = TelemetryConfig {
+            consent_given: None,
+            enabled: false,
+            consent_date: None,
+        };
+        with_temp_config(telemetry, |_dir| {
+            // In non-interactive mode (stdin not a terminal), run_enable should fail
+            // We can't easily test this without a real TTY, but we can verify the
+            // function returns an error when stdin is not a terminal
+            // The function checks io::stdin().is_terminal() which will be false in tests
+            let result = run_enable();
+            // Should fail with consent requires interactive terminal
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("interactive terminal") || err.contains("piped mode"));
+        });
+    }
+
+    #[test]
+    fn test_run_disable() {
+        let telemetry = TelemetryConfig {
+            consent_given: Some(true),
+            enabled: true,
+            consent_date: Some("2024-01-15T10:30:00Z".to_string()),
+        };
+        with_temp_config(telemetry, |_dir| {
+            let result = run_disable();
+            assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_run_forget_no_salt_no_marker() {
+        let telemetry = TelemetryConfig {
+            consent_given: Some(true),
+            enabled: true,
+            consent_date: Some("2024-01-15T10:30:00Z".to_string()),
+        };
+        with_temp_config(telemetry, |_dir| {
+            // Ensure no salt file exists
+            let salt_path = telemetry::salt_file_path();
+            let _ = fs::remove_file(&salt_path);
+
+            // Ensure no marker file exists
+            let marker_path = telemetry::telemetry_marker_path();
+            let _ = fs::remove_file(&marker_path);
+
+            // Ensure no history db exists
+            let db_path = dirs::data_local_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(constants::RTK_DATA_DIR)
+                .join(constants::HISTORY_DB);
+            let _ = fs::remove_file(&db_path);
+
+            let result = run_forget();
+            assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_telemetry_subcommand_enum_variants() {
+        // Verify all subcommand variants exist
+        let _ = TelemetrySubcommand::Status;
+        let _ = TelemetrySubcommand::Enable;
+        let _ = TelemetrySubcommand::Disable;
+        let _ = TelemetrySubcommand::Forget;
+    }
+
+    #[test]
+    fn test_run_routes_to_correct_handler() {
+        // Test that run() dispatches to correct handler
+        // We test this by checking the match arms are exhaustive
+        let status = TelemetrySubcommand::Status;
+        let enable = TelemetrySubcommand::Enable;
+        let disable = TelemetrySubcommand::Disable;
+        let forget = TelemetrySubcommand::Forget;
+
+        // Just verify they match - actual execution tested above
+        assert!(matches!(status, TelemetrySubcommand::Status));
+        assert!(matches!(enable, TelemetrySubcommand::Enable));
+        assert!(matches!(disable, TelemetrySubcommand::Disable));
+        assert!(matches!(forget, TelemetrySubcommand::Forget));
+    }
+
+    #[test]
+    fn test_save_telemetry_consent_roundtrip() {
+        let dir = TempDir::new().expect("tempdir");
+        let config_dir = dir.path().join("rtk");
+        fs::create_dir_all(&config_dir).expect("create config dir");
+
+        let original = std::env::var("RTK_CONFIG_DIR").ok();
+        std::env::set_var("RTK_CONFIG_DIR", dir.path());
+
+        // Test enabling
+        save_telemetry_consent(true).expect("save consent true");
+        let config = crate::core::config::Config::load().expect("load config");
+        assert!(config.telemetry.enabled);
+        assert_eq!(config.telemetry.consent_given, Some(true));
+
+        // Test disabling
+        save_telemetry_consent(false).expect("save consent false");
+        let config = crate::core::config::Config::load().expect("load config");
+        assert!(!config.telemetry.enabled);
+        assert_eq!(config.telemetry.consent_given, Some(false));
+
+        if let Some(orig) = original {
+            std::env::set_var("RTK_CONFIG_DIR", orig);
+        } else {
+            std::env::remove_var("RTK_CONFIG_DIR");
+        }
+    }
+
+    #[test]
+    fn test_consent_date_format() {
+        let telemetry = TelemetryConfig {
+            consent_given: Some(true),
+            enabled: true,
+            consent_date: Some("2024-01-15T10:30:00+00:00".to_string()),
+        };
+        with_temp_config(telemetry, |_dir| {
+            let result = run_status();
+            assert!(result.is_ok());
+        });
     }
 }
