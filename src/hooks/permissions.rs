@@ -36,6 +36,7 @@ pub enum Host {
     Cursor,
     Gemini,
     Droid,
+    Vibe,
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
@@ -44,6 +45,7 @@ pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
         Host::Cursor => load_cursor_rules(),
         Host::Gemini => load_gemini_rules(),
         Host::Droid => load_droid_rules(),
+        Host::Vibe => (Vec::new(), Vec::new(), Vec::new()),
     };
     check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
 }
