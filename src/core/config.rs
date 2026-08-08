@@ -183,6 +183,10 @@ impl Config {
 }
 
 fn get_config_path() -> Result<PathBuf> {
+    // Allow overriding config directory for testing
+    if let Ok(override_dir) = std::env::var("RTK_CONFIG_DIR") {
+        return Ok(PathBuf::from(override_dir).join(RTK_DATA_DIR).join(CONFIG_TOML));
+    }
     let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
     Ok(config_dir.join(RTK_DATA_DIR).join(CONFIG_TOML))
 }

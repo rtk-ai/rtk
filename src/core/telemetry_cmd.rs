@@ -224,7 +224,7 @@ mod tests {
         let toml = toml::to_string(&config).expect("serialize config");
         fs::write(&config_path, toml).expect("write config");
 
-        // Override config directory
+        // Override config directory - point to temp dir so get_config_path() finds rtk/config.toml
         let original = std::env::var("RTK_CONFIG_DIR").ok();
         std::env::set_var("RTK_CONFIG_DIR", dir.path());
 
