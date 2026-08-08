@@ -469,7 +469,7 @@ rtk gh <sous-commande> [args...]
 | `rtk gh pr checks` | Status des checks CI | ~79% |
 | `rtk gh issue list` | Liste des issues compacte | ~80% |
 | `rtk gh run list` | Status des workflow runs | ~82% |
-| `rtk gh api <endpoint>` | Reponse API compacte | ~26% |
+| `rtk gh api <endpoint>` | Passthrough intentionnel (JSON intact) | 0% |
 
 **Avant / Apres :**
 ```
