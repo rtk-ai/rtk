@@ -217,6 +217,7 @@ pub struct StreamResult {
     pub raw: String,
     pub raw_stdout: String,
     pub raw_stderr: String,
+    pub stdout_truncated: bool,
     pub filtered: String,
 }
 
@@ -266,6 +267,7 @@ pub fn run_streaming(
             raw: String::new(),
             raw_stdout: String::new(),
             raw_stderr: String::new(),
+            stdout_truncated: false,
             filtered: String::new(),
         });
     }
@@ -511,6 +513,7 @@ pub fn run_streaming(
         raw,
         raw_stdout,
         raw_stderr,
+        stdout_truncated: capped_out,
         filtered,
     })
 }
@@ -630,6 +633,7 @@ pub(crate) mod tests {
             raw: String::new(),
             raw_stdout: String::new(),
             raw_stderr: String::new(),
+            stdout_truncated: false,
             filtered: String::new(),
         };
         assert!(r.success());
@@ -642,6 +646,7 @@ pub(crate) mod tests {
             raw: String::new(),
             raw_stdout: String::new(),
             raw_stderr: String::new(),
+            stdout_truncated: false,
             filtered: String::new(),
         };
         assert!(!r.success());
@@ -654,6 +659,7 @@ pub(crate) mod tests {
             raw: String::new(),
             raw_stdout: String::new(),
             raw_stderr: String::new(),
+            stdout_truncated: false,
             filtered: String::new(),
         };
         assert!(!r.success());
@@ -753,6 +759,7 @@ pub(crate) mod tests {
             result.raw.len() > 1_000_000,
             "Should have captured significant data"
         );
+        assert!(result.stdout_truncated);
     }
 
     #[test]
@@ -771,6 +778,7 @@ pub(crate) mod tests {
             "stderr in raw should be capped at ~10 MiB, got {} bytes",
             result.raw.len()
         );
+        assert!(!result.stdout_truncated);
     }
 
     #[test]

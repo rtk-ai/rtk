@@ -34,6 +34,8 @@ pub fn print_with_hint(
 pub struct RunOptions<'a> {
     pub tee_label: Option<&'a str>,
     pub filter_stdout_only: bool,
+    pub guard_combined_output: bool,
+    pub force_tee_marker: Option<&'a str>,
     pub skip_filter_on_failure: bool,
     pub no_trailing_newline: bool,
     /// Forward rtk's own stdin to the child process. Needed for commands that
@@ -55,6 +57,21 @@ impl<'a> RunOptions<'a> {
             filter_stdout_only: true,
             ..Default::default()
         }
+    }
+
+    /// Parse stdout only while budgeting the rendered result against combined
+    /// stdout/stderr. This keeps an explicit fallback visible for stderr-only
+    /// command failures without feeding diagnostics into the parser.
+    pub fn guard_combined_output(mut self) -> Self {
+        self.guard_combined_output = true;
+        self
+    }
+
+    /// Force one raw-output artifact when the filtered result contains a
+    /// caller-owned fallback marker. The runner remains the sole tee writer.
+    pub fn force_tee_when_output_contains(mut self, marker: &'a str) -> Self {
+        self.force_tee_marker = Some(marker);
+        self
     }
 
     pub fn tee(mut self, label: &'a str) -> Self {
@@ -80,10 +97,12 @@ impl<'a> RunOptions<'a> {
 
 pub type CaptureFilter<'a> = Box<dyn Fn(&str) -> String + 'a>;
 pub type ExitAwareCaptureFilter<'a> = Box<dyn Fn(&str, i32) -> String + 'a>;
+pub type CaptureAwareFilter<'a> = Box<dyn Fn(&str, i32, bool) -> String + 'a>;
 
 pub enum RunMode<'a> {
     Filtered(CaptureFilter<'a>),
     FilteredWithExit(ExitAwareCaptureFilter<'a>),
+    FilteredWithCapture(CaptureAwareFilter<'a>),
     Streamed(Box<dyn StreamFilter + 'a>),
     Passthrough,
 }
@@ -97,7 +116,7 @@ fn run_captured_filter<F>(
     timer: tracking::TimedExecution,
 ) -> Result<i32>
 where
-    F: Fn(&str, i32) -> String,
+    F: Fn(&str, i32, bool) -> String,
 {
     let stdin_mode = if opts.inherit_stdin {
         StdinMode::Inherit
@@ -127,18 +146,31 @@ where
     } else {
         raw
     };
-    let filtered = filter_fn(text_to_filter, exit_code);
+    let filtered = filter_fn(text_to_filter, exit_code, result.stdout_truncated);
 
     let raw_for_tracking = if opts.filter_stdout_only {
         raw_stdout
     } else {
         raw
     };
+    let raw_for_guard = if opts.guard_combined_output {
+        raw
+    } else {
+        raw_for_tracking
+    };
 
     let shown = if let Some(label) = opts.tee_label {
-        print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
+        if opts
+            .force_tee_marker
+            .is_some_and(|marker| filtered.contains(marker))
+        {
+            let hint = crate::core::tee::force_tee_hint(raw, label);
+            emit_guarded(&filtered, hint.as_deref(), raw_for_guard)
+        } else {
+            print_with_hint(&filtered, raw, raw_for_guard, label, exit_code)
+        }
     } else {
-        let guarded = crate::core::guard::never_worse(raw_for_tracking, &filtered).to_string();
+        let guarded = crate::core::guard::never_worse(raw_for_guard, &filtered).to_string();
         if opts.no_trailing_newline {
             print!("{}", guarded);
         } else {
@@ -171,7 +203,7 @@ pub fn run(
             cmd,
             tool_name,
             &cmd_label,
-            move |text, _| filter_fn(text),
+            move |text, _, _| filter_fn(text),
             opts,
             timer,
         ),
@@ -179,7 +211,15 @@ pub fn run(
             cmd,
             tool_name,
             &cmd_label,
-            move |text, exit_code| filter_fn(text, exit_code),
+            move |text, exit_code, _| filter_fn(text, exit_code),
+            opts,
+            timer,
+        ),
+        RunMode::FilteredWithCapture(filter_fn) => run_captured_filter(
+            cmd,
+            tool_name,
+            &cmd_label,
+            move |text, exit_code, stdout_truncated| filter_fn(text, exit_code, stdout_truncated),
             opts,
             timer,
         ),
@@ -249,6 +289,25 @@ where
         tool_name,
         args_display,
         RunMode::FilteredWithExit(Box::new(filter_fn)),
+        opts,
+    )
+}
+
+pub fn run_filtered_with_capture<F>(
+    cmd: Command,
+    tool_name: &str,
+    args_display: &str,
+    filter_fn: F,
+    opts: RunOptions<'_>,
+) -> Result<i32>
+where
+    F: Fn(&str, i32, bool) -> String,
+{
+    run(
+        cmd,
+        tool_name,
+        args_display,
+        RunMode::FilteredWithCapture(Box::new(filter_fn)),
         opts,
     )
 }
