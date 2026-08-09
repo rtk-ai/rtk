@@ -784,8 +784,16 @@ fn extract_detached_head(raw: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Minimal filtering for git status with user-provided args
-fn filter_status_with_args(output: &str) -> String {
+/// Minimal filtering for git status with user-provided args.
+///
+/// When `args` requests machine-readable output (`--porcelain`, `--porcelain=v1/v2`,
+/// `-z`, `--null`), empty stdout is the documented "clean tree" contract — we must
+/// NOT substitute "ok", because callers parse the output programmatically.
+fn filter_status_with_args(output: &str, args: &[String]) -> String {
+    let machine_readable = args.iter().any(|a| {
+        a == "-z" || a == "--null" || a == "--porcelain" || a.starts_with("--porcelain=")
+    });
+
     let mut result = Vec::new();
 
     for line in output.lines() {
@@ -815,7 +823,12 @@ fn filter_status_with_args(output: &str) -> String {
     }
 
     if result.is_empty() {
-        "ok".to_string()
+        if machine_readable {
+            // Empty == clean for porcelain/null output. Preserve passthrough.
+            output.to_string()
+        } else {
+            "ok".to_string()
+        }
     } else {
         result.join("\n")
     }
@@ -847,8 +860,9 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
             eprint!("{}", result.stderr);
         }
 
-        // Apply minimal filtering: strip ANSI, remove hints, empty lines
-        let filtered = filter_status_with_args(&result.stdout);
+        // Apply minimal filtering: strip ANSI, remove hints, empty lines.
+        // Porcelain / -z args bypass the "ok" rewrite (empty == clean contract).
+        let filtered = filter_status_with_args(&result.stdout, args);
         let filtered = never_worse(&result.stdout, &filtered).to_string();
         print!("{}", filtered);
 
@@ -2767,7 +2781,7 @@ Changes not staged for commit:
 
 no changes added to commit (use "git add" and/or "git commit -a")
 "#;
-        let result = filter_status_with_args(output);
+        let result = filter_status_with_args(output, &[]);
         eprintln!("Result:\n{}", result);
         assert!(result.contains("On branch main"));
         assert!(result.contains("modified:   src/main.rs"));
@@ -2780,8 +2794,37 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     fn test_filter_status_with_args_clean() {
         let output = "nothing to commit, working tree clean\n";
-        let result = filter_status_with_args(output);
+        let result = filter_status_with_args(output, &[]);
         assert!(result.contains("nothing to commit"));
+    }
+
+    #[test]
+    fn test_filter_status_porcelain_clean_stays_empty() {
+        // `git status --porcelain` on a clean tree emits zero bytes, and that
+        // emptiness IS the result: consumers parse "no output" as "no changes".
+        // Substituting "ok" breaks every such caller.
+        for flag in [
+            "--porcelain",
+            "--porcelain=v1",
+            "--porcelain=v2",
+            "-z",
+            "--null",
+        ] {
+            let args = vec![flag.to_string()];
+            let result = filter_status_with_args("", &args);
+            assert_eq!(
+                result, "",
+                "empty porcelain output must stay empty for {flag}, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_filter_status_short_still_collapses_to_ok() {
+        // `-s` is a human-readable short form, not a machine-readable contract,
+        // so the "ok" compaction still applies there.
+        let result = filter_status_with_args("", &["-s".to_string()]);
+        assert_eq!(result, "ok");
     }
 
     #[test]
