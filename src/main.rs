@@ -195,6 +195,7 @@ enum Commands {
     /// AWS CLI with compact output (force JSON, compress)
     Aws {
         /// AWS service subcommand (e.g., sts, s3, ec2, ecs, rds, cloudformation)
+        #[arg(allow_hyphen_values = true)]
         subcommand: String,
         /// Additional arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -3062,6 +3063,20 @@ mod tests {
                 }
                 _ => panic!("Expected Git command"),
             }
+        }
+    }
+
+    #[test]
+    fn test_try_parse_aws_version_as_subcommand() {
+        let cli = Cli::try_parse_from(["rtk", "aws", "--version"])
+            .expect("aws --version should be forwarded to the AWS CLI");
+
+        match cli.command {
+            Commands::Aws { subcommand, args } => {
+                assert_eq!(subcommand, "--version");
+                assert!(args.is_empty());
+            }
+            _ => panic!("Expected Aws command"),
         }
     }
 
