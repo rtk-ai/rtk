@@ -84,7 +84,9 @@ loading fixtures
 Duplicates in this kind of output are scattered rather than consecutive, so the
 count is global (first occurrence wins), not per run. The last `keep_tail` lines
 are exempt — they are emitted verbatim and do not feed the counts, so a trailing
-summary survives even when it repeats an earlier line.
+summary survives even when it repeats an earlier line. When it does repeat one,
+both are visible: the earlier occurrence carries the count, the tail copy is
+printed bare and is not counted in it.
 
 The field is **opt-in**: a filter that doesn't set it behaves exactly as before.
 Only enable it for commands whose output is program chatter. Tools that repeat

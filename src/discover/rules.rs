@@ -860,13 +860,6 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^luac\s+(?:-\S+\s+)*-p\b",
-        rtk_cmd: "rtk luac",
-        rewrite_prefixes: &["luac"],
-        category: "Build",
-        ..RtkRule::DEFAULT
-    },
-    RtkRule {
         pattern: r"^luacheck\b",
         rtk_cmd: "rtk luacheck",
         rewrite_prefixes: &["luacheck"],

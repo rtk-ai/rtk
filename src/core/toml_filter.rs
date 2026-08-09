@@ -937,10 +937,10 @@ mod tests {
 
         assert_eq!(name_of("luajit tests/run.lua"), Some("lua"));
         assert_eq!(name_of("lua5.4 tests/run.lua"), Some("lua"));
-        assert_eq!(name_of("luac -p src/init.lua"), Some("luac-p"));
         assert_eq!(name_of("luacheck ."), Some("luacheck"));
-        // Bare REPL and non-syntax-check luac stay on the raw passthrough path.
+        // Bare REPL and the compiler stay on the raw passthrough path.
         assert_eq!(name_of("lua"), None);
+        assert_eq!(name_of("luac -p src/init.lua"), None);
         assert_eq!(name_of("luac -o out.luac src/init.lua"), None);
     }
 
@@ -1972,7 +1972,6 @@ match_command = "^make\\b"
             "iptables",
             "liquibase",
             "lua",
-            "luac-p",
             "luacheck",
             "make",
             "markdownlint",
@@ -2021,8 +2020,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            66,
-            "Expected exactly 66 built-in filters, got {}. \
+            65,
+            "Expected exactly 65 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -2079,11 +2078,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 66 existing filters still present + 1 new = 67
+        // All 65 existing filters still present + 1 new = 66
         assert_eq!(
             filters.len(),
-            67,
-            "Expected 67 filters after concat (66 built-in + 1 new)"
+            66,
+            "Expected 66 filters after concat (65 built-in + 1 new)"
         );
 
         // New filter is discoverable
