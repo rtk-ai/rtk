@@ -418,6 +418,13 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Sort lines using the native sort command
+    Sort {
+        /// Arguments passed to sort
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+
     /// Show token savings summary and history
     Gain {
         /// Filter statistics to current project (current working directory) // added
@@ -2139,6 +2146,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
 
+        Commands::Sort { args } => core::runner::run_passthrough("sort", &args, cli.verbose)?,
+
         Commands::Gain {
             project, // added
             graph,
@@ -2757,6 +2766,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Grep { .. }
             | Commands::Rg { .. }
             | Commands::Wget { .. }
+            | Commands::Sort { .. }
             | Commands::Vitest { .. }
             | Commands::Prisma { .. }
             | Commands::Tsc { .. }
@@ -3049,6 +3059,15 @@ mod tests {
     }
 
     #[test]
+    fn test_try_parse_sort_args() {
+        let cli = Cli::try_parse_from(["rtk", "sort", "-u", "names.txt"]).unwrap();
+        match cli.command {
+            Commands::Sort { args } => assert_eq!(args, ["-u", "names.txt"]),
+            _ => panic!("Expected Commands::Sort"),
+        }
+    }
+
+    #[test]
     fn test_try_parse_git_with_dash_c_succeeds() {
         let result = Cli::try_parse_from(["rtk", "git", "-C", "/path", "status"]);
         assert!(
@@ -3138,6 +3157,7 @@ mod tests {
             "grep",
             "wget",
             "wc",
+            "sort",
             "jest",
             "vitest",
             "prisma",
