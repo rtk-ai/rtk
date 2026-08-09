@@ -1233,51 +1233,62 @@ fn run_default_mode(
 /// can be registered.
 fn migrate_old_hook_script(ctx: InitContext) {
     let InitContext { verbose, dry_run } = ctx;
-    if let Some(home) = dirs::home_dir() {
-        let old_hook = home
-            .join(CLAUDE_DIR)
-            .join(HOOKS_SUBDIR)
-            .join(REWRITE_HOOK_FILE);
-        if old_hook.exists() {
-            if dry_run {
-                println!(
-                    "[dry-run] would migrate legacy hook script: {}",
-                    old_hook.display()
-                );
-            // nosemgrep: filesystem-deletion
-            } else if let Err(e) = std::fs::remove_file(&old_hook) {
+    // Resolve through resolve_claude_dir() so $CLAUDE_CONFIG_DIR applies.
+    // dirs::home_dir() ignores that override, so a user who points
+    // CLAUDE_CONFIG_DIR elsewhere has their real $HOME/.claude touched
+    // instead of the directory they configured.
+    // remove_legacy_settings_entries() below already resolves this way;
+    // this brings the two into agreement.
+    let claude_dir = match resolve_claude_dir() {
+        Ok(dir) => dir,
+        Err(_) => return,
+    };
+
+    let old_hook = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+    if old_hook.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would migrate legacy hook script: {}",
+                old_hook.display()
+            );
+        // nosemgrep: filesystem-deletion
+        } else if let Err(e) = std::fs::remove_file(&old_hook) {
+            if verbose > 0 {
+                eprintln!("  [warn] Failed to remove old hook script: {e}");
+            }
+        } else {
+            if verbose > 0 {
+                eprintln!("  [ok] Removed old hook script: {}", old_hook.display());
+            }
+            // Clean up the stale settings.json entry that pointed to the deleted script
+            if let Err(e) = remove_legacy_settings_entries(ctx) {
                 if verbose > 0 {
-                    eprintln!("  [warn] Failed to remove old hook script: {e}");
-                }
-            } else {
-                if verbose > 0 {
-                    eprintln!("  [ok] Removed old hook script: {}", old_hook.display());
-                }
-                // Clean up the stale settings.json entry that pointed to the deleted script
-                if let Err(e) = remove_legacy_settings_entries(ctx) {
-                    if verbose > 0 {
-                        eprintln!("  [warn] Failed to clean legacy settings.json entry: {e}");
-                    }
+                    eprintln!("  [warn] Failed to clean legacy settings.json entry: {e}");
                 }
             }
         }
-        // Remove legacy hash file
-        let hash_file = home
-            .join(CLAUDE_DIR)
-            .join(HOOKS_SUBDIR)
-            .join(".rtk-hook.sha256");
-        if hash_file.exists() {
-            if dry_run {
-                println!(
-                    "[dry-run] would remove legacy hash file: {}",
-                    hash_file.display()
-                );
-            } else {
-                let _ = std::fs::remove_file(&hash_file);
-            }
+    }
+    // Remove legacy hash file
+    let hash_file = claude_dir.join(HOOKS_SUBDIR).join(".rtk-hook.sha256");
+    if hash_file.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove legacy hash file: {}",
+                hash_file.display()
+            );
+        } else {
+            let _ = std::fs::remove_file(&hash_file);
         }
-        // Remove Cursor legacy hook
-        let cursor_hook = home.join(CURSOR_DIR).join("hooks").join(REWRITE_HOOK_FILE);
+    }
+    // Remove Cursor legacy hook. Derive the Cursor root from claude_dir's
+    // parent so the same override sandboxes this path too; fall back to
+    // dirs::home_dir() only if claude_dir has no parent.
+    let cursor_root = claude_dir
+        .parent()
+        .map(|p| p.to_path_buf())
+        .or_else(dirs::home_dir);
+    if let Some(root) = cursor_root {
+        let cursor_hook = root.join(CURSOR_DIR).join("hooks").join(REWRITE_HOOK_FILE);
         if cursor_hook.exists() {
             if dry_run {
                 println!(
@@ -7178,6 +7189,33 @@ mod tests {
             Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
             None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
         }
+    }
+
+    #[test]
+    fn test_migrate_old_hook_respects_claude_config_dir() {
+        // migrate_old_hook_script resolved its paths with dirs::home_dir(),
+        // which ignores $CLAUDE_CONFIG_DIR. A user who points that variable at
+        // a non-default location had rtk delete the legacy hook out of the real
+        // $HOME/.claude instead of the directory they configured. Only the
+        // configured directory may be touched.
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let hooks_dir = claude_dir.join(HOOKS_SUBDIR);
+            fs::create_dir_all(&hooks_dir).unwrap();
+            let sandboxed_hook = hooks_dir.join(REWRITE_HOOK_FILE);
+            fs::write(&sandboxed_hook, "#!/bin/sh\necho legacy\n").unwrap();
+            assert!(sandboxed_hook.exists(), "fixture setup failed");
+
+            migrate_old_hook_script(InitContext {
+                verbose: 0,
+                dry_run: false,
+            });
+
+            assert!(
+                !sandboxed_hook.exists(),
+                "legacy hook inside $CLAUDE_CONFIG_DIR must be the one removed"
+            );
+        });
     }
 
     fn with_pi_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
