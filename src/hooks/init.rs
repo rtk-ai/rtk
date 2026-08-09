@@ -1638,7 +1638,7 @@ fn run_cline_mode(ctx: InitContext) -> Result<()> {
     let rules_path = PathBuf::from(".clinerules");
 
     let existing = fs::read_to_string(&rules_path).unwrap_or_default();
-    if existing.contains("RTK") || existing.contains("rtk") {
+    if existing.contains("# RTK - Rust Token Killer") {
         if !dry_run {
             println!("\nRTK already configured for Cline in this project.\n");
             println!("  Rules: .clinerules (already present)");
@@ -1683,7 +1683,7 @@ fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
     let rules_path = PathBuf::from(".windsurfrules");
 
     let existing = fs::read_to_string(&rules_path).unwrap_or_default();
-    if existing.contains("RTK") || existing.contains("rtk") {
+    if existing.contains("# RTK - Rust Token Killer") {
         if !dry_run {
             println!("\nRTK already configured for Windsurf in this project.\n");
             println!("  Rules: .windsurfrules (already present)");
@@ -1736,7 +1736,7 @@ fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
     let rules_path = target_dir.join("rtk-rules.md");
 
     let existing = fs::read_to_string(&rules_path).unwrap_or_default();
-    if existing.contains("RTK") || existing.contains("rtk") {
+    if existing.contains("# RTK - Rust Token Killer") {
         if !dry_run {
             println!("\nRTK already configured for Kilo Code in this project.\n");
             println!("  Rules: .kilocode/rules/rtk-rules.md (already present)");
@@ -1794,7 +1794,7 @@ fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
     let rules_path = target_dir.join("antigravity-rtk-rules.md");
 
     let existing = fs::read_to_string(&rules_path).unwrap_or_default();
-    if existing.contains("RTK") || existing.contains("rtk") {
+    if existing.contains("# RTK - Rust Token Killer") {
         if !dry_run {
             println!("\nRTK already configured for Antigravity in this project.\n");
             println!("  Rules: .agents/rules/antigravity-rtk-rules.md (already present)");
