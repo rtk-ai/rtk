@@ -1,0 +1,16 @@
+[filters.df]
+description = "Compact df output — truncate wide columns, limit rows"
+match_command = "^df(\\s|$)"
+strip_ansi = true
+truncate_lines_at = 80
+max_lines = 20
+
+[[tests.df]]
+name = "short output passes through unchanged"
+input = "Filesystem     1K-blocks   Used Available Use% Mounted on\n/dev/sda1        4096000 123456   3972544   4% /"
+expected = "Filesystem     1K-blocks   Used Available Use% Mounted on\n/dev/sda1        4096000 123456   3972544   4% /"
+
+[[tests.df]]
+name = "empty input passes through"
+input = ""
+expected = ""

@@ -1,0 +1,45 @@
+[filters.skopeo]
+description = "Compact skopeo output — truncate large manifests, strip verbosity"
+match_command = "^skopeo\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Getting image source signatures",
+  "^Copying blob",
+  "^Copying config",
+  "^Writing manifest",
+  "^Storing signatures",
+]
+max_lines = 30
+truncate_lines_at = 120
+on_empty = "skopeo: ok"
+
+[[tests.skopeo]]
+name = "copy strips progress, keeps result"
+input = """
+Getting image source signatures
+Copying blob sha256:abc123 done
+Copying blob sha256:def456 done
+Copying config sha256:789ghi done
+Writing manifest to image destination
+Storing signatures
+"""
+expected = "skopeo: ok"
+
+[[tests.skopeo]]
+name = "inspect keeps output"
+input = """
+{
+    "Name": "docker.io/library/nginx",
+    "Tag": "latest",
+    "Digest": "sha256:abc123",
+    "RepoTags": ["latest", "1.25"],
+    "Created": "2026-01-01T00:00:00Z"
+}
+"""
+expected = "{\n    \"Name\": \"docker.io/library/nginx\",\n    \"Tag\": \"latest\",\n    \"Digest\": \"sha256:abc123\",\n    \"RepoTags\": [\"latest\", \"1.25\"],\n    \"Created\": \"2026-01-01T00:00:00Z\"\n}"
+
+[[tests.skopeo]]
+name = "empty input returns on_empty message"
+input = ""
+expected = "skopeo: ok"

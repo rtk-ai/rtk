@@ -1,0 +1,5656 @@
+//! Matches shell commands against known RTK rewrite rules to decide how to handle them.
+
+use crate::core::utils::composer_bin_dirs;
+use regex::{Regex, RegexSet};
+use std::path::Path;
+use std::sync::LazyLock;
+
+use super::lexer::{
+    shell_split, split_on_operators, tokenize, tokenize_with_newlines, ParsedToken, PipeKind,
+    TokenKind,
+};
+use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
+
+const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
+
+/// Result of classifying a command.
+#[derive(Debug, PartialEq)]
+pub enum Classification {
+    Supported {
+        rtk_equivalent: &'static str,
+        category: &'static str,
+        estimated_savings_pct: f64,
+        status: super::report::RtkStatus,
+    },
+    Unsupported {
+        base_command: String,
+    },
+    Ignored,
+}
+
+/// Average token counts per category for estimation when no output_len available.
+pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
+    match category {
+        "Git" => match subcmd {
+            "log" | "diff" | "show" => 200,
+            _ => 40,
+        },
+        "Cargo" => match subcmd {
+            "test" => 500,
+            _ => 150,
+        },
+        "Tests" => 800,
+        "Files" => 100,
+        "Build" => 300,
+        "Infra" => 120,
+        "Network" => 150,
+        "GitHub" => 200,
+        "GitLab" => 200,
+        "PackageManager" => 150,
+        _ => 150,
+    }
+}
+
+static REGEX_SET: LazyLock<RegexSet> = LazyLock::new(|| {
+    RegexSet::new(RULES.iter().map(|r| r.pattern)).expect("invalid regex patterns")
+});
+static COMPILED: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    RULES
+        .iter()
+        .map(|r| Regex::new(r.pattern).expect("invalid regex"))
+        .collect()
+});
+static ENV_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+    let double_quoted = r#""(?:[^"\\]|\\.)*""#;
+    let single_quoted = r#"'(?:[^'\\]|\\.)*'"#;
+    let unquoted = r#"[^\s]*"#;
+    let env_value = format!("(?:{}|{}|{})", double_quoted, single_quoted, unquoted);
+    let env_assign = format!(r#"[A-Z_][A-Z0-9_]*={}"#, env_value);
+    Regex::new(&format!(r#"^(?:sudo\s+|env\s+|{}\s+)+"#, env_assign)).unwrap()
+});
+// Git global options that appear before the subcommand: -C <path>, -c <key=val>,
+// --git-dir <dir>, --work-tree <dir>, and flag-only options (#163)
+static GIT_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:(?:-C\s+\S+|-c\s+\S+|--git-dir(?:=\S+|\s+\S+)|--work-tree(?:=\S+|\s+\S+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\s+)+").unwrap()
+});
+// Issue #1362: each capture expects a SINGLE file argument (`\S+$`). Multi-file
+// invocations like `head -3 a b c` fail to match so the segment is passed through
+// to the native `head`/`tail` binary — which already handles multi-file with
+// `==> name <==` banners that `rtk read --max-lines` cannot reproduce.
+static HEAD_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^head\s+-(\d+)\s+(\S+)$").unwrap());
+static HEAD_LINES: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^head\s+--lines=(\d+)\s+(\S+)$").unwrap());
+static TAIL_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^tail\s+-(\d+)\s+(\S+)$").unwrap());
+static TAIL_N_SPACE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^tail\s+-n\s+(\d+)\s+(\S+)$").unwrap());
+static TAIL_LINES_EQ: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^tail\s+--lines=(\d+)\s+(\S+)$").unwrap());
+static TAIL_LINES_SPACE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^tail\s+--lines\s+(\d+)\s+(\S+)$").unwrap());
+
+const GOLANGCI_GLOBAL_OPT_WITH_VALUE: &[&str] = &[
+    "-c",
+    "--color",
+    "--config",
+    "--cpu-profile-path",
+    "--mem-profile-path",
+    "--trace-path",
+];
+
+#[derive(Debug, Clone, Copy)]
+struct GolangciRunParts<'a> {
+    global_segment: &'a str,
+    run_segment: &'a str,
+}
+
+/// Classify a single (already-split) command.
+pub fn classify_command(cmd: &str) -> Classification {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return Classification::Ignored;
+    }
+
+    // Check ignored
+    for exact in IGNORED_EXACT {
+        if trimmed == *exact {
+            return Classification::Ignored;
+        }
+    }
+    for prefix in IGNORED_PREFIXES {
+        if trimmed.starts_with(prefix) {
+            return Classification::Ignored;
+        }
+    }
+
+    // Strip env prefixes (sudo, env VAR=val, VAR=val)
+    let stripped = ENV_PREFIX.replace(trimmed, "");
+    let cmd_clean = stripped.trim();
+    if cmd_clean.is_empty() {
+        return Classification::Ignored;
+    }
+
+    // Normalize absolute binary paths: /usr/bin/grep → grep (#485)
+    let cmd_normalized = strip_absolute_path(cmd_clean);
+    // Strip git global options: git -C /tmp status → git status (#163)
+    let cmd_normalized = strip_git_global_opts(&cmd_normalized);
+    // Normalize PHP tool paths: vendor/bin/phpunit, bin/phpunit, or composer
+    // custom bin-dir → phpunit (so one rule matches every Composer layout).
+    let cmd_normalized = normalize_php_tool_command(&cmd_normalized);
+    // Strip golangci-lint global options before `run` so classify/rewrite stays
+    // aligned with the runtime wrapper behavior.
+    let cmd_normalized = strip_golangci_global_opts(&cmd_normalized);
+    let cmd_clean = cmd_normalized.as_str();
+
+    // Exclude cat/head/tail with redirect operators — these are writes, not reads (#315)
+    if cmd_clean.starts_with("cat ")
+        || cmd_clean.starts_with("head ")
+        || cmd_clean.starts_with("tail ")
+    {
+        let has_redirect = cmd_clean
+            .split_whitespace()
+            .skip(1)
+            .any(|t| t.starts_with('>') || t == "<" || t.starts_with(">>"));
+        if has_redirect {
+            return Classification::Unsupported {
+                base_command: cmd_clean
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("cat")
+                    .to_string(),
+            };
+        }
+    }
+
+    // Fast check with RegexSet — take the last (most specific) match
+    let matches: Vec<usize> = REGEX_SET.matches(cmd_clean).into_iter().collect();
+    if let Some(&idx) = matches.last() {
+        let rule = &RULES[idx];
+
+        // Extract subcommand for savings override and status detection
+        let (savings, status) = if let Some(caps) = COMPILED[idx].captures(cmd_clean) {
+            if let Some(sub) = caps.get(1) {
+                let subcmd = sub.as_str();
+                // Check if this subcommand has a special status
+                let status = rule
+                    .subcmd_status
+                    .iter()
+                    .find(|(s, _)| *s == subcmd)
+                    .map(|(_, st)| *st)
+                    .unwrap_or(super::report::RtkStatus::Existing);
+
+                // Check if this subcommand has custom savings
+                let savings = rule
+                    .subcmd_savings
+                    .iter()
+                    .find(|(s, _)| *s == subcmd)
+                    .map(|(_, pct)| *pct)
+                    .unwrap_or(rule.savings_pct);
+
+                (savings, status)
+            } else {
+                (rule.savings_pct, super::report::RtkStatus::Existing)
+            }
+        } else {
+            (rule.savings_pct, super::report::RtkStatus::Existing)
+        };
+
+        Classification::Supported {
+            rtk_equivalent: rule.rtk_cmd,
+            category: rule.category,
+            estimated_savings_pct: savings,
+            status,
+        }
+    } else {
+        // Extract base command for unsupported
+        let base = extract_base_command(cmd_clean);
+        if base.is_empty() {
+            Classification::Ignored
+        } else {
+            Classification::Unsupported {
+                base_command: base.to_string(),
+            }
+        }
+    }
+}
+
+/// Extract the base command (first word, or first two if it looks like a subcommand pattern).
+fn extract_base_command(cmd: &str) -> &str {
+    let parts: Vec<&str> = cmd.splitn(3, char::is_whitespace).collect();
+    match parts.len() {
+        0 => "",
+        1 => parts[0],
+        _ => {
+            let second = parts[1];
+            // If the second token looks like a subcommand (no leading -)
+            if !second.starts_with('-') && !second.contains('/') && !second.contains('.') {
+                // Return "cmd subcmd"
+                let end = cmd
+                    .find(char::is_whitespace)
+                    .and_then(|i| {
+                        let rest = &cmd[i..];
+                        let trimmed = rest.trim_start();
+                        trimmed
+                            .find(char::is_whitespace)
+                            .map(|j| i + (rest.len() - trimmed.len()) + j)
+                    })
+                    .unwrap_or(cmd.len());
+                &cmd[..end]
+            } else {
+                parts[0]
+            }
+        }
+    }
+}
+
+/// Quote-aware heredoc detection — `<<` inside quotes is not a heredoc.
+pub fn has_heredoc(cmd: &str) -> bool {
+    tokenize(cmd)
+        .iter()
+        .any(|t| t.kind == TokenKind::Redirect && t.value.starts_with("<<"))
+}
+
+pub fn split_command_chain(cmd: &str) -> Vec<&str> {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return vec![];
+    }
+
+    // Lexer-based for `<<`; string-based for `$((` (lexer splits it across tokens).
+    if has_heredoc(trimmed) || trimmed.contains("$((") {
+        return vec![trimmed];
+    }
+
+    split_on_operators(trimmed, true)
+}
+
+fn normalize_php_tool_command(cmd: &str) -> String {
+    normalize_php_tool_command_with_dirs(cmd, &composer_bin_dirs())
+}
+
+/// Peel a leading `php` interpreter wrapper off a Composer-tool invocation
+/// (`php vendor/bin/phpunit …` → `vendor/bin/phpunit …`) so the tool path
+/// normalizes to its bare name. Only meaningful for the resolved tools, where
+/// a `php` prefix is always the interpreter (never `php artisan`/`run-tests.php`).
+fn strip_php_wrapper(cmd: &str) -> &str {
+    cmd.strip_prefix("php ").map_or(cmd, str::trim_start)
+}
+
+fn normalize_php_tool_command_with_dirs(cmd: &str, bin_dirs: &[std::path::PathBuf]) -> String {
+    let first_space = cmd.find(char::is_whitespace);
+    let first_word = match first_space {
+        Some(pos) => &cmd[..pos],
+        None => cmd,
+    };
+
+    let Some(tool) = normalize_php_tool_word(first_word, bin_dirs) else {
+        return cmd.to_string();
+    };
+
+    match first_space {
+        Some(pos) => format!("{}{}", tool, &cmd[pos..]),
+        None => tool.to_string(),
+    }
+}
+
+fn normalize_php_tool_word<'a>(word: &str, bin_dirs: &'a [std::path::PathBuf]) -> Option<&'a str> {
+    let normalized_word = normalize_php_tool_path(word);
+
+    for tool in PHP_TOOL_NAMES {
+        if normalized_word == tool {
+            return Some(tool);
+        }
+
+        if bin_dirs
+            .iter()
+            .any(|bin_dir| matches_php_tool_path(&normalized_word, bin_dir, tool))
+        {
+            return Some(tool);
+        }
+    }
+
+    None
+}
+
+fn matches_php_tool_path(word: &str, bin_dir: &Path, tool: &str) -> bool {
+    let normalized_dir = normalize_php_tool_path(&bin_dir.to_string_lossy());
+    let candidate = format!("{normalized_dir}/{tool}");
+    word == candidate || word.ends_with(&format!("/{candidate}"))
+}
+
+fn normalize_php_tool_path(path: &str) -> String {
+    let mut normalized = path.trim().replace('\\', "/");
+    while let Some(stripped) = normalized.strip_prefix("./") {
+        normalized = stripped.to_string();
+    }
+
+    if let Some((stem, ext)) = normalized.rsplit_once('.') {
+        if ["bat", "cmd", "exe", "ps1"]
+            .iter()
+            .any(|candidate| ext.eq_ignore_ascii_case(candidate))
+        {
+            normalized = stem.to_string();
+        }
+    }
+
+    normalized
+}
+
+/// Strip git global options before the subcommand (#163).
+/// `git -C /tmp status` → `git status`, preserving the rest.
+/// Returns the original string unchanged if not a git command.
+fn strip_git_global_opts(cmd: &str) -> String {
+    // Only applies to commands starting with "git "
+    if !cmd.starts_with("git ") {
+        return cmd.to_string();
+    }
+    let after_git = &cmd[4..]; // skip "git "
+    let stripped = GIT_GLOBAL_OPT.replace(after_git, "");
+    format!("git {}", stripped.trim())
+}
+
+/// Strip golangci-lint global options before the `run` subcommand.
+/// `golangci-lint --color never run ./...` → `golangci-lint run ./...`
+/// Returns the original string unchanged if this is not a supported compact `run` invocation.
+fn strip_golangci_global_opts(cmd: &str) -> String {
+    match parse_golangci_run_parts(cmd) {
+        Some(parts) => format!("golangci-lint {}", parts.run_segment),
+        None => cmd.to_string(),
+    }
+}
+
+/// Parse supported golangci-lint invocations with optional global flags before `run`.
+fn parse_golangci_run_parts(cmd: &str) -> Option<GolangciRunParts<'_>> {
+    let tokens = split_token_spans(cmd);
+    let first = tokens.first()?;
+    if first.0 != "golangci-lint" && first.0 != "golangci" {
+        return None;
+    }
+
+    let mut i = 1;
+    while i < tokens.len() {
+        let token = tokens[i].0;
+
+        if token == "--" {
+            return None;
+        }
+
+        if !token.starts_with('-') {
+            if token == "run" {
+                let global_segment = if i > 1 {
+                    cmd[tokens[1].1..tokens[i].1].trim()
+                } else {
+                    ""
+                };
+                let run_segment = cmd[tokens[i].1..].trim();
+                return Some(GolangciRunParts {
+                    global_segment,
+                    run_segment,
+                });
+            }
+            return None;
+        }
+
+        if let Some(flag) = split_golangci_flag_name(token) {
+            if golangci_flag_takes_separate_value(token, flag) {
+                i += 1;
+            }
+        }
+
+        i += 1;
+    }
+
+    None
+}
+
+fn split_golangci_flag_name(arg: &str) -> Option<&str> {
+    if arg.starts_with("--") {
+        return Some(arg.split_once('=').map(|(flag, _)| flag).unwrap_or(arg));
+    }
+
+    if arg.starts_with('-') {
+        return Some(arg);
+    }
+
+    None
+}
+
+fn golangci_flag_takes_separate_value(arg: &str, flag: &str) -> bool {
+    if !GOLANGCI_GLOBAL_OPT_WITH_VALUE.contains(&flag) {
+        return false;
+    }
+
+    if arg.starts_with("--") && arg.contains('=') {
+        return false;
+    }
+
+    true
+}
+
+fn split_token_spans(cmd: &str) -> Vec<(&str, usize, usize)> {
+    let mut tokens = Vec::new();
+    let mut start = None;
+
+    for (idx, ch) in cmd.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(token_start) = start.take() {
+                tokens.push((&cmd[token_start..idx], token_start, idx));
+            }
+        } else if start.is_none() {
+            start = Some(idx);
+        }
+    }
+
+    if let Some(token_start) = start {
+        tokens.push((&cmd[token_start..], token_start, cmd.len()));
+    }
+
+    tokens
+}
+
+/// Normalize absolute binary paths: `/usr/bin/grep -rn foo` → `grep -rn foo` (#485)
+/// Only strips if the first word contains a `/` (Unix path).
+fn strip_absolute_path(cmd: &str) -> String {
+    let first_space = cmd.find(' ');
+    let first_word = match first_space {
+        Some(pos) => &cmd[..pos],
+        None => cmd,
+    };
+    if first_word.contains('/') {
+        // Extract basename
+        let basename = first_word.rsplit('/').next().unwrap_or(first_word);
+        if basename.is_empty() {
+            return cmd.to_string();
+        }
+        match first_space {
+            Some(pos) => format!("{}{}", basename, &cmd[pos..]),
+            None => basename.to_string(),
+        }
+    } else {
+        cmd.to_string()
+    }
+}
+
+pub fn prefix_contains_rtk_disabled(prefix_part: &str) -> bool {
+    prefix_part.contains("RTK_DISABLED=")
+}
+
+/// Check if a command has RTK_DISABLED= prefix in its env prefix portion.
+pub fn cmd_has_rtk_disabled_prefix(cmd: &str) -> bool {
+    let (prefix_part, _) = strip_disabled_prefix(cmd);
+    prefix_contains_rtk_disabled(prefix_part)
+}
+
+/// Strip RTK_DISABLED=X and other env prefixes, returns `(env_prefix, actual_command)`.
+pub fn strip_disabled_prefix(cmd: &str) -> (&str, &str) {
+    let trimmed = cmd.trim();
+    let stripped = ENV_PREFIX.replace(trimmed, "");
+    // stripped is a Cow<str> that borrows from trimmed when no replacement happens.
+    // We need to return a &str into the original, so compute the offset.
+    let prefix_len = trimmed.len() - stripped.len();
+    let prefix_part = &trimmed[..prefix_len];
+    let rest = trimmed[prefix_len..].trim();
+    (prefix_part, rest)
+}
+
+fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
+    let tokens = tokenize(cmd);
+    if tokens.is_empty() {
+        return (cmd, "");
+    }
+
+    let mut redir_boundary = tokens.len();
+    let mut i = tokens.len();
+    while i > 0 {
+        i -= 1;
+        match tokens[i].kind {
+            TokenKind::Redirect => {
+                redir_boundary = i;
+            }
+            TokenKind::Arg => {
+                if i > 0 && tokens[i - 1].kind == TokenKind::Redirect {
+                    redir_boundary = i - 1;
+                    i -= 1;
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+
+    if redir_boundary >= tokens.len() {
+        return (cmd, "");
+    }
+
+    let cut = tokens[redir_boundary].offset;
+    let cmd_part = cmd[..cut].trim_end();
+    let redir_part = &cmd[cmd_part.len()..];
+    (cmd_part, redir_part)
+}
+
+/// Matches a bash line-continuation: a backslash immediately followed by
+/// `\n` or `\r\n`, *plus* any horizontal whitespace on the line before AND
+/// after the break. This is what bash already collapses to a single space
+/// before executing the command — rtk's hook matcher needs to do the same
+/// so commands authored across multiple lines still hit the rewrite rules.
+/// Consuming the trailing whitespace prevents double spaces in cases like
+/// `git diff \<NL>HEAD~1`.
+static LINE_CONTINUATION_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)[ \t\x0B\x0C]*\\\r?\n[ \t\x0B\x0C]*").unwrap());
+
+static BASH_JOIN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\\r?\n").unwrap());
+
+/// Replace every bash line continuation with a single space, mirroring what
+/// bash does before dispatching the command. Returns a borrowed `&str` when the
+/// input contains no continuations, so the common fast path allocates nothing.
+fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> {
+    LINE_CONTINUATION_RE.replace_all(s, " ")
+}
+
+/// Returns `None` if the command is unsupported or ignored (hook should pass through).
+///
+/// Handles compound commands (`&&`, `||`, `;`) by rewriting each segment independently.
+/// For pipelines, preserves intermediate stages and only rewrites a pipeline-safe final stage,
+/// then continues rewriting segments after subsequent `&&`/`||`/`;` operators.
+/// Also strips user-configured transparent wrapper prefixes
+/// (`[hooks].transparent_prefixes` in `config.toml`) before routing.
+///
+/// A transparent prefix is a wrapper command that doesn't change *what* is
+/// being run, only *how* it's run — e.g. `docker exec mycontainer`,
+/// `direnv exec .`, `poetry run`, or `bundle exec`. Stripping it lets the inner
+/// command match a filter; the prefix is then re-prepended to the rewrite. The
+/// built-in [`ROUTABLE_WRAPPER_PREFIXES`] and [`SHELL_KEYWORD_PREFIXES`] are
+/// always applied in addition to user-configured prefixes.
+///
+/// Matching is strict: a configured prefix `"foo bar"` matches a command that
+/// starts with `"foo bar "` (or strictly equals `"foo bar"`), not anything
+/// else. Matching is literal, not pattern-based: configure the exact concrete
+/// prefix you use.
+pub fn rewrite_command(
+    cmd: &str,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+) -> Option<String> {
+    // Bash joins `\<NL>` with nothing, so `<<` or `$((` can arrive split across
+    // a continuation; the space-join below would erase them (#3188 review).
+    if cmd.contains('\\') {
+        let joined = BASH_JOIN_RE.replace_all(cmd, "");
+        if has_heredoc(&joined) || joined.contains("$((") {
+            return None;
+        }
+    }
+
+    // Bash line continuations (`\<NL>`, `\<CRLF>`) and the leading whitespace that
+    // follows are syntactically equivalent to a single space, but `cmd.trim()` does
+    // not unwrap them so a leading backslash-newline used to defeat the whole matcher.
+    // Normalize first, then trim. See issue #1564.
+    let normalized = collapse_line_continuations(cmd);
+    let trimmed = normalized.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if has_heredoc(trimmed) || trimmed.contains("$((") {
+        return None;
+    }
+
+    let compiled = compile_exclude_patterns(excluded);
+    let normalized_prefixes = normalize_transparent_prefixes(transparent_prefixes);
+
+    if trimmed.contains('\n') {
+        return rewrite_multiline_block(trimmed, &compiled, &normalized_prefixes);
+    }
+
+    rewrite_single(trimmed, &compiled, &normalized_prefixes)
+}
+
+/// Rewrite one logical command line (no unquoted newlines).
+fn rewrite_single(
+    trimmed: &str,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+) -> Option<String> {
+    // Simple (non-compound) already-RTK command — return as-is.
+    // For compound commands that start with "rtk" (e.g. "rtk git add . && cargo test"),
+    // fall through to rewrite_compound so the remaining segments get rewritten.
+    let has_compound = trimmed.contains("&&")
+        || trimmed.contains("||")
+        || trimmed.contains(';')
+        || trimmed.contains('|')
+        || trimmed.contains(" & ");
+    if !has_compound && (trimmed.starts_with("rtk ") || trimmed == "rtk") {
+        return Some(trimmed.to_string());
+    }
+
+    rewrite_compound(trimmed, excluded, transparent_prefixes)
+}
+
+/// Shell keywords that open or close a multi-line construct. A line inside a
+/// loop, conditional, case arm, function body, or group is not an independent
+/// command, so the whole block passes through untouched.
+const BLOCK_KEYWORDS: &[&str] = &[
+    "for", "while", "until", "if", "then", "else", "elif", "fi", "do", "done", "case", "esac",
+    "select", "function", "coproc", "{", "}", "(", ")",
+];
+
+/// Shared quote-state byte walker used by all line scanners. Yields
+/// `(offset, byte, in_single_before, in_double_before)`, skipping backslash
+/// escape pairs outside single quotes and toggling quote state — the same
+/// model the lexer applies.
+struct QuoteScan<'a> {
+    bytes: &'a [u8],
+    i: usize,
+    in_single: bool,
+    in_double: bool,
+}
+
+impl<'a> QuoteScan<'a> {
+    fn new(s: &'a str) -> Self {
+        Self {
+            bytes: s.as_bytes(),
+            i: 0,
+            in_single: false,
+            in_double: false,
+        }
+    }
+
+    fn balanced(&self) -> bool {
+        !self.in_single && !self.in_double
+    }
+}
+
+impl Iterator for QuoteScan<'_> {
+    type Item = (usize, u8, bool, bool);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.i < self.bytes.len() {
+            let i = self.i;
+            let b = self.bytes[i];
+            if b == b'\\' && !self.in_single {
+                self.i += 2;
+                continue;
+            }
+            let item = (i, b, self.in_single, self.in_double);
+            match b {
+                b'\'' if !self.in_double => self.in_single = !self.in_single,
+                b'"' if !self.in_single => self.in_double = !self.in_double,
+                _ => {}
+            }
+            self.i += 1;
+            return Some(item);
+        }
+        None
+    }
+}
+
+/// Byte offset where an unquoted `#` at the start of a word begins a trailing
+/// comment, if any. The lexer has no comment state, so the independence checks
+/// must ignore comment text themselves: `git log | # keep pipeline` continues
+/// the pipeline across the newline even though the line ends in comment text.
+fn comment_start(line: &str) -> Option<usize> {
+    let bytes = line.as_bytes();
+    // `#` starts a comment at any word start, incl. after an operator
+    // byte — but not after `{`: `${#var}` is an expansion (#3188 review).
+    QuoteScan::new(line).find_map(|(i, b, in_single, in_double)| {
+        (b == b'#'
+            && !in_single
+            && !in_double
+            && (i == 0
+                || bytes[i - 1].is_ascii_whitespace()
+                || matches!(bytes[i - 1], b'|' | b'&' | b';' | b'(' | b')')))
+        .then_some(i)
+    })
+}
+
+/// Unquoted `(`/`)` or `{`/`}` that don't balance within the line: an array
+/// literal (`arr=(one`), function body (`foo() {`), or group spans lines, so
+/// the lines around it are not independent commands.
+fn line_has_unbalanced_grouping(code: &str) -> bool {
+    let mut paren = 0i32;
+    let mut brace = 0i32;
+    for (_, b, in_single, in_double) in QuoteScan::new(code) {
+        if in_single || in_double {
+            continue;
+        }
+        match b {
+            b'(' => paren += 1,
+            b')' => paren -= 1,
+            b'{' => brace += 1,
+            b'}' => brace -= 1,
+            _ => {}
+        }
+        if paren < 0 || brace < 0 {
+            return true;
+        }
+    }
+    paren != 0 || brace != 0
+}
+
+/// Unquoted `[[` / `]]` words that don't balance within the line: bash allows
+/// a conditional expression to span lines (`[[ -f a &&` / `-f b ]]`), so the
+/// surrounding lines are not independent commands.
+fn line_has_unbalanced_test_brackets(code: &str) -> bool {
+    let bytes = code.as_bytes();
+    let mut depth = 0i32;
+    for (i, b, in_single, in_double) in QuoteScan::new(code) {
+        if in_single || in_double || !matches!(b, b'[' | b']') {
+            continue;
+        }
+        let word_start = i == 0 || bytes[i - 1].is_ascii_whitespace();
+        let word_end = bytes.get(i + 2).is_none_or(|c| c.is_ascii_whitespace());
+        if bytes.get(i + 1) == Some(&b) && word_start && word_end {
+            depth += if b == b'[' { 1 } else { -1 };
+            if depth < 0 {
+                return true;
+            }
+        }
+    }
+    depth != 0
+}
+
+// Only `\'` inside `$'…'` diverges: bash keeps the string open, the lexer
+// closes it — an extra split point the newline-count check can't see (#3188).
+fn ansi_c_quote_defeats_lexer(cmd: &str) -> bool {
+    let bytes = cmd.as_bytes();
+    let mut ansi_span = false;
+    let mut backslash_run = 0u32;
+    for (i, b, in_single, in_double) in QuoteScan::new(cmd) {
+        if b == b'\'' && !in_double {
+            if !in_single {
+                ansi_span = i > 0 && bytes[i - 1] == b'$';
+                backslash_run = 0;
+            } else if ansi_span && backslash_run % 2 == 1 {
+                return true;
+            }
+        } else if in_single {
+            if b == b'\\' {
+                backslash_run += 1;
+            } else {
+                backslash_run = 0;
+            }
+        }
+    }
+    false
+}
+
+fn quotes_balanced(cmd: &str) -> bool {
+    let mut scan = QuoteScan::new(cmd);
+    scan.by_ref().for_each(drop);
+    scan.balanced()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineRole {
+    Passive,
+    Independent,
+    ContinuesNext,
+    Unsafe,
+}
+
+fn classify_line(line: &str) -> LineRole {
+    if line.is_empty() || line.starts_with('#') {
+        return LineRole::Passive;
+    }
+    let comment = comment_start(line);
+    let code = comment.map_or(line, |i| line[..i].trim_end());
+    let first = code.split_whitespace().next().unwrap_or("");
+    if BLOCK_KEYWORDS.contains(&first) {
+        return LineRole::Unsafe;
+    }
+    const CONTINUATION_OPS: [&str; 4] = ["&&", "||", "|&", "|"];
+    if CONTINUATION_OPS.iter().any(|op| code.starts_with(op))
+        || code.starts_with("((")
+        || code.ends_with("))")
+        || line_has_unbalanced_grouping(code)
+        || line_has_unbalanced_test_brackets(code)
+    {
+        return LineRole::Unsafe;
+    }
+    if CONTINUATION_OPS.iter().any(|op| code.ends_with(op)) {
+        // An operator behind a trailing comment can't be joined textually:
+        // the comment-blind tokenizer would read the comment as command words.
+        return if comment.is_some() {
+            LineRole::Unsafe
+        } else {
+            LineRole::ContinuesNext
+        };
+    }
+    LineRole::Independent
+}
+
+/// Rewrite each line of a multi-line block independently (issue #1243).
+///
+/// Split points are the newline tokens the quote-aware lexer emits, so a
+/// newline inside a quoted string (e.g. a multi-line commit message) never
+/// becomes a boundary. Lines continued by a trailing `&&`/`||`/`|`/`|&` are
+/// joined and rewritten as one logical command through the single-line path —
+/// joining is not byte-preserving: separators inside a joined unit collapse
+/// to single spaces (see `test_blank_line_inside_continuation_joins`);
+/// any line [`classify_line`] marks unsafe passes the whole block through.
+/// Blank lines and comment lines are preserved verbatim, as is indentation
+/// and the original separator bytes (`\n` vs `\r\n`).
+///
+/// If any newline byte was swallowed by quote state, the block passes through
+/// untouched. The lexer has no comment awareness, so an apostrophe in a `#`
+/// comment opens quote state and hides the rest of the block — rewriting (or
+/// prefixing) such a block would act on lines no permission verdict was
+/// computed for. Passthrough hands the original command to the agent's native
+/// permission handling instead. Genuine quoted newlines (multi-line commit
+/// messages) also land here; forgoing that rewrite is the safe trade.
+fn rewrite_multiline_block(
+    cmd: &str,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+) -> Option<String> {
+    let newline_offsets: Vec<usize> = tokenize_with_newlines(cmd)
+        .iter()
+        .filter(|t| t.kind == TokenKind::Operator && t.value == "\n")
+        .map(|t| t.offset)
+        .collect();
+
+    if ansi_c_quote_defeats_lexer(cmd) {
+        return None;
+    }
+
+    // The lexer emits one newline token per `\r` and per `\n` (CRLF = two
+    // tokens), so the parity check must count both bytes individually.
+    let raw_breaks = cmd.chars().filter(|c| matches!(c, '\n' | '\r')).count();
+    if raw_breaks != newline_offsets.len() {
+        // Every newline swallowed by quote state with quotes balanced at EOF
+        // is one logical command (a multi-line commit message), not a hidden
+        // extra line; rewrite it whole, as develop always did (#3319 fuzz).
+        if newline_offsets.is_empty() && quotes_balanced(cmd) {
+            return rewrite_single(cmd, excluded, transparent_prefixes);
+        }
+        return None;
+    }
+
+    let mut segments = Vec::with_capacity(newline_offsets.len() + 1);
+    let mut start = 0;
+    for &off in &newline_offsets {
+        segments.push((start, &cmd[start..off]));
+        start = off + 1;
+    }
+    segments.push((start, &cmd[start..]));
+
+    let roles: Vec<LineRole> = segments
+        .iter()
+        .map(|(_, seg)| classify_line(seg.trim()))
+        .collect();
+    if roles.contains(&LineRole::Unsafe) {
+        return None;
+    }
+
+    let mut any_changed = false;
+    let mut result = String::with_capacity(cmd.len() + 32);
+    let mut i = 0;
+    while i < segments.len() {
+        if i > 0 {
+            let off = newline_offsets[i - 1];
+            result.push_str(&cmd[off..off + 1]);
+        }
+        let (seg_off, seg) = segments[i];
+
+        if roles[i] == LineRole::Passive {
+            result.push_str(seg);
+            i += 1;
+            continue;
+        }
+
+        let mut end = i;
+        while roles[end] == LineRole::ContinuesNext {
+            let mut next = end + 1;
+            while next < segments.len() && segments[next].1.trim().is_empty() {
+                next += 1;
+            }
+            if next >= segments.len() {
+                break;
+            }
+            if roles[next] == LineRole::Passive {
+                // Comment line inside a continuation: the comment-blind
+                // tokenizer would join it as command words (#3188 review).
+                return None;
+            }
+            end = next;
+        }
+
+        // A joined unit is rebuilt through the single-line path: interior
+        // newlines and blank lines collapse to single spaces, not preserved.
+        let unit = if end == i {
+            seg
+        } else {
+            let (last_off, last_seg) = segments[end];
+            &cmd[seg_off..last_off + last_seg.len()]
+        };
+        let line = unit.trim();
+        match rewrite_single(line, excluded, transparent_prefixes) {
+            Some(rewritten) if rewritten != line => {
+                any_changed = true;
+                let indent = &seg[..seg.len() - seg.trim_start().len()];
+                result.push_str(indent);
+                result.push_str(&rewritten);
+            }
+            _ => result.push_str(unit),
+        }
+        i = end + 1;
+    }
+
+    if any_changed {
+        Some(result)
+    } else {
+        None
+    }
+}
+
+/// Pipeline boundaries used to rewrite its final stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PipelineAnalysis {
+    end_offset: usize,
+    next_clause_offset: Option<usize>,
+    final_stage_start: Option<usize>,
+}
+
+fn analyze_pipeline(
+    cmd: &str,
+    tokens: &[ParsedToken],
+    segment_start: usize,
+    first_pipe_offset: usize,
+) -> PipelineAnalysis {
+    let next_clause_offset = tokens
+        .iter()
+        .find(|token| {
+            token.offset > first_pipe_offset
+                && (token.kind == TokenKind::Operator
+                    || (token.kind == TokenKind::Shellism && token.value == "&"))
+        })
+        .map(|token| token.offset);
+    let end_offset = next_clause_offset.unwrap_or(cmd.len());
+
+    let mut stage_start = segment_start;
+    let mut final_stage_start = None;
+    let mut has_supported_structure = true;
+
+    for token in tokens {
+        if token.offset >= end_offset {
+            break;
+        }
+        if token.offset < first_pipe_offset {
+            continue;
+        }
+        let TokenKind::Pipe(kind) = token.kind else {
+            continue;
+        };
+
+        if cmd[stage_start..token.offset].trim().is_empty() || kind == PipeKind::StdoutAndStderr {
+            has_supported_structure = false;
+        }
+
+        stage_start = token.offset + token.value.len();
+        final_stage_start = Some(stage_start);
+    }
+
+    if cmd[stage_start..end_offset].trim().is_empty() {
+        has_supported_structure = false;
+    }
+
+    PipelineAnalysis {
+        end_offset,
+        next_clause_offset,
+        final_stage_start: if has_supported_structure {
+            final_stage_start
+        } else {
+            None
+        },
+    }
+}
+
+fn rewrite_pipeline_final_stage(
+    cmd: &str,
+    segment_start: usize,
+    analysis: PipelineAnalysis,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+) -> Option<String> {
+    let final_stage_start = analysis.final_stage_start?;
+    let final_stage = cmd[final_stage_start..analysis.end_offset].trim();
+
+    rewrite_segment_inner(
+        final_stage,
+        excluded,
+        transparent_prefixes,
+        RewriteContext::PipelineFinal,
+        0,
+    )
+    .filter(|rewritten| rewritten != final_stage)
+    .map(|rewritten| {
+        format!(
+            "{} {}",
+            cmd[segment_start..final_stage_start].trim(),
+            rewritten
+        )
+    })
+}
+
+/// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each segment.
+fn rewrite_compound(
+    cmd: &str,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+) -> Option<String> {
+    let tokens = tokenize(cmd);
+    let has_pipe = tokens
+        .iter()
+        .any(|token| matches!(token.kind, TokenKind::Pipe(_)));
+    let has_opaque_grouping = tokens.iter().any(|token| {
+        token.kind == TokenKind::Shellism && matches!(token.value.as_str(), "(" | ")" | "{" | "}")
+    });
+    if has_pipe && has_opaque_grouping {
+        return None;
+    }
+
+    let mut result = String::with_capacity(cmd.len() + 32);
+    let mut any_changed = false;
+    let mut seg_start: usize = 0;
+
+    for tok in &tokens {
+        if tok.offset < seg_start {
+            continue;
+        }
+        match tok.kind {
+            TokenKind::Operator => {
+                let seg = cmd[seg_start..tok.offset].trim();
+                let rewritten = rewrite_segment(seg, excluded, transparent_prefixes)
+                    .unwrap_or_else(|| seg.to_string());
+                if rewritten != seg {
+                    any_changed = true;
+                }
+                result.push_str(&rewritten);
+                if tok.value == ";" {
+                    result.push(';');
+                    let after = tok.offset + tok.value.len();
+                    if after < cmd.len() {
+                        result.push(' ');
+                    }
+                } else {
+                    result.push(' ');
+                    result.push_str(&tok.value);
+                    result.push(' ');
+                }
+                seg_start = tok.offset + tok.value.len();
+                while seg_start < cmd.len() && cmd.as_bytes().get(seg_start) == Some(&b' ') {
+                    seg_start += 1;
+                }
+            }
+            TokenKind::Pipe(_) => {
+                let analysis = analyze_pipeline(cmd, &tokens, seg_start, tok.offset);
+                let pipeline = cmd[seg_start..analysis.end_offset].trim();
+                let rewritten_pipeline = rewrite_pipeline_final_stage(
+                    cmd,
+                    seg_start,
+                    analysis,
+                    excluded,
+                    transparent_prefixes,
+                );
+
+                if let Some(rewritten) = rewritten_pipeline {
+                    any_changed = true;
+                    result.push_str(&rewritten);
+                } else {
+                    result.push_str(pipeline);
+                }
+
+                match analysis.next_clause_offset {
+                    Some(next_clause_offset) => {
+                        seg_start = next_clause_offset;
+                        continue;
+                    }
+                    None => {
+                        return if any_changed { Some(result) } else { None };
+                    }
+                }
+            }
+            TokenKind::Shellism if tok.value == "&" => {
+                let seg = cmd[seg_start..tok.offset].trim();
+                let rewritten = rewrite_segment(seg, excluded, transparent_prefixes)
+                    .unwrap_or_else(|| seg.to_string());
+                if rewritten != seg {
+                    any_changed = true;
+                }
+                result.push_str(&rewritten);
+                result.push_str(" & ");
+                seg_start = tok.offset + tok.value.len();
+                while seg_start < cmd.len() && cmd.as_bytes().get(seg_start) == Some(&b' ') {
+                    seg_start += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let seg = cmd[seg_start..].trim();
+    let rewritten =
+        rewrite_segment(seg, excluded, transparent_prefixes).unwrap_or_else(|| seg.to_string());
+    if rewritten != seg {
+        any_changed = true;
+    }
+    result.push_str(&rewritten);
+
+    if any_changed {
+        Some(result)
+    } else {
+        None
+    }
+}
+
+fn rewrite_line_range(cmd: &str) -> Option<String> {
+    for re in [&*HEAD_N, &*HEAD_LINES] {
+        if let Some(caps) = re.captures(cmd) {
+            let n = caps.get(1)?.as_str();
+            let file = caps.get(2)?.as_str();
+            return Some(format!("rtk read {} --max-lines {}", file, n));
+        }
+    }
+    if cmd.starts_with("head -") {
+        return None;
+    }
+    for re in [
+        &*TAIL_N,
+        &*TAIL_N_SPACE,
+        &*TAIL_LINES_EQ,
+        &*TAIL_LINES_SPACE,
+    ] {
+        if let Some(caps) = re.captures(cmd) {
+            let n = caps.get(1)?.as_str();
+            let file = caps.get(2)?.as_str();
+            return Some(format!("rtk read {} --tail-lines {}", file, n));
+        }
+    }
+    None
+}
+
+/// Transparent wrappers that RULES can also match as a whole string, so an
+/// unfiltered inner command falls through instead of dropping the rewrite.
+const ROUTABLE_WRAPPER_PREFIXES: &[&str] = &["uv run"];
+
+/// Shell keywords that wrap a command without changing which one runs. They are
+/// not spawnable, so they must never fall through: `rtk exec foo` cannot run.
+const SHELL_KEYWORD_PREFIXES: &[&str] = &["noglob", "command", "builtin", "exec", "nocorrect"];
+
+/// Every built-in transparent wrapper, paired with whether it may fall through.
+/// Derived from the two lists above so they cannot drift apart.
+fn builtin_transparent_prefixes() -> impl Iterator<Item = (&'static str, bool)> {
+    ROUTABLE_WRAPPER_PREFIXES
+        .iter()
+        .map(|prefix| (*prefix, true))
+        .chain(SHELL_KEYWORD_PREFIXES.iter().map(|prefix| (*prefix, false)))
+}
+
+const MAX_PREFIX_DEPTH: usize = 10;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RewriteContext {
+    Normal,
+    PipelineFinal,
+}
+
+/// Checks whether grep or rg reads patterns from a file.
+fn search_uses_pattern_file(cmd: &str) -> bool {
+    shell_split(cmd)
+        .into_iter()
+        .skip(1)
+        .take_while(|arg| arg != "--")
+        .any(|arg| {
+            arg == "--file"
+                || arg.starts_with("--file=")
+                || arg
+                    .strip_prefix('-')
+                    .filter(|flags| !flags.starts_with('-'))
+                    .is_some_and(|flags| flags.contains('f'))
+        })
+}
+
+fn pipeline_final_command_is_safe(rtk_cmd: &str, cmd: &str) -> bool {
+    !matches!(rtk_cmd, "rtk grep" | "rtk rg") || !search_uses_pattern_file(cmd)
+}
+
+enum ExcludePattern {
+    Regex(Regex),
+    Prefix(String),
+}
+
+fn compile_exclude_patterns(patterns: &[String]) -> Vec<ExcludePattern> {
+    patterns
+        .iter()
+        .filter_map(|pattern| {
+            let trimmed = pattern.trim();
+            if trimmed.is_empty() || trimmed == "^" {
+                eprintln!(
+                    "rtk: warning: ignoring trivial exclude_commands pattern '{}'",
+                    pattern
+                );
+                return None;
+            }
+            let anchored = if trimmed.starts_with('^') {
+                trimmed.to_string()
+            } else {
+                format!(r"^{}($|\s)", regex::escape(trimmed))
+            };
+            Some(match Regex::new(&anchored) {
+                Ok(re) => ExcludePattern::Regex(re),
+                Err(e) => {
+                    eprintln!(
+                        "rtk: warning: invalid exclude_commands pattern '{}': {}",
+                        pattern, e
+                    );
+                    ExcludePattern::Prefix(trimmed.to_string())
+                }
+            })
+        })
+        .collect()
+}
+
+fn normalize_transparent_prefixes(prefixes: &[String]) -> Vec<String> {
+    let mut normalized: Vec<String> = prefixes
+        .iter()
+        .map(|prefix| prefix.trim())
+        .filter(|prefix| !prefix.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    // Match longer wrappers first so `docker exec mycontainer` wins over `docker`.
+    normalized.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    normalized.dedup();
+    normalized
+}
+
+fn rewrite_segment(
+    seg: &str,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+) -> Option<String> {
+    rewrite_segment_inner(
+        seg,
+        excluded,
+        transparent_prefixes,
+        RewriteContext::Normal,
+        0,
+    )
+}
+
+fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
+    excluded.iter().any(|pat| match pat {
+        ExcludePattern::Regex(re) => re.is_match(cmd),
+        ExcludePattern::Prefix(prefix) => cmd.starts_with(prefix.as_str()),
+    })
+}
+
+fn rewrite_segment_inner(
+    seg: &str,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+    context: RewriteContext,
+    depth: usize,
+) -> Option<String> {
+    let trimmed = seg.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if depth >= MAX_PREFIX_DEPTH {
+        return None;
+    }
+
+    let (env_prefix, rest_after_env) = strip_disabled_prefix(trimmed);
+    if !env_prefix.is_empty() {
+        // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely
+        // #508: warn on stderr so agents learn to stop overusing it
+        if env_prefix.contains("RTK_DISABLED=") {
+            eprintln!(
+                "[rtk] RTK_DISABLED=1 detected — skipping filter for this command. \
+                 Remove RTK_DISABLED=1 to restore token savings."
+            );
+            return None;
+        }
+        let rewritten = rewrite_segment_inner(
+            rest_after_env,
+            excluded,
+            transparent_prefixes,
+            context,
+            depth + 1,
+        )?;
+        return Some(format!("{}{}", env_prefix, rewritten));
+    }
+
+    for (prefix, routable) in builtin_transparent_prefixes() {
+        if let Some(rest) = strip_word_prefix(trimmed, prefix) {
+            if rest.is_empty() {
+                return None;
+            }
+            if let Some(rewritten) =
+                rewrite_segment_inner(rest, excluded, transparent_prefixes, context, depth + 1)
+            {
+                return Some(format!("{} {}", prefix, rewritten));
+            }
+            // #2768: falling through re-tests the full prefixed string, which is
+            // only valid when the wrapper is itself a routable command.
+            if !routable {
+                return None;
+            }
+            break;
+        }
+    }
+
+    // User-configured wrapper prefixes (e.g. `docker exec mycontainer`). These
+    // never fall through: an unmatched inner command drops the rewrite.
+    for prefix in transparent_prefixes {
+        if let Some(rest) = strip_word_prefix(trimmed, prefix) {
+            if rest.is_empty() {
+                return None;
+            }
+            return rewrite_segment_inner(rest, excluded, transparent_prefixes, context, depth + 1)
+                .map(|rewritten| format!("{} {}", prefix, rewritten));
+        }
+    }
+
+    // Strip trailing stderr/stdout redirects before matching (#530)
+    // e.g. "git status 2>&1" → match "git status", re-append " 2>&1"
+    let (cmd_part, redirect_suffix) = strip_trailing_redirects(trimmed);
+
+    // Already RTK — pass through unchanged
+    if cmd_part.starts_with("rtk ") || cmd_part == "rtk" {
+        return Some(trimmed.to_string());
+    }
+
+    if context == RewriteContext::Normal
+        && (cmd_part.starts_with("head -") || cmd_part.starts_with("tail "))
+    {
+        return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
+    }
+
+    // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
+    // semantics than rtk read or no equivalent at all. Only `-n` (line numbers)
+    // maps correctly to `rtk read -n`. Skip rewrite for any other flag.
+    if let Some(cmd_args) = cmd_part.strip_prefix("cat ") {
+        let args = cmd_args.trim_start();
+        if args.starts_with('-') && !args.starts_with("-n ") && !args.starts_with("-n\t") {
+            return None;
+        }
+    }
+
+    // Use classify_command for correct ignore/prefix handling
+    let rtk_equivalent = match classify_command(cmd_part) {
+        Classification::Supported { rtk_equivalent, .. } => {
+            let stripped = ENV_PREFIX.replace(cmd_part, "");
+            let cmd_clean = stripped.trim();
+            if is_excluded(cmd_clean, excluded) {
+                return None;
+            }
+            rtk_equivalent
+        }
+        // TOML-only commands: consult the registry so the hook filters them too (#2179).
+        Classification::Unsupported { .. } => {
+            if context == RewriteContext::PipelineFinal {
+                return None;
+            }
+            if crate::core::toml_filter::toml_disabled() {
+                return None;
+            }
+            let normalized = strip_absolute_path(cmd_part.trim());
+            if is_excluded(&normalized, excluded) {
+                return None;
+            }
+            let base = normalized.split_whitespace().next().unwrap_or("");
+            if crate::core::toml_filter::is_rtk_reserved_command(base) {
+                return None;
+            }
+            if crate::core::toml_filter::command_matches_filter(&normalized) {
+                return Some(format!("rtk {}{}", cmd_part, redirect_suffix));
+            }
+            return None;
+        }
+        Classification::Ignored => return None,
+    };
+
+    // Find the matching rule (rtk_cmd values are unique across all rules)
+    let rule = RULES.iter().find(|r| r.rtk_cmd == rtk_equivalent)?;
+    if context == RewriteContext::PipelineFinal
+        && (!rule.pipeline_final_safe || !pipeline_final_command_is_safe(rule.rtk_cmd, cmd_part))
+    {
+        return None;
+    }
+
+    if let Some(parts) = parse_golangci_run_parts(cmd_part) {
+        let rewritten = if parts.global_segment.is_empty() {
+            format!("rtk golangci-lint {}", parts.run_segment)
+        } else {
+            format!(
+                "rtk golangci-lint {} {}",
+                parts.global_segment, parts.run_segment
+            )
+        };
+        return Some(rewritten);
+    }
+
+    // #196: gh with --json/--jq/--template produces structured output that
+    // rtk gh would corrupt — skip rewrite so the caller gets raw JSON.
+    if rule.rtk_cmd == "rtk gh" {
+        let args_lower = cmd_part.to_lowercase();
+        if args_lower.contains("--json")
+            || args_lower.contains("--jq")
+            || args_lower.contains("--template")
+        {
+            return None;
+        }
+    }
+
+    // For the Composer-resolved php tools, normalize the leading invocation
+    // (php wrapper + ini flags, ./, vendor/bin, composer bin-dir) exactly as
+    // classify_command does, so a small canonical prefix list matches every
+    // invocation form instead of enumerating each literal spelling.
+    let php_normalized;
+    let strip_target: &str = if rule
+        .rtk_cmd
+        .strip_prefix("rtk ")
+        .is_some_and(|t| PHP_TOOL_NAMES.contains(&t))
+    {
+        // Peel `php ` then a leading `./` (normalize_php_tool_command only
+        // strips `./` for paths that resolve to a Composer tool, so a plain
+        // `./bin/<tool>` would otherwise survive and miss the prefix match).
+        let unwrapped = strip_php_wrapper(cmd_part);
+        let unwrapped = unwrapped.strip_prefix("./").unwrap_or(unwrapped);
+        php_normalized = normalize_php_tool_command(unwrapped);
+        &php_normalized
+    } else {
+        cmd_part
+    };
+
+    // Try each rewrite prefix (longest first) with word-boundary check
+    for &prefix in rule.rewrite_prefixes {
+        if let Some(rest) = strip_word_prefix(strip_target, prefix) {
+            let rewritten = if rest.is_empty() {
+                format!("{}{}", rule.rtk_cmd, redirect_suffix)
+            } else {
+                format!("{} {}{}", rule.rtk_cmd, rest, redirect_suffix)
+            };
+            return Some(rewritten);
+        }
+    }
+
+    None
+}
+
+/// Strip a command prefix with word-boundary check.
+/// Returns the remainder of the command after the prefix, or `None` if no match.
+fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
+    if cmd == prefix {
+        Some("")
+    } else if cmd.len() > prefix.len()
+        && cmd.starts_with(prefix)
+        && cmd.as_bytes()[prefix.len()] == b' '
+    {
+        Some(cmd[prefix.len() + 1..].trim_start())
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::report::RtkStatus;
+    use super::*;
+
+    fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
+        super::rewrite_command(cmd, excluded, &[])
+    }
+
+    mod multiline_blocks {
+        use super::rewrite_command_no_prefixes;
+
+        #[test]
+        fn test_rewrites_each_line() {
+            assert_eq!(
+                rewrite_command_no_prefixes("git status\ngit log --oneline -3", &[]),
+                Some("rtk git status\nrtk git log --oneline -3".into())
+            );
+        }
+
+        #[test]
+        fn test_preserves_blank_lines_comments_and_indentation() {
+            assert_eq!(
+                rewrite_command_no_prefixes("git status\n\n# check history\n  git log -3", &[]),
+                Some("rtk git status\n\n# check history\n  rtk git log -3".into())
+            );
+        }
+
+        #[test]
+        fn test_compound_line_inside_block() {
+            assert_eq!(
+                rewrite_command_no_prefixes("cd /tmp && git status\ngrep -rn foo src", &[]),
+                Some("cd /tmp && rtk git status\nrtk grep -rn foo src".into())
+            );
+        }
+
+        #[test]
+        fn test_crlf_separators_preserved() {
+            assert_eq!(
+                rewrite_command_no_prefixes("git status\r\ngit log -3", &[]),
+                Some("rtk git status\r\nrtk git log -3".into())
+            );
+        }
+
+        #[test]
+        fn test_newline_inside_quotes_rewrites_as_one_command() {
+            // The quoted body is never treated as a command line of its own;
+            // the whole thing is one logical command and gets one prefix.
+            assert_eq!(
+                rewrite_command_no_prefixes("git commit -m \"subject\ngit status in body\"", &[]),
+                Some("rtk git commit -m \"subject\ngit status in body\"".into())
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes("git commit -m 'multi\nline\nmessage'", &[]),
+                Some("rtk git commit -m 'multi\nline\nmessage'".into())
+            );
+        }
+
+        #[test]
+        fn test_unbalanced_swallowed_newline_passes_through() {
+            assert_eq!(
+                rewrite_command_no_prefixes("git commit -m \"subject\ngit status", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_comment_apostrophe_swallowing_newline_passes_through() {
+            // The lexer has no comment state: the apostrophe in `don't` opens
+            // a quote that swallows the newline and hides the next line. The
+            // block must pass through so native permission handling sees the
+            // original command — never a partially rewritten one.
+            assert_eq!(
+                rewrite_command_no_prefixes("git status # don't\nrm -rf /tmp/x", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_comment_apostrophe_hidden_in_later_segment_passes_through() {
+            // Same hazard when a clean split point precedes the contaminated
+            // line: the swallowed-newline check is global, not per-segment.
+            assert_eq!(
+                rewrite_command_no_prefixes("git log -3\ngit status # don't\nrm -rf /tmp/x", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_comment_with_balanced_quotes_still_rewrites() {
+            // Both apostrophes close before the newline, so the split is safe
+            // and the trailing comment rides along untouched.
+            assert_eq!(
+                rewrite_command_no_prefixes(
+                    "git status # isn't it what's expected\ngit log -3",
+                    &[]
+                ),
+                Some("rtk git status # isn't it what's expected\nrtk git log -3".into())
+            );
+        }
+
+        #[test]
+        fn test_arithmetic_spanning_lines_passes_through() {
+            // `(( x = ls ))` is arithmetic evaluation; injecting `rtk` before
+            // `ls` would splice a command into arithmetic context.
+            assert_eq!(rewrite_command_no_prefixes("(( x =\nls ))", &[]), None);
+        }
+
+        #[test]
+        fn test_array_assignment_spanning_lines_passes_through() {
+            // The inner line is an array element, not a command; rewriting it
+            // would mutate the array's contents.
+            assert_eq!(
+                rewrite_command_no_prefixes("arr=(one\ngit status\ntwo)", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_function_definition_spanning_lines_passes_through() {
+            assert_eq!(
+                rewrite_command_no_prefixes("foo() {\n  git status\n}", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_continuation_operator_behind_comment_passes_through() {
+            // Bash continues the pipeline across the newline even though the
+            // line ends in comment text; the next line is a pipeline stage,
+            // not an independent command.
+            assert_eq!(
+                rewrite_command_no_prefixes("git log | # keep pipeline\ngrep -f patterns.txt", &[]),
+                None
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes("git status && # continue\ngit log -3", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_ansi_c_escaped_quote_passes_through() {
+            // Inside $'...' bash treats \' as a literal quote that does not
+            // close the string, so the second line is string content — the
+            // lexer can't see that, so the block forgoes the rewrite.
+            assert_eq!(
+                rewrite_command_no_prefixes("x=$'foo\\'\ngit status\n'", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_ansi_c_without_escaped_quote_still_rewrites() {
+            assert_eq!(
+                rewrite_command_no_prefixes("echo $'a\\tb'\ngit status", &[]),
+                Some("echo $'a\\tb'\nrtk git status".into())
+            );
+        }
+
+        #[test]
+        fn test_balanced_grouping_within_a_line_still_rewrites() {
+            // `${HOME}` braces (quoted or not) must not trip the
+            // unbalanced-grouping bail.
+            assert_eq!(
+                rewrite_command_no_prefixes("echo ${HOME}\ngit status", &[]),
+                Some("echo ${HOME}\nrtk git status".into())
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes("echo \"${HOME}\"\ngit status", &[]),
+                Some("echo \"${HOME}\"\nrtk git status".into())
+            );
+        }
+
+        #[test]
+        fn test_no_rewritable_line_passes_through() {
+            assert_eq!(rewrite_command_no_prefixes("echo one\necho two", &[]), None);
+        }
+
+        #[test]
+        fn test_already_rtk_lines_count_as_unchanged() {
+            assert_eq!(
+                rewrite_command_no_prefixes("rtk git status\necho done", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_mixed_rtk_and_rewritable_line() {
+            assert_eq!(
+                rewrite_command_no_prefixes("rtk git status\ngit log -3", &[]),
+                Some("rtk git status\nrtk git log -3".into())
+            );
+        }
+
+        #[test]
+        fn test_for_loop_block_passes_through() {
+            assert_eq!(
+                rewrite_command_no_prefixes("for f in a b; do\n  grep -n foo $f\ndone", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_if_block_passes_through() {
+            assert_eq!(
+                rewrite_command_no_prefixes("if [ -d src ]; then\n  git status\nfi", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_cross_line_and_list_joins_and_rewrites() {
+            assert_eq!(
+                rewrite_command_no_prefixes("git status &&\ngit log -3", &[]),
+                Some("rtk git status && rtk git log -3".into())
+            );
+        }
+
+        #[test]
+        fn test_cross_line_pipeline_joins_and_rewrites() {
+            assert_eq!(
+                rewrite_command_no_prefixes("git log |\ngrep feat", &[]),
+                Some("git log | rtk grep feat".into())
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes("cargo test |&\ngrep FAILED", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_cross_line_pipeline_unsafe_final_stage_passes_through() {
+            assert_eq!(
+                rewrite_command_no_prefixes("git log |\ngrep -f patterns.txt", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_mixed_independent_and_continued_lines() {
+            assert_eq!(
+                rewrite_command_no_prefixes("grep -rn foo src\ngit status &&\ngit log -3", &[]),
+                Some("rtk grep -rn foo src\nrtk git status && rtk git log -3".into())
+            );
+        }
+
+        #[test]
+        fn test_blank_line_inside_continuation_joins() {
+            assert_eq!(
+                rewrite_command_no_prefixes("git status &&\n\ngit log -3", &[]),
+                Some("rtk git status && rtk git log -3".into())
+            );
+        }
+
+        #[test]
+        fn test_comment_line_inside_continuation_passes_through() {
+            assert_eq!(
+                rewrite_command_no_prefixes("git status &&\n# note\ngit log -3", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_comment_directly_after_operator_passes_through() {
+            assert_eq!(
+                rewrite_command_no_prefixes("git log |# keep pipeline\ngrep -f patterns.txt", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_conditional_expression_spanning_lines_passes_through() {
+            assert_eq!(
+                rewrite_command_no_prefixes("[[ -f a &&\n-f b ]]\ngit status", &[]),
+                None
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes("git status\n[[\n-f a ]]", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_balanced_conditional_line_still_rewrites() {
+            assert_eq!(
+                rewrite_command_no_prefixes("[[ -x foo ]] &&\ngit status", &[]),
+                Some("[[ -x foo ]] && rtk git status".into())
+            );
+        }
+
+        #[test]
+        fn test_subshell_spanning_lines_passes_through() {
+            assert_eq!(rewrite_command_no_prefixes("(\n  git status\n)", &[]), None);
+        }
+
+        #[test]
+        fn test_group_spanning_lines_passes_through() {
+            assert_eq!(rewrite_command_no_prefixes("{\n  git status\n}", &[]), None);
+        }
+
+        #[test]
+        fn test_heredoc_block_passes_through() {
+            assert_eq!(
+                rewrite_command_no_prefixes("git status\ncat <<EOF\nhello\nEOF", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_heredoc_split_by_line_continuation_passes_through() {
+            assert_eq!(
+                rewrite_command_no_prefixes("cat <\\\n<EOF\ngit status\nEOF", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_arithmetic_split_by_line_continuation_passes_through() {
+            assert_eq!(
+                rewrite_command_no_prefixes("echo $(\\\n(1+2))\ngit status", &[]),
+                None
+            );
+        }
+    }
+
+    fn analyze_test_pipeline(cmd: &str) -> PipelineAnalysis {
+        let tokens = tokenize(cmd);
+        let first_pipe_offset = tokens
+            .iter()
+            .find(|token| matches!(token.kind, TokenKind::Pipe(_)))
+            .expect("test command must contain a pipe")
+            .offset;
+
+        analyze_pipeline(cmd, &tokens, 0, first_pipe_offset)
+    }
+
+    #[test]
+    fn test_analyze_pipeline_finds_final_stage() {
+        let cmd = "git log | grep feat | wc -l";
+        let analysis = analyze_test_pipeline(cmd);
+
+        assert_eq!(analysis.end_offset, cmd.len());
+        assert_eq!(analysis.next_clause_offset, None);
+        assert_eq!(
+            cmd[analysis.final_stage_start.unwrap()..analysis.end_offset].trim(),
+            "wc -l"
+        );
+    }
+
+    #[test]
+    fn test_analyze_pipeline_rejects_stderr_pipe() {
+        let analysis = analyze_test_pipeline("cargo test |& grep FAILED");
+
+        assert_eq!(analysis.final_stage_start, None);
+    }
+
+    #[test]
+    fn test_analyze_pipeline_rejects_empty_stage() {
+        let analysis = analyze_test_pipeline("cargo test | | grep FAILED");
+
+        assert_eq!(analysis.final_stage_start, None);
+    }
+
+    #[test]
+    fn test_analyze_pipeline_stops_at_next_clause() {
+        let cmd = "cargo test | grep FAILED && git status";
+        let analysis = analyze_test_pipeline(cmd);
+        let next_clause_offset = cmd.find("&&").unwrap();
+
+        assert_eq!(analysis.end_offset, next_clause_offset);
+        assert_eq!(analysis.next_clause_offset, Some(next_clause_offset));
+        assert_eq!(
+            cmd[analysis.final_stage_start.unwrap()..analysis.end_offset].trim(),
+            "grep FAILED"
+        );
+    }
+
+    #[test]
+    fn test_pipeline_final_safe_rule_set() {
+        let safe_rules: Vec<_> = RULES
+            .iter()
+            .filter(|rule| rule.pipeline_final_safe)
+            .map(|rule| rule.rtk_cmd)
+            .collect();
+
+        assert_eq!(safe_rules, vec!["rtk grep", "rtk rg"]);
+    }
+
+    #[test]
+    fn test_pipeline_final_search_pattern_file_is_unsafe() {
+        for command in [
+            "grep -f patterns.txt input.txt",
+            "grep -rfpatterns.txt input",
+            "grep --file patterns.txt input.txt",
+            "grep --file=patterns.txt input.txt",
+            "rg -f patterns.txt input.txt",
+            "rg --file=patterns.txt input.txt",
+        ] {
+            assert!(search_uses_pattern_file(command), "{command}");
+        }
+
+        assert!(!search_uses_pattern_file("grep -- -f"));
+        assert!(!search_uses_pattern_file("grep -F pattern"));
+    }
+
+    #[test]
+    fn test_classify_git_status() {
+        assert_eq!(
+            classify_command("git status"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_yadm_status() {
+        assert_eq!(
+            classify_command("yadm status"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_yadm_diff() {
+        assert_eq!(
+            classify_command("yadm diff"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_yadm_status() {
+        assert_eq!(
+            rewrite_command_no_prefixes("yadm status", &[]),
+            Some("rtk git status".to_string())
+        );
+    }
+
+    #[test]
+    fn test_classify_git_diff_cached() {
+        assert_eq!(
+            classify_command("git diff --cached"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_cargo_test_filter() {
+        assert_eq!(
+            classify_command("cargo test filter::"),
+            Classification::Supported {
+                rtk_equivalent: "rtk cargo",
+                category: "Cargo",
+                estimated_savings_pct: 90.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_npx_tsc() {
+        assert_eq!(
+            classify_command("npx tsc --noEmit"),
+            Classification::Supported {
+                rtk_equivalent: "rtk tsc",
+                category: "Build",
+                estimated_savings_pct: 83.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_cat_file() {
+        assert_eq!(
+            classify_command("cat src/main.rs"),
+            Classification::Supported {
+                rtk_equivalent: "rtk read",
+                category: "Files",
+                estimated_savings_pct: 60.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_cat_redirect_not_supported() {
+        // cat > file and cat >> file are writes, not reads — should not be classified as supported
+        let write_commands = [
+            "cat > /tmp/output.txt",
+            "cat >> /tmp/output.txt",
+            "cat file.txt > output.txt",
+            "cat -n file.txt >> log.txt",
+            "head -10 README.md > output.txt",
+            "tail -f app.log > /dev/null",
+        ];
+        for cmd in &write_commands {
+            if let Classification::Supported { .. } = classify_command(cmd) {
+                panic!("{} should NOT be classified as Supported", cmd)
+            }
+            // Unsupported or Ignored is fine
+        }
+    }
+
+    #[test]
+    fn test_classify_cd_ignored() {
+        assert_eq!(classify_command("cd /tmp"), Classification::Ignored);
+    }
+
+    #[test]
+    fn test_classify_rtk_already() {
+        assert_eq!(classify_command("rtk git status"), Classification::Ignored);
+    }
+
+    #[test]
+    fn test_classify_echo_ignored() {
+        assert_eq!(
+            classify_command("echo hello world"),
+            Classification::Ignored
+        );
+    }
+
+    #[test]
+    fn test_classify_htop_unsupported() {
+        match classify_command("htop -d 10") {
+            Classification::Unsupported { base_command } => {
+                assert_eq!(base_command, "htop");
+            }
+            other => panic!("expected Unsupported, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_classify_env_prefix_stripped() {
+        assert_eq!(
+            classify_command("GIT_SSH_COMMAND=ssh git push"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_sudo_stripped() {
+        assert_eq!(
+            classify_command("sudo docker ps"),
+            Classification::Supported {
+                rtk_equivalent: "rtk docker",
+                category: "Infra",
+                estimated_savings_pct: 85.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_cargo_check() {
+        assert_eq!(
+            classify_command("cargo check"),
+            Classification::Supported {
+                rtk_equivalent: "rtk cargo",
+                category: "Cargo",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_cargo_check_all_targets() {
+        assert_eq!(
+            classify_command("cargo check --all-targets"),
+            Classification::Supported {
+                rtk_equivalent: "rtk cargo",
+                category: "Cargo",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_cargo_fmt_passthrough() {
+        assert_eq!(
+            classify_command("cargo fmt"),
+            Classification::Supported {
+                rtk_equivalent: "rtk cargo",
+                category: "Cargo",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_cargo_clippy_savings() {
+        assert_eq!(
+            classify_command("cargo clippy --all-targets"),
+            Classification::Supported {
+                rtk_equivalent: "rtk cargo",
+                category: "Cargo",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_registry_covers_all_cargo_subcommands() {
+        // Verify that every CargoCommand variant (Build, Test, Clippy, Check, Fmt)
+        // except Other has a matching pattern in the registry
+        for subcmd in ["build", "test", "clippy", "check", "fmt"] {
+            let cmd = format!("cargo {subcmd}");
+            match classify_command(&cmd) {
+                Classification::Supported { .. } => {}
+                other => panic!("cargo {subcmd} should be Supported, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_registry_covers_all_git_subcommands() {
+        // Verify that every GitCommand subcommand has a matching pattern
+        for subcmd in [
+            "status", "log", "diff", "show", "add", "commit", "push", "pull", "branch", "fetch",
+            "stash", "worktree",
+        ] {
+            let cmd = format!("git {subcmd}");
+            match classify_command(&cmd) {
+                Classification::Supported { .. } => {}
+                other => panic!("git {subcmd} should be Supported, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_classify_find_not_blocked_by_fi() {
+        // Regression: "fi" in IGNORED_PREFIXES used to shadow "find" commands
+        // because "find".starts_with("fi") is true. "fi" should only match exactly.
+        assert_eq!(
+            classify_command("find . -name foo"),
+            Classification::Supported {
+                rtk_equivalent: "rtk find",
+                category: "Files",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_fi_still_ignored_exact() {
+        // Bare "fi" (shell keyword) should still be ignored
+        assert_eq!(classify_command("fi"), Classification::Ignored);
+    }
+
+    #[test]
+    fn test_done_still_ignored_exact() {
+        // Bare "done" (shell keyword) should still be ignored
+        assert_eq!(classify_command("done"), Classification::Ignored);
+    }
+
+    #[test]
+    fn test_split_chain_and() {
+        assert_eq!(split_command_chain("a && b"), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_split_chain_semicolon() {
+        assert_eq!(split_command_chain("a ; b"), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_split_pipe_first_only() {
+        assert_eq!(split_command_chain("a | b"), vec!["a"]);
+    }
+
+    #[test]
+    fn test_split_single() {
+        assert_eq!(split_command_chain("git status"), vec!["git status"]);
+    }
+
+    #[test]
+    fn test_split_quoted_and() {
+        assert_eq!(
+            split_command_chain(r#"echo "a && b""#),
+            vec![r#"echo "a && b""#]
+        );
+    }
+
+    #[test]
+    fn test_split_heredoc_no_split() {
+        let cmd = "cat <<'EOF'\nhello && world\nEOF";
+        assert_eq!(split_command_chain(cmd), vec![cmd]);
+    }
+
+    #[test]
+    fn test_classify_mypy() {
+        assert_eq!(
+            classify_command("mypy src/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mypy",
+                category: "Build",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_python_m_mypy() {
+        assert_eq!(
+            classify_command("python3 -m mypy --strict"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mypy",
+                category: "Build",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    // --- rewrite_command tests ---
+
+    #[test]
+    fn test_rewrite_git_status() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status", &[]),
+            Some("rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_checkout() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git checkout main", &[]),
+            Some("rtk git checkout main".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_log() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git log -10", &[]),
+            Some("rtk git log -10".into())
+        );
+    }
+
+    // --- git -C <path> support (#555) ---
+
+    #[test]
+    fn test_rewrite_git_dash_c_status() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git -C /path/to/repo status", &[]),
+            Some("rtk git -C /path/to/repo status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_dash_c_log() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git -C /tmp/myrepo log --oneline -5", &[]),
+            Some("rtk git -C /tmp/myrepo log --oneline -5".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_dash_c_diff() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git -C /home/user/project diff --name-only", &[]),
+            Some("rtk git -C /home/user/project diff --name-only".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_git_dash_c() {
+        let result = classify_command("git -C /tmp status");
+        assert!(
+            matches!(
+                result,
+                Classification::Supported {
+                    rtk_equivalent: "rtk git",
+                    ..
+                }
+            ),
+            "git -C should be classified as supported, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_rewrite_cargo_test() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test", &[]),
+            Some("rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_and() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git add . && cargo test", &[]),
+            Some("rtk git add . && rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_three_segments() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "cargo fmt --all && cargo clippy --all-targets && cargo test",
+                &[]
+            ),
+            Some("rtk cargo fmt --all && rtk cargo clippy --all-targets && rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_already_rtk() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rtk git status", &[]),
+            Some("rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_background_single_amp() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test & git status", &[]),
+            Some("rtk cargo test & rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_background_unsupported_right() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test & htop", &[]),
+            Some("rtk cargo test & htop".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_background_does_not_affect_double_amp() {
+        // `&&` must still work after adding `&` support
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test && git status", &[]),
+            Some("rtk cargo test && rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_unsupported_returns_none() {
+        assert_eq!(rewrite_command_no_prefixes("htop", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_ignored_cd() {
+        assert_eq!(rewrite_command_no_prefixes("cd /tmp", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_toml_orphan_jj() {
+        assert_eq!(
+            rewrite_command_no_prefixes("jj log", &[]),
+            Some("rtk jj log".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_orphan_jq() {
+        assert_eq!(
+            rewrite_command_no_prefixes("jq .", &[]),
+            Some("rtk jq .".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_orphan_just() {
+        assert_eq!(
+            rewrite_command_no_prefixes("just build", &[]),
+            Some("rtk just build".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_absolute_path() {
+        assert_eq!(
+            rewrite_command_no_prefixes("/usr/bin/jj log", &[]),
+            Some("rtk /usr/bin/jj log".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_redirect_suffix_preserved() {
+        assert_eq!(
+            rewrite_command_no_prefixes("jj log 2>&1", &[]),
+            Some("rtk jj log 2>&1".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_pipe_rewrites_only_safe_final() {
+        assert_eq!(
+            rewrite_command_no_prefixes("jj log | grep change", &[]),
+            Some("jj log | rtk grep change".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_compound() {
+        assert_eq!(
+            rewrite_command_no_prefixes("jj diff && jq .", &[]),
+            Some("rtk jj diff && rtk jq .".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_env_prefix() {
+        assert_eq!(
+            rewrite_command_no_prefixes("FOO=bar jj log", &[]),
+            Some("FOO=bar rtk jj log".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_respects_exclude() {
+        let excluded = vec!["jj".to_string()];
+        assert_eq!(rewrite_command_no_prefixes("jj log", &excluded), None);
+    }
+
+    #[test]
+    fn test_rewrite_toml_exclude_matches_absolute_path() {
+        let excluded = vec!["jj".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("/usr/bin/jj log", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_unknown_command_still_none() {
+        assert_eq!(rewrite_command_no_prefixes("frobnicate xyz", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_with_env_prefix() {
+        assert_eq!(
+            rewrite_command_no_prefixes("GIT_SSH_COMMAND=ssh git push", &[]),
+            Some("GIT_SSH_COMMAND=ssh rtk git push".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tsc() {
+        let commands = vec![
+            "npm exec tsc",
+            "npm rum tsc",
+            "npm run tsc",
+            "npm run-script tsc",
+            "npm urn tsc",
+            "npm x tsc",
+            "pnpm dlx tsc",
+            "pnpm exec tsc",
+            "pnpm run tsc",
+            "pnpm run-script tsc",
+            "npm tsc",
+            "npx tsc",
+            "pnpm tsc",
+            "pnpx tsc",
+            "tsc",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("{command} --noEmit"), &[]),
+                Some("rtk tsc --noEmit".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_cat_file() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cat src/main.rs", &[]),
+            Some("rtk read src/main.rs".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_cat_with_incompatible_flags_skipped() {
+        // cat flags with different semantics than rtk read — skip rewrite
+        assert_eq!(rewrite_command_no_prefixes("cat -A file.cpp", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("cat -v file.txt", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("cat -e file.txt", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("cat -t file.txt", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("cat -s file.txt", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("cat --show-all file.txt", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_cat_with_compatible_flags() {
+        // cat -n (line numbers) maps to rtk read -n — allow rewrite
+        assert_eq!(
+            rewrite_command_no_prefixes("cat -n file.txt", &[]),
+            Some("rtk read -n file.txt".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_pattern() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg \"fn main\"", &[]),
+            Some("rtk rg \"fn main\"".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_playwright() {
+        let commands = vec![
+            "npm exec playwright",
+            "npm rum playwright",
+            "npm run playwright",
+            "npm run-script playwright",
+            "npm urn playwright",
+            "npm x playwright",
+            "pnpm dlx playwright",
+            "pnpm exec playwright",
+            "pnpm run playwright",
+            "pnpm run-script playwright",
+            "npm playwright",
+            "npx playwright",
+            "pnpm playwright",
+            "pnpx playwright",
+            "playwright",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("{command} test"), &[]),
+                Some("rtk playwright test".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_next_build() {
+        let commands = vec![
+            "npm exec next build",
+            "npm rum next build",
+            "npm run next build",
+            "npm run-script next build",
+            "npm urn next build",
+            "npm x next build",
+            "pnpm dlx next build",
+            "pnpm exec next build",
+            "pnpm run next build",
+            "pnpm run-script next build",
+            "npm next build",
+            "npx next build",
+            "pnpm next build",
+            "pnpx next build",
+            "next build",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("{command} --turbo"), &[]),
+                Some("rtk next --turbo".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_pipe_final_safe_stage_only() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git log -10 | grep feat", &[]),
+            Some("git log -10 | rtk grep feat".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_find_pipe_skipped() {
+        // find in a pipe should NOT be rewritten — rtk find output format
+        // is incompatible with pipe consumers like xargs (#439)
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -name '*.rs' | xargs grep 'fn run'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_find_pipe_wc_stays_raw() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find src -type f | wc -l", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_multi_pipe_with_wc_final_stays_raw() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git log | grep feat | wc -l", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_unsafe_final_stage_stays_raw() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test | tail -50", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("find . | xargs grep TODO", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "printf 'src/main.rs\\n' | grep -f /dev/null src/main.rs",
+                &[]
+            ),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "printf 'src/main.rs\\n' | rg --file=/dev/null src/main.rs",
+                &[]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_malformed_pipeline_stays_raw() {
+        assert_eq!(rewrite_command_no_prefixes("| grep FAILED", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("cargo test |", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test | | grep FAILED", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_find_no_pipe_still_rewritten() {
+        // find WITHOUT a pipe should still be rewritten
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -name '*.rs'", &[]),
+            Some("rtk find . -name '*.rs'".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_heredoc_returns_none() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cat <<'EOF'\nfoo\nEOF", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_empty_returns_none() {
+        assert_eq!(rewrite_command_no_prefixes("", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("   ", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_mixed_compound_partial() {
+        // First segment already RTK, second gets rewritten
+        assert_eq!(
+            rewrite_command_no_prefixes("rtk git add . && cargo test", &[]),
+            Some("rtk git add . && rtk cargo test".into())
+        );
+    }
+
+    // --- #345: RTK_DISABLED ---
+
+    #[test]
+    fn test_rewrite_rtk_disabled_curl() {
+        assert_eq!(
+            rewrite_command_no_prefixes("RTK_DISABLED=1 curl https://example.com", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rtk_disabled_git_status() {
+        assert_eq!(
+            rewrite_command_no_prefixes("RTK_DISABLED=1 git status", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rtk_disabled_multi_env() {
+        assert_eq!(
+            rewrite_command_no_prefixes("FOO=1 RTK_DISABLED=1 git status", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rtk_disabled_warns_on_stderr() {
+        assert_eq!(
+            rewrite_command_no_prefixes("RTK_DISABLED=1 git status", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rtk_disabled_subprocess_warns() {
+        let rtk_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("debug")
+            .join("rtk");
+        if !rtk_bin.exists() {
+            return;
+        }
+        let rtk_mtime = std::fs::metadata(&rtk_bin)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        let test_mtime = std::env::current_exe()
+            .ok()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok());
+        if let (Some(rtk_t), Some(test_t)) = (rtk_mtime, test_mtime) {
+            if rtk_t < test_t {
+                return;
+            }
+        }
+
+        let output = std::process::Command::new(&rtk_bin)
+            .args(["rewrite", "RTK_DISABLED=1 git status"])
+            .output()
+            .expect("Failed to run rtk");
+
+        assert!(
+            !output.status.success(),
+            "Should exit non-zero (no rewrite)"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("RTK_DISABLED=1 detected"),
+            "Should warn on stderr, got: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_rewrite_non_rtk_disabled_env_still_rewrites() {
+        assert_eq!(
+            rewrite_command_no_prefixes("SOME_VAR=1 git status", &[]),
+            Some("SOME_VAR=1 rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_quoted_value_with_spaces() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no" git push"#,
+                &[]
+            ),
+            Some(r#"GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no" rtk git push"#.into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_single_quoted_value_with_spaces() {
+        assert_eq!(
+            rewrite_command_no_prefixes("EDITOR='vim -u NONE' git commit", &[]),
+            Some("EDITOR='vim -u NONE' rtk git commit".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_quoted_plus_unquoted() {
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"FOO="bar baz" BAR=1 git status"#, &[]),
+            Some(r#"FOO="bar baz" BAR=1 rtk git status"#.into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_escaped_quotes_in_value() {
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"FOO="he said \"hello\"" git status"#, &[]),
+            Some(r#"FOO="he said \"hello\"" rtk git status"#.into())
+        );
+    }
+
+    #[test]
+    fn test_classify_env_quoted_value_stripped() {
+        assert_eq!(
+            classify_command(r#"GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no" git push"#),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    // --- #346: 2>&1 and &> redirect detection ---
+
+    #[test]
+    fn test_rewrite_redirect_2_gt_amp_1_with_pipe() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test 2>&1 | grep FAILED", &[]),
+            Some("cargo test 2>&1 | rtk grep FAILED".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_redirect_2_gt_amp_1_trailing() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test 2>&1", &[]),
+            Some("rtk cargo test 2>&1".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_redirect_plain_2_devnull() {
+        // 2>/dev/null has no `&`, never broken — non-regression
+        assert_eq!(
+            rewrite_command_no_prefixes("git status 2>/dev/null", &[]),
+            Some("rtk git status 2>/dev/null".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_redirect_2_gt_amp_1_with_and() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test 2>&1 && echo done", &[]),
+            Some("rtk cargo test 2>&1 && echo done".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_redirect_amp_gt_devnull() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test &>/dev/null", &[]),
+            Some("rtk cargo test &>/dev/null".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_redirect_double() {
+        // Double redirect: only last one stripped, but full command rewrites correctly
+        assert_eq!(
+            rewrite_command_no_prefixes("git status 2>&1 >/dev/null", &[]),
+            Some("rtk git status 2>&1 >/dev/null".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_redirect_fd_close() {
+        // 2>&- (close stderr fd)
+        assert_eq!(
+            rewrite_command_no_prefixes("git status 2>&-", &[]),
+            Some("rtk git status 2>&-".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_redirect_quotes_not_stripped() {
+        // Redirect-like chars inside quotes should NOT be stripped
+        // Known limitation: apostrophes cause conservative no-strip (safe fallback)
+        let result = rewrite_command_no_prefixes("git commit -m \"it's fixed\" 2>&1", &[]);
+        assert!(
+            result.is_some(),
+            "Should still rewrite even with apostrophe"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_background_amp_non_regression() {
+        // background `&` must still work after redirect fix
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test & git status", &[]),
+            Some("rtk cargo test & rtk git status".into())
+        );
+    }
+
+    // --- P0.2: head -N rewrite ---
+
+    #[test]
+    fn test_rewrite_head_numeric_flag() {
+        // head -20 file → rtk read file --max-lines 20 (not rtk read -20 file)
+        assert_eq!(
+            rewrite_command_no_prefixes("head -20 src/main.rs", &[]),
+            Some("rtk read src/main.rs --max-lines 20".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_lines_long_flag() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head --lines=50 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --max-lines 50".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_no_flag_still_rewrites() {
+        // plain `head file` → `rtk read file` (no numeric flag)
+        assert_eq!(
+            rewrite_command_no_prefixes("head src/main.rs", &[]),
+            Some("rtk read src/main.rs".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_other_flag_skipped() {
+        // head -c 100 file: unsupported flag, skip rewriting
+        assert_eq!(
+            rewrite_command_no_prefixes("head -c 100 src/main.rs", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tail_numeric_flag() {
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -20 src/main.rs", &[]),
+            Some("rtk read src/main.rs --tail-lines 20".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tail_n_space_flag() {
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -n 12 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --tail-lines 12".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tail_lines_long_flag() {
+        assert_eq!(
+            rewrite_command_no_prefixes("tail --lines=7 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --tail-lines 7".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tail_lines_space_flag() {
+        assert_eq!(
+            rewrite_command_no_prefixes("tail --lines 7 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --tail-lines 7".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tail_other_flag_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -c 100 src/main.rs", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tail_plain_file_skipped() {
+        assert_eq!(rewrite_command_no_prefixes("tail src/main.rs", &[]), None);
+    }
+
+    // --- Issue #1362: head/tail with multiple files falls back to native command ---
+    //
+    // `rtk read <file> --max-lines N` only accepts a single positional file path in
+    // a shape that maps cleanly to `head -N`. Rewriting `head -N a b c` to
+    // `rtk read a b c --max-lines N` previously produced a command where `rtk read`
+    // would concatenate the files without the `==> name <==` banners that native
+    // `head` emits, so the fix is to skip the rewrite and let the shell run the
+    // real `head`/`tail` binary.
+
+    #[test]
+    fn test_rewrite_head_numeric_flag_multi_file_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head -3 /tmp/a /tmp/b /tmp/c", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_lines_long_flag_multi_file_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head --lines=50 src/main.rs src/lib.rs", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tail_numeric_flag_multi_file_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -20 a.log b.log", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tail_n_space_flag_multi_file_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -n 12 a.log b.log c.log", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tail_lines_eq_multi_file_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("tail --lines=7 a.log b.log", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tail_lines_space_multi_file_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("tail --lines 7 a.log b.log", &[]),
+            None
+        );
+    }
+
+    // --- New registry entries ---
+
+    #[test]
+    fn test_classify_gh_release() {
+        assert!(matches!(
+            classify_command("gh release list"),
+            Classification::Supported {
+                rtk_equivalent: "rtk gh",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_glab_mr() {
+        assert!(matches!(
+            classify_command("glab mr list"),
+            Classification::Supported {
+                rtk_equivalent: "rtk glab",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_glab_ci() {
+        assert!(matches!(
+            classify_command("glab ci list"),
+            Classification::Supported {
+                rtk_equivalent: "rtk glab",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_glab_release() {
+        assert!(matches!(
+            classify_command("glab release list"),
+            Classification::Supported {
+                rtk_equivalent: "rtk glab",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_glab_mr_list() {
+        assert_eq!(
+            rewrite_command_no_prefixes("glab mr list", &[]),
+            Some("rtk glab mr list".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_glab_ci_status() {
+        assert_eq!(
+            rewrite_command_no_prefixes("glab ci status", &[]),
+            Some("rtk glab ci status".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_cargo_install() {
+        assert!(matches!(
+            classify_command("cargo install rtk"),
+            Classification::Supported {
+                rtk_equivalent: "rtk cargo",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_docker_run() {
+        assert!(matches!(
+            classify_command("docker run --rm ubuntu bash"),
+            Classification::Supported {
+                rtk_equivalent: "rtk docker",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_docker_exec() {
+        assert!(matches!(
+            classify_command("docker exec -it mycontainer bash"),
+            Classification::Supported {
+                rtk_equivalent: "rtk docker",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_docker_build() {
+        assert!(matches!(
+            classify_command("docker build -t myimage ."),
+            Classification::Supported {
+                rtk_equivalent: "rtk docker",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_kubectl_describe() {
+        assert!(matches!(
+            classify_command("kubectl describe pod mypod"),
+            Classification::Supported {
+                rtk_equivalent: "rtk kubectl",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_kubectl_apply() {
+        assert!(matches!(
+            classify_command("kubectl apply -f deploy.yaml"),
+            Classification::Supported {
+                rtk_equivalent: "rtk kubectl",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_tree() {
+        assert!(matches!(
+            classify_command("tree src/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk tree",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_diff() {
+        assert!(matches!(
+            classify_command("diff file1.txt file2.txt"),
+            Classification::Supported {
+                rtk_equivalent: "rtk diff",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_tree() {
+        assert_eq!(
+            rewrite_command_no_prefixes("tree src/", &[]),
+            Some("rtk tree src/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_diff() {
+        assert_eq!(
+            rewrite_command_no_prefixes("diff file1.txt file2.txt", &[]),
+            Some("rtk diff file1.txt file2.txt".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gh_release() {
+        assert_eq!(
+            rewrite_command_no_prefixes("gh release list", &[]),
+            Some("rtk gh release list".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_cargo_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo install rtk", &[]),
+            Some("rtk cargo install rtk".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_kubectl_describe() {
+        assert_eq!(
+            rewrite_command_no_prefixes("kubectl describe pod mypod", &[]),
+            Some("rtk kubectl describe pod mypod".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_docker_run() {
+        assert_eq!(
+            rewrite_command_no_prefixes("docker run --rm ubuntu bash", &[]),
+            Some("rtk docker run --rm ubuntu bash".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_swift_test() {
+        assert!(matches!(
+            classify_command("swift test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk swift",
+                category: "Build",
+                estimated_savings_pct: 90.0,
+                status: RtkStatus::Existing,
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_swift_test() {
+        assert_eq!(
+            rewrite_command_no_prefixes("swift test --parallel", &[]),
+            Some("rtk swift test --parallel".into())
+        );
+    }
+
+    // --- #336: docker compose supported subcommands rewritten, unsupported skipped ---
+
+    #[test]
+    fn test_rewrite_docker_compose_ps() {
+        assert_eq!(
+            rewrite_command_no_prefixes("docker compose ps", &[]),
+            Some("rtk docker compose ps".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_docker_compose_logs() {
+        assert_eq!(
+            rewrite_command_no_prefixes("docker compose logs web", &[]),
+            Some("rtk docker compose logs web".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_docker_compose_build() {
+        assert_eq!(
+            rewrite_command_no_prefixes("docker compose build", &[]),
+            Some("rtk docker compose build".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_docker_compose_up_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("docker compose up -d", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_docker_compose_down_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("docker compose down", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_docker_compose_config_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("docker compose -f foo.yaml config --services", &[]),
+            None
+        );
+    }
+
+    // --- AWS / psql (PR #216) ---
+
+    #[test]
+    fn test_classify_aws() {
+        assert!(matches!(
+            classify_command("aws s3 ls"),
+            Classification::Supported {
+                rtk_equivalent: "rtk aws",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_aws_ec2() {
+        assert!(matches!(
+            classify_command("aws ec2 describe-instances"),
+            Classification::Supported {
+                rtk_equivalent: "rtk aws",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_psql() {
+        assert!(matches!(
+            classify_command("psql -U postgres"),
+            Classification::Supported {
+                rtk_equivalent: "rtk psql",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_psql_url() {
+        assert!(matches!(
+            classify_command("psql postgres://localhost/mydb"),
+            Classification::Supported {
+                rtk_equivalent: "rtk psql",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_aws() {
+        assert_eq!(
+            rewrite_command_no_prefixes("aws s3 ls", &[]),
+            Some("rtk aws s3 ls".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_aws_ec2() {
+        assert_eq!(
+            rewrite_command_no_prefixes("aws ec2 describe-instances --region us-east-1", &[]),
+            Some("rtk aws ec2 describe-instances --region us-east-1".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_psql() {
+        assert_eq!(
+            rewrite_command_no_prefixes("psql -U postgres -d mydb", &[]),
+            Some("rtk psql -U postgres -d mydb".into())
+        );
+    }
+
+    // --- Python tooling ---
+
+    #[test]
+    fn test_classify_ruff_check() {
+        assert!(matches!(
+            classify_command("ruff check ."),
+            Classification::Supported {
+                rtk_equivalent: "rtk ruff",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_ruff_format() {
+        assert!(matches!(
+            classify_command("ruff format src/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk ruff",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_pytest() {
+        assert!(matches!(
+            classify_command("pytest tests/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pytest",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_python_m_pytest() {
+        assert!(matches!(
+            classify_command("python -m pytest tests/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pytest",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_pip_list() {
+        assert!(matches!(
+            classify_command("pip list"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pip",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_uv_pip_list() {
+        assert!(matches!(
+            classify_command("uv pip list"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pip",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_ruff_check() {
+        assert_eq!(
+            rewrite_command_no_prefixes("ruff check .", &[]),
+            Some("rtk ruff check .".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_ruff_format() {
+        assert_eq!(
+            rewrite_command_no_prefixes("ruff format src/", &[]),
+            Some("rtk ruff format src/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pytest() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pytest tests/", &[]),
+            Some("rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_python_m_pytest() {
+        assert_eq!(
+            rewrite_command_no_prefixes("python -m pytest -x tests/", &[]),
+            Some("rtk pytest -x tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_pytest() {
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run pytest tests/", &[]),
+            Some("uv run rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_uv_run_pytest() {
+        assert_eq!(
+            rewrite_command_no_prefixes("PYTHONPATH=. uv run pytest tests/", &[]),
+            Some("PYTHONPATH=. uv run rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_python_m_pytest() {
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run python -m pytest -q", &[]),
+            Some("uv run rtk pytest -q".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_supported_inner_command() {
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run ruff check .", &[]),
+            Some("uv run rtk ruff check .".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_options_are_passed_through() {
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run --unknown pytest tests/", &[]),
+            Some("rtk uv run --unknown pytest tests/".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run -m pytest -q", &[]),
+            Some("rtk uv run -m pytest -q".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run --module pytest -q", &[]),
+            Some("rtk uv run --module pytest -q".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pip_list() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pip list", &[]),
+            Some("rtk pip list".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pip_outdated() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pip outdated", &[]),
+            Some("rtk pip outdated".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_uv_pip_list() {
+        assert_eq!(
+            rewrite_command_no_prefixes("uv pip list", &[]),
+            Some("rtk pip list".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_uv_run() {
+        let commands = vec![
+            "uv run python script.py",
+            "uv run pytest",
+            "uv run ruff check",
+            "uv run --project backend --extra dev python script.py",
+        ];
+
+        for command in commands {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk uv",
+                        ..
+                    }
+                ),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_shell_keyword_prefix_does_not_fall_through_to_whole_string() {
+        // `rtk exec date` would be unspawnable, so an unfiltered inner command
+        // must drop the rewrite rather than re-test the prefixed string.
+        for cmd in [
+            "exec somethingunfiltered",
+            "noglob somethingunfiltered",
+            "command somethingunfiltered",
+            "builtin somethingunfiltered",
+            "nocorrect somethingunfiltered",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                None,
+                "Failed for command: {}",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_uv_run() {
+        let cases = vec![
+            ("uv run pytest", "uv run rtk pytest"),
+            ("uv run ruff check", "uv run rtk ruff check"),
+            ("uv run python script.py", "rtk uv run python script.py"),
+            (
+                "uv run --project backend --extra dev python script.py",
+                "rtk uv run --project backend --extra dev python script.py",
+            ),
+        ];
+
+        for (command, expected) in cases {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.to_string()),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    // --- Go tooling ---
+
+    #[test]
+    fn test_classify_go_test() {
+        assert!(matches!(
+            classify_command("go test ./..."),
+            Classification::Supported {
+                rtk_equivalent: "rtk go",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_go_build() {
+        assert!(matches!(
+            classify_command("go build ./..."),
+            Classification::Supported {
+                rtk_equivalent: "rtk go",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_go_vet() {
+        assert!(matches!(
+            classify_command("go vet ./..."),
+            Classification::Supported {
+                rtk_equivalent: "rtk go",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_golangci_lint() {
+        assert!(matches!(
+            classify_command("golangci-lint run"),
+            Classification::Supported {
+                rtk_equivalent: "rtk golangci-lint run",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_golangci_lint_with_flag_before_run() {
+        assert!(matches!(
+            classify_command("golangci-lint -v run ./..."),
+            Classification::Supported {
+                rtk_equivalent: "rtk golangci-lint run",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_golangci_lint_with_value_flag_before_run() {
+        assert!(matches!(
+            classify_command("golangci-lint --color never run ./..."),
+            Classification::Supported {
+                rtk_equivalent: "rtk golangci-lint run",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_golangci_lint_with_inline_value_flag_before_run() {
+        assert!(matches!(
+            classify_command("golangci-lint --color=never run ./..."),
+            Classification::Supported {
+                rtk_equivalent: "rtk golangci-lint run",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_golangci_lint_with_inline_config_flag_before_run() {
+        assert!(matches!(
+            classify_command("golangci-lint --config=foo.yml run ./..."),
+            Classification::Supported {
+                rtk_equivalent: "rtk golangci-lint run",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_golangci_lint_bare_is_not_compact_wrapper() {
+        assert!(!matches!(
+            classify_command("golangci-lint"),
+            Classification::Supported {
+                rtk_equivalent: "rtk golangci-lint run",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_golangci_lint_other_subcommand_is_not_compact_wrapper() {
+        assert!(!matches!(
+            classify_command("golangci-lint version"),
+            Classification::Supported {
+                rtk_equivalent: "rtk golangci-lint run",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_go_test() {
+        assert_eq!(
+            rewrite_command_no_prefixes("go test ./...", &[]),
+            Some("rtk go test ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_go_build() {
+        assert_eq!(
+            rewrite_command_no_prefixes("go build ./...", &[]),
+            Some("rtk go build ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_go_vet() {
+        assert_eq!(
+            rewrite_command_no_prefixes("go vet ./...", &[]),
+            Some("rtk go vet ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_golangci_lint() {
+        assert_eq!(
+            rewrite_command_no_prefixes("golangci-lint run ./...", &[]),
+            Some("rtk golangci-lint run ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_golangci_lint_with_flag_before_run() {
+        assert_eq!(
+            rewrite_command_no_prefixes("golangci-lint -v run ./...", &[]),
+            Some("rtk golangci-lint -v run ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_golangci_lint_with_value_flag_before_run() {
+        assert_eq!(
+            rewrite_command_no_prefixes("golangci-lint --color never run ./...", &[]),
+            Some("rtk golangci-lint --color never run ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_golangci_lint_with_inline_value_flag_before_run() {
+        assert_eq!(
+            rewrite_command_no_prefixes("golangci-lint --color=never run ./...", &[]),
+            Some("rtk golangci-lint --color=never run ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_golangci_lint_with_inline_config_flag_before_run() {
+        assert_eq!(
+            rewrite_command_no_prefixes("golangci-lint --config=foo.yml run ./...", &[]),
+            Some("rtk golangci-lint --config=foo.yml run ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_prefixed_golangci_lint_with_value_flag_before_run() {
+        assert_eq!(
+            rewrite_command_no_prefixes("FOO=1 golangci-lint --color never run ./...", &[]),
+            Some("FOO=1 rtk golangci-lint --color never run ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_prefixed_golangci_lint_with_inline_value_flag_before_run() {
+        assert_eq!(
+            rewrite_command_no_prefixes("FOO=1 golangci-lint --color=never run ./...", &[]),
+            Some("FOO=1 rtk golangci-lint --color=never run ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bare_golangci_lint_skips_compact_wrapper() {
+        assert_eq!(rewrite_command_no_prefixes("golangci-lint", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_other_golangci_lint_subcommand_skips_compact_wrapper() {
+        assert_eq!(
+            rewrite_command_no_prefixes("golangci-lint version", &[]),
+            None
+        );
+    }
+
+    // --- JS/TS tooling ---
+
+    #[test]
+    fn test_classify_lint() {
+        let commands = vec![
+            "npm exec biome",
+            "npm exec eslint",
+            "npm rum biome",
+            "npm rum eslint",
+            "npm rum lint",
+            "npm run biome",
+            "npm run eslint",
+            "npm run lint",
+            "npm run-script biome",
+            "npm run-script eslint",
+            "npm run-script lint",
+            "npm urn biome",
+            "npm urn eslint",
+            "npm urn lint",
+            "npm x biome",
+            "npm x eslint",
+            "pnpm dlx biome",
+            "pnpm dlx eslint",
+            "pnpm exec biome",
+            "pnpm exec eslint",
+            "pnpm run biome",
+            "pnpm run eslint",
+            "pnpm run lint",
+            "pnpm run-script biome",
+            "pnpm run-script eslint",
+            "pnpm run-script lint",
+            "npm biome",
+            "npm eslint",
+            "npm lint",
+            "npx biome",
+            "npx eslint",
+            "npx lint",
+            "pnpm biome",
+            "pnpm eslint",
+            "pnpm lint",
+            "pnpx biome",
+            "pnpx eslint",
+            "pnpx lint",
+            "biome",
+            "eslint",
+            "lint",
+        ];
+        for command in commands {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk lint",
+                        ..
+                    }
+                ),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_lint() {
+        let commands = vec![
+            "npm exec biome",
+            "npm exec eslint",
+            "npm rum biome",
+            "npm rum eslint",
+            "npm rum lint",
+            "npm run biome",
+            "npm run eslint",
+            "npm run lint",
+            "npm run-script biome",
+            "npm run-script eslint",
+            "npm run-script lint",
+            "npm urn biome",
+            "npm urn eslint",
+            "npm urn lint",
+            "npm x biome",
+            "npm x eslint",
+            "pnpm dlx biome",
+            "pnpm dlx eslint",
+            "pnpm exec biome",
+            "pnpm exec eslint",
+            "pnpm run biome",
+            "pnpm run eslint",
+            "pnpm run lint",
+            "pnpm run-script biome",
+            "pnpm run-script eslint",
+            "pnpm run-script lint",
+            "npm biome",
+            "npm eslint",
+            "npm lint",
+            "npx biome",
+            "npx eslint",
+            "npx lint",
+            "pnpm biome",
+            "pnpm eslint",
+            "pnpm lint",
+            "pnpx biome",
+            "pnpx eslint",
+            "pnpx lint",
+            "biome",
+            "eslint",
+            "lint",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some("rtk lint".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_jest() {
+        let commands = vec![
+            "jest run",
+            "jest",
+            "npm exec jest run",
+            "npm exec jest",
+            "npm jest run",
+            "npm jest",
+            "npm rum jest run",
+            "npm rum jest",
+            "npm run jest run",
+            "npm run jest",
+            "npm run-script jest run",
+            "npm run-script jest",
+            "npm urn jest run",
+            "npm urn jest",
+            "npm x jest run",
+            "npm x jest",
+            "npx jest run",
+            "npx jest",
+            "pnpm dlx jest run",
+            "pnpm dlx jest",
+            "pnpm exec jest run",
+            "pnpm exec jest",
+            "pnpm jest run",
+            "pnpm jest",
+            "pnpm run jest run",
+            "pnpm run jest",
+            "pnpm run-script jest run",
+            "pnpm run-script jest",
+            "pnpx jest run",
+            "pnpx jest",
+        ];
+        for command in commands {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk jest",
+                        ..
+                    }
+                ),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_jest() {
+        let commands = vec![
+            "jest run",
+            "jest",
+            "npm exec jest run",
+            "npm exec jest",
+            "npm jest run",
+            "npm jest",
+            "npm rum jest run",
+            "npm rum jest",
+            "npm run jest run",
+            "npm run jest",
+            "npm run-script jest run",
+            "npm run-script jest",
+            "npm urn jest run",
+            "npm urn jest",
+            "npm x jest run",
+            "npm x jest",
+            "npx jest run",
+            "npx jest",
+            "pnpm dlx jest run",
+            "pnpm dlx jest",
+            "pnpm exec jest run",
+            "pnpm exec jest",
+            "pnpm jest run",
+            "pnpm jest",
+            "pnpm run jest run",
+            "pnpm run jest",
+            "pnpm run-script jest run",
+            "pnpm run-script jest",
+            "pnpx jest run",
+            "pnpx jest",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some("rtk jest".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_vitest() {
+        let commands = vec![
+            "npm exec vitest run",
+            "npm exec vitest",
+            "npm rum vitest run",
+            "npm rum vitest",
+            "npm run vitest run",
+            "npm run vitest",
+            "npm run-script vitest run",
+            "npm run-script vitest",
+            "npm urn vitest run",
+            "npm urn vitest",
+            "npm vitest run",
+            "npm vitest",
+            "npm x vitest run",
+            "npm x vitest",
+            "npx vitest run",
+            "npx vitest",
+            "pnpm dlx vitest run",
+            "pnpm dlx vitest",
+            "pnpm exec vitest run",
+            "pnpm exec vitest",
+            "pnpm run vitest run",
+            "pnpm run vitest",
+            "pnpm run-script vitest run",
+            "pnpm run-script vitest",
+            "pnpm vitest run",
+            "pnpm vitest",
+            "pnpx vitest run",
+            "pnpx vitest",
+            "vitest run",
+            "vitest",
+        ];
+        for command in commands {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk vitest",
+                        ..
+                    }
+                ),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_vitest() {
+        let commands = vec![
+            "npm exec vitest run",
+            "npm exec vitest",
+            "npm rum vitest run",
+            "npm rum vitest",
+            "npm run vitest run",
+            "npm run vitest",
+            "npm run-script vitest run",
+            "npm run-script vitest",
+            "npm urn vitest run",
+            "npm urn vitest",
+            "npm vitest run",
+            "npm vitest",
+            "npm x vitest run",
+            "npm x vitest",
+            "npx vitest run",
+            "npx vitest",
+            "pnpm dlx vitest run",
+            "pnpm dlx vitest",
+            "pnpm exec vitest run",
+            "pnpm exec vitest",
+            "pnpm run vitest run",
+            "pnpm run vitest",
+            "pnpm run-script vitest run",
+            "pnpm run-script vitest",
+            "pnpm vitest run",
+            "pnpm vitest",
+            "pnpx vitest run",
+            "pnpx vitest",
+            "vitest run",
+            "vitest",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some("rtk vitest".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_prisma() {
+        let commands = vec![
+            "npm exec prisma",
+            "npm rum prisma",
+            "npm run prisma",
+            "npm run-script prisma",
+            "npm urn prisma",
+            "npm x prisma",
+            "pnpm dlx prisma",
+            "pnpm exec prisma",
+            "pnpm run prisma",
+            "pnpm run-script prisma",
+            "npm prisma",
+            "npx prisma",
+            "pnpm prisma",
+            "pnpx prisma",
+            "prisma",
+        ];
+        for command in commands {
+            assert!(
+                matches!(
+                    classify_command(format!("{command} migrate dev").as_str()),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk prisma",
+                        ..
+                    }
+                ),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_prisma() {
+        let commands = vec![
+            "npm exec prisma",
+            "npm rum prisma",
+            "npm run prisma",
+            "npm run-script prisma",
+            "npm urn prisma",
+            "npm x prisma",
+            "pnpm dlx prisma",
+            "pnpm exec prisma",
+            "pnpm run prisma",
+            "pnpm run-script prisma",
+            "npm prisma",
+            "npx prisma",
+            "pnpm prisma",
+            "pnpx prisma",
+            "prisma",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(format!("{command} migrate dev").as_str(), &[]),
+                Some("rtk prisma migrate dev".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_prettier() {
+        let commands = vec![
+            "npm exec prettier",
+            "npm rum prettier",
+            "npm run prettier",
+            "npm run-script prettier",
+            "npm urn prettier",
+            "npm x prettier",
+            "pnpm dlx prettier",
+            "pnpm exec prettier",
+            "pnpm run prettier",
+            "pnpm run-script prettier",
+            "npm prettier",
+            "npx prettier",
+            "pnpm prettier",
+            "pnpx prettier",
+            "prettier",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(format!("{command} --check src/").as_str(), &[]),
+                Some("rtk prettier --check src/".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_command() {
+        let commands = vec![
+            "exec",
+            "i",
+            "install",
+            "list",
+            "ls",
+            "outdated",
+            "run",
+            "run-script",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(format!("pnpm {command}").as_str(), &[]),
+                Some(format!("rtk pnpm {command}")),
+                "Failed for command: pnpm {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_npm_bare_subcommand() {
+        let commands = vec!["exec", "run", "run-script", "x"];
+        for command in commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(format!("npm {command}").as_str(), &[]),
+                Some(format!("rtk npm {command}")),
+                "Failed for bare command: npm {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_npm_with_args() {
+        assert_eq!(
+            rewrite_command_no_prefixes("npm run test", &[]),
+            Some("rtk npm run test".to_string()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("npm exec vitest", &[]),
+            Some("rtk vitest".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npx() {
+        assert_eq!(
+            rewrite_command_no_prefixes("npx svgo", &[]),
+            Some("rtk npx svgo".to_string()),
+        );
+    }
+
+    // --- Gradle ---
+
+    #[test]
+    fn test_classify_gradlew() {
+        assert!(matches!(
+            classify_command("./gradlew assembleDebug"),
+            Classification::Supported {
+                rtk_equivalent: "rtk gradlew",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_gradlew_no_dot_slash() {
+        assert!(matches!(
+            classify_command("gradlew build"),
+            Classification::Supported {
+                rtk_equivalent: "rtk gradlew",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_gradlew_bat() {
+        assert!(matches!(
+            classify_command("gradlew.bat clean"),
+            Classification::Supported {
+                rtk_equivalent: "rtk gradlew",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_gradle() {
+        assert!(matches!(
+            classify_command("gradle build"),
+            Classification::Supported {
+                rtk_equivalent: "rtk gradlew",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_gradlew() {
+        assert_eq!(
+            rewrite_command_no_prefixes("./gradlew assembleDebug", &[]),
+            Some("rtk gradlew assembleDebug".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gradlew_no_dot_slash() {
+        assert_eq!(
+            rewrite_command_no_prefixes("gradlew build", &[]),
+            Some("rtk gradlew build".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gradlew_bat() {
+        assert_eq!(
+            rewrite_command_no_prefixes("gradlew.bat clean", &[]),
+            Some("rtk gradlew clean".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gradle() {
+        assert_eq!(
+            rewrite_command_no_prefixes("gradle build", &[]),
+            Some("rtk gradlew build".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gradlew_test_savings() {
+        assert_eq!(
+            classify_command("./gradlew test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk gradlew",
+                category: "Build",
+                estimated_savings_pct: 90.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_sbt_test_only() {
+        assert_eq!(
+            rewrite_command_no_prefixes("sbt testOnly com.example.MySpec", &[]),
+            Some("rtk sbt testOnly com.example.MySpec".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"sbt "testOnly com.example.MySpec""#, &[]),
+            Some(r#"rtk sbt "testOnly com.example.MySpec""#.into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"sbt "testOnly *MySpec -- -z foo""#, &[]),
+            Some(r#"rtk sbt "testOnly *MySpec -- -z foo""#.into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("sbt testQuick", &[]),
+            Some("rtk sbt testQuick".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_sbt_does_not_match_unrelated_tasks() {
+        assert_eq!(rewrite_command_no_prefixes("sbt testify", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"sbt "test:compile""#, &[]),
+            None
+        );
+    }
+
+    // --- Maven ---
+
+    #[test]
+    fn test_classify_mvn_test() {
+        assert!(matches!(
+            classify_command("mvn test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_integration_test() {
+        assert!(matches!(
+            classify_command("mvn integration-test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_flags_before_goal() {
+        assert!(matches!(
+            classify_command("mvn -B -DskipTests=false clean install"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvnw_wrapper() {
+        assert!(matches!(
+            classify_command("./mvnw verify"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvnw_cmd_wrapper() {
+        assert!(matches!(
+            classify_command("mvnw.cmd package"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_clean_bypassed() {
+        // `clean` deliberately excluded from the alternation to avoid 0-overhead fork.
+        assert!(!matches!(
+            classify_command("mvn clean"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_site_bypassed() {
+        assert!(!matches!(
+            classify_command("mvn site"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_plugin_goal_bypassed() {
+        assert!(!matches!(
+            classify_command("mvn dependency:tree"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_bare_bypassed() {
+        assert!(!matches!(
+            classify_command("mvn"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_version_bypassed() {
+        assert!(!matches!(
+            classify_command("mvn --version"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_mvn_clean_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("mvn -B clean install", &[]),
+            Some("rtk mvn -B clean install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_mvnw_test() {
+        assert_eq!(
+            rewrite_command_no_prefixes("./mvnw test", &[]),
+            Some("rtk mvn test".into())
+        );
+    }
+
+    // --- Compound operator edge cases ---
+
+    #[test]
+    fn test_rewrite_compound_or() {
+        // `||` fallback: left rewritten, right rewritten
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test || cargo build", &[]),
+            Some("rtk cargo test || rtk cargo build".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_semicolon() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status; cargo test", &[]),
+            Some("rtk git status; rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_pipe_raw_filter() {
+        // Producers stay raw; only a pipeline-safe final stage is rewritten.
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test | grep FAILED", &[]),
+            Some("cargo test | rtk grep FAILED".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_pipe_git_grep() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git log -10 | grep feat", &[]),
+            Some("git log -10 | rtk grep feat".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_four_segments() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "cargo fmt --all && cargo clippy && cargo test && git status",
+                &[]
+            ),
+            Some(
+                "rtk cargo fmt --all && rtk cargo clippy && rtk cargo test && rtk git status"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_mixed_supported_unsupported() {
+        // unsupported segments stay raw
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test && htop", &[]),
+            Some("rtk cargo test && htop".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_all_unsupported_returns_none() {
+        // No rewrite at all: returns None
+        assert_eq!(rewrite_command_no_prefixes("htop && top", &[]), None);
+    }
+
+    // --- sudo / env prefix + rewrite ---
+
+    #[test]
+    fn test_rewrite_sudo_docker() {
+        assert_eq!(
+            rewrite_command_no_prefixes("sudo docker ps", &[]),
+            Some("sudo rtk docker ps".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_var_prefix() {
+        assert_eq!(
+            rewrite_command_no_prefixes("GIT_SSH_COMMAND=ssh git push origin main", &[]),
+            Some("GIT_SSH_COMMAND=ssh rtk git push origin main".into())
+        );
+    }
+
+    // --- find with native flags ---
+
+    #[test]
+    fn test_rewrite_find_with_flags() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -name '*.rs' -type f", &[]),
+            Some("rtk find . -name '*.rs' -type f".into())
+        );
+    }
+
+    #[test]
+    fn test_all_rules_are_complete() {
+        for rule in RULES {
+            assert!(
+                !rule.pattern.is_empty(),
+                "Rule '{}' has empty pattern",
+                rule.rtk_cmd
+            );
+            assert!(!rule.rtk_cmd.is_empty(), "Rule with empty rtk_cmd found");
+            assert!(
+                rule.rtk_cmd.starts_with("rtk "),
+                "rtk_cmd '{}' must start with 'rtk '",
+                rule.rtk_cmd
+            );
+            assert!(
+                !rule.rewrite_prefixes.is_empty(),
+                "Rule '{}' has no rewrite_prefixes",
+                rule.rtk_cmd
+            );
+        }
+    }
+
+    // --- exclude_commands (#243) ---
+
+    #[test]
+    fn test_rewrite_excludes_curl() {
+        let excluded = vec!["curl".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("curl https://api.example.com/health", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_exclude_does_not_affect_other_commands() {
+        let excluded = vec!["curl".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("git status", &excluded),
+            Some("rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_empty_excludes_rewrites_curl() {
+        let excluded: Vec<String> = vec![];
+        assert!(rewrite_command_no_prefixes("curl https://api.example.com", &excluded).is_some());
+    }
+
+    #[test]
+    fn test_rewrite_compound_partial_exclude() {
+        // curl excluded but git still rewrites
+        let excluded = vec!["curl".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("git status && curl https://api.example.com", &excluded),
+            Some("rtk git status && curl https://api.example.com".into())
+        );
+    }
+
+    #[test]
+    fn test_exclude_env_prefixed_command() {
+        let excluded = vec!["psql".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("PGPASSWORD=postgres psql -h localhost", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_exclude_subcommand_pattern() {
+        let excluded = vec!["git push".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("git push origin main", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_exclude_regex_pattern() {
+        let excluded = vec!["^curl".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("curl http://example.com", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_exclude_invalid_regex_fallback() {
+        let excluded = vec!["curl[".to_string()];
+        assert!(rewrite_command_no_prefixes("curl http://example.com", &excluded).is_some());
+    }
+
+    #[test]
+    fn test_exclude_does_not_substring_match() {
+        let excluded = vec!["go".to_string()];
+        assert!(rewrite_command_no_prefixes("golangci-lint run ./...", &excluded).is_some());
+    }
+
+    #[test]
+    fn test_exclude_does_not_match_hyphenated_command() {
+        let excluded = vec!["golangci".to_string()];
+        assert!(rewrite_command_no_prefixes("golangci-lint run ./...", &excluded).is_some());
+    }
+
+    #[test]
+    fn test_exclude_empty_pattern_ignored() {
+        let excluded = vec!["".to_string()];
+        assert!(rewrite_command_no_prefixes("git status", &excluded).is_some());
+    }
+
+    #[test]
+    fn test_exclude_bare_anchor_ignored() {
+        let excluded = vec!["^".to_string()];
+        assert!(rewrite_command_no_prefixes("git status", &excluded).is_some());
+    }
+
+    #[test]
+    fn test_all_patterns_are_valid_regex() {
+        use regex::Regex;
+        for (i, rule) in RULES.iter().enumerate() {
+            assert!(
+                Regex::new(rule.pattern).is_ok(),
+                "RULES[{i}] ({}) has invalid pattern '{}'",
+                rule.rtk_cmd,
+                rule.pattern
+            );
+        }
+    }
+
+    // --- #196: gh --json/--jq/--template passthrough ---
+
+    #[test]
+    fn test_rewrite_gh_json_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("gh pr list --json number,title", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gh_jq_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("gh pr list --json number --jq '.[].number'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gh_template_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("gh pr view 42 --template '{{.title}}'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gh_api_json_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("gh api repos/owner/repo --jq '.name'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gh_without_json_still_works() {
+        assert_eq!(
+            rewrite_command_no_prefixes("gh pr list", &[]),
+            Some("rtk gh pr list".into())
+        );
+    }
+
+    // --- #508: RTK_DISABLED detection helpers ---
+
+    #[test]
+    fn test_cmd_has_rtk_disabled_prefix() {
+        assert!(cmd_has_rtk_disabled_prefix("RTK_DISABLED=1 git status"));
+        assert!(cmd_has_rtk_disabled_prefix(
+            "FOO=1 RTK_DISABLED=1 cargo test"
+        ));
+        assert!(cmd_has_rtk_disabled_prefix(
+            "RTK_DISABLED=true git log --oneline"
+        ));
+        assert!(!cmd_has_rtk_disabled_prefix("git status"));
+        assert!(!cmd_has_rtk_disabled_prefix("rtk git status"));
+        assert!(!cmd_has_rtk_disabled_prefix("SOME_VAR=1 git status"));
+    }
+
+    #[test]
+    fn test_strip_disabled_prefix() {
+        assert_eq!(
+            strip_disabled_prefix("RTK_DISABLED=1 git status"),
+            ("RTK_DISABLED=1 ", "git status")
+        );
+        assert_eq!(
+            strip_disabled_prefix("FOO=1 RTK_DISABLED=1 cargo test"),
+            ("FOO=1 RTK_DISABLED=1 ", "cargo test")
+        );
+        assert_eq!(strip_disabled_prefix("git status"), ("", "git status"));
+    }
+
+    // --- #485: absolute path normalization ---
+
+    #[test]
+    fn test_classify_absolute_path_grep() {
+        assert_eq!(
+            classify_command("/usr/bin/grep -rni pattern"),
+            Classification::Supported {
+                rtk_equivalent: "rtk grep",
+                category: "Files",
+                estimated_savings_pct: 75.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_absolute_path_ls() {
+        assert_eq!(
+            classify_command("/bin/ls -la"),
+            Classification::Supported {
+                rtk_equivalent: "rtk ls",
+                category: "Files",
+                estimated_savings_pct: 65.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_absolute_path_git() {
+        assert_eq!(
+            classify_command("/usr/local/bin/git status"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_absolute_path_no_args() {
+        // /usr/bin/find alone → still classified
+        assert_eq!(
+            classify_command("/usr/bin/find ."),
+            Classification::Supported {
+                rtk_equivalent: "rtk find",
+                category: "Files",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_strip_absolute_path_helper() {
+        assert_eq!(strip_absolute_path("/usr/bin/grep -rn foo"), "grep -rn foo");
+        assert_eq!(strip_absolute_path("/bin/ls -la"), "ls -la");
+        assert_eq!(strip_absolute_path("grep -rn foo"), "grep -rn foo");
+        assert_eq!(strip_absolute_path("/usr/local/bin/git"), "git");
+    }
+
+    // --- #163: git global options ---
+
+    #[test]
+    fn test_classify_git_with_dash_c_path() {
+        assert_eq!(
+            classify_command("git -C /tmp status"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_git_no_pager_log() {
+        assert_eq!(
+            classify_command("git --no-pager log -5"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_git_git_dir() {
+        assert_eq!(
+            classify_command("git --git-dir /tmp/.git status"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_dash_c() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git -C /tmp status", &[]),
+            Some("rtk git -C /tmp status".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_no_pager() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git --no-pager log -5", &[]),
+            Some("rtk git --no-pager log -5".to_string())
+        );
+    }
+
+    #[test]
+    fn test_strip_git_global_opts_helper() {
+        assert_eq!(strip_git_global_opts("git -C /tmp status"), "git status");
+        assert_eq!(strip_git_global_opts("git --no-pager log"), "git log");
+        assert_eq!(strip_git_global_opts("git status"), "git status");
+        assert_eq!(strip_git_global_opts("cargo test"), "cargo test");
+    }
+
+    #[test]
+    fn test_strip_golangci_global_opts_helper() {
+        assert_eq!(
+            strip_golangci_global_opts("golangci-lint -v run ./..."),
+            "golangci-lint run ./..."
+        );
+        assert_eq!(
+            strip_golangci_global_opts("golangci-lint --color never run ./..."),
+            "golangci-lint run ./..."
+        );
+        assert_eq!(
+            strip_golangci_global_opts("golangci-lint --color=never run ./..."),
+            "golangci-lint run ./..."
+        );
+        assert_eq!(
+            strip_golangci_global_opts("golangci-lint --config=foo.yml run ./..."),
+            "golangci-lint run ./..."
+        );
+        assert_eq!(
+            strip_golangci_global_opts("golangci-lint version"),
+            "golangci-lint version"
+        );
+        assert_eq!(strip_golangci_global_opts("cargo test"), "cargo test");
+    }
+
+    // --- #wc: wc filter was silently ignored by the hook ---
+
+    #[test]
+    fn test_classify_wc_supported() {
+        // BUG: "wc " was in IGNORED_PREFIXES despite wc_cmd.rs having a full filter.
+        // This test documents the bug: it must FAIL before the fix and PASS after.
+        assert_eq!(
+            classify_command("wc -l src/main.rs"),
+            Classification::Supported {
+                rtk_equivalent: "rtk wc",
+                category: "Files",
+                estimated_savings_pct: 60.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_wc_multi_file() {
+        assert_eq!(
+            classify_command("wc src/*.rs"),
+            Classification::Supported {
+                rtk_equivalent: "rtk wc",
+                category: "Files",
+                estimated_savings_pct: 60.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_wc() {
+        assert_eq!(
+            rewrite_command_no_prefixes("wc -l src/main.rs", &[]),
+            Some("rtk wc -l src/main.rs".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_wc_multi_file() {
+        assert_eq!(
+            rewrite_command_no_prefixes("wc src/*.rs", &[]),
+            Some("rtk wc src/*.rs".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_command_substitution_passthrough() {
+        assert_eq!(
+            classify_command("git log $(git rev-parse HEAD~1)"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_command_substitution_passthrough() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git log $(git rev-parse HEAD~1)", &[]),
+            Some("rtk git log $(git rev-parse HEAD~1)".into())
+        );
+    }
+
+    #[test]
+    fn test_split_command_substitution_no_split() {
+        assert_eq!(
+            split_command_chain("git log $(git rev-parse HEAD~1)"),
+            vec!["git log $(git rev-parse HEAD~1)"]
+        );
+    }
+
+    #[test]
+    fn test_shell_prefix_noglob() {
+        assert_eq!(
+            rewrite_command_no_prefixes("noglob git status", &[]),
+            Some("noglob rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_prefix_command() {
+        assert_eq!(
+            rewrite_command_no_prefixes("command git status", &[]),
+            Some("command rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_prefix_builtin_exec_nocorrect() {
+        assert_eq!(
+            rewrite_command_no_prefixes("builtin git status", &[]),
+            Some("builtin rtk git status".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("exec git status", &[]),
+            Some("exec rtk git status".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("nocorrect git status", &[]),
+            Some("nocorrect rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_prefix_unknown_inner() {
+        assert_eq!(
+            rewrite_command_no_prefixes("noglob unknown_cmd --flag", &[]),
+            None
+        );
+    }
+
+    // --- transparent_prefixes tests ---
+
+    #[test]
+    fn test_transparent_prefix_strips_and_reprepends() {
+        let prefixes = vec!["shadowenv exec --".to_string()];
+        assert_eq!(
+            super::rewrite_command("shadowenv exec -- git status", &[], &prefixes),
+            Some("shadowenv exec -- rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_with_test_runner() {
+        let prefixes = vec!["shadowenv exec --".to_string()];
+        assert_eq!(
+            super::rewrite_command("shadowenv exec -- cargo test", &[], &prefixes),
+            Some("shadowenv exec -- rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_unknown_inner_returns_none() {
+        let prefixes = vec!["shadowenv exec --".to_string()];
+        assert_eq!(
+            super::rewrite_command("shadowenv exec -- htop", &[], &prefixes),
+            None
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_not_matched_is_passthrough() {
+        // Without the prefix configured, the wrapper breaks routing.
+        assert_eq!(
+            super::rewrite_command("shadowenv exec -- git status", &[], &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_composed_with_builtin() {
+        // `noglob shadowenv exec -- git status` — builtin layer strips noglob,
+        // user layer strips shadowenv exec --, inner `git status` routes.
+        let prefixes = vec!["shadowenv exec --".to_string()];
+        assert_eq!(
+            super::rewrite_command("noglob shadowenv exec -- git status", &[], &prefixes),
+            Some("noglob shadowenv exec -- rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_composed_with_env_prefix() {
+        let prefixes = vec!["bundle exec".to_string()];
+        assert_eq!(
+            super::rewrite_command("RAILS_ENV=test bundle exec git status", &[], &prefixes),
+            Some("RAILS_ENV=test bundle exec rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_env_prefix_composed_with_builtin() {
+        assert_eq!(
+            rewrite_command_no_prefixes("sudo noglob git status", &[]),
+            Some("sudo noglob rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_multiple_configured() {
+        let prefixes = vec!["shadowenv exec --".to_string(), "direnv exec .".to_string()];
+        assert_eq!(
+            super::rewrite_command("direnv exec . git status", &[], &prefixes),
+            Some("direnv exec . rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefixes_normalize_once() {
+        let prefixes = vec![
+            "  docker exec mycontainer  ".to_string(),
+            "".to_string(),
+            "docker".to_string(),
+            "docker exec mycontainer".to_string(),
+        ];
+        assert_eq!(
+            normalize_transparent_prefixes(&prefixes),
+            vec!["docker exec mycontainer".to_string(), "docker".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_overlapping_entries_use_longest_match() {
+        let prefixes = vec!["docker".to_string(), "docker exec app".to_string()];
+        assert_eq!(
+            super::rewrite_command("docker exec app git status", &[], &prefixes),
+            Some("docker exec app rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_whole_word_matching() {
+        // A prefix `"foo"` must NOT match `"foobar git status"`.
+        let prefixes = vec!["foo".to_string()];
+        assert_eq!(
+            super::rewrite_command("foobar git status", &[], &prefixes),
+            None
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_empty_rest_returns_none() {
+        let prefixes = vec!["shadowenv exec --".to_string()];
+        assert_eq!(
+            super::rewrite_command("shadowenv exec --", &[], &prefixes),
+            None
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_empty_entry_is_skipped() {
+        // A blank entry in the config should not cause spurious matches or panics.
+        let prefixes = vec!["".to_string(), "   ".to_string()];
+        assert_eq!(
+            super::rewrite_command("git status", &[], &prefixes),
+            Some("rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_inside_compound() {
+        // Each segment of `&&` / `;` should independently get prefix-stripped.
+        let prefixes = vec!["shadowenv exec --".to_string()];
+        assert_eq!(
+            super::rewrite_command(
+                "shadowenv exec -- git status && shadowenv exec -- cargo test",
+                &[],
+                &prefixes
+            ),
+            Some("shadowenv exec -- rtk git status && shadowenv exec -- rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_respects_excluded() {
+        // An excluded inner command should still produce no rewrite even behind
+        // a transparent prefix.
+        let prefixes = vec!["shadowenv exec --".to_string()];
+        let excluded = vec!["git".to_string()];
+        assert_eq!(
+            super::rewrite_command("shadowenv exec -- git status", &excluded, &prefixes),
+            None
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_recursion_bounded() {
+        // A prefix that could recurse forever (e.g. one that maps to itself)
+        // must terminate once MAX_PREFIX_DEPTH is reached.
+        let prefixes = vec!["wrap".to_string()];
+        let mut cmd = String::new();
+        for _ in 0..(MAX_PREFIX_DEPTH + 2) {
+            cmd.push_str("wrap ");
+        }
+        cmd.push_str("git status");
+        // Doesn't matter exactly what it returns — just that it doesn't stack-
+        // overflow or loop forever. Exercise the code path.
+        let _ = super::rewrite_command(&cmd, &[], &prefixes);
+    }
+
+    #[test]
+    fn test_python3_m_pytest() {
+        assert_eq!(
+            rewrite_command_no_prefixes("python3 -m pytest tests/", &[]),
+            Some("rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_pip_show() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pip show flask", &[]),
+            Some("rtk pip show flask".into())
+        );
+    }
+
+    #[test]
+    fn test_gt_graphite() {
+        assert_eq!(
+            rewrite_command_no_prefixes("gt log", &[]),
+            Some("rtk gt log".into())
+        );
+    }
+
+    #[test]
+    fn test_command_no_longer_ignored() {
+        assert_ne!(
+            classify_command("command git status"),
+            Classification::Ignored
+        );
+    }
+
+    // --- Pipe + operator rewrite ---
+
+    #[test]
+    fn test_rewrite_pipe_then_and() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git log | head -5 && git stash", &[]),
+            Some("git log | head -5 && rtk git stash".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_then_semicolon() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test | head; git status", &[]),
+            Some("cargo test | head; rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_then_or() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test | grep FAIL || git stash", &[]),
+            Some("cargo test | rtk grep FAIL || rtk git stash".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_pipe_then_and() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "RUST_BACKTRACE=1 cargo test 2>&1 | grep FAILED && git stash",
+                &[]
+            ),
+            Some("RUST_BACKTRACE=1 cargo test 2>&1 | rtk grep FAILED && rtk git stash".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_and_then_pipe() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status && cargo test | grep FAIL", &[]),
+            Some("rtk git status && cargo test | rtk grep FAIL".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_multi_pipe_then_and() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git log | head | tail && git status", &[]),
+            Some("git log | head | tail && rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipeline_final_normalizes_prefixes() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test | FOO=1 command grep FAILED", &[]),
+            Some("cargo test | FOO=1 command rtk grep FAILED".into())
+        );
+        assert_eq!(
+            super::rewrite_command(
+                "cargo test | docker exec tools grep FAILED",
+                &[],
+                &["docker exec tools".into()]
+            ),
+            Some("cargo test | docker exec tools rtk grep FAILED".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_opaque_grouped_pipeline_stays_raw() {
+        assert_eq!(
+            rewrite_command_no_prefixes("echo x | { cat; git log; } | grep feat", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_stderr_pipe_stays_raw() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test |& grep FAILED", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test | grep FAILED |& wc -l", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test |& grep FAILED && git status", &[]),
+            Some("cargo test |& grep FAILED && rtk git status".into())
+        );
+    }
+
+    // --- line-continuation handling (issue #1564) ---
+
+    #[test]
+    fn test_rewrite_leading_backslash_newline() {
+        // The exact reproduction from #1564: a leading `\<NL>` made
+        // the matcher see `\` as the command and bail out.
+        assert_eq!(
+            rewrite_command_no_prefixes("\\\ngit diff HEAD~1", &[]),
+            Some("rtk git diff HEAD~1".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_leading_backslash_crlf() {
+        // CRLF line ending — same shape, Windows shells / Git Bash.
+        assert_eq!(
+            rewrite_command_no_prefixes("\\\r\ngit diff HEAD~1", &[]),
+            Some("rtk git diff HEAD~1".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_internal_backslash_newline() {
+        // Embedded line continuation between subcommand and args:
+        // `git diff \<NL>HEAD~1` is exactly equivalent to
+        // `git diff HEAD~1` per bash semantics.
+        assert_eq!(
+            rewrite_command_no_prefixes("git diff \\\nHEAD~1", &[]),
+            Some("rtk git diff HEAD~1".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_backslash_newline_with_indent() {
+        // Continuation followed by indentation — also collapsed.
+        assert_eq!(
+            rewrite_command_no_prefixes("git \\\n    diff HEAD~1", &[]),
+            Some("rtk git diff HEAD~1".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_no_line_continuation_unchanged() {
+        // Sanity check: a command without any `\<NL>` should match
+        // unchanged. This pins that the normalization step does not
+        // regress the no-op fast path.
+        assert_eq!(
+            rewrite_command_no_prefixes("git diff HEAD~1", &[]),
+            Some("rtk git diff HEAD~1".into())
+        );
+    }
+
+    #[test]
+    fn test_collapse_line_continuations_no_op() {
+        // Helper-level: no continuations → returns Borrowed (no
+        // allocation). We can only spot-check the equality here, but
+        // the `Cow::Borrowed` variant is implied by `replace_all`
+        // when no replacement occurs.
+        assert_eq!(
+            collapse_line_continuations("git diff HEAD~1"),
+            std::borrow::Cow::<str>::Borrowed("git diff HEAD~1"),
+        );
+    }
+
+    // --- PHP tooling ---
+
+    #[test]
+    fn test_classify_phpunit() {
+        assert!(matches!(
+            classify_command("phpunit tests/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpunit",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_vendor_bin_phpunit() {
+        assert!(matches!(
+            classify_command("vendor/bin/phpunit --filter EmailTest"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpunit",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_php_vendor_bin_phpunit() {
+        assert!(matches!(
+            classify_command("php vendor/bin/phpunit tests/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpunit",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_phpunit() {
+        assert_eq!(
+            rewrite_command_no_prefixes("phpunit tests/", &[]),
+            Some("rtk phpunit tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_vendor_bin_phpunit() {
+        assert_eq!(
+            rewrite_command_no_prefixes("vendor/bin/phpunit --filter EmailTest", &[]),
+            Some("rtk phpunit --filter EmailTest".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_dotslash_vendor_bin() {
+        // `./vendor/bin/<tool>` is the common Laravel invocation form. classify
+        // normalizes the leading `./`, but the rewrite strips literal prefixes,
+        // so the `./vendor/bin/<tool>` prefix must be present or rewrite no-ops.
+        assert_eq!(
+            rewrite_command_no_prefixes("./vendor/bin/pint --test", &[]),
+            Some("rtk pint --test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("./vendor/bin/pest tests/", &[]),
+            Some("rtk pest tests/".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("./vendor/bin/paratest", &[]),
+            Some("rtk paratest".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("./vendor/bin/ecs check", &[]),
+            Some("rtk ecs check".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("./vendor/bin/phpunit --filter EmailTest", &[]),
+            Some("rtk phpunit --filter EmailTest".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_php_tool_invocation_forms() {
+        // phpunit carries the full matrix: php wrapper, ./, plain bin/, vendor/bin.
+        // rewrite_segment_inner normalizes each to the same canonical rewrite.
+        for cmd in [
+            "phpunit tests/",
+            "vendor/bin/phpunit tests/",
+            "./vendor/bin/phpunit tests/",
+            "bin/phpunit tests/",
+            "./bin/phpunit tests/",
+            "php vendor/bin/phpunit tests/",
+            "php phpunit tests/",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some("rtk phpunit tests/".into()),
+                "form: {cmd}"
+            );
+        }
+
+        // pest/pint/ecs/paratest use the simpler variant: ./ and vendor/bin only.
+        for cmd in ["pint", "vendor/bin/pint", "./vendor/bin/pint", "./pint"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some("rtk pint".into()),
+                "form: {cmd}"
+            );
+        }
+        // Forms the simpler variant intentionally does not accept (no php
+        // wrapper, no plain bin/) — must not rewrite rather than misfire.
+        assert_eq!(
+            rewrite_command_no_prefixes("php vendor/bin/pint", &[]),
+            None
+        );
+        assert_eq!(rewrite_command_no_prefixes("bin/pint", &[]), None);
+    }
+
+    #[test]
+    fn test_classify_phpstan() {
+        assert!(matches!(
+            classify_command("vendor/bin/phpstan analyse src/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpstan",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_phpstan_direct() {
+        assert!(matches!(
+            classify_command("phpstan analyse --level=9"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpstan",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_phpstan_vendor_bin() {
+        assert_eq!(
+            rewrite_command_no_prefixes("vendor/bin/phpstan analyse src/", &[]),
+            Some("rtk phpstan analyse src/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_phpstan_php_prefix() {
+        assert_eq!(
+            rewrite_command_no_prefixes("php vendor/bin/phpstan analyse", &[]),
+            Some("rtk phpstan analyse".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_phpstan_version_not_rewritten() {
+        assert_eq!(rewrite_command_no_prefixes("phpstan --version", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("phpstan list", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("phpstan clear-result-cache", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_classify_pest() {
+        assert!(matches!(
+            classify_command("vendor/bin/pest tests/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pest",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_pint() {
+        assert!(matches!(
+            classify_command("vendor/bin/pint --test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pint",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_php_artisan_rewrites() {
+        assert!(matches!(
+            classify_command("php artisan migrate"),
+            Classification::Supported {
+                rtk_equivalent: "rtk php",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_normalize_php_tool_command_custom_bin_dir() {
+        use std::path::PathBuf;
+        let dirs = vec![PathBuf::from("tools/bin"), PathBuf::from("vendor/bin")];
+        assert_eq!(
+            normalize_php_tool_command_with_dirs("tools/bin/phpunit tests/", &dirs),
+            "phpunit tests/"
+        );
+        assert_eq!(
+            normalize_php_tool_command_with_dirs("./tools/bin/pest", &dirs),
+            "pest"
+        );
+    }
+}
