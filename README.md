@@ -53,6 +53,7 @@ RTK intercepts shell commands and compresses their output before your agent read
 | `ruff check` | Grouped by rule and file |
 | `pytest` | Failures only, traceback trimmed |
 | `go test` | NDJSON parsed, failures only |
+| `llvm-lit` / `lit` | Suppress per-test PASS, keep FAIL detail + summary |
 | `docker ps` | Essential fields only |
 
 ## How Savings Work
@@ -197,6 +198,7 @@ rtk rake test                   # Ruby minitest (-90%)
 rtk rspec                       # RSpec tests (JSON, -60%+)
 rtk err <cmd>                   # Filter errors only from any command
 rtk test <cmd>                  # Generic test wrapper - failures only (-90%)
+rtk lit                         # LLVM Integrated Tester (suppress PASS, keep FAIL detail + summary)
 ```
 
 ### Build & Lint
