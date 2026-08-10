@@ -136,6 +136,14 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^(llvm-)?lit(\s|$)",
+        rtk_cmd: "rtk lit",
+        rewrite_prefixes: &["lit", "llvm-lit"],
+        category: "TestRunner",
+        savings_pct: 75.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^find\s+",
         rtk_cmd: "rtk find",
         rewrite_prefixes: &["find"],
