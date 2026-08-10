@@ -360,6 +360,13 @@ pub fn incomplete_output_meta_marker(reason: &str, shown_records: Option<usize>)
     format!("{OUTPUT_META_PREFIX}{json}")
 }
 
+fn unavailable_recovery(reason: &str) -> String {
+    format!(
+        "[recovery unavailable]\n{}",
+        incomplete_output_meta_marker(reason, None)
+    )
+}
+
 fn format_recovery(
     human_hint: String,
     artifact: &TeeArtifact,
@@ -425,7 +432,7 @@ pub fn tee_and_hint(raw: &str, command_slug: &str, exit_code: i32) -> Option<Str
                 None,
             )
         }
-        None => incomplete_output_meta_marker("filtered_failure_output", None),
+        None => unavailable_recovery("filtered_failure_output"),
     })
 }
 
@@ -471,7 +478,7 @@ pub fn force_tee_hint(raw: &str, command_slug: &str) -> Option<String> {
             };
             format_recovery(hint, &artifact, "filtered_output", None, None, None, None)
         }
-        None => incomplete_output_meta_marker("filtered_output", None),
+        None => unavailable_recovery("filtered_output"),
     })
 }
 
@@ -506,7 +513,7 @@ pub fn force_tee_tail_hint(
                 None,
             )
         }
-        None => incomplete_output_meta_marker("filtered_output_tail", None),
+        None => unavailable_recovery("filtered_output_tail"),
     })
 }
 
@@ -986,14 +993,24 @@ directory = "/tmp/rtk-tee"
         let hint = force_tee_hint(&large_output, "test_cmd");
         std::env::remove_var("RTK_TEE");
         let hint = hint.expect("loss must remain machine-visible when tee is disabled");
-        assert!(hint.starts_with(OUTPUT_META_PREFIX));
+        assert!(hint.starts_with("[recovery unavailable]\n"));
+        let marker = hint.lines().nth(1).expect("standalone metadata line");
         let parsed: serde_json::Value = serde_json::from_str(
-            hint.strip_prefix(OUTPUT_META_PREFIX)
+            marker
+                .strip_prefix(OUTPUT_META_PREFIX)
                 .expect("metadata prefix"),
         )
         .expect("valid metadata");
         assert_eq!(parsed["truncated"], true);
         assert!(parsed["artifact"].is_null());
+    }
+
+    #[test]
+    fn test_unavailable_marker_stays_at_line_start_when_caller_prefixes_hint() {
+        let wrapped = format!("issues found: {}", unavailable_recovery("filtered_output"));
+        let marker = wrapped.lines().nth(1).expect("standalone metadata line");
+
+        assert!(marker.starts_with(OUTPUT_META_PREFIX));
     }
 
     #[test]
