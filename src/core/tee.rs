@@ -3,6 +3,38 @@
 use super::constants::RTK_DATA_DIR;
 use crate::core::config::Config;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+pub const OUTPUT_META_PREFIX: &str = "RTK_OUTPUT_META_V1 ";
+
+#[derive(Debug, Clone)]
+pub struct TeeArtifact {
+    pub path: PathBuf,
+    pub complete: bool,
+    pub source_bytes: usize,
+    pub stored_bytes: usize,
+}
+
+#[derive(serde::Serialize)]
+struct OutputArtifactMeta {
+    content: &'static str,
+    path: String,
+    complete: bool,
+    source_bytes: usize,
+    stored_bytes: usize,
+}
+
+#[derive(serde::Serialize)]
+struct OutputMeta<'a> {
+    schema: &'static str,
+    truncated: bool,
+    reason: &'a str,
+    raw_exit_code: Option<i32>,
+    recovery_start_line: Option<usize>,
+    shown_records: Option<usize>,
+    omitted_records: Option<usize>,
+    artifact: Option<OutputArtifactMeta>,
+}
 
 /// Minimum output size to tee (smaller outputs don't need recovery)
 const MIN_TEE_SIZE: usize = 500;
@@ -12,6 +44,8 @@ const DEFAULT_MAX_FILES: usize = 20;
 
 /// Default max file size (1MB)
 const DEFAULT_MAX_FILE_SIZE: usize = 1_048_576;
+
+static TEE_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Sanitize a command slug for use in filenames.
 /// Replaces non-alphanumeric chars (except underscore/hyphen) with underscore,
@@ -113,25 +147,27 @@ fn create_tee_dir(tee_dir: &std::path::Path) -> Option<()> {
 
 /// Write raw output to a tee file in the given directory.
 /// Returns file path on success.
-fn write_tee_file(
+fn write_tee_artifact(
     raw: &str,
     command_slug: &str,
     tee_dir: &std::path::Path,
     max_file_size: usize,
     max_files: usize,
-) -> Option<PathBuf> {
+) -> Option<TeeArtifact> {
     create_tee_dir(tee_dir)?;
 
     let slug = sanitize_slug(command_slug);
     let epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
-        .as_secs();
-    let filename = format!("{}_{}.log", epoch, slug);
+        .as_nanos();
+    let nonce = TEE_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let filename = format!("{}_{}_{}_{}.log", epoch, std::process::id(), nonce, slug);
     let filepath = tee_dir.join(filename);
 
     // Truncate at max_file_size (find a safe UTF-8 char boundary)
-    let content = if raw.len() > max_file_size {
+    let complete = raw.len() <= max_file_size;
+    let content = if !complete {
         let boundary = raw
             .char_indices()
             .take_while(|(i, _)| *i < max_file_size)
@@ -160,13 +196,31 @@ fn write_tee_file(
 
     // Rotate old files
     cleanup_old_files(tee_dir, max_files);
+    if !filepath.exists() {
+        return None;
+    }
 
-    Some(filepath)
+    Some(TeeArtifact {
+        path: filepath,
+        complete,
+        source_bytes: raw.len(),
+        stored_bytes: content.len(),
+    })
 }
 
-/// Write raw output to tee file if conditions are met.
-/// Returns file path on success, None if skipped/failed.
-pub fn tee_raw(raw: &str, command_slug: &str, exit_code: i32) -> Option<PathBuf> {
+#[cfg(test)]
+fn write_tee_file(
+    raw: &str,
+    command_slug: &str,
+    tee_dir: &std::path::Path,
+    max_file_size: usize,
+    max_files: usize,
+) -> Option<PathBuf> {
+    write_tee_artifact(raw, command_slug, tee_dir, max_file_size, max_files)
+        .map(|artifact| artifact.path)
+}
+
+fn tee_raw_artifact(raw: &str, command_slug: &str, exit_code: i32) -> Option<TeeArtifact> {
     // Check RTK_TEE=0 env override (disable)
     if std::env::var("RTK_TEE").ok().as_deref() == Some("0") {
         return None;
@@ -177,7 +231,7 @@ pub fn tee_raw(raw: &str, command_slug: &str, exit_code: i32) -> Option<PathBuf>
 
     let tee_dir = should_tee(&config.tee, raw.len(), exit_code, Some(tee_dir))?;
 
-    write_tee_file(
+    write_tee_artifact(
         raw,
         command_slug,
         &tee_dir,
@@ -252,14 +306,130 @@ fn format_hint(path: &std::path::Path) -> String {
     format!("[full output: {}]", display_shell_path(path))
 }
 
-/// Convenience: tee + format hint in one call.
-/// Returns hint string if file was written, None if skipped.
-pub fn tee_and_hint(raw: &str, command_slug: &str, exit_code: i32) -> Option<String> {
-    let path = tee_raw(raw, command_slug, exit_code)?;
-    Some(format_hint(&path))
+fn format_partial_hint(path: &std::path::Path) -> String {
+    format!("[partial recovery: {}]", display_shell_path(path))
 }
 
-fn force_tee_path(content: &str, command_slug: &str) -> Option<PathBuf> {
+pub fn output_meta_marker(
+    artifact: &TeeArtifact,
+    reason: &str,
+    raw_exit_code: Option<i32>,
+    recovery_start_line: Option<usize>,
+    shown_records: Option<usize>,
+    omitted_records: Option<usize>,
+) -> String {
+    let machine_path = if artifact.path.is_absolute() {
+        artifact.path.clone()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&artifact.path))
+            .unwrap_or_else(|_| artifact.path.clone())
+    };
+    let meta = OutputMeta {
+        schema: "rtk.output.v1",
+        truncated: true,
+        reason,
+        raw_exit_code,
+        recovery_start_line,
+        shown_records,
+        omitted_records,
+        artifact: Some(OutputArtifactMeta {
+            content: "complete_user_visible_output",
+            path: machine_path.display().to_string(),
+            complete: artifact.complete,
+            source_bytes: artifact.source_bytes,
+            stored_bytes: artifact.stored_bytes,
+        }),
+    };
+    let json = serde_json::to_string(&meta).expect("RTK output metadata must serialize");
+    format!("{OUTPUT_META_PREFIX}{json}")
+}
+
+pub fn incomplete_output_meta_marker(reason: &str, shown_records: Option<usize>) -> String {
+    let meta = OutputMeta {
+        schema: "rtk.output.v1",
+        truncated: true,
+        reason,
+        raw_exit_code: None,
+        recovery_start_line: None,
+        shown_records,
+        omitted_records: None,
+        artifact: None,
+    };
+    let json = serde_json::to_string(&meta).expect("RTK output metadata must serialize");
+    format!("{OUTPUT_META_PREFIX}{json}")
+}
+
+fn format_recovery(
+    human_hint: String,
+    artifact: &TeeArtifact,
+    reason: &str,
+    raw_exit_code: Option<i32>,
+    recovery_start_line: Option<usize>,
+    shown_records: Option<usize>,
+    omitted_records: Option<usize>,
+) -> String {
+    format!(
+        "{}\n{}",
+        human_hint,
+        output_meta_marker(
+            artifact,
+            reason,
+            raw_exit_code,
+            recovery_start_line,
+            shown_records,
+            omitted_records,
+        )
+    )
+}
+
+pub fn full_output_recovery(
+    artifact: &TeeArtifact,
+    reason: &str,
+    raw_exit_code: Option<i32>,
+    shown_records: Option<usize>,
+    omitted_records: Option<usize>,
+) -> String {
+    format_recovery(
+        format_hint(&artifact.path),
+        artifact,
+        reason,
+        raw_exit_code,
+        None,
+        shown_records,
+        omitted_records,
+    )
+}
+
+/// Convenience: tee + recovery metadata in one call.
+/// Non-empty lossy output always returns a machine marker, even when recovery
+/// is disabled, fails, or is only partial.
+pub fn tee_and_hint(raw: &str, command_slug: &str, exit_code: i32) -> Option<String> {
+    if raw.is_empty() {
+        return None;
+    }
+    Some(match tee_raw_artifact(raw, command_slug, exit_code) {
+        Some(artifact) => {
+            let hint = if artifact.complete {
+                format_hint(&artifact.path)
+            } else {
+                format_partial_hint(&artifact.path)
+            };
+            format_recovery(
+                hint,
+                &artifact,
+                "filtered_failure_output",
+                Some(exit_code),
+                None,
+                None,
+                None,
+            )
+        }
+        None => incomplete_output_meta_marker("filtered_failure_output", None),
+    })
+}
+
+pub fn force_tee_artifact(content: &str, command_slug: &str) -> Option<TeeArtifact> {
     if std::env::var("RTK_TEE").ok().as_deref() == Some("0") {
         return None;
     }
@@ -277,7 +447,7 @@ fn force_tee_path(content: &str, command_slug: &str) -> Option<PathBuf> {
     let tee_dir = get_tee_dir(&config)?;
     let tee_dir = create_tee_dir(&tee_dir).and(Some(tee_dir))?;
 
-    write_tee_file(
+    write_tee_artifact(
         content,
         command_slug,
         &tee_dir,
@@ -286,24 +456,58 @@ fn force_tee_path(content: &str, command_slug: &str) -> Option<PathBuf> {
     )
 }
 
-/// Returns `[full output: ~/path]`, or None if tee is disabled/skipped.
+/// Returns human recovery text plus machine metadata. Non-empty lossy output
+/// still gets an incomplete marker when tee is disabled or unavailable.
 pub fn force_tee_hint(raw: &str, command_slug: &str) -> Option<String> {
-    let path = force_tee_path(raw, command_slug)?;
-    Some(format_hint(&path))
+    if raw.is_empty() {
+        return None;
+    }
+    Some(match force_tee_artifact(raw, command_slug) {
+        Some(artifact) => {
+            let hint = if artifact.complete {
+                format_hint(&artifact.path)
+            } else {
+                format_partial_hint(&artifact.path)
+            };
+            format_recovery(hint, &artifact, "filtered_output", None, None, None, None)
+        }
+        None => incomplete_output_meta_marker("filtered_output", None),
+    })
 }
 
-/// Returns `[see remaining: tail -n +{line_offset} ~/path]`, or None if tee is disabled/skipped.
+/// Returns a tail recovery hint plus machine metadata when complete. Partial or
+/// unavailable recovery is labelled explicitly and never called full output.
 pub fn force_tee_tail_hint(
     content: &str,
     command_slug: &str,
     line_offset: usize,
 ) -> Option<String> {
-    let path = force_tee_path(content, command_slug)?;
-    Some(format!(
-        "[see remaining: tail -n +{} {}]",
-        line_offset,
-        display_shell_path(&path)
-    ))
+    if content.is_empty() {
+        return None;
+    }
+    Some(match force_tee_artifact(content, command_slug) {
+        Some(artifact) => {
+            let hint = if artifact.complete {
+                format!(
+                    "[see remaining: tail -n +{} {}]",
+                    line_offset,
+                    display_shell_path(&artifact.path)
+                )
+            } else {
+                format_partial_hint(&artifact.path)
+            };
+            format_recovery(
+                hint,
+                &artifact,
+                "filtered_output_tail",
+                None,
+                Some(line_offset),
+                None,
+                None,
+            )
+        }
+        None => incomplete_output_meta_marker("filtered_output_tail", None),
+    })
 }
 
 /// TeeMode controls when tee writes files.
@@ -424,6 +628,27 @@ mod tests {
         assert!(path.exists());
         let written = fs::read_to_string(&path).unwrap();
         assert!(written.contains("error: test failed"));
+    }
+
+    #[test]
+    fn test_write_tee_artifact_uses_unique_paths_for_same_slug() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let first =
+            write_tee_artifact("first", "grep", tmpdir.path(), 1000, 20).expect("first artifact");
+        let second =
+            write_tee_artifact("second", "grep", tmpdir.path(), 1000, 20).expect("second artifact");
+
+        assert_ne!(first.path, second.path);
+        assert_eq!(fs::read_to_string(first.path).unwrap(), "first");
+        assert_eq!(fs::read_to_string(second.path).unwrap(), "second");
+    }
+
+    #[test]
+    fn test_write_tee_artifact_returns_none_when_rotation_removes_it() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let artifact = write_tee_artifact("content", "grep", tmpdir.path(), 1000, 0);
+
+        assert!(artifact.is_none());
     }
 
     #[test]
@@ -561,6 +786,83 @@ mod tests {
     }
 
     #[test]
+    fn test_output_meta_marker_is_machine_parseable() {
+        let artifact = TeeArtifact {
+            path: PathBuf::from("/tmp/rtk/tee/full grep.log"),
+            complete: true,
+            source_bytes: 4096,
+            stored_bytes: 4096,
+        };
+        let marker = output_meta_marker(
+            &artifact,
+            "grep_result_limit",
+            Some(0),
+            None,
+            Some(25),
+            Some(7),
+        );
+        let payload = marker
+            .strip_prefix(OUTPUT_META_PREFIX)
+            .expect("stable RTK metadata prefix");
+        let parsed: serde_json::Value = serde_json::from_str(payload).expect("valid JSON metadata");
+
+        assert_eq!(parsed["schema"], "rtk.output.v1");
+        assert_eq!(parsed["truncated"], true);
+        assert_eq!(parsed["reason"], "grep_result_limit");
+        assert_eq!(parsed["raw_exit_code"], 0);
+        assert_eq!(parsed["shown_records"], 25);
+        assert_eq!(parsed["omitted_records"], 7);
+        assert_eq!(
+            parsed["artifact"]["content"],
+            "complete_user_visible_output"
+        );
+        assert_eq!(parsed["artifact"]["path"], "/tmp/rtk/tee/full grep.log");
+        assert_eq!(parsed["artifact"]["complete"], true);
+    }
+
+    #[test]
+    fn test_write_tee_artifact_reports_incomplete_storage() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let source = "x".repeat(2000);
+        let artifact = write_tee_artifact(&source, "grep", tmpdir.path(), 1000, 20)
+            .expect("tee artifact written");
+
+        assert!(!artifact.complete);
+        assert_eq!(artifact.source_bytes, 2000);
+        assert!(artifact.stored_bytes < artifact.source_bytes);
+    }
+
+    #[test]
+    fn test_incomplete_artifact_never_claims_full_output() {
+        let artifact = TeeArtifact {
+            path: PathBuf::from("/tmp/rtk/tee/partial.log"),
+            complete: false,
+            source_bytes: 2_000_000,
+            stored_bytes: 1_048_610,
+        };
+        let recovery = format_recovery(
+            format_partial_hint(&artifact.path),
+            &artifact,
+            "filtered_output",
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(recovery.starts_with("[partial recovery: "));
+        assert!(!recovery.contains("[full output:"));
+        let marker = recovery.lines().nth(1).expect("metadata marker");
+        let parsed: serde_json::Value = serde_json::from_str(
+            marker
+                .strip_prefix(OUTPUT_META_PREFIX)
+                .expect("metadata prefix"),
+        )
+        .expect("valid metadata");
+        assert_eq!(parsed["artifact"]["complete"], false);
+    }
+
+    #[test]
     fn test_display_shell_path_preserves_simple_paths() {
         let path = PathBuf::from("/tmp/rtk/tee/123_cargo_test.log");
         assert_eq!(display_shell_path(&path), "/tmp/rtk/tee/123_cargo_test.log");
@@ -678,13 +980,20 @@ directory = "/tmp/rtk-tee"
     }
 
     #[test]
-    fn test_force_tee_hint_respects_env_disable() {
-        // When RTK_TEE=0, force_tee_hint should return None
+    fn test_force_tee_hint_marks_unrecoverable_loss_when_env_disables_tee() {
         std::env::set_var("RTK_TEE", "0");
         let large_output = "x".repeat(1000);
         let hint = force_tee_hint(&large_output, "test_cmd");
         std::env::remove_var("RTK_TEE");
-        assert!(hint.is_none(), "Should respect RTK_TEE=0");
+        let hint = hint.expect("loss must remain machine-visible when tee is disabled");
+        assert!(hint.starts_with(OUTPUT_META_PREFIX));
+        let parsed: serde_json::Value = serde_json::from_str(
+            hint.strip_prefix(OUTPUT_META_PREFIX)
+                .expect("metadata prefix"),
+        )
+        .expect("valid metadata");
+        assert_eq!(parsed["truncated"], true);
+        assert!(parsed["artifact"].is_null());
     }
 
     #[test]
