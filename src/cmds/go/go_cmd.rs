@@ -49,21 +49,12 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     cmd.arg("test");
 
     let skip_json = args.iter().any(|a| a == "-json" || a.starts_with("-bench"));
+    let test_args = go_test_args(args, !skip_json);
 
-    if !skip_json {
-        cmd.arg("-json");
-    }
-
-    for arg in args {
-        cmd.arg(arg);
-    }
+    cmd.args(&test_args);
 
     if verbose > 0 {
-        eprintln!(
-            "Running: go test {}{}",
-            if !skip_json { "-json " } else { "" },
-            args.join(" ")
-        );
+        eprintln!("Running: go test {}", test_args.join(" "));
     }
 
     let filter: fn(&str) -> String = if skip_json {
@@ -79,6 +70,23 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
         filter,
         crate::core::runner::RunOptions::stdout_only().tee("go_test"),
     )
+}
+
+fn go_test_args(args: &[String], inject_json: bool) -> Vec<&str> {
+    let chdir_args = match args.first() {
+        Some(arg) if arg == "-C" && args.len() > 1 => 2,
+        Some(arg) if arg.starts_with("-C=") => 1,
+        _ => 0,
+    };
+    let mut result = Vec::with_capacity(args.len() + usize::from(inject_json));
+
+    result.extend(args[..chdir_args].iter().map(String::as_str));
+    if inject_json {
+        result.push("-json");
+    }
+    result.extend(args[chdir_args..].iter().map(String::as_str));
+
+    result
 }
 
 pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
@@ -748,6 +756,21 @@ fn compact_package_name(package: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_go_test_args_preserves_chdir_flag_order() {
+        let separate = vec!["-C".to_string(), "/tmp/project".to_string(), "./...".to_string()];
+        assert_eq!(
+            go_test_args(&separate, true),
+            vec!["-C", "/tmp/project", "-json", "./..."]
+        );
+
+        let joined = vec!["-C=/tmp/project".to_string(), "./...".to_string()];
+        assert_eq!(
+            go_test_args(&joined, true),
+            vec!["-C=/tmp/project", "-json", "./..."]
+        );
+    }
 
     #[test]
     fn test_filter_go_test_all_pass() {
