@@ -61,7 +61,7 @@ In `openclaw.json`:
 
 ## What gets rewritten
 
-Everything that `rtk rewrite` supports (30+ commands). See the [full command list](https://github.com/rtk-ai/rtk#commands).
+Everything that `rtk rewrite` supports. See the [full command list](https://github.com/rtk-ai/rtk#commands).
 
 ## What's NOT rewritten
 
