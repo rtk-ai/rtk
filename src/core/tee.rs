@@ -30,6 +30,12 @@ struct OutputArtifactMeta {
 }
 
 #[derive(serde::Serialize)]
+struct RecoveryErrorMeta {
+    code: &'static str,
+    repair: &'static str,
+}
+
+#[derive(serde::Serialize)]
 struct OutputMeta<'a> {
     schema: &'static str,
     truncated: bool,
@@ -39,7 +45,11 @@ struct OutputMeta<'a> {
     shown_records: Option<usize>,
     omitted_records: Option<usize>,
     artifact: Option<OutputArtifactMeta>,
+    recovery_error: Option<RecoveryErrorMeta>,
 }
+
+const ARTIFACT_UNAVAILABLE_REPAIR: &str =
+    "unset RTK_TEE=0, enable tee, and set RTK_TEE_DIR to a writable owner-only directory; then rerun the command";
 
 /// Minimum output size to tee (smaller outputs don't need recovery)
 const MIN_TEE_SIZE: usize = 500;
@@ -406,6 +416,7 @@ pub fn output_meta_marker(
             incomplete_reason: artifact.incomplete_reason,
             sha256: artifact.sha256.clone(),
         }),
+        recovery_error: None,
     };
     let json = serde_json::to_string(&meta).expect("RTK output metadata must serialize");
     format!("{OUTPUT_META_PREFIX}{json}")
@@ -429,22 +440,35 @@ fn incomplete_output_meta_marker_with_exit(
         shown_records,
         omitted_records: None,
         artifact: None,
+        recovery_error: None,
     };
     let json = serde_json::to_string(&meta).expect("RTK output metadata must serialize");
     format!("{OUTPUT_META_PREFIX}{json}")
 }
 
 fn unavailable_recovery(reason: &str) -> String {
-    format!(
-        "[recovery unavailable]\n{}",
-        incomplete_output_meta_marker(reason, None)
-    )
+    unavailable_recovery_with_exit(reason, None)
 }
 
 fn unavailable_recovery_with_exit(reason: &str, raw_exit_code: Option<i32>) -> String {
+    let meta = OutputMeta {
+        schema: "rtk.output.v1",
+        truncated: true,
+        reason,
+        raw_exit_code,
+        recovery_start_line: None,
+        shown_records: None,
+        omitted_records: None,
+        artifact: None,
+        recovery_error: Some(RecoveryErrorMeta {
+            code: "artifact_unavailable",
+            repair: ARTIFACT_UNAVAILABLE_REPAIR,
+        }),
+    };
+    let json = serde_json::to_string(&meta).expect("RTK output metadata must serialize");
     format!(
-        "[recovery unavailable]\n{}",
-        incomplete_output_meta_marker_with_exit(reason, None, raw_exit_code)
+        "[recovery unavailable: artifact could not be persisted; {}]\n{}{}",
+        ARTIFACT_UNAVAILABLE_REPAIR, OUTPUT_META_PREFIX, json
     )
 }
 
@@ -1159,7 +1183,7 @@ directory = "/tmp/rtk-tee"
         let hint = force_tee_hint(&large_output, "test_cmd");
         std::env::remove_var("RTK_TEE");
         let hint = hint.expect("loss must remain machine-visible when tee is disabled");
-        assert!(hint.starts_with("[recovery unavailable]\n"));
+        assert!(hint.starts_with("[recovery unavailable:"));
         let marker = hint.lines().nth(1).expect("standalone metadata line");
         let parsed: serde_json::Value = serde_json::from_str(
             marker
@@ -1169,6 +1193,11 @@ directory = "/tmp/rtk-tee"
         .expect("valid metadata");
         assert_eq!(parsed["truncated"], true);
         assert!(parsed["artifact"].is_null());
+        assert_eq!(parsed["recovery_error"]["code"], "artifact_unavailable");
+        assert!(parsed["recovery_error"]["repair"]
+            .as_str()
+            .expect("repair text")
+            .contains("RTK_TEE_DIR"));
     }
 
     #[test]
