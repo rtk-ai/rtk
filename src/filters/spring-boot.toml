@@ -1,0 +1,28 @@
+[filters.spring-boot]
+description = "Compact Spring Boot output — strip banner and verbose startup logs, keep key events"
+match_command = "^(mvn\\s+spring-boot:run|java\\s+-jar.*\\.jar|gradle\\s+.*bootRun)"
+strip_ansi = true
+keep_lines_matching = [
+  "Started\\s.*\\sin\\s",
+  "Tomcat started on port",
+  "ERROR",
+  "WARN",
+  "Exception",
+  "Caused by:",
+  "Application run failed",
+  "BUILD\\s",
+  "Tests run:",
+  "FAILURE",
+  "listening on port",
+]
+max_lines = 30
+
+[[tests.spring-boot]]
+name = "keeps startup summary and errors"
+input = "  .   ____          _ \n /\\\\ / ___'_ __ _ _(_)_ __  \n( ( )\\___ | '_ | '_| | '_ \\ \n \\/  ___)| |_)| | | | | || )\n  '  |____| .__|_| |_|_| |_\\__|\n  :: Spring Boot ::  (v3.2.0)\n2024-01-01 INFO Initializing Spring\n2024-01-01 INFO Bean 'dataSource' created\n2024-01-01 INFO Tomcat started on port 8080\n2024-01-01 INFO Started MyApp in 3.2 seconds"
+expected = "2024-01-01 INFO Tomcat started on port 8080\n2024-01-01 INFO Started MyApp in 3.2 seconds"
+
+[[tests.spring-boot]]
+name = "preserves errors"
+input = "  :: Spring Boot ::  (v3.2.0)\n2024-01-01 INFO Initializing Spring\n2024-01-01 ERROR Application run failed\nCaused by: java.lang.NullPointerException"
+expected = "2024-01-01 ERROR Application run failed\nCaused by: java.lang.NullPointerException"

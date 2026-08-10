@@ -1,0 +1,25 @@
+[filters.nx]
+description = "Compact Nx monorepo output — strip task graph noise, keep results"
+match_command = "^(pnpm\\s+)?nx\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*>\\s*NX\\s+Running target",
+  "^\\s*>\\s*NX\\s+Nx read the output",
+  "^\\s*>\\s*NX\\s+View logs",
+  "^———————",
+  "^—————————",
+  "^\\s+Nx \\(powered by",
+]
+truncate_lines_at = 150
+max_lines = 60
+
+[[tests.nx]]
+name = "strips Nx noise, keeps build output"
+input = "\n   > NX   Running target build for project myapp\n\n———————————————————————————————————————\nCompiled successfully.\nOutput: dist/apps/myapp\n\n   > NX   View logs at /tmp/.nx/runs/abc123\n\n   Nx (powered by computation caching)\n"
+expected = "Compiled successfully.\nOutput: dist/apps/myapp"
+
+[[tests.nx]]
+name = "preserves error output"
+input = "ERROR: Cannot find module '@myapp/shared'\n\n   > NX   Running target build for project myapp\n\nFailed at step: build"
+expected = "ERROR: Cannot find module '@myapp/shared'\nFailed at step: build"

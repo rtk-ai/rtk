@@ -1,0 +1,57 @@
+[filters.pulumi-refresh]
+description = "Compact Pulumi refresh (state reconciliation) output"
+match_command = "^pulumi\\s+refresh(\\s|$)"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Refreshing \\(",
+  "^Previewing (refresh|update)",
+  "^View in Browser",
+  "^View Live:",
+  "^Duration:",
+  "^Permalink:",
+  "^\\s*Type\\s+Name\\s+",
+  "^Loading policy packs",
+  "^@ (Previewing refresh|Refreshing)",
+  "^More information at:",
+  "^Use `pulumi ",
+  "^\\s+.*\\brefreshing\\s+\\(",
+  "^\\s+[~+\\-]\\s+[^ ]+\\s+\\S+\\s+refreshing\\s*$",
+  "^\\s{4,}at\\s+\\S+\\s*\\(",
+  "^\\s{4,}at\\s+/",
+  "^\\s+at\\s+processTicksAndRejections",
+  "^\\s+promise:\\s+Promise",
+  "^\\s+\\[Circular",
+  "^\\s*<ref\\s+\\*\\d",
+]
+on_empty = "pulumi refresh: no drift"
+
+[[tests.pulumi-refresh]]
+name = "strips refresh header and passes drift rows"
+input = """
+Refreshing (dev)
+
+View in Browser (Ctrl+O): https://app.pulumi.com/org/my-proj/dev/updates/44
+
+     Type                          Name              Status
+ ~   aws:s3:Bucket                 my-bucket         refreshed
+
+Resources:
+    ~ 1 updated
+
+Duration: 4s
+"""
+expected = """ ~   aws:s3:Bucket                 my-bucket         refreshed
+Resources:
+    ~ 1 updated"""
+
+[[tests.pulumi-refresh]]
+name = "on_empty when no drift detected"
+input = """
+Refreshing (dev)
+
+View in Browser (Ctrl+O): https://app.pulumi.com/org/my-proj/dev/updates/44
+
+Duration: 2s
+"""
+expected = "pulumi refresh: no drift"

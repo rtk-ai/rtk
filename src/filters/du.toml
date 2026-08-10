@@ -1,0 +1,16 @@
+[filters.du]
+description = "Compact du output"
+match_command = "^du\\b"
+strip_lines_matching = ["^\\s*$"]
+truncate_lines_at = 120
+max_lines = 40
+
+[[tests.du]]
+name = "preserves sizes, strips blank lines"
+input = "4.0K\t./src\n\n8.0K\t./tests\n16K\t."
+expected = "4.0K\t./src\n8.0K\t./tests\n16K\t."
+
+[[tests.du]]
+name = "single line passthrough"
+input = "128K\t."
+expected = "128K\t."
