@@ -1,9 +1,11 @@
 //! Data types for reporting which commands RTK can and cannot optimize.
 
 use crate::hooks::constants::{
-    COPILOT_HOOK_FILE, CURSOR_DIR, GITHUB_DIR, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
-    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_SUBDIR, REWRITE_HOOK_FILE,
+    CLAUDE_DIR, COPILOT_HOOK_FILE, CURSOR_DIR, GITHUB_DIR, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
+    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_SUBDIR, PRE_TOOL_USE_KEY,
+    REWRITE_HOOK_FILE, SETTINGS_JSON, SETTINGS_LOCAL_JSON,
 };
+use crate::hooks::is_claude_hook_command;
 use serde::Serialize;
 use std::path::Path;
 
@@ -50,6 +52,7 @@ pub struct UnsupportedEntry {
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AgentIntegrationStatus {
+    pub claude_hook_installed: bool,
     pub cursor_hook_installed: bool,
     pub hermes_plugin_installed: bool,
     pub copilot_hook_installed: bool,
@@ -64,11 +67,15 @@ impl AgentIntegrationStatus {
         status.copilot_hook_installed = std::env::current_dir()
             .map(|cwd| Self::copilot_hook_installed_in(&cwd))
             .unwrap_or(false);
+        status.claude_hook_installed |= std::env::current_dir()
+            .map(|cwd| Self::claude_hook_installed_in(&cwd))
+            .unwrap_or(false);
         status
     }
 
     fn detect_from_home(home: &Path) -> Self {
         Self {
+            claude_hook_installed: Self::claude_hook_installed_in(home),
             cursor_hook_installed: home
                 .join(CURSOR_DIR)
                 .join(HOOKS_SUBDIR)
@@ -82,6 +89,32 @@ impl AgentIntegrationStatus {
                 .is_file(),
             copilot_hook_installed: false,
         }
+    }
+
+    fn claude_hook_installed_in(base: &Path) -> bool {
+        let claude_dir = base.join(CLAUDE_DIR);
+        [SETTINGS_JSON, SETTINGS_LOCAL_JSON]
+            .iter()
+            .any(|file| Self::claude_settings_has_hook(&claude_dir.join(file)))
+    }
+
+    fn claude_settings_has_hook(path: &Path) -> bool {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) else {
+            return false;
+        };
+
+        root.get("hooks")
+            .and_then(|hooks| hooks.get(PRE_TOOL_USE_KEY))
+            .and_then(|entries| entries.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.get("hooks")?.as_array())
+            .flatten()
+            .filter_map(|hook| hook.get("command")?.as_str())
+            .any(|command| is_claude_hook_command(command) || command.contains(REWRITE_HOOK_FILE))
     }
 
     fn copilot_hook_installed_in(dir: &Path) -> bool {
@@ -131,24 +164,46 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
         "Scanned: {} sessions (last {} days), {} Bash commands\n",
         report.sessions_scanned, report.since_days, report.total_commands
     ));
-    out.push_str(&format!(
-        "Already using RTK: {} commands ({:.1}%)\n",
-        report.already_rtk,
-        if report.total_commands > 0 {
-            report.already_rtk as f64 * 100.0 / report.total_commands as f64
-        } else {
-            0.0
-        }
-    ));
+
+    if report.sessions_scanned == 0 {
+        out.push_str("\nNo Claude Code sessions found; no savings analysis was performed.\n");
+        append_agent_notes(&mut out, report.agent_status);
+        return out;
+    }
+
+    if report.agent_status.claude_hook_installed {
+        out.push_str(&format!(
+            "Explicit RTK commands in transcript: {}\n",
+            report.already_rtk
+        ));
+        out.push_str(
+            "\nClaude PreToolUse hook detected. Claude transcripts store pre-hook commands,\n\
+             so missed-savings and adoption estimates are unavailable.\n",
+        );
+    } else {
+        out.push_str(&format!(
+            "Already using RTK: {} commands ({:.1}%)\n",
+            report.already_rtk,
+            if report.total_commands > 0 {
+                report.already_rtk as f64 * 100.0 / report.total_commands as f64
+            } else {
+                0.0
+            }
+        ));
+    }
 
     if report.supported.is_empty() && report.unsupported.is_empty() {
-        out.push_str("\nNo missed savings found. RTK usage looks good!\n");
+        if report.agent_status.claude_hook_installed {
+            out.push_str("\nNo unhandled commands found in the scanned sessions.\n");
+        } else {
+            out.push_str("\nNo missed savings found. RTK usage looks good!\n");
+        }
         append_agent_notes(&mut out, report.agent_status);
         return out;
     }
 
     // Missed savings
-    if !report.supported.is_empty() {
+    if !report.agent_status.claude_hook_installed && !report.supported.is_empty() {
         out.push_str("\nMISSED SAVINGS -- Commands RTK already handles\n");
         out.push_str(&"-".repeat(72));
         out.push('\n');
@@ -216,7 +271,9 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
         out.push_str("-> Remove RTK_DISABLED=1 to recover token savings\n");
     }
 
-    out.push_str("\n~estimated from tool_result output sizes\n");
+    if !report.agent_status.claude_hook_installed {
+        out.push_str("\n~estimated from tool_result output sizes\n");
+    }
 
     append_agent_notes(&mut out, report.agent_status);
 
@@ -243,7 +300,22 @@ fn append_agent_notes(out: &mut String, status: AgentIntegrationStatus) {
 
 /// Format report as JSON.
 pub fn format_json(report: &DiscoverReport) -> String {
-    serde_json::to_string_pretty(report).unwrap_or_else(|_| "{}".to_string())
+    let Ok(mut value) = serde_json::to_value(report) else {
+        return "{}".to_string();
+    };
+
+    // Keep machine-readable output subject to the same correctness rule as text output:
+    // pre-hook transcript commands cannot prove that an RTK rewrite was missed.
+    if report.agent_status.claude_hook_installed {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "supported".to_string(),
+                serde_json::Value::Array(Vec::new()),
+            );
+        }
+    }
+
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string())
 }
 
 fn format_tokens(tokens: usize) -> String {
@@ -343,6 +415,32 @@ mod tests {
     }
 
     #[test]
+    fn test_agent_status_detects_claude_hook_from_global_settings() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let claude_dir = temp_home.path().join(CLAUDE_DIR);
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join(SETTINGS_JSON),
+            r#"{
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/opt/homebrew/bin/rtk hook claude"
+                        }]
+                    }]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let status = AgentIntegrationStatus::detect_from_home(temp_home.path());
+
+        assert!(status.claude_hook_installed);
+    }
+
+    #[test]
     fn test_agent_status_ignores_hermes_plugin_dir_without_manifest() {
         let temp_home = tempfile::tempdir().unwrap();
         let plugin_dir = temp_home
@@ -378,6 +476,7 @@ mod tests {
     fn test_format_json_includes_agent_status() {
         let mut report = make_report(0, 0);
         report.agent_status = AgentIntegrationStatus {
+            claude_hook_installed: true,
             cursor_hook_installed: true,
             hermes_plugin_installed: true,
             copilot_hook_installed: true,
@@ -386,9 +485,34 @@ mod tests {
         let output = format_json(&report);
         let json: serde_json::Value = serde_json::from_str(&output).unwrap();
 
+        assert_eq!(json["agent_status"]["claude_hook_installed"], true);
         assert_eq!(json["agent_status"]["cursor_hook_installed"], true);
         assert_eq!(json["agent_status"]["hermes_plugin_installed"], true);
         assert_eq!(json["agent_status"]["copilot_hook_installed"], true);
+    }
+
+    #[test]
+    fn test_format_json_suppresses_missed_savings_for_claude_hook() {
+        let mut report = make_report(10, 0);
+        report.supported.push(SupportedEntry {
+            command: "git status".to_string(),
+            count: 10,
+            rtk_equivalent: "rtk git status",
+            category: "git",
+            estimated_savings_tokens: 500,
+            estimated_savings_pct: 50.0,
+            rtk_status: RtkStatus::Existing,
+        });
+        report.agent_status = AgentIntegrationStatus {
+            claude_hook_installed: true,
+            ..AgentIntegrationStatus::default()
+        };
+
+        let output = format_json(&report);
+        let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(json["agent_status"]["claude_hook_installed"], true);
+        assert_eq!(json["supported"], serde_json::json!([]));
     }
 
     #[test]
@@ -425,5 +549,42 @@ mod tests {
             "Expected Copilot note in output but got:\n{}",
             output
         );
+    }
+
+    #[test]
+    fn test_format_text_suppresses_missed_savings_for_claude_hook() {
+        let mut report = make_report(23_009, 0);
+        report.supported.push(SupportedEntry {
+            command: "grep -n".to_string(),
+            count: 23_009,
+            rtk_equivalent: "rtk grep",
+            category: "search",
+            estimated_savings_tokens: 19_200_000,
+            estimated_savings_pct: 80.0,
+            rtk_status: RtkStatus::Existing,
+        });
+        report.agent_status = AgentIntegrationStatus {
+            claude_hook_installed: true,
+            ..AgentIntegrationStatus::default()
+        };
+
+        let output = format_text(&report, 10, false);
+
+        assert!(output.contains("Claude PreToolUse hook detected"));
+        assert!(output.contains("pre-hook commands"));
+        assert!(!output.contains("MISSED SAVINGS"));
+        assert!(!output.contains("19.2M tokens"));
+        assert!(!output.contains("0.0%"));
+    }
+
+    #[test]
+    fn test_format_text_zero_sessions_does_not_claim_usage_looks_good() {
+        let mut report = make_report(0, 0);
+        report.sessions_scanned = 0;
+
+        let output = format_text(&report, 10, false);
+
+        assert!(output.contains("No Claude Code sessions found"));
+        assert!(!output.contains("RTK usage looks good"));
     }
 }
