@@ -286,9 +286,9 @@ fi
 # 3. Use absolute path (prevent PATH hijacking)
 RTK_BIN=$(which rtk)
 
-# 4. Validate RTK version (prevent downgrade attacks)
-if ! "$RTK_BIN" --version | grep -q "rtk 0.16"; then
-    echo "Warning: RTK version mismatch"
+# 4. Validate RTK binary identity and version format
+if ! "$RTK_BIN" --version 2>/dev/null | grep -Eq '^rtk [0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'; then
+    echo "Warning: RTK binary identity/version check failed"
 fi
 
 # 5. Execute with explicit path

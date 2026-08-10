@@ -102,7 +102,7 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 ### Verify Installation
 
 ```bash
-rtk --version   # Should show "rtk 0.28.2"
+rtk --version   # Should print: rtk X.Y.Z
 rtk gain        # Should show the savings dashboard
 ```
 
