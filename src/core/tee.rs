@@ -2,6 +2,7 @@
 
 use super::constants::RTK_DATA_DIR;
 use crate::core::config::Config;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -13,6 +14,8 @@ pub struct TeeArtifact {
     pub complete: bool,
     pub source_bytes: usize,
     pub stored_bytes: usize,
+    pub incomplete_reason: Option<&'static str>,
+    pub sha256: String,
 }
 
 #[derive(serde::Serialize)]
@@ -22,6 +25,8 @@ struct OutputArtifactMeta {
     complete: bool,
     source_bytes: usize,
     stored_bytes: usize,
+    incomplete_reason: Option<&'static str>,
+    sha256: String,
 }
 
 #[derive(serde::Serialize)]
@@ -91,7 +96,27 @@ fn cleanup_old_files(dir: &std::path::Path, max_files: usize) {
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
+        .filter(|entry| {
+            let Ok(file_type) = entry.file_type() else {
+                return false;
+            };
+            if !file_type.is_file() {
+                return false;
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                return false;
+            };
+            let Some(stem) = name.strip_suffix(".log") else {
+                return false;
+            };
+            let mut parts = stem.splitn(4, '_');
+            parts
+                .by_ref()
+                .take(3)
+                .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+                && parts.next().is_some_and(|slug| !slug.is_empty())
+        })
         .collect();
 
     if entries.len() <= max_files {
@@ -147,12 +172,31 @@ fn create_tee_dir(tee_dir: &std::path::Path) -> Option<()> {
 
 /// Write raw output to a tee file in the given directory.
 /// Returns file path on success.
+#[cfg(test)]
 fn write_tee_artifact(
     raw: &str,
     command_slug: &str,
     tee_dir: &std::path::Path,
     max_file_size: usize,
     max_files: usize,
+) -> Option<TeeArtifact> {
+    write_tee_artifact_with_source_completeness(
+        raw,
+        command_slug,
+        tee_dir,
+        max_file_size,
+        max_files,
+        true,
+    )
+}
+
+fn write_tee_artifact_with_source_completeness(
+    raw: &str,
+    command_slug: &str,
+    tee_dir: &std::path::Path,
+    max_file_size: usize,
+    max_files: usize,
+    source_complete: bool,
 ) -> Option<TeeArtifact> {
     create_tee_dir(tee_dir)?;
 
@@ -166,8 +210,9 @@ fn write_tee_artifact(
     let filepath = tee_dir.join(filename);
 
     // Truncate at max_file_size (find a safe UTF-8 char boundary)
-    let complete = raw.len() <= max_file_size;
-    let content = if !complete {
+    let storage_complete = raw.len() <= max_file_size;
+    let complete = source_complete && storage_complete;
+    let content = if !storage_complete {
         let boundary = raw
             .char_indices()
             .take_while(|(i, _)| *i < max_file_size)
@@ -193,6 +238,7 @@ fn write_tee_artifact(
     .ok()?;
     use std::io::Write;
     file.write_all(content.as_bytes()).ok()?;
+    let sha256 = format!("{:x}", Sha256::digest(content.as_bytes()));
 
     // Rotate old files
     cleanup_old_files(tee_dir, max_files);
@@ -205,6 +251,14 @@ fn write_tee_artifact(
         complete,
         source_bytes: raw.len(),
         stored_bytes: content.len(),
+        incomplete_reason: if !source_complete {
+            Some("capture_limit")
+        } else if !storage_complete {
+            Some("storage_limit")
+        } else {
+            None
+        },
+        sha256,
     })
 }
 
@@ -220,7 +274,12 @@ fn write_tee_file(
         .map(|artifact| artifact.path)
 }
 
-fn tee_raw_artifact(raw: &str, command_slug: &str, exit_code: i32) -> Option<TeeArtifact> {
+fn tee_raw_artifact_with_source_completeness(
+    raw: &str,
+    command_slug: &str,
+    exit_code: i32,
+    source_complete: bool,
+) -> Option<TeeArtifact> {
     // Check RTK_TEE=0 env override (disable)
     if std::env::var("RTK_TEE").ok().as_deref() == Some("0") {
         return None;
@@ -231,12 +290,13 @@ fn tee_raw_artifact(raw: &str, command_slug: &str, exit_code: i32) -> Option<Tee
 
     let tee_dir = should_tee(&config.tee, raw.len(), exit_code, Some(tee_dir))?;
 
-    write_tee_artifact(
+    write_tee_artifact_with_source_completeness(
         raw,
         command_slug,
         &tee_dir,
         config.tee.max_file_size,
         config.tee.max_files,
+        source_complete,
     )
 }
 
@@ -334,11 +394,17 @@ pub fn output_meta_marker(
         shown_records,
         omitted_records,
         artifact: Some(OutputArtifactMeta {
-            content: "complete_user_visible_output",
+            content: if artifact.complete {
+                "complete_user_visible_output"
+            } else {
+                "partial_user_visible_output"
+            },
             path: machine_path.display().to_string(),
             complete: artifact.complete,
             source_bytes: artifact.source_bytes,
             stored_bytes: artifact.stored_bytes,
+            incomplete_reason: artifact.incomplete_reason,
+            sha256: artifact.sha256.clone(),
         }),
     };
     let json = serde_json::to_string(&meta).expect("RTK output metadata must serialize");
@@ -346,11 +412,19 @@ pub fn output_meta_marker(
 }
 
 pub fn incomplete_output_meta_marker(reason: &str, shown_records: Option<usize>) -> String {
+    incomplete_output_meta_marker_with_exit(reason, shown_records, None)
+}
+
+fn incomplete_output_meta_marker_with_exit(
+    reason: &str,
+    shown_records: Option<usize>,
+    raw_exit_code: Option<i32>,
+) -> String {
     let meta = OutputMeta {
         schema: "rtk.output.v1",
         truncated: true,
         reason,
-        raw_exit_code: None,
+        raw_exit_code,
         recovery_start_line: None,
         shown_records,
         omitted_records: None,
@@ -364,6 +438,13 @@ fn unavailable_recovery(reason: &str) -> String {
     format!(
         "[recovery unavailable]\n{}",
         incomplete_output_meta_marker(reason, None)
+    )
+}
+
+fn unavailable_recovery_with_exit(reason: &str, raw_exit_code: Option<i32>) -> String {
+    format!(
+        "[recovery unavailable]\n{}",
+        incomplete_output_meta_marker_with_exit(reason, None, raw_exit_code)
     )
 }
 
@@ -412,31 +493,55 @@ pub fn full_output_recovery(
 /// Non-empty lossy output always returns a machine marker, even when recovery
 /// is disabled, fails, or is only partial.
 pub fn tee_and_hint(raw: &str, command_slug: &str, exit_code: i32) -> Option<String> {
+    tee_and_hint_with_source_completeness(raw, command_slug, exit_code, true)
+}
+
+pub fn tee_and_hint_with_source_completeness(
+    raw: &str,
+    command_slug: &str,
+    exit_code: i32,
+    source_complete: bool,
+) -> Option<String> {
     if raw.is_empty() {
         return None;
     }
-    Some(match tee_raw_artifact(raw, command_slug, exit_code) {
-        Some(artifact) => {
-            let hint = if artifact.complete {
-                format_hint(&artifact.path)
-            } else {
-                format_partial_hint(&artifact.path)
-            };
-            format_recovery(
-                hint,
-                &artifact,
-                "filtered_failure_output",
-                Some(exit_code),
-                None,
-                None,
-                None,
-            )
-        }
-        None => unavailable_recovery("filtered_failure_output"),
-    })
+    Some(
+        match tee_raw_artifact_with_source_completeness(
+            raw,
+            command_slug,
+            exit_code,
+            source_complete,
+        ) {
+            Some(artifact) => {
+                let hint = if artifact.complete {
+                    format_hint(&artifact.path)
+                } else {
+                    format_partial_hint(&artifact.path)
+                };
+                format_recovery(
+                    hint,
+                    &artifact,
+                    "filtered_failure_output",
+                    Some(exit_code),
+                    None,
+                    None,
+                    None,
+                )
+            }
+            None => unavailable_recovery("filtered_failure_output"),
+        },
+    )
 }
 
 pub fn force_tee_artifact(content: &str, command_slug: &str) -> Option<TeeArtifact> {
+    force_tee_artifact_with_source_completeness(content, command_slug, true)
+}
+
+fn force_tee_artifact_with_source_completeness(
+    content: &str,
+    command_slug: &str,
+    source_complete: bool,
+) -> Option<TeeArtifact> {
     if std::env::var("RTK_TEE").ok().as_deref() == Some("0") {
         return None;
     }
@@ -454,32 +559,61 @@ pub fn force_tee_artifact(content: &str, command_slug: &str) -> Option<TeeArtifa
     let tee_dir = get_tee_dir(&config)?;
     let tee_dir = create_tee_dir(&tee_dir).and(Some(tee_dir))?;
 
-    write_tee_artifact(
+    write_tee_artifact_with_source_completeness(
         content,
         command_slug,
         &tee_dir,
         config.tee.max_file_size,
         config.tee.max_files,
+        source_complete,
     )
 }
 
 /// Returns human recovery text plus machine metadata. Non-empty lossy output
 /// still gets an incomplete marker when tee is disabled or unavailable.
 pub fn force_tee_hint(raw: &str, command_slug: &str) -> Option<String> {
+    force_tee_hint_internal(raw, command_slug, None, true)
+}
+
+pub fn force_tee_hint_with_source_completeness(
+    raw: &str,
+    command_slug: &str,
+    exit_code: i32,
+    source_complete: bool,
+) -> Option<String> {
+    force_tee_hint_internal(raw, command_slug, Some(exit_code), source_complete)
+}
+
+fn force_tee_hint_internal(
+    raw: &str,
+    command_slug: &str,
+    raw_exit_code: Option<i32>,
+    source_complete: bool,
+) -> Option<String> {
     if raw.is_empty() {
         return None;
     }
-    Some(match force_tee_artifact(raw, command_slug) {
-        Some(artifact) => {
-            let hint = if artifact.complete {
-                format_hint(&artifact.path)
-            } else {
-                format_partial_hint(&artifact.path)
-            };
-            format_recovery(hint, &artifact, "filtered_output", None, None, None, None)
-        }
-        None => unavailable_recovery("filtered_output"),
-    })
+    Some(
+        match force_tee_artifact_with_source_completeness(raw, command_slug, source_complete) {
+            Some(artifact) => {
+                let hint = if artifact.complete {
+                    format_hint(&artifact.path)
+                } else {
+                    format_partial_hint(&artifact.path)
+                };
+                format_recovery(
+                    hint,
+                    &artifact,
+                    "filtered_output",
+                    raw_exit_code,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            None => unavailable_recovery_with_exit("filtered_output", raw_exit_code),
+        },
+    )
 }
 
 /// Returns a tail recovery hint plus machine metadata when complete. Partial or
@@ -760,25 +894,27 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let dir = tmpdir.path();
 
-        // Create 25 .log files
+        // Create 25 RTK-owned .log files plus one unrelated log.
         for i in 0..25 {
-            let filename = format!("{:010}_{}.log", 1000000 + i, "test");
+            let filename = format!("{:010}_1_{}_test.log", 1000000 + i, i);
             fs::write(dir.join(&filename), "content").unwrap();
         }
+        fs::write(dir.join("application.log"), "must remain").unwrap();
 
         cleanup_old_files(dir, 20);
 
         let remaining: Vec<_> = fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).collect();
-        assert_eq!(remaining.len(), 20);
+        assert_eq!(remaining.len(), 21);
+        assert!(dir.join("application.log").exists());
 
         // Oldest 5 should be removed
         for i in 0..5 {
-            let filename = format!("{:010}_{}.log", 1000000 + i, "test");
+            let filename = format!("{:010}_1_{}_test.log", 1000000 + i, i);
             assert!(!dir.join(&filename).exists());
         }
         // Newest 20 should remain
         for i in 5..25 {
-            let filename = format!("{:010}_{}.log", 1000000 + i, "test");
+            let filename = format!("{:010}_1_{}_test.log", 1000000 + i, i);
             assert!(dir.join(&filename).exists());
         }
     }
@@ -799,6 +935,8 @@ mod tests {
             complete: true,
             source_bytes: 4096,
             stored_bytes: 4096,
+            incomplete_reason: None,
+            sha256: format!("{:x}", Sha256::digest(b"test")),
         };
         let marker = output_meta_marker(
             &artifact,
@@ -837,6 +975,32 @@ mod tests {
         assert!(!artifact.complete);
         assert_eq!(artifact.source_bytes, 2000);
         assert!(artifact.stored_bytes < artifact.source_bytes);
+        assert_eq!(artifact.incomplete_reason, Some("storage_limit"));
+    }
+
+    #[test]
+    fn test_capture_truncation_can_never_be_reported_as_complete_storage() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let source = "captured prefix only";
+        let artifact = write_tee_artifact_with_source_completeness(
+            source,
+            "pytest",
+            tmpdir.path(),
+            1000,
+            20,
+            false,
+        )
+        .expect("tee artifact written");
+
+        assert!(!artifact.complete);
+        assert_eq!(artifact.source_bytes, artifact.stored_bytes);
+        assert_eq!(artifact.incomplete_reason, Some("capture_limit"));
+        let marker = output_meta_marker(&artifact, "filtered_output", Some(0), None, None, None);
+        let payload = marker.strip_prefix(OUTPUT_META_PREFIX).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(parsed["artifact"]["content"], "partial_user_visible_output");
+        assert_eq!(parsed["artifact"]["complete"], false);
+        assert_eq!(parsed["artifact"]["incomplete_reason"], "capture_limit");
     }
 
     #[test]
@@ -846,6 +1010,8 @@ mod tests {
             complete: false,
             source_bytes: 2_000_000,
             stored_bytes: 1_048_610,
+            incomplete_reason: Some("storage_limit"),
+            sha256: format!("{:x}", Sha256::digest(b"partial")),
         };
         let recovery = format_recovery(
             format_partial_hint(&artifact.path),

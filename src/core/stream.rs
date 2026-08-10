@@ -217,6 +217,8 @@ pub struct StreamResult {
     pub raw: String,
     pub raw_stdout: String,
     pub raw_stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
     pub filtered: String,
 }
 
@@ -266,6 +268,8 @@ pub fn run_streaming(
             raw: String::new(),
             raw_stdout: String::new(),
             raw_stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
             filtered: String::new(),
         });
     }
@@ -414,7 +418,7 @@ pub fn run_streaming(
         stdout_thread.join().ok();
         stderr_thread.join().ok();
     } else {
-        let stderr_thread = std::thread::spawn(move || -> String {
+        let stderr_thread = std::thread::spawn(move || -> (String, bool) {
             let mut raw_err = String::new();
             let mut capped = false;
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
@@ -425,7 +429,7 @@ pub fn run_streaming(
                     capped = true;
                 }
             }
-            raw_err
+            (raw_err, capped)
         });
 
         {
@@ -477,10 +481,12 @@ pub fn run_streaming(
             }
         }
 
-        raw_stderr = stderr_thread.join().unwrap_or_else(|e| {
+        let stderr_result = stderr_thread.join().unwrap_or_else(|e| {
             eprintln!("[rtk] warning: stderr reader thread panicked: {:?}", e);
-            String::new()
+            (String::new(), true)
         });
+        raw_stderr = stderr_result.0;
+        capped_err = stderr_result.1;
     }
     if let Some(t) = stdin_thread {
         t.join().ok();
@@ -511,6 +517,8 @@ pub fn run_streaming(
         raw,
         raw_stdout,
         raw_stderr,
+        stdout_truncated: capped_out,
+        stderr_truncated: capped_err,
         filtered,
     })
 }
@@ -630,6 +638,8 @@ pub(crate) mod tests {
             raw: String::new(),
             raw_stdout: String::new(),
             raw_stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
             filtered: String::new(),
         };
         assert!(r.success());
@@ -642,6 +652,8 @@ pub(crate) mod tests {
             raw: String::new(),
             raw_stdout: String::new(),
             raw_stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
             filtered: String::new(),
         };
         assert!(!r.success());
@@ -654,6 +666,8 @@ pub(crate) mod tests {
             raw: String::new(),
             raw_stdout: String::new(),
             raw_stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
             filtered: String::new(),
         };
         assert!(!r.success());
