@@ -4,7 +4,7 @@
 
 **Deployed hook artifacts** — the actual files installed on user machines by `rtk init`. These are shell scripts, TypeScript plugins, and rules files that run outside the Rust binary. They are **thin delegates**: parse agent-specific JSON, call `rtk rewrite` as a subprocess, format agent-specific response. Zero filtering logic lives here.
 
-Owns: per-agent hook scripts and configuration files for 9 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi).
+Owns: per-agent hook scripts and configuration files for 10 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Mistral Vibe).
 
 Does **not** own: hook installation/uninstallation (that's `src/hooks/init.rs`), the rewrite pattern registry (that's `discover/registry`), or integrity verification (that's `src/hooks/integrity.rs`).
 
@@ -12,7 +12,7 @@ Relationship to `src/hooks/`: that component **creates** these files; this direc
 
 ## Purpose
 
-LLM agent integrations that intercept CLI commands and route them through RTK for token optimization. Each hook transparently rewrites raw commands (e.g., `git status`) to their RTK equivalents (e.g., `rtk git status`), delivering 60-90% token savings without requiring the agent or user to change their workflow.
+LLM agent integrations that intercept CLI commands and route them through RTK for token optimization. Each hook transparently rewrites raw commands (e.g., `git status`) to their RTK equivalents (e.g., `rtk git status`), cutting up to 90% of the bash output that reaches the LLM context without requiring the agent or user to change their workflow.
 
 ## How It Works
 
@@ -24,7 +24,7 @@ Agent runs command (e.g., "cargo test --nocapture")
   -> Registry matches pattern, returns "rtk cargo test --nocapture"
   -> Hook sends response in agent-specific JSON format
   -> Agent executes "rtk cargo test --nocapture" instead
-  -> Filtered output reaches LLM (~90% fewer tokens)
+  -> Filtered output reaches LLM (up to 90% fewer bash output bytes)
 ```
 
 All rewrite logic lives in the Rust binary (`src/discover/registry.rs`). Hook scripts are **thin delegates** that handle agent-specific JSON formats and call `rtk rewrite` for the actual decision. This ensures a single source of truth for all 70+ rewrite patterns.
@@ -42,6 +42,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
 - **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, `isToolCallEventType` guard, in-place mutation, `~/.pi/agent/extensions/`
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
+- **[`vibe/`](vibe/README.md)** — Rust binary hook (`rtk hook vibe`), `pre_tool` entry in `~/.vibe/hooks.toml`, `hook_specific_output.tool_input` rewrite plus `system_message` for UI visibility
 
 ## Supported Agents
 
@@ -58,6 +59,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | OpenCode | TypeScript plugin (`tool.execute.before`) | In-place mutation | Yes |
 | Pi | TypeScript extension (`tool_call` event) | In-place mutation | Yes |
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
+| Mistral Vibe | Rust binary (`rtk hook vibe`) | Transparent rewrite | Yes (`hook_specific_output.tool_input`) |
 
 ## JSON Formats by Agent
 
@@ -178,6 +180,32 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 
 Codex requires `permissionDecision: "allow"` whenever `updatedInput` is returned.
 
+### Mistral Vibe (Rust Binary)
+
+**Input** (stdin):
+
+```json
+{
+  "tool_name": "bash",
+  "tool_input": { "command": "git status" },
+  "hook_event_name": "pre_tool",
+  "session_id": "..."
+}
+```
+
+**Output** (when rewritten):
+
+```json
+{
+  "hook_specific_output": {
+    "tool_input": { "command": "rtk git status" }
+  },
+  "system_message": "rtk: rewrote to `rtk git status`"
+}
+```
+
+**No rewrite**: exit 0 with empty stdout (Vibe's contract for "no opinion" from a `pre_tool` hook).
+
 ### OpenCode (TypeScript Plugin)
 
 Mutates `args.command` in-place via the zx library:
@@ -218,11 +246,12 @@ The registry (`src/discover/registry.rs`) handles command patterns across these 
 
 ### Compound Command Handling
 
-The registry handles `&&`, `||`, `;`, `|`, and `&` operators:
+The registry handles `&&`, `||`, `;`, `|`, `|&`, and `&` operators:
 
-- **Pipe** (`|`): Only the left side is rewritten (right side consumes output format)
+- **Pipe** (`|`): Producers and intermediate stages stay raw; only a pipeline-safe final stage is rewritten
+- **Stderr pipe** (`|&`): The complete pipeline stays raw
 - **And/Or/Semicolon** (`&&`, `||`, `;`): Both sides rewritten independently
-- **find/fd in pipes**: Never rewritten (output format incompatible with xargs/wc/grep)
+- **Pipeline-safe rules**: Initially limited to argument-safe `grep`, `rg`, and `wc` invocations; search pattern-file forms defer
 
 Example: `cargo fmt --all && cargo test` becomes `rtk cargo fmt --all && rtk cargo test`
 

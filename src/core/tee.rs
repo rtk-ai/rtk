@@ -102,6 +102,15 @@ fn should_tee(
     tee_dir
 }
 
+/// Creates the parent as its own step, otherwise `create_dir_all` leaves the
+/// data root at the umask as an intermediate.
+fn create_tee_dir(tee_dir: &std::path::Path) -> Option<()> {
+    if let Some(parent) = tee_dir.parent() {
+        let _ = crate::core::utils::create_private_dir(parent);
+    }
+    crate::core::utils::create_private_dir(tee_dir).ok()
+}
+
 /// Write raw output to a tee file in the given directory.
 /// Returns file path on success.
 fn write_tee_file(
@@ -111,7 +120,7 @@ fn write_tee_file(
     max_file_size: usize,
     max_files: usize,
 ) -> Option<PathBuf> {
-    std::fs::create_dir_all(tee_dir).ok()?;
+    create_tee_dir(tee_dir)?;
 
     let slug = sanitize_slug(command_slug);
     let epoch = std::time::SystemTime::now()
@@ -138,7 +147,16 @@ fn write_tee_file(
         raw.to_string()
     };
 
-    std::fs::write(&filepath, content).ok()?;
+    let mut file = crate::core::utils::open_private(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true),
+        &filepath,
+    )
+    .ok()?;
+    use std::io::Write;
+    file.write_all(content.as_bytes()).ok()?;
 
     // Rotate old files
     cleanup_old_files(tee_dir, max_files);
@@ -177,8 +195,61 @@ fn display_path(path: &std::path::Path) -> String {
     path.display().to_string()
 }
 
+fn needs_shell_quoting(path: &str) -> bool {
+    path.chars().any(|c| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '\'' | '"'
+                    | '\\'
+                    | '$'
+                    | '`'
+                    | '!'
+                    | '#'
+                    | '&'
+                    | '('
+                    | ')'
+                    | ';'
+                    | '<'
+                    | '>'
+                    | '?'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '|'
+                    | '*'
+            )
+    })
+}
+
+fn escape_double_quoted_path(path: &str) -> String {
+    let mut escaped = String::with_capacity(path.len());
+    for c in path.chars() {
+        if matches!(c, '\\' | '"' | '$' | '`') {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
+}
+
+fn display_shell_path(path: &std::path::Path) -> String {
+    let display = display_path(path);
+    if !needs_shell_quoting(&display) {
+        return display;
+    }
+
+    if let Some(relative) = display.strip_prefix("~/") {
+        let relative = relative.replace(std::path::MAIN_SEPARATOR, "/");
+        return format!("\"$HOME/{}\"", escape_double_quoted_path(&relative));
+    }
+
+    format!("\"{}\"", escape_double_quoted_path(&display))
+}
+
 fn format_hint(path: &std::path::Path) -> String {
-    format!("[full output: {}]", display_path(path))
+    format!("[full output: {}]", display_shell_path(path))
 }
 
 /// Convenience: tee + format hint in one call.
@@ -204,7 +275,7 @@ fn force_tee_path(content: &str, command_slug: &str) -> Option<PathBuf> {
     }
 
     let tee_dir = get_tee_dir(&config)?;
-    let tee_dir = std::fs::create_dir_all(&tee_dir).ok().and(Some(tee_dir))?;
+    let tee_dir = create_tee_dir(&tee_dir).and(Some(tee_dir))?;
 
     write_tee_file(
         content,
@@ -231,7 +302,7 @@ pub fn force_tee_tail_hint(
     Some(format!(
         "[see remaining: tail -n +{} {}]",
         line_offset,
-        display_path(&path)
+        display_shell_path(&path)
     ))
 }
 
@@ -356,6 +427,48 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_write_tee_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let tee_dir = tmpdir.path().join("tee");
+        let path = write_tee_file(
+            "secret output\n",
+            "grep",
+            &tee_dir,
+            DEFAULT_MAX_FILE_SIZE,
+            20,
+        )
+        .expect("tee file written");
+
+        let mode = |p: &std::path::Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600, "tee file must be owner-only");
+        assert_eq!(mode(&tee_dir), 0o700, "tee dir must be owner-only");
+    }
+
+    // umask is process-global, so this must not run alongside another test that
+    // depends on it. Restored before the assertion can unwind.
+    #[test]
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    fn test_write_tee_file_owner_only_under_permissive_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // nosemgrep: unsafe-block
+        let previous = unsafe { libc::umask(0o000) };
+        let tmpdir = tempfile::tempdir().unwrap();
+        let tee_dir = tmpdir.path().join("tee");
+        let written = write_tee_file("secret\n", "grep", &tee_dir, DEFAULT_MAX_FILE_SIZE, 20);
+        // nosemgrep: unsafe-block
+        unsafe { libc::umask(previous) };
+
+        let path = written.expect("tee file written");
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "umask 000 must not widen the tee file");
+    }
+
+    #[test]
     fn test_write_tee_file_truncation() {
         let tmpdir = tempfile::tempdir().unwrap();
         let big_output = "x".repeat(2000);
@@ -445,6 +558,71 @@ mod tests {
         assert!(hint.starts_with("[full output: "));
         assert!(hint.ends_with(']'));
         assert!(hint.contains("123_cargo_test.log"));
+    }
+
+    #[test]
+    fn test_display_shell_path_preserves_simple_paths() {
+        let path = PathBuf::from("/tmp/rtk/tee/123_cargo_test.log");
+        assert_eq!(display_shell_path(&path), "/tmp/rtk/tee/123_cargo_test.log");
+    }
+
+    #[test]
+    fn test_display_shell_path_quotes_paths_with_spaces() {
+        let path = PathBuf::from("/tmp/rtk/Application Support/123_go_test.log");
+        assert_eq!(
+            display_shell_path(&path),
+            "\"/tmp/rtk/Application Support/123_go_test.log\""
+        );
+    }
+
+    #[test]
+    fn test_display_shell_path_quotes_backslashes() {
+        let path = PathBuf::from(r"/tmp/rtk/tee/path\segment.log");
+        assert_eq!(
+            display_shell_path(&path),
+            r#""/tmp/rtk/tee/path\\segment.log""#
+        );
+    }
+
+    #[test]
+    fn test_display_shell_path_uses_home_var_for_home_paths_with_spaces() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let path = home
+            .join("Library")
+            .join("Application Support")
+            .join("rtk")
+            .join("tee")
+            .join("123_go_test.log");
+
+        assert_eq!(
+            display_shell_path(&path),
+            "\"$HOME/Library/Application Support/rtk/tee/123_go_test.log\""
+        );
+    }
+
+    #[test]
+    fn test_format_hint_avoids_backslash_escaped_whitespace() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let path = home
+            .join("Library")
+            .join("Application Support")
+            .join("rtk")
+            .join("tee")
+            .join("123_go_test.log");
+        let hint = format_hint(&path);
+
+        assert_eq!(
+            hint,
+            "[full output: \"$HOME/Library/Application Support/rtk/tee/123_go_test.log\"]"
+        );
+        assert!(
+            !hint.contains("\\ "),
+            "hint should not encourage backslash-escaped whitespace"
+        );
     }
 
     #[test]

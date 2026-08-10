@@ -24,14 +24,23 @@ src/
 │   ├── filter.rs              ← Language-aware code filtering engine
 │   ├── toml_filter.rs         ← TOML DSL filter engine
 │   ├── display_helpers.rs     ← Terminal formatting helpers
-│   └── telemetry.rs           ← Analytics ping
+│   ├── telemetry.rs           ← Analytics ping
+│   ├── telemetry_cmd.rs       ← rtk telemetry command
+│   ├── args_utils.rs          ← Shared CLI arg parsing helpers
+│   ├── constants.rs           ← Shared constants
+│   ├── guard.rs                ← Guard-rail checks
+│   ├── runner.rs              ← Command execution runner
+│   └── stream.rs              ← Streaming output handling
 ├── hooks/                     ← Hook system
 │   ├── init.rs                ← rtk init command
 │   ├── rewrite_cmd.rs         ← rtk rewrite command
 │   ├── hook_cmd.rs            ← Gemini/Copilot hook processors
 │   ├── hook_check.rs          ← Hook status detection
+│   ├── hook_audit_cmd.rs      ← rtk hook audit command
 │   ├── verify_cmd.rs          ← rtk verify command
 │   ├── trust.rs               ← Project trust/untrust
+│   ├── permissions.rs         ← Hook permission handling
+│   ├── constants.rs           ← Shared hook constants
 │   └── integrity.rs           ← SHA-256 hook verification
 ├── analytics/                 ← Token savings analytics
 │   ├── gain.rs                ← rtk gain command
@@ -47,11 +56,13 @@ src/
 │   ├── dotnet/                ← dotnet, binlog, trx, format_report
 │   ├── cloud/                 ← aws, container (docker/kubectl), curl, wget, psql
 │   ├── system/                ← ls, tree, read, grep, find, wc, env, json, log, deps, summary, format, local_llm
-│   └── ruby/                  ← rake, rspec, rubocop
+│   ├── ruby/                  ← rake, rspec, rubocop
+│   ├── jvm/                   ← gradlew, mvn
+│   └── php/                   ← php, artisan, phpunit, phpstan, pest, paratest, ecs, pint
 ├── discover/                  ← Claude Code history analysis
 ├── learn/                     ← CLI correction detection
 ├── parser/                    ← Parser infrastructure
-└── filters/                   ← 60 TOML filter configs
+└── filters/                   ← 63 TOML filter configs
 ```
 
 ## Common Search Patterns
@@ -79,10 +90,10 @@ Glob pattern="src/cmds/**/*_cmd.rs"
 # Also: src/cmds/git/git.rs, src/cmds/rust/runner.rs, src/cmds/cloud/container.rs
 ```
 
-### "Find all lazy_static regex definitions"
+### "Find all LazyLock regex definitions"
 
 ```
-Grep pattern="lazy_static!" type="rust" output_mode="content"
+Grep pattern="LazyLock" type="rust" output_mode="content"
 ```
 
 ### "Find unwrap() outside tests"
@@ -123,7 +134,7 @@ Glob pattern="tests/fixtures/*.txt"
 
 1. Start with `src/cmds/<ecosystem>/<cmd>_cmd.rs` → find `run()` function
 2. Trace filter function (usually `filter_<cmd>()`)
-3. Check `lazy_static!` regex patterns in same file
+3. Check `LazyLock` regex patterns in same file
 4. Check `src/core/utils.rs::strip_ansi()` if ANSI codes involved
 
 ### Tracking/metrics issues

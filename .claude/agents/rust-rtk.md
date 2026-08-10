@@ -13,7 +13,7 @@ You are an expert Rust developer specializing in the RTK codebase architecture.
 
 - **CLI proxy architecture**: Command routing, stdin/stdout forwarding, fallback handling
 - **Filter development**: Regex-based condensation, token counting, format preservation
-- **Performance optimization**: Zero-overhead design, lazy_static regex, minimal allocations
+- **Performance optimization**: Zero-overhead design, LazyLock regex, minimal allocations
 - **Error handling**: anyhow for CLI binary, graceful fallback on filter failures
 - **Cross-platform**: macOS/Linux/Windows shell compatibility (bash/zsh/PowerShell)
 
@@ -48,16 +48,16 @@ pub fn execute_with_filter(cmd: &str, args: &[&str]) -> anyhow::Result<Output> {
 
 ### Lazy Regex Compilation (Performance Critical)
 
-**✅ RIGHT**: Compile regex ONCE with `lazy_static!`, reuse forever:
+**✅ RIGHT**: Compile regex ONCE with `LazyLock`, reuse forever:
 
 ```rust
-use lazy_static::lazy_static;
 use regex::Regex;
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref COMMIT_HASH: Regex = Regex::new(r"[0-9a-f]{7,40}").unwrap();
-    static ref AUTHOR_LINE: Regex = Regex::new(r"^Author: (.+) <(.+)>$").unwrap();
-}
+static COMMIT_HASH: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[0-9a-f]{7,40}").unwrap());
+static AUTHOR_LINE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^Author: (.+) <(.+)>$").unwrap());
 
 pub fn filter_git_log(input: &str) -> String {
     input.lines()
@@ -85,7 +85,7 @@ pub fn filter_git_log(input: &str) -> String {
 }
 ```
 
-**Why**: Regex compilation is expensive (~1-5ms per pattern). RTK targets <10ms total startup time. `lazy_static!` compiles patterns once at binary startup, then reuses them forever. This is **mandatory** for all regex in RTK.
+**Why**: Regex compilation is expensive (~1-5ms per pattern). RTK targets <10ms total startup time. `LazyLock` compiles fixed patterns on first use, then reuses them forever. Use it for regexes that are fixed at declaration time and reused across calls.
 
 ### Token Count Validation (Testing Critical)
 
@@ -373,9 +373,9 @@ docker run --rm -v $(pwd):/rtk -w /rtk rust:latest cargo test  # Linux via Docke
 - Adding async adds ~5-10ms startup overhead
 - RTK targets <10ms total startup
 
-❌ **DON'T** recompile regex at runtime → Use `lazy_static!`
+❌ **DON'T** repeatedly compile fixed regex patterns → Use `LazyLock<Regex>`
 - Regex compilation is expensive (~1-5ms per pattern)
-- Use `lazy_static! { static ref RE: Regex = ... }` for all patterns
+- Use `LazyLock<Regex>` for fixed patterns reused across calls
 
 ❌ **DON'T** panic on filter failure → Fallback to raw command
 - User workflow must never break
@@ -394,7 +394,7 @@ docker run --rm -v $(pwd):/rtk -w /rtk rust:latest cargo test  # Linux via Docke
 - Respect exit codes (0 = success, non-zero = failure)
 
 ✅ **DO** provide fallback to raw command on filter failure
-✅ **DO** compile regex once with `lazy_static!`
+✅ **DO** compile fixed, reused regexes once with `LazyLock<Regex>`
 ✅ **DO** verify token savings claims in tests (≥60%)
 ✅ **DO** test on macOS + Linux + Windows (via CI or manual)
 ✅ **DO** run `cargo fmt && cargo clippy --all-targets && cargo test` before commit
@@ -414,12 +414,11 @@ touch src/cmds/<ecosystem>/newcmd_cmd.rs
 ```rust
 // src/cmds/<ecosystem>/newcmd_cmd.rs
 use anyhow::{Context, Result};
-use lazy_static::lazy_static;
 use regex::Regex;
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref PATTERN: Regex = Regex::new(r"pattern").unwrap();
-}
+static PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"pattern").unwrap());
 
 pub fn filter_newcmd(input: &str) -> Result<String> {
     // Implement filtering logic

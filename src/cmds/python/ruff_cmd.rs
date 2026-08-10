@@ -40,11 +40,22 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     let mut cmd = resolved_command("ruff");
 
+    // Both spellings: injecting a second --output-format makes ruff reject the call.
+    let user_set_output_format = args
+        .iter()
+        .any(|a| a == "--output-format" || a.starts_with("--output-format="));
+
+    let user_json_format = args.iter().enumerate().any(|(i, a)| {
+        a == "--output-format=json"
+            || (a == "--output-format" && args.get(i + 1).is_some_and(|n| n == "json"))
+    });
+    let use_json_filter = !user_set_output_format || user_json_format;
+
     if is_check {
-        if !args.contains(&"--output-format".to_string()) {
-            cmd.arg("check").arg("--output-format=json");
-        } else {
+        if user_set_output_format {
             cmd.arg("check");
+        } else {
+            cmd.arg("check").arg("--output-format=json");
         }
 
         let start_idx = if !args.is_empty() && args[0] == "check" {
@@ -78,12 +89,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "ruff",
         &args.join(" "),
         move |stdout| {
-            if is_check && !stdout.trim().is_empty() {
+            if is_check && use_json_filter && !stdout.trim().is_empty() {
                 filter_ruff_check_json(stdout)
             } else if is_format {
                 filter_ruff_format(stdout)
             } else {
-                stdout.trim().to_string()
+                truncate(stdout.trim(), config::limits().passthrough_max_chars)
             }
         },
         runner::RunOptions::stdout_only(),

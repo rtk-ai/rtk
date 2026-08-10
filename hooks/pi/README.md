@@ -5,7 +5,7 @@
 ## Design Intent
 
 RTK's Pi extension is a **rewrite-only token optimizer**. It mutates bash commands to their
-`rtk`-prefixed equivalents, saving 60–90% context tokens.
+`rtk`-prefixed equivalents, cutting up to 90% of the bash output that reaches the context.
 
 **Permission gating is intentionally out of scope.** RTK does not block, confirm, or audit
 commands — that concern belongs to a dedicated permission extension (e.g. one that gates
