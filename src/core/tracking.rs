@@ -127,7 +127,7 @@ pub struct GainSummary {
     pub total_time_ms: u64,
     /// Average execution time per command (milliseconds)
     pub avg_time_ms: u64,
-    /// Top 10 commands by tokens saved: (cmd, count, saved, avg_pct, avg_time_ms)
+    /// Top 10 commands by tokens saved: (cmd, count, saved, total_pct, avg_time_ms)
     pub by_command: Vec<(String, usize, usize, f64, u64)>,
     /// Last 30 days of activity: (date, saved_tokens)
     pub by_day: Vec<(String, usize)>,
@@ -220,7 +220,7 @@ pub struct MonthStats {
     pub avg_time_ms: u64,
 }
 
-/// Type alias for command statistics tuple: (command, count, saved_tokens, avg_savings_pct, avg_time_ms)
+/// Type alias for command statistics tuple: (command, count, saved_tokens, total_savings_pct, avg_time_ms)
 type CommandStats = (String, usize, usize, f64, u64);
 
 impl Tracker {
@@ -651,7 +651,9 @@ impl Tracker {
     ) -> Result<Vec<CommandStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut stmt = self.conn.prepare(
-            "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)
+            "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens),
+                    COALESCE(100.0 * SUM(saved_tokens) / NULLIF(SUM(input_tokens), 0), 0.0),
+                    AVG(exec_time_ms)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY rtk_cmd
@@ -1721,6 +1723,50 @@ mod tests {
             failures.total, 0,
             "parse_failures table should be empty after reset"
         );
+    }
+
+    #[test]
+    fn test_by_command_uses_total_savings_percentage() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+
+        tracker
+            .record("large grep", "rtk grep", 1000, 100, 10)
+            .expect("Failed to record large command");
+        tracker
+            .record("small grep", "rtk grep", 10, 9, 20)
+            .expect("Failed to record small command");
+
+        let summary = tracker.get_summary().expect("Failed to get summary");
+        let (_, count, saved, savings_pct, _) = summary
+            .by_command
+            .iter()
+            .find(|(command, _, _, _, _)| command == "rtk grep")
+            .expect("rtk grep stats not found");
+
+        assert_eq!(*count, 2);
+        assert_eq!(*saved, 901);
+        let expected_pct = 901.0 / 1010.0 * 100.0;
+        assert!(
+            (savings_pct - expected_pct).abs() < 1e-10,
+            "expected total savings percentage {expected_pct}, got {savings_pct}"
+        );
+    }
+
+    #[test]
+    fn test_by_command_zero_input_has_zero_savings_percentage() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+        tracker
+            .record("interactive command", "rtk proxy", 0, 0, 5)
+            .expect("Failed to record passthrough command");
+
+        let summary = tracker.get_summary().expect("Failed to get summary");
+        let (_, _, _, savings_pct, _) = summary
+            .by_command
+            .iter()
+            .find(|(command, _, _, _, _)| command == "rtk proxy")
+            .expect("rtk proxy stats not found");
+
+        assert_eq!(*savings_pct, 0.0);
     }
 
     #[test]
