@@ -1323,106 +1323,117 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     };
 
     if let Some(filter) = toml_match {
-        // TOML match: capture stdout for filtering
-        let result = if filter.filter_stderr {
-            // Merge stderr into stdout so the filter can strip banners emitted by tools like liquibase
-            core::utils::resolved_command(&args[0])
-                .args(&args[1..])
-                .stdin(std::process::Stdio::inherit())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped()) // captured for merging
-                .output()
-        } else {
-            core::utils::resolved_command(&args[0])
-                .args(&args[1..])
-                .stdin(std::process::Stdio::inherit())
-                .stdout(std::process::Stdio::piped()) // capture
-                .stderr(std::process::Stdio::inherit()) // stderr always direct
-                .output()
-        };
+        // TOML match: capture stdout for filtering.
+        // Filters declaring pass_through_if_args (e.g. `du -s`, whose rows are
+        // independent per-root answers) skip filtering and run raw below.
+        if !filter.should_pass_through(&args[1..]) {
+            let result = if filter.filter_stderr {
+                // Merge stderr into stdout so the filter can strip banners emitted by tools like liquibase
+                core::utils::resolved_command(&args[0])
+                    .args(&args[1..])
+                    .stdin(std::process::Stdio::inherit())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped()) // captured for merging
+                    .output()
+            } else {
+                core::utils::resolved_command(&args[0])
+                    .args(&args[1..])
+                    .stdin(std::process::Stdio::inherit())
+                    .stdout(std::process::Stdio::piped()) // capture
+                    .stderr(std::process::Stdio::inherit()) // stderr always direct
+                    .output()
+            };
 
-        match result {
-            Ok(output) => {
-                let exit_code = core::utils::exit_code_from_output(&output, &raw_command);
-                let stdout_raw = String::from_utf8_lossy(&output.stdout);
-                let stderr_raw = String::from_utf8_lossy(&output.stderr);
+            match result {
+                Ok(output) => {
+                    let exit_code = core::utils::exit_code_from_output(&output, &raw_command);
+                    let stdout_raw = String::from_utf8_lossy(&output.stdout);
+                    let stderr_raw = String::from_utf8_lossy(&output.stderr);
 
-                // Merge stderr into the text to filter when filter_stderr is enabled;
-                // otherwise emit stderr directly so it is always visible.
-                let combined_raw = if filter.filter_stderr {
-                    format!("{}{}", stdout_raw, stderr_raw)
-                } else {
-                    stdout_raw.to_string()
-                };
-                let success = output.status.success();
-                let (filtered, loss) =
-                    core::toml_filter::apply_filter_with_info(filter, &combined_raw);
-                let lossy = !matches!(loss, core::toml_filter::Lossiness::None);
+                    // Merge stderr into the text to filter when filter_stderr is enabled;
+                    // otherwise emit stderr directly so it is always visible.
+                    let combined_raw = if filter.filter_stderr {
+                        format!("{}{}", stdout_raw, stderr_raw)
+                    } else {
+                        stdout_raw.to_string()
+                    };
+                    let success = output.status.success();
+                    let (filtered, loss) =
+                        core::toml_filter::apply_filter_with_info(filter, &combined_raw);
+                    let lossy = !matches!(loss, core::toml_filter::Lossiness::None);
 
-                let hint = if !success {
-                    core::tee::tee_and_hint(&combined_raw, &raw_command, exit_code)
-                } else {
-                    match &loss {
-                        core::toml_filter::Lossiness::None => None,
-                        core::toml_filter::Lossiness::Tail {
-                            tee_payload,
-                            tail_offset,
-                        } => {
-                            core::tee::force_tee_tail_hint(tee_payload, &raw_command, *tail_offset)
+                    let hint = if !success {
+                        core::tee::tee_and_hint(&combined_raw, &raw_command, exit_code)
+                    } else {
+                        match &loss {
+                            core::toml_filter::Lossiness::None => None,
+                            core::toml_filter::Lossiness::Tail {
+                                tee_payload,
+                                tail_offset,
+                            } => core::tee::force_tee_tail_hint(
+                                tee_payload,
+                                &raw_command,
+                                *tail_offset,
+                            ),
+                            core::toml_filter::Lossiness::Whole => {
+                                core::tee::force_tee_hint(&combined_raw, &raw_command)
+                            }
                         }
-                        core::toml_filter::Lossiness::Whole => {
-                            core::tee::force_tee_hint(&combined_raw, &raw_command)
-                        }
-                    }
-                };
+                    };
 
-                // Never emit an unrecoverable truncation marker: fall back to full raw.
-                let shown = if lossy && hint.is_none() {
-                    core::runner::emit_guarded(&combined_raw, None, &combined_raw)
-                } else {
-                    core::runner::emit_guarded(&filtered, hint.as_deref(), &combined_raw)
-                };
+                    // Never emit an unrecoverable truncation marker: fall back to full raw.
+                    let shown = if lossy && hint.is_none() {
+                        core::runner::emit_guarded(&combined_raw, None, &combined_raw)
+                    } else {
+                        core::runner::emit_guarded(&filtered, hint.as_deref(), &combined_raw)
+                    };
 
-                timer.track(
-                    &raw_command,
-                    &format!("rtk:toml {}", raw_command),
-                    &combined_raw,
-                    &shown,
-                );
-                core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+                    timer.track(
+                        &raw_command,
+                        &format!("rtk:toml {}", raw_command),
+                        &combined_raw,
+                        &shown,
+                    );
+                    core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
 
-                Ok(exit_code)
-            }
-            Err(e) => {
-                // Command not found — same behaviour as no-TOML path
-                core::tracking::record_parse_failure_silent(&raw_command, &error_message, false);
-                eprintln!("[rtk: {}]", e);
-                Ok(127)
+                    return Ok(exit_code);
+                }
+                Err(e) => {
+                    // Command not found — same behaviour as no-TOML path
+                    core::tracking::record_parse_failure_silent(
+                        &raw_command,
+                        &error_message,
+                        false,
+                    );
+                    eprintln!("[rtk: {}]", e);
+                    return Ok(127);
+                }
             }
         }
-    } else {
-        // No TOML match: original passthrough behaviour (Stdio::inherit, streaming)
-        let status = core::utils::resolved_command(&args[0])
-            .args(&args[1..])
-            .stdin(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status();
+    }
 
-        match status {
-            Ok(s) => {
-                timer.track_passthrough(&raw_command, &format!("rtk fallback: {}", raw_command));
+    // No TOML match, or the matched filter opted out via pass_through_if_args:
+    // raw streaming passthrough (Stdio::inherit, no capture, no filtering).
+    let status = core::utils::resolved_command(&args[0])
+        .args(&args[1..])
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status();
 
-                core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+    match status {
+        Ok(s) => {
+            timer.track_passthrough(&raw_command, &format!("rtk fallback: {}", raw_command));
 
-                Ok(core::utils::exit_code_from_status(&s, &raw_command))
-            }
-            Err(e) => {
-                core::tracking::record_parse_failure_silent(&raw_command, &error_message, false);
-                // Command not found or other OS error — single message, no duplicate Clap error
-                eprintln!("[rtk: {}]", e);
-                Ok(127)
-            }
+            core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+
+            Ok(core::utils::exit_code_from_status(&s, &raw_command))
+        }
+        Err(e) => {
+            core::tracking::record_parse_failure_silent(&raw_command, &error_message, false);
+            // Command not found or other OS error — single message, no duplicate Clap error
+            eprintln!("[rtk: {}]", e);
+            Ok(127)
         }
     }
 }
