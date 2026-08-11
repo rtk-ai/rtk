@@ -6,6 +6,7 @@
 //! mode toggle) that TOML DSL cannot express.
 
 use crate::core::runner::{self, RunOptions};
+use crate::core::stream::StreamFilter;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, strip_ansi};
 use anyhow::Result;
@@ -166,6 +167,7 @@ fn is_per_test_subline(line: &str) -> bool {
 
 // ── English-footer guard ────────────────────────────────────────────────────
 
+#[cfg(test)]
 fn has_english_footer(stripped: &str) -> bool {
     stripped.lines().any(|l| {
         let t = l.trim();
@@ -246,9 +248,9 @@ fn keep_outside_block(line: &str) -> bool {
 ///     End-of-input with `trail_rearm` still `Some` is harmless (nothing
 ///     pending in `out`); `finish()` / `flush_open_block_as_keep` need no
 ///     special handling.
-struct SurefireBlock<'a> {
-    block_lines: Vec<&'a str>,
-    block_running: Option<&'a str>,
+struct SurefireBlock {
+    block_lines: Vec<String>,
+    block_running: Option<String>,
     in_block: bool,
     failure_trail: bool,
     /// When set together with `failure_trail`, consumes the trail (per-test
@@ -263,22 +265,22 @@ struct SurefireBlock<'a> {
     trail_rearm: Option<bool>,
 }
 
-enum SurefireStep<'a> {
+enum SurefireStep {
     /// Inner machine consumed the line; outer loop should `continue;`.
     Consumed,
     /// A CLOSE line with `Failures > 0` or `Errors > 0` was reached. Outer
     /// loop decides whether to commit (via [`SurefireBlock::commit_failing`]).
     FailingClose {
-        running: Option<&'a str>,
-        lines: Vec<&'a str>,
-        close: &'a str,
+        running: Option<String>,
+        lines: Vec<String>,
+        close: String,
     },
     /// Inner machine did not handle the line; outer loop applies its own
     /// outside-block keep logic.
     Passthrough,
 }
 
-impl<'a> SurefireBlock<'a> {
+impl SurefireBlock {
     fn new() -> Self {
         Self {
             block_lines: Vec::new(),
@@ -290,7 +292,7 @@ impl<'a> SurefireBlock<'a> {
         }
     }
 
-    fn step(&mut self, line: &'a str, out: &mut String) -> SurefireStep<'a> {
+    fn step(&mut self, line: &str, out: &mut String) -> SurefireStep {
         if PLUGIN_BANNER.is_match(line) {
             return SurefireStep::Consumed;
         }
@@ -300,7 +302,7 @@ impl<'a> SurefireBlock<'a> {
                 self.flush_open_block_as_keep(out);
             }
             self.block_lines.clear();
-            self.block_running = Some(line);
+            self.block_running = Some(line.to_string());
             self.in_block = true;
             self.failure_trail = false;
             // Load-bearing: a capped multi-failure class followed by a kept
@@ -320,7 +322,7 @@ impl<'a> SurefireBlock<'a> {
                     return SurefireStep::FailingClose {
                         running,
                         lines,
-                        close: line,
+                        close: line.to_string(),
                     };
                 }
                 self.block_lines.clear();
@@ -328,7 +330,7 @@ impl<'a> SurefireBlock<'a> {
                 self.in_block = false;
                 return SurefireStep::Consumed;
             }
-            self.block_lines.push(line);
+            self.block_lines.push(line.to_string());
             return SurefireStep::Consumed;
         }
 
@@ -397,7 +399,7 @@ impl<'a> SurefireBlock<'a> {
         &mut self,
         out: &mut String,
         running: Option<&str>,
-        lines: &[&str],
+        lines: &[String],
         close: &str,
     ) {
         if let Some(r) = running {
@@ -429,11 +431,11 @@ impl<'a> SurefireBlock<'a> {
 
     fn flush_open_block_as_keep(&mut self, out: &mut String) {
         if let Some(r) = self.block_running.take() {
-            out.push_str(r);
+            out.push_str(&r);
             out.push('\n');
         }
         for l in self.block_lines.drain(..) {
-            out.push_str(l);
+            out.push_str(&l);
             out.push('\n');
         }
         self.in_block = false;
@@ -535,10 +537,12 @@ impl FailuresSummaryCap {
 ///
 /// English-footer guard: if no `BUILD SUCCESS`/`BUILD FAILURE` line is present,
 /// return the ANSI-stripped raw input (non-English locale or truncated output).
+#[cfg(test)]
 pub fn filter_surefire(raw: &str) -> String {
     filter_surefire_with_cap(raw, MAX_MVN_FAILING_CLASSES)
 }
 
+#[cfg(test)]
 fn filter_surefire_with_cap(raw: &str, cap: usize) -> String {
     let stripped = strip_ansi(raw);
     if !has_english_footer(&stripped) {
@@ -562,7 +566,7 @@ fn filter_surefire_with_cap(raw: &str, cap: usize) -> String {
                 close,
             } => {
                 if emitted_failing < cap {
-                    block.commit_failing(&mut out, running, &lines, close);
+                    block.commit_failing(&mut out, running.as_deref(), &lines, &close);
                     emitted_failing += 1;
                 } else {
                     block.drop_failing();
@@ -628,6 +632,7 @@ fn filter_surefire_with_cap(raw: &str, cap: usize) -> String {
 /// time, scanning line, install lines, and `[ERROR]` blocks with indented
 /// continuation (`  symbol:`, `  ^`, `  required:`). Deduplicates `[WARNING]`
 /// lines by normalised message (strip file coordinates).
+#[cfg(test)]
 pub fn filter_compile(raw: &str) -> String {
     let stripped = strip_ansi(raw);
     if !has_english_footer(&stripped) {
@@ -698,10 +703,12 @@ pub fn filter_compile(raw: &str) -> String {
 /// `[INFO] Running …` line is seen, switches back on `Tests run:` close.
 /// Outside any Surefire block, applies the unified keep-list (compile keepers
 /// + install/artifact lines).
+#[cfg(test)]
 pub fn filter_package(raw: &str) -> String {
     filter_package_with_cap(raw, MAX_MVN_FAILING_CLASSES)
 }
 
+#[cfg(test)]
 fn filter_package_with_cap(raw: &str, cap: usize) -> String {
     let stripped = strip_ansi(raw);
     if !has_english_footer(&stripped) {
@@ -726,7 +733,7 @@ fn filter_package_with_cap(raw: &str, cap: usize) -> String {
                 close,
             } => {
                 if emitted_failing < cap {
-                    block.commit_failing(&mut out, running, &lines, close);
+                    block.commit_failing(&mut out, running.as_deref(), &lines, &close);
                     emitted_failing += 1;
                 } else {
                     block.drop_failing();
@@ -875,6 +882,271 @@ pub fn filter_quiet(raw: &str) -> String {
     out
 }
 
+// ── Streaming filters (emissão em tempo real) ───────────────────────────────
+//
+// Convertem as state machines batch (filter_surefire / filter_compile /
+// filter_package) em implementações de `StreamFilter` que emitem linhas
+// conforme chegam. Isso evita o silêncio prolongado que IDEs interpretam como
+// término antecipado do processo.
+//
+// Footer guard: no modo streaming não há look-ahead para detectar locale
+// não-inglesa antes de começar a emitir. Aceitamos isso: em locale não-inglesa
+// o filtro emite apenas linhas [ERROR] (preservadas pela keep-list de qualquer
+// jeito) e silencia o progresso [INFO] — comportamento aceitável e correto.
+
+/// Streaming filter para `mvn test` / `mvn integration-test`.
+struct MvnTestStreamFilter {
+    cap: usize,
+    block: SurefireBlock,
+    keep_continuation: bool,
+    in_reactor_summary: bool,
+    emitted_failing: usize,
+    dropped_failing: usize,
+    summary: FailuresSummaryCap,
+}
+
+impl MvnTestStreamFilter {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            block: SurefireBlock::new(),
+            keep_continuation: false,
+            in_reactor_summary: false,
+            emitted_failing: 0,
+            dropped_failing: 0,
+            summary: FailuresSummaryCap::new(cap),
+        }
+    }
+}
+
+impl StreamFilter for MvnTestStreamFilter {
+    fn feed_line(&mut self, raw_line: &str) -> Option<String> {
+        let owned = strip_ansi(raw_line);
+        let line = owned.as_str();
+        let mut out = String::new();
+
+        match self.block.step(line, &mut out) {
+            SurefireStep::Consumed => return if out.is_empty() { None } else { Some(out) },
+            SurefireStep::FailingClose { running, lines, close } => {
+                if self.emitted_failing < self.cap {
+                    self.block.commit_failing(&mut out, running.as_deref(), &lines, &close);
+                    self.emitted_failing += 1;
+                } else {
+                    self.block.drop_failing();
+                    self.dropped_failing += 1;
+                }
+                self.keep_continuation = false;
+                return if out.is_empty() { None } else { Some(out) };
+            }
+            SurefireStep::Passthrough => {}
+        }
+
+        if self.keep_continuation && (line.starts_with(' ') || line.starts_with('\t')) {
+            out.push_str(line);
+            out.push('\n');
+            return Some(out);
+        }
+
+        if self.summary.handle_entry(line, &mut out) {
+            return if out.is_empty() { None } else { Some(out) };
+        }
+
+        let reactor_keep = reactor_summary_keep(line, &mut self.in_reactor_summary);
+        if reactor_keep || keep_outside_block(line) {
+            self.summary.handle_aggregate(line, &mut out);
+            self.summary.handle_header(line);
+            out.push_str(line);
+            out.push('\n');
+            self.keep_continuation = line.starts_with("[ERROR]")
+                && !line.starts_with("[ERROR] Tests run:")
+                && !line.starts_with("[ERROR] Failures:")
+                && !line.starts_with("[ERROR] Errors:");
+            return Some(out);
+        }
+        self.keep_continuation = false;
+        None
+    }
+
+    fn flush(&mut self) -> String {
+        let mut out = String::new();
+        self.block.finish(&mut out);
+        self.summary.finish(&mut out);
+        if self.dropped_failing > 0 {
+            out.push_str(&format!("\n… +{} more failing test classes\n", self.dropped_failing));
+        }
+        out
+    }
+}
+
+/// Streaming filter para `mvn compile` / `mvn test-compile`.
+struct MvnCompileStreamFilter {
+    keep_continuation: bool,
+    seen_warnings: HashSet<String>,
+}
+
+impl MvnCompileStreamFilter {
+    fn new() -> Self {
+        Self {
+            keep_continuation: false,
+            seen_warnings: HashSet::new(),
+        }
+    }
+}
+
+impl StreamFilter for MvnCompileStreamFilter {
+    fn feed_line(&mut self, raw_line: &str) -> Option<String> {
+        let owned = strip_ansi(raw_line);
+        let line = owned.as_str();
+        let mut out = String::new();
+
+        if MODULE_BANNER.is_match(line) {
+            self.keep_continuation = false;
+            out.push_str(line);
+            out.push('\n');
+            return Some(out);
+        }
+        if BUILD_FOOT.is_match(line)
+            || line.starts_with("[INFO] Building ")
+            || line.starts_with("[INFO] Total time:")
+            || line.starts_with("[INFO] Finished at:")
+            || line.starts_with("[INFO] Scanning ")
+        {
+            self.keep_continuation = false;
+            out.push_str(line);
+            out.push('\n');
+            return Some(out);
+        }
+        if is_boilerplate(line) {
+            self.keep_continuation = false;
+            return None;
+        }
+        if line.starts_with("[ERROR]") {
+            self.keep_continuation = true;
+            out.push_str(line);
+            out.push('\n');
+            return Some(out);
+        }
+        if self.keep_continuation && (line.starts_with(' ') || line.starts_with('\t')) {
+            out.push_str(line);
+            out.push('\n');
+            return Some(out);
+        }
+        if line.starts_with("[WARNING]") {
+            let payload = line.strip_prefix("[WARNING] ").unwrap_or(line);
+            let norm = FILE_COORD.replace_all(payload, "").to_string();
+            self.keep_continuation = false;
+            if self.seen_warnings.insert(norm) {
+                out.push_str(line);
+                out.push('\n');
+                return Some(out);
+            }
+            return None;
+        }
+        self.keep_continuation = false;
+        None
+    }
+
+    fn flush(&mut self) -> String {
+        String::new()
+    }
+}
+
+/// Streaming filter para `mvn package` / `install` / `verify` / `deploy`.
+struct MvnPackageStreamFilter {
+    cap: usize,
+    block: SurefireBlock,
+    keep_continuation: bool,
+    in_reactor_summary: bool,
+    seen_warnings: HashSet<String>,
+    emitted_failing: usize,
+    dropped_failing: usize,
+    summary: FailuresSummaryCap,
+}
+
+impl MvnPackageStreamFilter {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            block: SurefireBlock::new(),
+            keep_continuation: false,
+            in_reactor_summary: false,
+            seen_warnings: HashSet::new(),
+            emitted_failing: 0,
+            dropped_failing: 0,
+            summary: FailuresSummaryCap::new(cap),
+        }
+    }
+}
+
+impl StreamFilter for MvnPackageStreamFilter {
+    fn feed_line(&mut self, raw_line: &str) -> Option<String> {
+        let owned = strip_ansi(raw_line);
+        let line = owned.as_str();
+        let mut out = String::new();
+
+        match self.block.step(line, &mut out) {
+            SurefireStep::Consumed => return if out.is_empty() { None } else { Some(out) },
+            SurefireStep::FailingClose { running, lines, close } => {
+                if self.emitted_failing < self.cap {
+                    self.block.commit_failing(&mut out, running.as_deref(), &lines, &close);
+                    self.emitted_failing += 1;
+                } else {
+                    self.block.drop_failing();
+                    self.dropped_failing += 1;
+                }
+                self.keep_continuation = false;
+                return if out.is_empty() { None } else { Some(out) };
+            }
+            SurefireStep::Passthrough => {}
+        }
+
+        if self.summary.handle_entry(line, &mut out) {
+            return if out.is_empty() { None } else { Some(out) };
+        }
+
+        let reactor_keep = reactor_summary_keep(line, &mut self.in_reactor_summary);
+        if reactor_keep || MODULE_BANNER.is_match(line) || keep_outside_block(line) {
+            self.summary.handle_aggregate(line, &mut out);
+            self.summary.handle_header(line);
+            out.push_str(line);
+            out.push('\n');
+            self.keep_continuation = line.starts_with("[ERROR]")
+                && !line.starts_with("[ERROR] Tests run:")
+                && !line.starts_with("[ERROR] Failures:")
+                && !line.starts_with("[ERROR] Errors:");
+            return Some(out);
+        }
+        if self.keep_continuation && (line.starts_with(' ') || line.starts_with('\t')) {
+            out.push_str(line);
+            out.push('\n');
+            return Some(out);
+        }
+        if line.starts_with("[WARNING]") {
+            let payload = line.strip_prefix("[WARNING] ").unwrap_or(line);
+            let norm = FILE_COORD.replace_all(payload, "").to_string();
+            self.keep_continuation = false;
+            if self.seen_warnings.insert(norm) {
+                out.push_str(line);
+                out.push('\n');
+                return Some(out);
+            }
+            return None;
+        }
+        self.keep_continuation = false;
+        None
+    }
+
+    fn flush(&mut self) -> String {
+        let mut out = String::new();
+        self.block.finish(&mut out);
+        self.summary.finish(&mut out);
+        if self.dropped_failing > 0 {
+            out.push_str(&format!("\n… +{} more failing test classes\n", self.dropped_failing));
+        }
+        out
+    }
+}
+
 // ── Wrapper detection ───────────────────────────────────────────────────────
 
 fn mvn_binary() -> &'static str {
@@ -943,25 +1215,25 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let phase = detect_phase(args);
 
     match phase {
-        MvnPhase::Test => runner::run_filtered(
+        MvnPhase::Test => runner::run_streamed(
             new_mvn_command(args),
             tool,
             &args_display,
-            filter_surefire,
+            Box::new(MvnTestStreamFilter::new(MAX_MVN_FAILING_CLASSES)),
             RunOptions::with_tee("mvn_test"),
         ),
-        MvnPhase::Compile => runner::run_filtered(
+        MvnPhase::Compile => runner::run_streamed(
             new_mvn_command(args),
             tool,
             &args_display,
-            filter_compile,
+            Box::new(MvnCompileStreamFilter::new()),
             RunOptions::with_tee("mvn_compile"),
         ),
-        MvnPhase::Package => runner::run_filtered(
+        MvnPhase::Package => runner::run_streamed(
             new_mvn_command(args),
             tool,
             &args_display,
-            filter_package,
+            Box::new(MvnPackageStreamFilter::new(MAX_MVN_FAILING_CLASSES)),
             RunOptions::with_tee("mvn_package"),
         ),
         MvnPhase::Passthrough => {

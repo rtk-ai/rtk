@@ -1298,6 +1298,28 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         parse_error.exit();
     }
 
+    // Intercept wrapper scripts that are aliases for registered RTK filters.
+    // e.g. `rtk ./mvnw test` and `rtk ./gradlew build` should route to the
+    // same filter as `rtk mvn test` / `rtk gradlew build` — the filter already
+    // auto-detects and invokes the wrapper binary internally.
+    {
+        let base = std::path::Path::new(&args[0])
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| args[0].clone());
+        let base_lower = base.to_lowercase();
+        let filter_args: Vec<String> = args[1..].to_vec();
+        match base_lower.as_str() {
+            "mvnw" | "mvnw.cmd" => {
+                return mvn_cmd::run(&filter_args, 0);
+            }
+            "gradlew" | "gradlew.bat" => {
+                return gradlew_cmd::run(&filter_args, 0);
+            }
+            _ => {}
+        }
+    }
+
     let raw_command = args.join(" ");
     let error_message = core::utils::strip_ansi(&parse_error.to_string());
 
