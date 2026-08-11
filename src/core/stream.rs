@@ -17,21 +17,18 @@ use regex::Regex;
 /// never fails on the source encoding, so a garbled line still surfaces
 /// instead of vanishing along with everything downstream of it.
 fn read_lines_lossy(reader: impl Read) -> impl Iterator<Item = String> {
-    let mut reader = BufReader::new(reader);
-    std::iter::from_fn(move || {
-        let mut buf = Vec::new();
-        match reader.read_until(b'\n', &mut buf) {
-            Ok(0) | Err(_) => None,
-            Ok(_) => {
-                if buf.last() == Some(&b'\n') {
-                    buf.pop();
-                    if buf.last() == Some(&b'\r') {
-                        buf.pop();
-                    }
-                }
-                Some(String::from_utf8_lossy(&buf).into_owned())
+    BufReader::new(reader).split(b'\n').filter_map(|res| {
+        let mut buf = match res {
+            Ok(buf) => buf,
+            Err(e) => {
+                eprintln!("rtk: stream read error: {}", e);
+                return None;
             }
+        };
+        if buf.last() == Some(&b'\r') {
+            buf.pop();
         }
+        Some(String::from_utf8_lossy(&buf).into_owned())
     })
 }
 
@@ -617,6 +614,41 @@ pub(crate) mod tests {
     fn test_read_lines_lossy_empty_input() {
         let lines: Vec<String> = read_lines_lossy(&b""[..]).collect();
         assert!(lines.is_empty());
+    }
+
+    /// A `Read` that yields some good lines, then a genuine I/O error --
+    /// distinct from clean EOF (`Ok(0)`). Before this fix, `Ok(0) | Err(_)`
+    /// treated both the same way, silently truncating output on a real read
+    /// failure instead of surfacing it.
+    struct FailingReader {
+        data: std::io::Cursor<Vec<u8>>,
+        failed: bool,
+    }
+
+    impl Read for FailingReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.data.position() as usize >= self.data.get_ref().len() {
+                if !self.failed {
+                    self.failed = true;
+                    return Err(io::Error::other("simulated read failure"));
+                }
+                return Ok(0);
+            }
+            std::io::Read::read(&mut self.data, buf)
+        }
+    }
+
+    #[test]
+    fn test_read_lines_lossy_stops_on_io_error_without_panicking() {
+        let reader = FailingReader {
+            data: std::io::Cursor::new(b"line one\nline two\n".to_vec()),
+            failed: false,
+        };
+        // The two good lines are still yielded; the simulated failure after
+        // them must not panic or hang -- it just ends the iterator, same as
+        // clean EOF would, but via the Err(_) arm instead of Ok(0).
+        let lines: Vec<String> = read_lines_lossy(reader).collect();
+        assert_eq!(lines, vec!["line one".to_string(), "line two".to_string()]);
     }
 
     struct LineFilter<F: FnMut(&str) -> Option<String>> {
