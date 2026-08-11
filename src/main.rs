@@ -57,6 +57,8 @@ pub enum AgentTarget {
     Droid,
     /// Mistral Vibe CLI
     Vibe,
+    /// CodeBuddy
+    Codebuddy,
 }
 
 #[derive(Parser)]
@@ -870,6 +872,8 @@ enum HookCommands {
     Droid,
     /// Process Mistral Vibe CLI pre_tool hook (reads JSON from stdin)
     Vibe,
+    /// Process CodeBuddy PreToolUse hook (reads JSON from stdin)
+    Codebuddy,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1572,6 +1576,8 @@ where
         hooks::init::uninstall_droid(global, ctx)
     } else if agent == Some(AgentTarget::Vibe) {
         hooks::init::uninstall_vibe(ctx)
+    } else if agent == Some(AgentTarget::Codebuddy) {
+        hooks::init::uninstall_codebuddy(global, ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -2037,13 +2043,7 @@ fn run_cli() -> Result<i32> {
                     hooks::init::uninstall,
                 )?;
             } else if gemini {
-                let patch_mode = if auto_patch {
-                    hooks::init::PatchMode::Auto
-                } else if no_patch {
-                    hooks::init::PatchMode::Skip
-                } else {
-                    hooks::init::PatchMode::Ask
-                };
+                let patch_mode = hooks::init::patch_mode_from_flags(auto_patch, no_patch);
                 hooks::init::run_gemini(global, hook_only, patch_mode, ctx)?;
             } else if copilot {
                 if global {
@@ -2083,6 +2083,9 @@ fn run_cli() -> Result<i32> {
                     hooks::init::PatchMode::Ask
                 };
                 hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
+            } else if agent == Some(AgentTarget::Codebuddy) {
+                let patch_mode = hooks::init::patch_mode_from_flags(auto_patch, no_patch);
+                hooks::init::run_codebuddy_mode(global, hook_only, patch_mode, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2090,13 +2093,7 @@ fn run_cli() -> Result<i32> {
                 let install_windsurf = agent == Some(AgentTarget::Windsurf);
                 let install_cline = agent == Some(AgentTarget::Cline);
 
-                let patch_mode = if auto_patch {
-                    hooks::init::PatchMode::Auto
-                } else if no_patch {
-                    hooks::init::PatchMode::Skip
-                } else {
-                    hooks::init::PatchMode::Ask
-                };
+                let patch_mode = hooks::init::patch_mode_from_flags(auto_patch, no_patch);
                 hooks::init::run(
                     global,
                     install_claude,
@@ -2455,6 +2452,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Vibe => {
                 hooks::hook_cmd::run_vibe()?;
+                0
+            }
+            HookCommands::Codebuddy => {
+                hooks::hook_cmd::run_codebuddy()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {

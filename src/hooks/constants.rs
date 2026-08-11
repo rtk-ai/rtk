@@ -16,6 +16,10 @@ pub const CURSOR_HOOK_COMMAND: &str = "rtk hook cursor";
 pub const DROID_HOOK_COMMAND: &str = "rtk hook droid";
 /// Native Rust hook command for Mistral Vibe.
 pub const VIBE_HOOK_COMMAND: &str = "rtk hook vibe";
+/// Native Rust hook command for CodeBuddy (replaces rtk-rewrite.sh).
+pub const CODEBUDDY_HOOK_COMMAND: &str = "rtk hook codebuddy";
+/// CodeBuddy PreToolUse matcher: CLI mode (Bash) and IDE mode (execute_command).
+pub const CODEBUDDY_MATCHER: &str = "Bash|execute_command";
 
 pub const CONFIG_DIR: &str = ".config";
 pub const OPENCODE_SUBDIR: &str = "opencode";
@@ -67,3 +71,4 @@ pub const VIBE_PROMPTS_SUBDIR: &str = "prompts";
 pub const VIBE_PROMPT_FILE: &str = "rtk.md";
 pub const VIBE_HOOK_NAME: &str = "rtk-rewrite";
 pub const VIBE_BASH_MATCH: &str = "bash";
+pub const CODEBUDDY_DIR: &str = ".codebuddy";

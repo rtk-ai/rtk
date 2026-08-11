@@ -4,7 +4,7 @@
 
 **Deployed hook artifacts** — the actual files installed on user machines by `rtk init`. These are shell scripts, TypeScript plugins, and rules files that run outside the Rust binary. They are **thin delegates**: parse agent-specific JSON, call `rtk rewrite` as a subprocess, format agent-specific response. Zero filtering logic lives here.
 
-Owns: per-agent hook scripts and configuration files for 10 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Mistral Vibe).
+Owns: per-agent hook scripts and configuration files for 11 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Mistral Vibe, CodeBuddy).
 
 Does **not** own: hook installation/uninstallation (that's `src/hooks/init.rs`), the rewrite pattern registry (that's `discover/registry`), or integrity verification (that's `src/hooks/integrity.rs`).
 
@@ -43,6 +43,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, `isToolCallEventType` guard, in-place mutation, `~/.pi/agent/extensions/`
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
 - **[`vibe/`](vibe/README.md)** — Rust binary hook (`rtk hook vibe`), `pre_tool` entry in `~/.vibe/hooks.toml`, `hook_specific_output.tool_input` rewrite plus `system_message` for UI visibility
+- **[`codebuddy/`](codebuddy/README.md)** — Rust binary hook (`rtk hook codebuddy`), same `PreToolUse` protocol as Claude Code with `"continue": true` and `"permissionDecision"` added
 
 ## Supported Agents
 
@@ -60,6 +61,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | Pi | TypeScript extension (`tool_call` event) | In-place mutation | Yes |
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
 | Mistral Vibe | Rust binary (`rtk hook vibe`) | Transparent rewrite | Yes (`hook_specific_output.tool_input`) |
+| CodeBuddy | Rust binary (`rtk hook codebuddy`) | Transparent rewrite | Yes (`updatedInput`) |
 
 ## JSON Formats by Agent
 
@@ -185,6 +187,27 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 
 **No rewrite**: exit 0 with empty stdout (Vibe's contract for "no opinion" from a `pre_tool` hook).
 
+### CodeBuddy (Rust Binary)
+
+**Input**: Same as Claude Code (`tool_name: "Bash"`, `tool_input.command`).
+
+**Output** (when rewritten):
+
+```json
+{
+  "continue": true,
+  "permissionDecision": "allow",
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "allow",
+    "permissionDecisionReason": "RTK auto-rewrite",
+    "updatedInput": { "command": "rtk git status" }
+  }
+}
+```
+
+Differs from Claude Code: requires top-level `"continue": true` and `"permissionDecision"` (`"allow"`, `"ask"`, or `"deny"`).
+
 ### OpenCode (TypeScript Plugin)
 
 Mutates `args.command` in-place via the zx library:
@@ -269,7 +292,7 @@ New integrations must follow the [Exit Code Contract](#exit-code-contract) and [
 
 | Tier | Mechanism | Maintenance | Examples |
 |------|-----------|-------------|----------|
-| **Full hook** | Shell script or Rust binary, intercepts commands via agent's hook API | High — must track agent API changes | Claude Code, Cursor, Copilot, Gemini |
+| **Full hook** | Shell script or Rust binary, intercepts commands via agent's hook API | High — must track agent API changes | Claude Code, Cursor, Copilot, Gemini, CodeBuddy |
 | **Plugin** | TypeScript/JS/Python plugin in agent's plugin system | Medium — agent manages loading | OpenCode, Hermes, Pi |
 | **Rules file** | Prompt-level instructions the agent reads | Low — no code to break | Cline, Windsurf, Codex |
 
