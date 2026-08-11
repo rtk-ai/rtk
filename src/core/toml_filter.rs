@@ -184,9 +184,7 @@ impl CompiledFilter {
                     .filter(|c| !needle.starts_with("--") && c.chars().count() == 1);
                 match single {
                     Some(c) => {
-                        arg.starts_with('-')
-                            && !arg.starts_with("--")
-                            && arg[1..].contains(c)
+                        arg.starts_with('-') && !arg.starts_with("--") && arg[1..].contains(c)
                     }
                     None => false,
                 }
