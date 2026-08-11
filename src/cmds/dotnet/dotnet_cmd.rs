@@ -9,6 +9,7 @@ use crate::core::utils::{resolved_command, truncate};
 use crate::dotnet_format_report;
 use crate::dotnet_trx;
 use anyhow::{Context, Result};
+use quick_xml::escape::unescape;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use serde_json::Value;
@@ -618,8 +619,10 @@ fn scan_mtp_kind_in_file(path: &Path) -> MtpProjectKind {
                 );
             }
             Ok(Event::Text(e)) if inside_mtp_element => {
-                if let Ok(text) = e.unescape() {
-                    if text.trim().eq_ignore_ascii_case("true") {
+                if let Ok(decoded) = e.xml10_content() {
+                    if unescape(&decoded)
+                        .is_ok_and(|text| text.trim().eq_ignore_ascii_case("true"))
+                    {
                         return MtpProjectKind::VsTestBridge;
                     }
                 }
@@ -2118,6 +2121,23 @@ mod tests {
             r#"<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+  </PropertyGroup>
+</Project>"#,
+        )
+        .expect("write csproj");
+
+        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
+    }
+
+    #[test]
+    fn test_scan_mtp_kind_decodes_xml_entities() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let csproj = temp_dir.path().join("MyProject.csproj");
+        fs::write(
+            &csproj,
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <UseMicrosoftTestingPlatformRunner>tr&#x75;e</UseMicrosoftTestingPlatformRunner>
   </PropertyGroup>
 </Project>"#,
         )
