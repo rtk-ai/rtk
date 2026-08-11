@@ -1,0 +1,71 @@
+[package]
+name = "rtk"
+version = "0.42.4"
+edition = "2021"
+rust-version = "1.91"
+authors = ["Patrick Szymkowiak"]
+description = "Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption"
+license = "Apache 2.0"
+homepage = "https://www.rtk-ai.app"
+repository = "https://github.com/rtk-ai/rtk"
+readme = "README.md"
+keywords = ["cli", "llm", "token", "filter", "productivity"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+anyhow = "1.0"
+ignore = "0.4"
+walkdir = "2"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+colored = "3"
+dirs = "5"
+rusqlite = { version = "0.31", features = ["bundled"] }
+toml = "0.8"
+chrono = "0.4"
+tempfile = "3"
+sha2 = "0.10"
+ureq = "2"
+getrandom = "0.4"
+flate2 = "1.0"
+quick-xml = "0.37"
+which = "8"
+automod = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[build-dependencies]
+toml = "0.8"
+
+[dev-dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# cargo-deb configuration
+[package.metadata.deb]
+maintainer = "Patrick Szymkowiak"
+copyright = "2024 Patrick Szymkowiak"
+license-file = ["LICENSE", "0"]
+extended-description = "rtk filters and compresses command outputs before they reach your LLM context, saving 60-90% of tokens."
+section = "utility"
+priority = "optional"
+assets = [
+    ["target/release/rtk", "usr/bin/", "755"],
+]
+# cargo-generate-rpm configuration
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/rtk", dest = "/usr/bin/rtk", mode = "755" },
+]
+
+[lints.rust]
+unsafe_code = "deny"
+warnings = "deny"

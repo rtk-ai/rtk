@@ -1,0 +1,27 @@
+[filters.iptables]
+description = "Compact iptables output"
+match_command = "^iptables\\b"
+strip_lines_matching = [
+  "^\\s*$",
+  "^Chain DOCKER",
+  "^Chain BR-",
+]
+max_lines = 50
+truncate_lines_at = 120
+
+[[tests.iptables]]
+name = "strips Docker chains, preserves real rules"
+input = """
+Chain INPUT (policy ACCEPT)
+num  target     prot opt source               destination
+1    ACCEPT     all  --  0.0.0.0/0            0.0.0.0/0
+Chain DOCKER (1 references)
+    DOCKER     all  --  0.0.0.0/0            0.0.0.0/0
+Chain BR-abcdef (0 references)
+"""
+expected = "Chain INPUT (policy ACCEPT)\nnum  target     prot opt source               destination\n1    ACCEPT     all  --  0.0.0.0/0            0.0.0.0/0\n    DOCKER     all  --  0.0.0.0/0            0.0.0.0/0"
+
+[[tests.iptables]]
+name = "preserves FORWARD and OUTPUT chains"
+input = "Chain FORWARD (policy DROP)\n1 ACCEPT tcp\nChain OUTPUT (policy ACCEPT)\n1 ACCEPT all"
+expected = "Chain FORWARD (policy DROP)\n1 ACCEPT tcp\nChain OUTPUT (policy ACCEPT)\n1 ACCEPT all"

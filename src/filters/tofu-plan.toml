@@ -1,0 +1,35 @@
+[filters.tofu-plan]
+description = "Compact OpenTofu plan output"
+match_command = "^tofu\\s+plan(\\s|$)"
+strip_ansi = true
+strip_lines_matching = [
+  "^Refreshing state",
+  "^\\s*#.*unchanged",
+  "^\\s*$",
+  "^Acquiring state lock",
+  "^Releasing state lock",
+]
+max_lines = 80
+on_empty = "tofu plan: no changes detected"
+
+[[tests.tofu-plan]]
+name = "strips Refreshing state and lock lines"
+input = """
+Acquiring state lock. This may take a few moments...
+Refreshing state... [id=vpc-abc123]
+Refreshing state... [id=sg-def456]
+Releasing state lock. This may take a few moments...
+
+OpenTofu will perform the following actions:
+
+  # aws_instance.web will be created
+  + resource "aws_instance" "web" {}
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+"""
+expected = "OpenTofu will perform the following actions:\n  # aws_instance.web will be created\n  + resource \"aws_instance\" \"web\" {}\nPlan: 1 to add, 0 to change, 0 to destroy."
+
+[[tests.tofu-plan]]
+name = "on_empty when all noise stripped"
+input = "Refreshing state... [id=vpc-abc]\nAcquiring state lock. This may take a few moments...\nReleasing state lock. This may take a few moments..."
+expected = "tofu plan: no changes detected"

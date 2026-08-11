@@ -1,0 +1,50 @@
+# Build
+/target
+
+# Environment & Secrets
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+credentials.json
+secrets.json
+*.secret
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+.next
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+*.cast.bak
+
+# Benchmark results (fixture data, not infra)
+scripts/benchmark/diff/
+scripts/benchmark/rtk/
+scripts/benchmark/unix/
+benchmark-report.md
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+rtk_tracking.db
+claudedocs
+.omc
+
+# Vitals provenance data
+.vitals/
+.worktrees/
+
+# icm 
+.fastembed_cache/
