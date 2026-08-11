@@ -247,6 +247,7 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
     let mut lines_seen: usize = 0;
     let mut parsed_count: usize = 0;
     let mut dotdirs: usize = 0;
+    let mut hidden_count: usize = 0;
 
     for line in raw.lines() {
         if line.starts_with("total ") || line.is_empty() {
@@ -264,6 +265,7 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
 
         // Filter noise dirs unless -a
         if !show_all && NOISE_DIRS.iter().any(|noise| name == *noise) {
+            hidden_count += 1;
             continue;
         }
 
@@ -290,6 +292,9 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
     }
 
     if dirs.is_empty() && files.is_empty() {
+        if hidden_count > 0 {
+            return (hidden_entries_notice(hidden_count), String::new(), parsed_count);
+        }
         if lines_seen > 0 && parsed_count == 0 {
             if dotdirs == lines_seen {
                 // Only . and .. entries (empty directory)
@@ -325,6 +330,11 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
         entries.push('\n');
     }
 
+    if hidden_count > 0 {
+        entries.push('\n');
+        entries.push_str(&hidden_entries_notice(hidden_count));
+    }
+
     // Summary line (separate so caller can suppress when piped)
     let mut summary = format!("\nSummary: {} files, {} dirs", files.len(), dirs.len());
     if !by_ext.is_empty() {
@@ -347,6 +357,11 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
     summary.push('\n');
 
     (entries, summary, parsed_count)
+}
+
+fn hidden_entries_notice(count: usize) -> String {
+    let noun = if count == 1 { "entry" } else { "entries" };
+    format!("({count} {noun} hidden; use -a to show)\n")
 }
 
 #[cfg(test)]
@@ -391,6 +406,28 @@ mod tests {
     }
 
     #[test]
+    fn test_compact_reports_hidden_entries() {
+        let input = "total 8\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 build\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n\
+                     -rw-r--r--  1 user  staff   0 Jan  1 12:00 main.rs\n";
+        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        assert!(
+            entries.contains("(1 entry hidden; use -a to show)"),
+            "hidden entries should be discoverable, got: {entries}"
+        );
+    }
+
+    #[test]
+    fn test_compact_reports_when_all_entries_are_hidden() {
+        let input = "total 8\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 build\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 target\n";
+        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        assert_eq!(entries, "(2 entries hidden; use -a to show)\n");
+    }
+
+    #[test]
     fn test_compact_show_all() {
         let input = "total 8\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .git\n\
@@ -398,6 +435,7 @@ mod tests {
         let (entries, _summary, _parsed) = compact_ls(input, true, false);
         assert!(entries.contains(".git/"));
         assert!(entries.contains("src/"));
+        assert!(!entries.contains("use -a to show"));
     }
 
     #[test]
