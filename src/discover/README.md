@@ -70,4 +70,4 @@ Add an entry to `rules.rs`. Each rule has:
 - `category`, `savings_pct` — metadata for discover reports
 - `subcmd_savings`, `subcmd_status` — per-subcommand overrides
 
-No other files need to change. The registry compiles the patterns at first use via `lazy_static`.
+No other files need to change. The registry compiles the patterns at first use via `LazyLock`.

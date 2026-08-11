@@ -26,6 +26,13 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
     tokenize_inner(input, false)
 }
 
+/// Like [`tokenize`] but emits a `\n` operator token for each newline that
+/// sits outside quotes. Newlines inside quoted strings stay part of their
+/// argument, so callers can use the emitted offsets as safe line-split points.
+pub fn tokenize_with_newlines(input: &str) -> Vec<ParsedToken> {
+    tokenize_inner(input, true)
+}
+
 fn tokenize_inner(input: &str, emit_newline: bool) -> Vec<ParsedToken> {
     let mut tokens = Vec::new();
     let mut current = String::new();
@@ -1341,5 +1348,18 @@ mod tests {
     fn test_split_perms_empty() {
         assert!(split_for_permissions("").is_empty());
         assert!(split_for_permissions("   ").is_empty());
+    }
+
+    #[test]
+    fn test_tokenize_with_newlines_emits_operator_outside_quotes_only() {
+        let newline_ops = |input: &str| {
+            tokenize_with_newlines(input)
+                .iter()
+                .filter(|t| t.kind == TokenKind::Operator && t.value == "\n")
+                .count()
+        };
+        assert_eq!(newline_ops("git status\ngit log"), 1);
+        assert_eq!(newline_ops("echo 'line1\nline2'"), 0);
+        assert_eq!(newline_ops("git status\r\ngit log"), 2);
     }
 }

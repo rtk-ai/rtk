@@ -60,7 +60,7 @@ Every filter needs a fallback path. Every hook must handle malformed input grace
 
 <10ms startup. No async runtime. No config file I/O on the critical path. If developers perceive any delay, they'll disable RTK. Speed is the difference between adoption and abandonment.
 
-`lazy_static!` for all regex. No network calls. No disk reads in the hot path. Benchmark before/after with `hyperfine`.
+Use `LazyLock` statics for all regex. No network calls. No disk reads in the hot path. Benchmark before/after with `hyperfine`.
 
 ### Extensibility
 

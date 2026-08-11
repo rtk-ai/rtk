@@ -9,12 +9,12 @@ use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, strip_ansi};
 use anyhow::Result;
-use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
+use std::sync::LazyLock;
 
 /// Cap on emitted failing test-class blocks and `[ERROR] Failures:` summary
 /// entries — test-failure cap class, same binding as pytest/rspec/rake/runner.
@@ -22,46 +22,52 @@ const MAX_MVN_FAILING_CLASSES: usize = CAP_WARNINGS;
 
 // ── Shared regex patterns ────────────────────────────────────────────────────
 
-lazy_static! {
-    /// `[INFO] Running com.example.app.FooTest`
-    static ref RUNNING: Regex = Regex::new(r"^\[INFO\] Running ").unwrap();
+/// `[INFO] Running com.example.app.FooTest`
+static RUNNING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[INFO\] Running ").unwrap());
 
-    /// Surefire/Failsafe per-class close line. Captures `Failures` and `Errors`.
-    /// Tolerates the optional `<<< FAILURE!` / `<<< ERROR!` marker (3.5.5 emits
-    /// `<<< FAILURE!` even for errors-only classes — see
-    /// `mvn_test_multifail_slice_raw.txt`; `ERROR!` accepted defensively for
-    /// other Surefire versions; failure detection is via the captured counts,
-    /// not the marker). Separator is `-` (Surefire 2.x) or `--` (Surefire 3.x).
-    /// Prefix INFO/ERROR/WARNING (3.x emits WARNING for classes with only
-    /// skipped tests).
-    static ref CLOSE: Regex = Regex::new(
+/// Surefire/Failsafe per-class close line. Captures `Failures` and `Errors`.
+/// Tolerates the optional `<<< FAILURE!` / `<<< ERROR!` marker (3.5.5 emits
+/// `<<< FAILURE!` even for errors-only classes — see
+/// `mvn_test_multifail_slice_raw.txt`; `ERROR!` accepted defensively for
+/// other Surefire versions; failure detection is via the captured counts,
+/// not the marker). Separator is `-` (Surefire 2.x) or `--` (Surefire 3.x).
+/// Prefix INFO/ERROR/WARNING (3.x emits WARNING for classes with only
+/// skipped tests).
+static CLOSE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
         r"^\[(?:INFO|ERROR|WARNING)\] Tests run: \d+, Failures: (\d+), Errors: (\d+), Skipped: \d+, Time elapsed: [^ ]+ s(?:\s+<<<\s*(?:FAILURE|ERROR)!)?\s+--?\s+in (.+)$"
-    ).unwrap();
+    ).unwrap()
+});
 
-    /// Final BUILD footer.
-    static ref BUILD_FOOT: Regex = Regex::new(r"^\[(?:INFO|ERROR)\] BUILD (?:SUCCESS|FAILURE)$").unwrap();
+/// Final BUILD footer.
+static BUILD_FOOT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\[(?:INFO|ERROR)\] BUILD (?:SUCCESS|FAILURE)$").unwrap());
 
-    /// `[INFO] Results:` separator before the aggregate.
-    static ref RESULTS: Regex = Regex::new(r"^\[INFO\] Results:\s*$").unwrap();
+/// `[INFO] Results:` separator before the aggregate.
+static RESULTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[INFO\] Results:\s*$").unwrap());
 
-    /// Aggregate counts line (no `Time elapsed`, no ` - in `).
-    static ref AGG: Regex = Regex::new(
-        r"^\[(?:INFO|ERROR)\] Tests run: \d+, Failures: \d+, Errors: \d+, Skipped: \d+\s*$"
-    ).unwrap();
+/// Aggregate counts line (no `Time elapsed`, no ` - in `).
+static AGG: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\[(?:INFO|ERROR)\] Tests run: \d+, Failures: \d+, Errors: \d+, Skipped: \d+\s*$")
+        .unwrap()
+});
 
-    /// Plugin banner line: `[INFO] --- plugin:goal (id) @ module ---`.
-    static ref PLUGIN_BANNER: Regex = Regex::new(r"^\[INFO\] --- .* @ .* ---$").unwrap();
+/// Plugin banner line: `[INFO] --- plugin:goal (id) @ module ---`.
+static PLUGIN_BANNER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\[INFO\] --- .* @ .* ---$").unwrap());
 
-    /// Module banner with project name in brackets.
-    static ref MODULE_BANNER: Regex = Regex::new(r"^\[INFO\] -+< .+ >-+$").unwrap();
+/// Module banner with project name in brackets.
+static MODULE_BANNER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\[INFO\] -+< .+ >-+$").unwrap());
 
-    /// Reactor summary header that opens the per-module pass/fail block at
-    /// the end of a multi-module build.
-    static ref REACTOR_SUMMARY: Regex = Regex::new(r"^\[INFO\] Reactor Summary for ").unwrap();
+/// Reactor summary header that opens the per-module pass/fail block at
+/// the end of a multi-module build.
+static REACTOR_SUMMARY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\[INFO\] Reactor Summary for ").unwrap());
 
-    /// Compile-error coordinate substring to strip when deduping warnings/errors.
-    static ref FILE_COORD: Regex = Regex::new(r"/[^:]+\.java:\[\d+,\d+\]").unwrap();
-}
+/// Compile-error coordinate substring to strip when deduping warnings/errors.
+static FILE_COORD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"/[^:]+\.java:\[\d+,\d+\]").unwrap());
 
 // ── Quiet-mode detection ────────────────────────────────────────────────────
 

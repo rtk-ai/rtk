@@ -1,6 +1,6 @@
 ---
 name: debugger
-description: Use this agent when encountering errors, test failures, unexpected behavior, or when RTK doesn't work as expected. This agent should be used proactively whenever you encounter issues during development or testing.\n\nExamples:\n\n<example>\nContext: User encounters filter parsing error.\nuser: "The git log filter is crashing on certain commit messages"\nassistant: "I'm going to use the debugger agent to investigate this parsing error."\n<commentary>\nSince there's an error in filter logic, use the debugger agent to perform root cause analysis and provide a fix.\n</commentary>\n</example>\n\n<example>\nContext: Tests fail after filter modification.\nuser: "Token savings tests are failing after I updated the cargo test filter"\nassistant: "Let me use the debugger agent to analyze these test failures and identify the regression."\n<commentary>\nTest failures require systematic debugging to identify the root cause and fix the issue.\n</commentary>\n</example>\n\n<example>\nContext: Performance regression detected.\nuser: "RTK startup time increased to 25ms after adding lazy_static regex"\nassistant: "I'm going to use the debugger agent to profile the performance regression."\n<commentary>\nPerformance problems require systematic debugging with profiling tools (flamegraph, hyperfine).\n</commentary>\n</example>\n\n<example>\nContext: Shell escaping bug on Windows.\nuser: "Git commands work on macOS but fail on Windows with shell escaping errors"\nassistant: "Let me launch the debugger agent to investigate this cross-platform shell escaping issue."\n<commentary>\nCross-platform bugs require platform-specific debugging and testing.\n</commentary>\n</example>
+description: Use this agent when encountering errors, test failures, unexpected behavior, or when RTK doesn't work as expected. This agent should be used proactively whenever you encounter issues during development or testing.\n\nExamples:\n\n<example>\nContext: User encounters filter parsing error.\nuser: "The git log filter is crashing on certain commit messages"\nassistant: "I'm going to use the debugger agent to investigate this parsing error."\n<commentary>\nSince there's an error in filter logic, use the debugger agent to perform root cause analysis and provide a fix.\n</commentary>\n</example>\n\n<example>\nContext: Tests fail after filter modification.\nuser: "Token savings tests are failing after I updated the cargo test filter"\nassistant: "Let me use the debugger agent to analyze these test failures and identify the regression."\n<commentary>\nTest failures require systematic debugging to identify the root cause and fix the issue.\n</commentary>\n</example>\n\n<example>\nContext: Performance regression detected.\nuser: "RTK startup time increased to 25ms after adding LazyLock regex"\nassistant: "I'm going to use the debugger agent to profile the performance regression."\n<commentary>\nPerformance problems require systematic debugging with profiling tools (flamegraph, hyperfine).\n</commentary>\n</example>\n\n<example>\nContext: Shell escaping bug on Windows.\nuser: "Git commands work on macOS but fail on Windows with shell escaping errors"\nassistant: "Let me launch the debugger agent to investigate this cross-platform shell escaping issue."\n<commentary>\nCross-platform bugs require platform-specific debugging and testing.\n</commentary>\n</example>
 model: sonnet
 color: red
 permissionMode: ask
@@ -156,7 +156,7 @@ fn filter_cmd(input: &str) -> String {
 cargo flamegraph -- rtk <cmd>
 
 # Look for:
-# - Regex::new() in hot path (should be in lazy_static init)
+# - Regex::new() in hot path (should be in LazyLock init)
 # - Excessive allocations (String::from, Vec::new in loop)
 # - File I/O on startup (should be zero)
 # - Heavy dependency init (tokio, async-std - should not exist)
@@ -188,10 +188,9 @@ fn filter_line(line: &str) -> Option<&str> {
     re.find(line).map(|m| m.as_str())
 }
 
-// ✅ RIGHT: Lazy static compilation
-lazy_static! {
-    static ref PATTERN: Regex = Regex::new(r"pattern").unwrap();
-}
+// ✅ RIGHT: LazyLock compilation
+static PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"pattern").unwrap());
 
 fn filter_line(line: &str) -> Option<&str> {
     PATTERN.find(line).map(|m| m.as_str())
@@ -292,7 +291,7 @@ diff /tmp/before.txt /tmp/after.txt
 cargo flamegraph -- rtk git log -10
 
 # Look for hotspots (wide bars):
-# - Regex::new() in hot path → lazy_static missing
+# - Fixed Regex::new() in hot path → LazyLock missing
 # - String::from() in loop → excessive allocations
 # - std::fs::read() on startup → config file I/O
 # - tokio::runtime::new() → async runtime (should not exist!)
@@ -379,7 +378,7 @@ For each debugging session, provide:
 ## Key Principles
 
 - **Evidence-Based**: Every diagnosis supported by logs, flamegraphs, test output
-- **Root Cause Focus**: Fix underlying issue (e.g., lazy_static missing), not symptoms (add timeout)
+- **Root Cause Focus**: Fix underlying issue (e.g., a fixed regex is not cached), not symptoms (add timeout)
 - **Systematic Approach**: Follow methodology step-by-step, don't jump to conclusions
 - **Minimal Changes**: Keep fixes focused to reduce risk
 - **Verification**: Always verify fix + run full quality checks
@@ -402,7 +401,7 @@ For each debugging session, provide:
 **Common issues**:
 | Issue | Symptom | Root Cause | Fix |
 |-------|---------|-----------|-----|
-| Startup time >15ms | Slow CLI launch | Regex recompiled at runtime | `lazy_static!` all regex |
+| Startup time >15ms | Slow CLI launch | Regex recompiled at runtime | `LazyLock<Regex>` for fixed, reused patterns |
 | Memory >7MB | High resident set | Excessive allocations | Use `&str` not `String`, borrow not clone |
 | Flamegraph shows file I/O | Slow startup | Config loaded on launch | Lazy config loading (on-demand) |
 | Binary size >8MB | Large release binary | Full dependency features | Minimal features in `Cargo.toml` |
@@ -476,7 +475,7 @@ For each debugging session, provide:
    cargo flamegraph -- rtk git status
    open flamegraph.svg
    ```
-5. Fix hotspot (usually lazy_static missing or allocation in loop)
+5. Fix hotspot (usually an uncached fixed regex or allocation in loop)
 6. Verify fix:
    ```bash
    cargo build --release

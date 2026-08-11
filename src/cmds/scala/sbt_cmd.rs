@@ -1,55 +1,53 @@
 use crate::core::runner::{self, RunOptions};
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
-use lazy_static::lazy_static;
 use regex::Regex;
 use std::ffi::OsString;
+use std::sync::LazyLock;
 
-lazy_static! {
-    /// Matches the ScalaTest summary line:
-    /// Tests: succeeded N, failed N, canceled N, ignored N, pending N
-    static ref TEST_SUMMARY_RE: Regex = Regex::new(
-        r"Tests: succeeded (\d+), failed (\d+), canceled (\d+), ignored (\d+), pending (\d+)"
-    ).unwrap();
+/// Matches the ScalaTest summary line:
+/// Tests: succeeded N, failed N, canceled N, ignored N, pending N
+static TEST_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"Tests: succeeded (\d+), failed (\d+), canceled (\d+), ignored (\d+), pending (\d+)",
+    )
+    .unwrap()
+});
 
-    /// Matches the munit summary line (also used by discipline-munit / ZIO Test):
-    /// [info] Passed: Total N, Failed N, Errors N, Passed N
-    /// [info] Failed: Total N, Failed N, Errors N, Passed N
-    static ref MUNIT_SUMMARY_RE: Regex = Regex::new(
-        r"^\[info\] (?:Passed|Failed): Total \d+, Failed (\d+), Errors (\d+), Passed (\d+)"
-    ).unwrap();
+/// Matches the munit summary line (also used by discipline-munit / ZIO Test):
+/// [info] Passed: Total N, Failed N, Errors N, Passed N
+/// [info] Failed: Total N, Failed N, Errors N, Passed N
+static MUNIT_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\[info\] (?:Passed|Failed): Total \d+, Failed (\d+), Errors (\d+), Passed (\d+)")
+        .unwrap()
+});
 
-    /// Matches suite count line:
-    /// Suites: completed N, aborted N
-    static ref SUITE_SUMMARY_RE: Regex = Regex::new(
-        r"Suites: completed (\d+), aborted (\d+)"
-    ).unwrap();
+/// Matches suite count line:
+/// Suites: completed N, aborted N
+static SUITE_SUMMARY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"Suites: completed (\d+), aborted (\d+)").unwrap());
 
-    /// Matches the "Run completed in" timing line
-    static ref RUN_TIME_RE: Regex = Regex::new(
-        r"Run completed in (\d+) seconds?"
-    ).unwrap();
+/// Matches the "Run completed in" timing line
+static RUN_TIME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"Run completed in (\d+) seconds?").unwrap());
 
-    /// Matches [info] Compiling N Scala source(s)
-    static ref COMPILE_COUNT_RE: Regex = Regex::new(
-        r"\[info\] Compiling (\d+) Scala source"
-    ).unwrap();
+/// Matches [info] Compiling N Scala source(s)
+static COMPILE_COUNT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[info\] Compiling (\d+) Scala source").unwrap());
 
-    /// Matches [success] Total time: Ns
-    static ref SUCCESS_TIME_RE: Regex = Regex::new(
-        r"\[success\] Total time: (\d+) s"
-    ).unwrap();
+/// Matches [success] Total time: Ns
+static SUCCESS_TIME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[success\] Total time: (\d+) s").unwrap());
 
-    /// Matches [error] lines
-    static ref ERROR_RE: Regex = Regex::new(
-        r"^\[error\]"
-    ).unwrap();
+/// Matches [error] lines
+static ERROR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[error\]").unwrap());
 
-    /// Lines that are SBT noise (loading, resolving, downloading, etc.)
-    static ref NOISE_RE: Regex = Regex::new(
+/// Lines that are SBT noise (loading, resolving, downloading, etc.)
+static NOISE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
         r"^\[info\] (welcome to sbt|loading |set current project|Updating |Resolved |Fetching |downloading |Done )"
-    ).unwrap();
-}
+    ).unwrap()
+});
 
 /// Integration test subcommand patterns (sbt configuration/task notation).
 /// These produce ScalaTest output and should use the same filtering as `sbt test`.

@@ -14,6 +14,8 @@ pub const CLAUDE_HOOK_COMMAND: &str = "rtk hook claude";
 pub const CURSOR_HOOK_COMMAND: &str = "rtk hook cursor";
 /// Native Rust hook command for Factory Droid.
 pub const DROID_HOOK_COMMAND: &str = "rtk hook droid";
+/// Native Rust hook command for Mistral Vibe.
+pub const VIBE_HOOK_COMMAND: &str = "rtk hook vibe";
 
 pub const CONFIG_DIR: &str = ".config";
 pub const OPENCODE_SUBDIR: &str = "opencode";
@@ -69,3 +71,10 @@ pub const GROK_HOOK_COMMAND: &str = "rtk hook grok";
 pub const GROK_HOOK_JSON_FILE: &str = "rtk-rewrite.json";
 /// PreToolUse matcher: Grok shell tool + Bash alias.
 pub const GROK_SHELL_MATCHER: &str = "Bash|run_terminal_command";
+
+pub const VIBE_DIR: &str = ".vibe";
+pub const VIBE_HOOKS_FILE: &str = "hooks.toml";
+pub const VIBE_PROMPTS_SUBDIR: &str = "prompts";
+pub const VIBE_PROMPT_FILE: &str = "rtk.md";
+pub const VIBE_HOOK_NAME: &str = "rtk-rewrite";
+pub const VIBE_BASH_MATCH: &str = "bash";

@@ -57,7 +57,7 @@ Use this template to generate GitHub PR review comments. Fill in each section ba
 - 🟢 Suggestion : naming, DRY opportunity, documentation, style
 
 **RTK-specific checks to mention if relevant** :
-- `lazy_static!` for regex (not inline `Regex::new()`)
+- `LazyLock<Regex>` for fixed patterns reused across calls
 - `anyhow::Result` + `.context("msg")` (no bare `?`, no `.unwrap()`)
 - Fallback to raw command on filter failure
 - Exit code propagation (`std::process::exit(code)`)
