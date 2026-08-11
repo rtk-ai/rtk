@@ -1,0 +1,15 @@
+[filters.mix-format]
+description = "Compact mix format output"
+match_command = "^mix\\s+format(\\s|$)"
+on_empty = "mix format: ok"
+max_lines = 20
+
+[[tests.mix-format]]
+name = "empty output returns ok"
+input = ""
+expected = "mix format: ok"
+
+[[tests.mix-format]]
+name = "changed files pass through"
+input = "lib/my_app.ex\ntest/my_app_test.exs"
+expected = "lib/my_app.ex\ntest/my_app_test.exs"

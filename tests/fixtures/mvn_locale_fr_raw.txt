@@ -1,0 +1,15 @@
+[INFO] Recherche des projets...
+[INFO]
+[INFO] -----------------------< com.example:myapp >------------------------
+[INFO] Construction de myapp 1.0.0
+[INFO]   de pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO]
+[INFO] --- clean:3.2.0:clean (default-clean) @ myapp ---
+[INFO] Suppression de /path/to/project/target
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD ÉCHEC
+[INFO] ------------------------------------------------------------------------
+[INFO] Temps total:  0.713 s
+[INFO] Termine a: 2026-01-15T10:30:00Z
+[INFO] ------------------------------------------------------------------------

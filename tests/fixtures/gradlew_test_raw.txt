@@ -1,0 +1,12 @@
+> Task :app:testDebugUnitTest
+com.example.myapp.CalculatorTest > testAddition PASSED
+com.example.myapp.CalculatorTest > testSubtraction PASSED
+com.example.myapp.CalculatorTest > testMultiplication PASSED
+com.example.myapp.CalculatorTest > testDivision PASSED
+com.example.myapp.MainViewModelTest > loadDataSuccess PASSED
+com.example.myapp.MainViewModelTest > loadDataError PASSED
+
+6 tests completed, 0 failed
+
+BUILD SUCCESSFUL in 18s
+4 actionable tasks: 1 executed, 3 up-to-date

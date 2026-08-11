@@ -1,0 +1,35 @@
+[filters.gradle]
+description = "Compact Gradle build output — strip progress, keep tasks and errors"
+match_command = "^(gradle|gradlew|\\./)gradlew?\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^> Configuring project",
+  "^> Resolving dependencies",
+  "^> Transform ",
+  "^Download(ing)?\\s+http",
+  "^\\s*<-+>\\s*$",
+  "^> Task :.*UP-TO-DATE$",
+  "^> Task :.*NO-SOURCE$",
+  "^> Task :.*FROM-CACHE$",
+  "^Starting a Gradle Daemon",
+  "^Daemon will be stopped",
+]
+truncate_lines_at = 150
+max_lines = 50
+on_empty = "gradle: ok"
+
+[[tests.gradle]]
+name = "strips UP-TO-DATE tasks, keeps build result"
+input = "> Configuring project :app\n> Task :app:compileJava UP-TO-DATE\n> Task :app:compileKotlin UP-TO-DATE\n> Task :app:test\n\n3 tests completed, 1 failed\n\nBUILD FAILED in 12s"
+expected = "> Task :app:test\n3 tests completed, 1 failed\nBUILD FAILED in 12s"
+
+[[tests.gradle]]
+name = "clean build preserved"
+input = "BUILD SUCCESSFUL in 8s\n7 actionable tasks: 7 executed"
+expected = "BUILD SUCCESSFUL in 8s\n7 actionable tasks: 7 executed"
+
+[[tests.gradle]]
+name = "empty after stripping"
+input = "> Configuring project :app\n"
+expected = "gradle: ok"
