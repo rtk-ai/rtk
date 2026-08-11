@@ -14,9 +14,11 @@ use super::git_cmd;
 use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
 use crate::core::args_utils;
 use crate::core::runner::{self, RunOptions};
-use crate::core::shell::quote_word;
-use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
-use crate::core::utils::{ok_confirmation, resolved_command, strip_ansi, truncate};
+use crate::core::shell::{display_args, quote_word};
+use crate::core::truncate::{CAP_LIST, CAP_WARNINGS, reduced};
+use crate::core::utils::{
+    ok_confirmation, resolved_command, strip_ansi, truncate, truncate_iso_date,
+};
 use anyhow::Result;
 use regex::Regex;
 use serde_json::Value;
@@ -33,6 +35,10 @@ static HORIZONTAL_RULE_RE: LazyLock<Regex> =
 static MULTI_BLANK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
 static MR_URL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"/-/merge_requests/(\d+)").unwrap());
+/// Match a whole `<details>` block, capturing its `<summary>` text.
+static DETAILS_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)<details[^>]*>\s*<summary[^>]*>(.*?)</summary>.*?</details>").unwrap()
+});
 /// Match GitLab CI section markers: section_start/end:timestamp:name[0K
 static SECTION_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"section_(?:start|end):\d+:[a-z0-9_]+(?:\x1b\[0K|\[0K)*").unwrap()
@@ -103,6 +109,37 @@ fn filter_markdown_body(body: &str) -> String {
     }
 
     result.trim().to_string()
+}
+
+/// Fold `<details>…</details>` back to its own `<summary>` label, returning the folded
+/// line count. The author collapsed that content by default and GitLab honors it, so the
+/// summary plus the tee hint lose nothing.
+///
+/// Runs before `filter_markdown_body`: folded blocks embed code fences, and its
+/// fence-aware segmentation would split `<details>` from its `</details>`. Consequence:
+/// a `<details>` inside a fenced example is folded too — cosmetic, accepted.
+fn collapse_details_blocks(body: &str) -> (String, usize) {
+    if !body.contains("<details") {
+        return (body.to_string(), 0);
+    }
+
+    let mut folded_lines = 0;
+    let collapsed = DETAILS_BLOCK_RE.replace_all(body, |caps: &regex::Captures| {
+        let whole = caps.get(0).map(|m| m.as_str()).unwrap_or("");
+        let summary = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+        let replacement = if summary.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", summary)
+        };
+        folded_lines += whole
+            .lines()
+            .count()
+            .saturating_sub(replacement.lines().count());
+        replacement
+    });
+
+    (collapsed.to_string(), folded_lines)
 }
 
 /// Filter a markdown segment that is NOT inside a code block.
@@ -208,6 +245,43 @@ fn mr_note_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
     own.or_else(|| inherited_takes_value(kind, name))
 }
 
+/// `glab mr note create`: the diff-comment position flags take a value too, so without them
+/// `--line 42` names merge request 42. `--resolvable` is a boolean that only takes `=false`.
+fn mr_note_create_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    let own = match kind {
+        TokenKind::Long => matches!(
+            name,
+            "attach" | "file" | "line" | "message" | "old-line" | "reply"
+        )
+        .then(glab_value),
+        TokenKind::Short => (name == "m").then(glab_value),
+        _ => None,
+    };
+    own.or_else(|| inherited_takes_value(kind, name))
+}
+
+/// `glab mr note list`: only read by `note_list_compactable`; rtk forwards the arguments as is.
+fn mr_note_list_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    let own = match kind {
+        TokenKind::Long => {
+            matches!(name, "file" | "jq" | "output" | "state" | "type").then(glab_value)
+        }
+        TokenKind::Short => matches!(name, "F" | "t").then(glab_value),
+        _ => None,
+    };
+    own.or_else(|| inherited_takes_value(kind, name))
+}
+
+/// `glab mr note update`: `-m/--message` and `--attach`.
+fn mr_note_update_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    let own = match kind {
+        TokenKind::Long => matches!(name, "attach" | "message").then(glab_value),
+        TokenKind::Short => (name == "m").then(glab_value),
+        _ => None,
+    };
+    own.or_else(|| inherited_takes_value(kind, name))
+}
+
 /// `glab mr update`: nearly every flag takes a value, so a missing entry turns a label, a
 /// title or a username into the MR number.
 fn mr_update_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
@@ -271,6 +345,47 @@ fn escapes_a_bare_positional(args: &[String], escaped: &[arg_tokenizer::Token<'_
     arg_tokenizer::tokenize(&args[i..=i])
         .first()
         .is_some_and(|t| t.kind == TokenKind::Positional)
+}
+
+/// The merge request number a token names — itself, or the one in an MR URL. A bare word
+/// is deliberately not one: it is a branch or a sub-command, see `route_mr_note`.
+fn mr_label(token: &str) -> Option<String> {
+    if arg_tokenizer::is_digit_run(token) {
+        Some(token.to_string())
+    } else {
+        extract_mr_number(token)
+    }
+}
+
+/// The values of every occurrence of `--long` / `-short` ahead of the `--` boundary, `None`
+/// for a boolean occurrence. Empty when the flag is absent.
+fn flag_values<'a>(
+    args: &'a [String],
+    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
+    long: &str,
+    short: Option<&str>,
+) -> Vec<Option<&'a str>> {
+    let tokens = arg_tokenizer::tokenize_grammar(args, takes_value, Dialect::Posix);
+    arg_tokenizer::before_dashdash(&tokens)
+        .iter()
+        .filter(|t| match t.kind {
+            TokenKind::Long => t.text == long,
+            TokenKind::Short => Some(t.text) == short,
+            _ => false,
+        })
+        .map(|t| t.value(&tokens))
+        .collect()
+}
+
+/// Whether a note write carries its whole body in its arguments. Without `-m`, glab reads the
+/// body from stdin or opens `$EDITOR`, and `--attach -` reads a file from stdin: rtk captures
+/// glab's output with stdin closed, so only passthrough keeps those working.
+fn note_body_in_args(
+    args: &[String],
+    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
+) -> bool {
+    !flag_values(args, takes_value, "message", Some("m")).is_empty()
+        && !flag_values(args, takes_value, "attach", None).contains(&Some("-"))
 }
 
 /// Check if user explicitly requested JSON/custom output format.
@@ -410,7 +525,7 @@ fn run_mr(args: &[String], verbose: u8) -> Result<i32> {
             &mr_approve_takes_value,
         ),
         "diff" => mr_diff(&args[1..], verbose),
-        "note" => mr_action("note", "noted", &args[1..], verbose, &mr_note_takes_value),
+        "note" => run_mr_note(&args[1..]),
         "update" => mr_action(
             "update",
             "updated",
@@ -615,7 +730,7 @@ fn mr_diff(args: &[String], _verbose: u8) -> Result<i32> {
     )
 }
 
-/// Generic MR action handler for merge/approve/note/update. Each takes its own `takes_value`
+/// Generic MR action handler for merge/approve/update. Each takes its own `takes_value`
 /// table: the MR number is only reported, but reading it out of a flag's value would put a
 /// commit message or a label in the confirmation line.
 fn mr_action(
@@ -625,24 +740,359 @@ fn mr_action(
     _verbose: u8,
     takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
 ) -> Result<i32> {
+    let mr_ref = split_identifier(args, takes_value).0;
+    confirm_action(&["mr", subcmd], label, args, mr_ref)
+}
+
+/// Run the write command `base` + `args` and answer with a one-line confirmation naming
+/// `mr_ref`, or no merge request when glab resolves it from the current branch.
+fn confirm_action(
+    base: &[&str],
+    label: &str,
+    args: &[String],
+    mr_ref: Option<String>,
+) -> Result<i32> {
     let mut cmd = resolved_command("glab");
-    cmd.args(["mr", subcmd]);
+    cmd.args(base);
     for arg in args {
         cmd.arg(arg);
     }
 
-    let mr_num = split_identifier(args, takes_value)
-        .0
-        .map(|id| format!("!{}", id))
-        .unwrap_or_default();
+    let mr_num = mr_ref.map(|id| format!("!{}", id)).unwrap_or_default();
     let label = label.to_string();
     runner::run_filtered(
         cmd,
         "glab",
-        &format!("mr {}", subcmd),
+        &display_args(base),
         move |_stdout| ok_confirmation(&label, &mr_num),
         RunOptions::stdout_only().early_exit_on_failure(),
     )
+}
+
+// ── MR note subcommands ─────────────────────────────────────────────────
+
+/// glab's wording for a merge request with no discussion.
+const NO_DISCUSSIONS: &str = "No discussions found.";
+
+/// How many characters of a discussion id glab prints, and accepts back as a unique prefix
+/// in `create --reply`, `resolve` and `reopen`.
+const DISCUSSION_PREFIX_LEN: usize = 8;
+
+/// A non-system note, with the discussion it belongs to.
+struct VisibleNote<'a> {
+    note: &'a Value,
+    discussion_id: &'a str,
+    is_reply: bool,
+}
+
+/// Flatten discussions into renderable notes and count the `system: true` notes dropped
+/// along the way.
+///
+/// Those are GitLab activity events — "assigned to @user", "added 2 commits", "mentioned
+/// in commit <sha>" — which carry nothing an agent reading review feedback can act on.
+/// They are the bulk of a busy merge request, so they are filtered out and reported as a
+/// count; `-F json` passes the full set through untouched.
+fn visible_notes(discussions: &[Value]) -> (Vec<VisibleNote<'_>>, usize) {
+    let mut visible = Vec::new();
+    let mut activity_events = 0;
+
+    for discussion in discussions {
+        let Some(notes) = discussion["notes"].as_array() else {
+            continue;
+        };
+        let discussion_id = discussion["id"].as_str().unwrap_or("");
+        let mut is_reply = false;
+        for note in notes {
+            if note["system"].as_bool().unwrap_or(false) {
+                activity_events += 1;
+                continue;
+            }
+            visible.push(VisibleNote {
+                note,
+                discussion_id,
+                is_reply,
+            });
+            is_reply = true;
+        }
+    }
+
+    (visible, activity_events)
+}
+
+/// `path:line` for a diff note, so the agent knows what the comment points at.
+fn note_location(note: &Value) -> Option<String> {
+    let position = note.get("position")?;
+    if position.is_null() {
+        return None;
+    }
+    let path = position["new_path"]
+        .as_str()
+        .or_else(|| position["old_path"].as_str())?;
+
+    match position["new_line"]
+        .as_i64()
+        .or_else(|| position["old_line"].as_i64())
+    {
+        Some(line) => Some(format!("{}:{}", path, line)),
+        None => Some(path.to_string()),
+    }
+}
+
+/// Render notes as a recognizable subset of glab's own output. Bodies are never
+/// line-capped: a note is a reviewer's instruction, and acting on half of one is worse
+/// than spending the tokens. The note id and the thread's discussion prefix are kept, in
+/// glab's own notation: they are what `update`/`delete` and `resolve`/`reopen`/
+/// `create --reply` take. `fold` collapses author-folded `<details>` blocks; passing
+/// `false` produces the complete rendering that backs the tee hint.
+fn render_notes(notes: &[VisibleNote<'_>], fold: bool) -> (String, usize) {
+    let mut out = String::new();
+    let mut folded_total = 0;
+
+    for visible in notes {
+        let note = visible.note;
+        let indent = if visible.is_reply { "  " } else { "" };
+        let author = note["author"]["username"].as_str().unwrap_or("???");
+        let date = truncate_iso_date(note["created_at"].as_str().unwrap_or(""));
+
+        let mut header = format!("{}@{} {}", indent, author, date);
+        if note["resolvable"].as_bool().unwrap_or(false) {
+            header.push_str(if note["resolved"].as_bool().unwrap_or(false) {
+                " [resolved]"
+            } else {
+                " [unresolved]"
+            });
+        }
+        if let Some(location) = note_location(note) {
+            header.push_str(&format!(" {}", location));
+        }
+        if let Some(id) = note["id"].as_i64() {
+            header.push_str(&format!(" [note #{}]", id));
+        }
+        if !visible.is_reply && !visible.discussion_id.is_empty() {
+            let prefix: String = visible
+                .discussion_id
+                .chars()
+                .take(DISCUSSION_PREFIX_LEN)
+                .collect();
+            header.push_str(&format!(" [discussion: {}]", prefix));
+        }
+        // A malformed API response can leave the date empty; do not trail a space.
+        out.push_str(&format!("\n{}\n", header.trim_end()));
+
+        let raw_body = note["body"].as_str().unwrap_or("");
+        let (body, folded) = if fold {
+            collapse_details_blocks(raw_body)
+        } else {
+            (raw_body.to_string(), 0)
+        };
+        folded_total += folded;
+
+        for line in filter_markdown_body(&body).lines() {
+            out.push_str(&format!("{}{}\n", indent, line));
+        }
+        if folded > 0 {
+            out.push_str(&format!("{}[+{} lines folded]\n", indent, folded));
+        }
+    }
+
+    (out, folded_total)
+}
+
+/// Report the filtered-out activity events, so their absence is never silent.
+fn push_activity_count(out: &mut String, activity_events: usize) {
+    if activity_events > 0 {
+        let plural = if activity_events == 1 { "" } else { "s" };
+        out.push_str(&format!(
+            "  [+{} activity event{}]\n",
+            activity_events, plural
+        ));
+    }
+}
+
+/// Format `glab mr note list` JSON into compact output (pure function, testable).
+fn format_mr_note_list(json: &Value) -> String {
+    let discussions = match json.as_array() {
+        Some(arr) => arr,
+        None => return String::new(),
+    };
+
+    let (visible, activity_events) = visible_notes(discussions);
+
+    let mut filtered = String::new();
+    if visible.is_empty() {
+        // Only say there is no discussion when glab would: activity events are notes too.
+        filtered.push_str(if activity_events == 0 {
+            NO_DISCUSSIONS
+        } else {
+            "No comments"
+        });
+        filtered.push('\n');
+        push_activity_count(&mut filtered, activity_events);
+        return filtered;
+    }
+
+    // Notes are multi-line entries (header + full body), so show fewer than the flat-list cap.
+    const MAX_NOTES: usize = reduced(CAP_LIST, 10);
+    let shown = visible.len().min(MAX_NOTES);
+    let (rendered, folded) = render_notes(&visible[..shown], true);
+
+    filtered.push_str(rendered.trim_start_matches('\n'));
+
+    if visible.len() > shown {
+        filtered.push_str(&format!("  … +{} more\n", visible.len() - shown));
+    }
+    push_activity_count(&mut filtered, activity_events);
+
+    if folded > 0 || visible.len() > shown {
+        let (full, _) = render_notes(&visible, false);
+        // `-F json` passes through untouched, so the hidden content stays reachable even
+        // with tee recovery turned off.
+        let hint = crate::core::tee::force_tee_hint(&full, "glab-notes")
+            .unwrap_or_else(|| "[everything: rerun with -F json]".to_string());
+        filtered.push_str(&format!("  {}\n", hint));
+    }
+
+    filtered
+}
+
+/// Reads the discussions as JSON rather than filtering glab's text output. That output is
+/// presentation and it churns — headers, note and discussion ids, absolute timestamps and
+/// system-note visibility have all changed across recent glab releases — whereas these
+/// fields come straight from the GitLab discussions API and are pinned by the server.
+/// On a glab too old to know `note list`, glab's own error surfaces with its exit code.
+fn mr_note_list(args: &[String]) -> Result<i32> {
+    let mut cmd = resolved_command("glab");
+    cmd.args(["mr", "note", "list", "-F", "json"]);
+    for arg in args {
+        cmd.arg(arg);
+    }
+    run_glab_json(cmd, "mr note list", format_mr_note_list)
+}
+
+/// The merge request named by a `mr note` sub-command that also takes a note or
+/// discussion id.
+///
+/// The merge request comes first, the note or discussion id second:
+/// `glab mr note update 1 12345` updates note 12345 on merge request 1. glab's own `--help`
+/// synopsis advertises the reverse order while its examples and its parser do this, so do
+/// not "fix" this back on the strength of the synopsis. With a single positional the id is
+/// the note and glab resolves the merge request from the current branch, leaving nothing to
+/// name.
+fn note_mr_ref(
+    args: &[String],
+    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
+) -> Option<String> {
+    let (first, rest) = split_identifier(args, takes_value);
+    split_identifier(&rest, takes_value)
+        .0
+        .and(first)
+        .and_then(|token| mr_label(&token))
+}
+
+/// Route the `glab mr note` command group.
+///
+/// ISSUE #3531: rtk answered every `mr note` invocation with a write confirmation built
+/// from the first positional, ignoring that glab exposes create/delete/list/reopen/
+/// resolve/update under it. The read sub-command came out as `ok noted !list`, its output
+/// destroyed. Dispatch the group instead.
+///
+/// The sub-command is the first free positional, as glab's own parser finds it, so
+/// `glab mr note -R group/project list 42` is still a list. Anything not recognized goes to
+/// passthrough rather than to a confirmation: a bare word is either a branch name or a
+/// sub-command glab added later (such as `draft`), and guessing wrong is exactly
+/// what caused #3531. So does any write that needs the terminal — a body from stdin or
+/// `$EDITOR`, or `delete`'s confirmation prompt. Passthrough is lossless.
+fn run_mr_note(args: &[String]) -> Result<i32> {
+    match route_mr_note(args) {
+        NoteRoute::List(rest) => mr_note_list(&rest),
+        NoteRoute::Confirm {
+            sub,
+            label,
+            args,
+            mr_ref,
+        } => {
+            let mut base = vec!["mr", "note"];
+            base.extend(sub);
+            confirm_action(&base, label, &args, mr_ref)
+        }
+        NoteRoute::Passthrough => run_passthrough_with_extra("glab", &["mr", "note"], args),
+    }
+}
+
+/// What `run_mr_note` does with a `glab mr note` invocation.
+#[derive(Debug, PartialEq)]
+enum NoteRoute {
+    /// `mr note list`, with the sub-command word taken out of the arguments.
+    List(Vec<String>),
+    /// A write answered with a confirmation: `glab mr note [sub] <args>`.
+    Confirm {
+        sub: Option<&'static str>,
+        label: &'static str,
+        args: Vec<String>,
+        mr_ref: Option<String>,
+    },
+    Passthrough,
+}
+
+/// Whether `mr note list <args>` can take the compact listing, which injects `-F json` and
+/// drops system notes. An output format of the user's own, in any spelling (`--jq=…`,
+/// `-Fjson`), or a request for the system notes alone, goes through untouched.
+fn note_list_compactable(args: &[String]) -> bool {
+    let values = |long, short| flag_values(args, &mr_note_list_takes_value, long, short);
+    values("jq", None).is_empty()
+        && values("output", Some("F")).is_empty()
+        && !values("type", Some("t")).contains(&Some("system"))
+}
+
+fn route_mr_note(args: &[String]) -> NoteRoute {
+    if !flag_values(args, &mr_note_takes_value, "help", Some("h")).is_empty() {
+        return NoteRoute::Passthrough;
+    }
+    let (sub, rest) = split_identifier(args, &mr_note_takes_value);
+    let confirm = |sub, label, args: &[String], mr_ref| NoteRoute::Confirm {
+        sub,
+        label,
+        args: args.to_vec(),
+        mr_ref,
+    };
+
+    match sub.as_deref() {
+        Some("list") if note_list_compactable(&rest) => NoteRoute::List(rest),
+        // `--unique` may create nothing, which a confirmation would misreport.
+        Some("create")
+            if note_body_in_args(&rest, &mr_note_create_takes_value)
+                && flag_values(&rest, &mr_note_create_takes_value, "unique", None).is_empty() =>
+        {
+            let mr_ref = split_identifier(&rest, &mr_note_create_takes_value)
+                .0
+                .and_then(|token| mr_label(&token));
+            confirm(Some("create"), "noted", &rest, mr_ref)
+        }
+        Some("update") if note_body_in_args(&rest, &mr_note_update_takes_value) => {
+            let mr_ref = note_mr_ref(&rest, &mr_note_update_takes_value);
+            confirm(Some("update"), "updated", &rest, mr_ref)
+        }
+        Some("delete")
+            if !flag_values(&rest, &inherited_takes_value, "yes", Some("y")).is_empty() =>
+        {
+            let mr_ref = note_mr_ref(&rest, &inherited_takes_value);
+            confirm(Some("delete"), "deleted", &rest, mr_ref)
+        }
+        Some("resolve") => {
+            let mr_ref = note_mr_ref(&rest, &inherited_takes_value);
+            confirm(Some("resolve"), "resolved", &rest, mr_ref)
+        }
+        Some("reopen") => {
+            let mr_ref = note_mr_ref(&rest, &inherited_takes_value);
+            confirm(Some("reopen"), "reopened", &rest, mr_ref)
+        }
+        // The root write form `glab mr note [<id>] -m "msg"`, deprecated but still accepted.
+        Some(id) if mr_label(id).is_some() && note_body_in_args(args, &mr_note_takes_value) => {
+            confirm(None, "noted", args, mr_label(id))
+        }
+        None if note_body_in_args(args, &mr_note_takes_value) => confirm(None, "noted", args, None),
+        _ => NoteRoute::Passthrough,
+    }
 }
 
 // ── Issue subcommands ───────────────────────────────────────────────────
@@ -1456,6 +1906,469 @@ mod tests {
         let args: Vec<String> = vec!["-m".into(), "looks good".into()];
         let (id, _) = split_identifier(&args, &mr_note_takes_value);
         assert!(id.is_none());
+    }
+
+    // ── mr note routing (ISSUE #3531) ────────────────────────────────────
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    fn confirm(
+        sub: Option<&'static str>,
+        label: &'static str,
+        args: &[&str],
+        mr_ref: Option<&str>,
+    ) -> NoteRoute {
+        NoteRoute::Confirm {
+            sub,
+            label,
+            args: argv(args),
+            mr_ref: mr_ref.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn test_route_mr_note_list_is_a_read_not_a_confirmation() {
+        // `ok noted !list` was the bug: the read came back as a write confirmation.
+        assert_eq!(
+            route_mr_note(&argv(&["list", "42"])),
+            NoteRoute::List(argv(&["42"]))
+        );
+        assert_eq!(route_mr_note(&argv(&["list"])), NoteRoute::List(vec![]));
+    }
+
+    #[test]
+    fn test_route_mr_note_finds_the_sub_command_past_leading_flags() {
+        assert_eq!(
+            route_mr_note(&argv(&["-R", "group/project", "list", "42"])),
+            NoteRoute::List(argv(&["-R", "group/project", "42"]))
+        );
+    }
+
+    #[test]
+    fn test_route_mr_note_create() {
+        assert_eq!(
+            route_mr_note(&argv(&["create", "42", "-m", "LGTM"])),
+            confirm(Some("create"), "noted", &["42", "-m", "LGTM"], Some("42"))
+        );
+    }
+
+    #[test]
+    fn test_route_mr_note_create_position_values_are_not_the_mr() {
+        // `--line 42` is a diff position, not merge request 42.
+        let args = argv(&[
+            "create",
+            "--file",
+            "main.go",
+            "--line",
+            "42",
+            "-m",
+            "Needs work",
+        ]);
+        let NoteRoute::Confirm { mr_ref, .. } = route_mr_note(&args) else {
+            panic!("expected a confirmation");
+        };
+        assert_eq!(mr_ref, None);
+    }
+
+    #[test]
+    fn test_route_mr_note_write_without_message_needs_the_terminal() {
+        // No `-m`: glab reads the body from stdin or opens $EDITOR, which rtk's capture
+        // cannot provide.
+        for args in [
+            &["create", "42"][..],
+            &["update", "42", "12345"],
+            &["42"],
+            &[],
+        ] {
+            assert_eq!(
+                route_mr_note(&argv(args)),
+                NoteRoute::Passthrough,
+                "{:?}",
+                args
+            );
+        }
+    }
+
+    #[test]
+    fn test_route_mr_note_attach_from_stdin_needs_the_terminal() {
+        let args = argv(&["create", "42", "-m", "see", "--attach", "-"]);
+        assert_eq!(route_mr_note(&args), NoteRoute::Passthrough);
+    }
+
+    #[test]
+    fn test_route_mr_note_delete_prompts_unless_yes() {
+        assert_eq!(
+            route_mr_note(&argv(&["delete", "42", "12345"])),
+            NoteRoute::Passthrough
+        );
+        assert_eq!(
+            route_mr_note(&argv(&["delete", "42", "12345", "-y"])),
+            confirm(
+                Some("delete"),
+                "deleted",
+                &["42", "12345", "-y"],
+                Some("42")
+            )
+        );
+    }
+
+    #[test]
+    fn test_route_mr_note_names_the_mr_before_the_note_id() {
+        // `glab mr note update 42 12345` updates note 12345 on MR 42, whatever the
+        // `--help` synopsis claims.
+        assert_eq!(
+            route_mr_note(&argv(&["update", "42", "12345", "-m", "edited"])),
+            confirm(
+                Some("update"),
+                "updated",
+                &["42", "12345", "-m", "edited"],
+                Some("42")
+            )
+        );
+        assert_eq!(
+            route_mr_note(&argv(&["resolve", "-R", "group/project", "42", "abc12345"])),
+            confirm(
+                Some("resolve"),
+                "resolved",
+                &["-R", "group/project", "42", "abc12345"],
+                Some("42")
+            )
+        );
+    }
+
+    #[test]
+    fn test_route_mr_note_single_id_leaves_the_mr_to_the_branch() {
+        // `glab mr note reopen abc12345` — the id is the discussion and glab resolves the MR
+        // from the current branch, so there is no merge request to name.
+        assert_eq!(
+            route_mr_note(&argv(&["reopen", "abc12345"])),
+            confirm(Some("reopen"), "reopened", &["abc12345"], None)
+        );
+    }
+
+    #[test]
+    fn test_route_mr_note_legacy_write_form() {
+        assert_eq!(
+            route_mr_note(&argv(&["42", "-m", "LGTM"])),
+            confirm(None, "noted", &["42", "-m", "LGTM"], Some("42"))
+        );
+        assert_eq!(
+            route_mr_note(&argv(&["-m", "LGTM"])),
+            confirm(None, "noted", &["-m", "LGTM"], None)
+        );
+    }
+
+    #[test]
+    fn test_route_mr_note_unknown_word_passes_through() {
+        // A bare word is a branch name or a sub-command glab added later: guessing it is a
+        // write is the #3531 bug class.
+        for args in [
+            &["draft", "list", "42"][..],
+            &["feat/my-branch", "-m", "LGTM"],
+        ] {
+            assert_eq!(
+                route_mr_note(&argv(args)),
+                NoteRoute::Passthrough,
+                "{:?}",
+                args
+            );
+        }
+    }
+
+    #[test]
+    fn test_route_mr_note_help_is_never_a_confirmation() {
+        for args in [
+            &["resolve", "--help"][..],
+            &["create", "42", "-m", "x", "-h"],
+        ] {
+            assert_eq!(
+                route_mr_note(&argv(args)),
+                NoteRoute::Passthrough,
+                "{:?}",
+                args
+            );
+        }
+    }
+
+    #[test]
+    fn test_route_mr_note_list_not_compacted_when_format_or_system_requested() {
+        // The compact listing injects `-F json` and drops exactly the notes `--type system`
+        // asks for. A `--jq` result that is not an array would render as nothing.
+        for args in [
+            &["list", "42", "--type", "system"][..],
+            &["list", "-t", "system"],
+            &["list", "--type=system"],
+            &["list", "42", "--jq=.[0].id"],
+            &["list", "-Fjson"],
+            &["list", "--output=text"],
+        ] {
+            assert_eq!(
+                route_mr_note(&argv(args)),
+                NoteRoute::Passthrough,
+                "{:?}",
+                args
+            );
+        }
+        assert_eq!(
+            route_mr_note(&argv(&["list", "--type", "diff"])),
+            NoteRoute::List(argv(&["--type", "diff"]))
+        );
+    }
+
+    #[test]
+    fn test_route_mr_note_unique_create_may_post_nothing() {
+        let args = argv(&["create", "42", "-m", "LGTM", "--unique"]);
+        assert_eq!(route_mr_note(&args), NoteRoute::Passthrough);
+    }
+
+    #[test]
+    fn test_route_mr_note_names_only_a_real_mr_reference() {
+        // glab takes a branch where the MR goes; `!my-branch` would read as an MR.
+        let NoteRoute::Confirm { mr_ref, .. } =
+            route_mr_note(&argv(&["resolve", "my-branch", "abc12345"]))
+        else {
+            panic!("expected a confirmation");
+        };
+        assert_eq!(mr_ref, None);
+
+        let url = "https://gitlab.example.com/acme/toolkit/-/merge_requests/42";
+        let NoteRoute::Confirm { mr_ref, .. } =
+            route_mr_note(&argv(&["create", url, "-m", "LGTM"]))
+        else {
+            panic!("expected a confirmation");
+        };
+        assert_eq!(mr_ref.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn test_mr_label_accepts_number_and_url_only() {
+        assert_eq!(mr_label("42").as_deref(), Some("42"));
+        assert_eq!(
+            mr_label("https://gitlab.example.com/acme/toolkit/-/merge_requests/42").as_deref(),
+            Some("42")
+        );
+        assert_eq!(mr_label("list"), None);
+        assert_eq!(mr_label(""), None);
+    }
+
+    // ── mr note list formatting ──────────────────────────────────────────
+
+    const NOTE_LIST_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/glab_mr_note_list_raw.json");
+
+    #[test]
+    fn test_format_mr_note_list_header_and_authors() {
+        let output = format_mr_note_list(&parse_fixture(NOTE_LIST_FIXTURE));
+        // No invented header: current glab opens straight on the first note.
+        assert!(output.starts_with("@release-bot 2026-08-06"));
+        assert!(output.contains("@bob_dev 2026-08-07"));
+    }
+
+    #[test]
+    fn test_format_mr_note_list_skips_system_notes() {
+        let output = format_mr_note_list(&parse_fixture(NOTE_LIST_FIXTURE));
+        assert!(!output.contains("changed the description"));
+        assert!(!output.contains("mentioned in commit"));
+    }
+
+    #[test]
+    fn test_format_mr_note_list_resolution_markers() {
+        let output = format_mr_note_list(&parse_fixture(NOTE_LIST_FIXTURE));
+        assert!(output.contains("[unresolved]"));
+        assert!(output.contains("[resolved]"));
+    }
+
+    #[test]
+    fn test_format_mr_note_list_diff_note_location() {
+        let output = format_mr_note_list(&parse_fixture(NOTE_LIST_FIXTURE));
+        assert!(
+            output.contains("src/parser/lexer.rs:128"),
+            "expected diff-note location, got:\n{}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_format_mr_note_list_keeps_human_bodies_complete() {
+        let output = format_mr_note_list(&parse_fixture(NOTE_LIST_FIXTURE));
+        // A note is a reviewer's instruction: it is never line-capped.
+        assert!(
+            output.contains("otherwise a malformed API response takes the whole command down.")
+        );
+        assert!(output.contains("Bound to `CAP_LIST` with the deviation commented."));
+    }
+
+    #[test]
+    fn test_format_mr_note_list_folds_details_block() {
+        let output = format_mr_note_list(&parse_fixture(NOTE_LIST_FIXTURE));
+        assert!(output.contains("Release v2.1.0 — 14 commits, 3 fixes"));
+        assert!(!output.contains("off-by-one on empty input"));
+        assert!(output.contains("lines folded]"));
+    }
+
+    #[test]
+    fn test_format_mr_note_list_indents_thread_replies() {
+        let output = format_mr_note_list(&parse_fixture(NOTE_LIST_FIXTURE));
+        assert!(
+            output.contains("  @alice_dev 2026-08-07"),
+            "expected reply indent, got:\n{}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_format_mr_note_list_empty_array_uses_glab_wording() {
+        let output = format_mr_note_list(&parse_fixture("[]"));
+        assert_eq!(output, format!("{}\n", NO_DISCUSSIONS));
+    }
+
+    #[test]
+    fn test_format_mr_note_list_all_system_reads_as_no_discussions() {
+        let json = parse_fixture(
+            r#"[{"id":"d1","individual_note":true,"notes":[
+                {"body":"changed the description","author":{"username":"alice_dev"},
+                 "system":true,"created_at":"2026-08-06T16:03:11.342+02:00",
+                 "resolvable":false,"resolved":false,"position":null}]}]"#,
+        );
+        let output = format_mr_note_list(&json);
+        // Filtered out, but never silently, and never claimed to be no discussion at all.
+        assert_eq!(output, "No comments\n  [+1 activity event]\n");
+    }
+
+    #[test]
+    fn test_format_mr_note_list_keeps_the_ids_follow_ups_need() {
+        let output = format_mr_note_list(&parse_fixture(NOTE_LIST_FIXTURE));
+        // Thread start: note id for update/delete, discussion prefix for resolve/--reply.
+        assert!(
+            output.contains("@bob_dev 2026-08-07 [resolved] [note #987655] [discussion: 9e6a2c5f]"),
+            "got:\n{}",
+            output
+        );
+        // A reply shares its thread's discussion, so only its own note id is added.
+        assert!(output.contains("[note #987656]\n"), "got:\n{}", output);
+    }
+
+    #[test]
+    fn test_format_mr_note_list_cap_always_says_how_to_get_the_rest() {
+        let note = r#"{"id":1,"body":"b","author":{"username":"u"},"system":false,
+            "created_at":"2026-08-06T16:02:53.775+02:00","resolvable":false,
+            "resolved":false,"position":null}"#;
+        let discussions: Vec<String> = (0..CAP_LIST)
+            .map(|i| format!(r#"{{"id":"d{}","notes":[{}]}}"#, i, note))
+            .collect();
+        let output = format_mr_note_list(&parse_fixture(&format!("[{}]", discussions.join(","))));
+        assert!(output.contains("more\n"), "got:\n{}", output);
+        let last = output.lines().last().unwrap_or("");
+        assert!(
+            last.contains("-F json") || last.contains("full output"),
+            "hidden notes left unreachable:\n{}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_format_mr_note_list_needs_only_api_fields() {
+        // Robustness across glab versions: the formatter reads GitLab discussion-API
+        // fields, so a payload carrying nothing else must still render fully. Any glab
+        // presentation change (headers, ids, timestamps) is irrelevant by construction.
+        let json = parse_fixture(
+            r#"[{"individual_note":false,"notes":[
+                {"body":"first","author":{"username":"alice_dev"},"system":false,
+                 "created_at":"2026-08-06T16:02:53.775+02:00",
+                 "resolvable":true,"resolved":false,
+                 "position":{"new_path":"a.rs","new_line":7}},
+                {"body":"reply","author":{"username":"bob_dev"},"system":false,
+                 "created_at":"2026-08-07T09:00:00.000+02:00",
+                 "resolvable":true,"resolved":false,"position":null}]}]"#,
+        );
+        let output = format_mr_note_list(&json);
+        assert!(output.contains("@alice_dev 2026-08-06 [unresolved] a.rs:7"));
+        assert!(output.contains("  @bob_dev 2026-08-07 [unresolved]"));
+        assert!(output.contains("first"));
+        assert!(output.contains("reply"));
+    }
+
+    #[test]
+    fn test_format_mr_note_list_non_array_returns_empty() {
+        let output = format_mr_note_list(&Value::Object(Default::default()));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn test_format_mr_note_list_null_author_does_not_panic() {
+        let json = parse_fixture(
+            r#"[{"id":"d1","individual_note":true,"notes":[
+                {"body":"hi","author":null,"system":false,
+                 "created_at":null,"resolvable":false,"resolved":false,"position":null}]}]"#,
+        );
+        let output = format_mr_note_list(&json);
+        assert!(output.contains("@???"));
+        // An absent date must not leave a trailing space on the header line.
+        assert!(
+            !output.lines().any(|l| l.ends_with(' ')),
+            "trailing whitespace in:\n{:?}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_format_mr_note_list_token_savings() {
+        let output = format_mr_note_list(&parse_fixture(NOTE_LIST_FIXTURE));
+        let input_tokens = count_tokens(NOTE_LIST_FIXTURE);
+        let output_tokens = count_tokens(&output);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        // Savings scale with how much author-folded content the comments carry; human
+        // bodies are reproduced in full, so this stays well clear of the raw JSON.
+        assert!(
+            savings >= 60.0,
+            "MR note list: expected >=60% savings, got {:.1}% ({} -> {} tokens)",
+            savings,
+            input_tokens,
+            output_tokens
+        );
+    }
+
+    // ── collapse_details_blocks ──────────────────────────────────────────
+
+    #[test]
+    fn test_collapse_details_blocks_keeps_summary_and_counts_lines() {
+        let body = "before\n<details>\n<summary>Folded label</summary>\n<p>\none\ntwo\n</p>\n</details>\nafter";
+        let (collapsed, folded) = collapse_details_blocks(body);
+        assert!(collapsed.contains("before"));
+        assert!(collapsed.contains("Folded label"));
+        assert!(collapsed.contains("after"));
+        assert!(!collapsed.contains("one"));
+        assert!(folded > 0, "expected a folded line count, got {}", folded);
+    }
+
+    #[test]
+    fn test_collapse_details_blocks_folds_across_code_fences() {
+        // Real folded blocks embed fences; the fold must span them.
+        let body =
+            "<details>\n<summary>Bump</summary>\n<p>\n\n```diff\n-1\n+2\n```\n\n</p>\n</details>";
+        let (collapsed, folded) = collapse_details_blocks(body);
+        assert!(collapsed.contains("Bump"));
+        assert!(!collapsed.contains("+2"));
+        assert!(folded > 0);
+    }
+
+    #[test]
+    fn test_collapse_details_blocks_leaves_plain_body_untouched() {
+        let body = "A normal review comment.\n\nWith a second paragraph.";
+        let (collapsed, folded) = collapse_details_blocks(body);
+        assert_eq!(collapsed, body);
+        assert_eq!(folded, 0);
+    }
+
+    #[test]
+    fn test_collapse_details_blocks_leaves_unterminated_block_untouched() {
+        // No closing tag — nothing to fold, and the content must survive.
+        let body = "<details>\n<summary>Open</summary>\nstill here";
+        let (collapsed, folded) = collapse_details_blocks(body);
+        assert!(collapsed.contains("still here"));
+        assert_eq!(folded, 0);
     }
 
     #[test]
