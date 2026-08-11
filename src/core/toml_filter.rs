@@ -167,11 +167,30 @@ pub struct CompiledFilter {
 impl CompiledFilter {
     /// True when any invoked arg matches (exact or prefix) an entry in
     /// `pass_through_if_args`. Prefix matching covers combined short flags
-    /// (`-sk`) and value-bearing long flags (`--max-depth=1`).
+    /// (`-sk`) and value-bearing long flags (`--max-depth=1`). Short-option
+    /// clusters where the target flag is not first (`-hs`, `-hd1`) are matched
+    /// by scanning the cluster for the single-char needle.
     pub fn should_pass_through(&self, args: &[String]) -> bool {
         self.pass_through_if_args.iter().any(|needle| {
-            args.iter()
-                .any(|arg| arg == needle || arg.starts_with(needle))
+            args.iter().any(|arg| {
+                if arg == needle || arg.starts_with(needle) {
+                    return true;
+                }
+                // Short-option cluster: a single-dash token carrying the
+                // needle's char somewhere (du -hs, -hd1). Long flags (--) are
+                // handled by the exact/prefix branch above.
+                let single = needle
+                    .strip_prefix('-')
+                    .filter(|c| !needle.starts_with("--") && c.chars().count() == 1);
+                match single {
+                    Some(c) => {
+                        arg.starts_with('-')
+                            && !arg.starts_with("--")
+                            && arg[1..].contains(c)
+                    }
+                    None => false,
+                }
+            })
         })
     }
 }
@@ -873,10 +892,16 @@ pass_through_if_args = ["-s", "--summarize", "-d", "--max-depth"]
         assert!(filter.should_pass_through(&["--max-depth".into(), "1".into()]));
         // Depth flag among other args.
         assert!(filter.should_pass_through(&["-h".into(), "-d1".into(), "/tmp".into()]));
+        // Short-option clusters where the target flag is not first.
+        assert!(filter.should_pass_through(&["-hs".into(), "/tmp".into()]));
+        assert!(filter.should_pass_through(&["-hd1".into(), "/tmp".into()]));
+        assert!(filter.should_pass_through(&["-ahd1".into()]));
         // Flags that must NOT opt out.
         assert!(!filter.should_pass_through(&["-h".into(), "/tmp".into()]));
         assert!(!filter.should_pass_through(&["/tmp".into()]));
         assert!(!filter.should_pass_through(&["-a".into(), "-c".into()]));
+        // Capitalized short flags are distinct flags, not the needle.
+        assert!(!filter.should_pass_through(&["-S".into()]));
     }
 
     #[test]
