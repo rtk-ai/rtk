@@ -1,0 +1,58 @@
+[info] welcome to sbt 1.9.7 (Eclipse Adoptium Java 17.0.9)
+[info] loading settings for project root-build from plugins.sbt ...
+[info] loading project definition from /home/user/myproject/project
+[info] loading settings for project root from build.sbt ...
+[info] set current project to myproject (in build file:/home/user/myproject/)
+[info] Compiling 15 Scala sources to /home/user/myproject/target/scala-2.13/classes ...
+[info] Compiling 8 Scala sources to /home/user/myproject/target/scala-2.13/test-classes ...
+[info] MyServiceSpec:
+[info] A MyService
+[info]   when initialized
+[info]   - should return default config
+[info]   - should accept valid parameters
+[info]   - should reject invalid parameters
+[info]   when running
+[info]   - should process events correctly
+[info]   - should handle timeouts gracefully
+[info]   - should retry on transient failures
+[info] MyRepositorySpec:
+[info] A MyRepository
+[info]   - should save entities
+[info]   - should find entities by id
+[info]   - should delete entities
+[info]   - should list all entities
+[info]   - should handle concurrent writes
+[info] MyControllerSpec:
+[info] A MyController
+[info]   GET /api/items
+[info]   - should return 200 with items
+[info]   - should return 404 when not found
+[info]   POST /api/items
+[info]   - should return 201 on create
+[info]   - should return 400 on invalid input
+[info]   DELETE /api/items/:id
+[info]   - should return 204 on delete
+[info]   - should return 404 when not found
+[info] UtilsSpec:
+[info] Utils
+[info]   - should parse ISO dates
+[info]   - should format currency values
+[info]   - should validate email addresses
+[info]   - should sanitize HTML input
+[info]   - should truncate long strings
+[info] IntegrationSpec:
+[info] Integration tests
+[info]   database operations
+[info]   - should connect to test database
+[info]   - should run migrations
+[info]   - should rollback on failure
+[info]   API endpoints
+[info]   - should health check pass
+[info]   - should authenticate users
+[info]   - should authorize requests
+[info] Run completed in 5 seconds, 218 milliseconds.
+[info] Total number of tests run: 30
+[info] Suites: completed 5, aborted 0
+[info] Tests: succeeded 30, failed 0, canceled 0, ignored 2, pending 0
+[info] All tests passed.
+[success] Total time: 12 s, completed Jan 15, 2025 10:30:45 AM
