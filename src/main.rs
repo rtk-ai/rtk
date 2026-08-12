@@ -819,6 +819,14 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// System Gradle with compact output (build, test, lint)
+    #[command(name = "gradle")]
+    Gradle {
+        /// Gradle tasks and arguments (e.g., build, test, check, --info)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Apache Maven wrapper with compact output (test, integration-test, compile, package, install, verify, deploy)
     #[command(name = "mvn")]
     Mvn {
@@ -2425,6 +2433,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Gradlew { args } => gradlew_cmd::run(&args, cli.verbose)?,
 
+        Commands::Gradle { args } => gradlew_cmd::run_system(&args, cli.verbose)?,
+
         Commands::Mvn { args } => mvn_cmd::run(&args, cli.verbose)?,
 
         Commands::HookAudit { since } => {
@@ -3162,6 +3172,7 @@ mod tests {
             "gt",
             "golangci-lint",
             "gradlew",
+            "gradle",
             "mvn",
             "sbt",
             "php",

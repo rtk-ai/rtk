@@ -293,6 +293,7 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "pip",
     "go",
     "golangci-lint",
+    "gradle",
     "rewrite",
     "proxy",
     "verify",
@@ -862,6 +863,7 @@ mod tests {
     fn test_is_rtk_reserved_command() {
         assert!(is_rtk_reserved_command("git"));
         assert!(is_rtk_reserved_command("cargo"));
+        assert!(is_rtk_reserved_command("gradle"));
         assert!(is_rtk_reserved_command("json"));
         assert!(is_rtk_reserved_command("rewrite"));
         assert!(!is_rtk_reserved_command("jj"));
