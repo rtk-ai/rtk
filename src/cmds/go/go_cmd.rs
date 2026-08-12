@@ -74,8 +74,8 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
 
 fn go_test_args(args: &[String], inject_json: bool) -> Vec<&str> {
     let chdir_args = match args.first() {
-        Some(arg) if arg == "-C" && args.len() > 1 => 2,
-        Some(arg) if arg.starts_with("-C=") => 1,
+        Some(arg) if (arg == "-C" || arg == "--C") && args.len() > 1 => 2,
+        Some(arg) if arg.starts_with("-C=") || arg.starts_with("--C=") => 1,
         _ => 0,
     };
     let mut result = Vec::with_capacity(args.len() + usize::from(inject_json));
@@ -769,6 +769,18 @@ mod tests {
         assert_eq!(
             go_test_args(&joined, true),
             vec!["-C=/tmp/project", "-json", "./..."]
+        );
+
+        let separate = vec!["--C".to_string(), "/tmp/project".to_string(), "./...".to_string()];
+        assert_eq!(
+            go_test_args(&separate, true),
+            vec!["--C", "/tmp/project", "-json", "./..."]
+        );
+
+        let joined = vec!["--C=/tmp/project".to_string(), "./...".to_string()];
+        assert_eq!(
+            go_test_args(&joined, true),
+            vec!["--C=/tmp/project", "-json", "./..."]
         );
     }
 
