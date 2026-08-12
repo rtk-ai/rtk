@@ -122,7 +122,10 @@ Savings %     = (Saved / Input) × 100
 
 Savings data is stored locally in SQLite:
 
-- **Location**: `~/.local/share/rtk/history.db` (Linux / macOS)
+- **Location**:
+  - Linux: `~/.local/share/rtk/history.db`
+  - macOS: `~/Library/Application Support/rtk/history.db`
+  - Windows: `%LOCALAPPDATA%\rtk\history.db` (e.g. `C:\Users\<you>\AppData\Local\rtk\history.db`)
 - **Retention**: 90 days (automatic cleanup)
 - **Scope**: Global across all projects and Claude sessions
 
