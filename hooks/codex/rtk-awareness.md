@@ -4,7 +4,9 @@
 
 ## Rule
 
-Always prefix shell commands with `rtk`.
+Run shell commands normally. The Codex `PreToolUse` hook transparently routes supported commands through `rtk`; commands without an RTK filter run unchanged.
+
+You may invoke `rtk` explicitly for manual use, but do not add a second prefix to an already-prefixed command.
 
 Examples:
 
