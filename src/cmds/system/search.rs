@@ -19,6 +19,8 @@ use std::io::IsTerminal;
 use std::process::Command;
 use std::sync::LazyLock;
 
+use super::constants::{configured_ignore_patterns, IgnorePatterns};
+
 /// Short single-char flags that consume one following token (or inline remainder)
 /// as their value. `-e` is handled separately — its value goes to `patterns`.
 /// Includes all rg short flags that take a value argument except `-e` and `-r`
@@ -294,6 +296,41 @@ impl Engine {
     }
 }
 
+fn engine_ignore_args(engine: Engine, ignore_patterns: &IgnorePatterns) -> Vec<String> {
+    match engine {
+        Engine::Grep => ignore_patterns
+            .noise
+            .iter()
+            .chain(ignore_patterns.dirs.iter())
+            .map(|pattern| format!("--exclude-dir={pattern}"))
+            .chain(
+                ignore_patterns
+                    .noise
+                    .iter()
+                    .chain(ignore_patterns.files.iter())
+                    .map(|pattern| format!("--exclude={pattern}")),
+            )
+            .collect(),
+        Engine::Rg => ignore_patterns
+            .noise
+            .iter()
+            .map(|pattern| format!("--glob=!{pattern}"))
+            .chain(
+                ignore_patterns
+                    .dirs
+                    .iter()
+                    .map(|pattern| format!("--glob=!{pattern}/")),
+            )
+            .chain(
+                ignore_patterns
+                    .files
+                    .iter()
+                    .map(|pattern| format!("--glob=!{pattern}")),
+            )
+            .collect(),
+    }
+}
+
 /// Runs the agent's exact engine + flags for the grouping path, appending only the
 /// parse aids (see `Engine::parse_flags`).
 fn engine_capture<T: AsRef<str>>(
@@ -315,6 +352,7 @@ fn engine_command<T: AsRef<str>>(
 ) -> Command {
     let mut cmd = resolved_command(engine.bin());
     cmd.args(engine.parse_flags());
+    cmd.args(engine_ignore_args(engine, &configured_ignore_patterns()));
     for a in extra_args {
         cmd.arg(a.as_ref());
     }
@@ -850,6 +888,59 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_ignore_patterns() -> IgnorePatterns {
+        IgnorePatterns {
+            noise: vec!["node_modules".to_string()],
+            dirs: vec!["canary".to_string()],
+            files: vec!["*.lock".to_string()],
+        }
+    }
+
+    #[test]
+    fn rg_engine_ignore_args_are_explicit_globs() {
+        let args = engine_ignore_args(Engine::Rg, &sample_ignore_patterns());
+
+        assert!(args.contains(&"--glob=!node_modules".to_string()));
+        assert!(args.contains(&"--glob=!canary/".to_string()));
+        assert!(args.contains(&"--glob=!*.lock".to_string()));
+        assert!(!args.iter().any(|arg| arg.starts_with("--exclude")));
+    }
+
+    #[test]
+    fn grep_engine_ignore_args_use_engine_exclude_flags() {
+        let args = engine_ignore_args(Engine::Grep, &sample_ignore_patterns());
+
+        assert!(args.contains(&"--exclude-dir=node_modules".to_string()));
+        assert!(args.contains(&"--exclude-dir=canary".to_string()));
+        assert!(args.contains(&"--exclude=node_modules".to_string()));
+        assert!(args.contains(&"--exclude=*.lock".to_string()));
+        assert!(!args.iter().any(|arg| arg.starts_with("--glob")));
+    }
+
+    #[test]
+    fn rg_engine_ignore_args_skip_matching_entries_when_available() {
+        let dir = tempfile::tempdir().expect("temp search fixture");
+        std::fs::create_dir_all(dir.path().join("canary")).expect("canary dir");
+        std::fs::create_dir_all(dir.path().join("node_modules")).expect("node_modules dir");
+        std::fs::create_dir_all(dir.path().join("src")).expect("src dir");
+        std::fs::write(dir.path().join("canary/canary.txt"), "needle\n").expect("canary file");
+        std::fs::write(dir.path().join("node_modules/dep.txt"), "needle\n").expect("noise file");
+        std::fs::write(dir.path().join("src/Cargo.lock"), "needle\n").expect("lock file");
+        std::fs::write(dir.path().join("src/main.rs"), "needle\n").expect("src file");
+
+        let mut cmd = resolved_command("rg");
+        cmd.args(engine_ignore_args(Engine::Rg, &sample_ignore_patterns()));
+        cmd.args(["-n", "needle", dir.path().to_str().unwrap()]);
+
+        if let Ok(output) = cmd.output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(!stdout.contains("canary.txt"), "canary dir must be skipped");
+            assert!(!stdout.contains("dep.txt"), "noise dir must be skipped");
+            assert!(!stdout.contains("Cargo.lock"), "ignored file must be skipped");
+            assert!(stdout.contains("main.rs"), "non-ignored file must be searched");
+        }
+    }
 
     #[test]
     fn test_clean_line() {

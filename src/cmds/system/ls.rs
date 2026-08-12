@@ -1,5 +1,7 @@
 //! Filters directory listings into a compact tree format.
 
+use super::constants::{configured_ignore_patterns, IgnorePatterns};
+#[cfg(test)]
 use super::constants::NOISE_DIRS;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::{reduced, CAP_WARNINGS};
@@ -82,12 +84,14 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         paths.join(" ")
     };
 
+    let ignore_patterns = configured_ignore_patterns();
     runner::run_filtered(
         cmd,
         "ls",
         &format!("-la {}", target_display),
         |raw| {
-            let (entries, summary, parsed_count) = compact_ls(raw, show_all, show_long);
+            let (entries, summary, parsed_count) =
+                compact_ls_with_ignores(raw, show_all, show_long, &ignore_patterns);
 
             // If no lines were parsed (e.g., unrecognized locale), fall back to raw output.
             // This is safer than returning "(empty)" for a non-empty directory.
@@ -238,7 +242,22 @@ fn perms_to_octal(perms: &str) -> Option<String> {
 /// Returns (entries, summary, parsed_count) so caller can suppress summary when piped.
 /// parsed_count tracks how many non-header lines were successfully parsed.
 /// If parsed_count == 0 but raw had content, caller should fall back to raw output.
+#[cfg(test)]
 fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, usize) {
+    let ignore_patterns = IgnorePatterns {
+        noise: NOISE_DIRS.iter().map(|s| s.to_string()).collect(),
+        dirs: vec![],
+        files: vec![],
+    };
+    compact_ls_with_ignores(raw, show_all, show_long, &ignore_patterns)
+}
+
+fn compact_ls_with_ignores(
+    raw: &str,
+    show_all: bool,
+    show_long: bool,
+    ignore_patterns: &IgnorePatterns,
+) -> (String, String, usize) {
     use std::collections::HashMap;
 
     let mut dirs: Vec<(String, Option<String>)> = Vec::new(); // (name, octal_perms)
@@ -262,8 +281,8 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
         };
         parsed_count += 1;
 
-        // Filter noise dirs unless -a
-        if !show_all && NOISE_DIRS.iter().any(|noise| name == *noise) {
+        // Filter ignored dirs/files unless -a
+        if !show_all && ignore_patterns.is_ignored_name(&name, file_type == 'd') {
             continue;
         }
 
@@ -711,5 +730,29 @@ mod tests {
         assert_eq!(parsed_count, 0);
         assert!(entries.is_empty());
         assert!(summary.is_empty());
+    }
+
+    #[test]
+    fn test_compact_ls_with_configured_ignores() {
+        let input = "total 12\n\
+                     drwxr-xr-x  2 user staff 64 Jan  1 12:00 canary\n\
+                     drwxr-xr-x  2 user staff 64 Jan  1 12:00 src\n\
+                     -rw-r--r--  1 user staff  0 Jan  1 12:00 package.lock\n";
+        let ignore_patterns = IgnorePatterns {
+            noise: vec![],
+            dirs: vec!["canary".to_string()],
+            files: vec!["*.lock".to_string()],
+        };
+
+        let (entries, _summary, _parsed) = compact_ls_with_ignores(
+            input,
+            false,
+            false,
+            &ignore_patterns,
+        );
+
+        assert!(entries.contains("src/"));
+        assert!(!entries.contains("canary"));
+        assert!(!entries.contains("package.lock"));
     }
 }

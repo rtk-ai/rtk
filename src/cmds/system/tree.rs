@@ -6,7 +6,7 @@
 //! Token optimization: automatically excludes noise directories via -I pattern
 //! unless -a flag is present (respecting user intent).
 
-use super::constants::NOISE_DIRS;
+use super::constants::{configured_ignore_patterns, IgnorePatterns};
 use crate::core::runner::{self, RunOptions};
 use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::Result;
@@ -28,7 +28,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let has_ignore = args.iter().any(|a| a == "-I" || a.starts_with("--ignore="));
 
     if !show_all && !has_ignore {
-        let ignore_pattern = NOISE_DIRS.join("|");
+        let ignore_patterns = configured_ignore_patterns();
+        let ignore_pattern = tree_ignore_pattern(&ignore_patterns);
         cmd.arg("-I").arg(&ignore_pattern);
     }
 
@@ -60,6 +61,17 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             .early_exit_on_failure()
             .no_trailing_newline(),
     )
+}
+
+fn tree_ignore_pattern(ignore_patterns: &IgnorePatterns) -> String {
+    ignore_patterns
+        .noise
+        .iter()
+        .chain(ignore_patterns.dirs.iter())
+        .chain(ignore_patterns.files.iter())
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 fn filter_tree_output(raw: &str) -> String {
@@ -96,6 +108,7 @@ fn filter_tree_output(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmds::system::constants::NOISE_DIRS;
 
     #[test]
     fn test_filter_removes_summary() {
@@ -165,5 +178,20 @@ mod tests {
         assert!(NOISE_DIRS.contains(&".next"));
         assert!(NOISE_DIRS.contains(&"dist"));
         assert!(NOISE_DIRS.contains(&"build"));
+    }
+
+    #[test]
+    fn test_tree_ignore_pattern_includes_configured_entries() {
+        let ignore_patterns = IgnorePatterns {
+            noise: vec!["node_modules".to_string()],
+            dirs: vec!["canary".to_string()],
+            files: vec!["*.lock".to_string()],
+        };
+
+        let pattern = tree_ignore_pattern(&ignore_patterns);
+
+        assert!(pattern.contains("node_modules"));
+        assert!(pattern.contains("canary"));
+        assert!(pattern.contains("*.lock"));
     }
 }

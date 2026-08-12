@@ -33,8 +33,8 @@ emoji = true                # use emojis in output
 max_width = 120             # maximum output width
 
 [filters]
-# These apply to file-reading commands (ls, find, grep, cat/rtk read).
-# Paths matching these patterns are excluded from output, keeping noise low.
+# These apply to directory-walking commands (rtk ls, rtk tree, rtk find,
+# and rtk grep/rtk rg pattern searches). Matching names are excluded from output.
 ignore_dirs = [".git", "node_modules", "target", "__pycache__", ".venv", "vendor"]
 ignore_files = ["*.lock", "*.min.js", "*.min.css"]
 
