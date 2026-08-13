@@ -436,6 +436,34 @@ fn run_log(
     let mut cmd = git_cmd(global_args);
     cmd.arg("log");
 
+    if log_args_request_patch(args) {
+        for arg in args {
+            cmd.arg(arg);
+        }
+
+        let result = exec_capture(&mut cmd).context("Failed to run git log")?;
+
+        if !result.success() {
+            eprintln!("{}", result.stderr);
+            return Ok(result.exit_code);
+        }
+
+        if verbose > 0 {
+            eprintln!("Git log output:");
+        }
+
+        print!("{}", result.stdout);
+
+        timer.track(
+            &format!("git log {}", args.join(" ")),
+            &format!("rtk git log {} (passthrough)", args.join(" ")),
+            &result.stdout,
+            &result.stdout,
+        );
+
+        return Ok(0);
+    }
+
     // Check if user provided format flags
     let has_format_flag = args.iter().any(|arg| {
         arg.starts_with("--oneline") || arg.starts_with("--pretty") || arg.starts_with("--format")
@@ -619,6 +647,24 @@ pub(crate) fn filter_log_output(
     }
 
     result.join("\n").trim().to_string()
+}
+
+/// Whether the user explicitly asked `git log` to include patch output.
+fn log_args_request_patch(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "-p" | "-u"
+                | "--patch"
+                | "--patch-with-stat"
+                | "--patch-with-raw"
+                | "--cc"
+                | "--combined"
+                | "--full-diff"
+        ) || arg.starts_with("-U")
+            || arg.starts_with("--unified")
+            || arg.starts_with("--patch=")
+    })
 }
 
 /// Truncate a single line to `width` characters, appending "..." if needed
@@ -2729,6 +2775,16 @@ A  added.rs
     fn test_parse_user_limit_none() {
         let args: Vec<String> = vec!["--oneline".into()];
         assert_eq!(parse_user_limit(&args), None);
+    }
+
+    #[test]
+    fn test_log_patch_args_request_passthrough() {
+        assert!(log_args_request_patch(&["-p".into()]));
+        assert!(log_args_request_patch(&["--patch".into()]));
+        assert!(log_args_request_patch(&["--patch-with-stat".into()]));
+        assert!(log_args_request_patch(&["-U5".into()]));
+        assert!(log_args_request_patch(&["--unified=8".into()]));
+        assert!(!log_args_request_patch(&["--oneline".into()]));
     }
 
     #[test]
