@@ -1313,12 +1313,12 @@ fn filter_s3_objects(json_str: &str) -> Option<FilterResult> {
 
 fn filter_eks_cluster(json_str: &str) -> Option<FilterResult> {
     let v: Value = serde_json::from_str(json_str).ok()?;
-    let cluster = &v["cluster"];
+    let cluster = v.get("cluster")?.as_object()?;
 
-    let name = cluster["name"].as_str().unwrap_or("?");
-    let status = cluster["status"].as_str().unwrap_or("?");
-    let version = cluster["version"].as_str().unwrap_or("?");
-    let endpoint = cluster["endpoint"].as_str().unwrap_or("?");
+    let name = cluster.get("name")?.as_str()?;
+    let status = cluster.get("status")?.as_str()?;
+    let version = cluster.get("version")?.as_str()?;
+    let endpoint = cluster.get("endpoint")?.as_str()?;
     // certificateAuthority intentionally NOT read (base64 cert, 1000+ chars)
 
     let text = format!("{} {} k8s/{} {}", name, status, version, endpoint);
@@ -2340,6 +2340,16 @@ mod tests {
         // certificateAuthority should NOT appear
         assert!(!result.text.contains("LS0tLS1CRUdJTi"));
         assert!(!result.text.contains("VERY_LONG"));
+    }
+
+    #[test]
+    fn test_filter_eks_cluster_rejects_query_shaped_responses() {
+        for json in [r#""ACTIVE""#, r#"["ACTIVE"]"#, "null"] {
+            assert!(
+                filter_eks_cluster(json).is_none(),
+                "query-shaped response must pass through unchanged: {json}"
+            );
+        }
     }
 
     #[test]
