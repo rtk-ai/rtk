@@ -164,8 +164,10 @@ rewrite_segment(seg, excluded)                     [src/discover/registry.rs]
   |  Step 4 — Already RTK → return as-is
   |
   |  Step 5 — Special cases (short-circuit before classification)
-  |  head -N / --lines=N → rewrite_line_range() → "rtk read file --max-lines N"
+  |  head -N / --lines=N → rewrite_line_range() → "rtk read file --head-lines N"
   |  tail -N / -n N / --lines N → rewrite_line_range() → "rtk read file --tail-lines N"
+  |  (both honour hooks.exclude_commands; both windows are verbatim, since
+  |   head/tail promise an exact slice — --max-lines is the structure-aware one)
   |  head/tail with unsupported flag (-c, -f) → None (skip rewrite)
   |  cat with incompatible flag (-A, -v, -e) → None (skip rewrite)
   |

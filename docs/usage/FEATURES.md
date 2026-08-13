@@ -130,7 +130,9 @@ rtk read - [options]          # Lecture depuis stdin
 | Option | Court | Defaut | Description |
 |--------|-------|--------|-------------|
 | `--level` | `-l` | `minimal` | Niveau de filtrage : `none`, `minimal`, `aggressive` |
-| `--max-lines` | `-m` | illimite | Nombre maximum de lignes |
+| `--max-lines` | `-m` | illimite | Fenetre structurelle : conserve les signatures de tout le fichier (pas un prefixe litteral) |
+| `--head-lines` | | illimite | Les N premieres lignes, telles quelles (semantique de `head -n N`) |
+| `--tail-lines` | | illimite | Les N dernieres lignes, telles quelles (semantique de `tail -n N`) |
 | `--line-numbers` | `-n` | non | Afficher les numeros de ligne |
 
 **Niveaux de filtrage :**
