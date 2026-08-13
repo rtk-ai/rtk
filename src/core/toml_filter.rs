@@ -1405,6 +1405,24 @@ make[1]: Leaving directory '/home/user/project/docs'
         );
     }
 
+    #[test]
+    fn test_gcc_match_command_matches_gpp() {
+        let filters = make_filters(BUILTIN_TOML);
+
+        let gcc_filter = find_filter_in("gcc -c foo.c", &filters).expect("gcc built-in");
+        assert_eq!(gcc_filter.name, "gcc");
+
+        let gpp_filter =
+            find_filter_in("g++ -c foo.cpp -o foo.o", &filters).expect("g++ must match gcc filter");
+        assert_eq!(
+            gpp_filter.name, "gcc",
+            "g++ invocations must be routed to the same 'gcc' filter as gcc invocations"
+        );
+
+        let gpp_bare = find_filter_in("g++", &filters).expect("bare g++ must match gcc filter");
+        assert_eq!(gpp_bare.name, "gcc");
+    }
+
     // --- Edge cases ---
 
     #[test]

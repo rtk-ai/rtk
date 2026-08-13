@@ -6,8 +6,6 @@ strip_lines_matching = [
   "^\\s*$",
   "^\\s*cache (hit|miss|bypass)",
   "^\\s*\\d+ packages in scope",
-  "^\\s*Tasks:\\s+\\d+",
-  "^\\s*Duration:\\s+",
   "^\\s*Remote caching (enabled|disabled)",
 ]
 truncate_lines_at = 150
@@ -17,12 +15,12 @@ on_empty = "turbo: ok"
 [[tests.turbo]]
 name = "strips cache noise, keeps task output"
 input = " cache hit, replaying logs abc123\n cache miss, executing abc456\n\n3 packages in scope\n\n> myapp:build\n\nCompiled successfully.\n\nTasks:    2 successful, 2 total (1 cached)\nDuration: 3.2s"
-expected = "> myapp:build\nCompiled successfully."
+expected = "> myapp:build\nCompiled successfully.\nTasks:    2 successful, 2 total (1 cached)\nDuration: 3.2s"
 
 [[tests.turbo]]
 name = "preserves error output"
 input = "> myapp:lint\n\nError: src/index.ts(5,1): error TS2304\n\nTasks:    0 successful, 1 total\nDuration: 1.1s"
-expected = "> myapp:lint\nError: src/index.ts(5,1): error TS2304"
+expected = "> myapp:lint\nError: src/index.ts(5,1): error TS2304\nTasks:    0 successful, 1 total\nDuration: 1.1s"
 
 [[tests.turbo]]
 name = "empty after stripping"
