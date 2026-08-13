@@ -470,12 +470,7 @@ fn run_log(
         (10, false)
     };
 
-    // Only add --no-merges if user didn't explicitly request merge commits
-    let wants_merges = args
-        .iter()
-        .any(|arg| arg == "--merges" || arg == "--min-parents=2" || arg == "--no-merges");
-    // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
-    if !wants_merges && !has_limit_flag {
+    if should_add_no_merges(args, has_limit_flag) {
         cmd.arg("--no-merges");
     }
 
@@ -508,6 +503,49 @@ fn run_log(
     );
 
     Ok(0)
+}
+
+/// Flags that indicate the user wants merge commits or topology visualization.
+/// When any of these are present, RTK should NOT inject --no-merges.
+const MERGE_OR_TOPOLOGY_FLAGS: &[&str] = &[
+    "--merges",
+    "--min-parents=2",
+    "--no-merges",
+    "--graph",
+    "--all",
+    "--branches",
+    "--remotes",
+    "--decorate",
+    "--first-parent",
+    "--simplify-by-decoration",
+    "--parents",
+    "--boundary",
+    "--left-right",
+];
+
+/// Determine whether RTK should inject --no-merges into git log.
+///
+/// We suppress --no-merges when:
+/// - The user explicitly asks for merges (--merges, --min-parents=2, --no-merges)
+/// - The user sets an exact count (-n N / --max-count) via has_limit_flag
+/// - The user passes topology visualization flags that depend on merge commits
+///   for correct output (--graph, --all, --branches, --remotes, --decorate,
+///   --first-parent, --simplify-by-decoration, --parents, --boundary, --left-right)
+fn should_add_no_merges(args: &[String], has_limit_flag: bool) -> bool {
+    // Don't add --no-merges if user set an exact count
+    if has_limit_flag {
+        return false;
+    }
+
+    // Don't add --no-merges if user wants merge commits or topology visualization
+    let wants_merges_or_topology = args.iter().any(|arg| {
+        MERGE_OR_TOPOLOGY_FLAGS.contains(&arg.as_str())
+            || arg.starts_with("--branches=")
+            || arg.starts_with("--remotes=")
+            || arg.starts_with("--decorate=")
+    });
+
+    !wants_merges_or_topology
 }
 
 /// Filter git log output: truncate long messages, cap lines
@@ -2142,6 +2180,62 @@ mod tests {
             })
             .collect();
         assert!(envs.contains(&("LC_ALL".to_string(), "C".to_string())));
+    }
+
+    // --- should_add_no_merges tests ---
+
+    #[test]
+    fn test_git_log_default_adds_no_merges() {
+        let args: Vec<String> = vec![];
+        assert!(should_add_no_merges(&args, false));
+    }
+
+    #[test]
+    fn test_git_log_limit_flag_preserves_exact_count() {
+        let args = vec!["--oneline".to_string(), "-8".to_string()];
+        assert!(!should_add_no_merges(&args, true));
+    }
+
+    #[test]
+    fn test_git_log_merges_flag_preserves_merges() {
+        let args = vec!["--merges".to_string()];
+        assert!(!should_add_no_merges(&args, false));
+    }
+
+    #[test]
+    fn test_topology_flags_preserve_merges() {
+        let flags = &[
+            "--graph",
+            "--all",
+            "--branches",
+            "--remotes",
+            "--decorate",
+            "--first-parent",
+            "--simplify-by-decoration",
+            "--parents",
+            "--boundary",
+            "--left-right",
+        ];
+
+        for flag in flags {
+            let args = vec![flag.to_string()];
+            assert!(
+                !should_add_no_merges(&args, false),
+                "Flag {} should prevent --no-merges injection",
+                flag
+            );
+        }
+    }
+
+    #[test]
+    fn test_git_log_graph_all_decorate_combined() {
+        let args = vec![
+            "--graph".to_string(),
+            "--all".to_string(),
+            "--decorate".to_string(),
+            "--oneline".to_string(),
+        ];
+        assert!(!should_add_no_merges(&args, false));
     }
 
     #[test]
