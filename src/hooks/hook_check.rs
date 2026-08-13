@@ -86,7 +86,14 @@ fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
 
 /// Check if the installed hook is missing or outdated, warn once per day.
 pub fn maybe_warn() {
-    // Don't block startup — fail silently on any error
+    // Respect user opt-out: if config says quiet_hook_warnings, skip entirely.
+    if crate::core::config::Config::load()
+        .ok()
+        .map(|c| c.hooks.quiet_hook_warnings)
+        .unwrap_or(false)
+    {
+        return;
+    }
     let _ = check_and_warn();
 }
 
