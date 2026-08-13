@@ -470,12 +470,18 @@ fn run_log(
         (10, false)
     };
 
-    // Only add --no-merges if user didn't explicitly request merge commits
-    let wants_merges = args
-        .iter()
-        .any(|arg| arg == "--merges" || arg == "--min-parents=2" || arg == "--no-merges");
-    // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
-    if !wants_merges && !has_limit_flag {
+    // Add --no-merges only when RTK is fully driving defaults. When the user
+    // pins to specific commits (--format / -N / --graph / explicit ref or
+    // pathspec), --no-merges silently shifts the selection — e.g.
+    // `git log -1 HEAD` on a merge commit M resolves to M's second parent
+    // because `-1` walks past the dropped merge to the next non-merge
+    // commit. See #2009.
+    //
+    // Extends the partial fix in #2015 (which only honoured `-n N` /
+    // `--max-count`) to also preserve merges for `-1 HEAD`, `<sha>`,
+    // `--graph`, `--format=%H HEAD`, etc. — the remaining shapes from
+    // #2009's reproduction.
+    if should_add_no_merges_default(args, has_format_flag, has_limit_flag) {
         cmd.arg("--no-merges");
     }
 
@@ -508,6 +514,44 @@ fn run_log(
     );
 
     Ok(0)
+}
+
+/// Decide whether RTK should inject `--no-merges` as a token-saving default.
+///
+/// RTK drops merge commits from `git log` to keep output compact in the
+/// summary case, but that silently shifts the result whenever the user has
+/// pinned a specific commit — `git log -1 HEAD` against a merge commit M
+/// walks past M and returns its second parent instead of M itself (#2009).
+///
+/// The function returns `true` only when none of these "user is driving
+/// selection" signals are present:
+/// - `--format` / `--pretty` / `--oneline` (caller controls output shape)
+/// - `-N` / `-n N` / `--max-count=N` (caller asked for a precise window)
+/// - `--graph` (caller explicitly wants topology, which depends on merges)
+/// - any positional argument (treated as ref / SHA / tag / pathspec — even
+///   `--` separators or pathspecs land here; in every case it's a user
+///   selection signal, not RTK-driven defaults)
+/// - explicit `--merges` / `--min-parents=2` (caller already opted into
+///   merges; injecting `--no-merges` would contradict the request)
+///
+/// `has_format` and `has_limit` are pre-computed in the caller to avoid
+/// re-scanning the args list.
+fn should_add_no_merges_default(args: &[String], has_format: bool, has_limit: bool) -> bool {
+    if has_format || has_limit {
+        return false;
+    }
+    let user_specified_selection = args.iter().any(|arg| {
+        // --graph signals "show me topology" — dropping merges defeats it.
+        // Any positional (non-flag) arg is treated as a ref or pathspec.
+        arg == "--graph" || !arg.starts_with('-')
+    });
+    if user_specified_selection {
+        return false;
+    }
+    let explicit_merge_request = args
+        .iter()
+        .any(|arg| arg == "--merges" || arg == "--min-parents=2");
+    !explicit_merge_request
 }
 
 /// Filter git log output: truncate long messages, cap lines
@@ -2729,6 +2773,101 @@ A  added.rs
     fn test_parse_user_limit_none() {
         let args: Vec<String> = vec!["--oneline".into()];
         assert_eq!(parse_user_limit(&args), None);
+    }
+
+    // --- #2009: --no-merges must NOT be added when the user pins a commit ---
+
+    fn strs(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_no_merges_added_for_bare_git_log() {
+        // No user args at all → RTK fully drives defaults, drop merges for
+        // token savings.
+        assert!(should_add_no_merges_default(&[], false, false));
+    }
+
+    #[test]
+    fn test_no_merges_skipped_with_explicit_limit_one() {
+        // `git log -1 HEAD` — the exact reproduction from #2009. `-1` is a
+        // user-driven pin; dropping merges would skip a merge at HEAD and
+        // surface its second parent.
+        let args = strs(&["-1", "HEAD"]);
+        assert!(!should_add_no_merges_default(&args, false, true));
+    }
+
+    #[test]
+    fn test_no_merges_skipped_with_explicit_limit_only() {
+        // `git log -1` (no ref) — still a precise pin; dropping merges is
+        // wrong because the user asked for exactly one commit.
+        let args = strs(&["-1"]);
+        assert!(!should_add_no_merges_default(&args, false, true));
+    }
+
+    #[test]
+    fn test_no_merges_skipped_with_format_flag_and_ref() {
+        // `git log --format=%H HEAD` — user controls output shape AND
+        // points at a specific ref.
+        let args = strs(&["--format=%H", "HEAD"]);
+        assert!(!should_add_no_merges_default(&args, true, false));
+    }
+
+    #[test]
+    fn test_no_merges_skipped_with_explicit_sha() {
+        // `git log <sha>` — bare positional arg. Even without a format or
+        // limit flag, naming a ref is a "user is driving selection" signal.
+        let args = strs(&["abc123def456"]);
+        assert!(!should_add_no_merges_default(&args, false, false));
+    }
+
+    #[test]
+    fn test_no_merges_skipped_with_graph_flag() {
+        // `git log --graph` — the user explicitly wants topology. Dropping
+        // merges hides exactly what they came to see.
+        let args = strs(&["--graph"]);
+        assert!(!should_add_no_merges_default(&args, false, false));
+    }
+
+    #[test]
+    fn test_no_merges_skipped_with_graph_and_oneline() {
+        // `git log --graph --oneline` from #2009 — both signals present.
+        let args = strs(&["--graph", "--oneline"]);
+        assert!(!should_add_no_merges_default(&args, true, false));
+    }
+
+    #[test]
+    fn test_no_merges_skipped_with_explicit_merges() {
+        // `git log --merges` — user explicitly asked for merge commits;
+        // adding `--no-merges` would directly contradict that.
+        let args = strs(&["--merges"]);
+        assert!(!should_add_no_merges_default(&args, false, false));
+    }
+
+    #[test]
+    fn test_no_merges_skipped_with_min_parents() {
+        // `git log --min-parents=2` — semantic alias for "merges only".
+        let args = strs(&["--min-parents=2"]);
+        assert!(!should_add_no_merges_default(&args, false, false));
+    }
+
+    #[test]
+    fn test_no_merges_still_added_with_author_filter() {
+        // `git log --author=foo` — author filter is a flag, not a positional
+        // pin. RTK is still mostly driving (no format, no limit, no graph),
+        // so the token-saving default stays. This documents the intentional
+        // narrow scope of the fix: filters that don't pick a single commit
+        // do not need to defeat --no-merges.
+        let args = strs(&["--author=foo"]);
+        assert!(should_add_no_merges_default(&args, false, false));
+    }
+
+    #[test]
+    fn test_no_merges_skipped_with_max_count_arg() {
+        // `git log --max-count=5` — has_limit_flag short-circuits even
+        // before we look at positional args.
+        let args = strs(&["--max-count=5"]);
+        assert!(!should_add_no_merges_default(&args, false, true));
     }
 
     #[test]
