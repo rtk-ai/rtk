@@ -455,18 +455,22 @@ fn run_log(
         cmd.args(["--pretty=format:%h %s (%ar) <%an>%n%b%n---END---"]);
     }
 
-    // Determine limit: respect user's explicit -N flag, use sensible defaults otherwise
+    // Determine the display limit. Deliberately NOT passed to git: capping the
+    // child (`cmd.arg("-50")`) means the extra commits never exist, so nothing
+    // downstream can tell truncation happened and no marker can be emitted. A
+    // piped `git log | wc -l` then reports a plausible, complete-looking count
+    // that is silently wrong. Let git emit everything and cap the *output*, so
+    // the omission is counted and announced.
     let (limit, user_set_limit) = if has_limit_flag {
         // User explicitly passed -N / -n N / --max-count=N → respect their choice
+        // and let git do the capping; there is nothing for us to elide.
         let n = parse_user_limit(args).unwrap_or(10);
         (n, true)
     } else if has_format_flag {
         // --oneline / --pretty without -N: user wants compact output, allow more
-        cmd.arg("-50");
         (50, false)
     } else {
         // No flags at all: default to 10
-        cmd.arg("-10");
         (10, false)
     };
 
@@ -475,7 +479,8 @@ fn run_log(
         .iter()
         .any(|arg| arg == "--merges" || arg == "--min-parents=2" || arg == "--no-merges");
     // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
-    if !wants_merges && !has_limit_flag {
+    let dropped_merges = !wants_merges && !has_limit_flag;
+    if dropped_merges {
         cmd.arg("--no-merges");
     }
 
@@ -498,6 +503,15 @@ fn run_log(
     // Post-process: truncate long messages, cap lines only if RTK set the default
     let filtered = filter_log_output(&result.stdout, limit, user_set_limit, has_format_flag);
     let filtered = never_worse(&result.stdout, &filtered).to_string();
+
+    // The in-band omission marker is a line on stdout, so `wc -l` counts it as
+    // history and `grep -c` never sees it at all — in a pipeline the cap goes
+    // silent again exactly where history is being used as evidence. Repeat the
+    // notice on stderr, which the downstream pipe does not consume. Gating the
+    // cap on `is_terminal()` instead would disable it for every agent call,
+    // since a captured Bash tool never has a terminal on stdout.
+    report_log_elision(&result.stdout, &filtered, dropped_merges);
+
     println!("{}", filtered);
 
     timer.track(
@@ -508,6 +522,46 @@ fn run_log(
     );
 
     Ok(0)
+}
+
+/// Warn on stderr when the rendered log is not the whole answer.
+///
+/// Two things can make it partial: rtk capping the rendered output (announced
+/// in-band too) and rtk injecting `--no-merges`, which changes which commits
+/// git produced and therefore cannot be marked in-band at all.
+fn report_log_elision(raw: &str, filtered: &str, dropped_merges: bool) {
+    if let Some(notice) = log_elision_notice(raw, filtered, dropped_merges) {
+        eprintln!("{}", notice);
+    }
+}
+
+/// `None` when the rendered log is the whole answer, so a complete run stays quiet.
+pub(crate) fn log_elision_notice(
+    raw: &str,
+    filtered: &str,
+    dropped_merges: bool,
+) -> Option<String> {
+    let elided = filtered.contains("lines omitted") || filtered.contains("commits omitted");
+    if !elided && !dropped_merges {
+        return None;
+    }
+
+    let mut notes: Vec<String> = Vec::new();
+    if elided {
+        notes.push(format!(
+            "output capped ({} of {} raw lines shown)",
+            filtered.lines().count(),
+            raw.lines().count()
+        ));
+    }
+    if dropped_merges {
+        notes.push("merge commits excluded (--no-merges injected)".to_string());
+    }
+    Some(format!(
+        "[rtk] git log: {} — piping this? counts and greps see the filtered view; \
+         use `rtk proxy git log` or pass -n N for the raw stream.",
+        notes.join("; ")
+    ))
 }
 
 /// Filter git log output: truncate long messages, cap lines
@@ -568,24 +622,29 @@ pub(crate) fn filter_log_output(
     if user_format {
         let lines: Vec<&str> = output.lines().collect();
         let max_lines = if user_set_limit { lines.len() } else { limit };
-        return lines
+        let omitted = lines.len().saturating_sub(max_lines);
+        let mut out: Vec<String> = lines
             .iter()
             .take(max_lines)
             .map(|l| truncate_line(l, truncate_width))
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect();
+        if omitted > 0 {
+            out.push(log_omission_marker(omitted, "lines", lines.len()));
+        }
+        return out.join("\n");
     }
 
     // RTK injected format: split output into commit blocks separated by ---END---
-    let commits: Vec<&str> = output.split("---END---").collect();
+    let commits: Vec<&str> = output
+        .split("---END---")
+        .map(|b| b.trim())
+        .filter(|b| !b.is_empty())
+        .collect();
     let max_commits = if user_set_limit { commits.len() } else { limit };
+    let commits_omitted = commits.len().saturating_sub(max_commits);
 
     let mut result = Vec::new();
     for block in commits.iter().take(max_commits) {
-        let block = block.trim();
-        if block.is_empty() {
-            continue;
-        }
         let mut lines = block.lines();
         // First line is the header: hash subject (date) <author>
         let header = match lines.next() {
@@ -618,7 +677,25 @@ pub(crate) fn filter_log_output(
         }
     }
 
+    if commits_omitted > 0 {
+        result.push(log_omission_marker(commits_omitted, "commits", commits.len()));
+    }
+
     result.join("\n").trim().to_string()
+}
+
+/// Announce output-side truncation. rtk lets git emit the full history and caps
+/// the rendered output, so unlike a `-N` passed to git this omission is knowable
+/// and must be stated: a silent cap makes a piped `git log` look complete while
+/// hiding an arbitrary share of the history.
+/// `total` is an upper bound on the commits available (for the line-based path
+/// it counts lines, which is >= the commit count), so the suggested `-n` always
+/// covers the full history rather than under-asking for it.
+fn log_omission_marker(omitted: usize, unit: &str, total: usize) -> String {
+    format!(
+        "[+{} {} omitted; pass -n {} for all, or `rtk proxy git log` for the raw stream]",
+        omitted, unit, total
+    )
 }
 
 /// Truncate a single line to `width` characters, appending "..." if needed
@@ -2612,6 +2689,35 @@ A  added.rs
     }
 
     #[test]
+    fn test_log_elision_notice_silent_when_complete() {
+        // A run that showed everything and kept every merge must not warn, or
+        // the notice becomes noise and stops being read.
+        assert_eq!(log_elision_notice("a\nb\n", "a\nb", false), None);
+    }
+
+    #[test]
+    fn test_log_elision_notice_reports_cap() {
+        let raw = (0..100)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let filtered = "line 0\n[+99 lines omitted; pass -n 100 for all]";
+        let notice = log_elision_notice(&raw, filtered, false).expect("cap must be reported");
+        assert!(notice.contains("output capped"), "got: {notice}");
+        assert!(notice.contains("of 100 raw lines"), "got: {notice}");
+        assert!(!notice.contains("merge commits"), "got: {notice}");
+    }
+
+    #[test]
+    fn test_log_elision_notice_reports_injected_no_merges() {
+        // --no-merges changes which commits git produced, so there is no in-band
+        // marker for it at all; stderr is the only channel that can say so.
+        let notice = log_elision_notice("a\nb\n", "a\nb", true).expect("merge drop must be reported");
+        assert!(notice.contains("merge commits excluded"), "got: {notice}");
+        assert!(!notice.contains("output capped"), "got: {notice}");
+    }
+
+    #[test]
     fn test_filter_log_output() {
         let output = "abc1234 This is a commit message (2 days ago) <author>\n\n---END---\ndef5678 Another commit (1 week ago) <other>\n\n---END---\n";
         let result = filter_log_output(output, 10, false, false);
@@ -2661,7 +2767,68 @@ A  added.rs
             .collect::<Vec<_>>()
             .join("\n");
         let result = filter_log_output(&output, 5, false, false);
-        assert_eq!(result.lines().count(), 5);
+        // 5 commits + 1 omission marker. The marker is not decoration: rtk now
+        // lets git emit the full history and caps here, so the 15 hidden commits
+        // must be announced or a piped read looks complete.
+        assert_eq!(result.lines().count(), 6);
+        assert!(result.starts_with("hash0 "));
+        assert!(result.contains("hash4 "));
+        assert!(!result.contains("hash5 "));
+    }
+
+    #[test]
+    fn test_filter_log_output_announces_omitted_commits() {
+        let output = (0..20)
+            .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = filter_log_output(&output, 5, false, false);
+        let marker = result.lines().next_back().expect("marker line");
+        assert!(
+            marker.contains("+15 commits omitted"),
+            "expected 15 omitted, got: {marker}"
+        );
+        // Suggests a -n that actually covers the whole history, not shown+1.
+        assert!(marker.contains("-n 20"), "expected -n 20, got: {marker}");
+    }
+
+    #[test]
+    fn test_filter_log_output_no_marker_when_nothing_omitted() {
+        let output = (0..3)
+            .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = filter_log_output(&output, 10, false, false);
+        assert_eq!(result.lines().count(), 3);
+        assert!(!result.contains("omitted"));
+    }
+
+    #[test]
+    fn test_filter_log_output_user_format_announces_omitted_lines() {
+        // --oneline / --format path: no ---END--- markers, line-based capping.
+        let output = (0..20)
+            .map(|i| format!("hash{} subject {}", i, i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = filter_log_output(&output, 5, false, true);
+        assert_eq!(result.lines().count(), 6);
+        let marker = result.lines().next_back().expect("marker line");
+        assert!(
+            marker.contains("+15 lines omitted"),
+            "expected 15 omitted, got: {marker}"
+        );
+    }
+
+    #[test]
+    fn test_filter_log_output_user_limit_emits_no_marker() {
+        // git already capped to exactly N, so there is nothing for rtk to elide
+        // and claiming an omission would be a lie.
+        let output = (0..20)
+            .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = filter_log_output(&output, 20, true, false);
+        assert!(!result.contains("omitted"), "user -N must not be marked");
     }
 
     #[test]
@@ -2933,13 +3100,16 @@ no changes added to commit (use "git add" and/or "git commit -a")
                               jkl3456 docs: update readme\n\
                               mno7890 test: add tests\n";
 
-        // user_set_limit=true means respect all lines (no cap)
+        // user_set_limit=true means respect all lines (no cap, no marker)
         let result = filter_log_output(oneline_output, 3, true, true);
         assert_eq!(result.lines().count(), 5);
+        assert!(!result.contains("omitted"));
 
-        // user_set_limit=false means cap at limit
+        // user_set_limit=false means cap at limit, plus an omission marker for
+        // the 2 hidden lines: rtk caps the output now, so it must say so.
         let result = filter_log_output(oneline_output, 3, false, true);
-        assert_eq!(result.lines().count(), 3);
+        assert_eq!(result.lines().count(), 4);
+        assert!(result.contains("+2 lines omitted"));
     }
 
     /// Regression test: `git branch <name>` must create, not list.
