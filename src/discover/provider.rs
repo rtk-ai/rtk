@@ -41,6 +41,27 @@ pub trait SessionProvider {
 
 pub struct ClaudeProvider;
 
+/// Substring match of a project filter against a project directory name.
+///
+/// On Windows the match is case-insensitive: NTFS paths are case-insensitive
+/// and Claude Code encodes the project folder from whatever cwd casing it was
+/// launched with, so the same project can produce sibling folders like
+/// `E--proj` and `e--proj` while `std::env::current_dir()` reports an
+/// uppercase drive letter. A case-sensitive match then finds zero sessions.
+fn dir_matches_filter(dir_name: &str, filter: &str) -> bool {
+    dir_matches_filter_impl(dir_name, filter, cfg!(windows))
+}
+
+fn dir_matches_filter_impl(dir_name: &str, filter: &str, case_insensitive: bool) -> bool {
+    if case_insensitive {
+        dir_name
+            .to_ascii_lowercase()
+            .contains(&filter.to_ascii_lowercase())
+    } else {
+        dir_name.contains(filter)
+    }
+}
+
 impl ClaudeProvider {
     /// Get the base directory for Claude Code projects.
     fn projects_dir() -> Result<PathBuf> {
@@ -81,7 +102,7 @@ impl ClaudeProvider {
             // Apply project filter: substring match on directory name
             if let Some(filter) = project_filter {
                 let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !dir_name.contains(filter) {
+                if !dir_matches_filter(dir_name, filter) {
                     continue;
                 }
             }
@@ -415,6 +436,29 @@ mod tests {
             ClaudeProvider::encode_project_path(r"C:\Users\foo\bar"),
             "C--Users-foo-bar"
         );
+    }
+
+    #[test]
+    fn test_dir_matches_filter_case_sensitive() {
+        assert!(dir_matches_filter_impl("-Users-foo-rtk", "rtk", false));
+        assert!(!dir_matches_filter_impl("-Users-foo-RTK", "rtk", false));
+    }
+
+    #[test]
+    fn test_dir_matches_filter_case_insensitive_windows() {
+        // Uppercase cwd drive letter vs lowercase history folder
+        assert!(dir_matches_filter_impl(
+            "e--PROJECT-XXX-XXX-xxxx",
+            "E--PROJECT-XXX-XXX-xxxx",
+            true
+        ));
+        // And the reverse: lowercase cwd vs uppercase folder
+        assert!(dir_matches_filter_impl(
+            "E--PROJECT-app",
+            "e--PROJECT-app",
+            true
+        ));
+        assert!(!dir_matches_filter_impl("e--PROJECT-app", "e--OTHER", true));
     }
 
     #[test]
