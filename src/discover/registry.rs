@@ -1142,12 +1142,21 @@ fn rewrite_compound(
     }
 }
 
-fn rewrite_line_range(cmd: &str) -> Option<String> {
+fn rewrite_line_range(cmd: &str, excluded: &[ExcludePattern]) -> Option<String> {
+    // `head`/`tail` are routed here before the generic rule table, so the user's
+    // exclude_commands list has to be honoured explicitly — otherwise these two
+    // commands are silently unexcludable (see issue: exclude_commands ignored
+    // for head/tail).
+    if is_excluded(cmd, excluded) {
+        return None;
+    }
+
     for re in [&*HEAD_N, &*HEAD_LINES] {
         if let Some(caps) = re.captures(cmd) {
             let n = caps.get(1)?.as_str();
             let file = caps.get(2)?.as_str();
-            return Some(format!("rtk read {} --max-lines {}", file, n));
+            // --head-lines, not --max-lines: `head` promises a verbatim prefix.
+            return Some(format!("rtk read {} --head-lines {}", file, n));
         }
     }
     if cmd.starts_with("head -") {
@@ -1364,7 +1373,7 @@ fn rewrite_segment_inner(
     if context == RewriteContext::Normal
         && (cmd_part.starts_with("head -") || cmd_part.starts_with("tail "))
     {
-        return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
+        return rewrite_line_range(cmd_part, excluded).map(|r| format!("{}{}", r, redirect_suffix));
     }
 
     // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
@@ -2911,10 +2920,11 @@ mod tests {
 
     #[test]
     fn test_rewrite_head_numeric_flag() {
-        // head -20 file → rtk read file --max-lines 20 (not rtk read -20 file)
+        // head -20 file → rtk read file --head-lines 20 (not rtk read -20 file).
+        // --head-lines, not --max-lines: `head` promises a verbatim prefix.
         assert_eq!(
             rewrite_command_no_prefixes("head -20 src/main.rs", &[]),
-            Some("rtk read src/main.rs --max-lines 20".into())
+            Some("rtk read src/main.rs --head-lines 20".into())
         );
     }
 
@@ -2922,7 +2932,26 @@ mod tests {
     fn test_rewrite_head_lines_long_flag() {
         assert_eq!(
             rewrite_command_no_prefixes("head --lines=50 src/lib.rs", &[]),
-            Some("rtk read src/lib.rs --max-lines 50".into())
+            Some("rtk read src/lib.rs --head-lines 50".into())
+        );
+    }
+
+    #[test]
+    fn test_head_and_tail_honour_exclude_commands() {
+        // head/tail are routed before the generic rule table, so exclusion has
+        // to be checked explicitly — otherwise they are silently unexcludable.
+        assert_eq!(
+            rewrite_command_no_prefixes("head -20 src/main.rs", &["head".to_string()]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -20 app.log", &["tail".to_string()]),
+            None
+        );
+        // Excluding one must not disable the other.
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -20 app.log", &["head".to_string()]),
+            Some("rtk read app.log --tail-lines 20".into())
         );
     }
 
