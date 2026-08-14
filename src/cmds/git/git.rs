@@ -1011,10 +1011,16 @@ fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
 fn parse_commit_output(line: &str) -> String {
     if let Some(bracket_end) = line.find(']') {
         let bracket_content = &line[1..bracket_end];
-        let hash = bracket_content.split_whitespace().next_back().unwrap_or("");
+        let parts: Vec<&str> = bracket_content.split_whitespace().collect();
+        let hash = parts.last().copied().unwrap_or("");
+        let branch = parts.first().copied().unwrap_or("");
         if !hash.is_empty() && hash.len() >= 7 {
             let short_hash: String = hash.chars().take(7).collect();
-            format!("ok {}", short_hash)
+            if !branch.is_empty() {
+                format!("[{}] ok {}", branch, short_hash)
+            } else {
+                format!("ok {}", short_hash)
+            }
         } else {
             "ok".to_string()
         }
@@ -2828,27 +2834,27 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     fn test_parse_commit_output_normal() {
         let line = "[main abc1234def] add feature";
-        assert_eq!(parse_commit_output(line), "ok abc1234");
+        assert_eq!(parse_commit_output(line), "[main] ok abc1234");
     }
 
     #[test]
     fn test_parse_commit_output_root_commit() {
         let line = "[main (root-commit) abc1234def] initial commit";
-        assert_eq!(parse_commit_output(line), "ok abc1234");
+        assert_eq!(parse_commit_output(line), "[main] ok abc1234");
     }
 
     /// Regression test: multibyte branch name must not panic (was byte-slicing before fix)
     #[test]
     fn test_parse_commit_output_multibyte_branch() {
         let line = "[分支名 abc1234def] 提交消息";
-        assert_eq!(parse_commit_output(line), "ok abc1234");
+        assert_eq!(parse_commit_output(line), "[分支名] ok abc1234");
     }
 
     /// Regression test: Thai branch name (3 bytes per char)
     #[test]
     fn test_parse_commit_output_thai_branch() {
         let line = "[สาขา abc1234def] commit message";
-        assert_eq!(parse_commit_output(line), "ok abc1234");
+        assert_eq!(parse_commit_output(line), "[สาขา] ok abc1234");
     }
 
     #[test]
