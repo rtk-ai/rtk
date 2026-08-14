@@ -1311,6 +1311,13 @@ fn rewrite_segment_inner(
             );
             return None;
         }
+        // #3412: never insert rtk inside an elevated invocation. `sudo <tool>`
+        // elevates exactly one binary; rewriting to `sudo rtk <tool>` would run
+        // rtk's SQLite/tee/config/telemetry side effects as root and resolve
+        // the target binary outside sudo's secure_path. Pass through untouched.
+        if env_prefix.split_whitespace().any(|t| t == "sudo") {
+            return None;
+        }
         let rewritten = rewrite_segment_inner(
             rest_after_env,
             excluded,
@@ -4594,11 +4601,18 @@ mod tests {
 
     // --- sudo / env prefix + rewrite ---
 
+    // #3412: sudo-prefixed commands are never rewritten — inserting rtk into
+    // the elevation would run its database/tee/telemetry side effects as root.
     #[test]
-    fn test_rewrite_sudo_docker() {
+    fn test_rewrite_sudo_docker_skipped() {
+        assert_eq!(rewrite_command_no_prefixes("sudo docker ps", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_sudo_with_env_assign_skipped() {
         assert_eq!(
-            rewrite_command_no_prefixes("sudo docker ps", &[]),
-            Some("sudo rtk docker ps".into())
+            rewrite_command_no_prefixes("env FOO=1 sudo iptables -L", &[]),
+            None
         );
     }
 
@@ -5147,9 +5161,16 @@ mod tests {
 
     #[test]
     fn test_env_prefix_composed_with_builtin() {
+        // #3412: the sudo prefix suppresses the rewrite even through a
+        // builtin transparent prefix like noglob.
         assert_eq!(
             rewrite_command_no_prefixes("sudo noglob git status", &[]),
-            Some("sudo noglob rtk git status".into())
+            None
+        );
+        // A plain env-assignment prefix still composes with builtins.
+        assert_eq!(
+            rewrite_command_no_prefixes("FOO=1 noglob git status", &[]),
+            Some("FOO=1 noglob rtk git status".into())
         );
     }
 
