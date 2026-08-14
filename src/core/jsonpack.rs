@@ -44,13 +44,18 @@ use serde_json::Value;
 /// beats the savings.
 const MIN_ITEMS: usize = 2;
 
-/// Cap on inner-key count for nested-uniform flattening (headroom parity).
-/// Wider inner objects stay as JSON cells rather than exploding the table.
-const MAX_FLATTEN_INNER_KEYS: usize = 6;
+/// Cap on inner-key count for nested-uniform flattening. Headroom uses 6
+/// to keep tables narrow for humans; models read wide tables fine and the
+/// real gh api payloads need the width (a user object has ~18 keys, a
+/// repository object ~45). The cap only guards adversarial blowup.
+const MAX_FLATTEN_INNER_KEYS: usize = 64;
 
-/// Keys of the in-place table notation used inside JSON envelopes.
+/// Keys of the in-place table notation used inside JSON envelopes. `_flat`
+/// marks tables whose dotted `_cols` encode nesting (plain tables keep
+/// dots literal).
 const COLS_KEY: &str = "_cols";
 const ROWS_KEY: &str = "_rows";
+const FLAT_KEY: &str = "_flat";
 
 /// Type tags a column may carry in the CSV declaration.
 const TYPE_TAGS: [&str; 6] = ["int", "float", "bool", "string", "null", "json"];
@@ -164,16 +169,15 @@ fn csv_table(items: &[Value]) -> Option<String> {
 }
 
 /// Promote columns whose every present cell is a non-empty object with one
-/// identical key list into dotted columns (`author.login`). One level only;
-/// null parents, mixed inner keys, wide inner objects, dotted inner keys,
-/// and name collisions all block the promotion for that column.
+/// identical key list into dotted columns (`author.login`) — recursively: a
+/// freshly spliced dotted column is re-examined at the same index, so
+/// uniform chains become `commit.author.name`-style columns. Null parents,
+/// mixed inner keys, dotted inner keys, our own table notation, over-wide
+/// inner objects and name collisions all block the promotion for that
+/// column. Terminates because every splice strictly reduces nesting depth.
 fn flatten_uniform_nested(names: &mut Vec<String>, rows: &mut [Vec<Cell>]) {
     let mut i = 0;
     while i < names.len() {
-        if names[i].contains('.') {
-            i += 1;
-            continue;
-        }
         let Some(inner_keys) = uniform_inner_keys(rows, i) else {
             i += 1;
             continue;
@@ -213,7 +217,8 @@ fn flatten_uniform_nested(names: &mut Vec<String>, rows: &mut [Vec<Cell>]) {
                 row.insert(i + offset, cell);
             }
         }
-        i += inner_keys.len();
+        // Do not advance: the first spliced column may itself hold uniform
+        // objects (deeper nesting) — re-examine the same index.
     }
 }
 
@@ -226,6 +231,10 @@ fn uniform_inner_keys(rows: &[Vec<Cell>], col: usize) -> Option<Vec<String>> {
         match &row[col] {
             None => continue,
             Some(Value::Object(map)) if !map.is_empty() => {
+                if is_table_shape(map) {
+                    // Never flatten our own notation (replaced inner arrays).
+                    return None;
+                }
                 let keys: Vec<String> = map.keys().cloned().collect();
                 match &canonical {
                     None => canonical = Some(keys),
@@ -455,15 +464,22 @@ fn record_to_object(record: &[Field], cols: &[ColSpec]) -> Option<Value> {
         .zip(cols)
         .map(|(f, c)| field_to_value(f, &c.ty))
         .collect::<Option<_>>()?;
+    let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+    Some(rebuild_object(&names, &cells))
+}
 
-    // Rebuild objects, folding dotted columns back into their parent.
+/// Fold dotted column names back into nested objects, recursively (shared
+/// by the CSV decoder and `_flat` table decoding). A group whose every
+/// leaf is absent folds to "parent key absent" — matching the encoder,
+/// which only flattens parents that are uniformly present-or-missing.
+fn rebuild_object(names: &[&str], cells: &[Option<Value>]) -> Value {
     let mut obj = serde_json::Map::new();
     let mut done_parents: Vec<&str> = Vec::new();
-    for (idx, col) in cols.iter().enumerate() {
-        match col.name.split_once('.') {
+    for (idx, name) in names.iter().enumerate() {
+        match name.split_once('.') {
             None => {
                 if let Some(v) = cells[idx].clone() {
-                    obj.insert(col.name.clone(), v);
+                    obj.insert((*name).to_string(), v);
                 }
             }
             Some((parent, _)) => {
@@ -471,25 +487,24 @@ fn record_to_object(record: &[Field], cols: &[ColSpec]) -> Option<Value> {
                     continue;
                 }
                 done_parents.push(parent);
-                let mut inner = serde_json::Map::new();
-                let mut any_present = false;
-                for (j, other) in cols.iter().enumerate() {
-                    if let Some((p, key)) = other.name.split_once('.') {
+                let mut sub_names: Vec<&str> = Vec::new();
+                let mut sub_cells: Vec<Option<Value>> = Vec::new();
+                for (j, other) in names.iter().enumerate() {
+                    if let Some((p, rest)) = other.split_once('.') {
                         if p == parent {
-                            if let Some(v) = cells[j].clone() {
-                                inner.insert(key.to_string(), v);
-                                any_present = true;
-                            }
+                            sub_names.push(rest);
+                            sub_cells.push(cells[j].clone());
                         }
                     }
                 }
-                if any_present {
-                    obj.insert(parent.to_string(), Value::Object(inner));
+                if sub_cells.iter().all(|c| c.is_none()) {
+                    continue;
                 }
+                obj.insert(parent.to_string(), rebuild_object(&sub_names, &sub_cells));
             }
         }
     }
-    Some(Value::Object(obj))
+    Value::Object(obj)
 }
 
 /// Decode one field under its column type. `Some(None)` means the key was
@@ -561,6 +576,9 @@ fn walk_replace(v: Value) -> Value {
 /// Dense arrays only: every item an object with the same key SET. Sparse
 /// arrays stay verbatim — JSON rows have no way to say "absent" that is
 /// distinct from null, and inventing one would break citation fidelity.
+/// Uniform nested objects flatten into dotted `_cols` marked `"_flat":1`
+/// (rows repeating an identical `repository`-style object per item is
+/// where gh api spends most of its bytes).
 fn dense_table(items: &[Value]) -> Option<Value> {
     if items.len() < MIN_ITEMS {
         return None;
@@ -576,19 +594,45 @@ fn dense_table(items: &[Value]) -> Option<Value> {
             return None;
         }
     }
+
+    let mut names: Vec<String> = cols.iter().map(|k| (*k).clone()).collect();
+    let mut rows: Vec<Vec<Cell>> = objs
+        .iter()
+        .map(|obj| names.iter().map(|k| Some(obj[k].clone())).collect())
+        .collect();
+    // Literal dots in original keys would be indistinguishable from the
+    // flatten notation on decode — keep such tables plain.
+    let mut flat = false;
+    if names.iter().all(|n| !n.contains('.')) {
+        flatten_uniform_nested(&mut names, &mut rows);
+        flat = names.iter().any(|n| n.contains('.'));
+    }
+
     let mut table = serde_json::Map::new();
     table.insert(
         COLS_KEY.to_string(),
-        Value::Array(cols.iter().map(|k| Value::String((*k).clone())).collect()),
+        Value::Array(names.iter().map(|k| Value::String(k.clone())).collect()),
     );
     table.insert(
         ROWS_KEY.to_string(),
         Value::Array(
-            objs.iter()
-                .map(|obj| Value::Array(cols.iter().map(|k| obj[*k].clone()).collect()))
+            rows.into_iter()
+                .map(|row| {
+                    Value::Array(
+                        row.into_iter()
+                            // Dense + uniform flatten ⇒ never Missing; if
+                            // that invariant ever broke, the round-trip
+                            // verify would decline the pack.
+                            .map(|cell| cell.unwrap_or(Value::Null))
+                            .collect(),
+                    )
+                })
                 .collect(),
         ),
     );
+    if flat {
+        table.insert(FLAT_KEY.to_string(), Value::Number(1.into()));
+    }
     Some(Value::Object(table))
 }
 
@@ -605,10 +649,24 @@ fn decode_walk(v: Value) -> Value {
     }
 }
 
+/// Shape check for the `_cols`/`_rows` (+ optional `_flat`) notation.
+fn is_table_shape(map: &serde_json::Map<String, Value>) -> bool {
+    (map.len() == 2 || (map.len() == 3 && map.contains_key(FLAT_KEY)))
+        && map.contains_key(COLS_KEY)
+        && map.contains_key(ROWS_KEY)
+}
+
 fn decode_table_obj(map: &serde_json::Map<String, Value>) -> Option<Vec<Value>> {
-    if map.len() != 2 {
-        return None;
-    }
+    let flat = match map.len() {
+        2 => false,
+        3 => {
+            if map.get(FLAT_KEY)?.as_i64()? != 1 {
+                return None;
+            }
+            true
+        }
+        _ => return None,
+    };
     let cols = map.get(COLS_KEY)?.as_array()?;
     let rows = map.get(ROWS_KEY)?.as_array()?;
     let names: Vec<&str> = cols.iter().map(|c| c.as_str()).collect::<Option<_>>()?;
@@ -621,11 +679,17 @@ fn decode_table_obj(map: &serde_json::Map<String, Value>) -> Option<Vec<Value>> 
         if cells.len() != names.len() {
             return None;
         }
-        let mut obj = serde_json::Map::new();
-        for (name, cell) in names.iter().zip(cells) {
-            obj.insert(name.to_string(), decode_walk(cell.clone()));
+        let decoded: Vec<Option<Value>> =
+            cells.iter().map(|c| Some(decode_walk(c.clone()))).collect();
+        if flat {
+            items.push(rebuild_object(&names, &decoded));
+        } else {
+            let mut obj = serde_json::Map::new();
+            for (name, cell) in names.iter().zip(decoded) {
+                obj.insert(name.to_string(), cell.unwrap_or(Value::Null));
+            }
+            items.push(Value::Object(obj));
         }
-        items.push(Value::Object(obj));
     }
     Some(items)
 }
@@ -842,11 +906,15 @@ mod tests {
     }
 
     #[test]
-    fn wide_inner_objects_do_not_flatten() {
-        // 7 inner keys > MAX_FLATTEN_INNER_KEYS — stays a json column. The
+    fn wide_inner_objects_beyond_cap_do_not_flatten() {
+        // 65 inner keys > MAX_FLATTEN_INNER_KEYS — stays a json column. The
         // flat sibling columns give CSV enough headroom to win overall even
         // though the json cells pay the quote-doubling tax.
-        let inner: Value = json!({"a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"g":7});
+        let inner: Value = Value::Object(
+            (0..65)
+                .map(|i| (format!("k{i:02}"), json!(i)))
+                .collect::<serde_json::Map<String, Value>>(),
+        );
         let items: Vec<Value> = (0..5)
             .map(|i| {
                 json!({
@@ -859,11 +927,116 @@ mod tests {
             })
             .collect();
         let packed = pack_ok(&serde_json::to_string(&Value::Array(items)).unwrap());
-        let decl = packed.lines().next().unwrap();
-        assert!(decl.contains("m:json"), "got: {decl}");
+        // Whichever encoding wins (csv or _cols fallback), the over-wide
+        // object must survive as a verbatim cell, never as dotted columns.
         assert!(
-            !decl.contains("m.a"),
-            "must not flatten 7 inner keys: {decl}"
+            !packed.contains("m.k00"),
+            "must not flatten 65 inner keys: {packed}"
+        );
+    }
+
+    #[test]
+    fn flatten_recurses_into_deep_uniform_objects() {
+        // The gh api commits shape: commit.author.{name,email,date} must
+        // become second-level dotted columns, not a json cell — that is
+        // where the real-world savings live.
+        let items: Vec<Value> = (0..4)
+            .map(|i| {
+                json!({
+                    "sha": format!("{:040x}", 0xfeed00 + i),
+                    "commit": {
+                        "message": format!("message {i}"),
+                        "author": {"name": "R B", "email": "r@example.com", "date": "2026-08-14T10:00:00Z"},
+                        "url": format!("https://api.github.com/x/{i}")
+                    }
+                })
+            })
+            .collect();
+        let packed = pack_ok(&serde_json::to_string(&Value::Array(items)).unwrap());
+        let decl = packed.lines().next().unwrap();
+        assert!(decl.contains("commit.author.name:string"), "got: {decl}");
+        assert!(decl.contains("commit.author.email:string"), "got: {decl}");
+        assert!(decl.contains("commit.message:string"), "got: {decl}");
+        assert!(!decl.contains("commit:json"), "must be flattened: {decl}");
+    }
+
+    #[test]
+    fn flatten_missing_parent_chain_round_trips() {
+        // Row without `commit` at all: every commit.* cell is empty and the
+        // decoder must restore "no commit key" — not nested empty objects.
+        let raw = concat!(
+            r#"[{"id":1,"commit":{"author":{"name":"a","mail":"a@x"},"note":"n1"}},"#,
+            r#"{"id":2},"#,
+            r#"{"id":3,"commit":{"author":{"name":"c","mail":"c@x"},"note":"n3"}}]"#
+        );
+        let packed = pack_ok(raw);
+        assert!(
+            packed
+                .lines()
+                .next()
+                .unwrap()
+                .contains("commit.author.name"),
+            "got: {packed}"
+        );
+    }
+
+    #[test]
+    fn envelope_dense_rows_flatten_uniform_nested_with_marker() {
+        // The gh api actions/runs shape: every row repeats an identical-keyed
+        // `repository` object. Envelope tables must flatten it into dotted
+        // _cols and carry the `"_flat":1` marker so the decoder knows dots
+        // mean nesting (plain tables keep dots literal).
+        let raw = serde_json::to_string_pretty(&json!({
+            "total_count": 3,
+            "workflow_runs": [
+                {"id": 1, "status": "completed", "repository": {"name": "rtk", "full_name": "rtk-ai/rtk", "private": false}},
+                {"id": 2, "status": "completed", "repository": {"name": "rtk", "full_name": "rtk-ai/rtk", "private": false}},
+                {"id": 3, "status": "queued", "repository": {"name": "rtk", "full_name": "rtk-ai/rtk", "private": false}}
+            ]
+        }))
+        .unwrap();
+        let packed = pack_ok(&raw);
+        assert!(packed.contains("repository.full_name"), "got: {packed}");
+        assert!(packed.contains("\"_flat\":1"), "marker required: {packed}");
+    }
+
+    #[test]
+    fn envelope_table_objects_in_cells_are_never_flattened() {
+        // After inner replacement, cells may hold our own {_cols,_rows}
+        // tables (from nested dense arrays). Flattening THOSE would splice
+        // our notation into column names and break decode — they must stay
+        // intact cells. pack_ok proves the round trip survives.
+        let raw = serde_json::to_string_pretty(&json!({
+            "runs": [
+                {"id": 1, "steps": [{"n": "a", "ok": true}, {"n": "b", "ok": true}]},
+                {"id": 2, "steps": [{"n": "a", "ok": true}, {"n": "b", "ok": false}]},
+                {"id": 3, "steps": [{"n": "a", "ok": false}, {"n": "b", "ok": true}]}
+            ]
+        }))
+        .unwrap();
+        let packed = pack_ok(&raw);
+        assert!(
+            !packed.contains("steps._cols"),
+            "own notation must not be flattened: {packed}"
+        );
+    }
+
+    #[test]
+    fn data_containing_fake_flat_marker_is_refused() {
+        // A REAL 3-key object shaped like our _flat notation must make the
+        // round-trip verifier decline the pack, same as the 2-key case.
+        let raw = serde_json::to_string_pretty(&json!({
+            "legit": {"_cols": ["a.b"], "_rows": [[1]], "_flat": 1},
+            "runs": [
+                {"id": 1, "s": "ok"},
+                {"id": 2, "s": "ok"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            pack(&raw),
+            None,
+            "colliding _flat notation in data must refuse to pack"
         );
     }
 
@@ -1139,5 +1312,45 @@ mod tests {
     fn unpack_plain_json_passes_through() {
         // A packed envelope with zero replacements is just minified JSON.
         assert_eq!(unpack(r#"{"a":1}"#), Some(json!({"a": 1})));
+    }
+
+    // ── real captured outputs (produced by gh, not synthesized) ──
+
+    #[test]
+    fn real_gh_pr_list_capture_round_trips_and_saves() {
+        // Captured from `gh pr list --repo rtk-ai/rtk --state all --limit 8
+        // --json number,title,state,author,updatedAt`. Synthetic fixtures
+        // overstate savings (real titles/logins/ids are long); this pins the
+        // behavior on bytes gh actually produced.
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/gh_pr_list_real.json"
+        ));
+        let packed = pack_ok(raw);
+        assert!(packed.starts_with('['), "csv expected: {packed}");
+        let saved = 1.0 - (packed.len() as f64 / raw.len() as f64);
+        assert!(
+            saved >= 0.10,
+            "expected ≥10% on real pr list, got {:.1}%",
+            saved * 100.0
+        );
+    }
+
+    #[test]
+    fn real_gh_api_commits_capture_round_trips_and_saves() {
+        // Captured from `gh api repos/rtk-ai/rtk/commits?per_page=4`
+        // (author/committer emails+names sanitized). Deep nested objects:
+        // the recursive flatten is what makes this shape profitable.
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/gh_api_commits_real.json"
+        ));
+        let packed = pack_ok(raw);
+        let saved = 1.0 - (packed.len() as f64 / raw.len() as f64);
+        assert!(
+            saved >= 0.10,
+            "expected ≥10% on real commits, got {:.1}%",
+            saved * 100.0
+        );
     }
 }
