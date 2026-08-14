@@ -4710,6 +4710,45 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_compound_preserves_double_quoted_prose_assignment() {
+        let command =
+            r#"T="chore(skills): make every Pocock skill model-invocable"; echo "len=${#T}""#;
+
+        assert_eq!(rewrite_command_no_prefixes(command, &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_single_quoted_prose_assignment() {
+        let command = r#"T='please make a cake'; printf '%s' "$T""#;
+
+        assert_eq!(rewrite_command_no_prefixes(command, &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_single_preserves_inline_title_prose() {
+        let command =
+            r#"gh pr edit 1476 --title "chore(skills): make every Pocock skill model-invocable""#;
+
+        assert_eq!(
+            rewrite_command_no_prefixes(command, &[]),
+            Some(
+                r#"rtk gh pr edit 1476 --title "chore(skills): make every Pocock skill model-invocable""#
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_title_before_gh_edit() {
+        let command = r#"T="chore(skills): make every Pocock skill model-invocable"; echo "len=${#T}"; [ ${#T} -le 100 ] && gh pr edit 1476 --title "$T""#;
+
+        assert_eq!(
+            rewrite_command_no_prefixes(command, &[]),
+            Some(r#"T="chore(skills): make every Pocock skill model-invocable"; echo "len=${#T}"; [ ${#T} -le 100 ] && rtk gh pr edit 1476 --title "$T""#.into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_compound_pipe_raw_filter() {
         // Producers stay raw; only a pipeline-safe final stage is rewritten.
         assert_eq!(
