@@ -55,6 +55,12 @@ fn evaluate(cmd: &str, excluded: &[String], transparent_prefixes: &[String]) -> 
         return RewriteOutcome::Passthrough;
     }
 
+    // Signal commands emit canonical control markers the caller greps against —
+    // pass them through unrewritten so raw stdout survives intact.
+    if super::passthrough::is_signal_command(cmd) {
+        return RewriteOutcome::Passthrough;
+    }
+
     match registry::rewrite_command(cmd, excluded, transparent_prefixes) {
         Some(rewritten) => match verdict {
             PermissionVerdict::Allow => RewriteOutcome::Allow(rewritten),
@@ -128,7 +134,7 @@ mod tests {
         #[test]
         fn test_fd_dup_redirect_still_rewrites() {
             assert!(matches!(
-                evaluate("git status 2>&1", &[], &[]),
+                evaluate("git diff 2>&1", &[], &[]),
                 RewriteOutcome::Ask(_)
             ));
         }
@@ -136,9 +142,23 @@ mod tests {
         #[test]
         fn test_plain_command_still_rewrites() {
             assert!(matches!(
-                evaluate("git status", &[], &[]),
+                evaluate("git diff", &[], &[]),
                 RewriteOutcome::Ask(_)
             ));
+        }
+
+        #[test]
+        fn test_signal_command_passes_through() {
+            // `git status`/`git push` emit control markers the caller greps —
+            // they must pass through unrewritten even when attestable.
+            assert_eq!(
+                evaluate("git status", &[], &[]),
+                RewriteOutcome::Passthrough
+            );
+            assert_eq!(
+                evaluate("git push origin main", &[], &[]),
+                RewriteOutcome::Passthrough
+            );
         }
     }
 

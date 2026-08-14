@@ -236,6 +236,13 @@ fn get_rewritten(cmd: &str) -> Option<String> {
         return None;
     }
 
+    // Signal commands emit canonical control markers (`git push`'s `To <repo>`
+    // line, `git status` porcelain, `gh pr` state) that downstream agents grep
+    // against. Bypass rewriting so raw stdout reaches the caller unreshaped.
+    if super::passthrough::is_signal_command(cmd) {
+        return None;
+    }
+
     let (excluded, transparent_prefixes) = crate::core::config::Config::load()
         .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
         .unwrap_or_default();
@@ -1010,7 +1017,16 @@ mod tests {
 
     #[test]
     fn test_get_rewritten_supported() {
-        assert!(get_rewritten("git status").is_some());
+        assert!(get_rewritten("git diff").is_some());
+    }
+
+    #[test]
+    fn test_get_rewritten_signal_command_passthrough() {
+        // Signal commands bypass rewriting so their canonical control markers
+        // (git push's `To <repo>`, git status porcelain) reach the caller raw.
+        assert!(get_rewritten("git status").is_none());
+        assert!(get_rewritten("git push origin main").is_none());
+        assert!(get_rewritten("gh pr view 123").is_none());
     }
 
     #[test]
@@ -1252,7 +1268,7 @@ mod tests {
 
     #[test]
     fn test_copilot_cli_cve_safe_forms_still_rewrite() {
-        for cmd in ["git status", "git status 2>&1"] {
+        for cmd in ["git diff", "git diff 2>&1"] {
             let r = end_to_end(cmd).unwrap_or_else(|| panic!("expected rewrite for {cmd:?}"));
             assert_eq!(
                 r["modifiedArgs"]["command"].as_str().unwrap(),
@@ -1403,25 +1419,33 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_rewrite_git_status() {
-        let result = run_claude_inner(&claude_input("git status")).unwrap();
+    fn test_claude_rewrite_git_diff() {
+        let result = run_claude_inner(&claude_input("git diff")).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
         let cmd = v
             .pointer("/hookSpecificOutput/updatedInput/command")
             .and_then(|c| c.as_str())
             .unwrap();
-        assert_eq!(cmd, "rtk git status");
+        assert_eq!(cmd, "rtk git diff");
+    }
+
+    #[test]
+    fn test_claude_signal_command_passthrough() {
+        // A signal command produces no rewrite payload — Claude Code runs the
+        // original command natively so the canonical marker survives.
+        assert!(run_claude_inner(&claude_input("git push origin main")).is_none());
+        assert!(run_claude_inner(&claude_input("git status")).is_none());
     }
 
     #[test]
     fn test_claude_rewrite_preserves_tool_input_fields() {
-        let input = claude_input_with_fields("git status", 30000, "Check repo status");
+        let input = claude_input_with_fields("git diff", 30000, "Show working diff");
         let result = run_claude_inner(&input).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
         let updated = &v["hookSpecificOutput"]["updatedInput"];
-        assert_eq!(updated["command"], "rtk git status");
+        assert_eq!(updated["command"], "rtk git diff");
         assert_eq!(updated["timeout"], 30000);
-        assert_eq!(updated["description"], "Check repo status");
+        assert_eq!(updated["description"], "Show working diff");
     }
 
     #[test]
@@ -1446,7 +1470,7 @@ mod tests {
     #[test]
     fn test_claude_fd_dup_redirect_still_rewritten() {
         // `2>&1` is attestable — the rewrite proceeds as normal.
-        assert!(run_claude_inner(&claude_input("git status 2>&1")).is_some());
+        assert!(run_claude_inner(&claude_input("git diff 2>&1")).is_some());
     }
 
     #[test]
@@ -1476,13 +1500,13 @@ mod tests {
 
     #[test]
     fn test_claude_env_prefix_preserved() {
-        let result = run_claude_inner(&claude_input("GIT_PAGER=cat git status")).unwrap();
+        let result = run_claude_inner(&claude_input("GIT_PAGER=cat git diff")).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
         let cmd = v
             .pointer("/hookSpecificOutput/updatedInput/command")
             .and_then(|c| c.as_str())
             .unwrap();
-        assert_eq!(cmd, "GIT_PAGER=cat rtk git status");
+        assert_eq!(cmd, "GIT_PAGER=cat rtk git diff");
     }
 
     #[test]
@@ -1509,7 +1533,7 @@ mod tests {
 
     #[test]
     fn test_claude_json_output_structure() {
-        let result = run_claude_inner(&claude_input("git status")).unwrap();
+        let result = run_claude_inner(&claude_input("git diff")).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
         let hook = &v["hookSpecificOutput"];
 
@@ -1543,11 +1567,11 @@ mod tests {
 
     #[test]
     fn test_cursor_rewrite_flat_format() {
-        let result = run_cursor_allowed(&cursor_input("git status"));
+        let result = run_cursor_allowed(&cursor_input("git diff"));
         let v: Value = serde_json::from_str(&result).unwrap();
         // Cursor preToolUse expects allow/deny for rewrite application.
         assert_eq!(v["permission"], "allow");
-        assert_eq!(v["updated_input"]["command"], "rtk git status");
+        assert_eq!(v["updated_input"]["command"], "rtk git diff");
         assert!(v.get("hookSpecificOutput").is_none());
         // `continue: true` keeps the Cursor preToolUse panel from collapsing
         // to `Output: {}`; without it the rewrite is invisible to users.
@@ -1624,14 +1648,14 @@ mod tests {
 
     #[test]
     fn test_cursor_compound_rewrite_includes_continue() {
-        let cmd = "cd \"/tmp/proj\" && git status";
+        let cmd = "cd \"/tmp/proj\" && git diff";
         let result = run_cursor_allowed(&cursor_input(cmd));
         let v: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["continue"], true);
         assert_eq!(v["permission"], "allow");
         assert_eq!(
             v["updated_input"]["command"],
-            "cd \"/tmp/proj\" && rtk git status"
+            "cd \"/tmp/proj\" && rtk git diff"
         );
     }
 
@@ -1640,13 +1664,13 @@ mod tests {
         // Some Cursor builds prepend a single UTF-8 BOM to hook stdin.
         // serde_json rejects BOM-prefixed input, so without the strip
         // the hook returned `{}` and the rewrite became a silent no-op.
-        let payload = cursor_input("git status");
+        let payload = cursor_input("git diff");
         let with_single_bom = format!("\u{feff}{}", payload);
         let result = run_cursor_allowed(&with_single_bom);
         let v: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["continue"], true);
         assert_eq!(v["permission"], "allow");
-        assert_eq!(v["updated_input"]["command"], "rtk git status");
+        assert_eq!(v["updated_input"]["command"], "rtk git diff");
     }
 
     #[test]
@@ -1655,13 +1679,13 @@ mod tests {
         // UTF-8 BOMs (`EF BB BF EF BB BF`), confirmed via a stdin
         // tracer wrapping `rtk hook cursor` on Cursor 3.2.x. This is
         // the real-world payload shape the loop needs to survive.
-        let payload = cursor_input("git status");
+        let payload = cursor_input("git diff");
         let with_double_bom = format!("\u{feff}\u{feff}{}", payload);
         let result = run_cursor_allowed(&with_double_bom);
         let v: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["continue"], true);
         assert_eq!(v["permission"], "allow");
-        assert_eq!(v["updated_input"]["command"], "rtk git status");
+        assert_eq!(v["updated_input"]["command"], "rtk git diff");
     }
 
     #[test]
@@ -1794,7 +1818,7 @@ mod tests {
     #[test]
     fn test_decide_allow_for_attestable_allowed_command() {
         assert!(matches!(
-            decide_with_rules("git status", &[], &[], &all_allowed()),
+            decide_with_rules("git diff", &[], &[], &all_allowed()),
             HookDecision::AllowRewrite(_)
         ));
     }
@@ -1802,8 +1826,17 @@ mod tests {
     #[test]
     fn test_decide_ask_for_default_verdict() {
         assert!(matches!(
-            decide_with_rules("git status", &[], &[], &[]),
+            decide_with_rules("git diff", &[], &[], &[]),
             HookDecision::AskRewrite(_)
+        ));
+    }
+
+    #[test]
+    fn test_decide_defer_for_signal_command() {
+        // Signal commands have no rewrite available → Defer, even when allowed.
+        assert!(matches!(
+            decide_with_rules("git push origin main", &[], &[], &all_allowed()),
+            HookDecision::Defer
         ));
     }
 
@@ -1848,7 +1881,7 @@ mod tests {
     #[test]
     fn test_decide_allow_for_fd_dup_redirect() {
         assert!(matches!(
-            decide_with_rules("git status 2>&1", &[], &[], &all_allowed()),
+            decide_with_rules("git diff 2>&1", &[], &[], &all_allowed()),
             HookDecision::AllowRewrite(_)
         ));
     }
@@ -1869,11 +1902,11 @@ mod tests {
     #[test]
     fn test_gemini_allow_emits_rewrite() {
         let v: Value =
-            serde_json::from_str(&gemini_render("git status", &[], &[], &all_allowed())).unwrap();
+            serde_json::from_str(&gemini_render("git diff", &[], &[], &all_allowed())).unwrap();
         assert_eq!(v["decision"], "allow");
         assert_eq!(
             v["hookSpecificOutput"]["tool_input"]["command"],
-            "rtk git status"
+            "rtk git diff"
         );
     }
 
