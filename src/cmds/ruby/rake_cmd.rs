@@ -18,7 +18,7 @@ const MAX_RAKE_FAILURES: usize = CAP_WARNINGS;
 /// file args. When any positional test file paths are detected, we switch to
 /// `rails test` which handles single files, multiple files, and line-number
 /// syntax (`file.rb:15`) natively.
-fn select_runner(args: &[String]) -> (&'static str, Vec<String>) {
+fn select_runner(args: &[String], rails_available: bool) -> (&'static str, Vec<String>) {
     let has_test_subcommand = args.first().is_some_and(|a| a == "test");
     if !has_test_subcommand {
         return ("rake", args.to_vec());
@@ -32,7 +32,10 @@ fn select_runner(args: &[String]) -> (&'static str, Vec<String>) {
         .filter(|a| looks_like_test_path(a))
         .collect();
 
-    let needs_rails = !positional_files.is_empty();
+    // Only swap to `rails` when the project actually has Rails (#3416):
+    // plain Ruby gems use `rake test` with positional files and have no
+    // `rails` binary, so the swap would fail with Bundler::GemNotFound.
+    let needs_rails = !positional_files.is_empty() && rails_available;
 
     if needs_rails {
         ("rails", args.to_vec())
@@ -50,8 +53,14 @@ fn looks_like_test_path(arg: &str) -> bool {
         || path.contains("_spec.rb")
 }
 
+/// A Rails project is detected by its conventional binstub.
+// ponytail: bin/rails covers the Rails convention; check Gemfile.lock if binstub-less apps show up
+fn rails_available() -> bool {
+    std::path::Path::new("bin/rails").exists()
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let (tool, effective_args) = select_runner(args);
+    let (tool, effective_args) = select_runner(args, rails_available());
     let mut cmd = ruby_exec(tool);
     for arg in &effective_args {
         cmd.arg(arg);
@@ -65,7 +74,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         );
     }
 
-    runner::run_filtered(
+    runner::run_filtered_with_exit(
         cmd,
         "rake",
         &args.join(" "),
@@ -102,12 +111,15 @@ enum ParseState {
 ///
 /// 8 runs, 7 assertions, 1 failures, 1 errors, 0 skips
 /// ```
-fn filter_minitest_output(output: &str) -> String {
+fn filter_minitest_output(output: &str, exit_code: i32) -> String {
     let clean = strip_ansi(output);
     let mut state = ParseState::Header;
     let mut failures: Vec<String> = Vec::new();
     let mut current_failure: Vec<String> = Vec::new();
     let mut summary_line = String::new();
+    // Set when the output shows actual Minitest structure. Non-test rake
+    // tasks (db:migrate, -T, an aborted run) never produce it (#3416).
+    let mut saw_minitest = false;
 
     for line in clean.lines() {
         let trimmed = line.trim();
@@ -118,17 +130,20 @@ fn filter_minitest_output(output: &str) -> String {
             && trimmed.contains(" assertions,")
         {
             summary_line = trimmed.to_string();
+            saw_minitest = true;
             continue;
         }
 
         // State transitions — handle both standard Minitest and minitest-reporters
         if trimmed == "# Running:" || trimmed.starts_with("Started with run options") {
             state = ParseState::Running;
+            saw_minitest = true;
             continue;
         }
 
         if trimmed.starts_with("Finished in ") {
             state = ParseState::Failures;
+            saw_minitest = true;
             continue;
         }
 
@@ -160,7 +175,20 @@ fn filter_minitest_output(output: &str) -> String {
         failures.push(current_failure.join("\n"));
     }
 
-    build_minitest_summary(&summary_line, &failures)
+    // A filter that cannot recognise its input degrades to raw, not to a
+    // sentence asserting something about tests (#3416).
+    if !saw_minitest {
+        return clean.trim_end().to_string();
+    }
+
+    // Non-zero exit with nothing failure-shaped parsed: the real diagnostic
+    // (e.g. `rake aborted!` after a green suite) lives outside the Minitest
+    // grammar — pass the output through instead of claiming success (#3416).
+    if exit_code != 0 && failures.is_empty() {
+        return clean.trim_end().to_string();
+    }
+
+    build_minitest_summary(&summary_line, &failures, exit_code)
 }
 
 fn is_failure_header(line: &str) -> bool {
@@ -170,14 +198,14 @@ fn is_failure_header(line: &str) -> bool {
     RE_FAILURE.is_match(line)
 }
 
-fn build_minitest_summary(summary: &str, failures: &[String]) -> String {
+fn build_minitest_summary(summary: &str, failures: &[String], exit_code: i32) -> String {
     let (runs, _assertions, fail_count, error_count, skips) = parse_minitest_summary(summary);
 
     if runs == 0 && summary.is_empty() {
         return "rake test: no tests ran".to_string();
     }
 
-    if fail_count == 0 && error_count == 0 {
+    if fail_count == 0 && error_count == 0 && exit_code == 0 {
         let mut msg = format!("ok rake test: {} runs, 0 failures", runs);
         if skips > 0 {
             msg.push_str(&format!(", {} skips", skips));
@@ -276,7 +304,7 @@ Finished in 0.123456s, 64.8 runs/s, 72.9 assertions/s.
 
 8 runs, 9 assertions, 0 failures, 0 errors, 0 skips"#;
 
-        let result = filter_minitest_output(output);
+        let result = filter_minitest_output(output, 0);
         assert!(result.contains("ok rake test"));
         assert!(result.contains("8 runs"));
         assert!(result.contains("0 failures"));
@@ -299,7 +327,7 @@ Expected: true
 
 7 runs, 7 assertions, 1 failures, 0 errors, 0 skips"#;
 
-        let result = filter_minitest_output(output);
+        let result = filter_minitest_output(output, 1);
         assert!(result.contains("1 failures"));
         assert!(result.contains("test_that_fails"));
         assert!(result.contains("Expected: true"));
@@ -322,7 +350,7 @@ RuntimeError: something went wrong
 
 6 runs, 5 assertions, 0 failures, 1 errors, 0 skips"#;
 
-        let result = filter_minitest_output(output);
+        let result = filter_minitest_output(output, 1);
         assert!(result.contains("1 errors"));
         assert!(result.contains("test_boom"));
         assert!(result.contains("RuntimeError"));
@@ -330,8 +358,8 @@ RuntimeError: something went wrong
 
     #[test]
     fn test_filter_minitest_empty() {
-        let result = filter_minitest_output("");
-        assert!(result.contains("no tests ran"));
+        let result = filter_minitest_output("", 0);
+        assert!(result.is_empty());
     }
 
     #[test]
@@ -346,7 +374,7 @@ Finished in 0.100000s, 50.0 runs/s
 
 5 runs, 4 assertions, 0 failures, 0 errors, 1 skips"#;
 
-        let result = filter_minitest_output(output);
+        let result = filter_minitest_output(output, 0);
         assert!(result.contains("ok rake test"));
         assert!(result.contains("1 skips"));
     }
@@ -369,7 +397,7 @@ Finished in 0.100000s, 50.0 runs/s
         );
 
         let input_tokens = count_tokens(&output);
-        let result = filter_minitest_output(&output);
+        let result = filter_minitest_output(&output, 0);
         let output_tokens = count_tokens(&result);
 
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
@@ -425,7 +453,7 @@ NoMethodError: undefined method `blah'
 
 6 runs, 5 assertions, 2 failures, 1 errors, 0 skips"#;
 
-        let result = filter_minitest_output(output);
+        let result = filter_minitest_output(output, 1);
         assert!(result.contains("2 failures"));
         assert!(result.contains("1 errors"));
         assert!(result.contains("test_alpha"));
@@ -440,7 +468,7 @@ NoMethodError: undefined method `blah'
             Finished in 5.79938s\n\
             57 tests, 378 assertions, 0 failures, 0 errors, 0 skips";
 
-        let result = filter_minitest_output(output);
+        let result = filter_minitest_output(output, 0);
         assert!(result.contains("ok rake test"));
         assert!(result.contains("57 runs"));
         assert!(result.contains("0 failures"));
@@ -454,7 +482,7 @@ NoMethodError: undefined method `blah'
             Finished in 0.1s, 40.0 runs/s\n\n\
             4 runs, 4 assertions, 0 failures, 0 errors, 0 skips";
 
-        let result = filter_minitest_output(output);
+        let result = filter_minitest_output(output, 0);
         assert!(result.contains("ok rake test"));
         assert!(result.contains("4 runs"));
     }
@@ -467,13 +495,13 @@ NoMethodError: undefined method `blah'
 
     #[test]
     fn test_select_runner_single_file_uses_rake() {
-        let (tool, _) = select_runner(&args("test TEST=test/models/post_test.rb"));
+        let (tool, _) = select_runner(&args("test TEST=test/models/post_test.rb"), true);
         assert_eq!(tool, "rake");
     }
 
     #[test]
     fn test_select_runner_no_files_uses_rake() {
-        let (tool, _) = select_runner(&args("test"));
+        let (tool, _) = select_runner(&args("test"), true);
         assert_eq!(tool, "rake");
     }
 
@@ -481,7 +509,7 @@ NoMethodError: undefined method `blah'
     fn test_select_runner_multiple_files_uses_rails() {
         let (tool, a) = select_runner(&args(
             "test test/models/post_test.rb test/models/user_test.rb",
-        ));
+        ), true);
         assert_eq!(tool, "rails");
         assert_eq!(
             a,
@@ -491,7 +519,7 @@ NoMethodError: undefined method `blah'
 
     #[test]
     fn test_select_runner_line_number_uses_rails() {
-        let (tool, _) = select_runner(&args("test test/models/post_test.rb:15"));
+        let (tool, _) = select_runner(&args("test test/models/post_test.rb:15"), true);
         assert_eq!(tool, "rails");
     }
 
@@ -499,26 +527,80 @@ NoMethodError: undefined method `blah'
     fn test_select_runner_multiple_with_line_numbers() {
         let (tool, _) = select_runner(&args(
             "test test/models/post_test.rb:15 test/models/user_test.rb:30",
-        ));
+        ), true);
         assert_eq!(tool, "rails");
     }
 
     #[test]
     fn test_select_runner_non_test_subcommand_uses_rake() {
-        let (tool, _) = select_runner(&args("db:migrate"));
+        let (tool, _) = select_runner(&args("db:migrate"), true);
         assert_eq!(tool, "rake");
     }
 
     #[test]
     fn test_select_runner_single_positional_file_uses_rails() {
-        let (tool, _) = select_runner(&args("test test/models/post_test.rb"));
+        let (tool, _) = select_runner(&args("test test/models/post_test.rb"), true);
         assert_eq!(tool, "rails");
     }
 
     #[test]
     fn test_select_runner_flags_not_counted_as_files() {
-        let (tool, _) = select_runner(&args("test --verbose --seed 12345"));
+        let (tool, _) = select_runner(&args("test --verbose --seed 12345"), true);
         assert_eq!(tool, "rake");
+    }
+
+    #[test]
+    fn test_select_runner_files_without_rails_uses_rake() {
+        let (tool, _) = select_runner(&args("test test/models/post_test.rb"), false);
+        assert_eq!(tool, "rake");
+    }
+
+    // ── #3416 regression tests ──────────────────────────
+
+    #[test]
+    fn test_non_test_task_failure_passes_through() {
+        let output = "rake aborted!\n\
+            ActiveRecord::StatementInvalid: PG::UndefinedTable: ERROR: relation \"widgets\" does not exist\n\
+            /app/db/migrate/20240101_add_widgets.rb:5:in `change'\n\
+            Tasks: TOP => db:migrate";
+        let result = filter_minitest_output(output, 1);
+        assert!(result.contains("rake aborted!"));
+        assert!(result.contains("PG::UndefinedTable"));
+        assert!(!result.contains("no tests ran"));
+    }
+
+    #[test]
+    fn test_task_listing_passes_through() {
+        let output = "rake db:migrate    # Migrate the database\n\
+            rake test          # Run tests";
+        let result = filter_minitest_output(output, 0);
+        assert!(result.contains("rake db:migrate"));
+        assert!(!result.contains("no tests ran"));
+    }
+
+    #[test]
+    fn test_green_summary_with_late_abort_is_not_ok() {
+        let output = "Run options: --seed 123\n\n\
+            # Running:\n\n\
+            ....\n\n\
+            Finished in 0.1s\n\n\
+            4 runs, 4 assertions, 0 failures, 0 errors, 0 skips\n\
+            rake aborted!\n\
+            ActiveRecord::RecordNotUnique: duplicate key value violates unique constraint\n\
+            Tasks: TOP => test";
+        let result = filter_minitest_output(output, 1);
+        assert!(!result.starts_with("ok"));
+        assert!(result.contains("rake aborted!"));
+    }
+
+    #[test]
+    fn test_nonzero_exit_without_parsed_failures_passes_through() {
+        let output = "Run options: --seed 123\n\n\
+            # Running:\n\n\
+            Finished in 0.0s\n\n\
+            0 runs, 0 assertions, 0 failures, 0 errors, 0 skips";
+        let result = filter_minitest_output(output, 1);
+        assert!(!result.starts_with("ok"));
     }
 
     #[test]
