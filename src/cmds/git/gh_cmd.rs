@@ -8,7 +8,7 @@ use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::{ok_confirmation, resolved_command, truncate};
 use crate::git;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use regex::Regex;
 use serde_json::Value;
 use std::process::Command;
@@ -121,10 +121,17 @@ fn has_json_flag(args: &[String]) -> bool {
 /// --jq/--template in gh's flag set.
 fn wants_jq_or_template(args: &[String]) -> bool {
     args.iter().any(|a| {
-        a.starts_with("--jq")
-            || a.starts_with("--template")
-            || (a.starts_with("-q") && !a.starts_with("--"))
-            || (a.starts_with("-t") && !a.starts_with("--"))
+        if a.starts_with("--") {
+            return a.starts_with("--jq") || a.starts_with("--template");
+        }
+        // Short clusters: pflag fuses boolean shorts with a value-taking
+        // one (`-dq expr`, `-wq.x`), so any `q`/`t` in the alphanumeric
+        // run after `-` counts. Over-matching only costs a passthrough.
+        a.strip_prefix('-').is_some_and(|rest| {
+            rest.chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .any(|c| c == 'q' || c == 't')
+        })
     })
 }
 
@@ -1004,49 +1011,107 @@ fn run_api(args: &[String], _verbose: u8) -> Result<i32> {
     // gh api is an explicit/advanced command — the user knows what they
     // asked for, so no value may be dropped. jsonpack::pack keeps every
     // value while deduplicating repeated field names (csv+schema for
-    // arrays, `_cols`/`_rows` tables inside envelopes, minification for
-    // GitHub's pretty-printed bodies). Anything unpackable — --include
-    // headers, --paginate concatenations, empty bodies, non-JSON — falls
-    // back to the raw bytes, verified by pack's own round-trip check.
+    // arrays, `_cols`/`_rows` tables inside envelopes). The byte-exact
+    // runner below — NOT the shared line-oriented capture — is what makes
+    // this safe: binary bodies (tarball/zipball), >cap responses and
+    // stdin-fed requests (`--input -`) all behave exactly like the old
+    // passthrough, because anything unpackable is emitted verbatim.
     if wants_jq_or_template(args) {
         return run_passthrough("gh", "api", args);
     }
-    let mut cmd = resolved_command("gh");
-    cmd.arg("api");
-    for arg in args {
-        cmd.arg(arg);
-    }
-    runner::run_filtered(
-        cmd,
-        "gh",
-        "api",
-        |stdout| jsonpack::pack(stdout).unwrap_or_else(|| stdout.to_string()),
-        RunOptions::stdout_only()
-            .early_exit_on_failure()
-            .no_trailing_newline(),
-    )
+    run_gh_packed("api", &["api"], args)
 }
 
 /// Run `gh <subcommand> <args…>` verbatim and pack its JSON stdout
-/// losslessly. pack() returns None on anything unexpected and the raw
-/// output flows through untouched (Never Block); `never_worse` caps the
-/// rest.
+/// losslessly (`--json` path). pack() returns None on anything unexpected
+/// and the raw output flows through untouched (Never Block).
 fn run_json_packed(subcommand: &str, args: &[String]) -> Result<i32> {
+    let label = format!("{} --json", subcommand);
+    run_gh_packed(&label, &[subcommand], args)
+}
+
+/// Byte-exact capture cap: outputs larger than this skip packing and
+/// stream through verbatim instead (bounded memory, zero truncation).
+const PACK_CAP_BYTES: usize = 32 * 1024 * 1024;
+
+/// Run gh capturing stdout byte-exactly — no line splitting, no lossy
+/// UTF-8, no size truncation — then pack when the whole output is UTF-8
+/// JSON that shrinks, and otherwise emit the captured bytes verbatim.
+/// stdin and stderr stay inherited exactly like a passthrough, so
+/// `--input -` request bodies and live progress output keep working.
+/// This exists because the shared line-oriented capture drops lines over
+/// its cap and decodes lossily — fatal for `gh api` (binary downloads,
+/// multi-megabyte pages), where "fall back to raw" must mean raw bytes.
+fn run_gh_packed(label: &str, base_args: &[&str], extra_args: &[String]) -> Result<i32> {
+    use std::io::{Read, Write};
+
+    let timer = crate::core::tracking::TimedExecution::start();
+    let cmd_label = format!("gh {}", label);
     let mut cmd = resolved_command("gh");
-    cmd.arg(subcommand);
-    for arg in args {
+    for arg in base_args {
         cmd.arg(arg);
     }
-    let label = format!("{} --json", subcommand);
-    runner::run_filtered(
-        cmd,
-        "gh",
-        &label,
-        |stdout| jsonpack::pack(stdout).unwrap_or_else(|| stdout.to_string()),
-        RunOptions::stdout_only()
-            .early_exit_on_failure()
-            .no_trailing_newline(),
-    )
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    cmd.stdin(std::process::Stdio::inherit());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::inherit());
+
+    let mut child = cmd.spawn().with_context(|| "Failed to run gh")?;
+    let mut child_out = child.stdout.take().expect("stdout was piped above");
+
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    let mut overflowed = false;
+    loop {
+        let n = child_out.read(&mut chunk).with_context(|| "Failed to read gh output")?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() > PACK_CAP_BYTES {
+            // Too big to pack: emit what we have and stream the rest
+            // through verbatim, byte-faithful and memory-bounded.
+            overflowed = true;
+            let stdout = std::io::stdout();
+            let mut stdout = stdout.lock();
+            stdout.write_all(&buf).with_context(|| "Failed to write output")?;
+            std::io::copy(&mut child_out, &mut stdout)
+                .with_context(|| "Failed to stream gh output")?;
+            stdout.flush().ok();
+            break;
+        }
+    }
+
+    let status = child.wait().with_context(|| "Failed to wait for gh")?;
+    let exit_code = status.code().unwrap_or(1);
+
+    if overflowed {
+        timer.track_passthrough(&cmd_label, &format!("rtk {} (passthrough)", cmd_label));
+        return Ok(exit_code);
+    }
+
+    // Non-zero exit or non-UTF-8 body: verbatim bytes, exactly as gh
+    // produced them.
+    let text = match std::str::from_utf8(&buf) {
+        Ok(text) if exit_code == 0 => text,
+        _ => {
+            let stdout = std::io::stdout();
+            let mut stdout = stdout.lock();
+            stdout.write_all(&buf).with_context(|| "Failed to write output")?;
+            stdout.flush().ok();
+            timer.track_passthrough(&cmd_label, &format!("rtk {} (passthrough)", cmd_label));
+            return Ok(exit_code);
+        }
+    };
+
+    let packed = jsonpack::pack(text);
+    let shown = crate::core::guard::never_worse(text, packed.as_deref().unwrap_or(text));
+    print!("{}", shown);
+    std::io::stdout().flush().ok();
+    timer.track(&cmd_label, &format!("rtk {}", cmd_label), text, shown);
+    Ok(exit_code)
 }
 
 // Edge case: error context is now "Failed to run {cmd}" (loses subcommand detail)
@@ -1161,6 +1226,19 @@ mod tests {
         assert!(!wants_jq_or_template(&["--json".into(), "number".into()]));
         assert!(!wants_jq_or_template(&["view".into(), "123".into()]));
         assert!(!wants_jq_or_template(&["repos/owner/repo".into()]));
+    }
+
+    #[test]
+    fn test_wants_jq_fused_boolean_shorts() {
+        // pflag lets a boolean short fuse with a value-taking one:
+        // `gh pr list --json n -dq 'expr'` (-d = --draft). The projection
+        // must still be detected or jq output would get re-packed.
+        assert!(wants_jq_or_template(&["-dq".into(), "expr".into()]));
+        assert!(wants_jq_or_template(&["-wq.x".into()]));
+        assert!(wants_jq_or_template(&["-dt".into(), "{{.t}}".into()]));
+        // Plain boolean shorts without q/t stay packable.
+        assert!(!wants_jq_or_template(&["-d".into()]));
+        assert!(!wants_jq_or_template(&["-L".into(), "50".into()]));
     }
 
     #[test]

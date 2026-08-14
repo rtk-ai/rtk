@@ -50,6 +50,11 @@ const MIN_ITEMS: usize = 2;
 /// repository object ~45). The cap only guards adversarial blowup.
 const MAX_FLATTEN_INNER_KEYS: usize = 64;
 
+/// Hard ceiling on table width for the flatten pass. The collision scan
+/// and per-row splicing are quadratic in column count — real gh payloads
+/// sit far below this; only adversarial inputs approach it.
+const MAX_TOTAL_COLUMNS: usize = 512;
+
 /// Keys of the in-place table notation used inside JSON envelopes. `_flat`
 /// marks tables whose dotted `_cols` encode nesting (plain tables keep
 /// dots literal).
@@ -177,7 +182,7 @@ fn csv_table(items: &[Value]) -> Option<String> {
 /// column. Terminates because every splice strictly reduces nesting depth.
 fn flatten_uniform_nested(names: &mut Vec<String>, rows: &mut [Vec<Cell>]) {
     let mut i = 0;
-    while i < names.len() {
+    while i < names.len() && names.len() <= MAX_TOTAL_COLUMNS {
         let Some(inner_keys) = uniform_inner_keys(rows, i) else {
             i += 1;
             continue;
@@ -1312,6 +1317,38 @@ mod tests {
     fn unpack_plain_json_passes_through() {
         // A packed envelope with zero replacements is just minified JSON.
         assert_eq!(unpack(r#"{"a":1}"#), Some(json!({"a": 1})));
+    }
+
+    #[test]
+    fn flatten_bails_out_beyond_total_column_cap() {
+        // Adversarial width: hundreds of single-key object columns. The
+        // collision scan + per-row splicing are quadratic in column count,
+        // so beyond the cap flatten must not run at all (cells stay json).
+        let n = MAX_TOTAL_COLUMNS + 88;
+        let mut names: Vec<String> = (0..n).map(|i| format!("p{i:06}")).collect();
+        let row: Vec<Cell> = (0..n).map(|_| Some(json!({"x": 0}))).collect();
+        let mut rows = vec![row.clone(), row];
+        flatten_uniform_nested(&mut names, &mut rows);
+        assert!(
+            names.iter().all(|c| !c.contains('.')),
+            "over-wide tables must not flatten"
+        );
+    }
+
+    #[test]
+    fn float_digits_match_the_raw_text() {
+        // serde_json without float_roundtrip parses 124342.85041994731 to a
+        // neighboring f64 and re-emits …32 — a digit the API never sent.
+        // With the feature the packed cell must carry the source digits.
+        let raw = concat!(
+            r#"[{"v":124342.85041994731,"pad":"pppppppppppppppppppppppppppppp"},"#,
+            r#"{"v":1.5,"pad":"pppppppppppppppppppppppppppppp"}]"#
+        );
+        let packed = pack_ok(raw);
+        assert!(
+            packed.contains("124342.85041994731"),
+            "must emit the source digits, got: {packed}"
+        );
     }
 
     // ── real captured outputs (produced by gh, not synthesized) ──

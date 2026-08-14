@@ -1434,9 +1434,17 @@ fn rewrite_segment_inner(
     // #196: gh with --jq/--template produces caller-shaped output rtk must
     // not touch. Bare --json is rewritten again: rtk gh packs it losslessly
     // (csv+schema with verified raw fallback), so no value is lost.
+    // A file redirect on a packed path (`--json`/`api`) means a program
+    // will parse the file — packed output would corrupt it, so raw gh
+    // keeps those.
     if rule.rtk_cmd == "rtk gh" {
         let args_lower = cmd_part.to_lowercase();
         if args_lower.contains("--jq") || args_lower.contains("--template") {
+            return None;
+        }
+        if !redirect_suffix.is_empty()
+            && (args_lower.contains("--json") || args_lower.starts_with("gh api"))
+        {
             return None;
         }
     }
@@ -4754,6 +4762,29 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("gh pr list --json number,title", &[]),
             Some("rtk gh pr list --json number,title".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gh_json_with_file_redirect_skipped() {
+        // `> prs.json` means a program will read the file — packed CSV
+        // would corrupt it. Raw gh must own redirected --json output.
+        assert_eq!(
+            rewrite_command_no_prefixes("gh pr list --json number,title > prs.json", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gh_api_with_file_redirect_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("gh api repos/o/r/commits > commits.json", &[]),
+            None
+        );
+        // Without a redirect the api rewrite stays (tracked, packed).
+        assert_eq!(
+            rewrite_command_no_prefixes("gh api repos/o/r/commits", &[]),
+            Some("rtk gh api repos/o/r/commits".into())
         );
     }
 

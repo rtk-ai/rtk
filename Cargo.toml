@@ -19,7 +19,7 @@ ignore = "0.4"
 walkdir = "2"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 colored = "3"
 dirs = "5"
 rusqlite = { version = "0.31", features = ["bundled"] }
