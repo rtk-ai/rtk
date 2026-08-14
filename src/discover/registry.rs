@@ -1431,14 +1431,12 @@ fn rewrite_segment_inner(
         return Some(rewritten);
     }
 
-    // #196: gh with --json/--jq/--template produces structured output that
-    // rtk gh would corrupt — skip rewrite so the caller gets raw JSON.
+    // #196: gh with --jq/--template produces caller-shaped output rtk must
+    // not touch. Bare --json is rewritten again: rtk gh packs it losslessly
+    // (csv+schema with verified raw fallback), so no value is lost.
     if rule.rtk_cmd == "rtk gh" {
         let args_lower = cmd_part.to_lowercase();
-        if args_lower.contains("--json")
-            || args_lower.contains("--jq")
-            || args_lower.contains("--template")
-        {
+        if args_lower.contains("--jq") || args_lower.contains("--template") {
             return None;
         }
     }
@@ -4748,13 +4746,14 @@ mod tests {
         }
     }
 
-    // --- #196: gh --json/--jq/--template passthrough ---
+    // --- #196: gh --jq/--template passthrough. `--json` alone is rewritten
+    // --- again: rtk gh packs it losslessly (csv+schema) with raw fallback.
 
     #[test]
-    fn test_rewrite_gh_json_skipped() {
+    fn test_rewrite_gh_json_now_rewrites() {
         assert_eq!(
             rewrite_command_no_prefixes("gh pr list --json number,title", &[]),
-            None
+            Some("rtk gh pr list --json number,title".into())
         );
     }
 

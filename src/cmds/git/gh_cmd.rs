@@ -3,6 +3,7 @@
 //! Provides token-optimized alternatives to verbose `gh` commands.
 //! Focuses on extracting essential information from JSON outputs.
 
+use crate::core::jsonpack;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::{ok_confirmation, resolved_command, truncate};
@@ -107,9 +108,24 @@ fn filter_markdown_segment(text: &str) -> String {
     s
 }
 
-/// Check if args contain --json flag (user wants specific JSON fields, not RTK filtering)
+/// Check if args contain --json flag (the caller asked for specific JSON
+/// fields). Covers both `--json fields` and `--json=fields` forms.
 fn has_json_flag(args: &[String]) -> bool {
-    args.iter().any(|a| a == "--json")
+    args.iter().any(|a| a == "--json" || a.starts_with("--json="))
+}
+
+/// True when a --jq/--template projection is requested (long, short, `=` or
+/// attached short forms). The user asked for transformed output — rtk must
+/// pass it through untouched rather than pack it. Within the contexts this
+/// gate runs (`--json` present, or `gh api`), `-q`/`-t` unambiguously mean
+/// --jq/--template in gh's flag set.
+fn wants_jq_or_template(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        a.starts_with("--jq")
+            || a.starts_with("--template")
+            || (a.starts_with("-q") && !a.starts_with("--"))
+            || (a.starts_with("-t") && !a.starts_with("--"))
+    })
 }
 
 /// Extract a positional identifier (PR/issue number) from args, returning it
@@ -190,9 +206,15 @@ where
 }
 
 pub fn run(subcommand: &str, args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
-    // When user explicitly passes --json, they want raw gh JSON output, not RTK filtering
+    // Explicit --json: the caller wants those exact fields — keep every
+    // value, but pack the JSON losslessly (csv+schema, raw fallback).
+    // A --jq/--template projection means the output is already shaped by
+    // the caller: pass it through untouched.
     if has_json_flag(args) {
-        return run_passthrough("gh", subcommand, args);
+        if wants_jq_or_template(args) {
+            return run_passthrough("gh", subcommand, args);
+        }
+        return run_json_packed(subcommand, args);
     }
 
     match subcommand {
@@ -979,10 +1001,52 @@ fn pr_action(action: &str, args: &[String], _verbose: u8) -> Result<i32> {
 }
 
 fn run_api(args: &[String], _verbose: u8) -> Result<i32> {
-    // gh api is an explicit/advanced command — the user knows what they asked for.
-    // Converting JSON to a schema destroys all values and forces Claude to re-fetch.
-    // Passthrough preserves the full response and tracks metrics at 0% savings.
-    run_passthrough("gh", "api", args)
+    // gh api is an explicit/advanced command — the user knows what they
+    // asked for, so no value may be dropped. jsonpack::pack keeps every
+    // value while deduplicating repeated field names (csv+schema for
+    // arrays, `_cols`/`_rows` tables inside envelopes, minification for
+    // GitHub's pretty-printed bodies). Anything unpackable — --include
+    // headers, --paginate concatenations, empty bodies, non-JSON — falls
+    // back to the raw bytes, verified by pack's own round-trip check.
+    if wants_jq_or_template(args) {
+        return run_passthrough("gh", "api", args);
+    }
+    let mut cmd = resolved_command("gh");
+    cmd.arg("api");
+    for arg in args {
+        cmd.arg(arg);
+    }
+    runner::run_filtered(
+        cmd,
+        "gh",
+        "api",
+        |stdout| jsonpack::pack(stdout).unwrap_or_else(|| stdout.to_string()),
+        RunOptions::stdout_only()
+            .early_exit_on_failure()
+            .no_trailing_newline(),
+    )
+}
+
+/// Run `gh <subcommand> <args…>` verbatim and pack its JSON stdout
+/// losslessly. pack() returns None on anything unexpected and the raw
+/// output flows through untouched (Never Block); `never_worse` caps the
+/// rest.
+fn run_json_packed(subcommand: &str, args: &[String]) -> Result<i32> {
+    let mut cmd = resolved_command("gh");
+    cmd.arg(subcommand);
+    for arg in args {
+        cmd.arg(arg);
+    }
+    let label = format!("{} --json", subcommand);
+    runner::run_filtered(
+        cmd,
+        "gh",
+        &label,
+        |stdout| jsonpack::pack(stdout).unwrap_or_else(|| stdout.to_string()),
+        RunOptions::stdout_only()
+            .early_exit_on_failure()
+            .no_trailing_newline(),
+    )
 }
 
 // Edge case: error context is now "Failed to run {cmd}" (loses subcommand detail)
@@ -1066,6 +1130,37 @@ mod tests {
     #[test]
     fn test_has_json_flag_absent() {
         assert!(!has_json_flag(&["view".into(), "42".into()]));
+    }
+
+    #[test]
+    fn test_has_json_flag_equals_form() {
+        assert!(has_json_flag(&["list".into(), "--json=number,title".into()]));
+    }
+
+    // --- wants_jq_or_template: every spelling gh accepts ---
+
+    #[test]
+    fn test_wants_jq_long_forms() {
+        assert!(wants_jq_or_template(&["--jq".into(), ".x".into()]));
+        assert!(wants_jq_or_template(&["--jq=.x".into()]));
+        assert!(wants_jq_or_template(&["--template".into(), "{{.t}}".into()]));
+        assert!(wants_jq_or_template(&["--template={{.t}}".into()]));
+    }
+
+    #[test]
+    fn test_wants_jq_short_forms() {
+        assert!(wants_jq_or_template(&["-q".into(), ".x".into()]));
+        assert!(wants_jq_or_template(&["-q.x".into()]), "cobra attached short");
+        assert!(wants_jq_or_template(&["-q=.x".into()]));
+        assert!(wants_jq_or_template(&["-t".into(), "{{.t}}".into()]));
+        assert!(wants_jq_or_template(&["-t{{.t}}".into()]));
+    }
+
+    #[test]
+    fn test_wants_jq_absent() {
+        assert!(!wants_jq_or_template(&["--json".into(), "number".into()]));
+        assert!(!wants_jq_or_template(&["view".into(), "123".into()]));
+        assert!(!wants_jq_or_template(&["repos/owner/repo".into()]));
     }
 
     #[test]
