@@ -3567,6 +3567,14 @@ fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
     let cursor_dir = resolve_cursor_dir()?;
 
+    // Register the binary command in hooks.json FIRST (this also drops any
+    // legacy rtk-rewrite.sh entries in the same write). Only once that has
+    // succeeded is it safe to delete the legacy script: deleting the script
+    // while hooks.json still references it leaves Cursor with a registered
+    // hook whose command does not exist (#3465).
+    let hooks_json_path = cursor_dir.join(HOOKS_JSON);
+    let patched = patch_cursor_hooks_json(&hooks_json_path, ctx)?;
+
     // Migrate old hook script if present
     let old_hook = cursor_dir.join("hooks").join(REWRITE_HOOK_FILE);
     if old_hook.exists() {
@@ -3584,18 +3592,7 @@ fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
                 );
             }
         }
-        // Clean stale hooks.json entry pointing to the deleted script
-        let hooks_json_path = cursor_dir.join(HOOKS_JSON);
-        if let Err(e) = remove_legacy_cursor_hooks_json_entries(&hooks_json_path, ctx) {
-            if verbose > 0 {
-                eprintln!("  [warn] Failed to clean legacy Cursor hooks.json entry: {e}");
-            }
-        }
     }
-
-    // Create or patch hooks.json with binary command
-    let hooks_json_path = cursor_dir.join(HOOKS_JSON);
-    let patched = patch_cursor_hooks_json(&hooks_json_path, ctx)?;
 
     // Report (skip in dry-run)
     if !dry_run {
@@ -3632,15 +3629,23 @@ fn patch_cursor_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
         serde_json::json!({ "version": 1 })
     };
 
-    // Check idempotency
-    if cursor_hook_already_present(&root) {
+    // Drop legacy rtk-rewrite.sh entries in the same write that registers the
+    // binary command, so the migration is atomic from Cursor's point of view
+    // (#3465). A legacy entry must never count as "already present": its
+    // script is about to be (or already was) deleted.
+    let legacy_removed = remove_legacy_cursor_hook_entries_from_json(&mut root);
+
+    // Check idempotency (a removed legacy entry still needs persisting)
+    let already_present = cursor_hook_already_present(&root);
+    if already_present && !legacy_removed {
         if verbose > 0 {
             eprintln!("Cursor hooks.json: RTK hook already present");
         }
         return Ok(false);
     }
-
-    insert_cursor_hook_entry(&mut root)?;
+    if !already_present {
+        insert_cursor_hook_entry(&mut root)?;
+    }
 
     let serialized =
         serde_json::to_string_pretty(&root).context("Failed to serialize hooks.json")?;
@@ -3672,8 +3677,10 @@ fn patch_cursor_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
     Ok(true)
 }
 
-/// Check if RTK preToolUse hook is already present in Cursor hooks.json
-/// Matches on legacy rtk-rewrite.sh path OR new `rtk hook cursor` command
+/// Check if the RTK preToolUse hook is already present in Cursor hooks.json.
+/// Only the new `rtk hook cursor` command counts: a legacy rtk-rewrite.sh
+/// entry points at a script the installer deletes, so treating it as
+/// "present" would leave a registered hook with no script behind it (#3465).
 fn cursor_hook_already_present(root: &serde_json::Value) -> bool {
     let hooks = match root
         .get("hooks")
@@ -3688,7 +3695,7 @@ fn cursor_hook_already_present(root: &serde_json::Value) -> bool {
         entry
             .get("command")
             .and_then(|c| c.as_str())
-            .is_some_and(|cmd| cmd.contains(REWRITE_HOOK_FILE) || cmd == CURSOR_HOOK_COMMAND)
+            .is_some_and(|cmd| cmd == CURSOR_HOOK_COMMAND)
     })
 }
 
@@ -3720,45 +3727,6 @@ fn insert_cursor_hook_entry(root: &mut serde_json::Value) -> Result<()> {
         "command": CURSOR_HOOK_COMMAND,
         "matcher": "Shell"
     }));
-    Ok(())
-}
-
-/// Remove only legacy `rtk-rewrite.sh` entries from Cursor hooks.json.
-/// Preserves any existing `rtk hook cursor` entries (new format).
-fn remove_legacy_cursor_hooks_json_entries(path: &Path, ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
-    if !path.exists() {
-        return Ok(());
-    }
-
-    let content =
-        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    if content.trim().is_empty() {
-        return Ok(());
-    }
-
-    let mut root: serde_json::Value = serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
-
-    if !remove_legacy_cursor_hook_entries_from_json(&mut root) {
-        return Ok(());
-    }
-
-    if dry_run {
-        println!(
-            "[dry-run] would remove legacy rtk-rewrite.sh entry from Cursor hooks.json: {}",
-            path.display()
-        );
-        return Ok(());
-    }
-
-    let serialized =
-        serde_json::to_string_pretty(&root).context("Failed to serialize hooks.json")?;
-    atomic_write(path, &serialized)?;
-
-    if verbose > 0 {
-        eprintln!("  [ok] Removed legacy rtk-rewrite.sh entry from Cursor hooks.json");
-    }
     Ok(())
 }
 
@@ -6879,7 +6847,9 @@ mod tests {
     // ─── Cursor hooks.json tests ───
 
     #[test]
-    fn test_cursor_hook_already_present_legacy_script() {
+    fn test_cursor_hook_already_present_legacy_script_does_not_count() {
+        // #3465: a legacy entry references a script the installer deletes, so
+        // it must not satisfy the presence check.
         let json_content = serde_json::json!({
             "version": 1,
             "hooks": {
@@ -6889,7 +6859,38 @@ mod tests {
                 }]
             }
         });
-        assert!(cursor_hook_already_present(&json_content));
+        assert!(!cursor_hook_already_present(&json_content));
+    }
+
+    #[test]
+    fn test_patch_cursor_hooks_json_migrates_legacy_entry() {
+        // #3465: a hooks.json that still references the legacy script must be
+        // rewritten to the binary command in one operation, never left with a
+        // dangling reference to a deleted script.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("hooks.json");
+        let legacy = serde_json::json!({
+            "version": 1,
+            "hooks": {
+                "preToolUse": [{
+                    "command": "./hooks/rtk-rewrite.sh",
+                    "matcher": "Shell"
+                }]
+            }
+        });
+        fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+
+        let ctx = InitContext {
+            verbose: 0,
+            dry_run: false,
+        };
+        assert!(patch_cursor_hooks_json(&path, ctx).unwrap());
+
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let arr = root["hooks"]["preToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["command"].as_str().unwrap(), CURSOR_HOOK_COMMAND);
     }
 
     #[test]
