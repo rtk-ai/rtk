@@ -4725,6 +4725,30 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_compound_preserves_quoted_git_diff_with_argument() {
+        let command = "X='git diff --stat'; cargo test";
+
+        assert_eq!(
+            rewrite_command_no_prefixes(command, &[]),
+            Some("X='git diff --stat'; rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_embedded_quoted_git_diff() {
+        let command = "X='a git diff --stat b'; echo hi";
+
+        assert_eq!(rewrite_command_no_prefixes(command, &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_bare_quoted_git_diff() {
+        let command = "X='git diff'; echo hi";
+
+        assert_eq!(rewrite_command_no_prefixes(command, &[]), None);
+    }
+
+    #[test]
     fn test_rewrite_single_preserves_inline_title_prose() {
         let command =
             r#"gh pr edit 1476 --title "chore(skills): make every Pocock skill model-invocable""#;
