@@ -286,6 +286,7 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "npm",
     "npx",
     "curl",
+    "web",
     "discover",
     "ruff",
     "pytest",
