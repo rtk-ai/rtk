@@ -267,6 +267,107 @@ pub fn status_to_exit_code(status: std::process::ExitStatus) -> i32 {
     1
 }
 
+/// Collapse common single-line terminal redraw controls before filters parse output.
+fn collapse_terminal_control(text: &str) -> String {
+    let mut visible = String::new();
+    let mut line: Vec<char> = Vec::new();
+    let mut cursor = 0usize;
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\u{1b}' if chars.peek() == Some(&'[') => {
+                chars.next();
+                let mut params = String::new();
+                let mut final_byte = None;
+
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        final_byte = Some(c);
+                        break;
+                    }
+                    params.push(c);
+                }
+
+                match final_byte {
+                    Some('K') => apply_erase_in_line(&mut line, &mut cursor, &params),
+                    Some(final_byte) => {
+                        write_terminal_char(&mut line, &mut cursor, '\u{1b}');
+                        write_terminal_char(&mut line, &mut cursor, '[');
+                        for c in params.chars() {
+                            write_terminal_char(&mut line, &mut cursor, c);
+                        }
+                        write_terminal_char(&mut line, &mut cursor, final_byte);
+                    }
+                    None => {
+                        write_terminal_char(&mut line, &mut cursor, '\u{1b}');
+                        write_terminal_char(&mut line, &mut cursor, '[');
+                        for c in params.chars() {
+                            write_terminal_char(&mut line, &mut cursor, c);
+                        }
+                    }
+                }
+            }
+            '\r' if chars.peek() == Some(&'\n') => {
+                chars.next();
+                visible.extend(line.drain(..));
+                visible.push('\n');
+                cursor = 0;
+            }
+            '\r' => {
+                cursor = 0;
+            }
+            '\n' => {
+                visible.extend(line.drain(..));
+                visible.push('\n');
+                cursor = 0;
+            }
+            '\u{8}' => {
+                cursor = cursor.saturating_sub(1);
+            }
+            ch => {
+                write_terminal_char(&mut line, &mut cursor, ch);
+            }
+        }
+    }
+
+    visible.extend(line);
+    visible
+}
+
+fn write_terminal_char(line: &mut Vec<char>, cursor: &mut usize, ch: char) {
+    if *cursor < line.len() {
+        line[*cursor] = ch;
+    } else {
+        line.push(ch);
+    }
+    *cursor += 1;
+}
+
+fn apply_erase_in_line(line: &mut Vec<char>, cursor: &mut usize, params: &str) {
+    let mode = params
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .parse::<u8>()
+        .unwrap_or(0);
+
+    match mode {
+        1 => {
+            let end = (*cursor).min(line.len());
+            line.drain(..end);
+            *cursor = 0;
+        }
+        2 => {
+            line.clear();
+            *cursor = 0;
+        }
+        _ => {
+            line.truncate((*cursor).min(line.len()));
+        }
+    }
+}
+
 // ISSUE #897: ChildGuard RAII prevents zombie processes that caused kernel panic
 pub const RAW_CAP: usize = 10_485_760; // 10 MiB
 
@@ -389,6 +490,7 @@ pub fn run_streaming(
                     StreamLine::Stderr(l) => (l, true),
                     StreamLine::Stdout(l) => (l, false),
                 };
+                let line = collapse_terminal_control(&line);
                 if is_stderr {
                     if !capped_err {
                         if raw_stderr.len() + line.len() < RAW_CAP {
@@ -470,6 +572,7 @@ pub fn run_streaming(
                             );
                         }
                     }
+                    raw_stdout = collapse_terminal_control(&raw_stdout);
                     filtered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         filter_fn(&raw_stdout)
                     }))
@@ -495,15 +598,16 @@ pub fn run_streaming(
                             );
                         }
                     }
+                    raw_stdout = collapse_terminal_control(&raw_stdout);
                     filtered = raw_stdout.clone();
                 }
             }
         }
 
-        raw_stderr = stderr_thread.join().unwrap_or_else(|e| {
+        raw_stderr = collapse_terminal_control(&stderr_thread.join().unwrap_or_else(|e| {
             eprintln!("[rtk] warning: stderr reader thread panicked: {:?}", e);
             String::new()
-        });
+        }));
     }
     if let Some(t) = stdin_thread {
         t.join().ok();
@@ -558,8 +662,8 @@ pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
     cmd.stdin(Stdio::null());
     let output = cmd.output().context("Failed to execute command")?;
     Ok(CaptureResult {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        stdout: collapse_terminal_control(&String::from_utf8_lossy(&output.stdout)),
+        stderr: collapse_terminal_control(&String::from_utf8_lossy(&output.stderr)),
         exit_code: status_to_exit_code(output.status),
     })
 }
@@ -899,6 +1003,45 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_run_streaming_capture_only_collapses_carriage_return_progress() {
+        // nosemgrep: interpreter-execution
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf 'step 1\\rstep 2\\n'"]);
+        let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly).unwrap();
+        assert_eq!(result.raw_stdout, "step 2\n");
+        assert_eq!(result.filtered, "step 2\n");
+    }
+
+    #[test]
+    fn test_collapse_terminal_control_erases_to_line_end() {
+        assert_eq!(
+            collapse_terminal_control("Downloading 100%\r\u{1b}[KDone\n"),
+            "Done\n"
+        );
+    }
+
+    #[test]
+    fn test_collapse_terminal_control_erases_tail_from_mid_line() {
+        assert_eq!(collapse_terminal_control("abcdef\rXY\u{1b}[K\n"), "XY\n");
+    }
+
+    #[test]
+    fn test_collapse_terminal_control_preserves_sgr_sequences() {
+        assert_eq!(
+            collapse_terminal_control("\u{1b}[32mPASS\u{1b}[0m\n"),
+            "\u{1b}[32mPASS\u{1b}[0m\n"
+        );
+    }
+
+    #[test]
+    fn test_collapse_terminal_control_keeps_bare_cr_tail() {
+        assert_eq!(
+            collapse_terminal_control("Downloading 100%\rDone\n"),
+            "Doneloading 100%\n"
+        );
+    }
+
+    #[test]
     fn test_exec_capture_success() {
         let mut cmd = Command::new("echo");
         cmd.arg("hello_capture");
@@ -934,6 +1077,24 @@ pub(crate) mod tests {
         let combined = result.combined();
         assert!(combined.contains("out_msg"));
         assert!(combined.contains("err_msg"));
+    }
+
+    #[test]
+    fn test_exec_capture_collapses_carriage_return_progress() {
+        // nosemgrep: interpreter-execution
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf 'Downloading... 0%%\\rDownloading... 3%%\\n'"]);
+        let result = exec_capture(&mut cmd).unwrap();
+        assert_eq!(result.stdout, "Downloading... 3%\n");
+    }
+
+    #[test]
+    fn test_exec_capture_applies_backspace_overwrites() {
+        // nosemgrep: interpreter-execution
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf 'abc\\bD\\n'"]);
+        let result = exec_capture(&mut cmd).unwrap();
+        assert_eq!(result.stdout, "abD\n");
     }
 
     #[test]
