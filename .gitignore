@@ -27,6 +27,8 @@ Thumbs.db
 
 # Test artifacts
 *.cast.bak
+/.agent-run/
+/scratch/
 
 # Benchmark results (fixture data, not infra)
 scripts/benchmark/diff/

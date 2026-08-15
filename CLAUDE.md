@@ -132,6 +132,10 @@ cargo build --release
 hyperfine 'target/release/rtk git log -10' --warmup 3  # after (should be <10ms)
 ```
 
+### TDD Bug-Fix Sequence
+
+For deterministic bugs, first reproduce the exact command with the installed and source binaries and compare native or `rtk proxy` behavior. Only after RTK ownership is confirmed, add a minimal regression test that fails for the observed reason (RED), apply the smallest production fix (GREEN), then rerun the new test, historical tests for the same issue area, and the original command matrix before the full quality gates. Do not weaken or delete correct older assertions to make a fix pass. Use bounded attribution or benchmarks for host-policy, third-party, Prompt/UX/model, and performance uncertainty when no stable deterministic contract exists.
+
 ## Working Directory Confirmation
 
 **ALWAYS confirm working directory before starting any work**:
@@ -149,10 +153,10 @@ For RTK bug-fix requests, treat `D:\AI\RTK\RTK_run_log` as evidence, not as proo
 
 1. Merge the latest `origin/develop` while preserving Windows-native hook behavior, with a backup ref before non-trivial conflict resolution.
 2. Reproduce with both the installed `rtk.exe` and the updated source binary, capturing binary path/version/SHA256, original command, rewrite output, exit code, and host-hook output.
-3. Add a regression test before changing RTK. If direct/bypass evidence shows the fault belongs to Codex host policy, pnpm, the shell, or the environment, classify it under `RTK_run_log/archive/not-rtk/` rather than changing RTK safety semantics.
+3. Add a regression test before changing RTK. If direct/bypass evidence shows the fault belongs to Codex host policy, pnpm, the shell, or the environment, classify it under `RTK_run_log/archive/not-rtk/` rather than changing RTK safety semantics. Move verified RTK fixes to `RTK_run_log/archive/fixed/`; the log root contains unresolved reports only.
 4. Prioritize Windows correctness: PowerShell quoting, PATHEXT resolution, lifecycle `PATH`, exact argv, permission deferral, and native exit codes must be preserved without regressing Linux/macOS.
-5. Validate focused tests, formatting, Clippy with warnings denied, serial full tests on Windows, `git diff --check`, release build, and installed Claude/Codex hook smoke separately.
-6. Keep this contract synchronized with `AGENTS.md`, then publish scoped changes to the existing Windows branch/PR with the root cause and exact verification results.
+5. Validate focused tests, formatting, Clippy with warnings denied, serial full tests on Windows, `git diff --check`, release build, and installed Claude/Codex hook smoke separately. Use `scripts/rtk-windows-oracle.ps1` for the aggregated Windows gate and keep its generated artifacts under ignored `target/`.
+6. Keep this contract synchronized with `AGENTS.md`, then publish scoped changes to the existing Windows branch/PR with the root cause and exact verification results. The Windows PR release gate must include current real `rtk gain` data with a real `cmd.exe` screenshot, every active-log resolution, and separate PR/source, installed binary, signature, and upstream review/check outcomes.
 
 ## Avoiding Rabbit Holes
 

@@ -21,6 +21,8 @@ Use Rust 2021 idioms and keep code formatted with `cargo fmt`. `Cargo.toml` deni
 
 Add focused unit tests near the changed module and fixture-based tests when parsing real command output. For hook work, cover Bash, Shell, and PowerShell matchers. For compression changes, test both token savings and safety: preserve exit codes, retain key signals, and fall back to raw output on unsupported or failed parsing.
 
+For deterministic bugs, follow TDD: reproduce the exact command against the installed and source binaries and compare native or `rtk proxy` behavior first. Once RTK ownership is confirmed, add a minimal regression test that fails for the observed reason (RED), then make the smallest production change that passes it (GREEN). Re-run the new test, the historical tests for the same issue area, and the original command matrix before the full gates. Never weaken or remove a correct older assertion to make a new fix pass. Treat host policy, third-party tooling, Prompt/UX/model behavior, and performance uncertainty as bounded attribution or benchmark work unless a stable deterministic contract exists.
+
 ## Commit & Pull Request Guidelines
 
 Recent history uses conventional prefixes such as `fix:`, `feat:`, and `perf:`. Keep commit subjects imperative and scoped, for example `fix: preserve git failure exit code` or `perf: auto-window large read output`. PRs should describe the user-visible behavior, include validation commands, note Windows-specific effects, and link any relevant issue or evidence directory.
@@ -37,9 +39,9 @@ When asked to fix RTK bugs, use the active Windows worktree and the issue eviden
 
 1. Sync `origin/develop` into the Windows feature branch without discarding Windows-native hook behavior; create a backup ref before resolving a non-trivial merge.
 2. Reproduce against the currently installed `rtk.exe` and the updated source binary. Record the binary path, version, SHA256, original command, rewrite output, exit code, and relevant host-hook output.
-3. Separate RTK rewrite/runner failures from Codex host policy, third-party package-manager, shell, or environment failures. Add an RTK regression test before changing code; move disproven reports to `RTK_run_log/archive/not-rtk/` with current evidence instead of weakening RTK safety rules.
+3. Separate RTK rewrite/runner failures from Codex host policy, third-party package-manager, shell, or environment failures. Add an RTK regression test before changing code; move disproven reports to `RTK_run_log/archive/not-rtk/` with current evidence instead of weakening RTK safety rules. Move verified RTK fixes to `RTK_run_log/archive/fixed/`; the log root contains unresolved reports only.
 4. Prefer Windows semantics when behavior differs: preserve PowerShell quoting, PATHEXT command resolution, lifecycle `PATH`, exact command arguments, host permission flow, and native exit codes. Keep Linux/macOS behavior intact.
-5. Run focused regression tests first, then `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, serial full tests on Windows, `git diff --check`, and a release build. Re-test installed Claude/Codex hooks separately from direct `rtk rewrite` probes.
-6. Update this file and `CLAUDE.md` together when the maintenance workflow changes. Publish only scoped files, push the Windows branch, and update or open the upstream PR with root cause, Windows impact, and exact validation evidence.
+5. Run focused regression tests first, then `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, serial full tests on Windows, `git diff --check`, and a release build. Use `scripts/rtk-windows-oracle.ps1` for the aggregated Windows gate, and re-test installed Claude/Codex hooks separately from direct `rtk rewrite` probes. Keep generated oracle artifacts under ignored `target/`, not in commits.
+6. Update this file and `CLAUDE.md` together when the maintenance workflow changes. Publish only scoped files, push the Windows branch, and update or open the upstream PR with root cause, Windows impact, and exact validation evidence. For the Windows PR release gate, attach current real `rtk gain` data with a real `cmd.exe` screenshot, enumerate every active-log resolution, and report PR/source, installed binary, signature, and upstream review/check status as separate outcomes.
 
 @RTK.md
