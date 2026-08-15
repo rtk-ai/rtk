@@ -3,7 +3,7 @@
 use crate::core::config;
 use crate::core::runner;
 use crate::core::stream::exec_capture;
-use crate::core::truncate::CAP_WARNINGS;
+use crate::core::truncate::CAP_ERRORS;
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
 use serde::Deserialize;
@@ -50,10 +50,8 @@ struct Position {
     #[serde(rename = "Filename")]
     filename: String,
     #[serde(rename = "Line")]
-    #[allow(dead_code)]
     line: usize,
     #[serde(rename = "Column")]
-    #[allow(dead_code)]
     column: usize,
     #[serde(rename = "Offset", default)]
     #[allow(dead_code)]
@@ -65,7 +63,6 @@ struct Issue {
     #[serde(rename = "FromLinter")]
     from_linter: String,
     #[serde(rename = "Text")]
-    #[allow(dead_code)]
     text: String,
     #[serde(rename = "Pos")]
     pos: Position,
@@ -119,6 +116,12 @@ pub(crate) fn detect_major_version() -> u32 {
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     match classify_invocation(args) {
+        // A user-chosen output format wins: forcing our JSON parse onto a
+        // non-JSON format breaks and emits a parse-error string that reads as a
+        // tool failure. Honor what they asked for verbatim.
+        Invocation::FilteredRun(invocation) if has_output_flag(&invocation.run_args) => {
+            run_passthrough(args, verbose)
+        }
         Invocation::FilteredRun(invocation) => run_filtered(args, &invocation, verbose),
         Invocation::Passthrough => run_passthrough(args, verbose),
     }
@@ -261,19 +264,17 @@ fn format_command(base: &str, args: &[String]) -> String {
     }
 }
 
-/// Filter golangci-lint JSON output - group by linter and file
+/// Filter golangci-lint JSON output into standard `file:line:col: message (linter)`
+/// findings, with per-linter counts as a header.
 pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
     let result: Result<GolangciOutput, _> = serde_json::from_str(output);
 
     let golangci_output = match result {
         Ok(o) => o,
-        Err(e) => {
-            return format!(
-                "golangci-lint (JSON parse failed: {})\n{}",
-                e,
-                truncate(output, config::limits().passthrough_max_chars)
-            );
-        }
+        // Not JSON (user-supplied output format, or an unexpected shape): hand
+        // back the linter's own output rather than a "JSON parse failed" string
+        // that reads as a tool failure and provokes retries.
+        Err(_) => return truncate(output.trim(), config::limits().passthrough_max_chars),
     };
 
     let issues = golangci_output.issues;
@@ -283,88 +284,57 @@ pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
     }
 
     let total_issues = issues.len();
-
-    // Count unique files
     let unique_files: std::collections::HashSet<_> =
         issues.iter().map(|i| &i.pos.filename).collect();
     let total_files = unique_files.len();
 
-    // Group by linter
-    let mut by_linter: HashMap<String, usize> = HashMap::new();
+    let mut by_linter: HashMap<&str, usize> = HashMap::new();
     for issue in &issues {
-        *by_linter.entry(issue.from_linter.clone()).or_insert(0) += 1;
+        *by_linter.entry(issue.from_linter.as_str()).or_insert(0) += 1;
     }
+    let mut linter_counts: Vec<_> = by_linter.into_iter().collect();
+    linter_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let linters_summary = linter_counts
+        .iter()
+        .map(|(linter, count)| format!("{} ({}x)", linter, count))
+        .collect::<Vec<_>>()
+        .join(", ");
 
-    // Group by file
-    let mut by_file: HashMap<&str, usize> = HashMap::new();
-    for issue in &issues {
-        *by_file.entry(issue.pos.filename.as_str()).or_insert(0) += 1;
-    }
+    let mut result = format!(
+        "golangci-lint: {} issues in {} files\nLinters: {}\n\n",
+        total_issues, total_files, linters_summary
+    );
 
-    let mut file_counts: Vec<_> = by_file.iter().collect();
-    file_counts.sort_by(|a, b| b.1.cmp(a.1));
+    const MAX_GOLANGCI_ISSUES: usize = CAP_ERRORS;
+    for issue in issues.iter().take(MAX_GOLANGCI_ISSUES) {
+        result.push_str(&format!(
+            "{}:{}:{}: {} ({})\n",
+            compact_path(&issue.pos.filename),
+            issue.pos.line,
+            issue.pos.column,
+            issue.text.trim(),
+            issue.from_linter,
+        ));
 
-    // Build output
-    let mut result = String::new();
-    result.push_str(&format!(
-        "golangci-lint: {} issues in {} files\n",
-        total_issues, total_files
-    ));
-
-    // Show top linters
-    let mut linter_counts: Vec<_> = by_linter.iter().collect();
-    linter_counts.sort_by(|a, b| b.1.cmp(a.1));
-
-    if !linter_counts.is_empty() {
-        result.push_str("Top linters:\n");
-        for (linter, count) in linter_counts.iter().take(10) {
-            result.push_str(&format!("  {} ({}x)\n", linter, count));
-        }
-        result.push('\n');
-    }
-
-    // Show top files
-    const MAX_GOLANGCI_FILES: usize = CAP_WARNINGS;
-    result.push_str("Top files:\n");
-    for (file, count) in file_counts.iter().take(MAX_GOLANGCI_FILES) {
-        let short_path = compact_path(file);
-        result.push_str(&format!("  {} ({} issues)\n", short_path, count));
-
-        // Show top 3 linters in this file
-        let mut file_linters: HashMap<String, Vec<&Issue>> = HashMap::new();
-        for issue in issues.iter().filter(|i| i.pos.filename.as_str() == **file) {
-            file_linters
-                .entry(issue.from_linter.clone())
-                .or_default()
-                .push(issue);
-        }
-
-        let mut file_linter_counts: Vec<_> = file_linters.iter().collect();
-        file_linter_counts.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
-
-        for (linter, linter_issues) in file_linter_counts.iter().take(3) {
-            result.push_str(&format!("    {} ({})\n", linter, linter_issues.len()));
-
-            // v2 only: show first source line for this linter-file group
-            if version >= 2 {
-                if let Some(first_issue) = linter_issues.first() {
-                    if let Some(source_line) = first_issue.source_lines.first() {
-                        let trimmed = source_line.trim();
-                        let display = match trimmed.char_indices().nth(80) {
-                            Some((i, _)) => &trimmed[..i],
-                            None => trimmed,
-                        };
-                        result.push_str(&format!("      → {}\n", display));
-                    }
+        // v2 carries the offending source line — keep it as secondary context.
+        if version >= 2 {
+            if let Some(source_line) = issue.source_lines.first() {
+                let trimmed = source_line.trim();
+                if !trimmed.is_empty() {
+                    let display = match trimmed.char_indices().nth(80) {
+                        Some((i, _)) => &trimmed[..i],
+                        None => trimmed,
+                    };
+                    result.push_str(&format!("    → {}\n", display));
                 }
             }
         }
     }
 
-    if file_counts.len() > MAX_GOLANGCI_FILES {
+    if total_issues > MAX_GOLANGCI_ISSUES {
         result.push_str(&format!(
-            "\n... +{} more files\n",
-            file_counts.len() - MAX_GOLANGCI_FILES
+            "\n... +{} more issues\n",
+            total_issues - MAX_GOLANGCI_ISSUES
         ));
     }
 
@@ -429,6 +399,48 @@ mod tests {
         assert!(result.contains("gosimple"));
         assert!(result.contains("main.go"));
         assert!(result.contains("utils.go"));
+    }
+
+    #[test]
+    fn test_filter_golangci_surfaces_message_and_location() {
+        // The violation message (Text) is the actionable signal — counts alone
+        // forced agents to retry to recover it.
+        let output = r#"{
+  "Issues": [
+    {
+      "FromLinter": "typecheck",
+      "Text": "could not import github.com/google/gopacket/pcap (fatal error: pcap.h: No such file or directory)",
+      "Pos": {"Filename": "internal/sniff/capture.go", "Line": 9, "Column": 2}
+    }
+  ]
+}"#;
+
+        let result = filter_golangci_json(output, 1);
+        assert!(
+            result.contains("capture.go:9:2:"),
+            "Expected file:line:col, got: {}",
+            result
+        );
+        assert!(
+            result.contains("pcap.h: No such file or directory"),
+            "Expected the violation message, got: {}",
+            result
+        );
+        assert!(
+            result.contains("(typecheck)"),
+            "Expected the linter name per finding, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_golangci_parse_failure_is_clean_passthrough() {
+        // A non-JSON payload (e.g. user-supplied --out-format) must not emit a
+        // scary "JSON parse failed" string that reads as a tool failure.
+        let raw = "internal/foo.go:10:2: something is wrong (govet)";
+        let result = filter_golangci_json(raw, 1);
+        assert!(!result.contains("parse failed"), "got: {}", result);
+        assert!(result.contains("something is wrong"), "got: {}", result);
     }
 
     #[test]
@@ -550,6 +562,16 @@ mod tests {
             classify_invocation(&["version".into()]),
             Invocation::Passthrough
         );
+    }
+
+    #[test]
+    fn test_has_output_flag_detects_user_formats() {
+        assert!(has_output_flag(&["--out-format=line-number".into()]));
+        assert!(has_output_flag(&["--out-format".into(), "tab".into()]));
+        assert!(has_output_flag(&["--output.json.path".into(), "out.json".into()]));
+        assert!(has_output_flag(&["--output.json.path=out.json".into()]));
+        assert!(!has_output_flag(&["./...".into()]));
+        assert!(!has_output_flag(&["--fix".into()]));
     }
 
     #[test]
@@ -721,3 +743,4 @@ mod tests {
         );
     }
 }
+

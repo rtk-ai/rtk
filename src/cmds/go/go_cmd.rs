@@ -72,12 +72,16 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
         filter_go_test_json
     };
 
+    // No tee: the raw stream is `go test -json` (3–8× more verbose than native
+    // output). A `[full output: …go_test.log]` pointer just advertises that
+    // firehose — agents cat it and pull back more bytes than the unfiltered run.
+    // The filter surfaces build errors and per-test failure detail inline instead.
     runner::run_filtered(
         cmd,
         "go test",
         &args.join(" "),
         filter,
-        crate::core::runner::RunOptions::stdout_only().tee("go_test"),
+        crate::core::runner::RunOptions::stdout_only(),
     )
 }
 
@@ -280,6 +284,27 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
         &*stdout
     };
 
+    let exit_code = exit_code_from_output(&output, "go tool golangci-lint");
+    // golangci-lint: exit 0 = clean, exit 1 = lint issues found (not an error),
+    // exit 2+ = config/build error, None = killed by signal (OOM, SIGKILL)
+    let mapped_exit = if exit_code == 1 { 0 } else { exit_code };
+
+    // User chose their own output format — emit it verbatim rather than parsing
+    // it as JSON (which would fail and surface a parse-error string).
+    if has_format {
+        print!("{}", stdout);
+        if !stderr.trim().is_empty() {
+            eprint!("{}", stderr);
+        }
+        timer.track(
+            "go tool golangci-lint",
+            "rtk go tool golangci-lint (passthrough)",
+            &raw,
+            &raw,
+        );
+        return Ok(mapped_exit);
+    }
+
     let filtered = golangci_cmd::filter_golangci_json(json_output, version);
     let shown = never_worse(&raw, &filtered);
     println!("{}", shown);
@@ -295,10 +320,7 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
         shown,
     );
 
-    let exit_code = exit_code_from_output(&output, "go tool golangci-lint");
-    // golangci-lint: exit 0 = clean, exit 1 = lint issues found (not an error),
-    // exit 2+ = config/build error, None = killed by signal (OOM, SIGKILL)
-    Ok(if exit_code == 1 { 0 } else { exit_code })
+    Ok(mapped_exit)
 }
 
 /// Parse go test -json output (NDJSON format)
@@ -699,35 +721,39 @@ fn is_go_build_error_line(line: &str) -> bool {
         || lower.contains("function main is undeclared in the main package")
 }
 
-/// Filter go vet output - show issues
+/// Filter go vet output - show issues.
+///
+/// vet only prints when something is wrong, so every non-`#` line is signal —
+/// including location-less compiler/cgo failures (`fatal error: …`) that have
+/// no `.go:`. Filtering on `.go:` dropped those and reported "No issues found"
+/// on a hard failure; truncation cut the message tail an agent retries to read.
 fn filter_go_vet(output: &str) -> String {
-    let mut issues: Vec<String> = Vec::new();
-
-    for line in output.lines() {
-        let trimmed = line.trim();
-
-        // Collect issue lines (vet reports issues with file:line:col format)
-        if !trimmed.is_empty() && !trimmed.starts_with('#') && trimmed.contains(".go:") {
-            issues.push(trimmed.to_string());
-        }
-    }
+    let issues: Vec<&str> = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
 
     if issues.is_empty() {
         return "Go vet: No issues found".to_string();
     }
 
-    let mut result = String::new();
-    result.push_str(&format!("Go vet: {} issues\n", issues.len()));
+    let mut result = format!("Go vet: {} issues\n", issues.len());
 
     const MAX_GO_VET_ISSUES: usize = CAP_ERRORS;
     for (i, issue) in issues.iter().take(MAX_GO_VET_ISSUES).enumerate() {
-        result.push_str(&format!("{}. {}\n", i + 1, truncate(issue, 120)));
+        result.push_str(&format!("{}. {}\n", i + 1, issue));
     }
 
     if issues.len() > MAX_GO_VET_ISSUES {
-        result.push_str(&format!("\n… +{} more issues\n", issues.len() - MAX_GO_VET_ISSUES));
+        result.push_str(&format!(
+            "\n… +{} more issues\n",
+            issues.len() - MAX_GO_VET_ISSUES
+        ));
         let all_issues = issues.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_issues, "go-vet", MAX_GO_VET_ISSUES + 1) {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_issues, "go-vet", MAX_GO_VET_ISSUES + 1)
+        {
             result.push_str(&format!("  {}\n", hint));
         }
     }
@@ -904,6 +930,36 @@ mod tests {
     }
 
     #[test]
+    fn test_filter_go_test_surfaces_cgo_build_error_inline() {
+        // A cgo build failure (missing C header) must show the compiler error
+        // line inline — this is the one actionable fact. With no tee pointer,
+        // the agent has no firehose to fall back to, so the signal must be here.
+        let output = r##"{"Action":"start","Package":"example.com/sniff"}
+{"ImportPath":"example.com/sniff","Action":"build-output","Output":"# example.com/sniff\n"}
+{"ImportPath":"example.com/sniff","Action":"build-output","Output":"./capture.go:7:11: fatal error: pcap.h: No such file or directory\n"}
+{"ImportPath":"example.com/sniff","Action":"build-fail"}
+{"Package":"example.com/sniff","Action":"fail","FailedBuild":"example.com/sniff"}"##;
+
+        let result = filter_go_test_json(output);
+        assert!(
+            result.contains("[build failed]"),
+            "Expected build-failed marker, got: {}",
+            result
+        );
+        assert!(
+            result.contains("pcap.h: No such file or directory"),
+            "Compiler error line must survive inline, got: {}",
+            result
+        );
+        // The "# package" header is noise and should be dropped.
+        assert!(
+            !result.contains("# example.com/sniff"),
+            "Package header should be stripped, got: {}",
+            result
+        );
+    }
+
+    #[test]
     fn test_filter_go_build_success() {
         let output = "";
         let result = filter_go_build(output);
@@ -1069,6 +1125,45 @@ utils.go:15:5: unreachable code"#;
         assert!(result.contains("2 issues"));
         assert!(result.contains("Printf format"));
         assert!(result.contains("unreachable code"));
+    }
+
+    #[test]
+    fn test_filter_go_vet_preserves_location_less_cgo_error() {
+        // cgo/compiler failures have no `.go:` anchor — the old `.go:`-only
+        // filter dropped them and reported "No issues found" on a hard failure.
+        let output = r#"# example.com/sniff
+fatal error: pcap.h: No such file or directory
+compilation terminated."#;
+
+        let result = filter_go_vet(output);
+        assert!(
+            !result.contains("No issues found"),
+            "Must not claim success on a cgo failure, got: {}",
+            result
+        );
+        assert!(
+            result.contains("fatal error: pcap.h: No such file or directory"),
+            "Compiler error line must survive, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("# example.com/sniff"),
+            "Package header should be stripped, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_vet_does_not_truncate_long_message() {
+        // The actionable detail of a `could not import` line lives at its tail;
+        // a mid-message cut is exactly what an agent retries to recover.
+        let long = "./capture.go:9:2: could not import github.com/google/gopacket/pcap (-: # github.com/google/gopacket/pcap: fatal error: pcap.h: No such file or directory)";
+        let result = filter_go_vet(long);
+        assert!(
+            result.contains("pcap.h: No such file or directory"),
+            "Message tail must not be truncated, got: {}",
+            result
+        );
     }
 
     #[test]
