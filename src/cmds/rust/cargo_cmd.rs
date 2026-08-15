@@ -894,7 +894,11 @@ fn merge_diag_counts(error_count: usize, warnings: usize, json: &JsonDiagnostics
 
 fn cargo_build_success_line(compiled: usize, finished: Option<&str>, label: &str) -> String {
     match finished {
+        // Nothing was recompiled and cargo's own "Finished" line already says so —
+        // adding a "(0 crates compiled)" summary on top is pure noise, not a summary.
+        Some(f) if compiled == 0 => format!("{}\n", f),
         Some(f) => format!("cargo {} ({} crates compiled)\n{}\n", label, compiled, f),
+        None if compiled == 0 => format!("cargo {}: ok (up to date, nothing recompiled)\n", label),
         None => format!("cargo {} ({} crates compiled)\n", label, compiled),
     }
 }
@@ -1555,6 +1559,30 @@ mod tests {
         let result = filter_cargo_build(output);
         assert!(result.contains("cargo build"));
         assert!(result.contains("3 crates compiled"));
+    }
+
+    #[test]
+    fn test_filter_cargo_build_up_to_date_with_finished_line() {
+        // Nothing to recompile: cargo emits only its own "Finished" line. Adding a
+        // "(0 crates compiled)" summary on top would grow the output past the raw
+        // input for zero informational gain (see #759, #1140).
+        let output = "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.31s\n";
+        let result = filter_cargo_build(output);
+        // The existing capture normalizes cargo's leading indentation; only the
+        // "(0 crates compiled)" summary line is what this fix removes.
+        assert_eq!(
+            result,
+            "Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.31s\n"
+        );
+        assert!(!result.contains("crates compiled"));
+    }
+
+    #[test]
+    fn test_filter_cargo_build_up_to_date_no_finished_line() {
+        // Some cargo invocations succeed with 0 crates compiled and no captured
+        // "Finished" line at all — distinguish this from a silent failure.
+        let result = filter_cargo_build("");
+        assert_eq!(result, "cargo build: ok (up to date, nothing recompiled)\n");
     }
 
     #[test]
