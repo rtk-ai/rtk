@@ -3236,6 +3236,65 @@ mod tests {
         );
     }
 
+    // --- #927: kubectl global flags + additional subcommands ---
+
+    #[test]
+    fn test_rewrite_kubectl_with_context_flag() {
+        assert_eq!(
+            rewrite_command("kubectl --context msquant-test get pods -n test", &[], &[]),
+            Some("rtk kubectl --context msquant-test get pods -n test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_kubectl_short_namespace_flag() {
+        assert_eq!(
+            rewrite_command("kubectl -n test get pods", &[], &[]),
+            Some("rtk kubectl -n test get pods".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_kubectl_exec_subcommand() {
+        assert_eq!(
+            rewrite_command("kubectl exec -n test pod-0 -- psql", &[], &[]),
+            Some("rtk kubectl exec -n test pod-0 -- psql".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_kubectl_exec() {
+        assert!(matches!(
+            classify_command("kubectl exec -it mypod -- bash"),
+            Classification::Supported {
+                rtk_equivalent: "rtk kubectl",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_kubectl_delete() {
+        assert!(matches!(
+            classify_command("kubectl delete pod mypod"),
+            Classification::Supported {
+                rtk_equivalent: "rtk kubectl",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_kubectl_rollout() {
+        assert!(matches!(
+            classify_command("kubectl rollout status deployment/myapp"),
+            Classification::Supported {
+                rtk_equivalent: "rtk kubectl",
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn test_rewrite_docker_run() {
         assert_eq!(

@@ -400,7 +400,9 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^kubectl\s+(get|logs|describe|apply)",
+        // Allow global flags (--context, --kubeconfig, -n, etc.) before the subcommand.
+        // Also adds exec, delete, create, patch, rollout and other common subcommands (#927).
+        pattern: r"^kubectl\s+(?:(?:--[\w-]+(?:=\S+|\s+\S+)?|-\w(?:\s+\S+)?)\s+)*(get|logs|describe|apply|exec|delete|create|patch|rollout|scale|port-forward|top|diff|wait|events|run|expose|auth|cp|version|config|api-resources|label|annotate|edit|replace|cordon|drain|taint)",
         rtk_cmd: "rtk kubectl",
         rewrite_prefixes: &["kubectl"],
         category: "Infra",

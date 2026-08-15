@@ -12,11 +12,30 @@ else
 fi
 BENCH_DIR="$(pwd)/scripts/benchmark"
 RTK_ROOT="$(pwd)"
+readonly FILE_URL_PREFIX="file://"
+readonly CURL_JSON_FIXTURE_NAME="rtk_benchmark_curl_json"
+readonly CURL_JSON_FIXTURE_CONTENT='{"products":[{"id":101,"name":"Laptop","price":999.99,"stock":50},{"id":102,"name":"Mouse","price":29.99,"stock":200}],"total":2,"page":1}'
+BENCH_TEMP_FILES=()
+
+cleanup_benchmark_temp_files() {
+  if [ "${#BENCH_TEMP_FILES[@]}" -gt 0 ]; then
+    rm -f "${BENCH_TEMP_FILES[@]}"
+  fi
+}
+trap cleanup_benchmark_temp_files EXIT
 
 if [ -z "$CI" ]; then
   rm -rf "$BENCH_DIR"
   mkdir -p "$BENCH_DIR/unix" "$BENCH_DIR/rtk" "$BENCH_DIR/diff"
 fi
+
+make_curl_json_fixture_url() {
+  local fixture
+  fixture=$(mktemp "${TMPDIR:-/tmp}/${CURL_JSON_FIXTURE_NAME}.XXXXXX")
+  BENCH_TEMP_FILES+=("$fixture")
+  printf "%s\n" "$CURL_JSON_FIXTURE_CONTENT" > "$fixture"
+  printf "%s%s\n" "$FILE_URL_PREFIX" "$fixture"
+}
 
 safe_name() {
   echo "$1" | tr ' /' '_-' | tr -cd 'a-zA-Z0-9_-'
@@ -138,6 +157,20 @@ bench() {
     } > "$BENCH_DIR/diff/${prefix}-${filename}.md"
   fi
 }
+
+if [ "${1:-}" = "--self-test" ]; then
+  curl_json_url=$(make_curl_json_fixture_url)
+  curl_out=$(curl -s "$curl_json_url")
+  rtk_out=$("$RTK" curl "$curl_json_url")
+
+  if [ "$curl_out" != "$rtk_out" ]; then
+    echo "FAIL: curl json benchmark fixture is not deterministic"
+    exit 1
+  fi
+
+  echo "PASS: curl json benchmark fixture is deterministic"
+  exit 0
+fi
 
 section() {
   echo ""
@@ -346,7 +379,8 @@ bench "wc" "wc Cargo.toml src/main.rs" "$RTK wc Cargo.toml src/main.rs"
 # ===================
 section "curl"
 if command -v curl &> /dev/null; then
-  bench "curl json" "curl -s https://mockhttp.org/json/1" "$RTK curl https://mockhttp.org/json/1"
+  CURL_JSON_URL=$(make_curl_json_fixture_url)
+  bench "curl json" "curl -s '$CURL_JSON_URL'" "$RTK curl '$CURL_JSON_URL'"
   bench "curl text" "curl -s https://mockhttp.org/robots.txt" "$RTK curl https://mockhttp.org/robots.txt"
 fi
 
@@ -355,8 +389,8 @@ fi
 # ===================
 if command -v wget &> /dev/null; then
   section "wget"
-  bench "wget" "wget -qO- https://mockhttp.org/json/1" "$RTK wget https://mockhttp.org/json/1"
-  rm -f 1 2>/dev/null
+  bench "wget" "wget -qO- https://mockhttp.org/json" "$RTK wget https://mockhttp.org/json"
+  rm -f json 2>/dev/null
 fi
 
 # ===================
