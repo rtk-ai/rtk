@@ -4,7 +4,7 @@ use crate::core::guard::never_worse;
 use crate::core::runner;
 use crate::core::tracking;
 use crate::core::truncate::CAP_ERRORS;
-use crate::core::utils::{exit_code_from_output, resolved_command, truncate};
+use crate::core::utils::{exit_code_from_output, resolved_command, strip_ansi, truncate};
 use crate::golangci_cmd;
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -66,19 +66,23 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
         );
     }
 
-    let filter: fn(&str) -> String = if skip_json {
-        |s: &str| s.to_string()
+    if skip_json {
+        runner::run_filtered_with_exit(
+            cmd,
+            "go test",
+            &args.join(" "),
+            |s: &str, _| s.to_string(),
+            crate::core::runner::RunOptions::stdout_only().tee("go_test"),
+        )
     } else {
-        filter_go_test_json
-    };
-
-    runner::run_filtered(
-        cmd,
-        "go test",
-        &args.join(" "),
-        filter,
-        crate::core::runner::RunOptions::stdout_only().tee("go_test"),
-    )
+        runner::run_filtered_with_exit(
+            cmd,
+            "go test",
+            &args.join(" "),
+            filter_go_test_json_with_exit,
+            crate::core::runner::RunOptions::with_tee("go_test"),
+        )
+    }
 }
 
 pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
@@ -114,11 +118,11 @@ pub fn run_vet(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: go vet {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_filtered_with_exit(
         cmd,
         "go vet",
         &args.join(" "),
-        filter_go_vet,
+        filter_go_vet_with_exit,
         crate::core::runner::RunOptions::with_tee("go_vet"),
     )
 }
@@ -303,6 +307,11 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
 
 /// Parse go test -json output (NDJSON format)
 pub(crate) fn filter_go_test_json(output: &str) -> String {
+    filter_go_test_json_with_exit(output, 0)
+}
+
+fn filter_go_test_json_with_exit(output: &str, exit_code: i32) -> String {
+    let diagnostics = collect_go_diagnostic_lines(output);
     let mut packages: HashMap<String, PackageResult> = HashMap::new();
     let mut current_test_output: HashMap<(String, String), Vec<String>> = HashMap::new(); // (package, test) -> outputs
     let mut build_output: HashMap<String, Vec<String>> = HashMap::new(); // import_path -> error lines
@@ -413,6 +422,12 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
     let has_failures = total_fail > 0 || total_build_fail > 0 || total_pkg_fail > 0;
 
     if !has_failures && total_pass == 0 {
+        if !diagnostics.is_empty() {
+            return format_go_items("Go test", "errors", &diagnostics, "go-test");
+        }
+        if exit_code != 0 {
+            return format_go_failure("Go test", output, exit_code);
+        }
         return "Go test: No tests found".to_string();
     }
 
@@ -493,6 +508,8 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
             }
         }
     }
+
+    append_missing_go_diagnostics(&mut result, &diagnostics);
 
     result.trim().to_string()
 }
@@ -593,50 +610,36 @@ fn filter_go_build_with_exit(output: &str, exit_code: i32) -> String {
         };
     }
 
-    let mut result = String::new();
-    result.push_str(&format!("Go build: {} errors\n", errors.len()));
-
-    const MAX_GO_BUILD_ERRORS: usize = CAP_ERRORS;
-    for (i, error) in errors.iter().take(MAX_GO_BUILD_ERRORS).enumerate() {
-        result.push_str(&format!("{}. {}\n", i + 1, truncate(error, 120)));
-    }
-
-    if errors.len() > MAX_GO_BUILD_ERRORS {
-        result.push_str(&format!("\n… +{} more errors\n", errors.len() - MAX_GO_BUILD_ERRORS));
-        let all_errors = errors.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_errors, "go-build", MAX_GO_BUILD_ERRORS + 1) {
-            result.push_str(&format!("  {}\n", hint));
-        }
-    }
-
-    result.trim().to_string()
+    format_go_items("Go build", "errors", &errors, "go-build")
 }
 
 fn format_go_build_failure(output: &str, exit_code: i32) -> String {
+    format_go_failure("Go build", output, exit_code)
+}
+
+fn format_go_failure(command: &str, output: &str, exit_code: i32) -> String {
     let lines: Vec<String> = output
         .lines()
-        .map(str::trim)
+        .map(clean_go_line)
         .filter(|line| !line.is_empty())
-        .map(str::to_string)
         .collect();
 
     if lines.is_empty() {
-        return format!("Go build: failed (exit {})", exit_code);
+        return format!("{}: failed (exit {})", command, exit_code);
     }
 
     let mut result = String::new();
-    result.push_str(&format!("Go build: failed (exit {})\n", exit_code));
-    result.push_str("═══════════════════════════════════════\n");
+    result.push_str(&format!("{}: failed (exit {})\n", command, exit_code));
 
-    const MAX_GO_BUILD_ERRORS: usize = CAP_ERRORS;
-    for (i, line) in lines.iter().take(MAX_GO_BUILD_ERRORS).enumerate() {
+    const MAX_GO_FAILURE_LINES: usize = CAP_ERRORS;
+    for (i, line) in lines.iter().take(MAX_GO_FAILURE_LINES).enumerate() {
         result.push_str(&format!("{}. {}\n", i + 1, truncate(line, 120)));
     }
 
-    if lines.len() > MAX_GO_BUILD_ERRORS {
+    if lines.len() > MAX_GO_FAILURE_LINES {
         result.push_str(&format!(
             "\n… +{} more output lines\n",
-            lines.len() - MAX_GO_BUILD_ERRORS
+            lines.len() - MAX_GO_FAILURE_LINES
         ));
     }
 
@@ -644,7 +647,11 @@ fn format_go_build_failure(output: &str, exit_code: i32) -> String {
 }
 
 fn is_go_build_error_line(line: &str) -> bool {
-    let trimmed = line.trim();
+    is_go_diagnostic_line(line)
+}
+
+fn is_go_diagnostic_line(line: &str) -> bool {
+    let trimmed = clean_go_line(line);
     if trimmed.is_empty() {
         return false;
     }
@@ -675,6 +682,7 @@ fn is_go_build_error_line(line: &str) -> bool {
     // Some compiler/module failures do not include a file.go:line:col location.
     let non_file_error_prefixes = [
         "undefined: ",
+        "cannot ",
         "cannot use ",
         "cannot find package ",
         "no required module provides package ",
@@ -700,39 +708,105 @@ fn is_go_build_error_line(line: &str) -> bool {
 }
 
 /// Filter go vet output - show issues
+#[cfg(test)]
 fn filter_go_vet(output: &str) -> String {
-    let mut issues: Vec<String> = Vec::new();
+    filter_go_vet_with_exit(output, 0)
+}
 
-    for line in output.lines() {
-        let trimmed = line.trim();
-
-        // Collect issue lines (vet reports issues with file:line:col format)
-        if !trimmed.is_empty() && !trimmed.starts_with('#') && trimmed.contains(".go:") {
-            issues.push(trimmed.to_string());
-        }
-    }
-
+fn filter_go_vet_with_exit(output: &str, exit_code: i32) -> String {
+    let issues = collect_go_diagnostic_lines(output);
     if issues.is_empty() {
+        if exit_code != 0 {
+            return format_go_failure("Go vet", output, exit_code);
+        }
         return "Go vet: No issues found".to_string();
     }
 
-    let mut result = String::new();
-    result.push_str(&format!("Go vet: {} issues\n", issues.len()));
+    format_go_items("Go vet", "issues", &issues, "go-vet")
+}
 
-    const MAX_GO_VET_ISSUES: usize = CAP_ERRORS;
-    for (i, issue) in issues.iter().take(MAX_GO_VET_ISSUES).enumerate() {
-        result.push_str(&format!("{}. {}\n", i + 1, truncate(issue, 120)));
+fn collect_go_diagnostic_lines(output: &str) -> Vec<String> {
+    let mut diagnostics = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = clean_go_line(line);
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Ok(event) = serde_json::from_str::<GoTestEvent>(&trimmed) {
+            if let Some(output_text) = event.output {
+                diagnostics.extend(
+                    output_text
+                        .lines()
+                        .map(clean_go_line)
+                        .filter(|line| is_go_diagnostic_line(line)),
+                );
+            }
+            continue;
+        }
+
+        if is_go_diagnostic_line(&trimmed) {
+            diagnostics.push(trimmed);
+        }
     }
 
-    if issues.len() > MAX_GO_VET_ISSUES {
-        result.push_str(&format!("\n… +{} more issues\n", issues.len() - MAX_GO_VET_ISSUES));
-        let all_issues = issues.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_issues, "go-vet", MAX_GO_VET_ISSUES + 1) {
+    diagnostics
+}
+
+fn append_missing_go_diagnostics(result: &mut String, diagnostics: &[String]) {
+    let missing: Vec<String> = diagnostics
+        .iter()
+        .filter(|line| !result.contains(line.as_str()))
+        .cloned()
+        .collect();
+
+    if missing.is_empty() {
+        return;
+    }
+
+    result.push_str("\n\n");
+    result.push_str(&format_go_items(
+        "Go diagnostics",
+        "errors",
+        &missing,
+        "go-test-diagnostics",
+    ));
+}
+
+fn format_go_items(command: &str, item_label: &str, items: &[String], tee_slug: &str) -> String {
+    let mut result = String::new();
+    result.push_str(&format!(
+        "{}: {} {}\n",
+        command,
+        items.len(),
+        item_label
+    ));
+
+    const MAX_GO_ITEMS: usize = CAP_ERRORS;
+    for (i, item) in items.iter().take(MAX_GO_ITEMS).enumerate() {
+        result.push_str(&format!("{}. {}\n", i + 1, truncate(item, 120)));
+    }
+
+    if items.len() > MAX_GO_ITEMS {
+        result.push_str(&format!(
+            "\n… +{} more {}\n",
+            items.len() - MAX_GO_ITEMS,
+            item_label
+        ));
+        let all_items = items.join("\n");
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_items, tee_slug, MAX_GO_ITEMS + 1)
+        {
             result.push_str(&format!("  {}\n", hint));
         }
     }
 
     result.trim().to_string()
+}
+
+fn clean_go_line(line: &str) -> String {
+    strip_ansi(line).trim().to_string()
 }
 
 /// Compact package name (remove long paths)
@@ -904,6 +978,19 @@ mod tests {
     }
 
     #[test]
+    fn test_filter_go_test_preserves_raw_compile_errors() {
+        let output = "internal/workorder/biz/service.go:42:9: undefined: missingSymbol";
+
+        let result = filter_go_test_json(output);
+        assert!(result.contains("undefined: missingSymbol"));
+        assert!(
+            !result.contains("No tests found"),
+            "Must not hide raw compiler diagnostics, got: {}",
+            result
+        );
+    }
+
+    #[test]
     fn test_filter_go_build_success() {
         let output = "";
         let result = filter_go_build(output);
@@ -1069,6 +1156,24 @@ utils.go:15:5: unreachable code"#;
         assert!(result.contains("2 issues"));
         assert!(result.contains("Printf format"));
         assert!(result.contains("unreachable code"));
+    }
+
+    #[test]
+    fn test_filter_go_vet_preserves_compiler_diagnostics() {
+        let output = r#"undefined: missingSymbol
+cannot import example.com/internal/broken
+imports example.com/cycle/a: import cycle not allowed"#;
+
+        let result = filter_go_vet(output);
+        assert!(result.contains("3 issues"));
+        assert!(result.contains("undefined: missingSymbol"));
+        assert!(result.contains("cannot import"));
+        assert!(result.contains("import cycle not allowed"));
+        assert!(
+            !result.contains("No issues found"),
+            "Must not hide Go compiler diagnostics, got: {}",
+            result
+        );
     }
 
     #[test]
