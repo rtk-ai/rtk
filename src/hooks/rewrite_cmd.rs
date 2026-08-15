@@ -46,7 +46,20 @@ enum RewriteOutcome {
 
 fn evaluate(cmd: &str, excluded: &[String], transparent_prefixes: &[String]) -> RewriteOutcome {
     let verdict = check_command(cmd);
+    evaluate_with_verdict(cmd, verdict, excluded, transparent_prefixes)
+}
 
+/// Core of `evaluate`, with the permission `verdict` injected rather than read
+/// from the host's settings. Production passes `check_command(cmd)`; tests pass an
+/// explicit verdict so they don't depend on the machine's real Claude/rtk rules
+/// (which made `git status` / `rm -rf` outcomes environment-dependent — a deny
+/// rule for `rm -rf` or an allow rule for `git status` flipped the result).
+fn evaluate_with_verdict(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+) -> RewriteOutcome {
     if verdict == PermissionVerdict::Deny {
         return RewriteOutcome::Deny;
     }
@@ -91,12 +104,23 @@ mod tests {
     }
 
     mod unattestable_passthrough {
-        use super::super::{evaluate, RewriteOutcome};
+        use super::super::{evaluate_with_verdict, RewriteOutcome};
+        use crate::hooks::permissions::PermissionVerdict;
+
+        // These exercise the unattestable-construct / rewrite logic, NOT permission
+        // rules — so they inject a neutral verdict instead of calling check_command
+        // (which reads the machine's real Claude/rtk settings and made outcomes
+        // environment-dependent). `Ask` is the neutral choice: it doesn't short-
+        // circuit on Deny and isn't Allow, so the rewrite-vs-passthrough branch is
+        // what's actually under test.
+        fn eval(cmd: &str) -> RewriteOutcome {
+            evaluate_with_verdict(cmd, PermissionVerdict::Ask, &[], &[])
+        }
 
         #[test]
         fn test_backtick_substitution_passthrough() {
             assert_eq!(
-                evaluate("git status `rm -rf /tmp/x`", &[], &[]),
+                eval("git status `rm -rf /tmp/x`"),
                 RewriteOutcome::Passthrough
             );
         }
@@ -104,7 +128,7 @@ mod tests {
         #[test]
         fn test_dollar_substitution_passthrough() {
             assert_eq!(
-                evaluate("git status $(rm -rf /tmp/x)", &[], &[]),
+                eval("git status $(rm -rf /tmp/x)"),
                 RewriteOutcome::Passthrough
             );
         }
@@ -112,32 +136,42 @@ mod tests {
         #[test]
         fn test_double_quoted_substitution_passthrough() {
             assert_eq!(
-                evaluate("git log --pretty=\"$(rm -rf /tmp/x)\"", &[], &[]),
+                eval("git log --pretty=\"$(rm -rf /tmp/x)\""),
                 RewriteOutcome::Passthrough
             );
         }
 
         #[test]
         fn test_file_redirect_passthrough() {
-            assert_eq!(
-                evaluate("git log > /tmp/out.txt", &[], &[]),
-                RewriteOutcome::Passthrough
-            );
+            assert_eq!(eval("git log > /tmp/out.txt"), RewriteOutcome::Passthrough);
         }
 
         #[test]
         fn test_fd_dup_redirect_still_rewrites() {
-            assert!(matches!(
-                evaluate("git status 2>&1", &[], &[]),
-                RewriteOutcome::Ask(_)
-            ));
+            assert!(matches!(eval("git status 2>&1"), RewriteOutcome::Ask(_)));
         }
 
         #[test]
         fn test_plain_command_still_rewrites() {
+            assert!(matches!(eval("git status"), RewriteOutcome::Ask(_)));
+        }
+
+        // Deny still short-circuits regardless of construct — pin that too, now that
+        // the verdict is injectable (previously untestable without real rules).
+        #[test]
+        fn test_deny_verdict_short_circuits() {
+            assert_eq!(
+                evaluate_with_verdict("git status", PermissionVerdict::Deny, &[], &[]),
+                RewriteOutcome::Deny
+            );
+        }
+
+        // Allow verdict on a rewritable command yields Allow (not Ask).
+        #[test]
+        fn test_allow_verdict_yields_allow() {
             assert!(matches!(
-                evaluate("git status", &[], &[]),
-                RewriteOutcome::Ask(_)
+                evaluate_with_verdict("git status", PermissionVerdict::Allow, &[], &[]),
+                RewriteOutcome::Allow(_)
             ));
         }
     }
