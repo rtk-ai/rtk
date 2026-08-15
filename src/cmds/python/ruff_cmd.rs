@@ -79,11 +79,16 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     }
 
     let owned_args = args.to_vec();
-    runner::run_filtered(
+    runner::run_filtered_with_exit(
         cmd,
         "ruff",
         &display_args(args),
-        move |stdout| filter_ruff_output(&owned_args, stdout),
+        move |stdout, exit_code| {
+            let filtered = filter_ruff_output(&owned_args, stdout);
+            // "All files formatted correctly" / "No issues found" must never
+            // be shown when ruff exited non-zero (config error, etc.).
+            crate::core::guard::guard_exit(stdout, exit_code, "ruff", &filtered)
+        },
         runner::RunOptions::stdout_only().clean_outputs(clean_outputs),
     )
 }
@@ -827,6 +832,21 @@ mod tests {
         let result = filter_ruff_format(output);
         assert!(result.contains("Ruff format"));
         assert!(result.contains("All files formatted correctly"));
+    }
+
+    #[test]
+    fn test_ruff_format_nonzero_exit_never_says_formatted() {
+        // ruff format --check exits non-zero when it fails; a green verdict must
+        // never be shown for it.
+        let raw = "5 files left unchanged";
+        let filtered = filter_ruff_format(raw);
+        let result = crate::core::guard::guard_exit(raw, 2, "ruff", &filtered);
+        assert!(result.contains("ruff: failed (exit 2)"), "got: {}", result);
+        assert!(!result.contains("All files formatted"), "got: {}", result);
+
+        // Same input with exit 0 keeps the green verdict.
+        let ok = crate::core::guard::guard_exit(raw, 0, "ruff", &filtered);
+        assert_eq!(ok, filtered);
     }
 
     #[test]
