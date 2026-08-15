@@ -403,7 +403,7 @@ RTK supports 16 AI coding tools. Each integration rewrites shell commands to `rt
 | **Kimi AI** | `rtk init --agent kimi` | AGENTS.md (project-scoped) |
 | **Factory Droid** | `rtk init -g --agent droid` (or per-project) | PreToolUse hook in `~/.factory/hooks.json` (matcher `Execute`) |
 
-For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents). The Hermes plugin source and tests live in `hooks/hermes/`; installed Hermes runtime files still live under `~/.hermes/plugins/rtk-rewrite/`.
+For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://github.com/rtk-ai/rtk/blob/develop/docs/guide/getting-started/supported-agents.md). The Hermes plugin source and tests live in `hooks/hermes/`; installed Hermes runtime files still live under `~/.hermes/plugins/rtk-rewrite/`.
 
 ## Configuration
 
@@ -425,7 +425,7 @@ FAILED: 2/15 tests
 [full output: ~/.local/share/rtk/tee/1707753600_cargo_test.log]
 ```
 
-For the full config reference (all sections, env vars, per-project filters), see the [Configuration guide](https://www.rtk-ai.app/guide/getting-started/configuration).
+For the full config reference (all sections, env vars, per-project filters), see the [Configuration guide](https://github.com/rtk-ai/rtk/blob/develop/docs/guide/getting-started/configuration.md).
 
 ### Uninstall
 
