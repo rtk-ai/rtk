@@ -139,25 +139,29 @@ fn run_filtered(original_args: &[String], invocation: &RunInvocation, verbose: u
         );
     }
 
-    let exit_code = runner::run_filtered(
+    let exit_code = runner::run_filtered_with_exit(
         cmd,
         "golangci-lint",
         &original_args.join(" "),
-        |stdout| {
+        |stdout, exit_code| {
             // v2 outputs JSON on first line + trailing text; v1 outputs just JSON
             let json_output = if version >= 2 {
                 stdout.lines().next().unwrap_or("")
             } else {
                 stdout
             };
-            filter_golangci_json(json_output, version)
+            let filtered = filter_golangci_json(json_output, version);
+            // "No issues found" must never be rendered for a non-zero exit
+            // (config/build error, killed by signal, ...).
+            crate::core::guard::guard_exit(stdout, exit_code, "golangci-lint", &filtered)
         },
         crate::core::runner::RunOptions::stdout_only(),
     )?;
 
-    // golangci-lint: exit 0 = clean, exit 1 = lint issues found (not an error),
-    // exit 2+ = config/build error, None = killed by signal (OOM, SIGKILL)
-    Ok(if exit_code == 1 { 0 } else { exit_code })
+    // golangci-lint: exit 0 = clean, exit 1 = lint issues found (a real failure
+    // for CI/agents — do not silently rewrite it to 0), exit 2+ = config/build
+    // error, None = killed by signal (OOM, SIGKILL).
+    Ok(exit_code)
 }
 
 fn run_passthrough(args: &[String], verbose: u8) -> Result<i32> {
@@ -398,6 +402,22 @@ mod tests {
         let result = filter_golangci_json(output, 1);
         assert!(result.contains("golangci-lint"));
         assert!(result.contains("No issues found"));
+    }
+
+    #[test]
+    fn test_golangci_nonzero_exit_never_says_no_issues() {
+        // golangci-lint exits 2+ on config/build errors. "No issues found"
+        // must never be rendered for a non-zero exit.
+        let raw = r#"{"Issues":[]}"#;
+        let filtered = filter_golangci_json(raw, 1);
+        assert_eq!(filtered, "golangci-lint: No issues found");
+        let result = crate::core::guard::guard_exit(raw, 2, "golangci-lint", &filtered);
+        assert!(
+            result.contains("golangci-lint: failed (exit 2)"),
+            "got: {}",
+            result
+        );
+        assert!(!result.contains("No issues found"), "got: {}", result);
     }
 
     #[test]

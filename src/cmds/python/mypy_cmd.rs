@@ -31,11 +31,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         |raw, exit_code| {
             let clean = strip_ansi(raw);
             let filtered = filter_mypy_output(&clean);
-            // Nothing recognised on a failed run means mypy never type-checked.
-            if exit_code != 0 && filtered == MYPY_CLEAN {
-                return clean.trim().to_string();
-            }
-            filtered
+            // mypy exits 2 when it finds type errors; if nothing parsed on a
+            // non-zero exit, the run never type-checked — say so instead of
+            // claiming "No issues found".
+            crate::core::guard::guard_exit(clean.trim(), exit_code, "mypy", &filtered)
         },
         runner::RunOptions::default(),
     )
@@ -346,6 +345,19 @@ Found 1 error in 1 file
         let output = "Success: no issues found in 5 source files\n";
         let result = filter_mypy_output(output);
         assert_eq!(result, "mypy: No issues found");
+    }
+
+    #[test]
+    fn test_mypy_nonzero_exit_never_says_no_issues() {
+        // mypy exits 2 when it finds type errors. If only the "Found N errors"
+        // summary line arrives (stderr swallowed), the parser would report
+        // "mypy: No issues found" — the guard must fall back instead.
+        let raw = "Found 2 errors in 1 file (checked 10 source files)";
+        let filtered = filter_mypy_output(raw);
+        assert_eq!(filtered, MYPY_CLEAN);
+        let result = crate::core::guard::guard_exit(raw, 2, "mypy", &filtered);
+        assert!(result.contains("mypy: failed (exit 2)"), "got: {}", result);
+        assert!(!result.contains("No issues found"), "got: {}", result);
     }
 
     #[test]
