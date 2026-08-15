@@ -13,7 +13,15 @@ use crate::parser::{
     truncate_passthrough, FormatMode, OutputParser, ParseResult, TestFailure, TestResult,
     TokenFormatter,
 };
-use crate::Commands;
+
+/// Which JS test runner invoked [`run_test`]. Standing in for the CLI's own
+/// `Commands::Vitest`/`Commands::Jest` variants so this lib-crate module
+/// doesn't need to depend on the `rtk` binary's Clap `Commands` enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestFramework {
+    Vitest,
+    Jest,
+}
 
 /// Vitest JSON output structures (tool-specific format)
 #[derive(Debug, Deserialize)]
@@ -199,12 +207,12 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
     failures
 }
 
-pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32> {
+pub fn run_test(command: &TestFramework, args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
     let mut passthrough_requested = false;
 
     let (framework, mut cmd) = match command {
-        Commands::Vitest { .. } => {
+        TestFramework::Vitest => {
             let framework = "vitest";
             let mut cmd = package_manager_exec(framework);
             let effective_args = build_vitest_effective_args(args);
@@ -212,7 +220,7 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
             cmd.args(effective_args.args);
             (framework, cmd)
         }
-        Commands::Jest { .. } => {
+        TestFramework::Jest => {
             let framework = "jest";
             let mut cmd = package_manager_exec(framework);
             cmd
@@ -222,10 +230,9 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
                 .arg("--json");
             (framework, cmd)
         }
-        _ => unreachable!(),
     };
 
-    if !matches!(command, Commands::Vitest { .. }) {
+    if !matches!(command, TestFramework::Vitest) {
         for arg in args {
             if arg == "run"
                 || arg.starts_with("--json")

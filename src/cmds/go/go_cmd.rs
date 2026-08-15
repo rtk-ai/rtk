@@ -1,11 +1,11 @@
 //! Filters Go command output — test results, build errors, vet warnings.
 
+use super::golangci_cmd;
 use crate::core::guard::never_worse;
 use crate::core::runner;
 use crate::core::tracking;
 use crate::core::truncate::CAP_ERRORS;
 use crate::core::utils::{exit_code_from_output, resolved_command, truncate};
-use crate::golangci_cmd;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;

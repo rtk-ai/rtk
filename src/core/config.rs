@@ -21,6 +21,8 @@ pub struct Config {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub shell: ShellConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -148,6 +150,29 @@ impl Default for LimitsConfig {
 /// Get limits config. Falls back to defaults if config can't be loaded.
 pub fn limits() -> LimitsConfig {
     Config::load().map(|c| c.limits).unwrap_or_default()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ShellConfig {
+    /// Override for the backing shell to spawn (e.g. "bash", "zsh"). `None` means
+    /// auto-detect from the environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backing_shell: Option<String>,
+    /// Minimal prompt string shown in the rtk-managed shell session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimal_ps1: Option<String>,
+    /// Enable mode-3 swap heuristics (experimental).
+    pub enable_mode3_swap: bool,
+}
+
+impl Default for ShellConfig {
+    fn default() -> Self {
+        Self {
+            backing_shell: None,
+            minimal_ps1: Some("$ ".to_string()),
+            enable_mode3_swap: false,
+        }
+    }
 }
 
 impl Config {
@@ -295,5 +320,41 @@ consent_date = "2026-04-10T12:00:00Z"
             config.telemetry.consent_date.as_deref(),
             Some("2026-04-10T12:00:00Z")
         );
+    }
+
+    #[test]
+    fn test_shell_config_deserialize() {
+        let toml = r#"
+[shell]
+backing_shell = "zsh"
+minimal_ps1 = "> "
+enable_mode3_swap = true
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.shell.backing_shell.as_deref(), Some("zsh"));
+        assert_eq!(config.shell.minimal_ps1.as_deref(), Some("> "));
+        assert!(config.shell.enable_mode3_swap);
+    }
+
+    #[test]
+    fn test_shell_config_default() {
+        let config = Config::default();
+        assert!(config.shell.backing_shell.is_none());
+        assert_eq!(config.shell.minimal_ps1.as_deref(), Some("$ "));
+        assert!(!config.shell.enable_mode3_swap);
+    }
+
+    #[test]
+    fn test_config_without_shell_section_is_valid() {
+        // Older configs that predate this field must still parse.
+        let toml = r#"
+[tracking]
+enabled = true
+history_days = 90
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(config.shell.backing_shell.is_none());
+        assert_eq!(config.shell.minimal_ps1.as_deref(), Some("$ "));
+        assert!(!config.shell.enable_mode3_swap);
     }
 }

@@ -1,14 +1,11 @@
-mod analytics;
-mod cmds;
-mod core;
-mod discover;
-mod hooks;
-mod learn;
-mod parser;
+// The full module tree lives in `src/lib.rs` (crate `rtk`) so it can be
+// shared with the `rtk-shell` binary (see `src/bin/rtk_shell.rs`). This
+// binary consumes it like any other dependent of the `rtk` lib crate.
+use rtk::{analytics, cmds, core, discover, hooks, learn, shell};
 
 // Re-export command modules for routing
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
-use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
+use cmds::dotnet::dotnet_cmd;
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
@@ -642,6 +639,13 @@ enum Commands {
     /// Execute command without filtering but track usage
     Proxy {
         /// Command and arguments to execute
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+
+    /// Interactive rtk-managed shell: filters eligible commands, forwards the rest
+    Shell {
+        /// Command and arguments to execute (mirrors `rtk-shell`'s own argv handling)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<OsString>,
     },
@@ -2194,8 +2198,11 @@ fn run_cli() -> Result<i32> {
             0
         }
 
-        Commands::Jest { ref args } | Commands::Vitest { ref args } => {
-            vitest_cmd::run_test(&cli.command, args, cli.verbose)?
+        Commands::Jest { ref args } => {
+            vitest_cmd::run_test(&vitest_cmd::TestFramework::Jest, args, cli.verbose)?
+        }
+        Commands::Vitest { ref args } => {
+            vitest_cmd::run_test(&vitest_cmd::TestFramework::Vitest, args, cli.verbose)?
         }
 
         Commands::Prisma { command } => match command {
@@ -2458,9 +2465,9 @@ fn run_cli() -> Result<i32> {
                 0
             }
             HookCommands::Check { agent: _, command } => {
-                use crate::discover::registry::rewrite_command;
+                use rtk::discover::registry::rewrite_command;
                 let raw = command.join(" ");
-                let (excluded, transparent_prefixes) = crate::core::config::Config::load()
+                let (excluded, transparent_prefixes) = rtk::core::config::Config::load()
                     .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
                     .unwrap_or_default();
                 match rewrite_command(&raw, &excluded, &transparent_prefixes) {
@@ -2689,6 +2696,14 @@ fn run_cli() -> Result<i32> {
             );
 
             core::utils::exit_code_from_status(&status, &cmd_name)
+        }
+
+        Commands::Shell { args } => {
+            let args: Vec<String> = args
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            shell::dispatch(&args)?
         }
 
         Commands::Trust { list, yes } => {
@@ -3094,7 +3109,7 @@ mod tests {
         // RTK meta-commands should produce parse errors (not fall through to raw execution).
         // Skip "proxy" because it uses trailing_var_arg (accepts any args by design).
         for cmd in core::constants::RTK_META_COMMANDS {
-            if matches!(*cmd, "proxy" | "run" | "rewrite" | "session") {
+            if matches!(*cmd, "proxy" | "run" | "rewrite" | "session" | "shell") {
                 continue; // these use trailing_var_arg (accept any args by design)
             }
             let result = Cli::try_parse_from(["rtk", cmd, "--nonexistent-flag-xyz"]);

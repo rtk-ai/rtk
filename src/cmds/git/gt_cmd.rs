@@ -1,5 +1,6 @@
 //! Filters Graphite (gt) CLI output for stacking workflows.
 
+use super::git;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::{reduced, CAP_LIST};
@@ -136,18 +137,18 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
     // gt passes unknown subcommands to git, so "gt status" = "git status".
     // Route known git commands to RTK's git filters for token savings.
     match subcommand.as_ref() {
-        "status" => crate::git::run(crate::git::GitCommand::Status, &rest, None, verbose, &[]),
-        "diff" => crate::git::run(crate::git::GitCommand::Diff, &rest, None, verbose, &[]),
-        "show" => crate::git::run(crate::git::GitCommand::Show, &rest, None, verbose, &[]),
-        "add" => crate::git::run(crate::git::GitCommand::Add, &rest, None, verbose, &[]),
-        "push" => crate::git::run(crate::git::GitCommand::Push, &rest, None, verbose, &[]),
-        "pull" => crate::git::run(crate::git::GitCommand::Pull, &rest, None, verbose, &[]),
-        "fetch" => crate::git::run(crate::git::GitCommand::Fetch, &rest, None, verbose, &[]),
+        "status" => git::run(git::GitCommand::Status, &rest, None, verbose, &[]),
+        "diff" => git::run(git::GitCommand::Diff, &rest, None, verbose, &[]),
+        "show" => git::run(git::GitCommand::Show, &rest, None, verbose, &[]),
+        "add" => git::run(git::GitCommand::Add, &rest, None, verbose, &[]),
+        "push" => git::run(git::GitCommand::Push, &rest, None, verbose, &[]),
+        "pull" => git::run(git::GitCommand::Pull, &rest, None, verbose, &[]),
+        "fetch" => git::run(git::GitCommand::Fetch, &rest, None, verbose, &[]),
         "stash" => {
             let stash_sub = rest.first().cloned();
             let stash_args = rest.get(1..).unwrap_or(&[]);
-            crate::git::run(
-                crate::git::GitCommand::Stash {
+            git::run(
+                git::GitCommand::Stash {
                     subcommand: stash_sub,
                 },
                 stash_args,
@@ -156,7 +157,7 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
                 &[],
             )
         }
-        "worktree" => crate::git::run(crate::git::GitCommand::Worktree, &rest, None, verbose, &[]),
+        "worktree" => git::run(git::GitCommand::Worktree, &rest, None, verbose, &[]),
         _ => passthrough_gt(&subcommand, &rest, verbose),
     }
 }

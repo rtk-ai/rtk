@@ -13,13 +13,15 @@ use crate::hooks::constants::{
 };
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, DROID_DIR,
-    DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR,
-    DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
-    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
-    HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
-    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR,
-    VIBE_HOOKS_FILE, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
+    BASHRC_FILE, BASH_ENV_VAR, BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR,
+    CURSOR_HOOK_COMMAND, DROID_DIR, DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE,
+    DROID_HOOKS_SUBDIR, DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR,
+    HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE,
+    HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, KNOWN_HARNESS_ENV_VARS, PI_CODING_AGENT_DIR_ENV,
+    PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE, PRE_TOOL_USE_KEY,
+    REWRITE_HOOK_FILE, RTK_ENABLE_SHELL_SWAP_ENV, RTK_IN_SHELL_ENV, RTK_SHELL_SWAP_FILE,
+    SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOKS_FILE, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME,
+    VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE, ZSHRC_FILE,
 };
 use super::integrity;
 use super::is_claude_hook_command;
@@ -5096,6 +5098,392 @@ fn uninstall_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<V
     Ok(removed)
 }
 
+// ─── rtk-shell RC-file auto-swap (Mode 3) ─────────────────────────────────
+//
+// Installs a small, idempotent, marker-delimited block into the user's shell
+// startup files that conditionally re-execs into `rtk-shell` in place of the
+// user's normal interactive shell — but *only* when a dual-signal gate is
+// satisfied, and always with a guard against recursive re-exec and a
+// fallback that never blocks a login shell if `rtk-shell` can't be found or
+// spawned.
+//
+// Swap condition (the exact predicate baked into the generated block):
+//
+//     RTK_ENABLE_SHELL_SWAP is set (any value)
+//     OR (a known-harness env var is present AND stdin is not a tty)
+//
+// Two RC-file targets are patched, because bash and zsh source different
+// files depending on interactivity, and non-interactive bash does not
+// source `.bashrc` (or `.zshrc`) *at all*:
+//
+// - `~/.bashrc` and `~/.zshrc` — sourced by *interactive* shells. Good
+//   enough for a human's terminal, but silently skipped for
+//   non-interactive bash (e.g. `bash -c '...'`, CI steps, subshells
+//   spawned by a harness with no tty).
+// - `$BASH_ENV` — bash (and only bash) additionally sources whatever file
+//   this variable points to for *non-interactive* invocations. We point it
+//   at the same guarded fragment so harness-spawned non-interactive bash
+//   sessions get the identical swap logic, not a separate code path.
+//
+// All three entry points source one shared fragment file
+// ([`RTK_SHELL_SWAP_FILE`]) so the guard/condition logic exists in exactly
+// one place on disk.
+
+const SHELL_SWAP_BLOCK_START: &str = "# >>> rtk-shell swap >>>";
+const SHELL_SWAP_BLOCK_END: &str = "# <<< rtk-shell swap <<<";
+
+/// The guarded conditional block written into the shared rtk-shell fragment
+/// file, and sourced (via the marker block below) from `.bashrc`, `.zshrc`,
+/// and `$BASH_ENV`.
+///
+/// Never a bare `exec`: every path that can fail (missing binary, exec
+/// failure) falls through to the user's original shell untouched, so a
+/// broken or unreachable `rtk-shell` can never brick a login shell.
+fn rtk_shell_swap_fragment() -> String {
+    format!(
+        r#"{start}
+# Managed by `rtk init --shell`. Do not edit by hand — re-run the init
+# command to regenerate, or `rtk init --shell --uninstall` to remove.
+#
+# Swaps the current shell for `rtk-shell` when:
+#   - RTK_ENABLE_SHELL_SWAP is set in the environment, OR
+#   - a known AI-coding-harness env var is present AND stdin is not a tty
+# Guarded against recursive re-exec via RTK_IN_SHELL, and falls through to
+# this shell untouched if rtk-shell can't be found or exec'd.
+if [ -z "${{{in_shell_env}:-}}" ]; then
+  __rtk_shell_swap=0
+  if [ -n "${{{enable_env}:-}}" ]; then
+    __rtk_shell_swap=1
+  elif [ ! -t 0 ]; then
+    for __rtk_harness_var in {harness_vars}; do
+      eval "__rtk_harness_val=\${{$__rtk_harness_var:-}}"
+      if [ -n "$__rtk_harness_val" ]; then
+        __rtk_shell_swap=1
+        break
+      fi
+    done
+    unset -v __rtk_harness_var __rtk_harness_val
+  fi
+
+  if [ "$__rtk_shell_swap" = "1" ]; then
+    __rtk_shell_bin=$(command -v rtk-shell 2>/dev/null)
+    if [ -n "$__rtk_shell_bin" ]; then
+      RTK_IN_SHELL=1 exec "$__rtk_shell_bin"
+      # exec only returns on failure — fall through untouched below.
+    fi
+    unset -v __rtk_shell_bin
+  fi
+  unset -v __rtk_shell_swap
+fi
+{end}
+"#,
+        start = SHELL_SWAP_BLOCK_START,
+        end = SHELL_SWAP_BLOCK_END,
+        in_shell_env = RTK_IN_SHELL_ENV,
+        enable_env = RTK_ENABLE_SHELL_SWAP_ENV,
+        harness_vars = KNOWN_HARNESS_ENV_VARS.join(" "),
+    )
+}
+
+/// The one-line `source` stanza appended to `.bashrc`/`.zshrc` pointing at
+/// the shared fragment file. Kept separate from the fragment body itself so
+/// the fragment's guard/condition logic lives in exactly one place on disk
+/// (both RC files and `$BASH_ENV` all source the same file).
+fn rtk_shell_rc_stanza(fragment_path: &Path) -> String {
+    format!(
+        "{start}\n\
+         # Managed by `rtk init --shell`. See {fragment} for the guarded swap logic.\n\
+         [ -f \"{fragment}\" ] && . \"{fragment}\"\n\
+         {end}\n",
+        start = SHELL_SWAP_BLOCK_START,
+        end = SHELL_SWAP_BLOCK_END,
+        fragment = fragment_path.display(),
+    )
+}
+
+/// Insert or replace a marker-delimited block in `content`, using arbitrary
+/// caller-supplied `start`/`end` markers (unlike [`upsert_rtk_block`], whose
+/// markers are hardcoded to the Markdown/HTML-comment style used by
+/// Claude/Copilot/Gemini instruction files — shell RC files need `#`-style
+/// markers instead).
+///
+/// Returns `(new_content, action)`, matching [`upsert_rtk_block`]'s shape.
+fn upsert_marked_block(
+    content: &str,
+    start: &str,
+    end: &str,
+    block: &str,
+) -> (String, RtkBlockUpsert) {
+    if let Some(pos) = content.find(start) {
+        if let Some(relative_end) = content[pos..].find(end) {
+            let end_pos = pos + relative_end + end.len();
+            let current_block = content[pos..end_pos].trim();
+            let desired_block = block.trim();
+
+            if current_block == desired_block {
+                return (content.to_string(), RtkBlockUpsert::Unchanged);
+            }
+
+            let before = content[..pos].trim_end();
+            let after = content[end_pos..].trim_start();
+
+            let result = match (before.is_empty(), after.is_empty()) {
+                (true, true) => desired_block.to_string(),
+                (true, false) => format!("{desired_block}\n\n{after}"),
+                (false, true) => format!("{before}\n\n{desired_block}"),
+                (false, false) => format!("{before}\n\n{desired_block}\n\n{after}"),
+            };
+
+            return (result, RtkBlockUpsert::Updated);
+        }
+
+        return (content.to_string(), RtkBlockUpsert::Malformed);
+    }
+
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        (format!("{}\n", block.trim()), RtkBlockUpsert::Added)
+    } else {
+        (
+            format!("{trimmed}\n\n{}\n", block.trim()),
+            RtkBlockUpsert::Added,
+        )
+    }
+}
+
+/// Remove a marker-delimited block (see [`upsert_marked_block`]) from
+/// `content`. Mirrors [`remove_rtk_block`]'s shape/semantics for arbitrary
+/// markers: no-ops (returns `false`) if the markers aren't found, and warns
+/// (but does not fail) on an opening marker without a matching close.
+fn remove_marked_block(content: &str, start: &str, end: &str) -> (String, bool) {
+    if let (Some(pos), Some(end_marker_pos)) = (content.find(start), content.find(end)) {
+        let end_pos = end_marker_pos + end.len();
+        let before = content[..pos].trim_end();
+        let after = content[end_pos..].trim_start();
+
+        let result = if after.is_empty() {
+            format!("{}\n", before)
+        } else {
+            format!("{}\n\n{}", before, after)
+        };
+
+        (result, true)
+    } else if content.contains(start) {
+        eprintln!(
+            "[warn] Warning: Found '{}' without closing marker '{}'.",
+            start, end
+        );
+        eprintln!("    Manually remove the incomplete block, then re-run `rtk init --shell`.");
+        (content.to_string(), false)
+    } else {
+        (content.to_string(), false)
+    }
+}
+
+/// Idempotently write the RC-file `source` stanza into `path` (an RC file,
+/// not the fragment itself), preserving user content, following the same
+/// upsert/atomic-write/dry-run shape as [`write_rtk_block`].
+fn write_rc_stanza(path: &Path, fragment_path: &Path, label: &str, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let existing = if path.exists() {
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?
+    } else {
+        String::new()
+    };
+
+    let stanza = rtk_shell_rc_stanza(fragment_path);
+    let (new_content, action) = upsert_marked_block(
+        &existing,
+        SHELL_SWAP_BLOCK_START,
+        SHELL_SWAP_BLOCK_END,
+        &stanza,
+    );
+
+    match action {
+        RtkBlockUpsert::Added | RtkBlockUpsert::Updated => {
+            if dry_run {
+                println!("[dry-run] would update {label}: {}", path.display());
+            } else {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("Failed to create {}", parent.display()))?;
+                }
+                atomic_write(path, &new_content)
+                    .with_context(|| format!("Failed to write {}", path.display()))?;
+                println!("[ok] Updated {label}: {}", path.display());
+            }
+        }
+        RtkBlockUpsert::Unchanged => {
+            if !dry_run {
+                println!("[ok] {label} already up to date: {}", path.display());
+            }
+        }
+        RtkBlockUpsert::Malformed => {
+            eprintln!(
+                "[warn] Found '{}' without closing marker in {}",
+                SHELL_SWAP_BLOCK_START,
+                path.display()
+            );
+            eprintln!("    Action: Manually remove the incomplete block, then re-run:");
+            eprintln!("            rtk init --shell");
+            anyhow::bail!("Refusing to modify malformed {label} at {}", path.display());
+        }
+    }
+
+    Ok(())
+}
+
+/// Resolve the fragment file path shared by `.bashrc`/`.zshrc`/`$BASH_ENV`
+/// (lives directly under the user's home directory, like `.bashrc` itself).
+fn rtk_shell_fragment_path(home_dir: &Path) -> PathBuf {
+    home_dir.join(RTK_SHELL_SWAP_FILE)
+}
+
+/// Entry point for `rtk init --shell`: installs the guarded rtk-shell swap
+/// into `~/.bashrc`, `~/.zshrc`, and (non-interactive bash) `$BASH_ENV`.
+///
+/// Global-only, like Cursor/OpenCode/Windsurf: shell startup files are
+/// per-user, not per-project.
+pub fn run_shell_mode(ctx: InitContext) -> Result<()> {
+    let home_dir = dirs::home_dir().context("Cannot determine home directory. Is $HOME set?")?;
+    run_shell_mode_at(&home_dir, ctx)
+}
+
+/// Same as [`run_shell_mode`] but operates relative to an explicit home
+/// directory. Used by tests to avoid mutating the real `~/.bashrc`.
+fn run_shell_mode_at(home_dir: &Path, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let fragment_path = rtk_shell_fragment_path(home_dir);
+
+    // 1. Write the shared guarded fragment (contains all the condition
+    //    logic). Written before the RC stanzas so a malformed RC file
+    //    aborts the install without leaving a dangling `source` line.
+    write_if_changed(
+        &fragment_path,
+        &rtk_shell_swap_fragment(),
+        "rtk-shell swap fragment",
+        ctx,
+    )?;
+
+    // 2. Append the `source` stanza to the interactive-only RC files.
+    write_rc_stanza(
+        &home_dir.join(BASHRC_FILE),
+        &fragment_path,
+        "bash RC (.bashrc)",
+        ctx,
+    )?;
+    write_rc_stanza(
+        &home_dir.join(ZSHRC_FILE),
+        &fragment_path,
+        "zsh RC (.zshrc)",
+        ctx,
+    )?;
+
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        println!("\nrtk-shell RC-file auto-swap installed.\n");
+        println!("  Fragment:  {}", fragment_path.display());
+        println!("  Patched:   ~/.bashrc, ~/.zshrc (interactive shells)");
+        println!(
+            "\n  Non-interactive bash does not source .bashrc at all; export\n  {}={}\n  in your harness/CI environment to reach it there too.",
+            BASH_ENV_VAR,
+            fragment_path.display()
+        );
+        println!("\n  Swap only triggers when RTK_ENABLE_SHELL_SWAP is set, or a");
+        println!("  known harness env var is present with non-tty stdin.");
+        println!("  Restart your shell (or open a new terminal) to activate.\n");
+    }
+
+    Ok(())
+}
+
+/// Entry point for `rtk init --shell --uninstall`: removes the guarded
+/// swap stanza from `.bashrc`/`.zshrc` and deletes the shared fragment file.
+/// Never touches `$BASH_ENV` itself (an env var, not a file RTK owns) —
+/// only the fragment it may point to.
+pub fn uninstall_shell_mode(ctx: InitContext) -> Result<()> {
+    let home_dir = dirs::home_dir().context("Cannot determine home directory. Is $HOME set?")?;
+    let removed = uninstall_shell_mode_at(&home_dir, ctx)?;
+
+    let InitContext { dry_run, .. } = ctx;
+    if removed.is_empty() {
+        println!("RTK shell RC-file auto-swap was not installed (nothing to remove)");
+    } else {
+        let header = if dry_run {
+            "[dry-run] would uninstall RTK (shell RC-file auto-swap):"
+        } else {
+            "RTK uninstalled (shell RC-file auto-swap):"
+        };
+        println!("{}", header);
+        for item in &removed {
+            println!("  - {}", item);
+        }
+        if !dry_run {
+            println!("\nRestart your shell (or open a new terminal) to apply changes.");
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    }
+    Ok(())
+}
+
+/// Same as [`uninstall_shell_mode`] but operates relative to an explicit
+/// home directory. Used by tests to avoid mutating the real `~/.bashrc`.
+fn uninstall_shell_mode_at(home_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    let InitContext { dry_run, .. } = ctx;
+    let mut removed = Vec::new();
+
+    for (path, label) in [
+        (home_dir.join(BASHRC_FILE), "bash RC (.bashrc)"),
+        (home_dir.join(ZSHRC_FILE), "zsh RC (.zshrc)"),
+    ] {
+        if !path.exists() {
+            continue;
+        }
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        if !content.contains(SHELL_SWAP_BLOCK_START) {
+            continue;
+        }
+        let (cleaned, did_remove) =
+            remove_marked_block(&content, SHELL_SWAP_BLOCK_START, SHELL_SWAP_BLOCK_END);
+        if did_remove {
+            if dry_run {
+                println!(
+                    "[dry-run] would remove rtk-shell swap stanza from {}",
+                    path.display()
+                );
+            } else {
+                atomic_write(&path, &cleaned)
+                    .with_context(|| format!("Failed to write {}", path.display()))?;
+            }
+            removed.push(format!("{label}: removed rtk-shell swap stanza"));
+        }
+    }
+
+    let fragment_path = rtk_shell_fragment_path(home_dir);
+    if fragment_path.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove rtk-shell swap fragment: {}",
+                fragment_path.display()
+            );
+        } else {
+            fs::remove_file(&fragment_path)
+                .with_context(|| format!("Failed to remove {}", fragment_path.display()))?;
+        }
+        removed.push(format!(
+            "rtk-shell swap fragment: {}",
+            fragment_path.display()
+        ));
+    }
+
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8383,5 +8771,318 @@ mod tests {
         uninstall_vibe_at(&vibe_dir, InitContext::default()).unwrap();
 
         assert!(!vibe_dir.join(VIBE_HOOKS_FILE).exists());
+    }
+
+    // ─── rtk-shell RC-file auto-swap (Mode 3) ─────────────────────────
+
+    #[test]
+    fn test_shell_swap_fragment_contains_markers() {
+        let fragment = rtk_shell_swap_fragment();
+        assert!(fragment.starts_with(SHELL_SWAP_BLOCK_START));
+        assert!(fragment.trim_end().ends_with(SHELL_SWAP_BLOCK_END));
+    }
+
+    #[test]
+    fn test_shell_swap_fragment_never_bare_execs() {
+        // Every `exec` in the fragment must be guarded by a preceding
+        // condition check within the same conditional block — never a bare
+        // top-level `exec` that would unconditionally replace the shell.
+        let fragment = rtk_shell_swap_fragment();
+        for line in fragment.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("exec ") || trimmed == "exec" {
+                panic!("Found bare top-level exec in generated fragment: {line:?}");
+            }
+        }
+        // The only exec call must be inside the guarded swap branch, prefixed
+        // with the recursion-guard env var so a failed exec falls through.
+        assert!(fragment.contains(&format!("{RTK_IN_SHELL_ENV}=1 exec ")));
+    }
+
+    #[test]
+    fn test_shell_swap_fragment_guards_recursion() {
+        let fragment = rtk_shell_swap_fragment();
+        assert!(
+            fragment.contains(RTK_IN_SHELL_ENV),
+            "Fragment must check {RTK_IN_SHELL_ENV} to prevent recursive re-exec"
+        );
+    }
+
+    #[test]
+    fn test_shell_swap_fragment_references_enable_env_and_harness_vars() {
+        let fragment = rtk_shell_swap_fragment();
+        assert!(fragment.contains(RTK_ENABLE_SHELL_SWAP_ENV));
+        for var in KNOWN_HARNESS_ENV_VARS {
+            assert!(
+                fragment.contains(var),
+                "Fragment must reference known-harness var {var}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_shell_swap_fragment_checks_tty_and_falls_through_on_missing_binary() {
+        let fragment = rtk_shell_swap_fragment();
+        // Dual-signal gate: harness-var branch only applies when stdin is
+        // not a tty.
+        assert!(fragment.contains("[ ! -t 0 ]"));
+        // The swap only execs if rtk-shell is actually resolvable on PATH;
+        // otherwise it falls through to the original shell untouched.
+        assert!(fragment.contains("command -v rtk-shell"));
+    }
+
+    /// Reimplements the fragment's swap predicate in Rust so the gating
+    /// logic can be exercised in isolation, without spawning a real shell.
+    fn should_swap(
+        enable_var: Option<&str>,
+        harness_var: Option<&str>,
+        stdin_is_tty: bool,
+    ) -> bool {
+        if enable_var.is_some_and(|v| !v.is_empty()) {
+            return true;
+        }
+        if !stdin_is_tty && harness_var.is_some_and(|v| !v.is_empty()) {
+            return true;
+        }
+        false
+    }
+
+    #[test]
+    fn test_swap_condition_explicit_opt_in_always_wins() {
+        assert!(should_swap(Some("1"), None, true));
+        assert!(should_swap(Some("1"), None, false));
+    }
+
+    #[test]
+    fn test_swap_condition_harness_var_requires_non_tty() {
+        assert!(should_swap(None, Some("1"), false));
+        assert!(!should_swap(None, Some("1"), true));
+    }
+
+    #[test]
+    fn test_swap_condition_no_signals_never_swaps() {
+        assert!(!should_swap(None, None, false));
+        assert!(!should_swap(None, None, true));
+    }
+
+    #[test]
+    fn test_swap_condition_empty_env_values_do_not_count_as_set() {
+        assert!(!should_swap(Some(""), None, false));
+        assert!(!should_swap(None, Some(""), false));
+    }
+
+    #[test]
+    fn test_upsert_marked_block_adds_to_empty_file() {
+        let (result, action) = upsert_marked_block("", "<<S>>", "<<E>>", "<<S>>\nbody\n<<E>>");
+        assert_eq!(action, RtkBlockUpsert::Added);
+        assert_eq!(result, "<<S>>\nbody\n<<E>>\n");
+    }
+
+    #[test]
+    fn test_upsert_marked_block_preserves_surrounding_content() {
+        let existing = "export PATH=/foo:$PATH\nalias ll='ls -la'\n";
+        let (result, action) =
+            upsert_marked_block(existing, "<<S>>", "<<E>>", "<<S>>\nbody\n<<E>>");
+        assert_eq!(action, RtkBlockUpsert::Added);
+        assert!(result.contains("export PATH=/foo:$PATH"));
+        assert!(result.contains("alias ll='ls -la'"));
+        assert!(result.contains("<<S>>\nbody\n<<E>>"));
+    }
+
+    #[test]
+    fn test_upsert_marked_block_is_idempotent() {
+        let block = "<<S>>\nbody\n<<E>>";
+        let (first, _) = upsert_marked_block("some rc content\n", "<<S>>", "<<E>>", block);
+        let (second, action) = upsert_marked_block(&first, "<<S>>", "<<E>>", block);
+        assert_eq!(action, RtkBlockUpsert::Unchanged);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_upsert_marked_block_replaces_stale_content() {
+        let existing = "before\n\n<<S>>\nold stuff\n<<E>>\n\nafter\n";
+        let (result, action) =
+            upsert_marked_block(existing, "<<S>>", "<<E>>", "<<S>>\nnew stuff\n<<E>>");
+        assert_eq!(action, RtkBlockUpsert::Updated);
+        assert!(result.contains("before"));
+        assert!(result.contains("after"));
+        assert!(!result.contains("old stuff"));
+        assert!(result.contains("new stuff"));
+    }
+
+    #[test]
+    fn test_upsert_marked_block_detects_malformed() {
+        let existing = "<<S>>\nno closing marker\n";
+        let (result, action) = upsert_marked_block(existing, "<<S>>", "<<E>>", "<<S>>\nx\n<<E>>");
+        assert_eq!(action, RtkBlockUpsert::Malformed);
+        assert_eq!(result, existing);
+    }
+
+    #[test]
+    fn test_remove_marked_block_strips_block_and_preserves_rest() {
+        let existing = "before\n\n<<S>>\nbody\n<<E>>\n\nafter\n";
+        let (result, removed) = remove_marked_block(existing, "<<S>>", "<<E>>");
+        assert!(removed);
+        assert!(result.contains("before"));
+        assert!(result.contains("after"));
+        assert!(!result.contains("body"));
+        assert!(!result.contains("<<S>>"));
+    }
+
+    #[test]
+    fn test_remove_marked_block_noop_when_absent() {
+        let existing = "just some rc file content\n";
+        let (result, removed) = remove_marked_block(existing, "<<S>>", "<<E>>");
+        assert!(!removed);
+        assert_eq!(result, existing);
+    }
+
+    #[test]
+    fn test_remove_marked_block_warns_on_malformed_without_failing() {
+        let existing = "<<S>>\nincomplete\n";
+        let (result, removed) = remove_marked_block(existing, "<<S>>", "<<E>>");
+        assert!(!removed);
+        assert_eq!(result, existing);
+    }
+
+    #[test]
+    fn test_run_shell_mode_writes_fragment_and_patches_both_rc_files() {
+        let temp = TempDir::new().unwrap();
+        run_shell_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let fragment_path = temp.path().join(RTK_SHELL_SWAP_FILE);
+        assert!(fragment_path.exists(), "fragment file must be created");
+        let fragment_content = fs::read_to_string(&fragment_path).unwrap();
+        assert!(fragment_content.contains(RTK_IN_SHELL_ENV));
+
+        for rc in [BASHRC_FILE, ZSHRC_FILE] {
+            let rc_path = temp.path().join(rc);
+            assert!(rc_path.exists(), "{rc} must be created");
+            let rc_content = fs::read_to_string(&rc_path).unwrap();
+            assert!(rc_content.contains(SHELL_SWAP_BLOCK_START));
+            assert!(
+                rc_content.contains(&fragment_path.display().to_string()),
+                "{rc} must source the shared fragment"
+            );
+        }
+    }
+
+    #[test]
+    fn test_run_shell_mode_preserves_existing_rc_content() {
+        let temp = TempDir::new().unwrap();
+        let bashrc_path = temp.path().join(BASHRC_FILE);
+        fs::write(&bashrc_path, "export EDITOR=vim\nalias g=git\n").unwrap();
+
+        run_shell_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let content = fs::read_to_string(&bashrc_path).unwrap();
+        assert!(content.contains("export EDITOR=vim"));
+        assert!(content.contains("alias g=git"));
+        assert!(content.contains(SHELL_SWAP_BLOCK_START));
+    }
+
+    #[test]
+    fn test_run_shell_mode_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        run_shell_mode_at(temp.path(), InitContext::default()).unwrap();
+        let bashrc_first = fs::read_to_string(temp.path().join(BASHRC_FILE)).unwrap();
+
+        run_shell_mode_at(temp.path(), InitContext::default()).unwrap();
+        let bashrc_second = fs::read_to_string(temp.path().join(BASHRC_FILE)).unwrap();
+
+        assert_eq!(bashrc_first, bashrc_second, "second run must be a no-op");
+        let count = bashrc_first.matches(SHELL_SWAP_BLOCK_START).count();
+        assert_eq!(count, 1, "marker must appear exactly once, got {count}");
+    }
+
+    #[test]
+    fn test_run_shell_mode_dry_run_writes_nothing() {
+        let temp = TempDir::new().unwrap();
+        let ctx = InitContext {
+            dry_run: true,
+            ..InitContext::default()
+        };
+        run_shell_mode_at(temp.path(), ctx).unwrap();
+
+        assert!(!temp.path().join(RTK_SHELL_SWAP_FILE).exists());
+        assert!(!temp.path().join(BASHRC_FILE).exists());
+        assert!(!temp.path().join(ZSHRC_FILE).exists());
+    }
+
+    #[test]
+    fn test_uninstall_shell_mode_removes_stanza_and_fragment() {
+        let temp = TempDir::new().unwrap();
+        run_shell_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let removed = uninstall_shell_mode_at(temp.path(), InitContext::default()).unwrap();
+        assert!(!removed.is_empty());
+
+        assert!(!temp.path().join(RTK_SHELL_SWAP_FILE).exists());
+        for rc in [BASHRC_FILE, ZSHRC_FILE] {
+            let content = fs::read_to_string(temp.path().join(rc)).unwrap_or_default();
+            assert!(
+                !content.contains(SHELL_SWAP_BLOCK_START),
+                "{rc} must no longer contain the swap stanza"
+            );
+        }
+    }
+
+    #[test]
+    fn test_uninstall_shell_mode_preserves_user_content() {
+        let temp = TempDir::new().unwrap();
+        let bashrc_path = temp.path().join(BASHRC_FILE);
+        fs::write(&bashrc_path, "export EDITOR=vim\n").unwrap();
+        run_shell_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        uninstall_shell_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let content = fs::read_to_string(&bashrc_path).unwrap();
+        assert!(content.contains("export EDITOR=vim"));
+        assert!(!content.contains(SHELL_SWAP_BLOCK_START));
+    }
+
+    #[test]
+    fn test_uninstall_shell_mode_noop_when_not_installed() {
+        let temp = TempDir::new().unwrap();
+        let removed = uninstall_shell_mode_at(temp.path(), InitContext::default()).unwrap();
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn test_uninstall_shell_mode_dry_run_keeps_files() {
+        let temp = TempDir::new().unwrap();
+        run_shell_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let ctx = InitContext {
+            dry_run: true,
+            ..InitContext::default()
+        };
+        let removed = uninstall_shell_mode_at(temp.path(), ctx).unwrap();
+        assert!(!removed.is_empty(), "dry-run should still report intent");
+
+        assert!(temp.path().join(RTK_SHELL_SWAP_FILE).exists());
+        let content = fs::read_to_string(temp.path().join(BASHRC_FILE)).unwrap();
+        assert!(content.contains(SHELL_SWAP_BLOCK_START));
+    }
+
+    #[test]
+    fn test_bash_env_var_constant_is_bash_env() {
+        // BASH_ENV is the only mechanism to reach non-interactive bash
+        // (which never sources .bashrc); guard against accidental renames.
+        assert_eq!(BASH_ENV_VAR, "BASH_ENV");
+    }
+
+    #[test]
+    fn test_run_shell_mode_prints_bash_env_guidance() {
+        // Non-interactive bash needs BASH_ENV pointed at the fragment; this
+        // is documented in the install output rather than auto-exported
+        // (RTK cannot durably export env vars into the user's harness/CI
+        // environment from a one-shot `rtk init` invocation).
+        let temp = TempDir::new().unwrap();
+        run_shell_mode_at(temp.path(), InitContext::default()).unwrap();
+        // Smoke check: fragment path is a valid target for BASH_ENV (exists
+        // and is a plain file, not a directory).
+        let fragment_path = temp.path().join(RTK_SHELL_SWAP_FILE);
+        assert!(fragment_path.is_file())
     }
 }

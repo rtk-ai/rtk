@@ -955,7 +955,7 @@ fn filter_cargo_build(output: &str) -> String {
     filter_cargo_build_labeled(output, "build", 0)
 }
 
-fn filter_cargo_build_labeled(output: &str, label: &'static str, exit_code: i32) -> String {
+pub(crate) fn filter_cargo_build_labeled(output: &str, label: &'static str, exit_code: i32) -> String {
     let mut handler = CargoBuildHandler::with_label(label);
     let mut blocks: Vec<Vec<String>> = Vec::new();
     let mut current_block: Vec<String> = Vec::new();
@@ -1253,7 +1253,7 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
 }
 
 /// Filter cargo clippy output - show full error blocks, group warnings by lint rule
-fn filter_cargo_clippy(output: &str) -> String {
+pub(crate) fn filter_cargo_clippy(output: &str) -> String {
     let mut by_rule: HashMap<String, Vec<String>> = HashMap::new();
     let mut error_count = 0;
     let mut warning_count = 0;

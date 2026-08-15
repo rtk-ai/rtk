@@ -1,5 +1,6 @@
 //! Filters Docker and kubectl output into compact summaries.
 
+use crate::cmds::system::log_cmd;
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::stream::exec_capture;
@@ -338,7 +339,7 @@ fn docker_logs(args: &[String], _verbose: u8) -> Result<i32> {
             format!(
                 "[docker] Logs for {}:\n{}",
                 container,
-                crate::log_cmd::run_stdin_str(raw)
+                log_cmd::run_stdin_str(raw)
             )
         },
         RunOptions::default().early_exit_on_failure(),
@@ -514,7 +515,7 @@ pub fn k8s_logs(tool: &str, args: &[String], _verbose: u8) -> Result<i32> {
             format!(
                 "Logs for {}:\n{}",
                 pod,
-                crate::log_cmd::run_stdin_str(stdout)
+                log_cmd::run_stdin_str(stdout)
             )
         },
         RunOptions::stdout_only().early_exit_on_failure(),
@@ -584,7 +585,7 @@ pub fn format_compose_logs(raw: &str) -> String {
 
     // docker compose logs prefixes each line with "service-N  | "
     // Use the existing log deduplication engine
-    let analyzed = crate::log_cmd::run_stdin_str(raw);
+    let analyzed = log_cmd::run_stdin_str(raw);
     format!("[compose] Logs:\n{}", analyzed)
 }
 
