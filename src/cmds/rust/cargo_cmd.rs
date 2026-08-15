@@ -264,7 +264,7 @@ fn run_cargo_filtered<F>(
 where
     F: Fn(&str) -> String,
 {
-    let mut cmd = resolved_command("cargo");
+    let mut cmd = resolved_command("cargo")?;
     cmd.arg(subcommand);
 
     let restored_args = args_utils::restore_double_dash(args);
@@ -296,7 +296,7 @@ fn run_cargo_filtered_with_exit<F>(
 where
     F: Fn(&str, i32) -> String,
 {
-    let mut cmd = resolved_command("cargo");
+    let mut cmd = resolved_command("cargo")?;
     cmd.arg(subcommand);
 
     let restored_args = args_utils::restore_double_dash(args);
@@ -323,7 +323,7 @@ fn run_cargo_streamed(
     verbose: u8,
     filter: Box<dyn StreamFilter>,
 ) -> Result<i32> {
-    let mut cmd = resolved_command("cargo");
+    let mut cmd = resolved_command("cargo")?;
     cmd.arg(subcommand);
 
     let restored_args = args_utils::restore_double_dash(args);

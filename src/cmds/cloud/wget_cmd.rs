@@ -21,7 +21,7 @@ pub fn run(url: &str, args: &[String], verbose: u8) -> Result<i32> {
     }
     cmd_args.push(url);
 
-    let mut cmd = resolved_command("wget");
+    let mut cmd = resolved_command("wget")?;
     cmd.args(&cmd_args);
     let result = exec_capture(&mut cmd).context("Failed to run wget")?;
 
@@ -65,7 +65,7 @@ pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<i32> {
     }
     cmd_args.push(url);
 
-    let mut cmd = resolved_command("wget");
+    let mut cmd = resolved_command("wget")?;
     cmd.args(&cmd_args);
     let result = exec_capture(&mut cmd).context("Failed to run wget")?;
 

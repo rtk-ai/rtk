@@ -22,7 +22,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         );
     }
 
-    let mut cmd = resolved_command("tree");
+    let mut cmd = resolved_command("tree")?;
 
     let show_all = args.iter().any(|a| a == "-a" || a == "--all");
     let has_ignore = args.iter().any(|a| a == "-I" || a.starts_with("--ignore="));

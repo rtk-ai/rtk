@@ -58,7 +58,7 @@ where
 fn docker_ps(_verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let base = exec_capture(resolved_command("docker").args(["ps"]))
+    let base = exec_capture(resolved_command("docker")?.args(["ps"]))
         .context("Failed to run docker ps")?;
     if !base.success() {
         eprint!("{}", base.stderr);
@@ -68,7 +68,7 @@ fn docker_ps(_verbose: u8) -> Result<i32> {
     }
     let raw = base.stdout;
 
-    let stdout = match exec_capture(resolved_command("docker").args([
+    let stdout = match exec_capture(resolved_command("docker")?.args([
         "ps",
         "--format",
         "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}",
@@ -114,7 +114,7 @@ fn docker_ps(_verbose: u8) -> Result<i32> {
 fn docker_ps_all(_verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let base = exec_capture(resolved_command("docker").args(["ps", "-a"]))
+    let base = exec_capture(resolved_command("docker")?.args(["ps", "-a"]))
         .context("Failed to run docker ps -a")?;
     if !base.success() {
         eprint!("{}", base.stderr);
@@ -124,7 +124,7 @@ fn docker_ps_all(_verbose: u8) -> Result<i32> {
     }
     let raw = base.stdout;
 
-    let stdout = match exec_capture(resolved_command("docker").args([
+    let stdout = match exec_capture(resolved_command("docker")?.args([
         "ps",
         "-a",
         "--format",
@@ -230,7 +230,7 @@ fn format_container_line_from_parts(parts: &[&str], with_ports: bool) -> Option<
 fn docker_images(_verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let base = exec_capture(resolved_command("docker").args(["images"]))
+    let base = exec_capture(resolved_command("docker")?.args(["images"]))
         .context("Failed to run docker images")?;
     if !base.success() {
         eprint!("{}", base.stderr);
@@ -240,7 +240,7 @@ fn docker_images(_verbose: u8) -> Result<i32> {
     }
     let raw = base.stdout;
 
-    let stdout = match exec_capture(resolved_command("docker").args([
+    let stdout = match exec_capture(resolved_command("docker")?.args([
         "images",
         "--format",
         "{{.Repository}}:{{.Tag}}\t{{.Size}}",
@@ -326,7 +326,7 @@ fn docker_logs(args: &[String], _verbose: u8) -> Result<i32> {
         return Ok(0);
     }
 
-    let mut cmd = resolved_command("docker");
+    let mut cmd = resolved_command("docker")?;
     cmd.args(["logs", "--tail", "100", container]);
 
     let label = format!("logs {}", container);
@@ -346,7 +346,7 @@ fn docker_logs(args: &[String], _verbose: u8) -> Result<i32> {
 }
 
 pub fn k8s_pods(tool: &str, args: &[String], _verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command(tool);
+    let mut cmd = resolved_command(tool)?;
     cmd.args(["get", "pods", "-o", "json"]);
     for arg in args {
         cmd.arg(arg);
@@ -432,7 +432,7 @@ fn format_kubectl_pods(json: &Value) -> String {
 }
 
 pub fn k8s_services(tool: &str, args: &[String], _verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command(tool);
+    let mut cmd = resolved_command(tool)?;
     cmd.args(["get", "services", "-o", "json"]);
     for arg in args {
         cmd.arg(arg);
@@ -499,7 +499,7 @@ pub fn k8s_logs(tool: &str, args: &[String], _verbose: u8) -> Result<i32> {
         return Ok(0);
     }
 
-    let mut cmd = resolved_command(tool);
+    let mut cmd = resolved_command(tool)?;
     cmd.args(["logs", "--tail", "100", pod]);
     for arg in args.iter().skip(1) {
         cmd.arg(arg);
@@ -679,7 +679,7 @@ pub fn run_compose_ps(all: bool, verbose: u8) -> Result<i32> {
     if all {
         raw_args.push("-a");
     }
-    let raw_result = exec_capture(resolved_command("docker").args(&raw_args))
+    let raw_result = exec_capture(resolved_command("docker")?.args(&raw_args))
         .context("Failed to run docker compose ps")?;
 
     if !raw_result.success() {
@@ -693,7 +693,7 @@ pub fn run_compose_ps(all: bool, verbose: u8) -> Result<i32> {
         format_args.push("-a");
     }
     format_args.extend(["--format", "{{.Name}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"]);
-    let result = exec_capture(resolved_command("docker").args(&format_args))
+    let result = exec_capture(resolved_command("docker")?.args(&format_args))
         .context("Failed to run docker compose ps --format")?;
 
     if !result.success() {
@@ -716,7 +716,7 @@ pub fn run_compose_ps(all: bool, verbose: u8) -> Result<i32> {
 }
 
 pub fn run_compose_logs(service: Option<&str>, tail: u32, verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("docker");
+    let mut cmd = resolved_command("docker")?;
     let tail_str = tail.to_string();
     cmd.args(["compose", "logs", "--tail", &tail_str]);
     if let Some(svc) = service {
@@ -739,7 +739,7 @@ pub fn run_compose_logs(service: Option<&str>, tail: u32, verbose: u8) -> Result
 }
 
 pub fn run_compose_build(service: Option<&str>, verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("docker");
+    let mut cmd = resolved_command("docker")?;
     cmd.args(["compose", "build"]);
     if let Some(svc) = service {
         cmd.arg(svc);

@@ -19,9 +19,9 @@ enum ParseState {
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = if tool_exists("pytest") {
-        resolved_command("pytest")
+        resolved_command("pytest")?
     } else {
-        let mut c = resolved_command("python");
+        let mut c = resolved_command("python")?;
         c.arg("-m").arg("pytest");
         c
     };

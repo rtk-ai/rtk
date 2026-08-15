@@ -365,7 +365,7 @@ pub fn run(cmd: PnpmCommand, args: &[String], verbose: u8) -> Result<i32> {
 fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = resolved_command("pnpm");
+    let mut cmd = resolved_command("pnpm")?;
     cmd.arg("list");
     cmd.arg(format!("--depth={}", depth));
     cmd.arg("--json");
@@ -422,7 +422,7 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
 fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = resolved_command("pnpm");
+    let mut cmd = resolved_command("pnpm")?;
     cmd.arg("outdated");
     cmd.arg("--format");
     cmd.arg("json");
@@ -473,7 +473,7 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
 fn run_install(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = resolved_command("pnpm");
+    let mut cmd = resolved_command("pnpm")?;
     cmd.arg("install");
 
     for arg in args {

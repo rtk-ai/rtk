@@ -35,12 +35,12 @@ pub enum GitCommand {
 
 /// Create a git Command with global options (e.g. -C, -c, --git-dir, --work-tree)
 /// prepended before any subcommand arguments.
-fn git_cmd(global_args: &[String]) -> Command {
-    let mut cmd = resolved_command("git");
+fn git_cmd(global_args: &[String]) -> Result<Command> {
+    let mut cmd = resolved_command("git")?;
     for arg in global_args {
         cmd.arg(arg);
     }
-    cmd
+    Ok(cmd)
 }
 
 /// Create a git Command for internal parsing that must be locale-stable.
@@ -48,10 +48,11 @@ fn git_cmd(global_args: &[String]) -> Command {
 /// We only use this for non-user-facing parses where RTK depends on git's
 /// English status phrases. User-visible passthrough output keeps the user's
 /// locale.
-fn git_cmd_c_locale(global_args: &[String]) -> Command {
-    let mut cmd = git_cmd(global_args);
+fn git_cmd_c_locale(global_args: &[String]) -> Result<Command> {
+    let mut cmd = git_cmd(global_args)?;
     cmd.env("LC_ALL", "C");
-    cmd
+    Ok(cmd)
+
 }
 
 fn uses_compact_status_path(args: &[String]) -> bool {
@@ -72,15 +73,16 @@ fn uses_compact_status_path(args: &[String]) -> bool {
     saw_branch
 }
 
-fn build_status_command(args: &[String], global_args: &[String]) -> Command {
-    let mut cmd = git_cmd(global_args);
+fn build_status_command(args: &[String], global_args: &[String]) -> Result<Command> {
+    let mut cmd = git_cmd(global_args)?;
     cmd.arg("status");
     if uses_compact_status_path(args) {
         cmd.args(["--porcelain", "-b"]);
     } else {
         cmd.args(args);
     }
-    cmd
+    Ok(cmd)
+
 }
 
 pub fn run(
@@ -130,7 +132,7 @@ fn run_diff(
 
     if wants_stat || !wants_compact {
         // User wants stat or explicitly no compacting - pass through directly
-        let mut cmd = git_cmd(global_args);
+        let mut cmd = git_cmd(global_args)?;
         cmd.arg("diff");
         for arg in args {
             if arg == "--no-compact" {
@@ -159,7 +161,7 @@ fn run_diff(
     }
 
     // Default RTK behavior: stat first, then compacted diff
-    let mut cmd = git_cmd(global_args);
+    let mut cmd = git_cmd(global_args)?;
     cmd.arg("diff").arg("--stat");
 
     for arg in args {
@@ -186,7 +188,7 @@ fn run_diff(
     }
 
     // Now get actual diff but compact it
-    let mut diff_cmd = git_cmd(global_args);
+    let mut diff_cmd = git_cmd(global_args)?;
     diff_cmd.arg("diff");
     for arg in args {
         diff_cmd.arg(arg);
@@ -237,7 +239,7 @@ fn run_show(
     let wants_blob_show = args.iter().any(|arg| is_blob_show_arg(arg));
 
     if wants_stat_only || wants_format || wants_blob_show {
-        let mut cmd = git_cmd(global_args);
+        let mut cmd = git_cmd(global_args)?;
         cmd.arg("show");
         for arg in args {
             cmd.arg(arg);
@@ -264,7 +266,7 @@ fn run_show(
     }
 
     // Get raw output for tracking
-    let mut raw_cmd = git_cmd(global_args);
+    let mut raw_cmd = git_cmd(global_args)?;
     raw_cmd.arg("show");
     for arg in args {
         raw_cmd.arg(arg);
@@ -274,7 +276,7 @@ fn run_show(
         .unwrap_or_default();
 
     // Step 1: one-line commit summary
-    let mut summary_cmd = git_cmd(global_args);
+    let mut summary_cmd = git_cmd(global_args)?;
     summary_cmd.args(["show", "--no-patch", "--pretty=format:%h %s (%ar) <%an>"]);
     for arg in args {
         summary_cmd.arg(arg);
@@ -287,7 +289,7 @@ fn run_show(
     let mut printed = summary_result.stdout.trim().to_string();
 
     // Step 2: --stat summary
-    let mut stat_cmd = git_cmd(global_args);
+    let mut stat_cmd = git_cmd(global_args)?;
     stat_cmd.args(["show", "--stat", "--pretty=format:"]);
     for arg in args {
         stat_cmd.arg(arg);
@@ -300,7 +302,7 @@ fn run_show(
     }
 
     // Step 3: compacted diff
-    let mut diff_cmd = git_cmd(global_args);
+    let mut diff_cmd = git_cmd(global_args)?;
     diff_cmd.args(["show", "--pretty=format:"]);
     for arg in args {
         diff_cmd.arg(arg);
@@ -440,7 +442,7 @@ fn run_log(
 
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = git_cmd(global_args);
+    let mut cmd = git_cmd(global_args)?;
     cmd.arg("log");
 
     // Check if user provided format flags
@@ -845,7 +847,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     // Keep a narrow compact path for no-arg status and branch/short-only flags.
     // More complex explicit args still use the existing minimal-filter path.
     if !uses_compact_status_path(args) {
-        let mut cmd = build_status_command(args, global_args);
+        let mut cmd = build_status_command(args, global_args)?;
         let result = exec_capture(&mut cmd).context("Failed to run git status")?;
 
         if !result.success() {
@@ -880,14 +882,14 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         return Ok(0);
     }
 
-    let mut raw_cmd = git_cmd_c_locale(global_args);
+    let mut raw_cmd = git_cmd_c_locale(global_args)?;
     raw_cmd.arg("status");
     raw_cmd.args(args);
     let raw_output = exec_capture(&mut raw_cmd)
         .map(|r| r.stdout)
         .unwrap_or_default();
 
-    let mut cmd = build_status_command(args, global_args);
+    let mut cmd = build_status_command(args, global_args)?;
     let result = exec_capture(&mut cmd).context("Failed to run git status")?;
 
     if !result.success() {
@@ -949,7 +951,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = git_cmd(global_args);
+    let mut cmd = git_cmd(global_args)?;
     cmd.arg("add");
 
     // Pass all arguments directly to git (flags like -A, -p, --all, etc.)
@@ -971,7 +973,7 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
 
     if result.success() {
         // Count what was added
-        let mut stat_cmd = git_cmd(global_args);
+        let mut stat_cmd = git_cmd(global_args)?;
         stat_cmd.args(["diff", "--cached", "--stat", "--shortstat"]);
         let stat_result = exec_capture(&mut stat_cmd).context("Failed to check staged files")?;
 
@@ -1014,13 +1016,14 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
     Ok(0)
 }
 
-fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
-    let mut cmd = git_cmd(global_args);
+fn build_commit_command(args: &[String], global_args: &[String]) -> Result<Command> {
+    let mut cmd = git_cmd(global_args)?;
     cmd.arg("commit");
     for arg in args {
         cmd.arg(arg);
     }
-    cmd
+    Ok(cmd)
+
 }
 
 /// Parse the first line of `git commit` success output and return a compact token.
@@ -1050,7 +1053,7 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         eprintln!("{}", original_cmd);
     }
 
-    let output = build_commit_command(args, global_args)
+    let output = build_commit_command(args, global_args)?
         .stdin(Stdio::inherit())
         .output()
         .context("Failed to run git commit")?;
@@ -1108,7 +1111,7 @@ fn run_checkout(args: &[String], verbose: u8, global_args: &[String]) -> Result<
         eprintln!("git checkout");
     }
 
-    let mut cmd = git_cmd(global_args);
+    let mut cmd = git_cmd(global_args)?;
     cmd.arg("checkout");
     for arg in &args {
         cmd.arg(arg);
@@ -1341,7 +1344,7 @@ fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
         eprintln!("git push");
     }
 
-    let mut cmd = git_cmd(global_args);
+    let mut cmd = git_cmd(global_args)?;
     cmd.arg("push");
     for arg in args {
         cmd.arg(arg);
@@ -1373,7 +1376,7 @@ fn run_pull(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
         eprintln!("git pull");
     }
 
-    let mut cmd = git_cmd(global_args);
+    let mut cmd = git_cmd(global_args)?;
     cmd.arg("pull");
     for arg in args {
         cmd.arg(arg);
@@ -1500,7 +1503,7 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 
     // --show-current: passthrough with raw stdout (not "ok")
     if has_show_flag {
-        let mut cmd = git_cmd(global_args);
+        let mut cmd = git_cmd(global_args)?;
         cmd.arg("branch");
         for arg in args {
             cmd.arg(arg);
@@ -1530,7 +1533,7 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 
     // Write operation: action flags, or positional args without list flags (= branch creation)
     if has_action_flag || (has_positional_arg && !has_list_flag) {
-        let mut cmd = git_cmd(global_args);
+        let mut cmd = git_cmd(global_args)?;
         cmd.arg("branch");
         for arg in args {
             cmd.arg(arg);
@@ -1563,7 +1566,7 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     }
 
     // List mode: show compact branch list
-    let mut cmd = git_cmd(global_args);
+    let mut cmd = git_cmd(global_args)?;
     cmd.arg("branch");
     if !has_list_flag {
         cmd.arg("-a");
@@ -1670,7 +1673,7 @@ fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32
         eprintln!("git fetch");
     }
 
-    let mut cmd = git_cmd(global_args);
+    let mut cmd = git_cmd(global_args)?;
     cmd.arg("fetch");
     for arg in args {
         cmd.arg(arg);
@@ -1740,7 +1743,7 @@ fn run_stash(
 
     match subcommand {
         Some("list") => {
-            let mut cmd = git_cmd(global_args);
+            let mut cmd = git_cmd(global_args)?;
             cmd.args(["stash", "list"]);
             let result = exec_capture(&mut cmd).context("Failed to run git stash list")?;
 
@@ -1765,7 +1768,7 @@ fn run_stash(
         Some("show") => {
             let patch_mode = args.iter().any(|a| a == "-p" || a == "--patch");
 
-            let mut cmd = git_cmd(global_args);
+            let mut cmd = git_cmd(global_args)?;
             cmd.args(["stash", "show"]);
             for arg in args {
                 cmd.arg(arg);
@@ -1791,7 +1794,7 @@ fn run_stash(
         Some("apply") | Some("branch") | Some("clear") | Some("create") | Some("drop")
         | Some("export") | Some("import") | Some("pop") | Some("store") => {
             let sub = subcommand.unwrap();
-            let mut cmd = git_cmd(global_args);
+            let mut cmd = git_cmd(global_args)?;
             cmd.args(["stash", sub]);
             for arg in args {
                 cmd.arg(arg);
@@ -1830,7 +1833,7 @@ fn run_stash(
                 Some(s) => ("push", Some(s)),
                 None => ("push", None),
             };
-            let mut cmd = git_cmd(global_args);
+            let mut cmd = git_cmd(global_args)?;
             cmd.args(["stash", sub]);
             if let Some(arg) = arg {
                 cmd.arg(arg);
@@ -1976,7 +1979,7 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
     });
 
     if has_action {
-        let mut cmd = git_cmd(global_args);
+        let mut cmd = git_cmd(global_args)?;
         cmd.arg("worktree");
         for arg in args {
             cmd.arg(arg);
@@ -2006,7 +2009,7 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
     }
 
     // Default: list mode
-    let mut cmd = git_cmd(global_args);
+    let mut cmd = git_cmd(global_args)?;
     cmd.args(["worktree", "list"]);
     let result = exec_capture(&mut cmd).context("Failed to run git worktree list")?;
 
@@ -2070,7 +2073,7 @@ pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -
     if verbose > 0 {
         eprintln!("git passthrough: {:?}", args);
     }
-    let status = git_cmd(global_args)
+    let status = git_cmd(global_args)?
         .args(args)
         .status()
         .context("Failed to run git")?;
@@ -2093,7 +2096,7 @@ mod tests {
 
     #[test]
     fn test_git_cmd_no_global_args() {
-        let cmd = git_cmd(&[]);
+        let cmd = git_cmd(&[]).expect("git_cmd: git must resolve in tests");
         let program = cmd.get_program().to_string_lossy().to_string();
         // On Windows, resolved_command returns full path (e.g. "C:\Program Files\Git\bin\git.exe")
         let basename = std::path::Path::new(&program)
@@ -2109,7 +2112,7 @@ mod tests {
     #[test]
     fn test_git_cmd_with_directory() {
         let global_args = vec!["-C".to_string(), "/tmp".to_string()];
-        let cmd = git_cmd(&global_args);
+        let cmd = git_cmd(&global_args).expect("git_cmd: git must resolve in tests");
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args, vec!["-C", "/tmp"]);
     }
@@ -2124,7 +2127,7 @@ mod tests {
             "--git-dir".to_string(),
             "/foo/.git".to_string(),
         ];
-        let cmd = git_cmd(&global_args);
+        let cmd = git_cmd(&global_args).expect("git_cmd: git must resolve in tests");
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(
             args,
@@ -2142,14 +2145,14 @@ mod tests {
     #[test]
     fn test_git_cmd_with_boolean_flags() {
         let global_args = vec!["--no-pager".to_string(), "--bare".to_string()];
-        let cmd = git_cmd(&global_args);
+        let cmd = git_cmd(&global_args).expect("git_cmd: git must resolve in tests");
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args, vec!["--no-pager", "--bare"]);
     }
 
     #[test]
     fn test_git_cmd_c_locale_sets_stable_env() {
-        let cmd = git_cmd_c_locale(&[]);
+        let cmd = git_cmd_c_locale(&[]).expect("git_cmd_c_locale: binary must resolve in tests");
         let envs: Vec<_> = cmd
             .get_envs()
             .map(|(key, value)| {
@@ -2164,7 +2167,7 @@ mod tests {
 
     #[test]
     fn test_build_status_command_default_compact() {
-        let cmd = build_status_command(&[], &[]);
+        let cmd = build_status_command(&[], &[]).expect("build_status_command: binary must resolve in tests");
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args, vec!["status", "--porcelain", "-b"]);
     }
@@ -2191,7 +2194,7 @@ mod tests {
     #[test]
     fn test_build_status_command_with_user_args_passthrough() {
         let args = vec!["--short".to_string(), "--branch".to_string()];
-        let cmd = build_status_command(&args, &[]);
+        let cmd = build_status_command(&args, &[]).expect("build_status_command: binary must resolve in tests");
         let cmd_args: Vec<_> = cmd.get_args().collect();
         assert_eq!(cmd_args, vec!["status", "--porcelain", "-b"]);
     }
@@ -2199,7 +2202,7 @@ mod tests {
     #[test]
     fn test_build_status_command_with_incompatible_user_args_passthrough() {
         let args = vec!["--porcelain".to_string(), "-uno".to_string()];
-        let cmd = build_status_command(&args, &[]);
+        let cmd = build_status_command(&args, &[]).expect("build_status_command: binary must resolve in tests");
         let cmd_args: Vec<_> = cmd.get_args().collect();
         assert_eq!(cmd_args, vec!["status", "--porcelain", "-uno"]);
     }
@@ -3037,7 +3040,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     fn test_commit_single_message() {
         let args = vec!["-m".to_string(), "fix: typo".to_string()];
-        let cmd = build_commit_command(&args, &[]);
+        let cmd = build_commit_command(&args, &[]).expect("build_commit_command: binary must resolve in tests");
         let cmd_args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -3053,7 +3056,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
             "-m".to_string(),
             "This allows git commit -m \"title\" -m \"body\".".to_string(),
         ];
-        let cmd = build_commit_command(&args, &[]);
+        let cmd = build_commit_command(&args, &[]).expect("build_commit_command: binary must resolve in tests");
         let cmd_args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -3074,7 +3077,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     fn test_commit_am_flag() {
         let args = vec!["-am".to_string(), "quick fix".to_string()];
-        let cmd = build_commit_command(&args, &[]);
+        let cmd = build_commit_command(&args, &[]).expect("build_commit_command: binary must resolve in tests");
         let cmd_args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -3089,7 +3092,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
             "-m".to_string(),
             "new msg".to_string(),
         ];
-        let cmd = build_commit_command(&args, &[]);
+        let cmd = build_commit_command(&args, &[]).expect("build_commit_command: binary must resolve in tests");
         let cmd_args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())

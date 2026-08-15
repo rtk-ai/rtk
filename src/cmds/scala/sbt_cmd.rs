@@ -81,7 +81,7 @@ fn run_task(
     tee_label: &str,
     verbose: u8,
 ) -> Result<i32> {
-    let mut cmd = resolved_command("sbt");
+    let mut cmd = resolved_command("sbt")?;
 
     let (sbt_task, rest) = match args.first() {
         Some(a) if is_scoped_task(a) => (a.as_str(), &args[1..]),
@@ -135,7 +135,7 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
     // never_worse cap and tee hint apply (an unrecognized output would otherwise be
     // reprinted verbatim plus the hint, i.e. more than the raw command produced).
     if is_integration_test_cmd(&subcommand) || is_test_task(&subcommand) {
-        let mut cmd = resolved_command("sbt");
+        let mut cmd = resolved_command("sbt")?;
         cmd.arg(&subcommand);
         for arg in &args[1..] {
             cmd.arg(arg);

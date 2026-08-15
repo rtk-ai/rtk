@@ -34,7 +34,7 @@ struct PintFile {
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = php_tool_command("pint");
+    let mut cmd = php_tool_command("pint")?;
 
     let has_format = args
         .iter()

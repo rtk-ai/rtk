@@ -98,9 +98,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     // Python linters use resolved_command() directly (they're on PATH via pip/pipx)
     // JS linters use package_manager_exec (npx/pnpm exec)
     let mut cmd = if is_python_linter(linter) {
-        resolved_command(linter)
+        resolved_command(linter)?
     } else {
-        package_manager_exec(linter)
+        package_manager_exec(linter)?
     };
 
     // Add format flags based on linter

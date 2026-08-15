@@ -45,7 +45,7 @@ struct PackageResult {
 }
 
 pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("go");
+    let mut cmd = resolved_command("go")?;
     cmd.arg("test");
 
     let skip_json = args.iter().any(|a| a == "-json" || a.starts_with("-bench"));
@@ -82,7 +82,7 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("go");
+    let mut cmd = resolved_command("go")?;
     cmd.arg("build");
 
     for arg in args {
@@ -103,7 +103,7 @@ pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 pub fn run_vet(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("go");
+    let mut cmd = resolved_command("go")?;
     cmd.arg("vet");
 
     for arg in args {
@@ -138,7 +138,7 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     let subcommand = args[0].to_string_lossy();
-    let mut cmd = resolved_command("go");
+    let mut cmd = resolved_command("go")?;
     cmd.arg(&*subcommand);
 
     for arg in &args[1..] {
@@ -173,7 +173,12 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
 /// Detect golangci-lint major version when invoked via `go tool`.
 /// Returns 1 on any failure (safe fallback — v1 behaviour).
 fn detect_go_tool_golangci_version() -> u32 {
-    let output = resolved_command("go")
+    // A missing `go` is "any failure" per the contract above, not a hard error:
+    // this only picks a formatting branch.
+    let Ok(mut cmd) = resolved_command("go") else {
+        return 1;
+    };
+    let output = cmd
         .arg("tool")
         .arg("golangci-lint")
         .arg("--version")
@@ -238,7 +243,7 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
 
     let version = detect_go_tool_golangci_version();
 
-    let mut cmd = resolved_command("go");
+    let mut cmd = resolved_command("go")?;
     cmd.arg("tool").arg("golangci-lint");
 
     let has_format = has_golangci_format_flag(args);

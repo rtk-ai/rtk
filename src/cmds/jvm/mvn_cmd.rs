@@ -891,20 +891,21 @@ fn mvn_binary() -> &'static str {
     }
 }
 
-fn new_mvn_command(args: &[String]) -> Command {
+fn new_mvn_command(args: &[String]) -> Result<Command> {
     let mut cmd = if cfg!(windows) {
         if Path::new(".\\mvnw.cmd").exists() {
             Command::new(".\\mvnw.cmd")
         } else {
-            resolved_command("mvn")
+            resolved_command("mvn")?
         }
     } else if Path::new("./mvnw").exists() {
         Command::new("./mvnw")
     } else {
-        resolved_command("mvn")
+        resolved_command("mvn")?
     };
     cmd.args(args);
-    cmd
+    Ok(cmd)
+
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────
@@ -932,7 +933,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             return runner::run_passthrough(tool, &osargs, verbose);
         }
         return runner::run_filtered(
-            new_mvn_command(args),
+            new_mvn_command(args)?,
             tool,
             &args_display,
             filter_quiet,
@@ -944,21 +945,21 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     match phase {
         MvnPhase::Test => runner::run_filtered(
-            new_mvn_command(args),
+            new_mvn_command(args)?,
             tool,
             &args_display,
             filter_surefire,
             RunOptions::with_tee("mvn_test"),
         ),
         MvnPhase::Compile => runner::run_filtered(
-            new_mvn_command(args),
+            new_mvn_command(args)?,
             tool,
             &args_display,
             filter_compile,
             RunOptions::with_tee("mvn_compile"),
         ),
         MvnPhase::Package => runner::run_filtered(
-            new_mvn_command(args),
+            new_mvn_command(args)?,
             tool,
             &args_display,
             filter_package,

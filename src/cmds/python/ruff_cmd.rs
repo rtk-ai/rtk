@@ -38,7 +38,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     let is_format = args.iter().any(|a| a == "format");
 
-    let mut cmd = resolved_command("ruff");
+    let mut cmd = resolved_command("ruff")?;
 
     // Both spellings: injecting a second --output-format makes ruff reject the call.
     let user_set_output_format = args

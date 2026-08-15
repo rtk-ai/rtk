@@ -20,7 +20,7 @@ const MAX_DETAIL_LINES_PER_FAILURE: usize = 2;
 static FAILURE_HEADING_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d+\) \S").unwrap());
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = php_tool_command("phpunit");
+    let mut cmd = php_tool_command("phpunit")?;
     for arg in args {
         cmd.arg(arg);
     }

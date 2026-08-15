@@ -48,7 +48,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .map(|s| s.as_str())
         .collect();
 
-    let mut cmd = resolved_command("ls");
+    let mut cmd = resolved_command("ls")?;
     cmd.env("LC_ALL", "C");
     cmd.arg("-la");
     for flag in &flags {

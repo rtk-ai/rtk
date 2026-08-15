@@ -302,7 +302,7 @@ fn engine_capture<T: AsRef<str>>(
     patterns: &[String],
     paths: &[String],
 ) -> Result<CaptureResult> {
-    let mut cmd = engine_command(engine, extra_args, patterns, paths, false);
+    let mut cmd = engine_command(engine, extra_args, patterns, paths, false)?;
     exec_capture_stdin(&mut cmd).context("search failed")
 }
 
@@ -312,8 +312,8 @@ fn engine_command<T: AsRef<str>>(
     patterns: &[String],
     paths: &[String],
     line_buffered: bool,
-) -> Command {
-    let mut cmd = resolved_command(engine.bin());
+) -> Result<Command> {
+    let mut cmd = resolved_command(engine.bin())?;
     cmd.args(engine.parse_flags());
     for a in extra_args {
         cmd.arg(a.as_ref());
@@ -327,7 +327,7 @@ fn engine_command<T: AsRef<str>>(
     }
     cmd.arg("--");
     cmd.args(paths);
-    cmd
+    Ok(cmd)
 }
 
 fn format_match_line(line: &str, show_file: bool, show_line: bool) -> Option<String> {
@@ -420,7 +420,7 @@ fn run_streaming_search(
         shown: 0,
         cap_reported: false,
     };
-    let mut cmd = engine_command(engine, extra_args, patterns, paths, true);
+    let mut cmd = engine_command(engine, extra_args, patterns, paths, true)?;
     let result = stream::run_streaming(
         &mut cmd,
         StdinMode::Inherit,
@@ -446,7 +446,7 @@ fn passthrough<T: AsRef<str>>(
     real_cmd: &str,
     stream_stdin: bool,
 ) -> Result<i32> {
-    let mut cmd = resolved_command(engine.bin());
+    let mut cmd = resolved_command(engine.bin())?;
     if stream_stdin && !std::io::stdout().is_terminal() {
         // Keep passthrough output live when stdout is piped.
         cmd.arg("--line-buffered");
@@ -509,7 +509,7 @@ pub fn run(
         .iter()
         .any(|a| a == "--version" || a == "--help" || a == "-h")
     {
-        let mut cmd = resolved_command(engine.bin());
+        let mut cmd = resolved_command(engine.bin())?;
         cmd.args(args);
         let result = exec_capture(&mut cmd).context("search failed")?;
         print!("{}", result.stdout);
@@ -1470,7 +1470,11 @@ mod tests {
     fn test_rg_always_has_line_numbers() {
         // engine_capture always passes "-n" to the engine via parse_flags().
         // This test documents that -n is built-in, so the clap flag is safe to ignore.
-        let mut cmd = resolved_command("rg");
+        // Runners without ripgrep installed can't exercise this; the flag
+        // contract under test is unchanged either way.
+        let Ok(mut cmd) = resolved_command("rg") else {
+            return;
+        };
         cmd.args(["-n", "--no-heading", "NONEXISTENT_PATTERN_12345", "."]);
         // If rg is available, it should accept -n without error (exit 1 = no match, not error)
         if let Ok(output) = cmd.output() {

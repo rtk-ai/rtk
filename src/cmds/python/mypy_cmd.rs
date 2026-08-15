@@ -9,9 +9,9 @@ use std::sync::LazyLock;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = if tool_exists("mypy") {
-        resolved_command("mypy")
+        resolved_command("mypy")?
     } else {
-        let mut c = resolved_command("python3");
+        let mut c = resolved_command("python3")?;
         c.arg("-m").arg("mypy");
         c
     };

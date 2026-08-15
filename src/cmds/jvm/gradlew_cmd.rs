@@ -84,20 +84,21 @@ fn gradlew_binary() -> &'static str {
 /// semgrep's `dynamic-command-execution` rule stays happy. The `gradle` system
 /// binary is resolved via `resolved_command("gradle")` for PATHEXT support on
 /// Windows (`.CMD`/`.BAT` shims) — matches how cargo, golangci-lint, etc. do it.
-fn new_gradle_command(args: &[String]) -> Command {
+fn new_gradle_command(args: &[String]) -> Result<Command> {
     let mut cmd = if cfg!(windows) {
         if std::path::Path::new(".\\gradlew.bat").exists() {
             Command::new(".\\gradlew.bat")
         } else {
-            resolved_command("gradle")
+            resolved_command("gradle")?
         }
     } else if std::path::Path::new("./gradlew").exists() {
         Command::new("./gradlew")
     } else {
-        resolved_command("gradle")
+        resolved_command("gradle")?
     };
     cmd.args(args);
-    cmd
+    Ok(cmd)
+
 }
 
 /// `StreamFilter` for build mode: keeps lines for which `filter_build_line` returns true.
@@ -127,7 +128,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         return runner::run_passthrough(gradlew_binary(), &osargs, verbose);
     }
 
-    let cmd = new_gradle_command(args);
+    let cmd = new_gradle_command(args)?;
     let args_display = args.join(" ");
     let tool = gradlew_binary();
 

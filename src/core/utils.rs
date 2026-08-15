@@ -323,26 +323,26 @@ pub fn detect_package_manager() -> &'static str {
 
 /// Build a Command using the detected package manager's exec mechanism.
 /// Returns a Command ready to have tool-specific args appended.
-pub fn package_manager_exec(tool: &str) -> Command {
+pub fn package_manager_exec(tool: &str) -> Result<Command> {
     if tool_exists(tool) {
         resolved_command(tool)
     } else {
         let pm = detect_package_manager();
         match pm {
             "pnpm" => {
-                let mut c = resolved_command("pnpm");
+                let mut c = resolved_command("pnpm")?;
                 c.arg("exec").arg("--").arg(tool);
-                c
+                Ok(c)
             }
             "yarn" => {
-                let mut c = resolved_command("yarn");
+                let mut c = resolved_command("yarn")?;
                 c.arg("exec").arg("--").arg(tool);
-                c
+                Ok(c)
             }
             _ => {
-                let mut c = resolved_command("npx");
+                let mut c = resolved_command("npx")?;
                 c.arg("--no-install").arg("--").arg(tool);
-                c
+                Ok(c)
             }
         }
     }
@@ -365,34 +365,57 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
     which::which(name).context(format!("Binary '{}' not found on PATH", name))
 }
 
+/// A wrapped binary that isn't on PATH.
+///
+/// Typed so `main` can exit 127 (the POSIX command-not-found status) instead of
+/// a generic 1, which any `cmd || fallback` or CI gate testing for 127 would
+/// otherwise misread as an ordinary failure.
+#[derive(Debug)]
+pub struct CommandNotFound {
+    pub program: String,
+}
+
+impl std::fmt::Display for CommandNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: command not found", self.program)
+    }
+}
+
+impl std::error::Error for CommandNotFound {}
+
 /// Create a `Command` with PATHEXT-aware binary resolution.
 ///
-/// Drop-in replacement for `Command::new(name)` that works on Windows
-/// with `.CMD`/`.BAT`/`.PS1` wrappers.
+/// Drop-in replacement for `Command::new(name)` that works on Windows with
+/// `.CMD`/`.BAT`/`.PS1` wrappers.
 ///
-/// Falls back to `Command::new(name)` if resolution fails, so native
-/// commands (git, cargo) still work even if `which` can't find them.
+/// Returns `CommandNotFound` on Unix when `which` can't resolve the binary,
+/// rather than falling back to a bare-name spawn. The fallback used to hide the
+/// one fact rtk already knew: the errno from a bare-name exec cannot answer "is
+/// this binary missing?", because POSIX `execvp` reports **EACCES over ENOENT**
+/// if any PATH directory was unreadable. On WSL the Windows interop entries
+/// (`/mnt/c/.../WindowsApps`) are routinely unreadable, so a plainly missing
+/// binary surfaced as `Permission denied (os error 13)` and read like a sandbox
+/// fault. `which` walks the same PATH but skips unreadable directories, so its
+/// verdict is the trustworthy one — propagate it instead of discarding it.
 ///
-/// # Arguments
-/// * `name` - Binary name (e.g., "vitest", "eslint")
-///
-/// # Returns
-/// A `Command` configured with the resolved binary path.
-pub fn resolved_command(name: &str) -> Command {
+/// Windows keeps the fallback: a `.CMD`/`.BAT` wrapper can evade `which` while
+/// still being executable, so there the exec attempt is still worth making.
+pub fn resolved_command(name: &str) -> Result<Command> {
     match resolve_binary(name) {
-        Ok(path) => Command::new(path),
+        // nosemgrep: dynamic-command-execution -- `path` is which's resolution of a caller-supplied tool name; this is the sanctioned constructor the rule exists to funnel callers into
+        Ok(path) => Ok(Command::new(path)),
         Err(e) => {
-            // On Windows, resolution failure likely means a .CMD/.BAT wrapper
-            // wasn't found — always warn so users have a signal.
-            // On Unix, this is less common; only log in debug builds.
-            if cfg!(any(target_os = "windows", debug_assertions)) {
+            if cfg!(target_os = "windows") {
                 eprintln!(
                     "rtk: Failed to resolve '{}' via PATH, falling back to direct exec: {}",
                     name, e
                 );
+                // nosemgrep: dynamic-command-execution -- Windows-only fallback for .CMD/.BAT wrappers that evade which
+                return Ok(Command::new(name));
             }
-
-            Command::new(name)
+            Err(anyhow::Error::new(CommandNotFound {
+                program: name.to_string(),
+            }))
         }
     }
 }
@@ -498,6 +521,40 @@ pub fn human_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    // --- resolved_command: which's verdict must not be discarded ---
+
+    #[test]
+    fn test_resolved_command_resolves_a_real_binary() {
+        // sh is on PATH on every unix box CI runs on.
+        assert!(resolved_command("sh").is_ok());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn test_resolved_command_reports_missing_binary_as_not_found() {
+        // The bug this guards: falling back to a bare-name spawn let the errno
+        // decide, and POSIX execvp reports EACCES over ENOENT when any PATH dir
+        // is unreadable (WSL's WindowsApps), so a missing binary surfaced as
+        // "Permission denied (os error 13)". which skips unreadable dirs, so its
+        // verdict is the trustworthy one.
+        let err = resolved_command("rtk_definitely_no_such_binary_zzz")
+            .expect_err("missing binary must not resolve");
+        let not_found = err
+            .downcast_ref::<CommandNotFound>()
+            .expect("must be typed CommandNotFound so main can exit 127");
+        assert_eq!(not_found.program, "rtk_definitely_no_such_binary_zzz");
+        assert!(
+            err.to_string().contains("command not found"),
+            "got: {}",
+            err
+        );
+        assert!(
+            !err.to_string().contains("os error 13"),
+            "must not leak the misleading errno: {}",
+            err
+        );
+    }
     use super::*;
 
     #[test]
@@ -741,9 +798,10 @@ mod tests {
     #[test]
     fn test_resolved_command_executes_known_command() {
         let output = resolved_command("cargo")
+            .expect("cargo must resolve on PATH in tests")
             .arg("--version")
             .output()
-            .expect("resolved_command('cargo') should execute");
+            .expect("cargo --version should execute");
         assert!(
             output.status.success(),
             "cargo --version should succeed via resolved_command"
@@ -884,7 +942,8 @@ mod tests {
             // When resolve_binary fails, resolved_command should fall back to
             // Command::new(name) instead of panicking.  On Windows this also
             // prints a warning to stderr.
-            let mut cmd = resolved_command("nonexistent_binary_xyz_99999");
+            let mut cmd = resolved_command("nonexistent_binary_xyz_99999")
+                .expect("resolved_command: binary must resolve in tests");
             // The Command should be created (not panic).  Attempting to run it
             // will fail, but that's expected — we just verify the fallback path
             // produces a usable Command.

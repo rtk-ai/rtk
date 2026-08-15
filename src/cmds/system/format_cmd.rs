@@ -75,10 +75,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     // Build command based on formatter
     let mut cmd = match formatter.as_str() {
-        "prettier" => package_manager_exec("prettier"),
-        "black" | "ruff" => resolved_command(formatter.as_str()),
-        "biome" => package_manager_exec("biome"),
-        _ => resolved_command(formatter.as_str()),
+        "prettier" => package_manager_exec("prettier")?,
+        "black" | "ruff" => resolved_command(formatter.as_str())?,
+        "biome" => package_manager_exec("biome")?,
+        _ => resolved_command(formatter.as_str())?,
     };
 
     // Add formatter-specific flags

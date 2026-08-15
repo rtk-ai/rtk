@@ -12,9 +12,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let next_exists = tool_exists("next");
 
     let mut cmd = if next_exists {
-        resolved_command("next")
+        resolved_command("next")?
     } else {
-        let mut c = resolved_command("npx");
+        let mut c = resolved_command("npx")?;
         c.arg("next");
         c
     };

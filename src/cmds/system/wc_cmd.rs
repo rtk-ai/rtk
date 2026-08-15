@@ -11,7 +11,7 @@ use crate::core::utils::resolved_command;
 use anyhow::Result;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("wc");
+    let mut cmd = resolved_command("wc")?;
     for arg in args {
         cmd.arg(arg);
     }

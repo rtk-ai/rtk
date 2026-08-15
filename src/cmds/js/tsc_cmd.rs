@@ -16,9 +16,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let tsc_exists = tool_exists("tsc");
 
     let mut cmd = if tsc_exists {
-        resolved_command("tsc")
+        resolved_command("tsc")?
     } else {
-        let mut c = resolved_command("npx");
+        let mut c = resolved_command("npx")?;
         c.arg("tsc");
         c
     };
