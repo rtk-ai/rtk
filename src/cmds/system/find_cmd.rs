@@ -7,6 +7,19 @@ use ignore::WalkBuilder;
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Truncate a directory path for display, keeping the trailing portion.
+///
+/// Uses char boundaries so non-ASCII paths (CJK, Thai, …) never panic on a
+/// mid-character byte index. See #3415.
+fn truncate_path_display(dir: &str, max_bytes: usize) -> String {
+    if dir.len() <= max_bytes {
+        return dir.to_string();
+    }
+    let keep = max_bytes.saturating_sub(3); // room for "..."
+    let start = dir.floor_char_boundary(dir.len().saturating_sub(keep));
+    format!("...{}", &dir[start..])
+}
+
 /// Match a filename against a glob pattern (supports `*` and `?`).
 fn glob_match(pattern: &str, name: &str) -> bool {
     glob_match_inner(pattern.as_bytes(), name.as_bytes())
@@ -322,11 +335,7 @@ pub fn run(
         }
 
         let files_in_dir = &by_dir[dir];
-        let dir_display = if dir.len() > 50 {
-            format!("...{}", &dir[dir.len() - 47..])
-        } else {
-            dir.clone()
-        };
+        let dir_display = truncate_path_display(dir, 50);
 
         let remaining_budget = max_results - displayed;
         if files_in_dir.len() <= remaining_budget {
@@ -391,6 +400,41 @@ mod tests {
     /// Convert string slices to Vec<String> for test convenience.
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|s| s.to_string()).collect()
+    }
+
+    // --- truncate_path_display (#3415) ---
+
+    #[test]
+    fn truncate_path_display_ascii_short_unchanged() {
+        assert_eq!(truncate_path_display("src/cmds", 50), "src/cmds");
+    }
+
+    #[test]
+    fn truncate_path_display_ascii_long_keeps_tail() {
+        let dir = "a".repeat(60);
+        let shown = truncate_path_display(&dir, 50);
+        assert!(shown.starts_with("..."));
+        assert_eq!(shown.len(), 50); // "..." + 47 ascii bytes
+        assert!(shown.ends_with(&"a".repeat(47)));
+    }
+
+    /// Regression #3415: Thai chars are 3 bytes each; mid-char byte slice used to panic.
+    #[test]
+    fn truncate_path_display_thai_long_no_panic() {
+        let dir = "ก".repeat(20); // 60 bytes
+        let shown = truncate_path_display(&dir, 50);
+        assert!(shown.starts_with("..."));
+        assert!(shown.is_char_boundary(shown.len()));
+        assert!(shown.chars().skip(3).all(|c| c == 'ก'));
+    }
+
+    /// Regression #3415: CJK chars are 3 bytes each.
+    #[test]
+    fn truncate_path_display_cjk_long_no_panic() {
+        let dir = "日".repeat(20); // 60 bytes
+        let shown = truncate_path_display(&dir, 50);
+        assert!(shown.starts_with("..."));
+        assert!(shown.chars().skip(3).all(|c| c == '日'));
     }
 
     // --- glob_match unit tests ---
