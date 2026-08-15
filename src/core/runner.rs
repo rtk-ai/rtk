@@ -30,6 +30,75 @@ pub fn print_with_hint(
     emit_guarded(filtered, hint.as_deref(), guard_raw)
 }
 
+/// What a matched `[[tools]]` rule asks us to do for this invocation.
+/// Fields are consumed by the PTY capture path; without that feature only env
+/// injection (applied in-place to the command) is relevant, so they are unread.
+#[derive(Default)]
+struct ToolPlan {
+    /// Use a PTY instead of a pipe (only meaningful with the `pty` feature).
+    #[cfg_attr(not(feature = "pty"), allow(dead_code))]
+    use_pty: bool,
+    /// Strip ANSI at the capture boundary (relevant to the PTY path).
+    #[cfg_attr(not(feature = "pty"), allow(dead_code))]
+    strip_ansi: bool,
+}
+
+/// Apply the first matching `[[tools]]` rule to `cmd`: inject any `env` vars (all capture
+/// modes, feature-independent) and report whether PTY capture was requested. Env injection
+/// is the preferred fix for builders that hang on a pipe but honor a non-interactive
+/// signal — e.g. `env = { CI = "1" }` makes `ng build`/vite run one-shot and exit.
+fn apply_tool_rule(cmd: &mut Command) -> ToolPlan {
+    let Ok(config) = crate::core::config::Config::load() else {
+        return ToolPlan::default();
+    };
+    if config.tools.is_empty() {
+        return ToolPlan::default();
+    }
+    let Some(program) = std::path::Path::new(cmd.get_program())
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+    else {
+        return ToolPlan::default();
+    };
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+
+    let Some(rule) = config.tool_rule_for(&program, &args) else {
+        return ToolPlan::default();
+    };
+
+    // Env injection applies regardless of capture mode or the `pty` feature.
+    for (k, v) in &rule.env {
+        cmd.env(k, v);
+    }
+
+    ToolPlan {
+        use_pty: rule.capture == crate::core::config::CaptureMode::Pty,
+        strip_ansi: rule.strip_ansi_effective(),
+    }
+}
+
+/// Run `cmd` under a PTY when the plan asks for it and the feature is built in.
+/// Returns `None` to fall through to normal pipe-based capture.
+#[cfg(feature = "pty")]
+fn capture_via_pty(cmd: &Command, plan: &ToolPlan) -> Option<Result<stream::StreamResult>> {
+    if !plan.use_pty {
+        return None;
+    }
+    Some(crate::core::pty_capture::run_pty_capture(
+        cmd,
+        plan.strip_ansi,
+    ))
+}
+
+#[cfg(not(feature = "pty"))]
+fn capture_via_pty(_cmd: &Command, _plan: &ToolPlan) -> Option<Result<stream::StreamResult>> {
+    None
+}
+
 #[derive(Default)]
 pub struct RunOptions<'a> {
     pub tee_label: Option<&'a str>,
@@ -104,8 +173,15 @@ where
     } else {
         StdinMode::Null
     };
-    let result = stream::run_streaming(&mut cmd, stdin_mode, FilterMode::CaptureOnly)
-        .with_context(|| format!("Failed to run {}", tool_name))?;
+    // Consult [[tools]] config: inject env (e.g. CI=1) and decide pipe vs pty.
+    let plan = apply_tool_rule(&mut cmd);
+    let result = match capture_via_pty(&cmd, &plan) {
+        Some(pty_result) => {
+            pty_result.with_context(|| format!("Failed to run {} under pty", tool_name))?
+        }
+        None => stream::run_streaming(&mut cmd, stdin_mode, FilterMode::CaptureOnly)
+            .with_context(|| format!("Failed to run {}", tool_name))?,
+    };
 
     let exit_code = result.exit_code;
     let raw = &result.raw;
