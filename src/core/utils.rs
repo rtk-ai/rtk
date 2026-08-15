@@ -166,11 +166,9 @@ pub fn join_with_overflow(items: &[String], total: usize, max: usize, label: &st
 /// assert_eq!(truncate_iso_date("short"), "short");
 /// ```
 pub fn truncate_iso_date(date: &str) -> &str {
-    if date.len() >= 10 {
-        &date[..10]
-    } else {
-        date
-    }
+    // Round the 10-byte cut down to a char boundary: a multi-byte character
+    // straddling byte 10 must not be sliced through (issue #3444).
+    &date[..date.floor_char_boundary(10.min(date.len()))]
 }
 
 /// Format a confirmation message: "ok \<action\> \<detail\>"
@@ -687,6 +685,20 @@ mod tests {
         assert_eq!(result.chars().count(), 25);
         assert!(result.ends_with("..."));
         assert_eq!(result, "rtk ls -la Ародинамиче...");
+    }
+
+    // ===== truncate_iso_date multibyte safety (issue #3444) =====
+
+    /// Regression test (#3444): `&date[..10]` sliced inside a multi-byte
+    /// character ('é' occupies bytes 9..11) and panicked; the prefix must
+    /// land on a char boundary instead.
+    #[test]
+    fn test_truncate_iso_date_multibyte_never_panics() {
+        let s = "2024-01-1\u{00e9}5T10:30:00Z";
+        assert_eq!(truncate_iso_date(s), "2024-01-1");
+        // Existing behavior preserved for plain ASCII and short strings.
+        assert_eq!(truncate_iso_date("2024-01-15T10:30:00Z"), "2024-01-15");
+        assert_eq!(truncate_iso_date("short"), "short");
     }
 
     // ===== resolve_binary tests (issue #212) =====

@@ -202,12 +202,12 @@ impl PeriodStats for WeekStats {
 
     fn period(&self) -> String {
         let start = if self.week_start.len() > 5 {
-            &self.week_start[5..]
+            &self.week_start[self.week_start.floor_char_boundary(5)..]
         } else {
             &self.week_start
         };
         let end = if self.week_end.len() > 5 {
-            &self.week_end[5..]
+            &self.week_end[self.week_end.floor_char_boundary(5)..]
         } else {
             &self.week_end
         };
@@ -344,6 +344,26 @@ mod tests {
         assert_eq!(week.avg_time_ms(), 100);
         assert_eq!(WeekStats::icon(), "W");
         assert_eq!(WeekStats::label(), "Weekly");
+    }
+
+    /// Regression test (#3415 class): a multi-byte character before byte 5 in
+    /// week_start/week_end made `&s[5..]` slice mid-character and panic.
+    #[test]
+    fn test_week_stats_trait_multibyte_never_panics() {
+        let week = WeekStats {
+            week_start: "2024\u{00e9}1-20".to_string(),
+            week_end: "2024\u{00e9}1-26".to_string(),
+            commands: 1,
+            input_tokens: 1,
+            output_tokens: 1,
+            saved_tokens: 1,
+            savings_pct: 0.0,
+            total_time_ms: 1,
+            avg_time_ms: 1,
+        };
+
+        let period = week.period();
+        assert!(std::str::from_utf8(period.as_bytes()).is_ok());
     }
 
     #[test]
