@@ -542,6 +542,13 @@ fn run_log(
     verbose: u8,
     global_args: &[String],
 ) -> Result<i32> {
+    if requests_raw_log_output(args) {
+        let passthrough_args: Vec<OsString> = std::iter::once(OsString::from("log"))
+            .chain(args.iter().map(OsString::from))
+            .collect();
+        return run_passthrough(&passthrough_args, global_args, verbose);
+    }
+
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = git_cmd(global_args);
@@ -619,6 +626,17 @@ fn run_log(
     );
 
     Ok(0)
+}
+
+fn requests_raw_log_output(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| {
+            matches!(
+                arg.as_str(),
+                "-p" | "-u" | "--patch" | "--patch-with-raw" | "--patch-with-stat"
+            )
+        })
 }
 
 /// Filter git log output: truncate long messages, cap lines
@@ -2974,6 +2992,36 @@ A  added.rs
     fn test_parse_user_limit_none() {
         let args: Vec<String> = vec!["--oneline".into()];
         assert_eq!(parse_user_limit(&args), None);
+    }
+
+    #[test]
+    fn test_patch_log_flags_request_raw_output() {
+        for flag in ["-p", "-u", "--patch", "--patch-with-raw", "--patch-with-stat"] {
+            let args = vec![flag.to_string()];
+            assert!(requests_raw_log_output(&args), "{flag} should pass through");
+        }
+    }
+
+    #[test]
+    fn test_patch_flag_after_pathspec_separator_is_ignored() {
+        // `git log -- -p` means "show history for a path literally named -p",
+        // not "show patches" — the flag lookalike appears after `--`.
+        let args = vec!["--".to_string(), "-p".to_string()];
+        assert!(
+            !requests_raw_log_output(&args),
+            "-p after -- is a pathspec, not a patch flag, and should stay on the filtered path"
+        );
+    }
+
+    #[test]
+    fn test_non_patch_log_flags_remain_filtered() {
+        for flag in ["--no-patch", "--stat", "--oneline", "--format=%H"] {
+            let args = vec![flag.to_string()];
+            assert!(
+                !requests_raw_log_output(&args),
+                "{flag} should remain on the filtered log path"
+            );
+        }
     }
 
     #[test]
