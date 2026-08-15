@@ -1497,6 +1497,16 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_pipeline_rewrites_display_only_producer() {
+        let result = run_claude_inner(&claude_input("git status | head -20")).unwrap();
+        let value: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            value.pointer("/hookSpecificOutput/updatedInput/command"),
+            Some(&json!("rtk git status | head -20"))
+        );
+    }
+
+    #[test]
     fn test_claude_pipeline_rewrites_only_safe_final_stage() {
         let result = run_claude_inner(&claude_input("cargo test | grep FAILED")).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();

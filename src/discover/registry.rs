@@ -1031,6 +1031,64 @@ fn rewrite_pipeline_final_stage(
     })
 }
 
+/// Whether a final pipeline stage merely limits text displayed to the agent.
+/// Rewriting the producer is safe for these one-pipe forms because no further
+/// program consumes the filtered output. File arguments, follow mode, and
+/// multi-stage pipelines deliberately remain raw.
+fn is_display_only_pipeline_final(stage: &str) -> bool {
+    let args: Vec<&str> = stage.split_whitespace().collect();
+    let Some((command, rest)) = args.split_first() else {
+        return false;
+    };
+    if !matches!(*command, "head" | "tail") {
+        return false;
+    }
+    match rest {
+        [count] if count.starts_with("--lines=") => count
+            .strip_prefix("--lines=")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())),
+        [count] => count
+            .strip_prefix('-')
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())),
+        [flag, count] if matches!(*flag, "-n" | "--lines") => {
+            !count.is_empty() && count.bytes().all(|b| b.is_ascii_digit())
+        }
+        _ => false,
+    }
+}
+
+fn rewrite_pipeline_display_producer(
+    cmd: &str,
+    tokens: &[ParsedToken],
+    segment_start: usize,
+    first_pipe: &ParsedToken,
+    analysis: PipelineAnalysis,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+) -> Option<String> {
+    if first_pipe.value != "|"
+        || tokens
+            .iter()
+            .filter(|token| {
+                token.offset >= segment_start
+                    && token.offset < analysis.end_offset
+                    && matches!(token.kind, TokenKind::Pipe(_))
+            })
+            .count()
+            != 1
+        || !is_display_only_pipeline_final(
+            cmd[analysis.final_stage_start?..analysis.end_offset].trim(),
+        )
+    {
+        return None;
+    }
+
+    let producer = cmd[segment_start..first_pipe.offset].trim();
+    let rewritten = rewrite_segment(producer, excluded, transparent_prefixes)?;
+    let final_stage = cmd[analysis.final_stage_start?..analysis.end_offset].trim();
+    (rewritten != producer).then(|| format!("{} | {}", rewritten, final_stage))
+}
+
 /// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each segment.
 fn rewrite_compound(
     cmd: &str,
@@ -1090,7 +1148,18 @@ fn rewrite_compound(
                     analysis,
                     excluded,
                     transparent_prefixes,
-                );
+                )
+                .or_else(|| {
+                    rewrite_pipeline_display_producer(
+                        cmd,
+                        &tokens,
+                        seg_start,
+                        tok,
+                        analysis,
+                        excluded,
+                        transparent_prefixes,
+                    )
+                });
 
                 if let Some(rewritten) = rewritten_pipeline {
                     any_changed = true;
@@ -1873,6 +1942,40 @@ mod tests {
     }
 
     #[test]
+    fn test_display_only_pipeline_rewrites_producer() {
+        for (command, expected) in [
+            ("git status | head -20", "rtk git status | head -20"),
+            (
+                "grep -n foo file.txt | head -5",
+                "rtk grep -n foo file.txt | head -5",
+            ),
+            (
+                "find . -name '*.rs' | tail --lines 10",
+                "rtk find . -name '*.rs' | tail --lines 10",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.to_string()),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_display_only_pipeline_keeps_unsafe_shapes_raw() {
+        for command in [
+            "git status | head README.md",
+            "git status | head",
+            "git status | tail -f",
+            "git status | grep clean | head -1",
+            "git status |& head -1",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(command, &[]), None, "{command}");
+        }
+    }
+
+    #[test]
     fn test_pipeline_final_safe_rule_set() {
         let safe_rules: Vec<_> = RULES
             .iter()
@@ -2630,10 +2733,10 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_pipe_unsafe_final_stage_stays_raw() {
+    fn test_rewrite_pipe_display_only_final_stage_rewrites_producer() {
         assert_eq!(
             rewrite_command_no_prefixes("cargo test | tail -50", &[]),
-            None
+            Some("rtk cargo test | tail -50".into())
         );
         assert_eq!(
             rewrite_command_no_prefixes("find . | xargs grep TODO", &[]),
@@ -5293,7 +5396,7 @@ mod tests {
     fn test_rewrite_pipe_then_and() {
         assert_eq!(
             rewrite_command_no_prefixes("git log | head -5 && git stash", &[]),
-            Some("git log | head -5 && rtk git stash".into())
+            Some("rtk git log | head -5 && rtk git stash".into())
         );
     }
 
