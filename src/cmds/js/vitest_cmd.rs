@@ -28,6 +28,10 @@ struct VitestJsonOutput {
     num_failed_tests: usize,
     #[serde(rename = "numPendingTests", default)]
     num_pending_tests: usize,
+    #[serde(rename = "numFailedTestSuites", default)]
+    num_failed_test_suites: usize,
+    #[serde(rename = "success", default)]
+    success: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +39,8 @@ struct VitestTestFile {
     name: String,
     #[serde(rename = "assertionResults")]
     assertion_results: Vec<VitestTest>,
+    #[serde(default)]
+    status: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,10 +73,22 @@ impl OutputParser for VitestParser {
             Ok(json) => {
                 let failures = extract_failures_from_json(&json);
 
+                // numFailedTestSuites counts whole files that failed to load
+                // (syntax errors, import crashes). Those are real failures even
+                // when numFailedTests is 0 — they must surface as failed, not
+                // as an all-green "PASS (N) FAIL (0)" run.
+                let failed_suites = if json.num_failed_test_suites > 0 {
+                    json.num_failed_test_suites
+                } else if json.success == Some(false) && failures.is_empty() {
+                    1
+                } else {
+                    0
+                };
+
                 let result = TestResult {
                     total: json.num_total_tests,
                     passed: json.num_passed_tests,
-                    failed: json.num_failed_tests,
+                    failed: json.num_failed_tests + failed_suites,
                     skipped: json.num_pending_tests,
                     duration_ms: None,
                     failures,
@@ -97,6 +115,19 @@ impl OutputParser for VitestParser {
 /// Extract failures from JSON structure
 fn extract_failures_from_json(json: &VitestJsonOutput) -> Vec<TestFailure> {
     let mut failures = Vec::new();
+
+    // Failed suites first — the whole file failed to load, so there is no
+    // per-test breakdown to show.
+    for file in &json.test_results {
+        if file.status == "failed" {
+            failures.push(TestFailure {
+                test_name: format!("[suite] {}", file.name),
+                file_path: file.name.clone(),
+                error_message: format!("test file failed to load ({})", file.name),
+                stack_trace: None,
+            });
+        }
+    }
 
     for file in &json.test_results {
         for test in &file.assertion_results {
@@ -251,7 +282,9 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
     let tee_label = format!("{}_run", framework);
 
     let rendered = render_test_output(&filtered, &combined, &tee_label, result.exit_code);
-    let shown = crate::core::runner::emit_guarded(&rendered, None, &combined);
+    // Never render an all-green verdict when the test runner exited non-zero.
+    let guarded = crate::core::guard::guard_exit(&combined, result.exit_code, framework, &rendered);
+    let shown = crate::core::runner::emit_guarded(&guarded, None, &combined);
 
     timer.track(
         format!("{} run", framework).as_str(),
@@ -507,6 +540,59 @@ Scope: all 6 workspace projects
         assert_eq!(data.passed, 4);
         assert_eq!(data.failed, 1);
         assert_eq!(data.duration_ms, None);
+    }
+
+    #[test]
+    fn test_vitest_parser_failed_suite_counts_as_failure() {
+        // A test file that fails to load (syntax error) reports
+        // numFailedTestSuites > 0 even when numFailedTests is 0. It must not
+        // render as an all-green run.
+        let json = r#"{
+            "numTotalTests": 10,
+            "numPassedTests": 10,
+            "numFailedTests": 0,
+            "numFailedTestSuites": 1,
+            "numPendingTests": 0,
+            "success": false,
+            "testResults": [
+                {"name": "src/broken.spec.ts", "status": "failed", "assertionResults": []},
+                {"name": "src/ok.spec.ts", "status": "passed", "assertionResults": [
+                    {"fullName": "ok test", "status": "passed", "failureMessages": []}
+                ]}
+            ],
+            "startTime": 1000
+        }"#;
+
+        let result = VitestParser::parse(json);
+        let data = result.unwrap();
+        assert_eq!(data.failed, 1, "failed suites must count as failures");
+        assert!(
+            data.failures.iter().any(|f| f.test_name.contains("broken.spec.ts")),
+            "failed suite must appear in failures list"
+        );
+
+        let rendered = data.format(FormatMode::Compact);
+        assert!(rendered.contains("FAIL (1)"), "got: {}", rendered);
+        assert!(rendered.contains("broken.spec.ts"), "got: {}", rendered);
+    }
+
+    #[test]
+    fn test_vitest_parser_success_false_without_suites_counts_as_failure() {
+        // success:false with no failed tests and no failed suites (e.g. a
+        // crash outside the test results) must not render all-green.
+        let json = r#"{
+            "numTotalTests": 5,
+            "numPassedTests": 5,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "success": false,
+            "testResults": [],
+            "startTime": 1000
+        }"#;
+
+        let result = VitestParser::parse(json);
+        let data = result.unwrap();
+        assert_eq!(data.failed, 1, "success:false must count as a failure");
     }
 
     #[test]
