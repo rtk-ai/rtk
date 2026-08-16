@@ -236,10 +236,11 @@ fn run_filtered(original_args: &[String], invocation: &RunInvocation, verbose: u
         crate::core::runner::RunOptions::stdout_only(),
     )?;
 
-    // golangci-lint: exit 0 = clean, exit 1 = lint issues found (a real failure
-    // for CI/agents — do not silently rewrite it to 0), exit 2+ = config/build
-    // error, None = killed by signal (OOM, SIGKILL).
-    Ok(exit_code)
+    // golangci-lint: exit 0 = clean, exit 1 = lint issues found (not an
+    // error — RTK reports the issues in its summary and returns 0, per the
+    // design decision pinned by lint_issues_are_summarised_and_exit_zero),
+    // exit 2+ = config/build error, None = killed by signal (OOM, SIGKILL).
+    Ok(if exit_code == 1 { 0 } else { exit_code })
 }
 
 fn run_passthrough(args: &[String], verbose: u8) -> Result<i32> {
