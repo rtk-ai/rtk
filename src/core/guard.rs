@@ -2,6 +2,12 @@
 //! and never renders an all-green summary when the child process exited non-zero.
 
 use crate::core::tracking::estimate_tokens;
+use regex::Regex;
+use std::sync::LazyLock;
+
+/// "0 failed" — but NOT "10 failed" or "20 failed", whose counts merely end in a zero.
+static ZERO_FAILED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:^|[^0-9])0 failed").unwrap());
 
 /// Returns `filtered`, or `raw` when `filtered` would emit more tokens.
 pub fn never_worse<'a>(raw: &'a str, filtered: &'a str) -> &'a str {
@@ -52,6 +58,13 @@ pub fn failure_fallback(tool: &str, exit_code: i32, output: &str) -> String {
 
 /// True when `text` is a compact "all-good" verdict that must never be rendered
 /// for a non-zero child exit.
+///
+/// IMPORTANT: this is an ALLOWLIST. The guard only fires when a summary matches a
+/// known green phrase, so any new green verdict string introduced by a filter
+/// (e.g. "ok ✓ …", "N passed", "No issues found") MUST be added here — and to the
+/// `guard_catches_known_green_verdicts` test below — or the guard silently stops
+/// protecting that filter. When green summary strings change, extend this function
+/// and the test in the same change.
 fn looks_green(text: &str) -> bool {
     let t = text.trim().to_lowercase();
     if t.is_empty() {
@@ -69,10 +82,17 @@ fn looks_green(text: &str) -> bool {
         return true;
     }
     // "N passed" verdicts (incl. formatter output like "PASS (N) FAIL (0)").
-    // A non-zero FAIL count or any "failed"/"errors" mention means it is NOT green.
+    // A non-zero FAIL count or any "errors" mention means it is NOT green.
     if t.contains("passed") || t.contains("pass (") {
-        if t.contains("failed") || t.contains("errors") {
+        if t.contains("errors") {
             return false;
+        }
+        // "failed" alone is ambiguous: "44 passed, 0 failed, 3 skipped" is green,
+        // but "4 passed, 1 failed" is not. A digit-boundary match on "0 failed"
+        // keeps verdicts like "0 failed" green while "10 failed"/"20 failed"
+        // (counts ending in zero) stay red.
+        if t.contains("failed") {
+            return ZERO_FAILED.is_match(&t);
         }
         return !t.contains("fail (") || t.contains("fail (0)");
     }
@@ -189,6 +209,69 @@ mod tests {
     fn guard_keeps_counts_ending_in_zero() {
         let filtered = "Lint: 10 errors, 0 warnings\n1. bad line";
         assert_eq!(guard_exit("raw", 1, "lint", filtered), filtered);
+    }
+
+    #[test]
+    fn zero_failed_matches_only_digit_boundary() {
+        assert!(ZERO_FAILED.is_match("0 failed"));
+        assert!(ZERO_FAILED.is_match("Pytest: 44 passed, 0 failed, 3 skipped"));
+        assert!(!ZERO_FAILED.is_match("1 failed"));
+        assert!(!ZERO_FAILED.is_match("4 passed, 1 failed"));
+        assert!(
+            !ZERO_FAILED.is_match("10 failed"),
+            "count ending in zero must not match"
+        );
+        assert!(
+            !ZERO_FAILED.is_match("20 failed"),
+            "count ending in zero must not match"
+        );
+    }
+
+    #[test]
+    fn guard_detects_zero_failed_with_skips_as_green() {
+        // "Pytest: 44 passed, 0 failed, 3 skipped" is a GREEN verdict — the guard
+        // must fall back on non-zero exit instead of rendering it.
+        let result = guard_exit(
+            "opaque failure output",
+            1,
+            "pytest",
+            "Pytest: 44 passed, 0 failed, 3 skipped",
+        );
+        assert!(
+            result.contains("pytest: failed (exit 1)"),
+            "expected failure fallback, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn guard_keeps_nonzero_failed_with_skips() {
+        let filtered = "Pytest: 44 passed, 1 failed, 3 skipped\n\nFailures:\n1. [FAIL] test_x";
+        assert_eq!(guard_exit("raw", 1, "pytest", filtered), filtered);
+    }
+
+    #[test]
+    fn guard_catches_known_green_verdicts() {
+        // Every green verdict string a filter can currently produce must be caught
+        // by the guard. If a NEW filter renders green output, add its verdict here
+        // (and to `looks_green`) so it cannot bypass the guard.
+        let green_verdicts = [
+            "Pytest: 5 passed",
+            "Pytest: 44 passed, 0 failed, 3 skipped",
+            "Ruff: No issues found",
+            "Ruff format: All files formatted correctly",
+            "PASS (13) FAIL (0)",
+            "ESLint: No issues found",
+            "Prettier: All files formatted correctly",
+        ];
+        for verdict in green_verdicts {
+            let result = guard_exit("opaque failure", 1, "tool", verdict);
+            assert!(
+                result.contains("tool: failed (exit 1)"),
+                "guard missed green verdict {verdict:?}: got {}",
+                result
+            );
+        }
     }
 
     #[test]
