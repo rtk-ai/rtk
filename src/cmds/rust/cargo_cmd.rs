@@ -251,69 +251,16 @@ impl BlockHandler for CargoTestHandler {
     }
 
     fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String> {
-        if self.summary_lines.is_empty() {
-            let json = extract_json_diagnostics(raw);
-            if self.has_compile_errors || !json.errors.is_empty() {
-                // Content-based (exit 0): a real compile error yields "cargo test: N
-                // errors"; a bare "could not compile" leaves the raw tail fallback.
-                let build_filtered = filter_cargo_build_labeled(raw, "test", 0);
-                if build_filtered.contains("cargo test:") {
-                    return Some(format!("{}\n", build_filtered));
-                }
-                // Fallback: last 5 meaningful lines
-                let meaningful: Vec<&str> = raw
-                    .lines()
-                    .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("Compiling"))
-                    .collect();
-                let last5: Vec<&str> = meaningful.iter().rev().take(5).rev().copied().collect();
-                return Some(format!("{}\n", last5.join("\n")));
-            }
-        }
-
-        // No failures emitted — aggregate pass results
-        let mut aggregated: Option<AggregatedTestResult> = None;
-        let mut all_parsed = true;
-
-        for line in &self.summary_lines {
-            if let Some(parsed) = AggregatedTestResult::parse_line(line) {
-                if let Some(ref mut agg) = aggregated {
-                    agg.merge(&parsed);
-                } else {
-                    aggregated = Some(parsed);
-                }
-            } else {
-                all_parsed = false;
-                break;
-            }
-        }
-
-        if all_parsed {
-            if let Some(agg) = aggregated {
-                if agg.suites > 0 {
-                    let line = format!("{}\n", agg.format_compact());
-                    // "cargo test: N passed (M suites)" must never be rendered
-                    // for a non-zero child exit (killed mid-run, signal, etc.).
-                    return Some(crate::core::guard::guard_exit(
-                        raw,
-                        exit_code,
-                        "cargo test",
-                        &line,
-                    ));
-                }
-            }
-        }
-
-        // Fallback: show raw summary lines
-        if !self.summary_lines.is_empty() {
-            let mut s = String::new();
-            for line in &self.summary_lines {
-                s.push_str(line);
-                s.push('\n');
-            }
-            return Some(s);
-        }
-
-        None
+        // Compacted summary (compute_test_summary), then the never-worse
+        // guards in this order: the OUTPUT guard first keeps the compact
+        // summary within the raw token budget, then the EXIT guard ensures a
+        // green "cargo test: N passed (M suites)" verdict is never rendered
+        // for a non-zero child exit (killed mid-run, signal, ...) — it is
+        // replaced with a standardized failure verdict whose raw tail is
+        // intentionally exempt from the output guard.
+        let summary = self.compute_test_summary(raw)?;
+        let budgeted = crate::core::guard::never_worse(raw, &summary);
+        Some(crate::core::guard::guard_exit(raw, exit_code, "cargo test", budgeted))
     }
 }
 
