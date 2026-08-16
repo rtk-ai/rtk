@@ -6,8 +6,21 @@ its `ipython` tool and rewrites supported standalone commands through
 The extension preserves `%%bash` options and treats RTK exit status `3` with
 rewritten output as a successful rewrite.
 
-Install it by copying the extension into Prime Agent's global extension
-folder (`~/.prime/agent/extensions/`) and restarting Prime Agent.
+Because Prime Agent is built on Pi, the extension uses the same
+`@earendil-works/pi-coding-agent` `ExtensionAPI`. At load time it probes for
+`rtk >= 0.23.0` and disables itself with a warning if RTK is missing or too
+old. Set `RTK_DISABLED=1` to bypass rewriting.
+
+Install it using RTK's installer:
+
+```bash
+rtk init --agent prime-agent        # project-scoped (.prime/extensions/rtk.ts)
+rtk init --agent prime-agent --global # user-scoped (~/.prime/agent/extensions/rtk.ts)
+```
+
+Or copy `integrations/prime-agent/rtk-rewrite.ts` manually into
+`~/.prime/agent/extensions/` and restart Prime Agent. RTK can also be
+bypassed per-session with `RTK_DISABLED=1`.
 
 ## Smoke test
 

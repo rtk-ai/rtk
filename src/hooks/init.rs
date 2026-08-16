@@ -18,8 +18,10 @@ use super::constants::{
     DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
     HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
     HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
-    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR,
-    VIBE_HOOKS_FILE, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
+    PI_PLUGIN_FILE, PRIME_AGENT_DIR, PRIME_AGENT_DIR_ENV, PRIME_AGENT_EXTENSIONS_SUBDIR,
+    PRIME_AGENT_LOCAL_DIR, PRIME_AGENT_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
+    SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOKS_FILE, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME,
+    VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
 };
 use super::integrity;
 use super::is_claude_hook_command;
@@ -29,6 +31,9 @@ const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
 
 // Embedded Pi extension (auto-rewrite)
 const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
+
+// Embedded Prime Agent extension (auto-rewrite)
+const PRIME_AGENT_PLUGIN: &str = include_str!("../../integrations/prime-agent/rtk-rewrite.ts");
 
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
@@ -3501,6 +3506,146 @@ fn print_pi_result(plugin_path: &Path, installed: bool) {
     println!();
     println!("Pi will load the extension automatically on next start.");
     println!("Verify: pi -e {} --no-session", plugin_path.display());
+}
+
+// ── Prime Agent extension helpers ───────────────────────────────────────────
+
+/// Resolve Prime Agent config directory, honouring `PRIME_AGENT_DIR` override.
+fn resolve_prime_agent_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var(PRIME_AGENT_DIR_ENV) {
+        if !dir.is_empty() {
+            return Ok(PathBuf::from(dir));
+        }
+    }
+    resolve_home_subdir(PRIME_AGENT_DIR)
+}
+
+/// Return the path to the installed Prime Agent extension file.
+fn prime_agent_plugin_path(prime_agent_dir: &Path) -> PathBuf {
+    prime_agent_dir
+        .join(PRIME_AGENT_EXTENSIONS_SUBDIR)
+        .join(PRIME_AGENT_PLUGIN_FILE)
+}
+
+/// Return the Prime Agent extension install path for the given scope.
+/// global=true  → `$PRIME_AGENT_DIR/extensions/rtk.ts`
+/// global=false → `./.prime/extensions/rtk.ts`
+fn prime_agent_plugin_path_for_scope(global: bool) -> Result<PathBuf> {
+    if global {
+        Ok(prime_agent_plugin_path(&resolve_prime_agent_dir()?))
+    } else {
+        Ok(PathBuf::from(PRIME_AGENT_LOCAL_DIR)
+            .join(PRIME_AGENT_EXTENSIONS_SUBDIR)
+            .join(PRIME_AGENT_PLUGIN_FILE))
+    }
+}
+
+/// Write the Prime Agent extension file if missing or outdated. Returns true if written.
+fn ensure_prime_agent_plugin_installed(path: &Path, ctx: InitContext) -> Result<bool> {
+    write_if_changed(path, PRIME_AGENT_PLUGIN, "Prime Agent extension", ctx)
+}
+
+/// Create the Prime Agent extensions directory.
+fn ensure_prime_agent_extensions_dir(parent: &Path, name: &str, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    if dry_run {
+        if !parent.exists() {
+            println!("[dry-run] would create {}: {}", name, parent.display());
+        }
+    } else {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}: {}", name, parent.display()))?;
+    }
+    Ok(())
+}
+
+/// Uninstall Prime Agent extension for the given scope.
+fn uninstall_prime_agent(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+    let plugin_path = prime_agent_plugin_path_for_scope(global)?;
+    let mut removed: Vec<String> = Vec::new();
+
+    if plugin_path.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove Prime Agent extension: {}",
+                plugin_path.display()
+            );
+        } else {
+            // nosemgrep: filesystem-deletion -- uninstall removes only the RTK-managed extension file.
+            fs::remove_file(&plugin_path).with_context(|| {
+                format!("Failed to remove Prime Agent extension: {}", plugin_path.display())
+            })?;
+            if verbose > 0 {
+                eprintln!("Removed Prime Agent extension: {}", plugin_path.display());
+            }
+            removed.push(format!("Prime Agent extension: {}", plugin_path.display()));
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    } else if !removed.is_empty() {
+        println!("RTK uninstalled (Prime Agent):");
+        for item in &removed {
+            println!("  - {}", item);
+        }
+        println!("\nRestart Prime Agent to apply changes.");
+    } else {
+        println!("RTK Prime Agent extension was not installed (nothing to remove)");
+    }
+    Ok(())
+}
+
+/// Install the Prime Agent extension (hook-only; no AGENTS.md injection).
+///
+/// global=true  → `$PRIME_AGENT_DIR/extensions/rtk.ts`
+/// global=false → `.prime/extensions/rtk.ts`
+pub fn run_prime_agent_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext {
+        verbose: _,
+        dry_run,
+    } = ctx;
+    let plugin_path = if global {
+        let prime_agent_dir = resolve_prime_agent_dir()?;
+        let path = prime_agent_plugin_path(&prime_agent_dir);
+        if let Some(parent) = path.parent() {
+            ensure_prime_agent_extensions_dir(parent, "Prime Agent extensions directory", ctx)?;
+        }
+        path
+    } else {
+        let path = prime_agent_plugin_path_for_scope(false)?;
+        if let Some(parent) = path.parent() {
+            ensure_prime_agent_extensions_dir(parent, "local Prime Agent extensions directory", ctx)?;
+        }
+        path
+    };
+
+    let installed = ensure_prime_agent_plugin_installed(&plugin_path, ctx)?;
+
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        print_prime_agent_result(&plugin_path, installed);
+    }
+
+    Ok(())
+}
+
+fn print_prime_agent_result(plugin_path: &Path, installed: bool) {
+    let status = if installed {
+        "installed"
+    } else {
+        "already up to date"
+    };
+    println!("RTK Prime Agent extension {}:", status);
+    println!("  Extension: {}", plugin_path.display());
+    println!();
+    println!("Prime Agent will load the extension automatically on next start.");
+    println!(
+        "Verify: prime-agent -e {} --no-session",
+        plugin_path.display()
+    );
 }
 
 /// Return OpenCode plugin path: ~/.config/opencode/plugins/rtk.ts
@@ -7163,6 +7308,7 @@ mod tests {
     use std::sync::Mutex;
     static CLAUDE_DIR_LOCK: Mutex<()> = Mutex::new(());
     static PI_DIR_LOCK: Mutex<()> = Mutex::new(());
+    static PRIME_AGENT_DIR_LOCK: Mutex<()> = Mutex::new(());
     /// Serialises all tests that mutate the process-wide working directory.
     static CWD_LOCK: Mutex<()> = Mutex::new(());
 
@@ -7191,6 +7337,20 @@ mod tests {
         match orig {
             Some(v) => std::env::set_var(PI_CODING_AGENT_DIR_ENV, v),
             None => std::env::remove_var(PI_CODING_AGENT_DIR_ENV),
+        }
+    }
+
+    fn with_prime_agent_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
+        let _guard = PRIME_AGENT_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prime_agent_dir = tmp.path().join("prime_agent");
+        fs::create_dir_all(&prime_agent_dir).unwrap();
+
+        let orig = std::env::var_os(PRIME_AGENT_DIR_ENV);
+        std::env::set_var(PRIME_AGENT_DIR_ENV, &prime_agent_dir);
+        f(&prime_agent_dir);
+        match orig {
+            Some(v) => std::env::set_var(PRIME_AGENT_DIR_ENV, v),
+            None => std::env::remove_var(PRIME_AGENT_DIR_ENV),
         }
     }
 
@@ -7737,6 +7897,261 @@ mod tests {
         assert!(
             plugin.exists(),
             "dry-run uninstall must not remove the local Pi extension"
+        );
+    }
+
+    // ─── Prime Agent tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_run_prime_agent_mode_global_installs_plugin() {
+        let tmp = TempDir::new().unwrap();
+        with_prime_agent_dir_override(&tmp, |prime_agent_dir| {
+            run_prime_agent_mode(true, InitContext::default()).unwrap();
+
+            let plugin = prime_agent_dir
+                .join(PRIME_AGENT_EXTENSIONS_SUBDIR)
+                .join(PRIME_AGENT_PLUGIN_FILE);
+            assert!(plugin.exists(), "global Prime Agent extension must be created");
+
+            let content = fs::read_to_string(&plugin).unwrap();
+            assert!(
+                content.contains("rtk rewrite"),
+                "extension must delegate to rtk rewrite"
+            );
+        });
+    }
+
+    #[test]
+    fn test_run_prime_agent_mode_local_installs_plugin() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let result = run_prime_agent_mode(false, InitContext::default());
+        std::env::set_current_dir(&cwd).unwrap();
+        result.unwrap();
+
+        let plugin = tmp
+            .path()
+            .join(".prime")
+            .join(PRIME_AGENT_EXTENSIONS_SUBDIR)
+            .join(PRIME_AGENT_PLUGIN_FILE);
+        assert!(plugin.exists(), "local Prime Agent extension must be created");
+    }
+
+    #[test]
+    fn test_run_prime_agent_mode_global_does_not_create_agents_md() {
+        let tmp = TempDir::new().unwrap();
+        with_prime_agent_dir_override(&tmp, |prime_agent_dir| {
+            run_prime_agent_mode(true, InitContext::default()).unwrap();
+
+            let agents_md = prime_agent_dir.join(AGENTS_MD);
+            assert!(!agents_md.exists(), "AGENTS.md must not be created");
+        });
+    }
+
+    #[test]
+    fn test_run_prime_agent_mode_global_creates_plugin_when_dir_absent() {
+        let tmp = TempDir::new().unwrap();
+        let absent_dir = tmp.path().join("no_such_prime_agent_dir");
+        let _guard = PRIME_AGENT_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let orig = std::env::var_os(PRIME_AGENT_DIR_ENV);
+        std::env::set_var(PRIME_AGENT_DIR_ENV, &absent_dir);
+
+        let result = run_prime_agent_mode(true, InitContext::default());
+
+        match orig {
+            Some(v) => std::env::set_var(PRIME_AGENT_DIR_ENV, v),
+            None => std::env::remove_var(PRIME_AGENT_DIR_ENV),
+        }
+
+        result.unwrap();
+
+        let plugin = absent_dir
+            .join(PRIME_AGENT_EXTENSIONS_SUBDIR)
+            .join(PRIME_AGENT_PLUGIN_FILE);
+        assert!(
+            plugin.exists(),
+            "plugin must be written even when dir was absent"
+        );
+
+        let agents_md = absent_dir.join(AGENTS_MD);
+        assert!(!agents_md.exists(), "AGENTS.md must not be created");
+    }
+
+    #[test]
+    fn test_prime_agent_global_uninstall_removes_plugin() {
+        let tmp = TempDir::new().unwrap();
+        with_prime_agent_dir_override(&tmp, |prime_agent_dir| {
+            run_prime_agent_mode(true, InitContext::default()).unwrap();
+
+            let plugin = prime_agent_dir
+                .join(PRIME_AGENT_EXTENSIONS_SUBDIR)
+                .join(PRIME_AGENT_PLUGIN_FILE);
+            assert!(plugin.exists());
+
+            uninstall_prime_agent(true, InitContext::default()).unwrap();
+
+            assert!(!plugin.exists(), "plugin must be removed");
+        });
+    }
+
+    #[test]
+    fn test_prime_agent_local_uninstall_removes_plugin() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        run_prime_agent_mode(false, InitContext::default()).unwrap();
+        let result = uninstall_prime_agent(false, InitContext::default());
+        std::env::set_current_dir(&cwd).unwrap();
+        result.unwrap();
+
+        let plugin = tmp
+            .path()
+            .join(".prime")
+            .join(PRIME_AGENT_EXTENSIONS_SUBDIR)
+            .join(PRIME_AGENT_PLUGIN_FILE);
+        assert!(!plugin.exists(), "local plugin must be removed");
+    }
+
+    #[test]
+    fn test_prime_agent_plugin_path_for_scope_global() {
+        let tmp = TempDir::new().unwrap();
+        with_prime_agent_dir_override(&tmp, |prime_agent_dir| {
+            let path = prime_agent_plugin_path_for_scope(true).unwrap();
+            assert_eq!(
+                path,
+                prime_agent_dir
+                    .join(PRIME_AGENT_EXTENSIONS_SUBDIR)
+                    .join(PRIME_AGENT_PLUGIN_FILE)
+            );
+        });
+    }
+
+    #[test]
+    fn test_prime_agent_plugin_path_for_scope_local() {
+        let path = prime_agent_plugin_path_for_scope(false).unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from(PRIME_AGENT_LOCAL_DIR)
+                .join(PRIME_AGENT_EXTENSIONS_SUBDIR)
+                .join(PRIME_AGENT_PLUGIN_FILE)
+        );
+    }
+
+    #[test]
+    fn test_run_prime_agent_mode_global_dry_run_writes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        with_prime_agent_dir_override(&tmp, |prime_agent_dir| {
+            run_prime_agent_mode(
+                true,
+                InitContext {
+                    verbose: 0,
+                    dry_run: true,
+                },
+            )
+            .unwrap();
+
+            assert!(
+                !prime_agent_dir.join(PRIME_AGENT_EXTENSIONS_SUBDIR).exists(),
+                "dry-run must not create the Prime Agent extensions directory"
+            );
+            assert!(
+                !prime_agent_dir
+                    .join(PRIME_AGENT_EXTENSIONS_SUBDIR)
+                    .join(PRIME_AGENT_PLUGIN_FILE)
+                    .exists(),
+                "dry-run must not create the Prime Agent extension file"
+            );
+        });
+    }
+
+    #[test]
+    fn test_run_prime_agent_mode_local_dry_run_writes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let result = run_prime_agent_mode(
+            false,
+            InitContext {
+                verbose: 0,
+                dry_run: true,
+            },
+        );
+        std::env::set_current_dir(&cwd).unwrap();
+        result.unwrap();
+
+        assert!(
+            !tmp.path().join(".prime").join(PRIME_AGENT_EXTENSIONS_SUBDIR).exists(),
+            "dry-run must not create .prime/extensions/"
+        );
+    }
+
+    #[test]
+    fn test_prime_agent_global_uninstall_dry_run_keeps_plugin() {
+        let tmp = TempDir::new().unwrap();
+        with_prime_agent_dir_override(&tmp, |prime_agent_dir| {
+            run_prime_agent_mode(true, InitContext::default()).unwrap();
+            let plugin = prime_agent_dir
+                .join(PRIME_AGENT_EXTENSIONS_SUBDIR)
+                .join(PRIME_AGENT_PLUGIN_FILE);
+            assert!(
+                plugin.exists(),
+                "plugin must exist before uninstall dry-run"
+            );
+
+            uninstall_prime_agent(
+                true,
+                InitContext {
+                    verbose: 0,
+                    dry_run: true,
+                },
+            )
+            .unwrap();
+
+            assert!(
+                plugin.exists(),
+                "dry-run uninstall must not remove the Prime Agent extension"
+            );
+        });
+    }
+
+    #[test]
+    fn test_prime_agent_local_uninstall_dry_run_keeps_plugin() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        run_prime_agent_mode(false, InitContext::default()).unwrap();
+        let plugin = tmp
+            .path()
+            .join(".prime")
+            .join(PRIME_AGENT_EXTENSIONS_SUBDIR)
+            .join(PRIME_AGENT_PLUGIN_FILE);
+        assert!(
+            plugin.exists(),
+            "plugin must exist before uninstall dry-run"
+        );
+
+        let result = uninstall_prime_agent(
+            false,
+            InitContext {
+                verbose: 0,
+                dry_run: true,
+            },
+        );
+        std::env::set_current_dir(&cwd).unwrap();
+        result.unwrap();
+
+        assert!(
+            plugin.exists(),
+            "dry-run uninstall must not remove the local Prime Agent extension"
         );
     }
 
