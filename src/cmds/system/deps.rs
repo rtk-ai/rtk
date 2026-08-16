@@ -7,6 +7,15 @@ use anyhow::Result;
 use regex::Regex;
 use std::fs;
 use std::path::Path;
+use std::sync::LazyLock;
+
+static CARGO_DEP_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^([a-zA-Z0-9_-]+)\s*=\s*(?:"([^"]+)"|.*version\s*=\s*"([^"]+)")"#).unwrap()
+});
+static CARGO_SECTION_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\[([^\]]+)\]").unwrap());
+static REQUIREMENTS_DEP_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^([a-zA-Z0-9_-]+)([=<>!~]+.*)?$").unwrap());
 
 const MAX_DEPS: usize = CAP_WARNINGS;
 // dev deps are secondary to prod — show fewer.
@@ -82,21 +91,18 @@ pub fn run(path: &Path, verbose: u8) -> Result<()> {
 
 fn summarize_cargo_str(path: &Path) -> Result<String> {
     let content = fs::read_to_string(path)?;
-    let dep_re =
-        Regex::new(r#"^([a-zA-Z0-9_-]+)\s*=\s*(?:"([^"]+)"|.*version\s*=\s*"([^"]+)")"#).unwrap();
-    let section_re = Regex::new(r"^\[([^\]]+)\]").unwrap();
     let mut current_section = String::new();
     let mut deps = Vec::new();
     let mut dev_deps = Vec::new();
     let mut out = String::new();
 
     for line in content.lines() {
-        if let Some(caps) = section_re.captures(line) {
+        if let Some(caps) = CARGO_SECTION_RE.captures(line) {
             current_section = caps
                 .get(1)
                 .map(|m| m.as_str().to_string())
                 .unwrap_or_default();
-        } else if let Some(caps) = dep_re.captures(line) {
+        } else if let Some(caps) = CARGO_DEP_RE.captures(line) {
             let name = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let version = caps
                 .get(2)
@@ -171,7 +177,6 @@ fn summarize_package_json_str(path: &Path) -> Result<String> {
 
 fn summarize_requirements_str(path: &Path) -> Result<String> {
     let content = fs::read_to_string(path)?;
-    let dep_re = Regex::new(r"^([a-zA-Z0-9_-]+)([=<>!~]+.*)?$").unwrap();
     let mut deps = Vec::new();
     let mut out = String::new();
 
@@ -180,7 +185,7 @@ fn summarize_requirements_str(path: &Path) -> Result<String> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some(caps) = dep_re.captures(line) {
+        if let Some(caps) = REQUIREMENTS_DEP_RE.captures(line) {
             let name = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let version = caps.get(2).map(|m| m.as_str()).unwrap_or("");
             deps.push(format!("{}{}", name, version));
