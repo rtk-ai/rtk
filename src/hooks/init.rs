@@ -18,10 +18,10 @@ use super::constants::{
     DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
     HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
     HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
-    PI_PLUGIN_FILE, PRIME_AGENT_DIR, PRIME_AGENT_DIR_ENV, PRIME_AGENT_EXTENSIONS_SUBDIR,
-    PRIME_AGENT_LOCAL_DIR, PRIME_AGENT_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
-    SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOKS_FILE, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME,
-    VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
+    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, PRIME_AGENT_DIR, PRIME_AGENT_DIR_ENV,
+    PRIME_AGENT_EXTENSIONS_SUBDIR, PRIME_AGENT_LOCAL_DIR, PRIME_AGENT_PLUGIN_FILE,
+    REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOKS_FILE,
+    VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
 };
 use super::integrity;
 use super::is_claude_hook_command;
@@ -3574,7 +3574,10 @@ fn uninstall_prime_agent(global: bool, ctx: InitContext) -> Result<()> {
         } else {
             // nosemgrep: filesystem-deletion -- uninstall removes only the RTK-managed extension file.
             fs::remove_file(&plugin_path).with_context(|| {
-                format!("Failed to remove Prime Agent extension: {}", plugin_path.display())
+                format!(
+                    "Failed to remove Prime Agent extension: {}",
+                    plugin_path.display()
+                )
             })?;
             if verbose > 0 {
                 eprintln!("Removed Prime Agent extension: {}", plugin_path.display());
@@ -3616,7 +3619,11 @@ pub fn run_prime_agent_mode(global: bool, ctx: InitContext) -> Result<()> {
     } else {
         let path = prime_agent_plugin_path_for_scope(false)?;
         if let Some(parent) = path.parent() {
-            ensure_prime_agent_extensions_dir(parent, "local Prime Agent extensions directory", ctx)?;
+            ensure_prime_agent_extensions_dir(
+                parent,
+                "local Prime Agent extensions directory",
+                ctx,
+            )?;
         }
         path
     };
@@ -7341,7 +7348,9 @@ mod tests {
     }
 
     fn with_prime_agent_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
-        let _guard = PRIME_AGENT_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = PRIME_AGENT_DIR_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prime_agent_dir = tmp.path().join("prime_agent");
         fs::create_dir_all(&prime_agent_dir).unwrap();
 
@@ -7911,7 +7920,10 @@ mod tests {
             let plugin = prime_agent_dir
                 .join(PRIME_AGENT_EXTENSIONS_SUBDIR)
                 .join(PRIME_AGENT_PLUGIN_FILE);
-            assert!(plugin.exists(), "global Prime Agent extension must be created");
+            assert!(
+                plugin.exists(),
+                "global Prime Agent extension must be created"
+            );
 
             let content = fs::read_to_string(&plugin).unwrap();
             assert!(
@@ -7937,7 +7949,10 @@ mod tests {
             .join(".prime")
             .join(PRIME_AGENT_EXTENSIONS_SUBDIR)
             .join(PRIME_AGENT_PLUGIN_FILE);
-        assert!(plugin.exists(), "local Prime Agent extension must be created");
+        assert!(
+            plugin.exists(),
+            "local Prime Agent extension must be created"
+        );
     }
 
     #[test]
@@ -7955,7 +7970,9 @@ mod tests {
     fn test_run_prime_agent_mode_global_creates_plugin_when_dir_absent() {
         let tmp = TempDir::new().unwrap();
         let absent_dir = tmp.path().join("no_such_prime_agent_dir");
-        let _guard = PRIME_AGENT_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = PRIME_AGENT_DIR_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let orig = std::env::var_os(PRIME_AGENT_DIR_ENV);
         std::env::set_var(PRIME_AGENT_DIR_ENV, &absent_dir);
 
@@ -8087,7 +8104,10 @@ mod tests {
         result.unwrap();
 
         assert!(
-            !tmp.path().join(".prime").join(PRIME_AGENT_EXTENSIONS_SUBDIR).exists(),
+            !tmp.path()
+                .join(".prime")
+                .join(PRIME_AGENT_EXTENSIONS_SUBDIR)
+                .exists(),
             "dry-run must not create .prime/extensions/"
         );
     }
