@@ -3560,7 +3560,7 @@ fn ensure_prime_agent_extensions_dir(parent: &Path, name: &str, ctx: InitContext
 }
 
 /// Uninstall Prime Agent extension for the given scope.
-fn uninstall_prime_agent(global: bool, ctx: InitContext) -> Result<()> {
+pub fn uninstall_prime_agent(global: bool, ctx: InitContext) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
     let plugin_path = prime_agent_plugin_path_for_scope(global)?;
     let mut removed: Vec<String> = Vec::new();
