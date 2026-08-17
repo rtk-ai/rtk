@@ -705,11 +705,7 @@ pub fn run_codebuddy() -> Result<()> {
         }
     };
 
-    let cmd = match v
-        .pointer("/tool_input/command")
-        .and_then(|c| c.as_str())
-        .filter(|c| !c.is_empty())
-    {
+    let cmd = match codebuddy_execute_command(&v) {
         Some(c) => c.to_string(),
         None => return Ok(()),
     };
@@ -721,6 +717,22 @@ pub fn run_codebuddy() -> Result<()> {
         let _ = writeln!(io::stdout(), "{response}");
     }
     Ok(())
+}
+
+/// Extract the shell command when the payload targets CodeBuddy's shell tool.
+///
+/// CodeBuddy uses `Bash` in CLI mode and `execute_command` in IDE mode (the
+/// installed matcher is `Bash|execute_command`). Tolerate a missing `tool_name`
+/// defensively, mirroring `droid_execute_command`.
+fn codebuddy_execute_command(v: &Value) -> Option<&str> {
+    let tool_name = v.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
+    if !matches!(tool_name, "Bash" | "execute_command" | "") {
+        return None;
+    }
+
+    v.pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
 }
 
 /// Build the CodeBuddy `PreToolUse` hook response for a verdict, mirroring RTK's

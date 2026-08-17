@@ -133,31 +133,7 @@ pub(crate) fn check_command_with_rules(
 ///
 /// Missing files and malformed JSON are silently skipped.
 fn load_permission_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
-    let mut deny_rules = Vec::new();
-    let mut ask_rules = Vec::new();
-    let mut allow_rules = Vec::new();
-
-    for path in get_settings_paths() {
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(json) = serde_json::from_str::<Value>(&content) else {
-            eprintln!(
-                "[rtk] warning: failed to parse permissions from {}",
-                path.display()
-            );
-            continue;
-        };
-        let Some(permissions) = json.get("permissions") else {
-            continue;
-        };
-
-        append_bash_rules(permissions.get("deny"), &mut deny_rules);
-        append_bash_rules(permissions.get("ask"), &mut ask_rules);
-        append_bash_rules(permissions.get("allow"), &mut allow_rules);
-    }
-
-    (deny_rules, ask_rules, allow_rules)
+    load_rules_from_paths(&get_settings_paths())
 }
 
 /// Extract Bash-scoped patterns from a JSON array and append them to `target`.
@@ -198,12 +174,22 @@ fn get_settings_paths() -> Vec<PathBuf> {
 /// stored under `permissions.deny` / `permissions.ask` / `permissions.allow`
 /// in `.codebuddy/settings.json` and `.codebuddy/settings.local.json`.
 fn load_codebuddy_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
+    load_rules_from_paths(&get_codebuddy_settings_paths())
+}
+
+/// Load deny, ask, and allow Bash rules from an ordered list of settings files.
+///
+/// Shared by Claude (`load_permission_rules`) and CodeBuddy
+/// (`load_codebuddy_rules`), which differ only in which settings paths they
+/// resolve. Missing files and malformed JSON are silently skipped; later files
+/// are merged with earlier ones (all rules accumulate).
+fn load_rules_from_paths(paths: &[PathBuf]) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut deny_rules = Vec::new();
     let mut ask_rules = Vec::new();
     let mut allow_rules = Vec::new();
 
-    for path in get_codebuddy_settings_paths() {
-        let Ok(content) = std::fs::read_to_string(&path) else {
+    for path in paths {
+        let Ok(content) = std::fs::read_to_string(path) else {
             continue;
         };
         let Ok(json) = serde_json::from_str::<Value>(&content) else {

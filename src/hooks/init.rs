@@ -2599,8 +2599,14 @@ fn write_rtk_block(
     Ok(action)
 }
 
-/// Patch CLAUDE.md: add @RTK.md, migrate if old block exists
+/// Patch an agent markdown file: add @RTK.md, migrate if old block exists
 fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
+    patch_md_with_ref(path, CLAUDE_MD, ctx)
+}
+
+/// Patch an agent markdown file (e.g. CLAUDE.md, CODEBUDDY.md): add @RTK.md,
+/// migrate if old block exists. `md_name` is used only for log/dry-run output.
+fn patch_md_with_ref(path: &Path, md_name: &str, ctx: InitContext) -> Result<bool> {
     let InitContext { verbose, dry_run } = ctx;
     let mut content = if path.exists() {
         fs::read_to_string(path)?
@@ -2617,7 +2623,7 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
             content = new_content;
             migrated = true;
             if verbose > 0 {
-                eprintln!("Migrated: removed old RTK block from CLAUDE.md");
+                eprintln!("Migrated: removed old RTK block from {}", md_name);
             }
         }
     }
@@ -2625,12 +2631,13 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
     // Check if @RTK.md already present
     if content.contains(RTK_MD_REF) {
         if verbose > 0 {
-            eprintln!("@RTK.md reference already present in CLAUDE.md");
+            eprintln!("@RTK.md reference already present in {}", md_name);
         }
         if migrated {
             if dry_run {
                 println!(
-                    "[dry-run] would migrate old RTK block in CLAUDE.md: {}",
+                    "[dry-run] would migrate old RTK block in {}: {}",
+                    md_name,
                     path.display()
                 );
             } else {
@@ -2649,7 +2656,8 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
 
     if dry_run {
         println!(
-            "[dry-run] would add @RTK.md reference to CLAUDE.md: {}",
+            "[dry-run] would add @RTK.md reference to {}: {}",
+            md_name,
             path.display()
         );
         if verbose > 0 {
@@ -2659,7 +2667,7 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
         fs::write(path, new_content)?;
 
         if verbose > 0 {
-            eprintln!("Added @RTK.md reference to CLAUDE.md");
+            eprintln!("Added @RTK.md reference to {}", md_name);
         }
     }
 
@@ -5235,7 +5243,7 @@ pub fn run_codebuddy_mode(
     // 2. Patch CODEBUDDY.md (add @RTK.md reference, migrate old blocks)
     if !hook_only {
         let codebuddy_md_path = codebuddy_dir.join(CODEBUDDY_MD);
-        patch_claude_md(&codebuddy_md_path, ctx)?;
+        patch_md_with_ref(&codebuddy_md_path, CODEBUDDY_MD, ctx)?;
     }
 
     // 3. Patch ~/.codebuddy/settings.json with the PreToolUse hook
@@ -5267,8 +5275,9 @@ pub fn run_codebuddy_mode(
             PatchResult::Declined | PatchResult::Skipped => {
                 println!(
                     "\n  To add manually, patch ~/.codebuddy/settings.json:\n  \
-                     {{\"hooks\": {{\"PreToolUse\": [{{\"matcher\": \"Bash|execute_command\", \"hooks\": \
-                     [{{\"type\": \"command\", \"command\": \"rtk hook codebuddy\"}}]}}]}}}}"
+                     {{\"hooks\": {{\"PreToolUse\": [{{\"matcher\": \"{}\", \"hooks\": \
+                     [{{\"type\": \"command\", \"command\": \"{}\"}}]}}]}}}}",
+                    CODEBUDDY_MATCHER, CODEBUDDY_HOOK_COMMAND
                 );
             }
         }
