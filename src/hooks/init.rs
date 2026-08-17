@@ -871,14 +871,18 @@ pub fn uninstall(
 
 fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
-    if !global {
-        anyhow::bail!(
-            "Uninstall only works with --global flag. For local projects, manually remove RTK from AGENTS.md"
-        );
-    }
-
-    let codex_dir = resolve_codex_dir()?;
-    let removed = uninstall_codex_at(&codex_dir, ctx)?;
+    let removed = if global {
+        let codex_dir = resolve_codex_dir()?;
+        uninstall_codex_at(&codex_dir, ctx)?
+    } else {
+        uninstall_codex_with_paths(
+            Path::new(AGENTS_MD),
+            Path::new(RTK_MD),
+            &Path::new(CODEX_DIR).join(HOOKS_JSON),
+            &[RTK_MD_REF],
+            ctx,
+        )?
+    };
 
     if removed.is_empty() {
         println!("RTK was not installed for Codex CLI (nothing to remove)");
@@ -898,21 +902,35 @@ fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
 }
 
 fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    let absolute_rtk_md_ref = codex_rtk_md_ref(codex_dir);
+    uninstall_codex_with_paths(
+        &codex_dir.join(AGENTS_MD),
+        &codex_dir.join(RTK_MD),
+        &codex_dir.join(HOOKS_JSON),
+        &[RTK_MD_REF, absolute_rtk_md_ref.as_str()],
+        ctx,
+    )
+}
+
+fn uninstall_codex_with_paths(
+    agents_md_path: &Path,
+    rtk_md_path: &Path,
+    hooks_json_path: &Path,
+    rtk_md_refs: &[&str],
+    ctx: InitContext,
+) -> Result<Vec<String>> {
     let InitContext { verbose, dry_run } = ctx;
     let mut removed = Vec::new();
-    let absolute_rtk_md_ref = codex_rtk_md_ref(codex_dir);
 
-    let hooks_json_path = codex_dir.join(HOOKS_JSON);
-    if remove_codex_hook_from_file(&hooks_json_path, ctx)? {
+    if remove_codex_hook_from_file(hooks_json_path, ctx)? {
         removed.push(format!("hooks.json: removed {} entry", CODEX_HOOK_COMMAND));
     }
 
-    let rtk_md_path = codex_dir.join(RTK_MD);
     if rtk_md_path.exists() {
         if dry_run {
             println!("[dry-run] would remove RTK.md: {}", rtk_md_path.display());
         } else {
-            fs::remove_file(&rtk_md_path)
+            fs::remove_file(rtk_md_path)
                 .with_context(|| format!("Failed to remove RTK.md: {}", rtk_md_path.display()))?;
             if verbose > 0 {
                 eprintln!("Removed RTK.md: {}", rtk_md_path.display());
@@ -921,9 +939,8 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
         removed.push(format!("RTK.md: {}", rtk_md_path.display()));
     }
 
-    let agents_md_path = codex_dir.join(AGENTS_MD);
     if agents_md_path.exists() {
-        let content = fs::read_to_string(&agents_md_path)
+        let content = fs::read_to_string(agents_md_path)
             .with_context(|| format!("Failed to read AGENTS.md: {}", agents_md_path.display()))?;
 
         let mut working_content = content.clone();
@@ -939,17 +956,13 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
         }
 
         if agents_changed {
-            atomic_write(&agents_md_path, &working_content).with_context(|| {
+            atomic_write(agents_md_path, &working_content).with_context(|| {
                 format!("Failed to write AGENTS.md: {}", agents_md_path.display())
             })?;
         }
     }
 
-    if remove_rtk_reference_from_agents(
-        &agents_md_path,
-        &[RTK_MD_REF, absolute_rtk_md_ref.as_str()],
-        ctx,
-    )? {
+    if remove_rtk_reference_from_agents(agents_md_path, rtk_md_refs, ctx)? {
         removed.push("AGENTS.md: removed @RTK.md reference".to_string());
     }
 
@@ -4353,6 +4366,7 @@ fn show_codex_config() -> Result<()> {
     println!("\nUsage:");
     println!("  rtk init --codex              # Configure local AGENTS.md + RTK.md + hooks.json");
     println!("  rtk init -g --codex           # Configure global AGENTS.md + RTK.md + hooks.json");
+    println!("  rtk init --codex --uninstall     # Remove local Codex RTK artifacts");
     println!("  rtk init -g --codex --uninstall  # Remove global Codex RTK artifacts");
 
     Ok(())
@@ -6586,6 +6600,32 @@ mod tests {
         let content = fs::read_to_string(&agents_md).unwrap();
         assert!(!content.contains("@RTK.md"));
         assert!(content.contains("# Team rules"));
+    }
+
+    #[test]
+    fn test_local_codex_install_can_be_uninstalled() {
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let original_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        fs::write(AGENTS_MD, "# Team rules\n").unwrap();
+        run_codex_mode(false, InitContext::default()).unwrap();
+        let uninstall_result = uninstall_codex(false, InitContext::default());
+
+        std::env::set_current_dir(original_cwd).unwrap();
+        uninstall_result.unwrap();
+
+        assert!(!temp.path().join(RTK_MD).exists());
+        assert!(!codex_hook_already_present(
+            &serde_json::from_str(
+                &fs::read_to_string(temp.path().join(CODEX_DIR).join(HOOKS_JSON)).unwrap()
+            )
+            .unwrap()
+        ));
+        let agents = fs::read_to_string(temp.path().join(AGENTS_MD)).unwrap();
+        assert_eq!(agents.trim_end(), "# Team rules");
+        assert!(!agents.contains(RTK_MD_REF));
     }
 
     #[test]

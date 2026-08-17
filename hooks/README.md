@@ -110,6 +110,7 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 {
   "hook_event_name": "PreToolUse",
   "tool_name": "Bash",
+  "permission_mode": "default",
   "tool_input": { "command": "git status" }
 }
 ```
@@ -127,7 +128,7 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 }
 ```
 
-The `allow` value is required by Codex to accept `updatedInput`; Codex still runs its native approval and sandbox checks after applying the replacement. No rewrite produces no stdout.
+The `allow` value is required by Codex to accept `updatedInput`; Codex still runs its native approval and sandbox checks after applying the replacement. Those checks classify the rewritten command, and Codex does not currently unwrap the `rtk` binary for its safe/dangerous-command heuristics. Missing or unknown permission modes and other no-rewrite cases produce no stdout.
 
 ### Copilot CLI (Rust Binary)
 

@@ -672,6 +672,13 @@ fn run_claude_inner(input: &str) -> Option<String> {
 
 // ── Codex CLI native hook ─────────────────────────────────────
 
+fn is_supported_codex_permission_mode(v: &Value) -> bool {
+    matches!(
+        v.get("permission_mode").and_then(Value::as_str),
+        Some("default" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions")
+    )
+}
+
 fn process_codex_payload(v: &Value) -> PayloadAction {
     if v.get("hook_event_name").and_then(Value::as_str) != Some(PRE_TOOL_USE_KEY)
         || !matches!(
@@ -691,6 +698,15 @@ fn process_codex_payload(v: &Value) -> PayloadAction {
         None => return PayloadAction::Ignore,
     };
 
+    // Codex deliberately includes this field in every hook event. Fail open
+    // for missing or future modes instead of assuming their approval semantics.
+    if !is_supported_codex_permission_mode(v) {
+        return PayloadAction::Skip {
+            reason: "skip:unsupported_permission_mode",
+            cmd: cmd.to_string(),
+        };
+    }
+
     if crate::discover::lexer::contains_unattestable_construct(cmd) {
         return PayloadAction::Skip {
             reason: "skip:defer",
@@ -709,9 +725,13 @@ fn process_codex_payload(v: &Value) -> PayloadAction {
     };
 
     // Codex requires `permissionDecision: allow` alongside `updatedInput`.
-    // Its runtime applies the replacement before the command handler performs
-    // native approval and sandbox checks, so this protocol-level allow does
-    // not replace Codex's execution policy.
+    // Its runtime applies the replacement before native approval and sandbox
+    // checks, so this is a protocol-level allow rather than RTK approving the
+    // command. Those checks inspect the rewritten argv, however, and Codex's
+    // safe/dangerous-command classifiers do not currently unwrap `rtk`. This
+    // can add prompts for known-safe commands and obscure classifier signals
+    // for wrapped mutating commands such as git push. Keep the passthrough gates
+    // above conservative and revisit this boundary whenever coverage expands.
     let mut updated_input = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
     if let Some(obj) = updated_input.as_object_mut() {
         obj.insert("command".into(), Value::String(rewritten.clone()));
@@ -1638,16 +1658,23 @@ mod tests {
 
     // --- Codex handler ---
 
-    fn codex_input(cmd: &str) -> String {
-        json!({
+    fn codex_input_with_permission_mode(cmd: &str, permission_mode: Option<&str>) -> String {
+        let mut input = json!({
             "session_id": "session-1",
             "turn_id": "turn-1",
             "hook_event_name": PRE_TOOL_USE_KEY,
             "tool_name": "Bash",
             "tool_use_id": "tool-1",
             "tool_input": { "command": cmd }
-        })
-        .to_string()
+        });
+        if let Some(permission_mode) = permission_mode {
+            input["permission_mode"] = json!(permission_mode);
+        }
+        input.to_string()
+    }
+
+    fn codex_input(cmd: &str) -> String {
+        codex_input_with_permission_mode(cmd, Some("default"))
     }
 
     #[test]
@@ -1660,6 +1687,36 @@ mod tests {
         assert_eq!(hook["permissionDecision"], "allow");
         assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
         assert_eq!(hook["updatedInput"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_codex_rewrites_all_documented_permission_modes() {
+        for permission_mode in [
+            "default",
+            "acceptEdits",
+            "plan",
+            "dontAsk",
+            "bypassPermissions",
+        ] {
+            assert!(
+                run_codex_inner(&codex_input_with_permission_mode(
+                    "git status",
+                    Some(permission_mode)
+                ))
+                .is_some(),
+                "documented permission mode should rewrite: {permission_mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_codex_unknown_or_missing_permission_mode_passes_through() {
+        assert!(run_codex_inner(&codex_input_with_permission_mode("git status", None)).is_none());
+        assert!(run_codex_inner(&codex_input_with_permission_mode(
+            "git status",
+            Some("futureMode")
+        ))
+        .is_none());
     }
 
     #[test]
@@ -1678,6 +1735,7 @@ mod tests {
         let input = json!({
             "hook_event_name": PRE_TOOL_USE_KEY,
             "tool_name": "Bash",
+            "permission_mode": "default",
             "tool_input": {
                 "command": "git status --short",
                 "timeout": 30_000,
@@ -1717,6 +1775,8 @@ mod tests {
     fn test_codex_passthrough_for_unsupported_or_unattestable_commands() {
         assert!(run_codex_inner(&codex_input("rtk git status")).is_none());
         assert!(run_codex_inner(&codex_input("htop")).is_none());
+        assert!(run_codex_inner(&codex_input("rm -rf /tmp/rtk-safety-test")).is_none());
+        assert!(run_codex_inner(&codex_input("sudo rm -rf /tmp/rtk-safety-test")).is_none());
         assert!(run_codex_inner(&codex_input("git status > /tmp/status")).is_none());
         assert!(run_codex_inner(&codex_input("git status $(touch /tmp/x)")).is_none());
     }

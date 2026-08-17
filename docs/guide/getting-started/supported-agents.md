@@ -179,6 +179,8 @@ rtk init --global --agent windsurf    # creates .windsurfrules in current projec
 ```bash
 rtk init --codex           # project-scoped (.codex/hooks.json + AGENTS.md)
 rtk init --global --codex  # user-global ($CODEX_HOME or ~/.codex/)
+rtk init --codex --uninstall           # remove project-scoped integration
+rtk init --global --codex --uninstall  # remove user-global integration
 ```
 
 Restart Codex after installation. Project-scoped hooks must be trusted when Codex prompts. The native `rtk hook codex` processor rewrites supported `Bash` commands through `PreToolUse.updatedInput`; Codex then applies its normal approval and sandbox checks to the rewritten command.
