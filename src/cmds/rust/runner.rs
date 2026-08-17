@@ -2,7 +2,7 @@
 
 use crate::core::stream::StreamFilter;
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use regex::Regex;
 use std::process::Command;
 use std::sync::LazyLock;
@@ -130,16 +130,21 @@ pub fn run_err(command: &str, verbose: u8) -> Result<i32> {
 }
 
 /// Run tests and show only failures
-pub fn run_test(command: &str, verbose: u8) -> Result<i32> {
+pub fn run_test(command: &[String], verbose: u8) -> Result<i32> {
+    let Some((program, args)) = command.split_first() else {
+        bail!("test command cannot be empty");
+    };
+    let command_display = command.join(" ");
     if verbose > 0 {
-        eprintln!("Running tests: {}", command);
+        eprintln!("Running tests: {}", command_display);
     }
-    let cmd = build_shell_command(command);
-    let command_owned = command.to_string();
+    let mut cmd = crate::core::utils::resolved_command(program);
+    cmd.args(args);
+    let command_owned = command_display.clone();
     crate::core::runner::run_filtered(
         cmd,
         "test",
-        command,
+        &command_display,
         move |raw| extract_test_summary(raw, &command_owned),
         crate::core::runner::RunOptions::with_tee("test"),
     )
