@@ -161,6 +161,32 @@ fn git_stash_list_no_stashes_emits_empty() {
 }
 
 #[test]
+fn git_log_patch_output_matches_raw_git() {
+    let dir = init_git_repo();
+    std::fs::write(
+        dir.path().join("history.txt"),
+        "STRIPE_KEY=sk_live_FAKE1234567890\n",
+    )
+    .expect("write history fixture");
+    git_in_dir(dir.path(), &["add", "history.txt"]);
+    git_in_dir(dir.path(), &["commit", "-q", "-m", "add history fixture"]);
+
+    let raw = Command::new("git")
+        .args(["log", "-p", "--all"])
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn raw git log");
+    assert!(raw.status.success());
+
+    let (rtk_stdout, rtk_stderr, rtk_code) =
+        rtk_output_in_dir(dir.path(), &["git", "log", "-p", "--all"]);
+
+    assert_eq!(rtk_code, Some(0), "rtk stderr: {rtk_stderr}");
+    assert_eq!(rtk_stdout.as_bytes(), raw.stdout.as_slice());
+    assert!(rtk_stdout.contains("STRIPE_KEY=sk_live_FAKE1234567890"));
+}
+
+#[test]
 fn git_stash_show_no_stash_emits_empty_and_propagates_failure() {
     // Regression: previously printed "Empty stash" and returned Ok(0), masking
     // the underlying `git stash show` failure.

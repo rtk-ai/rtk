@@ -4,17 +4,17 @@ use crate::core::args_utils;
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::stream::{
-    self, exec_capture, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode,
+    self, exec_capture, exec_capture_stdin, CaptureResult, FilterMode, LineHandler,
+    LineStreamFilter, StdinMode,
 };
 use crate::core::tracking;
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{
-    exit_code_from_output, exit_code_from_status, join_with_overflow, resolved_command, strip_ansi,
+    exit_code_from_status, join_with_overflow, resolved_command, strip_ansi,
 };
 use anyhow::{Context, Result};
 use std::ffi::OsString;
 use std::process::Command;
-use std::process::Stdio;
 
 #[derive(Debug, Clone)]
 pub enum GitCommand {
@@ -431,6 +431,13 @@ fn run_log(
     verbose: u8,
     global_args: &[String],
 ) -> Result<i32> {
+    if requests_raw_log_output(args) {
+        let passthrough_args: Vec<OsString> = std::iter::once(OsString::from("log"))
+            .chain(args.iter().map(OsString::from))
+            .collect();
+        return run_passthrough(&passthrough_args, global_args, verbose);
+    }
+
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = git_cmd(global_args);
@@ -508,6 +515,17 @@ fn run_log(
     );
 
     Ok(0)
+}
+
+fn requests_raw_log_output(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| {
+            matches!(
+                arg.as_str(),
+                "-p" | "-u" | "--patch" | "--patch-with-raw" | "--patch-with-stat"
+            )
+        })
 }
 
 /// Filter git log output: truncate long messages, cap lines
@@ -1009,15 +1027,24 @@ fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
 /// Handles: `[main abc1234def] message`, `[main (root-commit) abc1234def] msg`,
 /// localized variants, and multibyte branch names.
 fn parse_commit_output(line: &str) -> String {
-    if let Some(bracket_end) = line.find(']') {
-        let bracket_content = &line[1..bracket_end];
-        let hash = bracket_content.split_whitespace().next_back().unwrap_or("");
-        if !hash.is_empty() && hash.len() >= 7 {
-            let short_hash: String = hash.chars().take(7).collect();
-            format!("ok {}", short_hash)
-        } else {
-            "ok".to_string()
-        }
+    // Locate the summary's own brackets rather than assuming the line starts
+    // with '['. git prints hook output before its summary, so the first line
+    // is often something else entirely; slicing from byte 1 panics outright
+    // when that line opens with a multi-byte character ("✅ lint passed]"),
+    // and a line decoded from non-UTF-8 bytes starts with a multi-byte U+FFFD.
+    // Both indices come from `find`, so both land on character boundaries.
+    let (Some(open), Some(bracket_end)) = (line.find('['), line.find(']')) else {
+        return "ok".to_string();
+    };
+    if open >= bracket_end {
+        return "ok".to_string();
+    }
+
+    let bracket_content = &line[open + 1..bracket_end];
+    let hash = bracket_content.split_whitespace().next_back().unwrap_or("");
+    if hash.chars().count() >= 7 {
+        let short_hash: String = hash.chars().take(7).collect();
+        format!("ok {}", short_hash)
     } else {
         "ok".to_string()
     }
@@ -1032,17 +1059,17 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         eprintln!("{}", original_cmd);
     }
 
-    let output = build_commit_command(args, global_args)
-        .stdin(Stdio::inherit())
-        .output()
+    // stdin is inherited so an interactive editor, GPG passphrase prompt or
+    // credential helper still reaches the terminal.
+    let CaptureResult {
+        stdout,
+        stderr,
+        exit_code,
+    } = exec_capture_stdin(&mut build_commit_command(args, global_args))
         .context("Failed to run git commit")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let exit_code = exit_code_from_output(&output, "git commit");
     let raw_output = format!("{}\n{}", stdout, stderr);
 
-    match classify_commit_outcome(output.status.success(), &stdout, exit_code) {
+    match classify_commit_outcome(exit_code == 0, &stdout, exit_code) {
         CommitOutcome::Ok(compact) => {
             println!("{}", compact);
             timer.track(&original_cmd, "rtk git commit", &raw_output, &compact);
@@ -2732,6 +2759,36 @@ A  added.rs
     }
 
     #[test]
+    fn test_patch_log_flags_request_raw_output() {
+        for flag in ["-p", "-u", "--patch", "--patch-with-raw", "--patch-with-stat"] {
+            let args = vec![flag.to_string()];
+            assert!(requests_raw_log_output(&args), "{flag} should pass through");
+        }
+    }
+
+    #[test]
+    fn test_patch_flag_after_pathspec_separator_is_ignored() {
+        // `git log -- -p` means "show history for a path literally named -p",
+        // not "show patches" — the flag lookalike appears after `--`.
+        let args = vec!["--".to_string(), "-p".to_string()];
+        assert!(
+            !requests_raw_log_output(&args),
+            "-p after -- is a pathspec, not a patch flag, and should stay on the filtered path"
+        );
+    }
+
+    #[test]
+    fn test_non_patch_log_flags_remain_filtered() {
+        for flag in ["--no-patch", "--stat", "--oneline", "--format=%H"] {
+            let args = vec![flag.to_string()];
+            assert!(
+                !requests_raw_log_output(&args),
+                "{flag} should remain on the filtered log path"
+            );
+        }
+    }
+
+    #[test]
     fn test_filter_log_output_token_savings() {
         fn count_tokens(text: &str) -> usize {
             text.split_whitespace().count()
@@ -2849,6 +2906,37 @@ no changes added to commit (use "git add" and/or "git commit -a")
     fn test_parse_commit_output_thai_branch() {
         let line = "[สาขา abc1234def] commit message";
         assert_eq!(parse_commit_output(line), "ok abc1234");
+    }
+
+    /// Regression: git prints hook output before its own summary. A first line
+    /// that opens with a multi-byte character and contains ']' used to panic on
+    /// `line[1..]` ("byte index 1 is not a char boundary").
+    #[test]
+    fn test_parse_commit_output_multibyte_prefix_does_not_panic() {
+        assert_eq!(parse_commit_output("✅ lint passed]"), "ok");
+        assert_eq!(parse_commit_output("→ hook] done"), "ok");
+    }
+
+    /// The same shape as above, but with a real summary after the hook text —
+    /// the hash must still be found via the bracket pair.
+    #[test]
+    fn test_parse_commit_output_after_multibyte_hook_prefix() {
+        assert_eq!(
+            parse_commit_output("✅ [main abc1234def] add feature"),
+            "ok abc1234"
+        );
+    }
+
+    /// A U+FFFD from lossily decoded output is itself multi-byte.
+    #[test]
+    fn test_parse_commit_output_replacement_char_prefix() {
+        assert_eq!(parse_commit_output("\u{FFFD}oops]"), "ok");
+    }
+
+    /// A closing bracket before any opening one must not slice backwards.
+    #[test]
+    fn test_parse_commit_output_close_before_open() {
+        assert_eq!(parse_commit_output("] stray [main abc1234def]"), "ok");
     }
 
     #[test]

@@ -45,8 +45,22 @@ enum RewriteOutcome {
 }
 
 fn evaluate(cmd: &str, excluded: &[String], transparent_prefixes: &[String]) -> RewriteOutcome {
-    let verdict = check_command(cmd);
+    evaluate_with_verdict(cmd, check_command(cmd), excluded, transparent_prefixes)
+}
 
+/// Decision logic for [`evaluate`] with the permission verdict supplied by the
+/// caller, mirroring [`check_command_with_rules`](super::permissions::check_command_with_rules).
+///
+/// `check_command` reads the machine's Claude Code settings files, so tests that
+/// call [`evaluate`] directly would change verdict with the developer's local
+/// `settings.local.json`. Taking the verdict as a parameter keeps the rewrite
+/// logic under test independent of the host configuration (#3146).
+fn evaluate_with_verdict(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+) -> RewriteOutcome {
     if verdict == PermissionVerdict::Deny {
         return RewriteOutcome::Deny;
     }
@@ -90,13 +104,46 @@ mod tests {
         );
     }
 
+    /// The verdict still drives the outcome: an allow rule yields `Allow`.
+    /// Pinning both directions keeps the mapping covered without depending
+    /// on which rules the developer happens to have configured.
+    #[test]
+    fn test_allow_verdict_yields_allow() {
+        assert!(matches!(
+            evaluate_with_verdict("git status", PermissionVerdict::Allow, &[], &[]),
+            RewriteOutcome::Allow(_)
+        ));
+    }
+
+    #[test]
+    fn test_deny_verdict_yields_deny() {
+        assert_eq!(
+            evaluate_with_verdict("git status", PermissionVerdict::Deny, &[], &[]),
+            RewriteOutcome::Deny
+        );
+    }
+
+    /// Commands with an unattestable construct are always a passthrough,
+    /// regardless of permission verdict.
+    ///
+    /// The verdict is pinned to `Default` rather than going through `evaluate`,
+    /// which reads the developer's own `.claude/settings.local.json`: a
+    /// `Bash(git *)` allow rule turns the expected `Ask` into `Allow` and these
+    /// tests fail on that machine only (#3146). Pinning the verdict keeps the
+    /// assertions about the rewrite logic and nothing about the host.
     mod unattestable_passthrough {
-        use super::super::{evaluate, RewriteOutcome};
+        use super::super::{evaluate_with_verdict, RewriteOutcome};
+        use crate::hooks::permissions::PermissionVerdict;
 
         #[test]
         fn test_backtick_substitution_passthrough() {
             assert_eq!(
-                evaluate("git status `rm -rf /tmp/x`", &[], &[]),
+                evaluate_with_verdict(
+                    "git status `rm -rf /tmp/x`",
+                    PermissionVerdict::Default,
+                    &[],
+                    &[]
+                ),
                 RewriteOutcome::Passthrough
             );
         }
@@ -104,7 +151,12 @@ mod tests {
         #[test]
         fn test_dollar_substitution_passthrough() {
             assert_eq!(
-                evaluate("git status $(rm -rf /tmp/x)", &[], &[]),
+                evaluate_with_verdict(
+                    "git status $(rm -rf /tmp/x)",
+                    PermissionVerdict::Default,
+                    &[],
+                    &[]
+                ),
                 RewriteOutcome::Passthrough
             );
         }
@@ -112,7 +164,12 @@ mod tests {
         #[test]
         fn test_double_quoted_substitution_passthrough() {
             assert_eq!(
-                evaluate("git log --pretty=\"$(rm -rf /tmp/x)\"", &[], &[]),
+                evaluate_with_verdict(
+                    "git log --pretty=\"$(rm -rf /tmp/x)\"",
+                    PermissionVerdict::Default,
+                    &[],
+                    &[]
+                ),
                 RewriteOutcome::Passthrough
             );
         }
@@ -120,7 +177,12 @@ mod tests {
         #[test]
         fn test_file_redirect_passthrough() {
             assert_eq!(
-                evaluate("git log > /tmp/out.txt", &[], &[]),
+                evaluate_with_verdict(
+                    "git log > /tmp/out.txt",
+                    PermissionVerdict::Default,
+                    &[],
+                    &[]
+                ),
                 RewriteOutcome::Passthrough
             );
         }
@@ -128,7 +190,7 @@ mod tests {
         #[test]
         fn test_fd_dup_redirect_still_rewrites() {
             assert!(matches!(
-                evaluate("git status 2>&1", &[], &[]),
+                evaluate_with_verdict("git status 2>&1", PermissionVerdict::Default, &[], &[]),
                 RewriteOutcome::Ask(_)
             ));
         }
@@ -136,7 +198,7 @@ mod tests {
         #[test]
         fn test_plain_command_still_rewrites() {
             assert!(matches!(
-                evaluate("git status", &[], &[]),
+                evaluate_with_verdict("git status", PermissionVerdict::Default, &[], &[]),
                 RewriteOutcome::Ask(_)
             ));
         }
