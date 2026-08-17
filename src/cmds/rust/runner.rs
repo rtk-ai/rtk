@@ -130,16 +130,23 @@ pub fn run_err(command: &str, verbose: u8) -> Result<i32> {
 }
 
 /// Run tests and show only failures
-pub fn run_test(command: &str, verbose: u8) -> Result<i32> {
+pub fn run_test(command: &[String], verbose: u8) -> Result<i32> {
+    let command_label = command.join(" ");
     if verbose > 0 {
-        eprintln!("Running tests: {}", command);
+        eprintln!("Running tests: {}", command_label);
     }
-    let cmd = build_shell_command(command);
-    let command_owned = command.to_string();
+    let cmd = if let Some((program, args)) = command.split_first() {
+        let mut cmd = crate::core::utils::resolved_command(program);
+        cmd.args(args);
+        cmd
+    } else {
+        build_shell_command("")
+    };
+    let command_owned = command_label.clone();
     crate::core::runner::run_filtered(
         cmd,
         "test",
-        command,
+        &command_label,
         move |raw| extract_test_summary(raw, &command_owned),
         crate::core::runner::RunOptions::with_tee("test"),
     )
