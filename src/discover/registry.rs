@@ -9,7 +9,7 @@ use super::lexer::{
     shell_split, split_on_operators, tokenize, tokenize_with_newlines, ParsedToken, PipeKind,
     TokenKind,
 };
-use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
+use super::rules::{RtkRule, IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
 
@@ -1448,11 +1448,11 @@ fn rewrite_segment_inner(
     // classify_command does, so a small canonical prefix list matches every
     // invocation form instead of enumerating each literal spelling.
     let php_normalized;
-    let strip_target: &str = if rule
+    let php_tool = rule
         .rtk_cmd
         .strip_prefix("rtk ")
-        .is_some_and(|t| PHP_TOOL_NAMES.contains(&t))
-    {
+        .is_some_and(|t| PHP_TOOL_NAMES.contains(&t));
+    let strip_target: &str = if php_tool {
         // Peel `php ` then a leading `./` (normalize_php_tool_command only
         // strips `./` for paths that resolve to a Composer tool, so a plain
         // `./bin/<tool>` would otherwise survive and miss the prefix match).
@@ -1464,19 +1464,68 @@ fn rewrite_segment_inner(
         cmd_part
     };
 
+    let rewrite = |rest: &str| {
+        if rest.is_empty() {
+            format!("{}{}", rule.rtk_cmd, redirect_suffix)
+        } else {
+            format!("{} {}{}", rule.rtk_cmd, rest, redirect_suffix)
+        }
+    };
+
     // Try each rewrite prefix (longest first) with word-boundary check
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(strip_target, prefix) {
-            let rewritten = if rest.is_empty() {
-                format!("{}{}", rule.rtk_cmd, redirect_suffix)
-            } else {
-                format!("{} {}{}", rule.rtk_cmd, rest, redirect_suffix)
-            };
-            return Some(rewritten);
+            return Some(rewrite(rest));
         }
     }
 
-    None
+    // The Composer tools accept a deliberately narrow set of spellings above
+    // (`bin/pint` is rejected on purpose), so leave that ecosystem to its own
+    // normalization rather than widening it from here.
+    if php_tool {
+        return None;
+    }
+
+    rewrite_path_prefixed(strip_target, rule, &rewrite)
+}
+
+/// Match a command that names its binary by path (`.venv/bin/pytest`,
+/// `./node_modules/.bin/vitest`, `/usr/bin/grep`) and carry that path to the
+/// handler in `RTK_BIN`, so the rewrite runs the binary the caller chose
+/// instead of whatever PATH resolves (#1053).
+///
+/// Only reached once the literal prefixes have failed, so every command that
+/// rewrites today keeps its exact current output.
+///
+/// The path is preserved only when its basename is the tool rtk will re-invoke.
+/// `.venv/bin/python -m pytest` names python but routes to `rtk pytest`, and
+/// handing pytest a python path would resolve to the wrong binary, so those
+/// forms keep today's behavior of not rewriting at all.
+fn rewrite_path_prefixed(
+    cmd: &str,
+    rule: &RtkRule,
+    rewrite: &dyn Fn(&str) -> String,
+) -> Option<String> {
+    let normalized = strip_absolute_path(cmd);
+    if normalized == cmd {
+        return None;
+    }
+
+    let caller_bin = cmd.split_whitespace().next()?;
+    let tool = rule.rtk_cmd.strip_prefix("rtk ")?;
+    if caller_bin.rsplit('/').next() != Some(tool) {
+        return None;
+    }
+
+    let rest = rule
+        .rewrite_prefixes
+        .iter()
+        .find_map(|&prefix| strip_word_prefix(&normalized, prefix))?;
+
+    // Single-quote the path and escape embedded quotes the POSIX way, so an
+    // arbitrary directory name cannot break out of the assignment.
+    let quoted = caller_bin.replace('\'', "'\\''");
+    Some(format!("RTK_BIN='{}' {}", quoted, rewrite(rest)))
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -5652,5 +5701,68 @@ mod tests {
             normalize_php_tool_command_with_dirs("./tools/bin/pest", &dirs),
             "pest"
         );
+    }
+
+    mod path_prefixed_invocations {
+        use super::rewrite_command_no_prefixes;
+
+        #[test]
+        fn test_rewrites_venv_binary_and_preserves_it() {
+            assert_eq!(
+                rewrite_command_no_prefixes(".venv/bin/pytest -v", &[]),
+                Some("RTK_BIN='.venv/bin/pytest' rtk pytest -v".into())
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(".venv/bin/ruff check .", &[]),
+                Some("RTK_BIN='.venv/bin/ruff' rtk ruff check .".into())
+            );
+        }
+
+        #[test]
+        fn test_rewrites_absolute_and_dot_slash_paths() {
+            assert_eq!(
+                rewrite_command_no_prefixes("/usr/bin/grep -rn foo", &[]),
+                Some("RTK_BIN='/usr/bin/grep' rtk grep -rn foo".into())
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes("./node_modules/.bin/vitest run", &[]),
+                Some("RTK_BIN='./node_modules/.bin/vitest' rtk vitest".into())
+            );
+        }
+
+        #[test]
+        fn test_bare_command_carries_no_rtk_bin() {
+            assert_eq!(
+                rewrite_command_no_prefixes("pytest -v", &[]),
+                Some("rtk pytest -v".into())
+            );
+        }
+
+        #[test]
+        fn test_interpreter_form_is_left_alone() {
+            // The path names python but the rewrite routes to rtk pytest, so
+            // there is no binary to preserve and rewriting would run the wrong
+            // pytest. Leaving it unrewritten keeps the venv's interpreter.
+            assert_eq!(
+                rewrite_command_no_prefixes(".venv/bin/python -m pytest -v", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn test_quotes_are_escaped_in_the_preserved_path() {
+            assert_eq!(
+                rewrite_command_no_prefixes("./it's/bin/pytest -q", &[]),
+                Some(r"RTK_BIN='./it'\''s/bin/pytest' rtk pytest -q".into())
+            );
+        }
+
+        #[test]
+        fn test_unknown_tool_still_does_not_rewrite() {
+            assert_eq!(
+                rewrite_command_no_prefixes(".venv/bin/httpie GET /", &[]),
+                None
+            );
+        }
     }
 }
