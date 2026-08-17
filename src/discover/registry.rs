@@ -1382,7 +1382,13 @@ fn rewrite_segment_inner(
         Classification::Supported { rtk_equivalent, .. } => {
             let stripped = ENV_PREFIX.replace(cmd_part, "");
             let cmd_clean = stripped.trim();
-            if is_excluded(cmd_clean, excluded) {
+            // Match exclusions against the path-stripped form as well, the way
+            // the TOML branch below already does. A user who excludes "gradlew"
+            // means the tool, not one spelling of it, and `./gradlew` would
+            // otherwise rewrite straight through the exclusion.
+            if is_excluded(cmd_clean, excluded)
+                || is_excluded(&strip_absolute_path(cmd_clean), excluded)
+            {
                 return None;
             }
             rtk_equivalent
@@ -4684,6 +4690,29 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("PGPASSWORD=postgres psql -h localhost", &excluded),
             None
+        );
+    }
+
+    #[test]
+    fn test_exclude_path_prefixed_command() {
+        // The tool is excluded however the caller spelled its path (#1053).
+        let excluded = vec!["gradlew".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("./gradlew assembleDebug", &excluded),
+            None
+        );
+
+        let excluded = vec!["phpunit".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("vendor/bin/phpunit tests/", &excluded),
+            None
+        );
+
+        // An unrelated exclusion still leaves the command alone.
+        let excluded = vec!["pytest".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("./gradlew assembleDebug", &excluded),
+            Some("rtk gradlew assembleDebug".into())
         );
     }
 
