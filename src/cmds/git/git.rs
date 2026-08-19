@@ -418,6 +418,16 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
         result.push(format!("  +{} -{}", added, removed));
     }
 
+    // Nothing was ever pushed, so no `diff --git` and no `@@` was seen: this is not
+    // unified diff. Returning the empty join here would silently drop the whole diff
+    // while the surrounding stat summary still looks authoritative. Fall back to the
+    // raw text instead, and let `never_worse()` at the call site pick the cheaper of
+    // the two. Reachable whenever an external diff driver is configured, and for the
+    // `gh` / `glab` callers, which have no equivalent flag.
+    if result.is_empty() && !diff.trim().is_empty() {
+        return diff.to_string();
+    }
+
     if was_truncated {
         result.push("[full diff: rtk git diff --no-compact]".to_string());
     }
@@ -2250,6 +2260,36 @@ mod tests {
         let result = compact_diff(diff, 100);
         assert!(result.contains("foo.rs"));
         assert!(result.contains("+"));
+    }
+
+    #[test]
+    fn test_compact_diff_passes_through_non_unified_input() {
+        // Real `git diff` output from a repo with `diff.external = difft`. It has
+        // no `diff --git` and no `@@`, so the parser matches nothing. Dropping it
+        // would silently lose the entire diff, so it must come back verbatim.
+        let raw = include_str!("../../../tests/fixtures/git_diff_external_driver_raw.txt");
+        assert!(
+            !raw.contains("diff --git"),
+            "fixture must not be unified diff"
+        );
+
+        let result = compact_diff(raw, 500);
+        assert_eq!(result, raw);
+    }
+
+    #[test]
+    fn test_compact_diff_empty_input_stays_empty() {
+        assert_eq!(compact_diff("", 500), "");
+        assert_eq!(compact_diff("   \n\n", 500), "");
+    }
+
+    #[test]
+    fn test_compact_diff_rename_only_is_not_treated_as_unparseable() {
+        // A pure rename has a `diff --git` marker but no hunks, so `result` is
+        // non-empty and the passthrough fallback must not fire.
+        let diff = "diff --git a/old.rs b/new.rs\nsimilarity index 100%\nrename from old.rs\nrename to new.rs\n";
+        let result = compact_diff(diff, 500);
+        assert_eq!(result.trim(), "new.rs");
     }
 
     #[test]

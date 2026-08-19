@@ -1,0 +1,40 @@
+src/cmds/rust/cargo_cmd.rs --- 1/8 --- Rust
+  96         !(line.trim().is_empty() &    96         !(line.trim().is_empty() &
+  .. & block.len() > 3)                    .. & block.len() > 3)
+  97     }                                 97     }
+  98                                       98 
+  99     fn format_summary(&self, exit_    99     fn format_summary(&self, exit_
+  .. code: i32, _raw: &str) -> Option<S    .. code: i32, raw: &str) -> Option<St
+  .. tring> {                              .. ring> {
+ 100         if self.error_count == 0 &   100         if self.error_count == 0 &
+ ... & self.warnings == 0 && exit_code    ... & self.warnings == 0 && exit_code 
+ ... == 0 {                               ... == 0 {
+ 101             return Some(cargo_buil   101             let summary = cargo_bu
+ ... d_success_line(                      ... ild_success_line(
+ 102                 self.compiled,       102                 self.compiled,
+ 103                 self.finished_line   103                 self.finished_line
+ ... .as_deref(),                         ... .as_deref(),
+ 104                 self.label,          104                 self.label,
+ 105             ));                      105             );
+ ...                                      106             return Some(crate::cor
+ ...                                      ... e::guard::never_worse(raw, &summar
+ ...                                      ... y).to_string());
+ 106         }                            107         }
+ 107         // The streamed path only    108         // The streamed path only 
+ ... runs for non-json build/check; err   ... runs for non-json build/check; err
+ ... or blocks are                        ... or blocks are
+ 108         // emitted live, so the su   109         // emitted live, so the su
+ ... mmary carries no rendered diagnost   ... mmary carries no rendered diagnost
+ ... ics.                                 ... ics.
+
+src/cmds/rust/cargo_cmd.rs --- 2/8 --- Rust
+ 128     has_compile_errors: bool,        129     has_compile_errors: bool,
+ 129 }                                    130 }
+ 130                                      131 
+ 131 impl CargoTestHandler {              132 impl CargoTestHandler {
+ 132     fn new() -> Self {               133     fn new() -> Self {
+ 133         Self {                       134         Self {
+ 134             in_failure_section: fa   135             in_failure_section: fa
+ ... lse,                                 ... lse,
+
+src/cmds/rust/cargo_cmd.rs --- 3/8 --- Rust
