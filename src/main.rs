@@ -49,6 +49,8 @@ pub enum AgentTarget {
     Antigravity,
     /// Kimi AI
     Kimi,
+    /// ZCode Agent
+    Zcode,
     /// Pi coding agent
     Pi,
     /// Hermes CLI
@@ -2026,6 +2028,13 @@ fn run_cli() -> Result<i32> {
                 } else {
                     hooks::init::uninstall_copilot(ctx)?;
                 }
+            } else if uninstall && agent == Some(AgentTarget::Zcode) {
+                if !global {
+                    anyhow::bail!(
+                        "ZCode instructions are user-scoped. Use: rtk init -g --agent zcode"
+                    );
+                }
+                hooks::init::uninstall_zcode(ctx)?;
             } else if uninstall {
                 uninstall_init_dispatch(
                     agent,
@@ -2053,6 +2062,13 @@ fn run_cli() -> Result<i32> {
                 }
             } else if agent == Some(AgentTarget::Pi) {
                 hooks::init::run_pi_mode(global, ctx)?
+            } else if agent == Some(AgentTarget::Zcode) {
+                if !global {
+                    anyhow::bail!(
+                        "ZCode instructions are user-scoped. Use: rtk init -g --agent zcode"
+                    );
+                }
+                hooks::init::run_zcode_mode(ctx)?;
             } else if agent == Some(AgentTarget::Kilocode) {
                 if global {
                     anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");
@@ -2934,6 +2950,18 @@ mod tests {
         match cli.command {
             Commands::Init { agent, .. } => {
                 assert_eq!(agent, Some(AgentTarget::Hermes));
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_init_agent_zcode() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "zcode", "--global"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, global, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Zcode));
+                assert!(global);
             }
             _ => panic!("Expected Init command"),
         }

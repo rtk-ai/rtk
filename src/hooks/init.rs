@@ -20,6 +20,7 @@ use super::constants::{
     HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
     PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR,
     VIBE_HOOKS_FILE, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
+    ZCODE_DIR,
 };
 use super::integrity;
 use super::is_claude_hook_command;
@@ -33,6 +34,7 @@ const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
 const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
+const ZCODE_INSTRUCTIONS: &str = include_str!("../../hooks/zcode/rtk-awareness.md");
 
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
@@ -3365,6 +3367,102 @@ fn resolve_opencode_dir() -> Result<PathBuf> {
     resolve_home_subdir(CONFIG_DIR).map(|p| p.join(OPENCODE_SUBDIR))
 }
 
+// ─── ZCode Agent support ─────────────────────────────────────────────
+
+fn resolve_zcode_dir() -> Result<PathBuf> {
+    resolve_home_subdir(ZCODE_DIR)
+}
+
+/// Install RTK instructions into ZCode's user-level AGENTS.md.
+///
+/// ZCode loads this file for every task, whereas skills are selected explicitly.
+/// RTK therefore installs its always-on guidance at the user level.
+pub fn run_zcode_mode(ctx: InitContext) -> Result<()> {
+    let zcode_dir = resolve_zcode_dir()?;
+    run_zcode_mode_at(&zcode_dir, ctx)
+}
+
+fn run_zcode_mode_at(zcode_dir: &Path, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let agents_path = zcode_dir.join(AGENTS_MD);
+    if !dry_run {
+        fs::create_dir_all(zcode_dir).with_context(|| {
+            format!(
+                "Failed to create ZCode config directory: {}",
+                zcode_dir.display()
+            )
+        })?;
+    }
+
+    write_rtk_block(
+        &agents_path,
+        ZCODE_INSTRUCTIONS,
+        "ZCode instructions",
+        "rtk init -g --agent zcode",
+        ctx,
+    )?;
+
+    if !dry_run {
+        println!("\nRTK configured for ZCode Agent.\n");
+        println!("  Instructions: {}", agents_path.display());
+        println!("  ZCode Agent will now use rtk commands for token savings.");
+        println!("  Restart ZCode. Test with: git status\n");
+    }
+
+    Ok(())
+}
+
+pub fn uninstall_zcode(ctx: InitContext) -> Result<()> {
+    let zcode_dir = resolve_zcode_dir()?;
+    uninstall_zcode_at(&zcode_dir, ctx)
+}
+
+fn uninstall_zcode_at(zcode_dir: &Path, ctx: InitContext) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+    let agents_path = zcode_dir.join(AGENTS_MD);
+    if !agents_path.exists() {
+        if !dry_run {
+            println!("RTK ZCode instructions were not installed (nothing to remove)");
+        }
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&agents_path).with_context(|| {
+        format!(
+            "Failed to read ZCode instructions: {}",
+            agents_path.display()
+        )
+    })?;
+    let (cleaned, removed) = remove_rtk_block(&content);
+    if !removed {
+        if !dry_run {
+            println!("RTK ZCode instructions were not installed (nothing to remove)");
+        }
+        return Ok(());
+    }
+
+    if dry_run {
+        println!(
+            "[dry-run] would remove RTK instructions from {}",
+            agents_path.display()
+        );
+        print_dry_run_footer();
+        return Ok(());
+    }
+
+    atomic_write(&agents_path, &cleaned).with_context(|| {
+        format!(
+            "Failed to write ZCode instructions: {}",
+            agents_path.display()
+        )
+    })?;
+    if verbose > 0 {
+        eprintln!("Removed RTK instructions from {}", agents_path.display());
+    }
+    println!("RTK uninstalled for ZCode Agent.");
+    Ok(())
+}
+
 // ─── Pi coding agent support ──────────────────────────────────────────
 
 /// Resolve Pi config directory, honouring `PI_CODING_AGENT_DIR` override.
@@ -5417,6 +5515,45 @@ mod tests {
         run_kimi_mode_at(temp.path(), InitContext::default()).unwrap();
         let second = fs::read_to_string(&path).unwrap();
         assert_eq!(first, second, "Idempotent: content should not change");
+    }
+
+    #[test]
+    fn test_zcode_mode_creates_global_instructions() {
+        let temp = TempDir::new().unwrap();
+        run_zcode_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let agents_path = temp.path().join(AGENTS_MD);
+        let content = fs::read_to_string(agents_path).unwrap();
+        assert!(content.contains(RTK_BLOCK_START));
+        assert!(content.contains("Always prefix shell commands with `rtk`"));
+    }
+
+    #[test]
+    fn test_zcode_mode_preserves_user_instructions_and_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let agents_path = temp.path().join(AGENTS_MD);
+        fs::write(&agents_path, "# Team preferences\n\nPrefer cargo fmt.\n").unwrap();
+
+        run_zcode_mode_at(temp.path(), InitContext::default()).unwrap();
+        let first = fs::read_to_string(&agents_path).unwrap();
+        run_zcode_mode_at(temp.path(), InitContext::default()).unwrap();
+        let second = fs::read_to_string(&agents_path).unwrap();
+
+        assert!(first.contains("Prefer cargo fmt."));
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_zcode_uninstall_preserves_user_instructions() {
+        let temp = TempDir::new().unwrap();
+        let agents_path = temp.path().join(AGENTS_MD);
+        fs::write(&agents_path, "# Team preferences\n\nPrefer cargo fmt.\n").unwrap();
+        run_zcode_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        uninstall_zcode_at(temp.path(), InitContext::default()).unwrap();
+        let content = fs::read_to_string(&agents_path).unwrap();
+        assert!(content.contains("Prefer cargo fmt."));
+        assert!(!content.contains(RTK_BLOCK_START));
     }
 
     #[test]
