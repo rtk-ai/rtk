@@ -61,7 +61,33 @@ For full details on what is collected, opt-out options, and GDPR rights, see [Te
 | `RTK_TEE_DIR` | Override the tee directory |
 | `RTK_TELEMETRY_DISABLED=1` | Disable telemetry |
 | `RTK_HOOK_AUDIT=1` | Enable hook audit logging |
+| `RTK_SHELL` | Shell used by `rtk err`, `rtk test` and `rtk summary` (see below) |
 | `SKIP_ENV_VALIDATION=1` | Skip env validation (useful with Next.js) |
+
+### Choosing the shell (`RTK_SHELL`)
+
+`rtk err`, `rtk test` and `rtk summary` take a command as one string and run it
+through a shell. By default that is `sh` on Linux/macOS. On Windows RTK looks at
+the command's first word: a `cmd` builtin (`dir`, `echo`, `type`, …) or a program
+on `PATH` (`git`, `cargo`, `npm`) runs under `cmd.exe`, and anything else — a
+cmdlet, a variable, a PowerShell pipeline — runs under `pwsh` if installed,
+otherwise `powershell`.
+
+```powershell
+rtk summary "dir /b"                          # cmd.exe
+rtk summary "Get-ChildItem | Measure-Object"  # PowerShell
+```
+
+Set `RTK_SHELL` to pin one shell and skip that decision entirely. It accepts
+`cmd`, `powershell`, `pwsh`, `sh`, `bash`, or any executable name or full path:
+
+```powershell
+$env:RTK_SHELL = 'pwsh'     # always PowerShell 7
+```
+
+```bash
+RTK_SHELL=bash rtk test "make check"
+```
 
 ## Tee system
 

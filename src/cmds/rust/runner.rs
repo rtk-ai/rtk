@@ -1,10 +1,10 @@
 //! Runs arbitrary commands and captures only stderr or test failures.
 
+use crate::core::shell::build_shell_command;
 use crate::core::stream::StreamFilter;
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 use anyhow::Result;
 use regex::Regex;
-use std::process::Command;
 use std::sync::LazyLock;
 
 const MAX_RUNNER_FAILURES: usize = CAP_WARNINGS;
@@ -99,18 +99,6 @@ impl StreamFilter for ErrorStreamFilter {
             }
             Some(msg)
         }
-    }
-}
-
-fn build_shell_command(command: &str) -> Command {
-    if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd");
-        c.args(["/C", command]);
-        c
-    } else {
-        let mut c = Command::new("sh");
-        c.args(["-c", command]);
-        c
     }
 }
 

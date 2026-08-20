@@ -1,13 +1,13 @@
 //! Runs a command and produces a heuristic summary of its output.
 
 use crate::core::guard::never_worse;
+use crate::core::shell;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::truncate;
 use anyhow::{Context, Result};
 use regex::Regex;
-use std::process::Command;
 
 const MAX_SUMMARY_LIST: usize = CAP_WARNINGS;
 const MAX_SUMMARY_KEYS: usize = CAP_WARNINGS;
@@ -20,15 +20,7 @@ pub fn run(command: &str, verbose: u8) -> Result<i32> {
         eprintln!("Running and summarizing: {}", command);
     }
 
-    let mut cmd = if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd");
-        c.args(["/C", command]);
-        c
-    } else {
-        let mut c = Command::new("sh");
-        c.args(["-c", command]);
-        c
-    };
+    let mut cmd = shell::build_shell_command(command);
     let result = exec_capture(&mut cmd).context("Failed to execute command")?;
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);
