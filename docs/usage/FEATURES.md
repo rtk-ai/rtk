@@ -1413,7 +1413,7 @@ en edition manuelle est `[retriever] mode`.
 
 RTK peut envoyer un ping anonyme une fois par jour (23h d'intervalle) pour des statistiques d'utilisation. La telemetrie est **desactivee par defaut** et requiert un consentement explicite (RGPD Art. 6, 7).
 
-**Donnees envoyees :** hash de device (SHA-256 d'un sel aleatoire), version, OS, architecture, nombre de commandes/24h, top commandes, pourcentage de reduction de sortie bash.
+**Donnees envoyees :** hash de device (SHA-256 d'un sel aleatoire), version, OS, architecture, nombre de commandes/24h, top commandes, pourcentage de reduction de sortie bash, compteurs recall par famille de filtre (elisions/consultations — noms issus d'une allowlist fermee, jamais de hash, chemin, argument ou contenu).
 
 **Responsable du traitement :** `RTK AI Labs`, contact@rtk-ai.app
 

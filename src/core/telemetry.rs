@@ -150,6 +150,11 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
         "projects_count": enriched.projects_count,
         // Meta-commands: feature adoption
         "meta_usage": enriched.meta_usage,
+        // Recall efficiency: which filter caps to tune (counters per filter family only)
+        "recall_mode": recall_mode_label(),
+        "recall_stats": build_recall_stats(
+            &crate::core::retriever::stats_snapshot().unwrap_or_default()
+        ),
     });
 
     let mut req = ureq::post(url).set("Content-Type", "application/json");
@@ -331,6 +336,106 @@ fn get_enriched_stats(tracker: &tracking::Tracker) -> EnrichedStats {
 }
 
 /// Build meta-command usage counts (gain, discover, proxy, verify, learn, init).
+fn recall_mode_label() -> &'static str {
+    use crate::core::retriever::RecoveryMode;
+    match crate::core::config::Config::load()
+        .unwrap_or_default()
+        .retriever
+        .mode
+    {
+        RecoveryMode::Sqlite => "sqlite",
+        RecoveryMode::Tee => "tee",
+        RecoveryMode::Disabled => "disabled",
+    }
+}
+
+const RECALL_FAMILIES: &[&str] = &[
+    "grep",
+    "cargo",
+    "docker",
+    "compose",
+    "kubectl",
+    "gh",
+    "glab",
+    "git",
+    "aws",
+    "curl",
+    "wget",
+    "dotnet",
+    "eslint",
+    "lint",
+    "go",
+    "gradlew",
+    "mvn",
+    "sbt",
+    "pnpm",
+    "npm",
+    "npx",
+    "jest",
+    "vitest",
+    "playwright",
+    "next",
+    "tsc",
+    "prettier",
+    "prisma",
+    "pytest",
+    "pylint",
+    "ruff",
+    "mypy",
+    "pip",
+    "uv",
+    "rspec",
+    "rubocop",
+    "rake",
+    "php",
+    "artisan",
+    "phpunit",
+    "phpstan",
+    "pest",
+    "paratest",
+    "ecs",
+    "pint",
+    "test",
+    "err",
+    "run",
+    "gt",
+];
+
+fn recall_slug_is_public(slug: &str) -> bool {
+    slug.len() <= 32
+        && slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+        && RECALL_FAMILIES.contains(&slug.split(['_', '-']).next().unwrap_or(""))
+}
+
+fn build_recall_stats(stats: &[crate::core::retriever::RecallStat]) -> serde_json::Value {
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let mut other = (0i64, 0i64);
+    for s in stats {
+        if recall_slug_is_public(&s.slug) {
+            rows.push(serde_json::json!({
+                "filter": s.slug,
+                "mode": s.mode,
+                "elisions": s.elisions,
+                "recalls": s.recalls,
+            }));
+        } else {
+            other.0 += s.elisions;
+            other.1 += s.recalls;
+        }
+    }
+    if other != (0, 0) {
+        rows.push(serde_json::json!({
+            "filter": "other",
+            "mode": "mixed",
+            "elisions": other.0,
+            "recalls": other.1,
+        }));
+    }
+    serde_json::Value::Array(rows)
+}
+
 fn build_meta_usage(tracker: &tracking::Tracker) -> serde_json::Value {
     let meta_cmds = ["gain", "discover", "proxy", "verify", "learn", "init"];
     let mut usage = serde_json::Map::new();
@@ -463,6 +568,61 @@ fn touch_marker(path: &PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stat(
+        slug: &str,
+        mode: &str,
+        elisions: i64,
+        recalls: i64,
+    ) -> crate::core::retriever::RecallStat {
+        crate::core::retriever::RecallStat {
+            slug: slug.to_string(),
+            mode: mode.to_string(),
+            elisions,
+            recalls,
+        }
+    }
+
+    #[test]
+    fn test_recall_stats_known_families_pass_named() {
+        let stats = vec![
+            stat("grep", "sqlite", 142, 9),
+            stat("cargo_test", "sqlite", 12, 4),
+            stat("docker-images", "tee", 6, 1),
+        ];
+        let v = build_recall_stats(&stats);
+        let arr = v.as_array().expect("array");
+        let names: Vec<&str> = arr.iter().map(|e| e["filter"].as_str().unwrap()).collect();
+        assert!(names.contains(&"grep"));
+        assert!(names.contains(&"cargo_test"));
+        assert!(names.contains(&"docker-images"));
+    }
+
+    #[test]
+    fn test_recall_stats_unknown_or_suspicious_slugs_fold_into_other() {
+        let stats = vec![
+            stat("mysecretproject", "sqlite", 3, 1),
+            stat("grep__tmpEz7w0", "sqlite", 2, 0),
+            stat("a/b/path", "sqlite", 1, 0),
+            stat(&"x".repeat(40), "sqlite", 1, 1),
+        ];
+        let v = build_recall_stats(&stats);
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "everything folds into one row: {v}");
+        assert_eq!(arr[0]["filter"], "other");
+        assert_eq!(arr[0]["elisions"], 7);
+        assert_eq!(arr[0]["recalls"], 2);
+    }
+
+    #[test]
+    fn test_recall_stats_payload_has_only_expected_keys() {
+        let stats = vec![stat("grep", "sqlite", 1, 1)];
+        let v = build_recall_stats(&stats);
+        let obj = v.as_array().unwrap()[0].as_object().unwrap();
+        let mut keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["elisions", "filter", "mode", "recalls"]);
+    }
 
     #[test]
     fn test_device_hash_is_stable() {
