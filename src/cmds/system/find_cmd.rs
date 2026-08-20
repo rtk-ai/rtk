@@ -60,7 +60,7 @@ fn next_arg(args: &[String], i: &mut usize) -> Option<String> {
 /// Check if args contain native find flags (-name, -type, -maxdepth, etc.)
 fn has_native_find_flags(args: &[String]) -> bool {
     args.iter()
-        .any(|a| a == "-name" || a == "-type" || a == "-maxdepth" || a == "-iname")
+        .any(|a| a == "-name" || a == "-type" || a == "-maxdepth" || a == "-iname" || a == "-print")
 }
 
 /// Native find flags that RTK cannot handle correctly.
@@ -131,6 +131,9 @@ fn parse_native_find_args(args: &[String]) -> Result<FindArgs> {
                 if let Some(val) = next_arg(args, &mut i) {
                     parsed.max_depth = Some(val.parse().context("invalid -maxdepth value")?);
                 }
+            }
+            "-print" => {
+                // Native find's default action. RTK already prints matches, so this is a no-op.
             }
             flag if flag.starts_with('-') => {
                 eprintln!("rtk find: unknown flag '{}', ignored", flag);
@@ -491,6 +494,21 @@ mod tests {
         let parsed = parse_find_args(&args(&["-name", "*.rs"])).unwrap();
         assert_eq!(parsed.pattern, "*.rs");
         assert_eq!(parsed.path, ".");
+    }
+
+    #[test]
+    fn parse_native_find_print_is_noop() {
+        let parsed = parse_find_args(&args(&[".", "-maxdepth", "2", "-type", "f", "-print"])).unwrap();
+        assert_eq!(parsed.path, ".");
+        assert_eq!(parsed.max_depth, Some(2));
+        assert_eq!(parsed.file_type, "f");
+    }
+
+    #[test]
+    fn parse_native_find_print_without_other_flags() {
+        let parsed = parse_find_args(&args(&[".", "-print"])).unwrap();
+        assert_eq!(parsed.path, ".");
+        assert_eq!(parsed.pattern, "*");
     }
 
     // --- parse_find_args: unsupported flags ---
