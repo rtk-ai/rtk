@@ -2546,6 +2546,31 @@ fn run_cli() -> Result<i32> {
                 )
             };
 
+            // On Windows, warn about PowerShell aliases and built-ins that aren't real executables.
+            // These commands will fail because RTK resolves executables on PATH, not shell aliases/built-ins.
+            if cfg!(target_os = "windows") {
+                let powershell_aliases = [
+                    "ls", "dir", "echo", "pwd", "cp", "mv", "rm", "cat", "man", "which",
+                ];
+                let powershell_builtins =
+                    ["cd", "set", "exit", "cls", "history", "alias", "function"];
+
+                if powershell_aliases.contains(&cmd_name.as_str()) {
+                    eprintln!(
+                        "[rtk] Note: '{}' is a PowerShell alias, not a native executable on PATH.\n\
+                         rtk proxy only works with real executables. Try running the command directly in PowerShell,\n\
+                         or use the native Windows equivalent.",
+                        cmd_name
+                    );
+                } else if powershell_builtins.contains(&cmd_name.as_str()) {
+                    eprintln!(
+                        "[rtk] Note: '{}' is a PowerShell built-in command, not an executable on PATH.\n\
+                         rtk proxy cannot execute shell built-ins. Run it directly in PowerShell instead.",
+                        cmd_name
+                    );
+                }
+            }
+
             if cli.verbose > 0 {
                 eprintln!("Proxy mode: {} {}", cmd_name, cmd_args.join(" "));
             }

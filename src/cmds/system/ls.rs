@@ -3,7 +3,7 @@
 use super::constants::NOISE_DIRS;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::{reduced, CAP_WARNINGS};
-use crate::core::utils::resolved_command;
+use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::Result;
 use regex::Regex;
 use std::io::IsTerminal;
@@ -47,6 +47,16 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
+
+    // On Windows, `ls` is a PowerShell alias, not an executable on PATH.
+    // Suggest `rtk tree` as a native alternative.
+    if cfg!(target_os = "windows") && !tool_exists("ls") {
+        eprintln!(
+            "[rtk] Note: 'ls' is a PowerShell alias on Windows, not a native executable.\n\
+             For directory listings on Windows, use 'rtk tree .' instead."
+        );
+        // Fall through to let resolved_command fail with its own message
+    }
 
     let mut cmd = resolved_command("ls");
     cmd.env("LC_ALL", "C");

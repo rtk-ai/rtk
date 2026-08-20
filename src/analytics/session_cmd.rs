@@ -65,6 +65,15 @@ pub fn run(_verbose: u8) -> Result<()> {
     if sessions.is_empty() {
         println!("No Claude Code sessions found in the last 30 days.");
         println!("Make sure Claude Code has been used at least once.");
+
+        // On Windows, the session directory may not exist or be in a different location
+        if cfg!(target_os = "windows") {
+            println!("\n[rtk] Note: On Windows, Claude Code sessions are stored in:");
+            println!("  %USERPROFILE%\\.claude\\projects\\");
+            println!("If this directory doesn't exist, Claude Code may not have been run yet,");
+            println!("or the sessions may be stored in a different location.");
+        }
+
         return Ok(());
     }
 
