@@ -1673,6 +1673,8 @@ mod tests {
         input.to_string()
     }
 
+    // Normal Codex payloads include `default`; missing permission_mode is
+    // covered deliberately by the dedicated fail-open test below.
     fn codex_input(cmd: &str) -> String {
         codex_input_with_permission_mode(cmd, Some("default"))
     }

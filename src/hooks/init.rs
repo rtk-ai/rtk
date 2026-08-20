@@ -434,6 +434,45 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+/// Read a JSON file with path-aware errors. Missing files return `None` and
+/// empty files are treated as an empty JSON object.
+fn read_json_file(path: &Path) -> Result<Option<serde_json::Value>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    if content.trim().is_empty() {
+        return Ok(Some(serde_json::json!({})));
+    }
+
+    serde_json::from_str(&content)
+        .map(Some)
+        .with_context(|| format!("Failed to parse {} as JSON", path.display()))
+}
+
+/// Back up an existing JSON file before replacing it atomically.
+fn backup_and_atomic_write(path: &Path, content: &str) -> Result<Option<PathBuf>> {
+    let backup_path = if path.exists() {
+        let backup_path = path.with_extension("json.bak");
+        fs::copy(path, &backup_path).with_context(|| {
+            format!(
+                "Failed to backup {} to {}",
+                path.display(),
+                backup_path.display()
+            )
+        })?;
+        Some(backup_path)
+    } else {
+        None
+    };
+
+    atomic_write(path, content)
+        .with_context(|| format!("Failed to update JSON file: {}", path.display()))?;
+    Ok(backup_path)
+}
+
 /// Prompt user for consent to patch settings.json
 /// Prints to stderr (stdout may be piped), reads from stdin
 /// Default is No (capital N)
@@ -930,6 +969,7 @@ fn uninstall_codex_with_paths(
         if dry_run {
             println!("[dry-run] would remove RTK.md: {}", rtk_md_path.display());
         } else {
+            // nosemgrep: filesystem-deletion
             fs::remove_file(rtk_md_path)
                 .with_context(|| format!("Failed to remove RTK.md: {}", rtk_md_path.display()))?;
             if verbose > 0 {
@@ -2493,18 +2533,7 @@ fn codex_hook_already_present(root: &serde_json::Value) -> bool {
 
 fn patch_codex_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
     let InitContext { verbose, dry_run } = ctx;
-    let mut root = if path.exists() {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read Codex hooks: {}", path.display()))?;
-        if content.trim().is_empty() {
-            serde_json::json!({})
-        } else {
-            serde_json::from_str(&content)
-                .with_context(|| format!("Failed to parse Codex hooks: {}", path.display()))?
-        }
-    } else {
-        serde_json::json!({})
-    };
+    let mut root = read_json_file(path)?.unwrap_or_else(|| serde_json::json!({}));
 
     if codex_hook_already_present(&root) {
         return Ok(false);
@@ -2530,11 +2559,7 @@ fn patch_codex_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
             )
         })?;
     }
-    if path.exists() {
-        fs::copy(path, path.with_extension("json.bak"))
-            .with_context(|| format!("Failed to backup Codex hooks: {}", path.display()))?;
-    }
-    atomic_write(path, &serialized)?;
+    backup_and_atomic_write(path, &serialized)?;
     if verbose > 0 {
         eprintln!("Patched Codex hooks: {}", path.display());
     }
@@ -2579,18 +2604,9 @@ fn remove_codex_hook_from_json(root: &mut serde_json::Value) -> bool {
 
 fn remove_codex_hook_from_file(path: &Path, ctx: InitContext) -> Result<bool> {
     let InitContext { verbose, dry_run } = ctx;
-    if !path.exists() {
+    let Some(mut root) = read_json_file(path)? else {
         return Ok(false);
-    }
-
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read Codex hooks: {}", path.display()))?;
-    if content.trim().is_empty() {
-        return Ok(false);
-    }
-
-    let mut root: serde_json::Value = serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse Codex hooks: {}", path.display()))?;
+    };
     if !remove_codex_hook_from_json(&mut root) {
         return Ok(false);
     }
@@ -2608,9 +2624,7 @@ fn remove_codex_hook_from_file(path: &Path, ctx: InitContext) -> Result<bool> {
         return Ok(true);
     }
 
-    fs::copy(path, path.with_extension("json.bak"))
-        .with_context(|| format!("Failed to backup Codex hooks: {}", path.display()))?;
-    atomic_write(path, &serialized)?;
+    backup_and_atomic_write(path, &serialized)?;
     if verbose > 0 {
         eprintln!("Removed Codex RTK hook: {}", path.display());
     }
@@ -3129,22 +3143,6 @@ fn droid_hook_file_candidates(droid_dir: &Path) -> [DroidHookFile; 3] {
     ]
 }
 
-/// Read a Droid config file as JSON. `Ok(None)` when the file doesn't exist;
-/// an empty file parses as `{}`.
-fn read_droid_json(path: &Path) -> Result<Option<serde_json::Value>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let content =
-        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    if content.trim().is_empty() {
-        return Ok(Some(serde_json::json!({})));
-    }
-    serde_json::from_str(&content)
-        .map(Some)
-        .with_context(|| format!("Failed to parse {} as JSON", path.display()))
-}
-
 /// The JSON object holding hook events for the given layout, if present.
 fn droid_events(root: &serde_json::Value, layout: DroidLayout) -> &serde_json::Value {
     match layout {
@@ -3187,7 +3185,7 @@ fn resolve_droid_install_target(droid_dir: &Path) -> Result<DroidHookFile> {
     };
 
     if let Some(path) = &live_hooks_json {
-        if let Some(json) = read_droid_json(path)? {
+        if let Some(json) = read_json_file(path)? {
             if droid_has_pre_tool_use(&json, DroidLayout::Root) {
                 return Ok(DroidHookFile {
                     path: path.clone(),
@@ -3197,7 +3195,7 @@ fn resolve_droid_install_target(droid_dir: &Path) -> Result<DroidHookFile> {
         }
     }
 
-    if let Some(json) = read_droid_json(&settings)? {
+    if let Some(json) = read_json_file(&settings)? {
         if droid_has_pre_tool_use(&json, DroidLayout::Nested) {
             return Ok(DroidHookFile {
                 path: settings,
@@ -3281,7 +3279,7 @@ fn run_droid_mode_at(droid_dir: &Path, global: bool, ctx: InitContext) -> Result
 fn patch_droid_hook_file(file: &DroidHookFile, ctx: InitContext) -> Result<bool> {
     let InitContext { verbose, dry_run } = ctx;
     let path = &file.path;
-    let mut root = read_droid_json(path)?.unwrap_or_else(|| serde_json::json!({}));
+    let mut root = read_json_file(path)?.unwrap_or_else(|| serde_json::json!({}));
 
     if droid_hook_already_present(&root, file.layout) {
         if verbose > 0 {
@@ -3303,16 +3301,11 @@ fn patch_droid_hook_file(file: &DroidHookFile, ctx: InitContext) -> Result<bool>
         return Ok(true);
     }
 
-    if path.exists() {
-        let backup_path = path.with_extension("json.bak");
-        fs::copy(path, &backup_path)
-            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+    if let Some(backup_path) = backup_and_atomic_write(path, &serialized)? {
         if verbose > 0 {
             eprintln!("Backup: {}", backup_path.display());
         }
     }
-
-    atomic_write(path, &serialized)?;
     Ok(true)
 }
 
@@ -3440,7 +3433,7 @@ fn remove_droid_hook_from_file(file: &DroidHookFile, ctx: InitContext) -> Result
     let InitContext { verbose, dry_run } = ctx;
     let path = &file.path;
 
-    let mut root = match read_droid_json(path)? {
+    let mut root = match read_json_file(path)? {
         Some(v) => v,
         None => return Ok(false),
     };
@@ -3455,12 +3448,9 @@ fn remove_droid_hook_from_file(file: &DroidHookFile, ctx: InitContext) -> Result
             path.display()
         );
     } else {
-        let backup_path = path.with_extension("json.bak");
-        fs::copy(path, &backup_path).ok();
-
         let serialized =
             serde_json::to_string_pretty(&root).context("Failed to serialize Droid hook file")?;
-        atomic_write(path, &serialized)?;
+        backup_and_atomic_write(path, &serialized)?;
 
         if verbose > 0 {
             eprintln!("Removed RTK hook from {}", path.display());
@@ -3798,18 +3788,7 @@ fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
 /// Returns true if the file was modified.
 fn patch_cursor_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
     let InitContext { verbose, dry_run } = ctx;
-    let mut root = if path.exists() {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read {}", path.display()))?;
-        if content.trim().is_empty() {
-            serde_json::json!({ "version": 1 })
-        } else {
-            serde_json::from_str(&content)
-                .with_context(|| format!("Failed to parse {} as JSON", path.display()))?
-        }
-    } else {
-        serde_json::json!({ "version": 1 })
-    };
+    let mut root = read_json_file(path)?.unwrap_or_else(|| serde_json::json!({ "version": 1 }));
 
     // Check idempotency
     if cursor_hook_already_present(&root) {
@@ -3835,18 +3814,11 @@ fn patch_cursor_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
         return Ok(true);
     }
 
-    // Backup if exists
-    if path.exists() {
-        let backup_path = path.with_extension("json.bak");
-        fs::copy(path, &backup_path)
-            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+    if let Some(backup_path) = backup_and_atomic_write(path, &serialized)? {
         if verbose > 0 {
             eprintln!("Backup: {}", backup_path.display());
         }
     }
-
-    // Atomic write
-    atomic_write(path, &serialized)?;
 
     Ok(true)
 }
@@ -3906,18 +3878,9 @@ fn insert_cursor_hook_entry(root: &mut serde_json::Value) -> Result<()> {
 /// Preserves any existing `rtk hook cursor` entries (new format).
 fn remove_legacy_cursor_hooks_json_entries(path: &Path, ctx: InitContext) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
-    if !path.exists() {
+    let Some(mut root) = read_json_file(path)? else {
         return Ok(());
-    }
-
-    let content =
-        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    if content.trim().is_empty() {
-        return Ok(());
-    }
-
-    let mut root: serde_json::Value = serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    };
 
     if !remove_legacy_cursor_hook_entries_from_json(&mut root) {
         return Ok(());
@@ -3933,7 +3896,7 @@ fn remove_legacy_cursor_hooks_json_entries(path: &Path, ctx: InitContext) -> Res
 
     let serialized =
         serde_json::to_string_pretty(&root).context("Failed to serialize hooks.json")?;
-    atomic_write(path, &serialized)?;
+    backup_and_atomic_write(path, &serialized)?;
 
     if verbose > 0 {
         eprintln!("  [ok] Removed legacy rtk-rewrite.sh entry from Cursor hooks.json");
@@ -3990,33 +3953,23 @@ fn remove_cursor_hooks(ctx: InitContext) -> Result<Vec<String>> {
 
     // 2. Remove RTK entry from hooks.json
     let hooks_json_path = cursor_dir.join(HOOKS_JSON);
-    if hooks_json_path.exists() {
-        let content = fs::read_to_string(&hooks_json_path)
-            .with_context(|| format!("Failed to read {}", hooks_json_path.display()))?;
+    if let Some(mut root) = read_json_file(&hooks_json_path)? {
+        if remove_cursor_hook_from_json(&mut root) {
+            if dry_run {
+                println!(
+                    "[dry-run] would remove RTK entry from Cursor hooks.json: {}",
+                    hooks_json_path.display()
+                );
+            } else {
+                let serialized = serde_json::to_string_pretty(&root)
+                    .context("Failed to serialize hooks.json")?;
+                backup_and_atomic_write(&hooks_json_path, &serialized)?;
 
-        if !content.trim().is_empty() {
-            if let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&content) {
-                if remove_cursor_hook_from_json(&mut root) {
-                    if dry_run {
-                        println!(
-                            "[dry-run] would remove RTK entry from Cursor hooks.json: {}",
-                            hooks_json_path.display()
-                        );
-                    } else {
-                        let backup_path = hooks_json_path.with_extension("json.bak");
-                        fs::copy(&hooks_json_path, &backup_path).ok();
-
-                        let serialized = serde_json::to_string_pretty(&root)
-                            .context("Failed to serialize hooks.json")?;
-                        atomic_write(&hooks_json_path, &serialized)?;
-
-                        if verbose > 0 {
-                            eprintln!("Removed RTK hook from Cursor hooks.json");
-                        }
-                    }
-                    removed.push("Cursor hooks.json: removed RTK entry".to_string());
+                if verbose > 0 {
+                    eprintln!("Removed RTK hook from Cursor hooks.json");
                 }
             }
+            removed.push("Cursor hooks.json: removed RTK entry".to_string());
         }
     }
 
@@ -4306,7 +4259,12 @@ fn show_codex_config() -> Result<()> {
     }
 
     if global_hooks_json.exists() {
-        let content = fs::read_to_string(&global_hooks_json)?;
+        let content = fs::read_to_string(&global_hooks_json).with_context(|| {
+            format!(
+                "Failed to read global Codex hooks: {}",
+                global_hooks_json.display()
+            )
+        })?;
         match serde_json::from_str::<serde_json::Value>(&content) {
             Ok(root) if codex_hook_already_present(&root) => {
                 println!("[ok] Global hook: {}", global_hooks_json.display());
@@ -4319,7 +4277,12 @@ fn show_codex_config() -> Result<()> {
     }
 
     if global_agents_md.exists() {
-        let content = fs::read_to_string(&global_agents_md)?;
+        let content = fs::read_to_string(&global_agents_md).with_context(|| {
+            format!(
+                "Failed to read global Codex instructions: {}",
+                global_agents_md.display()
+            )
+        })?;
         if has_rtk_reference(&content, &[RTK_MD_REF, global_rtk_md_ref.as_str()]) {
             println!("[ok] Global AGENTS.md: RTK.md reference");
         } else if content.contains(RTK_BLOCK_START) {
@@ -4338,7 +4301,12 @@ fn show_codex_config() -> Result<()> {
     }
 
     if local_hooks_json.exists() {
-        let content = fs::read_to_string(&local_hooks_json)?;
+        let content = fs::read_to_string(&local_hooks_json).with_context(|| {
+            format!(
+                "Failed to read local Codex hooks: {}",
+                local_hooks_json.display()
+            )
+        })?;
         match serde_json::from_str::<serde_json::Value>(&content) {
             Ok(root) if codex_hook_already_present(&root) => {
                 println!("[ok] Local hook: {}", local_hooks_json.display());
@@ -4351,7 +4319,12 @@ fn show_codex_config() -> Result<()> {
     }
 
     if local_agents_md.exists() {
-        let content = fs::read_to_string(&local_agents_md)?;
+        let content = fs::read_to_string(&local_agents_md).with_context(|| {
+            format!(
+                "Failed to read local Codex instructions: {}",
+                local_agents_md.display()
+            )
+        })?;
         if has_rtk_reference(&content, &[RTK_MD_REF]) {
             println!("[ok] Local AGENTS.md: @RTK.md reference");
         } else if content.contains(RTK_BLOCK_START) {
@@ -6439,6 +6412,33 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_droid_hook_propagates_backup_failure_and_preserves_file() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(DROID_HOOKS_FILE);
+        let original = serde_json::to_string_pretty(&serde_json::json!({
+            "PreToolUse": [{
+                "matcher": DROID_EXECUTE_MATCHER,
+                "hooks": [{ "type": "command", "command": DROID_HOOK_COMMAND }]
+            }]
+        }))
+        .unwrap();
+        fs::write(&path, &original).unwrap();
+        fs::create_dir(path.with_extension("json.bak")).unwrap();
+
+        let err = remove_droid_hook_from_file(
+            &DroidHookFile {
+                path: path.clone(),
+                layout: DroidLayout::Root,
+            },
+            InitContext::default(),
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("backup"));
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
     fn test_droid_target_defaults_to_hooks_json() {
         // Fresh setup: the canonical hooks.json is created (Droid's own
         // /hooks UI location), not the settings.json fallback.
@@ -7017,6 +7017,56 @@ mod tests {
         assert_eq!(written, content);
     }
 
+    #[test]
+    fn test_read_json_file_handles_missing_and_empty_files() {
+        let temp = TempDir::new().unwrap();
+        let missing = temp.path().join("missing.json");
+        let empty = temp.path().join("empty.json");
+        fs::write(&empty, "  \n").unwrap();
+
+        assert!(read_json_file(&missing).unwrap().is_none());
+        assert_eq!(read_json_file(&empty).unwrap(), Some(serde_json::json!({})));
+    }
+
+    #[test]
+    fn test_read_json_file_errors_include_the_path() {
+        let temp = TempDir::new().unwrap();
+        let invalid = temp.path().join("invalid.json");
+        fs::write(&invalid, "{").unwrap();
+
+        let parse_error = read_json_file(&invalid).unwrap_err();
+        assert!(format!("{parse_error:#}").contains(&invalid.display().to_string()));
+
+        let read_error = read_json_file(temp.path()).unwrap_err();
+        assert!(format!("{read_error:#}").contains(&temp.path().display().to_string()));
+    }
+
+    #[test]
+    fn test_backup_and_atomic_write_preserves_previous_content() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("hooks.json");
+        fs::write(&path, "old").unwrap();
+
+        let backup = backup_and_atomic_write(&path, "new").unwrap().unwrap();
+
+        assert_eq!(backup, path.with_extension("json.bak"));
+        assert_eq!(fs::read_to_string(path).unwrap(), "new");
+        assert_eq!(fs::read_to_string(backup).unwrap(), "old");
+    }
+
+    #[test]
+    fn test_backup_and_atomic_write_failure_preserves_original() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("hooks.json");
+        fs::write(&path, "old").unwrap();
+        fs::create_dir(path.with_extension("json.bak")).unwrap();
+
+        let err = backup_and_atomic_write(&path, "new").unwrap_err();
+
+        assert!(format!("{err:#}").contains("backup"));
+        assert_eq!(fs::read_to_string(path).unwrap(), "old");
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_atomic_write_preserves_symlink() {
@@ -7304,6 +7354,29 @@ mod tests {
 
         // afterFileEdit should be preserved
         assert!(json_content["hooks"]["afterFileEdit"].is_array());
+    }
+
+    #[test]
+    fn test_patch_cursor_hook_propagates_backup_failure_and_preserves_file() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(HOOKS_JSON);
+        let original = serde_json::to_string_pretty(&serde_json::json!({
+            "version": 1,
+            "hooks": {
+                "preToolUse": [{
+                    "command": "./hooks/other.sh",
+                    "matcher": "Shell"
+                }]
+            }
+        }))
+        .unwrap();
+        fs::write(&path, &original).unwrap();
+        fs::create_dir(path.with_extension("json.bak")).unwrap();
+
+        let err = patch_cursor_hooks_json(&path, InitContext::default()).unwrap_err();
+
+        assert!(format!("{err:#}").contains("backup"));
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
     }
 
     #[test]
