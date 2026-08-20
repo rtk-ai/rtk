@@ -30,7 +30,7 @@ fn glob_match_inner(pat: &[u8], name: &[u8]) -> bool {
 #[derive(Debug)]
 struct FindArgs {
     pattern: String,
-    path: String,
+    paths: Vec<String>,
     max_results: usize,
     max_depth: Option<usize>,
     file_type: String,
@@ -41,7 +41,7 @@ impl Default for FindArgs {
     fn default() -> Self {
         Self {
             pattern: "*".to_string(),
-            path: ".".to_string(),
+            paths: vec![".".to_string()],
             max_results: 50,
             max_depth: None,
             file_type: "f".to_string(),
@@ -55,6 +55,16 @@ impl Default for FindArgs {
 fn next_arg(args: &[String], i: &mut usize) -> Option<String> {
     *i += 1;
     args.get(*i).cloned()
+}
+
+/// Collect leading non-flag arguments as paths, advancing `i` past them.
+fn collect_leading_paths(args: &[String], i: &mut usize) -> Vec<String> {
+    let mut paths = Vec::new();
+    while *i < args.len() && !args[*i].starts_with('-') {
+        paths.push(args[*i].clone());
+        *i += 1;
+    }
+    paths
 }
 
 /// Check if args contain native find flags (-name, -type, -maxdepth, etc.)
@@ -98,15 +108,15 @@ fn parse_find_args(args: &[String]) -> Result<FindArgs> {
     }
 }
 
-/// Parse native find syntax: `find [path] -name "*.rs" -type f -maxdepth 3`
+/// Parse native find syntax: `find [path...] -name "*.rs" -type f -maxdepth 3`
 fn parse_native_find_args(args: &[String]) -> Result<FindArgs> {
     let mut parsed = FindArgs::default();
     let mut i = 0;
 
-    // First non-flag argument is the path (standard find behavior)
-    if !args[0].starts_with('-') {
-        parsed.path = args[0].clone();
-        i = 1;
+    // Leading non-flag arguments are paths (standard find behavior: `find p1 p2 ... -name ...`)
+    let paths = collect_leading_paths(args, &mut i);
+    if !paths.is_empty() {
+        parsed.paths = paths;
     }
 
     while i < args.len() {
@@ -143,7 +153,7 @@ fn parse_native_find_args(args: &[String]) -> Result<FindArgs> {
     Ok(parsed)
 }
 
-/// Parse RTK syntax: `find <pattern> [path] [-m max] [-t type]`
+/// Parse RTK syntax: `find <pattern> [path...] [-m max] [-t type]`
 fn parse_rtk_find_args(args: &[String]) -> Result<FindArgs> {
     let mut parsed = FindArgs {
         pattern: args[0].clone(),
@@ -151,10 +161,10 @@ fn parse_rtk_find_args(args: &[String]) -> Result<FindArgs> {
     };
     let mut i = 1;
 
-    // Second positional arg (if not a flag) is the path
-    if i < args.len() && !args[i].starts_with('-') {
-        parsed.path = args[i].clone();
-        i += 1;
+    // Leading non-flag args after the pattern are paths
+    let paths = collect_leading_paths(args, &mut i);
+    if !paths.is_empty() {
+        parsed.paths = paths;
     }
 
     while i < args.len() {
@@ -182,7 +192,7 @@ pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
     let parsed = parse_find_args(args)?;
     run(
         &parsed.pattern,
-        &parsed.path,
+        &parsed.paths,
         parsed.max_results,
         parsed.max_depth,
         &parsed.file_type,
@@ -193,7 +203,7 @@ pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
 
 pub fn run(
     pattern: &str,
-    path: &str,
+    paths: &[String],
     max_results: usize,
     max_depth: Option<usize>,
     file_type: &str,
@@ -202,11 +212,25 @@ pub fn run(
 ) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
+    // Duplicate roots would be walked and reported twice for no benefit; dedup
+    // keeps the search and the output no larger than the set of distinct roots.
+    let mut deduped_paths: Vec<String> = Vec::with_capacity(paths.len());
+    for p in paths {
+        if !deduped_paths.contains(p) {
+            deduped_paths.push(p.clone());
+        }
+    }
+    let paths: &[String] = &deduped_paths;
+
+    // paths is guaranteed non-empty by both parse_native_find_args and
+    // parse_rtk_find_args (they default to ["."] via FindArgs::default()).
+    let single_root = paths.len() == 1;
+
     // Treat "." as match-all
     let effective_pattern = if pattern == "." { "*" } else { pattern };
 
     if verbose > 0 {
-        eprintln!("find: {} in {}", effective_pattern, path);
+        eprintln!("find: {} in {}", effective_pattern, paths.join(", "));
     }
 
     let want_dirs = file_type == "d";
@@ -215,12 +239,16 @@ pub fn run(
     // entries; otherwise skip them to keep results tidy (#1101).
     let search_hidden = effective_pattern.starts_with('.');
 
-    let mut builder = WalkBuilder::new(path);
+    let mut builder = WalkBuilder::new(&paths[0]);
+    for p in &paths[1..] {
+        builder.add(p);
+    }
     builder
         .hidden(!search_hidden) // skip hidden files/dirs unless pattern targets dotfiles
         .git_ignore(true) // respect .gitignore
         .git_global(true)
         .git_exclude(true);
+
     if let Some(depth) = max_depth {
         builder.max_depth(Some(depth));
     }
@@ -262,16 +290,24 @@ pub fn run(
             continue;
         }
 
-        // Store path relative to search root
-        let display_path = entry_path
-            .strip_prefix(path)
-            .unwrap_or(entry_path)
-            .to_string_lossy()
-            .to_string();
+        files.push(entry_path.to_string_lossy().to_string());
+    }
 
-        if !display_path.is_empty() {
-            files.push(display_path);
-        }
+    // With a single root, display paths relative to it; with multiple roots, keep
+    // the given root as a prefix so files from different roots don't collide
+    // (e.g. `folder1/foo.txt` vs `folder2/bar.txt` rather than both showing as
+    // `foo.txt`/`bar.txt` with no indication of which root they came from).
+    if single_root {
+        files = files
+            .into_iter()
+            .filter_map(|f| {
+                let stripped = Path::new(&f)
+                    .strip_prefix(&paths[0])
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or(f);
+                (!stripped.is_empty()).then_some(stripped)
+            })
+            .collect();
     }
 
     files.sort();
@@ -280,7 +316,7 @@ pub fn run(
 
     if files.is_empty() {
         timer.track(
-            &format!("find {} -name '{}'", path, effective_pattern),
+            &format!("find {} -name '{}'", paths.join(" "), effective_pattern),
             "rtk find",
             &raw_output,
             "",
@@ -375,7 +411,7 @@ pub fn run(
     let shown = never_worse(&raw_output, &body);
     print!("{}", shown);
     timer.track(
-        &format!("find {} -name '{}'", path, effective_pattern),
+        &format!("find {} -name '{}'", paths.join(" "), effective_pattern),
         "rtk find",
         &raw_output,
         shown,
@@ -444,7 +480,7 @@ mod tests {
     fn parse_native_find_name() {
         let parsed = parse_find_args(&args(&[".", "-name", "*.rs"])).unwrap();
         assert_eq!(parsed.pattern, "*.rs");
-        assert_eq!(parsed.path, ".");
+        assert_eq!(parsed.paths, vec!["."]);
         assert_eq!(parsed.file_type, "f");
         assert_eq!(parsed.max_results, 50);
     }
@@ -453,8 +489,21 @@ mod tests {
     fn parse_native_find_name_and_type() {
         let parsed = parse_find_args(&args(&["src", "-name", "*.rs", "-type", "f"])).unwrap();
         assert_eq!(parsed.pattern, "*.rs");
-        assert_eq!(parsed.path, "src");
+        assert_eq!(parsed.paths, vec!["src"]);
         assert_eq!(parsed.file_type, "f");
+    }
+
+    #[test]
+    fn parse_native_find_three_paths() {
+        let parsed = parse_find_args(&args(&["a", "b", "c", "-name", "*.rs"])).unwrap();
+        assert_eq!(parsed.pattern, "*.rs");
+        assert_eq!(parsed.paths, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn parse_native_find_duplicate_paths() {
+        let parsed = parse_find_args(&args(&["a", "a", "-name", "*.txt"])).unwrap();
+        assert_eq!(parsed.paths, vec!["a", "a"]);
     }
 
     #[test]
@@ -490,7 +539,7 @@ mod tests {
         // `find -name "*.rs"` without explicit path defaults to "."
         let parsed = parse_find_args(&args(&["-name", "*.rs"])).unwrap();
         assert_eq!(parsed.pattern, "*.rs");
-        assert_eq!(parsed.path, ".");
+        assert_eq!(parsed.paths, vec!["."]);
     }
 
     // --- parse_find_args: unsupported flags ---
@@ -515,21 +564,28 @@ mod tests {
     fn parse_rtk_syntax_pattern_only() {
         let parsed = parse_find_args(&args(&["*.rs"])).unwrap();
         assert_eq!(parsed.pattern, "*.rs");
-        assert_eq!(parsed.path, ".");
+        assert_eq!(parsed.paths, vec!["."]);
     }
 
     #[test]
     fn parse_rtk_syntax_pattern_and_path() {
         let parsed = parse_find_args(&args(&["*.rs", "src"])).unwrap();
         assert_eq!(parsed.pattern, "*.rs");
-        assert_eq!(parsed.path, "src");
+        assert_eq!(parsed.paths, vec!["src"]);
+    }
+
+    #[test]
+    fn parse_rtk_syntax_multiple_paths() {
+        let parsed = parse_find_args(&args(&["*.rs", "src", "tests"])).unwrap();
+        assert_eq!(parsed.pattern, "*.rs");
+        assert_eq!(parsed.paths, vec!["src", "tests"]);
     }
 
     #[test]
     fn parse_rtk_syntax_with_flags() {
         let parsed = parse_find_args(&args(&["*.rs", "src", "-m", "10", "-t", "d"])).unwrap();
         assert_eq!(parsed.pattern, "*.rs");
-        assert_eq!(parsed.path, "src");
+        assert_eq!(parsed.paths, vec!["src"]);
         assert_eq!(parsed.max_results, 10);
         assert_eq!(parsed.file_type, "d");
     }
@@ -538,7 +594,7 @@ mod tests {
     fn parse_empty_args() {
         let parsed = parse_find_args(&args(&[])).unwrap();
         assert_eq!(parsed.pattern, "*");
-        assert_eq!(parsed.path, ".");
+        assert_eq!(parsed.paths, vec!["."]);
     }
 
     // --- run_from_args integration tests ---
@@ -569,14 +625,14 @@ mod tests {
     #[test]
     fn find_dotfile_pattern_includes_hidden() {
         // .gitignore exists at the repo root — must be found when using a dotfile pattern
-        let result = run(".gitignore", ".", 50, Some(1), "f", false, 0);
+        let result = run(".gitignore", &args(&["."]), 50, Some(1), "f", false, 0);
         assert!(result.is_ok(), "run with dotfile pattern should not error");
     }
 
     #[test]
     fn find_regular_pattern_skips_hidden() {
         // Non-dot pattern should not error (hidden dirs remain skipped)
-        let result = run("*.rs", "src", 5, None, "f", false, 0);
+        let result = run("*.rs", &args(&["src"]), 5, None, "f", false, 0);
         assert!(result.is_ok());
     }
 
@@ -585,34 +641,42 @@ mod tests {
     #[test]
     fn find_rs_files_in_src() {
         // Should find .rs files without error
-        let result = run("*.rs", "src", 100, None, "f", false, 0);
+        let result = run("*.rs", &args(&["src"]), 100, None, "f", false, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_dot_pattern_works() {
         // "." pattern should not error (was broken before)
-        let result = run(".", "src", 10, None, "f", false, 0);
+        let result = run(".", &args(&["src"]), 10, None, "f", false, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_no_matches() {
-        let result = run("*.xyz_nonexistent", "src", 50, None, "f", false, 0);
+        let result = run(
+            "*.xyz_nonexistent",
+            &args(&["src"]),
+            50,
+            None,
+            "f",
+            false,
+            0,
+        );
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_respects_max() {
         // With max=2, should not error
-        let result = run("*.rs", "src", 2, None, "f", false, 0);
+        let result = run("*.rs", &args(&["src"]), 2, None, "f", false, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_gitignored_excluded() {
         // target/ is in .gitignore — files inside should not appear
-        let result = run("*", ".", 1000, None, "f", false, 0);
+        let result = run("*", &args(&["."]), 1000, None, "f", false, 0);
         assert!(result.is_ok());
         // We can't easily capture stdout in unit tests, but at least
         // verify it runs without error. The smoke tests verify content.

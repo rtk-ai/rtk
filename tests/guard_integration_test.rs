@@ -150,6 +150,65 @@ fn find_no_results_emits_empty() {
 }
 
 #[test]
+fn find_multiple_paths_returns_matches_from_both() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("folder1")).expect("mkdir folder1");
+    std::fs::create_dir_all(dir.path().join("folder2")).expect("mkdir folder2");
+    std::fs::write(dir.path().join("folder1/foo.txt"), "x").expect("write foo");
+    std::fs::write(dir.path().join("folder2/bar.txt"), "x").expect("write bar");
+
+    let (out, _) = rtk_in_dir(
+        dir.path(),
+        &["find", "folder1", "folder2", "-name", "*.txt"],
+    );
+    assert!(
+        out.contains("foo.txt"),
+        "expected foo.txt from the first path in output: {out:?}"
+    );
+    assert!(
+        out.contains("bar.txt"),
+        "expected bar.txt from the second path in output: {out:?}"
+    );
+}
+
+#[test]
+fn find_one_valid_one_invalid_path_subprocess() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("folder1")).expect("mkdir folder1");
+    std::fs::write(dir.path().join("folder1/foo.txt"), "x").expect("write foo");
+
+    let (out, code) = rtk_in_dir(
+        dir.path(),
+        &["find", "folder1", "does_not_exist", "-name", "*.txt"],
+    );
+    assert_eq!(code, Some(0), "invalid root should not fail the command");
+    assert!(
+        out.contains("foo.txt"),
+        "expected foo.txt from the valid path in output: {out:?}"
+    );
+}
+
+#[test]
+fn find_duplicate_paths_dedups_to_a_single_match() {
+    // Unlike native find (which prints the match once per repeated path arg),
+    // rtk find dedups identical paths: searching the same root twice wastes a
+    // walk and would produce misleading duplicate results.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("folder1")).expect("mkdir folder1");
+    std::fs::write(dir.path().join("folder1/foo.txt"), "x").expect("write foo");
+
+    let (out, _) = rtk_in_dir(
+        dir.path(),
+        &["find", "folder1", "folder1", "-name", "*.txt"],
+    );
+    let occurrences = out.matches("foo.txt").count();
+    assert_eq!(
+        occurrences, 1,
+        "expected foo.txt to appear once after deduping a repeated path arg, got {occurrences}: {out:?}"
+    );
+}
+
+#[test]
 fn git_stash_list_no_stashes_emits_empty() {
     let dir = init_git_repo();
     let (out, code) = rtk_in_dir(dir.path(), &["git", "stash", "list"]);
