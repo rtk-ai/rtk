@@ -588,12 +588,27 @@ pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
 /// `.output()` keep the diagnostic instead of losing it. The program name is
 /// used as the label so no call site has to pass one.
 fn capture(cmd: &mut Command) -> Result<CaptureResult> {
+    let raw = capture_raw(cmd)?;
+    Ok(CaptureResult {
+        stdout: super::utils::decode_process_output(&raw.stdout),
+        stderr: super::utils::decode_process_output(&raw.stderr),
+        exit_code: raw.exit_code,
+    })
+}
+
+/// Run `cmd` to completion and return its raw bytes plus a signal-aware exit code.
+/// The single spot that turns an `ExitStatus` into a code via
+/// [`exit_code_from_output`](super::utils::exit_code_from_output) — so the
+/// `process terminated by signal N` diagnostic is emitted uniformly whether the
+/// caller decodes the bytes ([`capture`]) or keeps them raw ([`exec_capture_bytes`]),
+/// instead of the raw path silently dropping it.
+fn capture_raw(cmd: &mut Command) -> Result<CaptureBytes> {
     let program = cmd.get_program().to_string_lossy().into_owned();
     let output = cmd.output().context("Failed to execute command")?;
     let exit_code = super::utils::exit_code_from_output(&output, &program);
-    Ok(CaptureResult {
-        stdout: super::utils::decode_process_output(&output.stdout),
-        stderr: super::utils::decode_process_output(&output.stderr),
+    Ok(CaptureBytes {
+        stdout: output.stdout,
+        stderr: output.stderr,
         exit_code,
     })
 }
@@ -615,12 +630,7 @@ impl CaptureBytes {
 /// Like [`exec_capture`] but returns raw bytes so the caller decides how to decode.
 pub fn exec_capture_bytes(cmd: &mut Command) -> Result<CaptureBytes> {
     cmd.stdin(Stdio::null());
-    let output = cmd.output().context("Failed to execute command")?;
-    Ok(CaptureBytes {
-        stdout: output.stdout,
-        stderr: output.stderr,
-        exit_code: status_to_exit_code(output.status),
-    })
+    capture_raw(cmd)
 }
 
 /// How captured bytes were decoded into text.
@@ -763,21 +773,36 @@ fn text_looks_binary(s: &str) -> bool {
     control * 100 / total > 2
 }
 
-/// Heuristic: a NUL byte, or more than 2% C0 control bytes (excluding tab/newline/CR)
-/// in the first 8 KiB, marks content as binary rather than single-byte text.
+/// Heuristic: a NUL byte anywhere, or more than 2% C0 control bytes (excluding
+/// tab/newline/CR) across a head+tail sample, marks content as binary rather than
+/// single-byte text.
+///
+/// The control scan samples BOTH ends, not just the head: a blob with a clean
+/// ASCII/UTF-8 head but a binary tail past the first window (an appended signature
+/// block, a corrupted trailer, an embedded resource) and no NUL byte would pass a
+/// head-only scan and get silently transcoded to Latin-1 mojibake. Two 8 KiB windows
+/// keep the scan bounded on very large blobs while covering the tail; when the buffer
+/// is at most two windows the whole thing is scanned (no gap, no double-count).
 fn looks_binary(bytes: &[u8]) -> bool {
     if bytes.contains(&0) {
         return true;
     }
-    let sample = &bytes[..bytes.len().min(8192)];
-    if sample.is_empty() {
+    if bytes.is_empty() {
         return false;
     }
-    let control = sample
-        .iter()
-        .filter(|&&b| b < 0x09 || (0x0D < b && b < 0x20))
-        .count();
-    control * 100 / sample.len() > 2
+    const WINDOW: usize = 8192;
+    let is_control = |&&b: &&u8| b < 0x09 || (0x0D < b && b < 0x20);
+    let (sample_len, control) = if bytes.len() <= 2 * WINDOW {
+        (bytes.len(), bytes.iter().filter(is_control).count())
+    } else {
+        let head = bytes[..WINDOW].iter().filter(is_control).count();
+        let tail = bytes[bytes.len() - WINDOW..]
+            .iter()
+            .filter(is_control)
+            .count();
+        (2 * WINDOW, head + tail)
+    };
+    control * 100 / sample_len > 2
 }
 
 #[cfg(test)]
@@ -991,6 +1016,23 @@ pub(crate) mod tests {
             .map(|i| if i % 2 == 0 { 0x01 } else { b'a' })
             .collect();
         assert!(looks_binary(&ctrl));
+    }
+
+    #[test]
+    fn test_looks_binary_scans_tail_past_head_window() {
+        // Clean ASCII head longer than the 8 KiB control-scan window, then a control-
+        // byte tail with NO NUL byte (an appended signature / corrupted trailer). A
+        // head-only scan would miss the tail and pass this off as text; the head+tail
+        // sample must flag it. Total > 2×8 KiB so the two-window branch is exercised.
+        let mut bytes = vec![b'a'; 20_000];
+        bytes.extend(std::iter::repeat_n(0x01u8, 3_000));
+        assert!(
+            !bytes.contains(&0),
+            "fixture must have no NUL to be meaningful"
+        );
+        assert!(looks_binary(&bytes));
+        // And decode_output routes it to Binary (raw passthrough), not lossy Latin-1.
+        assert!(matches!(decode_output(&bytes), Decoded::Binary));
     }
 
     struct LineFilter<F: FnMut(&str) -> Option<String>> {

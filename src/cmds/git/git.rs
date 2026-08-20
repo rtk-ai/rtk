@@ -223,21 +223,19 @@ fn run_show(
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    // If user wants --stat or --format only, pass through
-    let wants_stat_only = args
-        .iter()
-        .any(|arg| arg == "--stat" || arg == "--numstat" || arg == "--shortstat");
+    // Re-insert `--` when clap's trailing_var_arg consumed it (issue #1215), same as
+    // run_diff/run_checkout. Without this the pathspec separator never reaches
+    // `blob_show_targets`, so `git show <rev> -- <path:with:colon>` would misread the
+    // colon'd pathspec as a `<rev>:<path>` blob and dump it instead of a commit-diff.
+    let args = &args_utils::restore_double_dash(args);
 
-    let wants_format = args
-        .iter()
-        .any(|arg| arg.starts_with("--pretty") || arg.starts_with("--format"));
+    // Pick one of three handlers for `git show`. `show_route` decides the blob case
+    // FIRST (see its docs): the two branches below are mutually exclusive on `route`,
+    // so their source order does not affect which one runs.
+    let blob_args = blob_show_targets(args);
+    let route = show_route(args);
 
-    // `git show rev:path` prints a blob (file content), not a commit diff. A pathspec
-    // (`--`) keeps it a commit-diff, so that case is excluded from blob handling.
-    let blob_args: Vec<&String> = args.iter().filter(|a| is_blob_show_arg(a)).collect();
-    let wants_blob_show = !blob_args.is_empty() && !args.iter().any(|a| a == "--");
-
-    if wants_stat_only || wants_format || emits_word_diff(args) {
+    if route == ShowRoute::StatOrFormat {
         let mut cmd = git_cmd(global_args);
         cmd.arg("show");
         for arg in args {
@@ -260,7 +258,7 @@ fn run_show(
         return Ok(0);
     }
 
-    if wants_blob_show {
+    if route == ShowRoute::Blob {
         let mut cmd = git_cmd(global_args);
         cmd.arg("show");
         for arg in args {
@@ -419,8 +417,72 @@ fn is_blob_show_arg(arg: &str) -> bool {
     !arg.starts_with('-') && !arg.starts_with(":/") && arg.contains(':')
 }
 
+/// The `<rev>:<path>` blob arguments of a `git show`. Args after a `--` are
+/// pathspecs, never revs/blobs, so a colon in a filename there (`-- weird:name`) is
+/// excluded by scanning only the args before the first `--`. Conversely a trailing
+/// `-- <path>` beside a real blob arg is ignored by git (still a blob dump), so its
+/// presence must not empty this list — hence the split rather than a blanket
+/// "contains `--` → not a blob" test.
+fn blob_show_targets(args: &[String]) -> Vec<&String> {
+    let rev_args = match args.iter().position(|a| a == "--") {
+        Some(sep) => &args[..sep],
+        None => args,
+    };
+    rev_args.iter().filter(|a| is_blob_show_arg(a)).collect()
+}
+
+/// Which `git show` handler an invocation routes to.
+#[derive(Debug, PartialEq, Eq)]
+enum ShowRoute {
+    /// A `<rev>:<path>` blob dump → byte-safe decode/window path.
+    Blob,
+    /// `--stat`/`--numstat`/`--shortstat`/`--pretty`/`--format` with NO blob target
+    /// → summary-only passthrough.
+    StatOrFormat,
+    /// An ordinary commit → compacted commit-diff.
+    CommitDiff,
+}
+
+/// Classify a `git show` invocation. Blob detection wins over --stat/--format
+/// because git accepts and silently ignores those flags when the argument resolves
+/// to a blob (verified against git 2.39 — output byte-identical to a plain blob
+/// dump), still emitting the full file. Routing such a call to the --stat passthrough
+/// would send it through lossy UTF-8 decoding and reintroduce the blob corruption the
+/// byte-safe path fixes, so the blob case is checked first.
+fn show_route(args: &[String]) -> ShowRoute {
+    if !blob_show_targets(args).is_empty() {
+        return ShowRoute::Blob;
+    }
+    let wants_stat = args
+        .iter()
+        .any(|a| a == "--stat" || a == "--numstat" || a == "--shortstat");
+    let wants_format = args
+        .iter()
+        .any(|a| a.starts_with("--pretty") || a.starts_with("--format"));
+    // A word/color-word diff has no unified-diff markers for `compact_diff` to read,
+    // so it passes through untouched like a --stat/--format summary (see
+    // `emits_word_diff`). It only ever applies to a commit-diff, so it is checked
+    // after the blob case above.
+    if wants_stat || wants_format || emits_word_diff(args) {
+        return ShowRoute::StatOrFormat;
+    }
+    ShowRoute::CommitDiff
+}
+
 /// Byte budget for a blob preview before truncation kicks in (~2k tokens).
-const MAX_BLOB_BYTES: usize = 8192;
+const MAX_BLOB_BYTES: Budget = Budget(8192);
+
+/// Byte budget after which a blob preview is truncated. A distinct newtype from
+/// [`MaxRecoverable`] so the two `usize` limits `blob_truncation` takes cannot be
+/// silently transposed at a call site (they are NOT interchangeable, and a smaller
+/// recovery cap than budget is a valid config, so no ordering assertion can guard it).
+#[derive(Clone, Copy)]
+struct Budget(usize);
+
+/// Largest blob the recovery tee file can store intact; a bigger blob is passed
+/// through so the tail hint never promises content the recovery file can't hold.
+#[derive(Clone, Copy)]
+struct MaxRecoverable(usize);
 
 /// Decide how to window a `git show <rev>:<path>` blob. Returns
 /// `Some((head, remaining_lines, tail_offset))` when the blob should be truncated,
@@ -428,13 +490,20 @@ const MAX_BLOB_BYTES: usize = 8192;
 /// listing, a blob too large for the recovery file to store intact, or a single line
 /// too long to cut at a line boundary.
 ///
-/// `max_recoverable` is the byte size the recovery tee file can hold whole; a larger
-/// blob is passed through so the tail hint never promises unrecoverable content.
-///
 /// Pure and side-effect free so it can be unit-tested against real blob fixtures.
-fn blob_truncation(raw: &str, budget: usize, max_recoverable: usize) -> Option<(&str, usize, usize)> {
+fn blob_truncation(
+    raw: &str,
+    budget: Budget,
+    max_recoverable: MaxRecoverable,
+) -> Option<(&str, usize, usize)> {
+    let Budget(budget) = budget;
+    let MaxRecoverable(max_recoverable) = max_recoverable;
     // `git show <rev>:<dir>` prints a tree listing (`tree <rev>:<dir>\n\n...`), not
-    // file content.
+    // file content. This is a content prefix, not a git-provided type signal, so a
+    // text blob that genuinely begins with "tree " (e.g. a Newick/NEXUS phylogenetic
+    // file) is a false positive — but it only degrades to full passthrough (the blob
+    // is emitted whole, never truncated), never corruption, so a heavier
+    // `git cat-file -t` type probe isn't worth the extra subprocess.
     if raw.starts_with("tree ") {
         return None;
     }
@@ -471,7 +540,7 @@ fn blob_truncation(raw: &str, budget: usize, max_recoverable: usize) -> Option<(
 /// only when the full content was successfully tee'd — never drop data without a way
 /// to recover it.
 fn compact_blob_show(raw: &str, blob_arg: &str) -> String {
-    let max_recoverable = crate::core::tee::max_recoverable_bytes();
+    let max_recoverable = MaxRecoverable(crate::core::tee::max_recoverable_bytes());
     let Some((head, remaining, offset)) = blob_truncation(raw, MAX_BLOB_BYTES, max_recoverable)
     else {
         return raw.to_string();
@@ -3562,11 +3631,100 @@ mod tests {
         assert!(!is_blob_show_arg(":/fix the bug"));
     }
 
+    /// Helper: build an args slice from string literals.
+    fn show_args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn test_show_route_blob_wins_over_stat_and_format() {
+        // Blocking bug #1: git accepts and silently ignores --stat/--numstat/--pretty/
+        // --format for a blob target and still dumps the file, so these must NOT shadow
+        // the blob path (which would send the blob through lossy UTF-8 decoding).
+        assert_eq!(
+            show_route(&show_args(&["--stat", "HEAD:legacy.pck"])),
+            ShowRoute::Blob
+        );
+        assert_eq!(
+            show_route(&show_args(&["--numstat", "HEAD:legacy.pck"])),
+            ShowRoute::Blob
+        );
+        assert_eq!(
+            show_route(&show_args(&["--format=medium", "HEAD:legacy.pck"])),
+            ShowRoute::Blob
+        );
+        assert_eq!(
+            show_route(&show_args(&["--pretty=oneline", "HEAD:legacy.pck"])),
+            ShowRoute::Blob
+        );
+    }
+
+    #[test]
+    fn test_show_route_trailing_pathspec_stays_a_blob() {
+        // Blocking bug #2: a trailing `-- <path>` beside a blob arg is ignored by git
+        // (still a blob dump), so it must not disable blob handling.
+        let args = show_args(&["HEAD:Cargo.toml", "--", "Cargo.toml"]);
+        assert_eq!(show_route(&args), ShowRoute::Blob);
+        assert_eq!(blob_show_targets(&args).len(), 1);
+    }
+
+    #[test]
+    fn test_show_route_colon_pathspec_after_dashdash_is_not_a_blob() {
+        // A filename containing a colon AFTER `--` is a pathspec, not a blob target.
+        // This `--` is representative of the real CLI path: clap strips the separator,
+        // but `run_show` restores it via `restore_double_dash` before calling
+        // `show_route`/`blob_show_targets` (verified live: `git show HEAD -- a:b.txt`
+        // renders a commit-diff, not a blob dump).
+        let args = show_args(&["HEAD", "--", "weird:name.txt"]);
+        assert_eq!(show_route(&args), ShowRoute::CommitDiff);
+        assert!(blob_show_targets(&args).is_empty());
+    }
+
+    #[test]
+    fn test_show_route_plain_cases() {
+        assert_eq!(
+            show_route(&show_args(&["--stat", "HEAD"])),
+            ShowRoute::StatOrFormat
+        );
+        assert_eq!(show_route(&show_args(&["HEAD"])), ShowRoute::CommitDiff);
+        assert_eq!(
+            show_route(&show_args(&["HEAD:src/main.rs"])),
+            ShowRoute::Blob
+        );
+    }
+
+    #[test]
+    fn test_blob_windowing_token_savings() {
+        // Per `.claude/rules/cli-testing.md`, a filter must verify its 60–90% savings
+        // claim with a real fixture. A ~40 KB text blob (well over the 8 KiB budget,
+        // under the 1 MB recovery cap) windows to the head; the recovery hint is a
+        // handful of tokens, so head-vs-raw is the savings floor.
+        fn count_tokens(text: &str) -> usize {
+            text.split_whitespace().count()
+        }
+        let mut raw = String::new();
+        for i in 0..600 {
+            raw.push_str(&format!(
+                "line {i}: some representative source content with a few tokens here\n"
+            ));
+        }
+        assert!(raw.len() > 3 * MAX_BLOB_BYTES.0);
+        let (head, _remaining, _offset) =
+            blob_truncation(&raw, MAX_BLOB_BYTES, MaxRecoverable(1_000_000))
+                .expect("large blob should window");
+        let savings = 100.0 - (count_tokens(head) as f64 / count_tokens(&raw) as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "expected ≥60% token savings, got {:.1}%",
+            savings
+        );
+    }
+
     #[test]
     fn test_blob_truncation_small_passthrough() {
         // Real committed file, ~1.7KB < budget: passed through unchanged.
         let small = include_str!("../../../Cargo.toml");
-        assert!(blob_truncation(small, MAX_BLOB_BYTES, usize::MAX).is_none());
+        assert!(blob_truncation(small, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX)).is_none());
     }
 
     #[test]
@@ -3574,8 +3732,8 @@ mod tests {
         // Real blob fixture (`git show HEAD:src/main.rs | head -350`), ~10.7KB.
         let large = include_str!("../../../tests/fixtures/git/blob_large.txt");
         let (head, remaining, offset) =
-            blob_truncation(large, MAX_BLOB_BYTES, usize::MAX).expect("large blob should window");
-        assert!(head.len() <= MAX_BLOB_BYTES);
+            blob_truncation(large, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX)).expect("large blob should window");
+        assert!(head.len() <= MAX_BLOB_BYTES.0);
         assert!(head.ends_with('\n'), "head must end at a line boundary");
         let head_lines = head.lines().count();
         // N formula: remaining == total - head_lines, offset == head_lines + 1.
@@ -3590,9 +3748,9 @@ mod tests {
         // promise a tail the tee file cannot hold → pass the blob through whole.
         let large = include_str!("../../../tests/fixtures/git/blob_large.txt");
         assert!(large.len() > 5_000);
-        assert!(blob_truncation(large, MAX_BLOB_BYTES, 5_000).is_none());
+        assert!(blob_truncation(large, MAX_BLOB_BYTES, MaxRecoverable(5_000)).is_none());
         // With ample recovery capacity it windows normally.
-        assert!(blob_truncation(large, MAX_BLOB_BYTES, 1_000_000).is_some());
+        assert!(blob_truncation(large, MAX_BLOB_BYTES, MaxRecoverable(1_000_000)).is_some());
     }
 
     #[test]
@@ -3600,24 +3758,24 @@ mod tests {
         // Real tree listing (`git show HEAD:src`): `tree <rev>:<dir>\n\n...`.
         let tree = include_str!("../../../tests/fixtures/git/tree_listing.txt");
         assert!(tree.starts_with("tree "));
-        assert!(blob_truncation(tree, MAX_BLOB_BYTES, usize::MAX).is_none());
+        assert!(blob_truncation(tree, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX)).is_none());
     }
 
     #[test]
     fn test_blob_truncation_binary_passthrough() {
         let mut binary = "x".repeat(9000);
         binary.push('\0');
-        assert!(blob_truncation(&binary, MAX_BLOB_BYTES, usize::MAX).is_none());
+        assert!(blob_truncation(&binary, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX)).is_none());
         // Replacement char from lossy UTF-8 decoding of a binary blob.
         let lossy = format!("{}\u{FFFD}", "y".repeat(9000));
-        assert!(blob_truncation(&lossy, MAX_BLOB_BYTES, usize::MAX).is_none());
+        assert!(blob_truncation(&lossy, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX)).is_none());
     }
 
     #[test]
     fn test_blob_truncation_giant_single_line_passthrough() {
         // A single line longer than the budget has no line boundary to cut at.
         let giant = "a".repeat(20_000);
-        assert!(blob_truncation(&giant, MAX_BLOB_BYTES, usize::MAX).is_none());
+        assert!(blob_truncation(&giant, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX)).is_none());
     }
 
     #[test]
@@ -3629,11 +3787,11 @@ mod tests {
             s.push('\n');
         }
         // Exercise budgets straddling a multibyte char around the window edge.
-        let _ = blob_truncation(&s, MAX_BLOB_BYTES, usize::MAX);
-        let _ = blob_truncation(&s, 8191, usize::MAX);
-        let _ = blob_truncation(&s, 8193, usize::MAX);
+        let _ = blob_truncation(&s, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX));
+        let _ = blob_truncation(&s, Budget(8191), MaxRecoverable(usize::MAX));
+        let _ = blob_truncation(&s, Budget(8193), MaxRecoverable(usize::MAX));
         // Should still window (multi-line, over budget) without crashing.
-        assert!(blob_truncation(&s, MAX_BLOB_BYTES, usize::MAX).is_some());
+        assert!(blob_truncation(&s, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX)).is_some());
     }
 
     #[test]
@@ -3644,7 +3802,7 @@ mod tests {
         }
         s.pop(); // drop the final newline
         let (head, remaining, offset) =
-            blob_truncation(&s, MAX_BLOB_BYTES, usize::MAX).expect("should window");
+            blob_truncation(&s, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX)).expect("should window");
         assert_eq!(offset, head.lines().count() + 1);
         assert_eq!(remaining, s.lines().count() - head.lines().count());
     }
@@ -3662,8 +3820,8 @@ mod tests {
         };
         assert!(!text.contains('\u{FFFD}'), "transcode must not corrupt");
         assert!(text.contains("MÉTODO"));
-        assert!(text.len() > MAX_BLOB_BYTES);
-        assert!(blob_truncation(&text, MAX_BLOB_BYTES, usize::MAX).is_some());
+        assert!(text.len() > MAX_BLOB_BYTES.0);
+        assert!(blob_truncation(&text, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX)).is_some());
     }
 
     #[test]
