@@ -1,6 +1,6 @@
 //! Filters directory listings into a compact tree format.
 
-use super::constants::NOISE_DIRS;
+use super::constants::{is_system_metadata_name, NOISE_DIRS};
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::{reduced, CAP_WARNINGS};
 use crate::core::utils::resolved_command;
@@ -262,6 +262,10 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
         };
         parsed_count += 1;
 
+        if is_system_metadata_name(&name) {
+            continue;
+        }
+
         // Filter noise dirs unless -a
         if !show_all && NOISE_DIRS.iter().any(|noise| name == *noise) {
             continue;
@@ -398,6 +402,20 @@ mod tests {
         let (entries, _summary, _parsed) = compact_ls(input, true, false);
         assert!(entries.contains(".git/"));
         assert!(entries.contains("src/"));
+    }
+
+    #[test]
+    fn test_compact_always_filters_storage_metadata() {
+        let input = "total 16\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 @eaDir\n\
+                     -rw-r--r--  1 user  staff  32 Jan  1 12:00 ._index.ts\n\
+                     -rw-r--r--  1 user  staff  80 Jan  1 12:00 index.ts\n";
+        let (entries, _summary, parsed) = compact_ls(input, true, false);
+
+        assert!(!entries.contains("@eaDir"));
+        assert!(!entries.contains("._index.ts"));
+        assert!(entries.contains("index.ts"));
+        assert_eq!(parsed, 3);
     }
 
     #[test]

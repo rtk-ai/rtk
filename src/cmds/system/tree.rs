@@ -3,10 +3,10 @@
 //! This module proxies to the native `tree` command and filters the output
 //! to reduce token usage while preserving structure visibility.
 //!
-//! Token optimization: automatically excludes noise directories via -I pattern
-//! unless -a flag is present (respecting user intent).
+//! Token optimization: automatically excludes noise directories via `-I`
+//! unless `-a` is present. Storage metadata remains excluded in every mode.
 
-use super::constants::NOISE_DIRS;
+use super::constants::{NOISE_DIRS, SYSTEM_METADATA_PATTERNS};
 use crate::core::runner::{self, RunOptions};
 use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::Result;
@@ -27,13 +27,32 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let show_all = args.iter().any(|a| a == "-a" || a == "--all");
     let has_ignore = args.iter().any(|a| a == "-I" || a.starts_with("--ignore="));
 
-    if !show_all && !has_ignore {
-        let ignore_pattern = NOISE_DIRS.join("|");
+    if !has_ignore {
+        let ignore_pattern = default_ignore_pattern(show_all);
         cmd.arg("-I").arg(&ignore_pattern);
     }
 
-    for arg in args {
-        cmd.arg(arg);
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "-I" {
+            cmd.arg(arg);
+            if let Some(pattern) = args.get(index + 1) {
+                cmd.arg(append_metadata_ignore(pattern));
+                index += 2;
+                continue;
+            }
+        } else if let Some(pattern) = arg.strip_prefix("--ignore=") {
+            cmd.arg(format!(
+                "--ignore={}",
+                append_metadata_ignore(pattern)
+            ));
+            index += 1;
+            continue;
+        } else {
+            cmd.arg(arg);
+        }
+        index += 1;
     }
 
     runner::run_filtered(
@@ -60,6 +79,31 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             .early_exit_on_failure()
             .no_trailing_newline(),
     )
+}
+
+fn metadata_ignore_pattern() -> String {
+    SYSTEM_METADATA_PATTERNS.join("|")
+}
+
+fn append_metadata_ignore(pattern: &str) -> String {
+    if pattern.is_empty() {
+        metadata_ignore_pattern()
+    } else {
+        format!("{}|{}", pattern, metadata_ignore_pattern())
+    }
+}
+
+fn default_ignore_pattern(show_all: bool) -> String {
+    if show_all {
+        metadata_ignore_pattern()
+    } else {
+        NOISE_DIRS
+            .iter()
+            .copied()
+            .chain(SYSTEM_METADATA_PATTERNS.iter().copied())
+            .collect::<Vec<_>>()
+            .join("|")
+    }
 }
 
 fn filter_tree_output(raw: &str) -> String {
@@ -165,5 +209,27 @@ mod tests {
         assert!(NOISE_DIRS.contains(&".next"));
         assert!(NOISE_DIRS.contains(&"dist"));
         assert!(NOISE_DIRS.contains(&"build"));
+    }
+
+    #[test]
+    fn test_show_all_still_excludes_storage_metadata() {
+        assert_eq!(default_ignore_pattern(true), "._*|@eaDir");
+    }
+
+    #[test]
+    fn test_default_ignore_includes_noise_and_storage_metadata() {
+        let pattern = default_ignore_pattern(false);
+        assert!(pattern.split('|').any(|part| part == "node_modules"));
+        assert!(pattern.split('|').any(|part| part == "._*"));
+        assert!(pattern.split('|').any(|part| part == "@eaDir"));
+    }
+
+    #[test]
+    fn test_user_ignore_is_augmented_with_storage_metadata() {
+        assert_eq!(
+            append_metadata_ignore("vendor|tmp"),
+            "vendor|tmp|._*|@eaDir"
+        );
+        assert_eq!(append_metadata_ignore(""), "._*|@eaDir");
     }
 }
