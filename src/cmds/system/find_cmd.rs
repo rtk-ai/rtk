@@ -218,9 +218,9 @@ pub fn run(
     let mut builder = WalkBuilder::new(path);
     builder
         .hidden(!search_hidden) // skip hidden files/dirs unless pattern targets dotfiles
-        .git_ignore(true) // respect .gitignore
-        .git_global(true)
-        .git_exclude(true);
+        .git_ignore(false) // do not respect .gitignore — match native find (#2589)
+        .git_global(false)
+        .git_exclude(false);
     if let Some(depth) = max_depth {
         builder.max_depth(Some(depth));
     }
@@ -610,11 +610,41 @@ mod tests {
     }
 
     #[test]
-    fn find_gitignored_excluded() {
-        // target/ is in .gitignore — files inside should not appear
+    fn find_includes_all_files_regardless_of_gitignore() {
+        // rtk find does not respect .gitignore — matches native find behavior (#2589)
         let result = run("*", ".", 1000, None, "f", false, 0);
         assert!(result.is_ok());
-        // We can't easily capture stdout in unit tests, but at least
-        // verify it runs without error. The smoke tests verify content.
+        // All files are returned regardless of gitignore status.
+        // Smoke tests verify content.
     }
+    // --- #2589: rtk find should work in git repos ---
+
+    #[test]
+    fn find_works_after_git_init() {
+        // Regression test for https://github.com/rtk-ai/rtk/issues/2589
+        // rtk find must return results in a git-initialized directory,
+        // matching the behavior of native find.
+        use std::fs;
+        use std::process::Command;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("message.csv");
+        fs::write(&file_path, "test").unwrap();
+
+        // Before git init: should find the file
+        let result_before = run("message.csv", dir.path().to_str().unwrap(), 50, None, "f", false, 0);
+        assert!(result_before.is_ok(), "find should work before git init");
+
+        // Initialize git repo
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git init failed");
+
+        // After git init: should still find the file
+        let result_after = run("message.csv", dir.path().to_str().unwrap(), 50, None, "f", false, 0);
+        assert!(result_after.is_ok(), "find should work after git init (#2589)");
+    }
+
 }
