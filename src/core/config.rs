@@ -51,6 +51,13 @@ pub struct HooksConfig {
     /// not anything else.
     #[serde(default)]
     pub transparent_prefixes: Vec<String>,
+
+    /// Suppress non-error diagnostic output to stderr during hook execution.
+    /// When true, only actual errors are written to stderr; informational
+    /// messages (PATH resolution warnings, etc.) are silenced. This prevents
+    /// stderr pollution in AI agent contexts that merge stderr into the prompt.
+    #[serde(default)]
+    pub quiet: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -224,6 +231,19 @@ exclude_commands = ["curl", "gh"]
         let config = Config::default();
         assert!(config.hooks.exclude_commands.is_empty());
         assert!(config.hooks.transparent_prefixes.is_empty());
+    }
+
+    #[test]
+    fn test_hooks_quiet_defaults_off_and_deserializes() {
+        // Off unless asked for: existing users see no change.
+        assert!(!Config::default().hooks.quiet);
+
+        let config: Config = toml::from_str("[hooks]\nquiet = true\n").expect("valid toml");
+        assert!(config.hooks.quiet);
+
+        // A config predating the field must still parse.
+        let config: Config = toml::from_str("[hooks]\n").expect("valid toml");
+        assert!(!config.hooks.quiet);
     }
 
     #[test]

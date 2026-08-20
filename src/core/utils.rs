@@ -365,6 +365,20 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
     which::which(name).context(format!("Binary '{}' not found on PATH", name))
 }
 
+/// `hooks.quiet` from the config file, read once per process.
+///
+/// `Config::load` re-reads and re-parses the file on every call, and this sits
+/// on the command-resolution path, so the answer is cached rather than paid for
+/// each time a lookup falls back.
+fn hooks_quiet() -> bool {
+    static QUIET: OnceLock<bool> = OnceLock::new();
+    *QUIET.get_or_init(|| {
+        crate::core::config::Config::load()
+            .map(|c| c.hooks.quiet)
+            .unwrap_or(false)
+    })
+}
+
 /// Create a `Command` with PATHEXT-aware binary resolution.
 ///
 /// Drop-in replacement for `Command::new(name)` that works on Windows
@@ -385,7 +399,10 @@ pub fn resolved_command(name: &str) -> Command {
             // On Windows, resolution failure likely means a .CMD/.BAT wrapper
             // wasn't found — always warn so users have a signal.
             // On Unix, this is less common; only log in debug builds.
-            if cfg!(any(target_os = "windows", debug_assertions)) {
+            // Respect quiet mode: RTK_QUIET=1 or hooks.quiet in the config.
+            let quiet = std::env::var("RTK_QUIET").as_deref() == Ok("1") || hooks_quiet();
+
+            if !quiet && cfg!(any(target_os = "windows", debug_assertions)) {
                 eprintln!(
                     "rtk: Failed to resolve '{}' via PATH, falling back to direct exec: {}",
                     name, e
