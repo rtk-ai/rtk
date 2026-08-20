@@ -1,4 +1,6 @@
-#![cfg(unix)]
+//! Runs on every platform: each test that shells out to `grep` or `rg`
+//! skips itself when that engine is not installed, so Windows CI exercises
+//! the filters instead of compiling an empty test binary.
 //! Integration tests for the shared grep/rg compression filter: the GROUP path
 //! with context flags (-A/-B/-C) and the safety-net passthrough for flags (some
 //! grep-only like -I, some rg-only like --heading/-p) that break the NUL reparse.
