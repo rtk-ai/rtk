@@ -441,6 +441,47 @@ fn run_log(
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = git_cmd(global_args);
+    let log_plan = configure_log_command(&mut cmd, args);
+
+    let result = exec_capture(&mut cmd).context("Failed to run git log")?;
+
+    if !result.success() {
+        eprintln!("{}", result.stderr);
+        return Ok(result.exit_code);
+    }
+
+    if verbose > 0 {
+        eprintln!("Git log output:");
+    }
+
+    // Post-process: truncate long messages, cap lines only if RTK set the default
+    let filtered = filter_log_output(
+        &result.stdout,
+        log_plan.limit,
+        log_plan.user_set_limit,
+        log_plan.has_format_flag,
+    );
+    let filtered = never_worse(&result.stdout, &filtered).to_string();
+    println!("{}", filtered);
+
+    timer.track(
+        &format!("git log {}", args.join(" ")),
+        &format!("rtk git log {}", args.join(" ")),
+        &result.stdout,
+        &filtered,
+    );
+
+    Ok(0)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LogCommandPlan {
+    limit: usize,
+    user_set_limit: bool,
+    has_format_flag: bool,
+}
+
+fn configure_log_command(cmd: &mut Command, args: &[String]) -> LogCommandPlan {
     cmd.arg("log");
 
     // Check if user provided format flags
@@ -477,44 +518,17 @@ fn run_log(
         (10, false)
     };
 
-    // Only add --no-merges if user didn't explicitly request merge commits
-    let wants_merges = args
-        .iter()
-        .any(|arg| arg == "--merges" || arg == "--min-parents=2" || arg == "--no-merges");
-    // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
-    if !wants_merges && !has_limit_flag {
-        cmd.arg("--no-merges");
-    }
-
-    // Pass all user arguments
+    // Preserve git log semantics: merge commits can be HEAD and are essential
+    // for merge/PR verification, so RTK must not hide them by default.
     for arg in args {
         cmd.arg(arg);
     }
 
-    let result = exec_capture(&mut cmd).context("Failed to run git log")?;
-
-    if !result.success() {
-        eprintln!("{}", result.stderr);
-        return Ok(result.exit_code);
+    LogCommandPlan {
+        limit,
+        user_set_limit,
+        has_format_flag,
     }
-
-    if verbose > 0 {
-        eprintln!("Git log output:");
-    }
-
-    // Post-process: truncate long messages, cap lines only if RTK set the default
-    let filtered = filter_log_output(&result.stdout, limit, user_set_limit, has_format_flag);
-    let filtered = never_worse(&result.stdout, &filtered).to_string();
-    println!("{}", filtered);
-
-    timer.track(
-        &format!("git log {}", args.join(" ")),
-        &format!("rtk git log {}", args.join(" ")),
-        &result.stdout,
-        &filtered,
-    );
-
-    Ok(0)
 }
 
 fn requests_raw_log_output(args: &[String]) -> bool {
@@ -2100,6 +2114,12 @@ pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -
 mod tests {
     use super::*;
 
+    fn command_args(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect()
+    }
+
     #[test]
     fn test_git_cmd_no_global_args() {
         let cmd = git_cmd(&[]);
@@ -2726,6 +2746,41 @@ A  added.rs
             !result_user.contains("..."),
             "User limit should not truncate 90-char line"
         );
+    }
+
+    #[test]
+    fn test_configure_log_command_preserves_merge_commits_by_default() {
+        let mut cmd = git_cmd(&[]);
+        let plan = configure_log_command(&mut cmd, &[]);
+        let args = command_args(&cmd);
+
+        assert_eq!(
+            plan,
+            LogCommandPlan {
+                limit: 10,
+                user_set_limit: false,
+                has_format_flag: false
+            }
+        );
+        assert!(!args.contains(&"--no-merges".to_string()));
+    }
+
+    #[test]
+    fn test_configure_log_command_preserves_merge_commits_with_oneline() {
+        let mut cmd = git_cmd(&[]);
+        let args_in = vec!["--oneline".to_string()];
+        let plan = configure_log_command(&mut cmd, &args_in);
+        let args = command_args(&cmd);
+
+        assert_eq!(
+            plan,
+            LogCommandPlan {
+                limit: 50,
+                user_set_limit: false,
+                has_format_flag: true
+            }
+        );
+        assert!(!args.contains(&"--no-merges".to_string()));
     }
 
     #[test]
