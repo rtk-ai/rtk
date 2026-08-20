@@ -178,7 +178,14 @@ fn parse_rtk_find_args(args: &[String]) -> Result<FindArgs> {
 }
 
 /// Entry point from main.rs — parses raw args then delegates to run().
-pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
+pub fn run_from_args(args: &[String], verbose: u8) -> Result<i32> {
+    // Never-Block: run native find unfiltered rather than refuse predicates
+    // rtk can't compact (#2469).
+    if has_unsupported_find_flags(args) {
+        let os_args: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
+        return crate::core::runner::run_passthrough("find", &os_args, verbose);
+    }
+
     let parsed = parse_find_args(args)?;
     run(
         &parsed.pattern,
@@ -188,7 +195,8 @@ pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
         &parsed.file_type,
         parsed.case_insensitive,
         verbose,
-    )
+    )?;
+    Ok(0)
 }
 
 pub fn run(
@@ -562,6 +570,38 @@ mod tests {
         // -iname should match case-insensitively
         let result = run_from_args(&args(&[".", "-iname", "cargo.toml"]), 0);
         assert!(result.is_ok());
+    }
+
+    // --- #2469: unsupported predicates fall back to native find (Never Block) ---
+    // These two execute the resolved `find` and assert GNU/BSD find semantics
+    // (a valid -not/-exec query exits 0). On Windows, `find.exe` is an unrelated
+    // text-search tool that rejects these args (exit 2), so the assertions only
+    // hold on unix. The passthrough routing itself is covered cross-platform by
+    // `has_unsupported_find_flags_detects_and_ignores` below.
+
+    #[cfg(unix)]
+    #[test]
+    fn run_from_args_unsupported_predicate_passes_through() {
+        let result = run_from_args(&args(&[".", "-not", "-name", "*.nonexistent-xyz"]), 0);
+        assert!(result.is_ok(), "unsupported predicate should not error out");
+        assert_eq!(result.unwrap(), 0, "native find exit code is propagated");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_from_args_exec_passes_through() {
+        let result = run_from_args(&args(&[".", "-name", "Cargo.toml", "-exec", "echo", "{}", ";"]), 0);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn has_unsupported_find_flags_detects_and_ignores() {
+        assert!(has_unsupported_find_flags(&args(&[".", "-not", "-name", "x"])));
+        assert!(has_unsupported_find_flags(&args(&[".", "-size", "+1M"])));
+        assert!(has_unsupported_find_flags(&args(&[".", "-mtime", "-7"])));
+        assert!(!has_unsupported_find_flags(&args(&[".", "-name", "*.rs", "-type", "f"])));
+        assert!(!has_unsupported_find_flags(&args(&["*.rs", "src", "-m", "10"])));
     }
 
     // --- #1101: dotfile pattern should not skip hidden files ---
