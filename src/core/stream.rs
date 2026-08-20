@@ -608,7 +608,17 @@ pub(crate) mod tests {
         assert_eq!(lines.len(), 3, "got: {:?}", lines);
         assert_eq!(lines[0], "ERRO A: ascii");
         assert!(lines[1].starts_with("ERRO B: "), "got: {:?}", lines[1]);
-        assert!(lines[1].contains('\u{FFFD}'), "got: {:?}", lines[1]);
+        // The bad byte decodes to exactly one character, whatever that
+        // turns out to be: U+FFFD when there is no code page to consult,
+        // or the code page's own mapping (0xE3 is pi on cp437, a-tilde on
+        // cp1252). What must not happen is the byte taking the rest of
+        // the line with it.
+        assert_eq!(
+            lines[1].chars().count(),
+            "ERRO B: ".len() + 1,
+            "got: {:?}",
+            lines[1]
+        );
         assert_eq!(lines[2], "ERRO C: ascii again");
     }
 
