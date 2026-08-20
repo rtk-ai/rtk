@@ -5,63 +5,85 @@
 //!
 //! Token optimization: automatically excludes noise directories via -I pattern
 //! unless -a flag is present (respecting user intent).
+//!
+//! On Windows, always uses a pure-Rust implementation to avoid conflicts with
+//! `tree.com` which doesn't support GNU-style flags like `-I`.
 
-use super::constants::NOISE_DIRS;
-use crate::core::runner::{self, RunOptions};
-use crate::core::utils::{resolved_command, tool_exists};
+use super::native_tree::run_native_tree;
 use anyhow::Result;
 
+// Windows always takes the pure-Rust path below, so the pieces that only drive
+// the external `tree` proxy would be dead imports there.
+#[cfg(any(not(target_os = "windows"), test))]
+use super::constants::NOISE_DIRS;
+#[cfg(not(target_os = "windows"))]
+use crate::core::runner::{self, RunOptions};
+#[cfg(not(target_os = "windows"))]
+use crate::core::utils::{resolved_command, tool_exists};
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    if !tool_exists("tree") {
-        anyhow::bail!(
-            "tree command not found. Install it first:\n\
-             - macOS: brew install tree\n\
-             - Ubuntu/Debian: sudo apt install tree\n\
-             - Fedora/RHEL: sudo dnf install tree\n\
-             - Arch: sudo pacman -S tree"
-        );
+    // On Windows, always use native Rust tree to avoid tree.com conflicts
+    #[cfg(target_os = "windows")]
+    {
+        run_native_tree(args, verbose)
     }
 
-    let mut cmd = resolved_command("tree");
+    #[cfg(not(target_os = "windows"))]
+    {
+        if !tool_exists("tree") {
+            anyhow::bail!(
+                "tree command not found. Install it first:\n\
+                 - macOS: brew install tree\n\
+                 - Ubuntu/Debian: sudo apt install tree\n\
+                 - Fedora/RHEL: sudo dnf install tree\n\
+                 - Arch: sudo pacman -S tree"
+            );
+        }
 
-    let show_all = args.iter().any(|a| a == "-a" || a == "--all");
-    let has_ignore = args.iter().any(|a| a == "-I" || a.starts_with("--ignore="));
+        let mut cmd = resolved_command("tree");
 
-    if !show_all && !has_ignore {
-        let ignore_pattern = NOISE_DIRS.join("|");
-        cmd.arg("-I").arg(&ignore_pattern);
+        let show_all = args.iter().any(|a| a == "-a" || a == "--all");
+        let has_ignore = args.iter().any(|a| a == "-I" || a.starts_with("--ignore="));
+
+        if !show_all && !has_ignore {
+            let ignore_pattern = NOISE_DIRS.join("|");
+            cmd.arg("-I").arg(&ignore_pattern);
+        }
+
+        for arg in args {
+            cmd.arg(arg);
+        }
+
+        runner::run_filtered(
+            cmd,
+            "tree",
+            &args.join(" "),
+            |raw| {
+                let filtered = filter_tree_output(raw);
+                if verbose > 0 {
+                    eprintln!(
+                        "Lines: {} → {} ({}% reduction)",
+                        raw.lines().count(),
+                        filtered.lines().count(),
+                        if raw.lines().count() > 0 {
+                            100 - (filtered.lines().count() * 100 / raw.lines().count())
+                        } else {
+                            0
+                        }
+                    );
+                }
+                filtered
+            },
+            RunOptions::stdout_only()
+                .early_exit_on_failure()
+                .no_trailing_newline(),
+        )
     }
-
-    for arg in args {
-        cmd.arg(arg);
-    }
-
-    runner::run_filtered(
-        cmd,
-        "tree",
-        &args.join(" "),
-        |raw| {
-            let filtered = filter_tree_output(raw);
-            if verbose > 0 {
-                eprintln!(
-                    "Lines: {} → {} ({}% reduction)",
-                    raw.lines().count(),
-                    filtered.lines().count(),
-                    if raw.lines().count() > 0 {
-                        100 - (filtered.lines().count() * 100 / raw.lines().count())
-                    } else {
-                        0
-                    }
-                );
-            }
-            filtered
-        },
-        RunOptions::stdout_only()
-            .early_exit_on_failure()
-            .no_trailing_newline(),
-    )
 }
 
+// Only the external-proxy path uses this; Windows always takes the
+// pure-Rust path, so it is dead there but still compiled and unit-tested.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn filter_tree_output(raw: &str) -> String {
     let lines: Vec<&str> = raw.lines().collect();
 

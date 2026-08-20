@@ -6,42 +6,60 @@
 /// - `wc -w file.py`  → `96`
 /// - `wc -c file.py`  → `978`
 /// - `wc -l *.py`     → table with common path prefix stripped
-use crate::core::runner::{self, RunOptions};
-use crate::core::utils::resolved_command;
+use super::native_wc::run_native_wc;
 use anyhow::Result;
 
+// Windows always takes the pure-Rust path below, so the pieces that only drive
+// the external `wc` proxy would be dead imports there.
+#[cfg(not(target_os = "windows"))]
+use crate::core::runner::{self, RunOptions};
+#[cfg(not(target_os = "windows"))]
+use crate::core::utils::resolved_command;
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("wc");
-    for arg in args {
-        cmd.arg(arg);
+    // On Windows, always use native Rust wc to avoid missing GNU wc
+    #[cfg(target_os = "windows")]
+    {
+        run_native_wc(args, verbose)
     }
 
-    if verbose > 0 {
-        eprintln!("Running: wc {}", args.join(" "));
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut cmd = resolved_command("wc");
+        for arg in args {
+            cmd.arg(arg);
+        }
+
+        if verbose > 0 {
+            eprintln!("Running: wc {}", args.join(" "));
+        }
+
+        let mode = detect_mode(args);
+
+        // No file operands → wc reads from stdin. Forward rtk's stdin to the child
+        // so `cat file | rtk wc` counts the piped data instead of reporting zero.
+        let reads_stdin = !args.iter().any(|a| !a.starts_with('-'));
+        let opts = if reads_stdin {
+            RunOptions::stdout_only().inherit_stdin()
+        } else {
+            RunOptions::stdout_only()
+        };
+
+        runner::run_filtered(
+            cmd,
+            "wc",
+            &args.join(" "),
+            |stdout| filter_wc_output(stdout, &mode),
+            opts,
+        )
     }
-
-    let mode = detect_mode(args);
-
-    // No file operands → wc reads from stdin. Forward rtk's stdin to the child
-    // so `cat file | rtk wc` counts the piped data instead of reporting zero.
-    let reads_stdin = !args.iter().any(|a| !a.starts_with('-'));
-    let opts = if reads_stdin {
-        RunOptions::stdout_only().inherit_stdin()
-    } else {
-        RunOptions::stdout_only()
-    };
-
-    runner::run_filtered(
-        cmd,
-        "wc",
-        &args.join(" "),
-        |stdout| filter_wc_output(stdout, &mode),
-        opts,
-    )
 }
 
 /// Which columns the user requested
 #[derive(Debug, PartialEq)]
+// Only the external-proxy path uses this; Windows always takes the
+// pure-Rust path, so it is dead there but still compiled and unit-tested.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 enum WcMode {
     /// Default: lines, words, bytes (3 columns)
     Full,
@@ -57,6 +75,7 @@ enum WcMode {
     Mixed,
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn detect_mode(args: &[String]) -> WcMode {
     let flags: Vec<&str> = args
         .iter()
@@ -119,6 +138,7 @@ fn detect_mode(args: &[String]) -> WcMode {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn filter_wc_output(raw: &str, mode: &WcMode) -> String {
     let lines: Vec<&str> = raw.trim().lines().collect();
 
@@ -136,6 +156,7 @@ fn filter_wc_output(raw: &str, mode: &WcMode) -> String {
 }
 
 /// Format a single wc output line (one file or stdin)
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn format_single_line(line: &str, mode: &WcMode) -> String {
     let parts: Vec<&str> = line.split_whitespace().collect();
 
@@ -168,6 +189,7 @@ fn format_single_line(line: &str, mode: &WcMode) -> String {
 }
 
 /// Format multiple files as a compact table
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn format_multi_line(lines: &[&str], mode: &WcMode) -> String {
     let mut result = Vec::new();
 
@@ -242,6 +264,7 @@ fn format_multi_line(lines: &[&str], mode: &WcMode) -> String {
 }
 
 /// Find common directory prefix among paths
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn find_common_prefix(paths: &[&str]) -> String {
     if paths.len() <= 1 {
         return String::new();
@@ -274,6 +297,7 @@ fn find_common_prefix(paths: &[&str]) -> String {
 }
 
 /// Strip common prefix from a path
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn strip_prefix<'a>(path: &'a str, prefix: &str) -> &'a str {
     if prefix.is_empty() {
         return path;
