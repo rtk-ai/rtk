@@ -26,6 +26,18 @@ fn glob_match_inner(pat: &[u8], name: &[u8]) -> bool {
     }
 }
 
+/// Truncate a long directory path for display, keeping the last ~47 bytes.
+/// The cut is rounded up to a char boundary so multi-byte UTF-8 (e.g. 'é')
+/// at the cut point doesn't panic (issue #2851).
+fn dir_display(dir: &str) -> String {
+    if dir.len() > 50 {
+        let cut = dir.ceil_char_boundary(dir.len() - 47);
+        format!("...{}", &dir[cut..])
+    } else {
+        dir.to_string()
+    }
+}
+
 /// Parsed arguments from either native find or RTK find syntax.
 #[derive(Debug)]
 struct FindArgs {
@@ -322,11 +334,7 @@ pub fn run(
         }
 
         let files_in_dir = &by_dir[dir];
-        let dir_display = if dir.len() > 50 {
-            format!("...{}", &dir[dir.len() - 47..])
-        } else {
-            dir.clone()
-        };
+        let dir_display = dir_display(dir);
 
         let remaining_budget = max_results - displayed;
         if files_in_dir.len() <= remaining_budget {
@@ -391,6 +399,23 @@ mod tests {
     /// Convert string slices to Vec<String> for test convenience.
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|s| s.to_string()).collect()
+    }
+
+    // --- dir_display unit tests ---
+
+    #[test]
+    fn dir_display_truncates_multibyte_on_char_boundary() {
+        // 57 bytes: the naive cut lands at byte 10, inside 'é' (bytes 9..11)
+        // and used to panic (issue #2851)
+        let dir = "Les Plongées de Juliette/5-Pipeline/Versions-imprimables";
+        let out = dir_display(dir);
+        assert!(out.starts_with("..."));
+        assert!(out.ends_with("Versions-imprimables"));
+    }
+
+    #[test]
+    fn dir_display_leaves_short_paths_unchanged() {
+        assert_eq!(dir_display("src/cmds"), "src/cmds");
     }
 
     // --- glob_match unit tests ---
