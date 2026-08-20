@@ -4,16 +4,12 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Default log file location (aligned with hook's $HOME/.local/share/rtk/).
+/// Default log file location. Resolution lives in `hooks::audit_dir` so the
+/// reader here and the writer in `hook_cmd` can never disagree.
 fn default_log_path() -> PathBuf {
-    if let Ok(dir) = std::env::var("RTK_AUDIT_DIR") {
-        PathBuf::from(dir).join("hook-audit.log")
-    } else {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        PathBuf::from(home)
-            .join(".local/share/rtk")
-            .join("hook-audit.log")
-    }
+    super::audit_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("hook-audit.log")
 }
 
 /// A single parsed audit log entry.
