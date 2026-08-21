@@ -469,7 +469,11 @@ rtk gh <sous-commande> [args...]
 | `rtk gh pr checks` | Status des checks CI | ~79% |
 | `rtk gh issue list` | Liste des issues compacte | ~80% |
 | `rtk gh run list` | Status des workflow runs | ~82% |
-| `rtk gh api <endpoint>` | Reponse API compacte | ~26% |
+| `rtk gh api <endpoint>` | Reponse API complete (passthrough intentionnel) | 0% |
+
+`rtk gh api` preserve volontairement la reponse complete pour ne pas perdre
+de valeurs. Filtrez la reponse a la source avec `--jq` lorsque vous n'avez
+besoin que de champs specifiques.
 
 **Avant / Apres :**
 ```
