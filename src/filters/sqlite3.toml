@@ -1,0 +1,30 @@
+[filters.sqlite3]
+description = "Compact sqlite3 CLI output — strip column-mode header underlines, empty lines, and the sqliterc loading banner"
+match_command = "^sqlite3\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Loading resources from ",
+  "^-+(\\s+-+)+\\s*$",
+]
+on_empty = "sqlite3: no rows"
+
+[[tests.sqlite3]]
+name = "strips column-mode underline, keeps header and rows"
+input = "id  name\n--  -----\n1   alice\n2   bob\n"
+expected = "id  name\n1   alice\n2   bob\n"
+
+[[tests.sqlite3]]
+name = "strips empty lines, keeps list-mode rows"
+input = "1|alice\n\n2|bob\n"
+expected = "1|alice\n2|bob\n"
+
+[[tests.sqlite3]]
+name = "strips sqliterc loading banner"
+input = "Loading resources from /Users/me/.sqliterc\n1\n"
+expected = "1\n"
+
+[[tests.sqlite3]]
+name = "passthrough compact default list mode"
+input = "1|alice\n2|bob\n"
+expected = "1|alice\n2|bob\n"
