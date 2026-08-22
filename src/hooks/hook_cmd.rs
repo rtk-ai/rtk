@@ -1580,13 +1580,27 @@ mod tests {
     #[test]
     fn test_cursor_unallowed_segment_asks() {
         let out = run_cursor_inner_with_rules(
-            &cursor_input("git status && rm -rf /tmp/x"),
+            &cursor_input("git status && cargo test"),
             &[],
             &[],
             &["git *".to_string()],
         );
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["permission"], "ask");
+    }
+
+    #[test]
+    fn test_cursor_destructive_segment_in_compound_defers_to_host() {
+        // The registry's destructive-compound guard withholds the rewrite
+        // entirely; with no rewrite available, RTK defers to the host's own
+        // native permission handling instead of asserting a stale verdict.
+        let out = run_cursor_inner_with_rules(
+            &cursor_input("git status && rm -rf /tmp/x"),
+            &[],
+            &[],
+            &["git *".to_string()],
+        );
+        assert_eq!(out, "{}");
     }
 
     #[test]

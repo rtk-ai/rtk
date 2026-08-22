@@ -127,6 +127,8 @@ rewrite_command(cmd, excluded)                     [src/discover/registry.rs]
   |  Early exits:
   |  - Empty → None
   |  - Contains "<<" or "$((" (heredoc/arithmetic) → None
+  |  - Multi-segment compound with a destructive leading command anywhere
+  |    (rm, git reset, git stash drop, ...) → stderr note, None
   |  - Simple "rtk ..." (no operators) → return as-is
   |  - Otherwise → rewrite_compound(cmd, excluded)
   |
@@ -211,6 +213,7 @@ Key design decisions:
 - **Pipe semantics**: Producers and intermediate stages of `|` remain raw. Only an argument-safe final stage whose rule has `pipeline_final_safe` may be rewritten; initially this is limited to ordinary `grep` and `rg` invocations. Search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. `|&` is recognized separately and its complete pipeline stays raw.
 - **Double env prefix handling**: `classify_command()` strips env prefixes to match the underlying command against rules. `rewrite_segment()` extracts the same prefix separately to re-prepend it to the rewritten command.
 - **Fallback contract**: If any segment fails to match, it stays raw. `rewrite_command()` returns `None` only when zero segments were rewritten.
+- **Destructive-compound guard**: Before splitting, `rewrite_command()` scans every `&&`/`||`/`;`/`|`/background-`&`/newline/subshell segment (the same boundaries `split_for_permissions` uses) for a leading destructive command (`rm`, `rmdir`, `unlink`, `shred`, `dd`, `truncate`, `mv`, `xargs`, or a destructive `git` subcommand like `reset`, `clean`, `rm`, `stash drop`, `worktree remove`, `branch -D`). If a multi-segment command contains one anywhere, the whole compound is left unrewritten instead of partially rewritten: a rewritten segment's reformatted output could otherwise be consumed by the destructive segment. Single-segment commands are unaffected. Returns `None`, and prints one line to stderr (`[rtk] destructive command '<cmd>' in compound; rewrite skipped`) only when withholding the rewrite actually gave up a rewrite — i.e. at least one segment would otherwise have been rewritten. A compound with no rewritable segment (e.g. `mkdir -p d && mv a d`) is withheld silently.
 
 ### 3.3 CLI Parsing and Routing
 
