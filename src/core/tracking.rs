@@ -61,7 +61,9 @@ fn project_filter_params(project_path: Option<&str>) -> (Option<String>, Option<
     }
 }
 
-use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB, RTK_DATA_DIR};
+use super::constants::{
+    DEFAULT_ESTIMATE_CAP_CHARS, DEFAULT_HISTORY_DAYS, HISTORY_DB, RTK_DATA_DIR,
+};
 
 /// Main tracking interface for recording and querying command history.
 ///
@@ -1322,6 +1324,47 @@ pub fn estimate_tokens(text: &str) -> usize {
     (text.len() as f64 / 4.0).ceil() as usize
 }
 
+/// Char ceiling for tracked token estimates. `RTK_TRACK_CAP_CHARS` (if set and
+/// parseable) wins over `tracking.estimate_cap_chars` in config.toml, which
+/// falls back to `DEFAULT_ESTIMATE_CAP_CHARS` if config can't be loaded.
+///
+/// The env var is re-read on every call (cheap). The config-derived fallback
+/// is resolved once per process and cached in a `OnceLock` — `Config::load()`
+/// only ever runs on the first call that has no env override. Tests that
+/// exercise the fallback path can silently inherit whatever an earlier test
+/// in the same process cached; set `RTK_TRACK_CAP_CHARS` explicitly instead
+/// of relying on the fallback.
+fn estimate_cap_chars() -> usize {
+    if let Some(chars) = std::env::var("RTK_TRACK_CAP_CHARS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        return chars;
+    }
+    // Malformed RTK_TRACK_CAP_CHARS (non-numeric, negative) falls through to
+    // the config/default cap below, silently — the hook path must stay quiet.
+    static CONFIG_CAP_CHARS_FALLBACK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CONFIG_CAP_CHARS_FALLBACK.get_or_init(|| {
+        crate::core::config::Config::load()
+            .map(|c| c.tracking.estimate_cap_chars)
+            .unwrap_or(DEFAULT_ESTIMATE_CAP_CHARS)
+    })
+}
+
+/// Token ceiling derived from `estimate_cap_chars()` (ceil(chars/4), same
+/// rounding as `estimate_tokens`). Many coding-agent shells truncate captured
+/// command output around this many characters, so estimating tokens past it
+/// counts savings that never reached any model context. A cap of `0` chars
+/// disables clamping entirely.
+fn max_tracked_tokens() -> usize {
+    let chars = estimate_cap_chars();
+    if chars == 0 {
+        usize::MAX
+    } else {
+        (chars as f64 / 4.0).ceil() as usize
+    }
+}
+
 /// Helper struct for timing command execution
 /// Helper for timing command execution and tracking results.
 ///
@@ -1391,8 +1434,9 @@ impl TimedExecution {
     /// ```
     pub fn track(&self, original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
-        let input_tokens = estimate_tokens(input);
-        let output_tokens = estimate_tokens(output);
+        let cap = max_tracked_tokens();
+        let input_tokens = estimate_tokens(input).min(cap);
+        let output_tokens = estimate_tokens(output).min(cap);
 
         if let Ok(tracker) = Tracker::new() {
             let _ = tracker.record(
@@ -1459,6 +1503,36 @@ pub fn args_display(args: &[OsString]) -> String {
 mod tests {
     use super::*;
 
+    /// Serializes tests that mutate process-wide env vars (`RTK_DB_PATH`,
+    /// `RTK_TRACK_CAP_CHARS`) so they can't race each other's Tracker::new()
+    /// calls or cap lookups.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Restores a previously-set environment variable on drop (including on
+    /// panic), so a failed assertion can't leak an override into whatever
+    /// test runs next.
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
     fn test_estimate_tokens() {
@@ -1483,6 +1557,7 @@ mod tests {
     // 3. Tracker::record + get_recent — round-trip DB
     #[test]
     fn test_tracker_record_and_recent() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tracker = Tracker::new().expect("Failed to create tracker");
 
         // Use unique test identifier to avoid conflicts with other tests
@@ -1507,6 +1582,7 @@ mod tests {
     // 4. track_passthrough doesn't dilute stats (input=0, output=0)
     #[test]
     fn test_track_passthrough_no_dilution() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tracker = Tracker::new().expect("Failed to create tracker");
 
         // Use unique test identifiers
@@ -1551,6 +1627,7 @@ mod tests {
     // 5. TimedExecution::track records with exec_time > 0
     #[test]
     fn test_timed_execution_records_time() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let timer = TimedExecution::start();
         std::thread::sleep(std::time::Duration::from_millis(10));
         timer.track("test cmd", "rtk test", "raw input data", "filtered");
@@ -1564,6 +1641,7 @@ mod tests {
     // 6. TimedExecution::track_passthrough records with 0 tokens
     #[test]
     fn test_timed_execution_passthrough() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let timer = TimedExecution::start();
         timer.track_passthrough("git tag", "rtk git tag (passthrough)");
 
@@ -1586,9 +1664,7 @@ mod tests {
     #[test]
     fn test_db_path_env_and_default() {
         use std::env;
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let custom_path = env::temp_dir().join("rtk_test_custom.db");
         env::set_var("RTK_DB_PATH", &custom_path);
@@ -1645,6 +1721,7 @@ mod tests {
     // 12. record_parse_failure + get_parse_failure_summary roundtrip
     #[test]
     fn test_parse_failure_roundtrip() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tracker = Tracker::new().expect("Failed to create tracker");
         let test_cmd = format!("git -C /path status test_{}", std::process::id());
 
@@ -1663,6 +1740,7 @@ mod tests {
     // 13. recovery_rate calculation
     #[test]
     fn test_parse_failure_recovery_rate() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tracker = Tracker::new().expect("Failed to create tracker");
         let pid = std::process::id();
 
@@ -1756,5 +1834,157 @@ mod tests {
             let mode = std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "expected 0600 on {}", p.display());
         }
+    }
+
+    // 14. TimedExecution::track clamps oversized input before it reaches
+    // record() — raw text far past the default cap must not inflate
+    // input_tokens.
+    #[test]
+    fn test_timed_execution_track_clamps_oversized_input() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _db_guard = EnvVarGuard::set("RTK_DB_PATH", tmp.path().join("clamp_input.db"));
+        // Pin the cap to the documented default regardless of the local config.toml.
+        let _cap_guard = EnvVarGuard::set("RTK_TRACK_CAP_CHARS", "30000");
+
+        let timer = TimedExecution::start();
+        let pid = std::process::id();
+        let cmd = format!("rtk clamp_input_test_{}", pid);
+        let raw = "a".repeat(130_000); // far past DEFAULT_ESTIMATE_CAP_CHARS
+
+        timer.track("cat huge.log", &cmd, &raw, "short output");
+
+        let tracker = Tracker::new().expect("Failed to create tracker");
+        let input_tokens: i64 = tracker
+            .conn
+            .query_row(
+                "SELECT input_tokens FROM commands WHERE rtk_cmd = ?1",
+                params![cmd],
+                |row| row.get(0),
+            )
+            .expect("record not found");
+
+        assert_eq!(input_tokens as usize, 7_500);
+    }
+
+    // 15. Same clamp applies to output tokens, not just input.
+    #[test]
+    fn test_timed_execution_track_clamps_oversized_output() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _db_guard = EnvVarGuard::set("RTK_DB_PATH", tmp.path().join("clamp_output.db"));
+        // Pin the cap to the documented default regardless of the local config.toml.
+        let _cap_guard = EnvVarGuard::set("RTK_TRACK_CAP_CHARS", "30000");
+
+        let timer = TimedExecution::start();
+        let pid = std::process::id();
+        let cmd = format!("rtk clamp_output_test_{}", pid);
+        let huge_output = "b".repeat(130_000); // far past DEFAULT_ESTIMATE_CAP_CHARS
+
+        timer.track("cmd", &cmd, "small input", &huge_output);
+
+        let tracker = Tracker::new().expect("Failed to create tracker");
+        let output_tokens: i64 = tracker
+            .conn
+            .query_row(
+                "SELECT output_tokens FROM commands WHERE rtk_cmd = ?1",
+                params![cmd],
+                |row| row.get(0),
+            )
+            .expect("record not found");
+
+        assert_eq!(output_tokens as usize, 7_500);
+    }
+
+    // 16. saved/pct stay consistent post-clamp — no fictional multi-million
+    // token savings when both sides are clamped to the same cap.
+    #[test]
+    fn test_timed_execution_track_clamped_saved_is_consistent() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _db_guard = EnvVarGuard::set("RTK_DB_PATH", tmp.path().join("clamp_saved.db"));
+        // Pin the cap to the documented default regardless of the local config.toml.
+        let _cap_guard = EnvVarGuard::set("RTK_TRACK_CAP_CHARS", "30000");
+
+        let timer = TimedExecution::start();
+        let pid = std::process::id();
+        let cmd = format!("rtk clamp_saved_test_{}", pid);
+        let huge_input = "c".repeat(200_000);
+        let huge_output = "d".repeat(150_000);
+
+        timer.track("cmd", &cmd, &huge_input, &huge_output);
+
+        let tracker = Tracker::new().expect("Failed to create tracker");
+        let (input_tokens, output_tokens, saved_tokens, pct): (i64, i64, i64, f64) = tracker
+            .conn
+            .query_row(
+                "SELECT input_tokens, output_tokens, saved_tokens, savings_pct
+                 FROM commands WHERE rtk_cmd = ?1",
+                params![cmd],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("record not found");
+
+        assert_eq!(input_tokens as usize, 7_500);
+        assert_eq!(output_tokens as usize, 7_500);
+        assert_eq!(saved_tokens, 0);
+        assert_eq!(pct, 0.0);
+    }
+
+    // 17. RTK_TRACK_CAP_CHARS overrides the default truncation ceiling.
+    #[test]
+    fn test_timed_execution_track_respects_cap_chars_override() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _db_guard = EnvVarGuard::set("RTK_DB_PATH", tmp.path().join("cap_override.db"));
+        let _cap_guard = EnvVarGuard::set("RTK_TRACK_CAP_CHARS", "40"); // 40 chars → 10 tokens
+
+        let timer = TimedExecution::start();
+        let pid = std::process::id();
+        let cmd = format!("rtk cap_override_test_{}", pid);
+        let raw = "e".repeat(1000);
+
+        timer.track("cmd", &cmd, &raw, "short");
+
+        let tracker = Tracker::new().expect("Failed to create tracker");
+        let input_tokens: i64 = tracker
+            .conn
+            .query_row(
+                "SELECT input_tokens FROM commands WHERE rtk_cmd = ?1",
+                params![cmd],
+                |row| row.get(0),
+            )
+            .expect("record not found");
+
+        assert_eq!(input_tokens as usize, 10);
+    }
+
+    // 18. RTK_TRACK_CAP_CHARS=0 disables the cap entirely — estimates pass
+    // through unclamped regardless of the config default.
+    #[test]
+    fn test_timed_execution_track_cap_zero_disables_clamp() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _db_guard = EnvVarGuard::set("RTK_DB_PATH", tmp.path().join("cap_disabled.db"));
+        let _cap_guard = EnvVarGuard::set("RTK_TRACK_CAP_CHARS", "0");
+
+        let timer = TimedExecution::start();
+        let pid = std::process::id();
+        let cmd = format!("rtk cap_zero_test_{}", pid);
+        let raw = "f".repeat(130_000); // far past the default cap
+
+        timer.track("cmd", &cmd, &raw, "short");
+
+        let tracker = Tracker::new().expect("Failed to create tracker");
+        let input_tokens: i64 = tracker
+            .conn
+            .query_row(
+                "SELECT input_tokens FROM commands WHERE rtk_cmd = ?1",
+                params![cmd],
+                |row| row.get(0),
+            )
+            .expect("record not found");
+
+        assert_eq!(input_tokens as usize, estimate_tokens(&raw));
     }
 }
