@@ -1,9 +1,13 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
-use super::constants::{HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON};
+use super::constants::{
+    CLAUDE_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    SETTINGS_LOCAL_JSON,
+};
 use super::init::resolve_claude_dir;
-use super::is_claude_hook_command;
+use super::is_claude_hook_invocation;
 use crate::core::constants::RTK_DATA_DIR;
+use crate::discover::lexer::shell_split;
 use std::path::PathBuf;
 
 const CURRENT_HOOK_VERSION: u8 = 3;
@@ -57,9 +61,20 @@ pub fn status() -> HookStatus {
     }
 }
 
-/// Check if the native binary command is registered in settings.json
+/// Wrapper scripts larger than this are not inspected (avoid reading arbitrary large files).
+const MAX_WRAPPER_SCRIPT_BYTES: u64 = 64 * 1024;
+
+/// Check if the native binary command is registered in settings.json or
+/// settings.local.json, directly or via a wrapper script (e.g.
+/// `bash ~/.claude/hooks/rtk-pipe-guard.sh`) that pipes into it.
 fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
-    let settings_path = claude_dir.join(SETTINGS_JSON);
+    [SETTINGS_JSON, SETTINGS_LOCAL_JSON]
+        .iter()
+        .any(|file_name| settings_file_registers_hook(claude_dir, file_name))
+}
+
+fn settings_file_registers_hook(claude_dir: &std::path::Path, file_name: &str) -> bool {
+    let settings_path = claude_dir.join(file_name);
     let content = match std::fs::read_to_string(&settings_path) {
         Ok(c) if !c.trim().is_empty() => c,
         _ => return false,
@@ -76,12 +91,63 @@ fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
         Some(arr) => arr,
         None => return false,
     };
-    pre_tool_use
+    let commands: Vec<&str> = pre_tool_use
         .iter()
         .filter_map(|entry| entry.get("hooks")?.as_array())
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
-        .any(is_claude_hook_command)
+        .collect();
+
+    commands.iter().any(|cmd| is_claude_hook_invocation(cmd))
+        || commands
+            .iter()
+            .any(|cmd| wrapper_script_references_hook(cmd, claude_dir))
+}
+
+/// True if `cmd` invokes a wrapper script (directly, or via an interpreter/
+/// `env` prefix — see [`super::skip_wrapper_prefix`]) whose contents
+/// reference the rtk hook command.
+fn wrapper_script_references_hook(cmd: &str, claude_dir: &std::path::Path) -> bool {
+    let tokens = shell_split(cmd);
+    let Some(token) = super::skip_wrapper_prefix(&tokens).first() else {
+        return false;
+    };
+    if token.starts_with('$') {
+        return false; // unresolvable env-var path — can't be probed on disk
+    }
+
+    let home = dirs::home_dir();
+    let script_path = if let Some(rest) = token.strip_prefix("~/") {
+        match home {
+            Some(h) => h.join(rest),
+            None => return false,
+        }
+    } else if token.as_str() == "~" {
+        match home {
+            Some(h) => h.to_path_buf(),
+            None => return false,
+        }
+    } else {
+        let candidate = PathBuf::from(token);
+        if candidate.is_absolute() {
+            candidate
+        } else {
+            claude_dir.join(candidate)
+        }
+    };
+
+    let Ok(meta) = std::fs::metadata(&script_path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() > MAX_WRAPPER_SCRIPT_BYTES {
+        return false;
+    }
+    let Ok(content) = std::fs::read_to_string(&script_path) else {
+        return false;
+    };
+    content
+        .lines()
+        .any(|line| !line.trim_start().starts_with('#') && line.contains(CLAUDE_HOOK_COMMAND))
 }
 
 /// Check if the installed hook is missing or outdated, warn once per day.
@@ -231,6 +297,186 @@ mod tests {
         .expect("write settings");
 
         assert!(binary_hook_registered(tmp.path()));
+    }
+
+    fn write_settings(claude_dir: &std::path::Path, file_name: &str, command: &str) {
+        std::fs::create_dir_all(claude_dir).unwrap();
+        let json = format!(
+            r#"{{"hooks":{{"{}":[{{"hooks":[{{"command":"{}"}}]}}]}}}}"#,
+            PRE_TOOL_USE_KEY,
+            command.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        std::fs::write(claude_dir.join(file_name), json).unwrap();
+    }
+
+    #[test]
+    fn test_binary_hook_registered_missing_settings() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path()).unwrap();
+        assert!(!binary_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_binary_hook_registered_settings_local_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_settings(tmp.path(), SETTINGS_LOCAL_JSON, CLAUDE_HOOK_COMMAND);
+        assert!(binary_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_binary_hook_registered_inline_wrapper_string() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_settings(tmp.path(), SETTINGS_JSON, r#"bash -c "rtk hook claude""#);
+        assert!(binary_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_binary_hook_registered_wrapper_script_with_hook_string() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path();
+        let script_path = claude_dir.join(HOOKS_SUBDIR).join("rtk-pipe-guard.sh");
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &script_path,
+            format!("#!/bin/bash\ncat | {}\n", CLAUDE_HOOK_COMMAND),
+        )
+        .unwrap();
+        let command = format!("bash {}", script_path.display());
+        write_settings(claude_dir, SETTINGS_JSON, &command);
+        assert!(binary_hook_registered(claude_dir));
+    }
+
+    #[test]
+    fn test_binary_hook_registered_wrapper_script_without_hook_string() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path();
+        let script_path = claude_dir.join(HOOKS_SUBDIR).join("unrelated.sh");
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(&script_path, "#!/bin/bash\necho hi\n").unwrap();
+        let command = format!("bash {}", script_path.display());
+        write_settings(claude_dir, SETTINGS_JSON, &command);
+        assert!(!binary_hook_registered(claude_dir));
+    }
+
+    #[test]
+    fn test_binary_hook_registered_wrapper_script_hook_only_in_comment() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path();
+        let script_path = claude_dir.join(HOOKS_SUBDIR).join("rtk-pipe-guard.sh");
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &script_path,
+            format!("#!/bin/bash\n# {}\necho hi\n", CLAUDE_HOOK_COMMAND),
+        )
+        .unwrap();
+        let command = format!("bash {}", script_path.display());
+        write_settings(claude_dir, SETTINGS_JSON, &command);
+        assert!(!binary_hook_registered(claude_dir));
+    }
+
+    #[test]
+    fn test_binary_hook_registered_wrapper_script_hook_on_piped_line() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path();
+        let script_path = claude_dir.join(HOOKS_SUBDIR).join("rtk-pipe-guard.sh");
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &script_path,
+            format!(
+                "#!/bin/bash\nprintf '%s' \"$INPUT\" | {}\n",
+                CLAUDE_HOOK_COMMAND
+            ),
+        )
+        .unwrap();
+        let command = format!("bash {}", script_path.display());
+        write_settings(claude_dir, SETTINGS_JSON, &command);
+        assert!(binary_hook_registered(claude_dir));
+    }
+
+    #[test]
+    fn test_binary_hook_registered_wrapper_quoted_path_with_space() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path();
+        let script_path = claude_dir.join(HOOKS_SUBDIR).join("rtk pipe guard.sh");
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &script_path,
+            format!("#!/bin/bash\n{}\n", CLAUDE_HOOK_COMMAND),
+        )
+        .unwrap();
+        let command = format!("bash \"{}\"", script_path.display());
+        write_settings(claude_dir, SETTINGS_JSON, &command);
+        assert!(binary_hook_registered(claude_dir));
+    }
+
+    #[test]
+    fn test_binary_hook_registered_wrapper_bin_bash_prefix() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path();
+        let script_path = claude_dir.join(HOOKS_SUBDIR).join("rtk-pipe-guard.sh");
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &script_path,
+            format!("#!/bin/bash\n{}\n", CLAUDE_HOOK_COMMAND),
+        )
+        .unwrap();
+        let command = format!("/bin/bash {}", script_path.display());
+        write_settings(claude_dir, SETTINGS_JSON, &command);
+        assert!(binary_hook_registered(claude_dir));
+    }
+
+    #[test]
+    fn test_binary_hook_registered_wrapper_env_prefix() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path();
+        let script_path = claude_dir.join(HOOKS_SUBDIR).join("rtk-pipe-guard.sh");
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &script_path,
+            format!("#!/bin/bash\n{}\n", CLAUDE_HOOK_COMMAND),
+        )
+        .unwrap();
+        let command = format!("env RTK_LOG=1 bash {}", script_path.display());
+        write_settings(claude_dir, SETTINGS_JSON, &command);
+        assert!(binary_hook_registered(claude_dir));
+    }
+
+    /// Serialises tests that mutate the process-wide `HOME` env var.
+    static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_wrapper_script_tilde_resolves_via_home_not_claude_dir_parent() {
+        let _guard = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fake_home = tempfile::tempdir().expect("tempdir");
+        let script_path = fake_home
+            .path()
+            .join(HOOKS_SUBDIR)
+            .join("rtk-pipe-guard.sh");
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &script_path,
+            format!("#!/bin/bash\n{}\n", CLAUDE_HOOK_COMMAND),
+        )
+        .unwrap();
+
+        // claude_dir sits far away from fake_home, so claude_dir.parent()
+        // would resolve "~/..." to the wrong directory — only dirs::home_dir()
+        // (backed by $HOME) resolves it to fake_home.
+        let unrelated = tempfile::tempdir().expect("tempdir");
+        let claude_dir = unrelated.path().join("nested").join("claude_config");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+
+        let orig_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", fake_home.path());
+        let command = "bash ~/hooks/rtk-pipe-guard.sh".to_string();
+        write_settings(&claude_dir, SETTINGS_JSON, &command);
+        let result = binary_hook_registered(&claude_dir);
+        match orig_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+
+        assert!(result);
     }
 
     #[test]

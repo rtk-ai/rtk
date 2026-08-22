@@ -1595,7 +1595,8 @@ fn run_cli() -> Result<i32> {
 
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
     // Skip for Gain — it shows its own inline hook warning.
-    if !matches!(cli.command, Commands::Gain { .. }) {
+    // Skip for Hook — warning would pollute hook stderr during execution.
+    if !matches!(cli.command, Commands::Gain { .. } | Commands::Hook { .. }) {
         hooks::hook_check::maybe_warn();
     }
 
