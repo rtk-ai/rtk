@@ -231,16 +231,32 @@ fn heal_legacy_hook_file(path: &std::path::Path) -> bool {
         .is_ok()
 }
 
-fn get_rewritten(cmd: &str) -> Option<String> {
+/// `(exclude_commands, transparent_prefixes)` from the machine's `config.toml`.
+fn hook_rewrite_settings() -> (Vec<String>, Vec<String>) {
+    crate::core::config::Config::load()
+        .map(settings_from_config)
+        .unwrap_or_default()
+}
+
+/// Split from the load so the field mapping stays reachable from a test —
+/// `Config::load` only ever reads the developer's own file.
+fn settings_from_config(config: crate::core::config::Config) -> (Vec<String>, Vec<String>) {
+    (
+        config.hooks.exclude_commands,
+        config.hooks.transparent_prefixes,
+    )
+}
+
+fn get_rewritten(
+    cmd: &str,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+) -> Option<String> {
     if has_heredoc(cmd) {
         return None;
     }
 
-    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
-        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
-        .unwrap_or_default();
-
-    let rewritten = rewrite_command(cmd, &excluded, &transparent_prefixes)?;
+    let rewritten = rewrite_command(cmd, excluded, transparent_prefixes)?;
 
     if rewritten == cmd {
         return None;
@@ -256,14 +272,27 @@ enum HookDecision {
     Deny,
 }
 
-fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
+/// Decision logic with the verdict and rewrite settings supplied by the caller,
+/// mirroring [`evaluate_with_verdict`](super::rewrite_cmd) and
+/// [`check_command_with_rules`](super::permissions::check_command_with_rules).
+///
+/// Both inputs are read from the machine by [`decide_hook_action`] —
+/// `.claude/settings.json` for the verdict, `config.toml` for the settings — so
+/// taking them as parameters is what keeps a test describing the hook logic
+/// rather than whichever rules the developer happens to have configured.
+fn decide_from_verdict(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
     }
     if crate::discover::lexer::contains_unattestable_construct(cmd) {
         return HookDecision::Defer;
     }
-    match get_rewritten(cmd) {
+    match get_rewritten(cmd, excluded, transparent_prefixes) {
         Some(r) if verdict == PermissionVerdict::Allow => HookDecision::AllowRewrite(r),
         Some(r) => HookDecision::AskRewrite(r),
         None => HookDecision::Defer,
@@ -271,7 +300,13 @@ fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
 }
 
 fn decide_hook_action(cmd: &str, host: permissions::Host) -> HookDecision {
-    decide_from_verdict(cmd, permissions::check_command_for(cmd, host))
+    let (excluded, transparent_prefixes) = hook_rewrite_settings();
+    decide_from_verdict(
+        cmd,
+        permissions::check_command_for(cmd, host),
+        &excluded,
+        &transparent_prefixes,
+    )
 }
 
 fn handle_vscode(cmd: &str) -> Result<()> {
@@ -449,13 +484,18 @@ pub fn run_gemini() -> Result<()> {
 /// - Deny: emit `{"decision": "deny", "reason": "..."}`.
 pub fn run_vibe() -> Result<()> {
     let input = read_stdin_limited()?;
-    if let Some(output) = run_vibe_inner(&input) {
+    let (excluded, transparent_prefixes) = hook_rewrite_settings();
+    if let Some(output) = run_vibe_inner(&input, &excluded, &transparent_prefixes) {
         let _ = writeln!(io::stdout(), "{output}");
     }
     Ok(())
 }
 
-fn run_vibe_inner(input: &str) -> Option<String> {
+fn run_vibe_inner(
+    input: &str,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+) -> Option<String> {
     let json: Value = match serde_json::from_str(input) {
         Ok(v) => v,
         Err(e) => {
@@ -477,7 +517,8 @@ fn run_vibe_inner(input: &str) -> Option<String> {
         return None;
     }
 
-    match decide_hook_action(cmd, permissions::Host::Vibe) {
+    let verdict = permissions::check_command_for(cmd, permissions::Host::Vibe);
+    match decide_from_verdict(cmd, verdict, excluded, transparent_prefixes) {
         HookDecision::Deny => {
             audit_log("deny", cmd, "");
             Some(r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string())
@@ -571,17 +612,23 @@ enum PayloadAction {
     Ignore,
 }
 
-fn process_claude_payload(v: &Value) -> PayloadAction {
-    let cmd = match v
-        .pointer("/tool_input/command")
+/// Extract the shell command from a Claude Code PreToolUse payload.
+fn claude_command(v: &Value) -> Option<&str> {
+    v.pointer("/tool_input/command")
         .and_then(|c| c.as_str())
         .filter(|c| !c.is_empty())
-    {
-        Some(c) => c,
-        None => return PayloadAction::Ignore,
-    };
+}
 
-    let (rewritten, allow) = match decide_hook_action(cmd, permissions::Host::Claude) {
+fn process_claude_payload(v: &Value) -> PayloadAction {
+    let Some(cmd) = claude_command(v) else {
+        return PayloadAction::Ignore;
+    };
+    claude_action_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::Claude))
+}
+
+/// Build the Claude Code hook action for a decision from the shared flow.
+fn claude_action_from_decision(v: &Value, cmd: &str, decision: HookDecision) -> PayloadAction {
+    let (rewritten, allow) = match decision {
         HookDecision::Deny => {
             return PayloadAction::Skip {
                 reason: "skip:deny_rule",
@@ -661,10 +708,27 @@ pub fn run_claude() -> Result<()> {
     Ok(())
 }
 
+/// Hermetic test path: no Claude Code settings, no `config.toml`.
 #[cfg(test)]
 fn run_claude_inner(input: &str) -> Option<String> {
+    run_claude_inner_with_rules(input, &[], &[], &[])
+}
+
+/// `process_claude_payload` resolves the verdict through `check_command_for`,
+/// which reads the developer's own `.claude/settings.json` (project and home)
+/// and locates the project by walking up the process-global CWD. Injecting the
+/// rules keeps unit tests describing the hook logic rather than the machine.
+#[cfg(test)]
+fn run_claude_inner_with_rules(
+    input: &str,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;
-    match process_claude_payload(&v) {
+    let cmd = claude_command(&v)?;
+    let verdict = permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
+    match claude_action_from_decision(&v, cmd, decide_from_verdict(cmd, verdict, &[], &[])) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
         _ => None,
     }
@@ -780,7 +844,7 @@ fn run_cursor_inner_with_rules(
     };
 
     let verdict = permissions::check_command_with_rules(&cmd, deny_rules, ask_rules, allow_rules);
-    match decide_from_verdict(&cmd, verdict) {
+    match decide_from_verdict(&cmd, verdict, &[], &[]) {
         HookDecision::AllowRewrite(rewritten) => cursor_allow(&rewritten),
         HookDecision::AskRewrite(rewritten) => cursor_ask(&rewritten),
         _ => "{}".to_string(),
@@ -889,7 +953,8 @@ fn run_droid_inner_with_rules(
     let v: Value = serde_json::from_str(input).ok()?;
     let cmd = droid_execute_command(&v)?;
     let verdict = permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
-    droid_response_from_decision(&v, cmd, decide_from_verdict(cmd, verdict)).map(|o| o.to_string())
+    droid_response_from_decision(&v, cmd, decide_from_verdict(cmd, verdict, &[], &[]))
+        .map(|o| o.to_string())
 }
 
 #[cfg(test)]
@@ -1010,22 +1075,40 @@ mod tests {
 
     #[test]
     fn test_get_rewritten_supported() {
-        assert!(get_rewritten("git status").is_some());
+        assert!(get_rewritten("git status", &[], &[]).is_some());
     }
 
     #[test]
     fn test_get_rewritten_unsupported() {
-        assert!(get_rewritten("htop").is_none());
+        assert!(get_rewritten("htop", &[], &[]).is_none());
     }
 
     #[test]
     fn test_get_rewritten_already_rtk() {
-        assert!(get_rewritten("rtk git status").is_none());
+        assert!(get_rewritten("rtk git status", &[], &[]).is_none());
     }
 
     #[test]
     fn test_get_rewritten_heredoc() {
-        assert!(get_rewritten("cat <<'EOF'\nhello\nEOF").is_none());
+        assert!(get_rewritten("cat <<'EOF'\nhello\nEOF", &[], &[]).is_none());
+    }
+
+    #[test]
+    fn test_get_rewritten_honors_excluded_commands() {
+        assert!(get_rewritten("git status", &["git".to_string()], &[]).is_none());
+    }
+
+    #[test]
+    fn test_settings_from_config_maps_hooks_fields() {
+        // Guards the field order of the tuple every rewrite path is handed;
+        // swapping the two would type-check and silently misapply both lists.
+        let mut config = crate::core::config::Config::default();
+        config.hooks.exclude_commands = vec!["grep".to_string()];
+        config.hooks.transparent_prefixes = vec!["docker exec".to_string()];
+        assert_eq!(
+            settings_from_config(config),
+            (vec!["grep".to_string()], vec!["docker exec".to_string()])
+        );
     }
 
     // --- VS Code Copilot Chat / Copilot CLI (PascalCase) handler ---
@@ -1087,6 +1170,25 @@ mod tests {
 
     fn cli_args(cmd: &str) -> Value {
         json!({ "command": cmd })
+    }
+
+    /// Hermetic counterpart to `copilot_cli_response`, which resolves the
+    /// verdict from the developer's own `.claude/settings.json` — a local deny
+    /// rule on `cargo test` or `git status` would otherwise flip these results.
+    fn copilot_cli_response_with_rules(
+        cmd: &str,
+        args: &Value,
+        deny_rules: &[String],
+        ask_rules: &[String],
+        allow_rules: &[String],
+    ) -> Option<Value> {
+        let verdict =
+            permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
+        copilot_cli_response_from_decision(args, decide_from_verdict(cmd, verdict, &[], &[]), cmd)
+    }
+
+    fn copilot_cli_response_no_rules(cmd: &str, args: &Value) -> Option<Value> {
+        copilot_cli_response_with_rules(cmd, args, &[], &[], &[])
     }
 
     #[test]
@@ -1191,24 +1293,38 @@ mod tests {
     }
 
     #[test]
+    fn test_copilot_cli_deny_rule_returns_none() {
+        assert!(copilot_cli_response_with_rules(
+            "cargo test",
+            &cli_args("cargo test"),
+            &["cargo test".to_string()],
+            &[],
+            &[],
+        )
+        .is_none());
+    }
+
+    #[test]
     fn test_copilot_cli_passthrough_unsupported() {
-        assert!(copilot_cli_response("htop", &cli_args("htop")).is_none());
+        assert!(copilot_cli_response_no_rules("htop", &cli_args("htop")).is_none());
     }
 
     #[test]
     fn test_copilot_cli_passthrough_already_rtk() {
-        assert!(copilot_cli_response("rtk cargo test", &cli_args("rtk cargo test")).is_none());
+        assert!(
+            copilot_cli_response_no_rules("rtk cargo test", &cli_args("rtk cargo test")).is_none()
+        );
     }
 
     #[test]
     fn test_copilot_cli_passthrough_heredoc() {
         let cmd = "cat <<EOF\nhi\nEOF";
-        assert!(copilot_cli_response(cmd, &cli_args(cmd)).is_none());
+        assert!(copilot_cli_response_no_rules(cmd, &cli_args(cmd)).is_none());
     }
 
     #[test]
     fn test_copilot_cli_preserves_env_prefix() {
-        let r = copilot_cli_response(
+        let r = copilot_cli_response_no_rules(
             "RUST_LOG=debug cargo test",
             &cli_args("RUST_LOG=debug cargo test"),
         )
@@ -1240,14 +1356,13 @@ mod tests {
         assert_eq!(modified["mode"], "sync");
     }
 
+    /// Allow rules reach `check_command_with_rules` already unwrapped —
+    /// `load_permission_rules` strips the `Bash(…)` wrapper via
+    /// `extract_bash_pattern`. Passing the wrapper through verbatim yields a
+    /// pattern no command can match, which silently downgrades every verdict
+    /// below to Default and makes the auto-allow assertions unfalsifiable.
     fn end_to_end(cmd: &str) -> Option<Value> {
-        let verdict = crate::hooks::permissions::check_command_with_rules(
-            cmd,
-            &[],
-            &[],
-            &["Bash(git:*)".to_string()],
-        );
-        copilot_cli_response_from_decision(&cli_args(cmd), decide_from_verdict(cmd, verdict), cmd)
+        copilot_cli_response_with_rules(cmd, &cli_args(cmd), &[], &[], &["git:*".to_string()])
     }
 
     #[test]
@@ -1264,24 +1379,23 @@ mod tests {
 
     #[test]
     fn test_copilot_cli_cve_newline_bypass_never_auto_allows() {
-        let r = end_to_end("git status\nrm -rf /tmp/x");
-        if let Some(resp) = r {
-            assert!(
-                resp.get("permissionDecision").is_none(),
-                "newline-hidden command must not produce permissionDecision: \"allow\""
-            );
-        }
+        // `git *` allows the first segment only; a newline-hidden `rm -rf` must
+        // stop the chain short of Allow. Asserted unconditionally — a `None`
+        // response would otherwise let the check pass without ever running.
+        let resp = end_to_end("git status\nrm -rf /tmp/x").expect("rewrite expected");
+        assert!(
+            resp.get("permissionDecision").is_none(),
+            "newline-hidden command must not produce permissionDecision: \"allow\""
+        );
     }
 
     #[test]
     fn test_copilot_cli_cve_background_bypass_never_auto_allows() {
-        let r = end_to_end("git status & rm -rf /tmp/x");
-        if let Some(resp) = r {
-            assert!(
-                resp.get("permissionDecision").is_none(),
-                "background-& hidden command must not produce permissionDecision: \"allow\""
-            );
-        }
+        let resp = end_to_end("git status & rm -rf /tmp/x").expect("rewrite expected");
+        assert!(
+            resp.get("permissionDecision").is_none(),
+            "background-& hidden command must not produce permissionDecision: \"allow\""
+        );
     }
 
     #[test]
@@ -1516,14 +1630,71 @@ mod tests {
         assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
         // permissionDecision is only set when an explicit allow rule matches;
         // with default-to-ask semantics (no rules configured), it is absent.
+        assert!(hook.get("permissionDecision").is_none());
         assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
         assert!(hook["updatedInput"].is_object());
         assert!(hook["updatedInput"]["command"].is_string());
     }
 
     #[test]
+    fn test_claude_allow_rule_sets_permission_allow() {
+        let result = run_claude_inner_with_rules(
+            &claude_input("git status"),
+            &[],
+            &[],
+            &["git *".to_string()],
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "allow");
+    }
+
+    #[test]
+    fn test_claude_deny_rule_skips_rewrite() {
+        assert!(run_claude_inner_with_rules(
+            &claude_input("git status"),
+            &["git status".to_string()],
+            &[],
+            &[],
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn test_claude_deny_and_defer_carry_distinct_audit_reasons() {
+        // Both skip the rewrite, so the JSON output alone can't tell them
+        // apart — only the reason reaching audit_log distinguishes a blocked
+        // command from one RTK simply had nothing to offer for.
+        let v: Value = serde_json::from_str(&claude_input("git status")).unwrap();
+        assert!(matches!(
+            claude_action_from_decision(&v, "git status", HookDecision::Deny),
+            PayloadAction::Skip {
+                reason: "skip:deny_rule",
+                ..
+            }
+        ));
+        assert!(matches!(
+            claude_action_from_decision(&v, "git status", HookDecision::Defer),
+            PayloadAction::Skip {
+                reason: "skip:defer",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn test_claude_no_tool_input_passthrough() {
         let input = json!({ "tool_name": "Bash" }).to_string();
+        assert!(run_claude_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_claude_non_string_command_passthrough() {
+        let input = json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": 123 }
+        })
+        .to_string();
         assert!(run_claude_inner(&input).is_none());
     }
 
@@ -1770,7 +1941,7 @@ mod tests {
         );
         // Denied commands must not be rewritten — Gemini handler checks deny before rewrite
         assert!(
-            get_rewritten("cargo test").is_some(),
+            get_rewritten("cargo test", &[], &[]).is_some(),
             "cargo test should be rewritable when not denied"
         );
     }
@@ -1784,7 +1955,7 @@ mod tests {
         allow: &[String],
     ) -> HookDecision {
         let verdict = permissions::check_command_with_rules(cmd, deny, ask, allow);
-        decide_from_verdict(cmd, verdict)
+        decide_from_verdict(cmd, verdict, &[], &[])
     }
 
     fn all_allowed() -> Vec<String> {
@@ -2135,7 +2306,7 @@ mod tests {
     #[test]
     fn test_vibe_rewrites_bash_command() {
         let input = vibe_input("bash", "git status");
-        let out = run_vibe_inner(&input).expect("rewrite expected");
+        let out = run_vibe_inner(&input, &[], &[]).expect("rewrite expected");
         let v: Value = serde_json::from_str(&out).unwrap();
         let rewritten = v
             .pointer("/hook_specific_output/tool_input/command")
@@ -2154,30 +2325,30 @@ mod tests {
     #[test]
     fn test_vibe_ignores_non_bash_tool() {
         let input = vibe_input("read_file", "irrelevant");
-        assert!(run_vibe_inner(&input).is_none());
+        assert!(run_vibe_inner(&input, &[], &[]).is_none());
     }
 
     #[test]
     fn test_vibe_empty_command_passthrough() {
         let input = vibe_input("bash", "");
-        assert!(run_vibe_inner(&input).is_none());
+        assert!(run_vibe_inner(&input, &[], &[]).is_none());
     }
 
     #[test]
     fn test_vibe_malformed_json_returns_none() {
-        assert!(run_vibe_inner("not json at all").is_none());
-        assert!(run_vibe_inner("{ unterminated").is_none());
+        assert!(run_vibe_inner("not json at all", &[], &[]).is_none());
+        assert!(run_vibe_inner("{ unterminated", &[], &[]).is_none());
     }
 
     #[test]
     fn test_vibe_unknown_binary_passthrough() {
         let input = vibe_input("bash", "definitely-not-a-real-binary --foo");
-        assert!(run_vibe_inner(&input).is_none());
+        assert!(run_vibe_inner(&input, &[], &[]).is_none());
     }
 
     #[test]
     fn test_vibe_substitution_defers() {
         let input = vibe_input("bash", "echo $(rm -rf /)");
-        assert!(run_vibe_inner(&input).is_none());
+        assert!(run_vibe_inner(&input, &[], &[]).is_none());
     }
 }
