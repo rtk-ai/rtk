@@ -1,10 +1,12 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
-use super::constants::{HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON};
-use super::init::resolve_claude_dir;
-use super::is_claude_hook_command;
+use super::constants::{
+    COPILOT_HOOK_FILE, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+};
+use super::init::{copilot_user_dir, resolve_claude_dir};
+use super::{is_claude_hook_command, is_copilot_hook_command};
 use crate::core::constants::RTK_DATA_DIR;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const CURRENT_HOOK_VERSION: u8 = 3;
 const WARN_INTERVAL_SECS: u64 = 24 * 3600;
@@ -21,19 +23,38 @@ pub enum HookStatus {
 }
 
 /// Return the current hook status without printing anything.
+///
+/// Aggregates the supported automatic-rewrite integrations: a missing Claude
+/// hook is not reported as `Missing` when another automatic integration
+/// (currently the user-global GitHub Copilot hook) is installed and valid.
 /// Returns `Ok` if no Claude Code is detected (not applicable).
 pub fn status() -> HookStatus {
+    let claude_dir = resolve_claude_dir().ok();
+    let copilot_dir = copilot_user_dir().ok();
+    status_at(claude_dir.as_deref(), copilot_dir.as_deref())
+}
+
+/// Path-parameterized core of [`status`], testable without env mutation.
+fn status_at(claude_dir: Option<&Path>, copilot_dir: Option<&Path>) -> HookStatus {
+    let claude = claude_status_at(claude_dir);
+    if claude == HookStatus::Missing && copilot_dir.is_some_and(copilot_hook_registered) {
+        return HookStatus::Ok;
+    }
+    claude
+}
+
+/// Claude Code hook status. Returns `Ok` if Claude Code is not installed.
+fn claude_status_at(claude_dir: Option<&Path>) -> HookStatus {
     // Don't warn users who don't have Claude Code installed
-    let claude_dir = match resolve_claude_dir() {
-        Ok(d) => d,
-        Err(_) => return HookStatus::Ok,
+    let Some(claude_dir) = claude_dir else {
+        return HookStatus::Ok;
     };
     if !claude_dir.exists() {
         return HookStatus::Ok;
     }
 
     // Check for new binary command in settings.json first
-    if binary_hook_registered(&claude_dir) {
+    if binary_hook_registered(claude_dir) {
         // If old script file still exists alongside new command, report Outdated
         // (migration not complete — user should run `rtk init -g` to clean up)
         let old_hook = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
@@ -44,7 +65,7 @@ pub fn status() -> HookStatus {
     }
 
     // Fall back to legacy script file check
-    let Some(hook_path) = hook_installed_path() else {
+    let Some(hook_path) = hook_installed_path(claude_dir) else {
         return HookStatus::Missing;
     };
     let Ok(content) = std::fs::read_to_string(&hook_path) else {
@@ -82,6 +103,36 @@ fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
         .any(is_claude_hook_command)
+}
+
+/// Check whether a valid RTK GitHub Copilot hook is installed under
+/// `copilot_dir` (`$COPILOT_HOME` or `~/.copilot`).
+///
+/// Valid means `hooks/rtk-rewrite.json` parses as JSON and contains a
+/// `PreToolUse` command entry invoking `rtk hook copilot` (bare or via an
+/// absolute path to the rtk binary).
+pub(crate) fn copilot_hook_registered(copilot_dir: &Path) -> bool {
+    let hook_path = copilot_dir.join(HOOKS_SUBDIR).join(COPILOT_HOOK_FILE);
+    let content = match std::fs::read_to_string(&hook_path) {
+        Ok(c) if !c.trim().is_empty() => c,
+        _ => return false,
+    };
+    let root: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let entries = match root
+        .get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+    entries
+        .iter()
+        .filter_map(|entry| entry.get("command")?.as_str())
+        .any(is_copilot_hook_command)
 }
 
 /// Check if the installed hook is missing or outdated, warn once per day.
@@ -131,8 +182,7 @@ pub fn parse_hook_version(content: &str) -> u8 {
     0 // No version tag = version 0 (outdated)
 }
 
-fn hook_installed_path() -> Option<PathBuf> {
-    let claude_dir = resolve_claude_dir().ok()?;
+fn hook_installed_path(claude_dir: &Path) -> Option<PathBuf> {
     let path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
     if path.exists() {
         Some(path)
@@ -231,6 +281,185 @@ mod tests {
         .expect("write settings");
 
         assert!(binary_hook_registered(tmp.path()));
+    }
+
+    // ── Copilot hook detection ───────────────────────────────
+
+    const COPILOT_STOCK: &str = r#"{
+  "version": 1,
+  "hooks": {
+    "PreToolUse": [
+      { "type": "command", "command": "rtk hook copilot", "cwd": ".", "timeout": 5 }
+    ]
+  }
+}
+"#;
+
+    fn write_copilot_hook(copilot_dir: &std::path::Path, content: &str) {
+        let hooks_dir = copilot_dir.join(HOOKS_SUBDIR);
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(hooks_dir.join(COPILOT_HOOK_FILE), content).unwrap();
+    }
+
+    #[test]
+    fn test_copilot_hook_registered_stock_config() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_copilot_hook(tmp.path(), COPILOT_STOCK);
+        assert!(copilot_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_copilot_hook_registered_matches_installed_stock_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_copilot_hook(tmp.path(), crate::hooks::init::COPILOT_HOOK_JSON);
+        assert!(copilot_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_copilot_hook_registered_accepts_absolute_rtk_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_copilot_hook(
+            tmp.path(),
+            &COPILOT_STOCK.replace("rtk hook copilot", "/opt/homebrew/bin/rtk hook copilot"),
+        );
+        assert!(copilot_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_copilot_hook_missing_file_not_registered() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(!copilot_hook_registered(tmp.path()));
+        // Hooks dir without the file is not enough either.
+        std::fs::create_dir_all(tmp.path().join(HOOKS_SUBDIR)).unwrap();
+        assert!(!copilot_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_copilot_hook_malformed_json_not_registered() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for content in ["{ not json", "", "   ", "[1, 2]", "\"rtk hook copilot\""] {
+            write_copilot_hook(tmp.path(), content);
+            assert!(
+                !copilot_hook_registered(tmp.path()),
+                "content {content:?} must not count as installed"
+            );
+        }
+    }
+
+    #[test]
+    fn test_copilot_hook_empty_pre_tool_use_not_registered() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_copilot_hook(
+            tmp.path(),
+            r#"{ "version": 1, "hooks": { "PreToolUse": [] } }"#,
+        );
+        assert!(!copilot_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_copilot_hook_wrong_command_not_registered() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for cmd in [
+            "other-tool --hook",
+            "rtk hook claude",
+            "echo rtk hook copilot",
+        ] {
+            write_copilot_hook(tmp.path(), &COPILOT_STOCK.replace("rtk hook copilot", cmd));
+            assert!(
+                !copilot_hook_registered(tmp.path()),
+                "command {cmd:?} must not count as installed"
+            );
+        }
+    }
+
+    // ── Aggregate status ─────────────────────────────────────
+
+    fn write_claude_binary_hook(claude_dir: &std::path::Path) {
+        std::fs::create_dir_all(claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join(SETTINGS_JSON),
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude","timeout":5}]}]}}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_status_copilot_only_is_ok_without_claude_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path().join(".claude"); // never created
+        let copilot_dir = tmp.path().join(".copilot");
+        write_copilot_hook(&copilot_dir, COPILOT_STOCK);
+        assert_eq!(
+            status_at(Some(&claude_dir), Some(&copilot_dir)),
+            HookStatus::Ok
+        );
+    }
+
+    #[test]
+    fn test_status_copilot_only_is_ok_with_unconfigured_claude_dir() {
+        // Regression: `.claude` exists but has no RTK hook; a valid Copilot
+        // hook must suppress the "No hook installed" warning.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let copilot_dir = tmp.path().join(".copilot");
+        write_copilot_hook(&copilot_dir, COPILOT_STOCK);
+        assert_eq!(
+            status_at(Some(&claude_dir), Some(&copilot_dir)),
+            HookStatus::Ok
+        );
+    }
+
+    #[test]
+    fn test_status_missing_without_any_integration() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let copilot_dir = tmp.path().join(".copilot");
+        assert_eq!(
+            status_at(Some(&claude_dir), Some(&copilot_dir)),
+            HookStatus::Missing
+        );
+        assert_eq!(status_at(Some(&claude_dir), None), HookStatus::Missing);
+    }
+
+    #[test]
+    fn test_status_invalid_copilot_hook_does_not_suppress_warning() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let copilot_dir = tmp.path().join(".copilot");
+        write_copilot_hook(&copilot_dir, "{ not json");
+        assert_eq!(
+            status_at(Some(&claude_dir), Some(&copilot_dir)),
+            HookStatus::Missing
+        );
+    }
+
+    #[test]
+    fn test_status_valid_claude_hook_still_ok() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path().join(".claude");
+        write_claude_binary_hook(&claude_dir);
+        assert_eq!(status_at(Some(&claude_dir), None), HookStatus::Ok);
+    }
+
+    #[test]
+    fn test_status_outdated_claude_hook_not_masked_by_copilot() {
+        // A real "hook outdated" condition must keep warning even when a
+        // valid Copilot hook exists.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path().join(".claude");
+        write_claude_binary_hook(&claude_dir);
+        let old_script = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+        std::fs::create_dir_all(old_script.parent().unwrap()).unwrap();
+        std::fs::write(&old_script, "#!/usr/bin/env bash\n").unwrap();
+        let copilot_dir = tmp.path().join(".copilot");
+        write_copilot_hook(&copilot_dir, COPILOT_STOCK);
+        assert_eq!(
+            status_at(Some(&claude_dir), Some(&copilot_dir)),
+            HookStatus::Outdated
+        );
     }
 
     #[test]
