@@ -1175,12 +1175,18 @@ rtk init -g --uninstall         # Desinstaller
 
 ### `rtk rewrite` -- Recriture de commande
 
-Commande interne utilisee par le hook. Imprime la commande reecrite sur stdout (exit 0) ou sort avec exit 1 si aucun equivalent RTK n'existe.
+Commande interne utilisee par le hook. Le code de sortie preserve la decision de permission :
+
+- `0` : imprime une commande reecrite explicitement autorisee
+- `1` : aucun equivalent RTK, sans sortie
+- `2` : une regle de refus correspond, sans sortie
+- `3` : imprime une commande reecrite qui necessite encore une confirmation (regle ask ou comportement par defaut)
+
+Les integrations doivent donc lire stdout pour les codes `0` et `3`, tout en conservant la demande de confirmation pour le code `3`.
 
 ```bash
-rtk rewrite "git status"           # -> "rtk git status" (exit 0)
-rtk rewrite "terraform plan"       # -> (exit 1, pas de recriture)
-rtk rewrite "rtk git status"       # -> "rtk git status" (exit 0, inchange)
+rtk rewrite "git status"           # -> "rtk git status" (exit 3 par defaut)
+rtk rewrite "echo hello"           # -> (exit 1, pas de recriture)
 ```
 
 ### `rtk verify` -- Verification d'integrite
