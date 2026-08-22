@@ -12,13 +12,37 @@ pub mod rewrite_cmd;
 pub mod trust;
 pub mod verify_cmd;
 
+/// Match a hook-config command string against `rtk hook <agent>`.
+///
+/// Hook configs store plain command strings, not shell scripts, so this
+/// parses without shell unescaping: Windows backslash paths survive, a
+/// quoted binary path may contain spaces, and a trailing `.exe` on the
+/// binary is accepted.
 fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
-    let parts = crate::discover::lexer::shell_split(command);
-    let [binary, hook, target] = parts.as_slice() else {
+    let trimmed = command.trim();
+    let (binary, rest) = match trimmed.chars().next() {
+        Some(quote @ ('"' | '\'')) => {
+            let inner = &trimmed[1..];
+            let Some(end) = inner.find(quote) else {
+                return false;
+            };
+            (&inner[..end], &inner[end + 1..])
+        }
+        Some(_) => {
+            let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+            trimmed.split_at(end)
+        }
+        None => return false,
+    };
+
+    let mut args = rest.split_whitespace();
+    let (Some(hook), Some(target), None) = (args.next(), args.next(), args.next()) else {
         return false;
     };
 
     let binary_name = binary.rsplit(['/', '\\']).next().unwrap_or(binary);
+    let binary_name = binary_name.to_ascii_lowercase();
+    let binary_name = binary_name.strip_suffix(".exe").unwrap_or(&binary_name);
 
     binary_name == "rtk" && hook == "hook" && target == agent
 }
@@ -70,5 +94,24 @@ mod tests {
         ));
         assert!(!is_copilot_hook_command("echo rtk hook copilot"));
         assert!(!is_copilot_hook_command("rtk hook copilot extra"));
+    }
+
+    #[test]
+    fn hook_command_matches_windows_paths() {
+        assert!(is_copilot_hook_command(r"C:\rtk\rtk.exe hook copilot"));
+        assert!(is_copilot_hook_command(
+            r#""C:\Program Files\rtk\rtk.exe" hook copilot"#
+        ));
+        assert!(is_copilot_hook_command("rtk.exe hook copilot"));
+        assert!(is_claude_hook_command(r"C:\rtk\rtk.exe hook claude"));
+    }
+
+    #[test]
+    fn hook_command_rejects_lookalike_windows_binaries() {
+        assert!(!is_copilot_hook_command(r"C:\rtk\not-rtk.exe hook copilot"));
+        assert!(!is_copilot_hook_command(r"C:\rtk\rtk.exe.bak hook copilot"));
+        assert!(!is_copilot_hook_command(
+            r#""C:\Program Files\rtk\rtk.exe hook copilot"#
+        ));
     }
 }

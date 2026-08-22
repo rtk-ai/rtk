@@ -70,6 +70,10 @@ impl Sandbox {
             .env("USERPROFILE", &self.home)
             .env("XDG_DATA_HOME", self.home.join(".local/share"))
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
+            // RTK_DB_PATH outranks the XDG/home paths and is honored on
+            // Windows too — pin the tracking DB inside the sandbox so tests
+            // never touch the developer's real database.
+            .env("RTK_DB_PATH", self.home.join("rtk-history.db"))
             .env("CLAUDE_CONFIG_DIR", &self.claude_dir)
             .env("COPILOT_HOME", &self.copilot_home)
             .env("NO_COLOR", "1")
@@ -80,8 +84,10 @@ impl Sandbox {
 
     /// Seed the tracking database so `rtk gain` reaches its summary view
     /// (and thus its hook-status warning) instead of "No tracking data yet".
+    /// Proxies the rtk binary itself: portable, unlike `echo` which is a
+    /// shell built-in on Windows.
     fn seed_tracking_data(&self) {
-        let out = self.rtk(&["proxy", "echo", "ok"]);
+        let out = self.rtk(&["proxy", env!("CARGO_BIN_EXE_rtk"), "--version"]);
         assert!(out.status.success(), "seeding via rtk proxy must succeed");
     }
 

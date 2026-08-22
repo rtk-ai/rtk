@@ -108,9 +108,10 @@ fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
 /// Check whether a valid RTK GitHub Copilot hook is installed under
 /// `copilot_dir` (`$COPILOT_HOME` or `~/.copilot`).
 ///
-/// Valid means `hooks/rtk-rewrite.json` parses as JSON and contains a
-/// `PreToolUse` command entry invoking `rtk hook copilot` (bare or via an
-/// absolute path to the rtk binary).
+/// Valid means `hooks/rtk-rewrite.json` parses as JSON with `version == 1`
+/// (Copilot rejects hook files with any other version, so they never run)
+/// and contains a `PreToolUse` command entry invoking `rtk hook copilot`
+/// (bare or via an absolute path to the rtk binary).
 pub(crate) fn copilot_hook_registered(copilot_dir: &Path) -> bool {
     let hook_path = copilot_dir.join(HOOKS_SUBDIR).join(COPILOT_HOOK_FILE);
     let content = match std::fs::read_to_string(&hook_path) {
@@ -121,6 +122,9 @@ pub(crate) fn copilot_hook_registered(copilot_dir: &Path) -> bool {
         Ok(v) => v,
         Err(_) => return false,
     };
+    if root.get("version").and_then(|v| v.as_u64()) != Some(1) {
+        return false;
+    }
     let entries = match root
         .get("hooks")
         .and_then(|h| h.get(PRE_TOOL_USE_KEY))
@@ -363,6 +367,22 @@ mod tests {
             r#"{ "version": 1, "hooks": { "PreToolUse": [] } }"#,
         );
         assert!(!copilot_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_copilot_hook_wrong_or_missing_version_not_registered() {
+        // Copilot rejects hook files whose version is missing or != 1, so
+        // they never run and must not count as installed.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wrong_version = COPILOT_STOCK.replace("\"version\": 1", "\"version\": 2");
+        let missing_version = COPILOT_STOCK.replace("\"version\": 1,\n", "");
+        for content in [wrong_version.as_str(), missing_version.as_str()] {
+            write_copilot_hook(tmp.path(), content);
+            assert!(
+                !copilot_hook_registered(tmp.path()),
+                "content {content:?} must not count as installed"
+            );
+        }
     }
 
     #[test]
