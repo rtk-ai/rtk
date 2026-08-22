@@ -141,8 +141,16 @@ pub fn maybe_warn() {
     let _ = check_and_warn();
 }
 
-/// Single source of truth: delegates to `status()` then rate-limits the warning.
+/// Single source of truth: rate-limit gate first, then delegates to `status()`.
 fn check_and_warn() -> Option<()> {
+    // Check the rate-limit marker before computing status: this runs on most
+    // CLI invocations, and a fresh marker means any warning would be
+    // suppressed anyway — skip the detection disk I/O and JSON parsing.
+    let marker = warn_marker_path()?;
+    if warned_recently(&marker) {
+        return Some(());
+    }
+
     let warning = match status() {
         HookStatus::Ok => return Some(()),
         HookStatus::Missing => {
@@ -151,16 +159,6 @@ fn check_and_warn() -> Option<()> {
         HookStatus::Outdated => "[rtk] /!\\ Hook outdated — run `rtk init -g` to update",
     };
 
-    // Rate limit: warn once per day
-    let marker = warn_marker_path()?;
-    if let Ok(meta) = std::fs::metadata(&marker) {
-        if let Ok(modified) = meta.modified() {
-            if modified.elapsed().map(|e| e.as_secs()).unwrap_or(u64::MAX) < WARN_INTERVAL_SECS {
-                return Some(());
-            }
-        }
-    }
-
     eprintln!("{}", warning);
 
     // Touch marker after warning is printed
@@ -168,6 +166,17 @@ fn check_and_warn() -> Option<()> {
     let _ = std::fs::write(&marker, b"");
 
     Some(())
+}
+
+/// True when the warn marker was touched within the rate-limit interval.
+fn warned_recently(marker: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(marker) else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    modified.elapsed().map(|e| e.as_secs()).unwrap_or(u64::MAX) < WARN_INTERVAL_SECS
 }
 
 pub fn parse_hook_version(content: &str) -> u8 {
@@ -460,6 +469,17 @@ mod tests {
             status_at(Some(&claude_dir), Some(&copilot_dir)),
             HookStatus::Outdated
         );
+    }
+
+    #[test]
+    fn test_warned_recently_gates_on_marker_freshness() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let marker = tmp.path().join(".hook_warn_last");
+        // No marker → not warned recently → detection would run.
+        assert!(!warned_recently(&marker));
+        // Fresh marker → warned recently → detection is skipped.
+        std::fs::write(&marker, b"").unwrap();
+        assert!(warned_recently(&marker));
     }
 
     #[test]
