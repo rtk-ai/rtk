@@ -496,6 +496,131 @@ pub fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// Decode child process output bytes, respecting the Windows console code page.
+///
+/// Valid UTF-8 is returned untouched — the overwhelmingly common case, and the
+/// only one on Unix. Otherwise the buffer is decoded a line at a time: lines
+/// that are valid UTF-8 keep their bytes, and only the lines that are not get
+/// re-decoded through the console code page (GBK, Big5, CP850, …). Decoding
+/// the whole buffer as a legacy code page at the first bad byte would mangle
+/// output that was almost entirely valid UTF-8.
+///
+/// Falls back to lossy UTF-8 (`U+FFFD`) when no code page applies, matching the
+/// previous behavior.
+pub fn decode_process_output(bytes: &[u8]) -> String {
+    // Fast path: fully valid UTF-8 needs no scanning and no allocation beyond
+    // the copy. This is every Unix run and every UTF-8 console on Windows.
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_owned(),
+        Err(_) => decode_mixed(bytes, output_codepage()),
+    }
+}
+
+/// Decode `bytes` line by line, keeping valid UTF-8 lines verbatim and passing
+/// the rest through code page `cp` (lossy UTF-8 when `cp` is `None`).
+///
+/// The line is the decoding unit because a byte run is not one: GB18030's
+/// four-byte sequences embed bytes in the ASCII digit range, so any rule that
+/// stops a run at the first byte under `0x80` splits them. `\n` is unambiguous
+/// in every encoding handled here — none of UTF-8, GBK, gb18030, Big5,
+/// Shift_JIS, EUC-KR or the single-byte pages can produce it as a trail byte —
+/// and a process does not switch encoding mid-line, so the whole line can be
+/// handed to one decoder.
+///
+/// Takes the code page as a parameter so the walk and the mapping are
+/// unit-testable on every platform, not only Windows.
+fn decode_mixed(bytes: &[u8], cp: Option<u16>) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    // `split_inclusive` keeps the terminator, so line endings survive intact
+    // and an empty input yields no chunks at all.
+    for line in bytes.split_inclusive(|&b| b == b'\n') {
+        match std::str::from_utf8(line) {
+            Ok(valid) => out.push_str(valid),
+            Err(_) => out.push_str(&decode_line(line, cp)),
+        }
+    }
+    out
+}
+
+/// Decode one line that failed UTF-8 validation using code page `cp`.
+///
+/// A code page result is only accepted when it decodes cleanly. A line that is
+/// really UTF-8 with a corrupt byte usually fails the code page decoder too,
+/// and lossy UTF-8 preserves its valid characters where the code page would
+/// turn all of them into mojibake.
+fn decode_line(line: &[u8], cp: Option<u16>) -> String {
+    if let Some(cp) = cp {
+        // encoding_rs covers the ANSI and DBCS pages (1252, GBK, gb18030,
+        // Shift_JIS, Big5, …); `codepage` maps the Windows page number onto it.
+        if let Some(encoding) = codepage::to_encoding(cp) {
+            let (decoded, _, had_errors) = encoding.decode(line);
+            if !had_errors {
+                return decoded.into_owned();
+            }
+        // encoding_rs implements only WHATWG encodings, which exclude the
+        // legacy OEM/DOS pages (437, 850, 852, …) that plain cmd.exe still
+        // defaults to in many locales. `oem_cp` supplies those tables.
+        } else if let Some(table) = oem_cp::code_table::DECODING_TABLE_CP_MAP.get(&cp) {
+            if let Some(decoded) = table.decode_string_checked(line) {
+                return decoded;
+            }
+        } else {
+            warn_unmapped_codepage(cp);
+        }
+    }
+    String::from_utf8_lossy(line).into_owned()
+}
+
+/// Warn once that output is being decoded lossily because the console code
+/// page has no known table — previously this fell back silently.
+fn warn_unmapped_codepage(cp: u16) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        eprintln!(
+            "[rtk] warning: no decoder for console code page {}; \
+             non-UTF-8 output will be shown with replacement characters",
+            cp
+        );
+    });
+}
+
+/// The code page child output should be decoded with, or `None` when the
+/// platform has no such concept (every Unix) and lossy UTF-8 should be used.
+#[cfg(not(windows))]
+fn output_codepage() -> Option<u16> {
+    None
+}
+
+/// Windows: the console output code page, cached after the first lookup.
+///
+/// `GetConsoleOutputCP` describes the console rtk is attached to, which the
+/// child inherits. It returns 0 when there is no console — rtk running under a
+/// hook with its output piped, the common case flagged in review — and a
+/// console program writing to a pipe uses the ANSI code page instead, so
+/// `GetACP` is the fallback rather than giving up and decoding lossily.
+///
+/// This remains a best guess: a child is free to emit any encoding regardless
+/// of either code page. It is only ever consulted for bytes that already
+/// failed UTF-8 validation, so a wrong guess degrades to the same replacement
+/// characters that the previous lossy conversion produced.
+#[cfg(windows)]
+fn output_codepage() -> Option<u16> {
+    static CODEPAGE: OnceLock<Option<u16>> = OnceLock::new();
+    *CODEPAGE.get_or_init(|| {
+        #[allow(unsafe_code)]
+        // nosemgrep: unsafe-block — read-only Win32 APIs, no memory or thread safety risk
+        let cp = unsafe {
+            let console = windows_sys::Win32::System::Console::GetConsoleOutputCP();
+            if console != 0 {
+                console
+            } else {
+                windows_sys::Win32::Globalization::GetACP()
+            }
+        };
+        u16::try_from(cp).ok().filter(|&cp| cp != 0)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1044,5 +1169,166 @@ mod tests {
     fn test_restrict_file_ignores_missing_path() {
         let tmp = tempfile::tempdir().unwrap();
         restrict_file(&tmp.path().join("absent.db-wal"));
+    }
+
+    #[test]
+    fn test_decode_process_output_valid_utf8() {
+        assert_eq!(decode_process_output(b"hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_decode_process_output_chinese_utf8() {
+        let input = "测试中文".as_bytes();
+        assert_eq!(decode_process_output(input), "测试中文");
+    }
+
+    #[test]
+    fn test_decode_process_output_empty() {
+        assert_eq!(decode_process_output(b""), "");
+    }
+
+    #[test]
+    fn test_decode_process_output_invalid_utf8_no_panic() {
+        let bytes: &[u8] = &[0xFF, 0xFE, 0x41, 0x42];
+        let result = decode_process_output(bytes);
+        assert!(!result.is_empty());
+    }
+
+    // `decode_mixed` takes the code page as a parameter so these run on every
+    // platform, not only Windows — the CI runners that would exercise the
+    // Windows-gated versions do not exist.
+
+    /// The bug this fix targets: GBK output from a Chinese-locale console.
+    #[test]
+    fn test_decode_mixed_gbk_run() {
+        assert_eq!(decode_mixed(&[0xB2, 0xE2, 0xCA, 0xD4], Some(936)), "测试");
+    }
+
+    /// GB18030 (54936) must not be treated as plain GBK: it has to keep its
+    /// own table so 4-byte sequences decode.
+    #[test]
+    fn test_decode_mixed_gb18030_is_not_gbk() {
+        // 0x81 0x35 0xF4 0x37 is a 4-byte GB18030 sequence.
+        let decoded = decode_mixed(&[0x81, 0x35, 0xF4, 0x37], Some(54936));
+        assert_eq!(
+            decoded.chars().count(),
+            1,
+            "expected one char: {:?}",
+            decoded
+        );
+        assert!(
+            !decoded.contains('\u{FFFD}'),
+            "got replacement: {:?}",
+            decoded
+        );
+        assert_eq!(
+            codepage::to_encoding(54936).map(|e| e.name()),
+            Some("gb18030")
+        );
+    }
+
+    /// Legacy OEM/DOS pages are cmd.exe's default in many locales and are not
+    /// WHATWG encodings, so they come from `oem_cp` rather than encoding_rs.
+    #[test]
+    fn test_decode_mixed_oem_codepages() {
+        assert_eq!(decode_mixed(&[0xB0, 0xDB], Some(437)), "░█");
+        // 850 and 852 are likewise absent from encoding_rs.
+        assert!(codepage::to_encoding(437).is_none());
+        assert!(!decode_mixed(&[0xE1], Some(850)).contains('\u{FFFD}'));
+    }
+
+    /// The regression the review flagged: a buffer that is almost entirely
+    /// valid UTF-8 must not be reinterpreted wholesale because of one bad
+    /// line. Only the GBK line is re-decoded; the UTF-8 lines keep their bytes.
+    #[test]
+    fn test_decode_mixed_only_redecodes_invalid_lines() {
+        let mut bytes = "héllo wörld\n".as_bytes().to_vec();
+        bytes.extend_from_slice(&[0xB2, 0xE2, 0xCA, 0xD4, b'\n']); // GBK 测试
+        bytes.extend_from_slice("grüße\n".as_bytes());
+
+        assert_eq!(
+            decode_mixed(&bytes, Some(936)),
+            "héllo wörld\n测试\ngrüße\n"
+        );
+    }
+
+    /// A corrupt byte inside an otherwise-UTF-8 line falls back to lossy UTF-8
+    /// rather than mojibake, because the code page decode does not come out
+    /// clean. The surrounding lines are untouched either way.
+    #[test]
+    fn test_decode_mixed_corrupt_byte_prefers_lossy_utf8() {
+        let mut bytes = "first\n".as_bytes().to_vec();
+        bytes.extend_from_slice("naïve".as_bytes());
+        bytes.push(0xC3); // dangling lead byte: invalid UTF-8 and invalid GBK
+        bytes.extend_from_slice(b"\nlast\n");
+
+        let decoded = decode_mixed(&bytes, Some(936));
+        assert!(decoded.starts_with("first\n"), "{:?}", decoded);
+        assert!(decoded.contains("naïve"), "{:?}", decoded);
+        assert!(decoded.ends_with("\nlast\n"), "{:?}", decoded);
+    }
+
+    /// Line endings and the final line without a terminator must survive.
+    #[test]
+    fn test_decode_mixed_preserves_line_structure() {
+        let mut bytes = b"a\r\n".to_vec();
+        bytes.extend_from_slice(&[0xB2, 0xE2, b'\n']); // GBK 测
+        bytes.extend_from_slice(b"tail"); // no trailing newline
+
+        assert_eq!(decode_mixed(&bytes, Some(936)), "a\r\n测\ntail");
+    }
+
+    /// No code page (every Unix run) keeps the old lossy behavior.
+    #[test]
+    fn test_decode_mixed_without_codepage_is_lossy() {
+        let mut bytes = b"ok ".to_vec();
+        bytes.push(0xFF);
+        assert_eq!(decode_mixed(&bytes, None), "ok \u{FFFD}");
+    }
+
+    /// An unmapped code page must degrade to lossy rather than panic.
+    #[test]
+    fn test_decode_mixed_unknown_codepage_is_lossy() {
+        assert_eq!(decode_mixed(&[0xFF], Some(60000)), "\u{FFFD}");
+    }
+
+    /// Truncated trailing UTF-8 must terminate rather than loop forever.
+    #[test]
+    fn test_decode_mixed_truncated_utf8_terminates() {
+        // First two bytes of a three-byte character, cut short.
+        let decoded = decode_mixed(&[b'a', 0xE6, 0xB5], None);
+        assert!(decoded.starts_with('a'), "{:?}", decoded);
+    }
+
+    /// Every byte value must survive both paths without panicking.
+    #[test]
+    fn test_decode_mixed_all_byte_values_no_panic() {
+        let all: Vec<u8> = (0u8..=255).collect();
+        for cp in [None, Some(936), Some(437), Some(65001), Some(1252)] {
+            let _ = decode_mixed(&all, cp);
+        }
+    }
+
+    /// Without a code page — every Unix run — the result must stay identical to
+    /// the `String::from_utf8_lossy` this replaced. Splitting on `\n` cannot
+    /// change it: a newline is valid ASCII, so no ill-formed sequence spans one.
+    #[test]
+    fn test_decode_process_output_unchanged_without_codepage() {
+        let cases: [&[u8]; 6] = [
+            b"",
+            b"plain ascii\n",
+            "utf8 ünïcödé\nsecond ライン\n".as_bytes(),
+            &[0xFF, 0xFE, b'\n', b'o', b'k'],
+            &[b'a', b'\n', 0xE6, 0xB5, b'\n', b'b'],
+            &[0xB2, 0xE2, 0xCA, 0xD4],
+        ];
+        for bytes in cases {
+            assert_eq!(
+                decode_mixed(bytes, None),
+                String::from_utf8_lossy(bytes),
+                "lossy mismatch for {:?}",
+                bytes
+            );
+        }
     }
 }
