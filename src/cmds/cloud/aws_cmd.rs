@@ -4,11 +4,12 @@
 //! Specialized filters for high-frequency commands (STS, S3, EC2, ECS, RDS, CloudFormation).
 
 use crate::core::guard::never_worse;
+use crate::core::stream::{exec_capture, CaptureResult};
 use crate::core::tee::force_tee_hint;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_INVENTORY, CAP_LIST};
 use crate::core::utils::{
-    exit_code_from_output, exit_code_from_status, human_bytes, join_with_overflow,
+    human_bytes, join_with_overflow,
     resolved_command, shorten_arn, truncate_iso_date,
 };
 use crate::json_cmd;
@@ -242,11 +243,13 @@ fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -
         eprintln!("Running: aws {}", full_sub);
     }
 
-    let output = cmd.output().context("Failed to run aws CLI")?;
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let CaptureResult {
+        stdout: raw,
+        stderr,
+        exit_code,
+    } = exec_capture(&mut cmd).context("Failed to run aws CLI")?;
 
-    if !output.status.success() {
+    if exit_code != 0 {
         timer.track(
             &format!("aws {}", full_sub),
             &format!("rtk aws {}", full_sub),
@@ -254,7 +257,7 @@ fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -
             &stderr,
         );
         eprintln!("{}", stderr.trim());
-        return Ok(crate::core::utils::exit_code_from_output(&output, "aws"));
+        return Ok(exit_code);
     }
 
     let filtered = match json_cmd::filter_json_compact(&raw, JSON_COMPRESS_DEPTH) {
@@ -280,11 +283,7 @@ fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -
     Ok(0)
 }
 
-fn run_aws_json(
-    sub_args: &[&str],
-    extra_args: &[String],
-    verbose: u8,
-) -> Result<(String, String, std::process::ExitStatus)> {
+fn run_aws_json(sub_args: &[&str], extra_args: &[String], verbose: u8) -> Result<CaptureResult> {
     let mut cmd = resolved_command("aws");
     for arg in sub_args {
         cmd.arg(arg);
@@ -313,17 +312,13 @@ fn run_aws_json(
         eprintln!("Running: {}", cmd_desc);
     }
 
-    let output = cmd
-        .output()
-        .context(format!("Failed to run {}", cmd_desc))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let captured = exec_capture(&mut cmd).context(format!("Failed to run {}", cmd_desc))?;
 
-    if !output.status.success() {
-        eprintln!("{}", stderr.trim());
+    if !captured.success() {
+        eprintln!("{}", captured.stderr.trim());
     }
 
-    Ok((stdout, stderr, output.status))
+    Ok(captured)
 }
 
 /// Shared runner for AWS commands that return JSON.
@@ -338,7 +333,11 @@ fn run_aws_filtered(
     let rtk_label = format!("rtk {}", cmd_label);
     let slug = cmd_label.replace(' ', "_");
     let timer = tracking::TimedExecution::start();
-    let (stdout, stderr, status) = run_aws_json(sub_args, extra_args, verbose)?;
+    let CaptureResult {
+        stdout,
+        stderr,
+        exit_code,
+    } = run_aws_json(sub_args, extra_args, verbose)?;
 
     // Combine stdout+stderr for accurate tracking (per contract)
     let raw = if stderr.is_empty() {
@@ -347,8 +346,7 @@ fn run_aws_filtered(
         format!("{}\n{}", stdout, stderr)
     };
 
-    if !status.success() {
-        let exit_code = exit_code_from_status(&status, "aws");
+    if exit_code != 0 {
         if let Some(hint) = crate::core::tee::tee_and_hint(&raw, &slug, exit_code) {
             eprintln!("{}\n{}", stderr.trim(), hint);
         } else {
@@ -387,16 +385,17 @@ fn run_s3_ls(extra_args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: aws s3 ls {}", extra_args.join(" "));
     }
 
-    let output = cmd.output().context("Failed to run aws s3 ls")?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let CaptureResult {
+        stdout,
+        stderr,
+        exit_code,
+    } = exec_capture(&mut cmd).context("Failed to run aws s3 ls")?;
     let raw = if stderr.is_empty() {
         stdout.clone()
     } else {
         format!("{}\n{}", stdout, stderr)
     };
-    if !output.status.success() {
-        let exit_code = exit_code_from_output(&output, "aws");
+    if exit_code != 0 {
         if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "aws_s3_ls", exit_code) {
             eprintln!("{}\n{}", stderr.trim(), hint);
         } else {
@@ -435,18 +434,17 @@ fn run_s3_transfer(operation: &str, extra_args: &[String], verbose: u8) -> Resul
         eprintln!("Running: {} {}", cmd_label, extra_args.join(" "));
     }
 
-    let output = cmd
-        .output()
-        .context(format!("Failed to run {}", cmd_label))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let CaptureResult {
+        stdout,
+        stderr,
+        exit_code,
+    } = exec_capture(&mut cmd).context(format!("Failed to run {}", cmd_label))?;
     let raw = if stderr.is_empty() {
         stdout.clone()
     } else {
         format!("{}\n{}", stdout, stderr)
     };
-    if !output.status.success() {
-        let exit_code = exit_code_from_output(&output, "aws");
+    if exit_code != 0 {
         if let Some(hint) = crate::core::tee::tee_and_hint(&raw, &slug, exit_code) {
             eprintln!("{}\n{}", stderr.trim(), hint);
         } else {
