@@ -1499,6 +1499,58 @@ mod tests {
     use super::super::report::RtkStatus;
     use super::*;
 
+    /// npm's lifecycle subcommands are the noisiest thing an agent runs, and
+    /// npm_cmd already knows them -- KNOWN_SUBCOMMANDS lists install, ci, test,
+    /// audit and outdated so it does not inject `run` for them. Only the
+    /// rewrite rule was too narrow to route them.
+    mod npm_lifecycle {
+        use super::rewrite_command_no_prefixes;
+
+        #[test]
+        fn lifecycle_subcommands_are_rewritten() {
+            for cmd in [
+                "npm test",
+                "npm install",
+                "npm install express",
+                "npm i",
+                "npm ci",
+                "npm audit",
+                "npm outdated",
+                "npm ls",
+                "npm list",
+            ] {
+                assert_eq!(
+                    rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                    Some(format!("rtk {cmd}").as_str()),
+                    "{cmd} should route to rtk npm"
+                );
+            }
+        }
+
+        #[test]
+        fn already_supported_forms_still_rewrite() {
+            for cmd in ["npm run build", "npm exec vitest", "npm run-script lint"] {
+                assert!(
+                    rewrite_command_no_prefixes(cmd, &[]).is_some(),
+                    "{cmd} must keep working"
+                );
+            }
+        }
+
+        /// Guard against the regex matching a longer word that merely starts
+        /// with a listed subcommand.
+        #[test]
+        fn similar_subcommands_are_not_captured() {
+            for cmd in ["npm install-test", "npm testify", "npm auditlog"] {
+                assert_eq!(
+                    rewrite_command_no_prefixes(cmd, &[]),
+                    None,
+                    "{cmd} must not be treated as a known subcommand"
+                );
+            }
+        }
+    }
+
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
     }
