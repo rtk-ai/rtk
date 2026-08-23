@@ -26,7 +26,13 @@ fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
             let Some(end) = inner.find(quote) else {
                 return false;
             };
-            (&inner[..end], &inner[end + 1..])
+            let rest = &inner[end + 1..];
+            // The closing quote must end the token: `"rtk"hook copilot`
+            // is not a registration of the rtk binary.
+            if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+                return false;
+            }
+            (&inner[..end], rest)
         }
         Some(_) => {
             let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
@@ -113,5 +119,12 @@ mod tests {
         assert!(!is_copilot_hook_command(
             r#""C:\Program Files\rtk\rtk.exe hook copilot"#
         ));
+    }
+
+    #[test]
+    fn hook_command_rejects_quote_glued_to_next_token() {
+        assert!(!is_copilot_hook_command(r#""rtk"hook copilot"#));
+        assert!(!is_copilot_hook_command("'rtk'hook copilot"));
+        assert!(!is_copilot_hook_command(r#""rtk"x hook copilot"#));
     }
 }
