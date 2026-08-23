@@ -456,41 +456,11 @@ pub fn strip_quotes(s: &str) -> String {
 }
 
 pub fn shell_split(input: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut chars = input.chars().peekable();
-    let mut in_single = false;
-    let mut in_double = false;
-
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' if !in_single => {
-                if let Some(next) = chars.next() {
-                    current.push(next);
-                }
-            }
-            '\'' if !in_double => {
-                in_single = !in_single;
-            }
-            '"' if !in_single => {
-                in_double = !in_double;
-            }
-            ' ' | '\t' if !in_single && !in_double => {
-                if !current.is_empty() {
-                    tokens.push(std::mem::take(&mut current));
-                }
-            }
-            _ => {
-                current.push(c);
-            }
-        }
-    }
-
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-
-    tokens
+    input
+        .replace('"', "")
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 #[cfg(test)]
