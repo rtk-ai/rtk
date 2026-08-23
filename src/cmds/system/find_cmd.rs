@@ -7,6 +7,19 @@ use ignore::WalkBuilder;
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Ensure the block ends with a newline.
+///
+/// `find` newline-terminates its last result. Without it `wc -l` undercounts by
+/// one, `while read` drops the final entry, and the next line of output runs on
+/// to the same line.
+fn terminated(body: &str) -> std::borrow::Cow<'_, str> {
+    if body.is_empty() || body.ends_with('\n') {
+        std::borrow::Cow::Borrowed(body)
+    } else {
+        std::borrow::Cow::Owned(format!("{body}\n"))
+    }
+}
+
 /// Match a filename against a glob pattern (supports `*` and `?`).
 fn glob_match(pattern: &str, name: &str) -> bool {
     glob_match_inner(pattern.as_bytes(), name.as_bytes())
@@ -373,7 +386,7 @@ pub fn run(
     }
 
     let shown = never_worse(&raw_output, &body);
-    print!("{}", shown);
+    print!("{}", terminated(shown));
     timer.track(
         &format!("find {} -name '{}'", path, effective_pattern),
         "rtk find",
@@ -387,6 +400,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
 
     /// Convert string slices to Vec<String> for test convenience.
     fn args(values: &[&str]) -> Vec<String> {
@@ -617,4 +631,14 @@ mod tests {
         // We can't easily capture stdout in unit tests, but at least
         // verify it runs without error. The smoke tests verify content.
     }
+
+    /// `find` newline-terminates its last result. rtk's `print!` did not, so
+    /// `wc -l` undercounted by one and `while read` dropped the final entry.
+    #[test]
+    fn output_is_newline_terminated() {
+        assert_eq!(terminated("a/one.txt\nb/two.txt"), "a/one.txt\nb/two.txt\n");
+        assert_eq!(terminated("already\n"), "already\n");
+        assert_eq!(terminated(""), "", "no results prints nothing at all");
+    }
+
 }
