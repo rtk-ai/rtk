@@ -159,11 +159,17 @@ fn format_with_line_numbers(content: &str) -> String {
     out
 }
 
+/// Window the content to the first `max_lines` or the last `tail_lines`.
+///
+/// Both ends slice plainly. `--max-lines` used to route through
+/// `filter::smart_truncate`, which budgets only `max_lines / 2` for ordinary
+/// lines, so `head -20 file` -- which rewrites to `--max-lines 20` -- returned
+/// ten lines of a plain text file with nothing to say the rest was dropped.
 fn apply_line_window(
     content: &str,
     max_lines: Option<usize>,
     tail_lines: Option<usize>,
-    lang: &Language,
+    _lang: &Language,
 ) -> String {
     if let Some(tail) = tail_lines {
         if tail == 0 {
@@ -179,7 +185,18 @@ fn apply_line_window(
     }
 
     if let Some(max) = max_lines {
-        return filter::smart_truncate(content, max, lang);
+        if max == 0 {
+            return String::new();
+        }
+        let lines: Vec<&str> = content.lines().collect();
+        if lines.len() <= max {
+            return content.to_string();
+        }
+        let mut result = lines[..max].join("\n");
+        if content.ends_with('\n') {
+            result.push('\n');
+        }
+        return result;
     }
 
     content.to_string()
@@ -188,6 +205,49 @@ fn apply_line_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--max-lines N` is what `head -N file` is rewritten to, so it must mean
+    /// "the first N lines". It routed through `filter::smart_truncate`, whose
+    /// budget for ordinary lines is `max_lines / 2`, so a plain text file came
+    /// back at exactly half the requested size with no marker.
+    #[test]
+    fn max_lines_returns_the_first_n_lines() {
+        let content = (1..=100)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for n in [5usize, 10, 20, 50] {
+            let output = apply_line_window(&content, Some(n), None, &Language::Unknown);
+            let lines: Vec<&str> = output.lines().collect();
+            assert_eq!(lines.len(), n, "--max-lines {n} must return {n} lines, got {}", lines.len());
+            assert_eq!(lines[0], "1", "must start at the first line");
+            assert_eq!(lines[n - 1], n.to_string(), "must be the first {n} lines, contiguous");
+        }
+    }
+
+    /// Content shorter than the window is returned whole.
+    #[test]
+    fn max_lines_under_the_limit_is_untouched() {
+        let content = "a\nb\nc\n";
+        assert_eq!(
+            apply_line_window(content, Some(10), None, &Language::Unknown),
+            content
+        );
+    }
+
+    /// Control: the tail window already sliced correctly and must stay that way.
+    #[test]
+    fn tail_lines_still_returns_the_last_n_lines() {
+        let content = (1..=100)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let output = apply_line_window(&content, None, Some(20), &Language::Unknown);
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 20);
+        assert_eq!(lines[0], "81");
+        assert_eq!(lines[19], "100");
+    }
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -228,12 +288,19 @@ fn main() {{
         assert_eq!(output, "c\nd");
     }
 
+    /// `--max-lines N` is an explicit, user-requested window -- the rewrite
+    /// target for `head -N file` -- so it matches `head` exactly and carries no
+    /// truncation marker. RTK discloses truncation *it* chose; this one the
+    /// caller asked for.
     #[test]
     fn test_apply_line_window_max_lines_still_works() {
         let input = "a\nb\nc\nd\n";
         let output = apply_line_window(input, Some(2), None, &Language::Unknown);
-        assert!(output.starts_with("a\n"));
-        assert!(output.contains("more lines"));
+        assert_eq!(output, "a\nb\n");
+        assert!(
+            !output.contains("more lines"),
+            "an explicitly requested window is not annotated: {output:?}"
+        );
     }
 
     fn rtk_bin() -> std::path::PathBuf {
