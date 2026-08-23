@@ -14,11 +14,28 @@ pub mod verify_cmd;
 
 /// Match a hook-config command string against `rtk hook <agent>`.
 ///
-/// Hook configs store plain command strings, not shell scripts, so this
-/// parses without shell unescaping: Windows backslash paths survive, a
-/// quoted binary path may contain spaces, and a trailing `.exe` on the
-/// binary is accepted.
+/// Accepts either interpretation of the command string: POSIX shell form
+/// (quotes and backslash escapes unwrapped, e.g. `/opt/RTK\ Tools/rtk hook
+/// claude`) or raw Windows form (backslashes are path separators and the
+/// binary may be quoted to contain spaces, e.g. `C:\rtk\rtk.exe hook
+/// copilot`). A trailing `.exe` on the binary is accepted in both.
 fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
+    matches_posix_form(command, agent) || matches_raw_form(command, agent)
+}
+
+/// POSIX shell interpretation via `shell_split`.
+fn matches_posix_form(command: &str, agent: &str) -> bool {
+    let parts = crate::discover::lexer::shell_split(command);
+    let [binary, hook, target] = parts.as_slice() else {
+        return false;
+    };
+    hook == "hook" && target == agent && binary_is_rtk(binary)
+}
+
+/// Raw interpretation for Windows-style registrations: no unescaping, so
+/// backslash paths survive; a quoted binary may contain spaces and the
+/// closing quote must end the token.
+fn matches_raw_form(command: &str, agent: &str) -> bool {
     let trimmed = command.trim();
     let (binary, rest) = match trimmed.chars().next() {
         Some(quote @ ('"' | '\'')) => {
@@ -27,8 +44,6 @@ fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
                 return false;
             };
             let rest = &inner[end + 1..];
-            // The closing quote must end the token: `"rtk"hook copilot`
-            // is not a registration of the rtk binary.
             if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
                 return false;
             }
@@ -46,11 +61,14 @@ fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
         return false;
     };
 
-    let binary_name = binary.rsplit(['/', '\\']).next().unwrap_or(binary);
-    let binary_name = binary_name.to_ascii_lowercase();
-    let binary_name = binary_name.strip_suffix(".exe").unwrap_or(&binary_name);
+    hook == "hook" && target == agent && binary_is_rtk(binary)
+}
 
-    binary_name == "rtk" && hook == "hook" && target == agent
+fn binary_is_rtk(binary: &str) -> bool {
+    let name = binary.rsplit(['/', '\\']).next().unwrap_or(binary);
+    let name = name.to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    name == "rtk"
 }
 
 pub fn is_claude_hook_command(command: &str) -> bool {
@@ -126,5 +144,17 @@ mod tests {
         assert!(!is_copilot_hook_command(r#""rtk"hook copilot"#));
         assert!(!is_copilot_hook_command("'rtk'hook copilot"));
         assert!(!is_copilot_hook_command(r#""rtk"x hook copilot"#));
+    }
+
+    #[test]
+    fn hook_command_matches_posix_escaped_paths() {
+        assert!(is_claude_hook_command(r"/opt/RTK\ Tools/rtk hook claude"));
+        assert!(is_copilot_hook_command(r"/opt/RTK\ Tools/rtk hook copilot"));
+        assert!(is_copilot_hook_command(
+            r#""/opt/rtk tools/rtk" hook copilot"#
+        ));
+        assert!(!is_copilot_hook_command(
+            r"/opt/RTK\ Tools/not-rtk hook copilot"
+        ));
     }
 }
