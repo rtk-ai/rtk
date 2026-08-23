@@ -481,23 +481,20 @@ fn run_log(
         let n = parse_limit_from_tokens(&tokens).unwrap_or(10);
         (n, true)
     } else if has_format_flag {
-        // --oneline / --pretty without -N: user wants compact output, allow more
-        cmd.arg("-50");
+        // --oneline / --pretty without -N: user wants compact output, allow more.
+        // Ask for one past the cap so the filter can tell it truncated and say so.
+        cmd.arg("-51");
         (50, false)
     } else {
-        // No flags at all: default to 10
-        cmd.arg("-10");
+        // No flags at all: default to 10, plus one to detect the overflow.
+        cmd.arg("-11");
         (10, false)
     };
 
-    // Only add --no-merges if user didn't explicitly request merge commits
-    let wants_merges = flag_args
-        .iter()
-        .any(|arg| *arg == "--merges" || *arg == "--min-parents=2" || *arg == "--no-merges");
-    // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
-    if !wants_merges && !has_limit_flag {
-        cmd.arg("--no-merges");
-    }
+    // No --no-merges injection: a cap trims the tail of the list, but hiding
+    // merge commits removes commits from the middle of history, and no
+    // truncation notice can express that. "Was the branch merged?" has to stay
+    // answerable from `git log`.
 
     // Pass all user arguments
     for arg in args {
@@ -719,6 +716,17 @@ fn parse_limit_from_tokens(tokens: &[LogArg<'_>]) -> Option<usize> {
 /// so we skip line capping (git already returns exactly N commits) and use a
 /// wider truncation threshold (120 chars) to preserve commit context that LLMs
 /// need for rebase/squash operations.
+/// RTK's own cap is a presentation choice, so it has to be visible. An explicit
+/// -N is the agent's choice and is left alone.
+///
+/// Deliberately unquantified: `run_log` asks git for one commit past the cap
+/// purely to detect the overflow, so the number of commits RTK can see is not
+/// the number that remain. Printing "+1 more" against a 16-commit history would
+/// trade one misleading output for another.
+fn cap_notice(total: usize, shown: usize, limit: usize) -> Option<String> {
+    (total > shown).then(|| format!("[rtk] truncated at {limit} commits; use -n N for more"))
+}
+
 pub(crate) fn filter_log_output(
     output: &str,
     limit: usize,
@@ -730,18 +738,26 @@ pub(crate) fn filter_log_output(
     // When user specified their own format (--oneline, --pretty, --format),
     // RTK did not inject ---END--- markers. Use simple line-based truncation.
     if user_format {
-        let lines: Vec<&str> = output.lines().collect();
+        let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
         let max_lines = if user_set_limit { lines.len() } else { limit };
-        return lines
+        let mut kept: Vec<String> = lines
             .iter()
             .take(max_lines)
             .map(|l| truncate_line(l, truncate_width))
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect();
+        if !user_set_limit {
+            if let Some(notice) = cap_notice(lines.len(), kept.len(), limit) {
+                kept.push(notice);
+            }
+        }
+        return kept.join("\n");
     }
 
     // RTK injected format: split output into commit blocks separated by ---END---
-    let commits: Vec<&str> = output.split("---END---").collect();
+    let commits: Vec<&str> = output
+        .split("---END---")
+        .filter(|b| !b.trim().is_empty())
+        .collect();
     let max_commits = if user_set_limit { commits.len() } else { limit };
 
     let mut result = Vec::new();
@@ -779,6 +795,12 @@ pub(crate) fn filter_log_output(
                 entry.push_str(&format!("\n  [+{} lines omitted]", body_omitted));
             }
             result.push(entry);
+        }
+    }
+
+    if !user_set_limit {
+        if let Some(notice) = cap_notice(commits.len(), result.len(), limit) {
+            result.push(notice);
         }
     }
 
@@ -2260,6 +2282,60 @@ pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -
 mod tests {
     use super::*;
 
+    /// RTK's default -10 is a presentation cap, so it has to be visible. Without
+    /// a marker the agent reads ten commits as the whole history.
+    #[test]
+    fn default_cap_is_disclosed() {
+        let output = (0..12)
+            .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = filter_log_output(&output, 10, false, false);
+        assert_eq!(
+            result.lines().filter(|l| l.starts_with("hash")).count(),
+            10,
+            "still capped at 10:\n{result}"
+        );
+        assert!(
+            result.contains("truncated at 10 commits"),
+            "the cap must be disclosed:\n{result}"
+        );
+    }
+
+    /// An explicit -N is the agent's own choice, so nothing is added.
+    #[test]
+    fn user_limit_is_not_annotated() {
+        let output = (0..12)
+            .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = filter_log_output(&output, 12, true, false);
+        assert!(!result.contains("more"), "no cap notice expected:\n{result}");
+    }
+
+    /// Nothing was dropped, so nothing is claimed.
+    #[test]
+    fn exact_fit_is_not_annotated() {
+        let output = (0..10)
+            .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = filter_log_output(&output, 10, false, false);
+        assert!(!result.contains("more"), "no cap notice expected:\n{result}");
+    }
+
+    /// The same disclosure applies to --oneline / --pretty, which take the
+    /// line-based path.
+    #[test]
+    fn default_cap_is_disclosed_for_user_formats() {
+        let output = (0..12)
+            .map(|i| format!("hash{} message {}", i, i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = filter_log_output(&output, 10, false, true);
+        assert!(result.contains("truncated at 10 commits"), "{result}");
+    }
+
     #[test]
     fn test_git_cmd_no_global_args() {
         let cmd = git_cmd(&[]);
@@ -2860,7 +2936,15 @@ A  added.rs
             .collect::<Vec<_>>()
             .join("\n");
         let result = filter_log_output(&output, 5, false, false);
-        assert_eq!(result.lines().count(), 5);
+        assert_eq!(
+            result.lines().filter(|l| l.starts_with("hash")).count(),
+            5,
+            "still capped at 5:\n{result}"
+        );
+        assert!(
+            result.contains("truncated at 5 commits"),
+            "cap must be disclosed:\n{result}"
+        );
     }
 
     #[test]
@@ -3387,9 +3471,17 @@ no changes added to commit (use "git add" and/or "git commit -a")
         let result = filter_log_output(oneline_output, 3, true, true);
         assert_eq!(result.lines().count(), 5);
 
-        // user_set_limit=false means cap at limit
+        // user_set_limit=false means cap at limit, and say so
         let result = filter_log_output(oneline_output, 3, false, true);
-        assert_eq!(result.lines().count(), 3);
+        assert_eq!(
+            result.lines().filter(|l| !l.starts_with("[rtk]")).count(),
+            3,
+            "{result}"
+        );
+        assert!(
+            result.contains("truncated at 3 commits"),
+            "cap must be disclosed:\n{result}"
+        );
     }
 
     /// Regression test: `git branch <name>` must create, not list.
