@@ -19,6 +19,10 @@ static LS_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
+fn default_ls_flags() -> &'static str {
+    "-laH"
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let show_all = args
         .iter()
@@ -50,7 +54,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     let mut cmd = resolved_command("ls");
     cmd.env("LC_ALL", "C");
-    cmd.arg("-la");
+    cmd.arg(default_ls_flags());
     for flag in &flags {
         if flag.starts_with("--") {
             if *flag != "--all" {
@@ -467,6 +471,39 @@ mod tests {
                      lrwxr-xr-x  1 user  staff  10 Jan  1 12:00 link -> target\n";
         let (entries, _summary, _parsed) = compact_ls(input, false, false);
         assert!(entries.contains("link -> target"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_command_line_directory_symlink_is_followed() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let target_dir = temp_dir.path().join("target");
+        let link_path = temp_dir.path().join("directory-link");
+        std::fs::create_dir(&target_dir).unwrap();
+        std::fs::write(target_dir.join("inside.txt"), "content").unwrap();
+        symlink(&target_dir, &link_path).unwrap();
+
+        let link = link_path.to_string_lossy().into_owned();
+        let output = resolved_command("ls")
+            .env("LC_ALL", "C")
+            .arg(default_ls_flags())
+            .arg(&link)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let raw = String::from_utf8(output.stdout).unwrap();
+        let (entries, _, _) = compact_ls(&raw, false, false);
+        assert!(
+            entries.contains("inside.txt"),
+            "directory target should be listed, got: {entries}"
+        );
+        assert!(
+            !entries.contains("directory-link ->"),
+            "the command-line symlink itself should not replace the target listing"
+        );
     }
 
     #[test]
