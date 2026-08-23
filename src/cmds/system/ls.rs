@@ -238,6 +238,25 @@ fn perms_to_octal(perms: &str) -> Option<String> {
 /// Returns (entries, summary, parsed_count) so caller can suppress summary when piped.
 /// parsed_count tracks how many non-header lines were successfully parsed.
 /// If parsed_count == 0 but raw had content, caller should fall back to raw output.
+/// `ls -R` introduces each directory's block with a `<path>:` header. Only
+/// lines the entry parser rejected reach this, so a real listing line can't be
+/// mistaken for one.
+fn section_header(line: &str) -> Option<&str> {
+    let path = line.strip_suffix(':')?;
+    (!path.is_empty()).then_some(path)
+}
+
+/// Qualify an entry with the directory block it came from, so two files with
+/// the same basename in different directories stay distinguishable.
+fn qualify(dir: &str, name: &str) -> String {
+    let dir = dir.strip_prefix("./").unwrap_or(dir);
+    if dir.is_empty() || dir == "." {
+        name.to_string()
+    } else {
+        format!("{}/{}", dir.trim_end_matches('/'), name)
+    }
+}
+
 fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, usize) {
     use std::collections::HashMap;
 
@@ -247,6 +266,7 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
     let mut lines_seen: usize = 0;
     let mut parsed_count: usize = 0;
     let mut dotdirs: usize = 0;
+    let mut current_dir: Option<String> = None;
 
     for line in raw.lines() {
         if line.starts_with("total ") || line.is_empty() {
@@ -255,7 +275,9 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
         lines_seen += 1;
 
         let Some((file_type, perms, size, name)) = parse_ls_line(line) else {
-            if is_dotdir(line) {
+            if let Some(dir) = section_header(line) {
+                current_dir = Some(dir.to_string());
+            } else if is_dotdir(line) {
                 dotdirs += 1;
             }
             continue;
@@ -275,8 +297,13 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
             None
         };
 
+        let display = match &current_dir {
+            Some(dir) => qualify(dir, &name),
+            None => name.clone(),
+        };
+
         if file_type == 'd' {
-            dirs.push((name, octal));
+            dirs.push((display, octal));
         } else {
             // Regular files, symlinks, character/block devices, pipes, sockets
             let ext = if let Some(pos) = name.rfind('.') {
@@ -285,7 +312,7 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
                 "no ext".to_string()
             };
             *by_ext.entry(ext).or_insert(0) += 1;
-            files.push((name, human_size(size), octal));
+            files.push((display, human_size(size), octal));
         }
     }
 
@@ -352,6 +379,65 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ls -R` prints each directory's block under a `<path>:` header. rtk
+    /// dropped those headers as unparseable, so every entry collapsed to a bare
+    /// basename and two files called config.json in different directories became
+    /// two indistinguishable rows.
+    #[test]
+    fn recursive_listing_keeps_the_parent_directory() {
+        let raw = "\
+.:
+total 12
+drwxr-xr-x 4 root root 4096 Aug 23 07:00 .
+drwxr-xr-x 3 root root 4096 Aug 23 07:00 ..
+drwxr-xr-x 2 root root 4096 Aug 23 07:00 alpha
+drwxr-xr-x 2 root root 4096 Aug 23 07:00 beta
+-rw-r--r-- 1 root root    2 Aug 23 07:00 top.txt
+
+./alpha:
+total 4
+drwxr-xr-x 2 root root 4096 Aug 23 07:00 .
+drwxr-xr-x 4 root root 4096 Aug 23 07:00 ..
+-rw-r--r-- 1 root root    2 Aug 23 07:00 config.json
+
+./beta:
+total 4
+drwxr-xr-x 2 root root 4096 Aug 23 07:00 .
+drwxr-xr-x 4 root root 4096 Aug 23 07:00 ..
+-rw-r--r-- 1 root root    2 Aug 23 07:00 config.json
+";
+        let (entries, _summary, _n) = compact_ls(raw, false, false);
+        assert!(
+            entries.contains("alpha/config.json"),
+            "entry must carry its directory:\n{entries}"
+        );
+        assert!(
+            entries.contains("beta/config.json"),
+            "entry must carry its directory:\n{entries}"
+        );
+        // The root block stays unprefixed.
+        assert!(
+            entries.contains("top.txt") && !entries.contains("./top.txt"),
+            "root-level entries keep their bare name:\n{entries}"
+        );
+    }
+
+    /// A non-recursive listing has no section headers and must be untouched.
+    #[test]
+    fn flat_listing_is_unprefixed() {
+        let raw = "\
+total 4
+drwxr-xr-x 2 root root 4096 Aug 23 07:00 alpha
+-rw-r--r-- 1 root root    2 Aug 23 07:00 top.txt
+";
+        let (entries, _summary, _n) = compact_ls(raw, false, false);
+        assert!(entries.contains("top.txt"), "{entries}");
+        assert!(
+            !entries.contains("/top.txt"),
+            "a flat listing must not gain a directory prefix:\n{entries}"
+        );
+    }
 
     #[test]
     fn test_compact_basic() {
