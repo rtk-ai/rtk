@@ -49,6 +49,8 @@ fn evaluate(cmd: &str, excluded: &[String], transparent_prefixes: &[String]) -> 
     evaluate_with_verdict(cmd, excluded, transparent_prefixes, verdict)
 }
 
+/// Decision logic for [`evaluate`] with an injected verdict, so tests do not
+/// depend on a developer's local Claude permission settings.
 fn evaluate_with_verdict(
     cmd: &str,
     excluded: &[String],
@@ -95,6 +97,22 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("rtk git status"),
             Some("rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_allow_verdict_yields_allow() {
+        assert!(matches!(
+            evaluate_with_verdict("git status", &[], &[], PermissionVerdict::Allow),
+            RewriteOutcome::Allow(_)
+        ));
+    }
+
+    #[test]
+    fn test_deny_verdict_yields_deny() {
+        assert_eq!(
+            evaluate_with_verdict("git status", &[], &[], PermissionVerdict::Deny),
+            RewriteOutcome::Deny
         );
     }
 
