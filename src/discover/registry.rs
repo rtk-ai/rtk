@@ -1499,6 +1499,48 @@ mod tests {
     use super::super::report::RtkStatus;
     use super::*;
 
+    mod docker_compose_hyphenated {
+        use super::rewrite_command_no_prefixes;
+
+        /// `docker compose ps` was routed but the standalone `docker-compose`
+        /// binary -- still what most projects invoke -- was not.
+        #[test]
+        fn hyphenated_form_routes_to_the_same_filter() {
+            for (cmd, want) in [
+                ("docker-compose ps", "rtk docker compose ps"),
+                ("docker-compose logs", "rtk docker compose logs"),
+                ("docker-compose build", "rtk docker compose build"),
+                ("docker-compose ps -a", "rtk docker compose ps -a"),
+            ] {
+                assert_eq!(
+                    rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                    Some(want),
+                    "{cmd} should rewrite to {want}"
+                );
+            }
+        }
+
+        #[test]
+        fn subcommand_form_still_rewrites() {
+            assert_eq!(
+                rewrite_command_no_prefixes("docker compose ps", &[]).as_deref(),
+                Some("rtk docker compose ps")
+            );
+        }
+
+        /// Subcommands with no filter -- and the long-running ones -- stay native.
+        #[test]
+        fn unfiltered_compose_subcommands_are_left_alone() {
+            for cmd in [
+                "docker-compose up",
+                "docker-compose down",
+                "docker-compose exec web sh",
+            ] {
+                assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+            }
+        }
+    }
+
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
     }

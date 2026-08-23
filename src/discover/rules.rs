@@ -400,6 +400,17 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        // The standalone `docker-compose` binary is still what most projects
+        // invoke. Same filters as the `docker compose` subcommand form, which
+        // was already routed.
+        pattern: r"^docker-compose\s+(ps|logs|build)(\s|$)",
+        rtk_cmd: "rtk docker compose",
+        rewrite_prefixes: &["docker-compose"],
+        category: "Infra",
+        savings_pct: 85.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^kubectl\s+(get|logs|describe|apply)",
         rtk_cmd: "rtk kubectl",
         rewrite_prefixes: &["kubectl"],
