@@ -35,6 +35,9 @@ struct FindArgs {
     max_depth: Option<usize>,
     file_type: String,
     case_insensitive: bool,
+    /// Opt-in tidy mode: prune hidden entries and anything VCS-ignored.
+    /// Off by default so the result set matches `find`'s.
+    respect_ignore: bool,
 }
 
 impl Default for FindArgs {
@@ -46,6 +49,7 @@ impl Default for FindArgs {
             max_depth: None,
             file_type: "f".to_string(),
             case_insensitive: false,
+            respect_ignore: false,
         }
     }
 }
@@ -65,6 +69,10 @@ fn has_native_find_flags(args: &[String]) -> bool {
 
 /// Native find flags that RTK cannot handle correctly.
 /// These involve compound predicates, actions, or semantics we don't support.
+/// Opt back in to the pruned, token-lean walk (hidden entries and VCS-ignored
+/// paths skipped). Not a `find` flag, hence the double dash.
+const IGNORE_VCS_FLAG: &str = "--ignore-vcs";
+
 const UNSUPPORTED_FIND_FLAGS: &[&str] = &[
     "-not", "!", "-or", "-o", "-and", "-a", "-exec", "-execdir", "-delete", "-print0", "-newer",
     "-perm", "-size", "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin", "-empty", "-link",
@@ -81,8 +89,22 @@ fn has_unsupported_find_flags(args: &[String]) -> bool {
 /// Native find syntax: `find . -name "*.rs" -type f -maxdepth 3`
 /// RTK syntax: `find *.rs [path] [-m max] [-t type]`
 fn parse_find_args(args: &[String]) -> Result<FindArgs> {
+    // Stripped before dispatch so neither syntax parser has to know about it.
+    // A double-dash spelling can't collide with find's own single-dash
+    // predicates -- the lesson from rtk grep owning -l/-m/-t.
+    let respect_ignore = args.iter().any(|a| a == IGNORE_VCS_FLAG);
+    let args: Vec<String> = args
+        .iter()
+        .filter(|a| a.as_str() != IGNORE_VCS_FLAG)
+        .cloned()
+        .collect();
+    let args = args.as_slice();
+
     if args.is_empty() {
-        return Ok(FindArgs::default());
+        return Ok(FindArgs {
+            respect_ignore,
+            ..FindArgs::default()
+        });
     }
 
     if has_unsupported_find_flags(args) {
@@ -91,11 +113,13 @@ fn parse_find_args(args: &[String]) -> Result<FindArgs> {
         );
     }
 
-    if has_native_find_flags(args) {
-        parse_native_find_args(args)
+    let mut parsed = if has_native_find_flags(args) {
+        parse_native_find_args(args)?
     } else {
-        parse_rtk_find_args(args)
-    }
+        parse_rtk_find_args(args)?
+    };
+    parsed.respect_ignore = respect_ignore;
+    Ok(parsed)
 }
 
 /// Parse native find syntax: `find [path] -name "*.rs" -type f -maxdepth 3`
@@ -178,49 +202,39 @@ fn parse_rtk_find_args(args: &[String]) -> Result<FindArgs> {
 }
 
 /// Entry point from main.rs — parses raw args then delegates to run().
-pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
-    let parsed = parse_find_args(args)?;
-    run(
-        &parsed.pattern,
-        &parsed.path,
-        parsed.max_results,
-        parsed.max_depth,
-        &parsed.file_type,
-        parsed.case_insensitive,
-        verbose,
-    )
-}
-
-pub fn run(
-    pattern: &str,
+/// Walk `path` and return every entry matching the pattern, relative to the root.
+///
+/// Split out of `run` so the walk's filtering semantics can be asserted directly.
+fn collect_matches(
     path: &str,
-    max_results: usize,
-    max_depth: Option<usize>,
-    file_type: &str,
+    effective_pattern: &str,
+    want_dirs: bool,
     case_insensitive: bool,
-    verbose: u8,
-) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    // Treat "." as match-all
-    let effective_pattern = if pattern == "." { "*" } else { pattern };
-
-    if verbose > 0 {
-        eprintln!("find: {} in {}", effective_pattern, path);
-    }
-
-    let want_dirs = file_type == "d";
-
-    // When the pattern targets dotfiles (e.g. -name ".claude.json"), we must walk hidden
-    // entries; otherwise skip them to keep results tidy (#1101).
-    let search_hidden = effective_pattern.starts_with('.');
-
+    max_depth: Option<usize>,
+    respect_ignore: bool,
+) -> Vec<String> {
     let mut builder = WalkBuilder::new(path);
-    builder
-        .hidden(!search_hidden) // skip hidden files/dirs unless pattern targets dotfiles
-        .git_ignore(true) // respect .gitignore
-        .git_global(true)
-        .git_exclude(true);
+    if respect_ignore {
+        // When the pattern targets dotfiles (e.g. -name ".claude.json"), we must walk hidden
+        // entries; otherwise skip them to keep results tidy (#1101).
+        let search_hidden = effective_pattern.starts_with('.');
+        builder
+            .hidden(!search_hidden)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true);
+    } else {
+        // Default: `find`'s result set. A compressor may shrink how results are
+        // printed, never which results exist -- pruning them here returned exit 0
+        // with no output, indistinguishable from "no such file".
+        builder
+            .hidden(false)
+            .git_ignore(false)
+            .git_global(false)
+            .git_exclude(false)
+            .ignore(false)
+            .parents(false);
+    }
     if let Some(depth) = max_depth {
         builder.max_depth(Some(depth));
     }
@@ -276,6 +290,45 @@ pub fn run(
 
     files.sort();
 
+    files
+}
+
+pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
+    run(&parse_find_args(args)?, verbose)
+}
+
+fn run(args: &FindArgs, verbose: u8) -> Result<()> {
+    let FindArgs {
+        pattern,
+        path,
+        max_results,
+        max_depth,
+        file_type,
+        case_insensitive,
+        respect_ignore,
+    } = args;
+    let (path, max_results, max_depth) = (path.as_str(), *max_results, *max_depth);
+    let (case_insensitive, respect_ignore) = (*case_insensitive, *respect_ignore);
+
+    let timer = tracking::TimedExecution::start();
+
+    // Treat "." as match-all
+    let effective_pattern = if pattern == "." { "*" } else { pattern.as_str() };
+
+    if verbose > 0 {
+        eprintln!("find: {} in {}", effective_pattern, path);
+    }
+
+    let want_dirs = file_type == "d";
+
+    let files = collect_matches(
+        path,
+        effective_pattern,
+        want_dirs,
+        case_insensitive,
+        max_depth,
+        respect_ignore,
+    );
     let raw_output = files.join("\n");
 
     if files.is_empty() {
@@ -387,6 +440,82 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `run` smoke test uses files, case-sensitive, find's default walk.
+    fn args_for(pattern: &str, path: &str, max_results: usize, max_depth: Option<usize>) -> FindArgs {
+        FindArgs {
+            pattern: pattern.to_string(),
+            path: path.to_string(),
+            max_results,
+            max_depth,
+            ..FindArgs::default()
+        }
+    }
+
+    /// `rtk find` is a proxy for `find`, so its result set must be `find`'s.
+    /// The walk used the `ignore` crate's defaults, which prune hidden entries
+    /// and everything `.gitignore` matches, so build output, logs and
+    /// `node_modules` were invisible -- with exit 0 and no warning, which is
+    /// indistinguishable from "no such file".
+    #[test]
+    fn walk_finds_gitignored_and_hidden_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        // The `ignore` crate only applies .gitignore inside a git repo, so the
+        // fixture needs the marker directory for this to exercise the real path.
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".gitignore"), "logs/\n*.log\nnode_modules/\n").unwrap();
+        std::fs::create_dir_all(root.join("logs")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(root.join(".config")).unwrap();
+        std::fs::write(root.join("logs/app.log"), "x").unwrap();
+        std::fs::write(root.join("build.log"), "x").unwrap();
+        std::fs::write(root.join("node_modules/pkg/index.js"), "x").unwrap();
+        std::fs::write(root.join(".config/settings.json"), "x").unwrap();
+
+        let root = root.to_string_lossy().to_string();
+        let logs = collect_matches(&root, "*.log", false, false, None, false);
+        assert_eq!(
+            logs.len(),
+            2,
+            "gitignored matches must still be found, got {logs:?}"
+        );
+
+        let js = collect_matches(&root, "index.js", false, false, None, false);
+        assert_eq!(js.len(), 1, "node_modules matches must be found, got {js:?}");
+
+        let json = collect_matches(&root, "settings.json", false, false, None, false);
+        assert_eq!(
+            json.len(),
+            1,
+            "entries under a hidden directory must be found, got {json:?}"
+        );
+
+        // --ignore-vcs opts back in to the pruned walk.
+        let pruned = collect_matches(&root, "*.log", false, false, None, true);
+        assert!(
+            pruned.is_empty(),
+            "--ignore-vcs should still prune gitignored matches, got {pruned:?}"
+        );
+    }
+
+    /// The opt-in flag is stripped before either syntax parser sees it, so it
+    /// cannot be mistaken for a path or a pattern.
+    #[test]
+    fn ignore_vcs_flag_is_parsed_and_stripped() {
+        let args: Vec<String> = ["--ignore-vcs", ".", "-name", "*.log"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let parsed = parse_find_args(&args).expect("parses");
+        assert!(parsed.respect_ignore);
+        assert_eq!(parsed.path, ".");
+        assert_eq!(parsed.pattern, "*.log");
+
+        let plain: Vec<String> = [".", "-name", "*.log"].iter().map(|s| s.to_string()).collect();
+        let parsed = parse_find_args(&plain).expect("parses");
+        assert!(!parsed.respect_ignore, "default must be find's semantics");
+    }
 
     /// Convert string slices to Vec<String> for test convenience.
     fn args(values: &[&str]) -> Vec<String> {
@@ -569,14 +698,16 @@ mod tests {
     #[test]
     fn find_dotfile_pattern_includes_hidden() {
         // .gitignore exists at the repo root — must be found when using a dotfile pattern
-        let result = run(".gitignore", ".", 50, Some(1), "f", false, 0);
+        let result = run(&args_for(".gitignore", ".", 50, Some(1)), 0);
         assert!(result.is_ok(), "run with dotfile pattern should not error");
     }
 
     #[test]
     fn find_regular_pattern_skips_hidden() {
-        // Non-dot pattern should not error (hidden dirs remain skipped)
-        let result = run("*.rs", "src", 5, None, "f", false, 0);
+        // Smoke test: a non-dot pattern must not error. Hidden entries are now
+        // walked by default (find's semantics); content is asserted by
+        // walk_finds_gitignored_and_hidden_entries.
+        let result = run(&args_for("*.rs", "src", 5, None), 0);
         assert!(result.is_ok());
     }
 
@@ -585,36 +716,37 @@ mod tests {
     #[test]
     fn find_rs_files_in_src() {
         // Should find .rs files without error
-        let result = run("*.rs", "src", 100, None, "f", false, 0);
+        let result = run(&args_for("*.rs", "src", 100, None), 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_dot_pattern_works() {
         // "." pattern should not error (was broken before)
-        let result = run(".", "src", 10, None, "f", false, 0);
+        let result = run(&args_for(".", "src", 10, None), 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_no_matches() {
-        let result = run("*.xyz_nonexistent", "src", 50, None, "f", false, 0);
+        let result = run(&args_for("*.xyz_nonexistent", "src", 50, None), 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_respects_max() {
         // With max=2, should not error
-        let result = run("*.rs", "src", 2, None, "f", false, 0);
+        let result = run(&args_for("*.rs", "src", 2, None), 0);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn find_gitignored_excluded() {
-        // target/ is in .gitignore — files inside should not appear
-        let result = run("*", ".", 1000, None, "f", false, 0);
+    fn find_runs_over_a_gitignored_tree() {
+        // Smoke test only: this asserts the run succeeds, not what it contains.
+        // Since the walk now matches find, gitignored files DO appear unless
+        // --ignore-vcs is passed; walk_finds_gitignored_and_hidden_entries
+        // pins both modes.
+        let result = run(&args_for("*", ".", 1000, None), 0);
         assert!(result.is_ok());
-        // We can't easily capture stdout in unit tests, but at least
-        // verify it runs without error. The smoke tests verify content.
     }
 }
