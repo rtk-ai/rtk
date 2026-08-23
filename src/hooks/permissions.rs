@@ -103,7 +103,7 @@ pub(crate) fn check_command_with_rules(
         if all_segments_allowed {
             let matched = allow_rules
                 .iter()
-                .any(|pattern| command_matches_pattern(segment, pattern));
+                .any(|pattern| allow_matches_pattern(segment, pattern));
             if !matched {
                 all_segments_allowed = false;
             }
@@ -375,6 +375,39 @@ pub(crate) fn extract_bash_pattern(rule: &str) -> &str {
     rule
 }
 
+/// Match `cmd` against an **allow** rule.
+///
+/// `command_matches_pattern` also accepts anything with the rule as a prefix.
+/// That is the right default for deny and ask -- broadening those can only add
+/// friction -- but it is fail-open for allow: `Bash(docker run)` auto-allowed
+/// `docker run -v /:/host alpine sh -c id`, mounting the host root into the
+/// container. Since the hook answers exit 0 with permissionDecision "allow",
+/// RTK's reading is what actually gates the command.
+///
+/// The distinction is the rule's shape, not its host:
+///
+/// - a bare program name (`git`, `docker`) is how every supported host spells
+///   "this tool is allowed" -- Gemini's `run_shell_command(git)` and Cursor's
+///   rules both mean that -- so it keeps prefix matching;
+/// - a rule that already names arguments (`docker run`, `git diff`) is a
+///   specific invocation, and further arguments can change what it does, so it
+///   must match exactly.
+///
+/// Prefix matching stays available for the second shape through the wildcard
+/// forms the settings syntax provides: `Bash(docker run:*)`, `Bash(docker run *)`.
+fn allow_matches_pattern(cmd: &str, pattern: &str) -> bool {
+    let pattern_norm = normalize_command(pattern);
+    if pattern_norm.contains('*') || !pattern_norm.contains(' ') {
+        return command_matches_pattern(cmd, pattern);
+    }
+    normalize_command(cmd) == pattern_norm
+}
+
+/// Collapse runs of whitespace so rule and command compare on equal terms.
+fn normalize_command(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Check if `cmd` matches a Claude Code permission pattern.
 ///
 /// Pattern forms:
@@ -382,9 +415,12 @@ pub(crate) fn extract_bash_pattern(rule: &str) -> &str {
 /// - `prefix:*` or `prefix *` (trailing `*`, no other wildcards) → prefix match with word boundary
 /// - `* suffix`, `pre * suf` → glob matching where `*` matches any sequence of characters
 /// - `pattern` → exact match or prefix match (cmd must equal pattern or start with `{pattern} `)
+///
+/// Deny and ask use this directly. Allow goes through [`allow_matches_pattern`],
+/// which drops the last form's prefix match -- see its docs for why.
 pub(crate) fn command_matches_pattern(cmd: &str, pattern: &str) -> bool {
-    let cmd_norm = cmd.split_whitespace().collect::<Vec<_>>().join(" ");
-    let pattern_norm = pattern.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cmd_norm = normalize_command(cmd);
+    let pattern_norm = normalize_command(pattern);
     let cmd = cmd_norm.as_str();
     let pattern = pattern_norm.as_str();
 
@@ -477,6 +513,82 @@ fn split_compound_command(cmd: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SECURITY: an allow rule with no wildcard names an exact command.
+    /// `command_matches_pattern`'s final branch also accepts any command with
+    /// that prefix, so `Bash(docker run)` auto-allowed
+    /// `docker run -v /:/host alpine sh -c id`. Because the hook answers exit 0
+    /// with permissionDecision "allow", RTK's reading is what actually gates the
+    /// command -- it grants permission the rule never named.
+    ///
+    /// Broadening is fail-safe for deny and ask, and fail-open only for allow,
+    /// so only allow is tightened.
+    #[test]
+    fn exact_allow_rule_does_not_cover_extra_arguments() {
+        let allow = vec!["docker run".to_string()];
+        assert_eq!(
+            check_command_with_rules("docker run", &[], &[], &allow),
+            PermissionVerdict::Allow,
+            "the exact command still matches"
+        );
+        assert_ne!(
+            check_command_with_rules("docker run -v /:/host alpine sh -c id", &[], &[], &allow),
+            PermissionVerdict::Allow,
+            "extra arguments must not be covered by an exact-form allow rule"
+        );
+
+        let allow = vec!["git diff".to_string()];
+        assert_ne!(
+            check_command_with_rules("git diff --ext-diff", &[], &[], &allow),
+            PermissionVerdict::Allow,
+            "--ext-diff runs an arbitrary configured program; it is not `git diff`"
+        );
+    }
+
+    /// A bare program name is how every supported host spells "this tool is
+    /// allowed", so it keeps prefix matching.
+    #[test]
+    fn bare_program_allow_rule_still_matches_subcommands() {
+        let allow = vec!["git".to_string()];
+        assert_eq!(
+            check_command_with_rules("git status", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+        assert_ne!(
+            check_command_with_rules("rm -rf /", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+    }
+
+    /// The wildcard forms are how a user asks for prefix matching, and they
+    /// keep working.
+    #[test]
+    fn wildcard_allow_rule_still_matches_a_prefix() {
+        for rule in ["docker run:*", "docker run *", "docker run*"] {
+            let allow = vec![rule.to_string()];
+            assert_eq!(
+                check_command_with_rules("docker run -v /tmp:/tmp alpine sh", &[], &[], &allow),
+                PermissionVerdict::Allow,
+                "{rule} should still cover extra arguments"
+            );
+        }
+    }
+
+    /// Deny and ask stay prefix-matching: broadening them can only ever add
+    /// friction, never remove it.
+    #[test]
+    fn deny_and_ask_still_match_a_prefix() {
+        let deny = vec!["rm -rf".to_string()];
+        assert_eq!(
+            check_command_with_rules("rm -rf /tmp/x", &deny, &[], &[]),
+            PermissionVerdict::Deny
+        );
+        let ask = vec!["git push".to_string()];
+        assert_eq!(
+            check_command_with_rules("git push origin main", &[], &ask, &[]),
+            PermissionVerdict::Ask
+        );
+    }
 
     #[test]
     fn test_parse_bash_pattern() {
