@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 /// Verdict from checking a command against Claude Code's permission rules.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum PermissionVerdict {
     /// An explicit allow rule matched — safe to auto-allow.
     Allow,
@@ -33,21 +33,19 @@ pub fn check_command(cmd: &str) -> PermissionVerdict {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Host {
     Claude,
-    /// Codex applies its own approval and execpolicy rules. RTK does not
-    /// reuse Claude settings for this host.
-    Codex,
     Cursor,
     Gemini,
     Droid,
+    Vibe,
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
     let (deny_rules, ask_rules, allow_rules) = match host {
         Host::Claude => load_permission_rules(),
-        Host::Codex => (Vec::new(), Vec::new(), Vec::new()),
         Host::Cursor => load_cursor_rules(),
         Host::Gemini => load_gemini_rules(),
         Host::Droid => load_droid_rules(),
+        Host::Vibe => (Vec::new(), Vec::new(), Vec::new()),
     };
     check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
 }

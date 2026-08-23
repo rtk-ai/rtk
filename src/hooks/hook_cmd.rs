@@ -78,7 +78,12 @@ pub fn run_copilot() -> Result<()> {
 
     match detect_format(&v) {
         HookFormat::VsCode { command } => handle_vscode(&command),
-        HookFormat::CopilotCli { command, args } => handle_copilot_cli(&command, &args),
+        HookFormat::CopilotCli { command, args } => {
+            for path in heal_legacy_copilot_configs() {
+                audit_log("self_heal", &path.display().to_string(), "");
+            }
+            handle_copilot_cli(&command, &args)
+        }
         HookFormat::CopilotIde { command } => handle_copilot_ide(&command),
         HookFormat::PassThrough => Ok(()),
     }
@@ -143,6 +148,87 @@ fn detect_format(v: &Value) -> HookFormat {
     }
 
     HookFormat::PassThrough
+}
+
+fn heal_legacy_copilot_configs() -> Vec<std::path::PathBuf> {
+    use super::constants::{COPILOT_HOOK_FILE, GITHUB_DIR, HOOKS_SUBDIR};
+
+    let mut healed = Vec::new();
+    let project = std::path::Path::new(GITHUB_DIR)
+        .join(HOOKS_SUBDIR)
+        .join(COPILOT_HOOK_FILE);
+    if heal_legacy_hook_file(&project) {
+        healed.push(project);
+    }
+    if let Ok(dir) = super::init::copilot_user_dir() {
+        let global = dir.join(HOOKS_SUBDIR).join(COPILOT_HOOK_FILE);
+        if heal_legacy_hook_file(&global) {
+            healed.push(global);
+        }
+    }
+    healed
+}
+
+// Exact camelCase entry written by pre-b754b85 `rtk init --copilot`; that
+// stale registration is the only thing routing invocations into the
+// CopilotCli arm above. Only this entry is removed — user additions stay.
+fn legacy_camelcase_entry() -> Value {
+    json!([{
+        "type": "command",
+        "bash": "rtk hook copilot",
+        "powershell": "rtk hook copilot",
+        "cwd": ".",
+        "timeoutSec": 5
+    }])
+}
+
+fn heal_legacy_hook_file(path: &std::path::Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(mut config) = serde_json::from_str::<Value>(&raw) else {
+        return false;
+    };
+    let Some(hooks) = config.get("hooks").and_then(|h| h.as_object()) else {
+        return false;
+    };
+    if hooks.get("preToolUse") != Some(&legacy_camelcase_entry()) {
+        return false;
+    }
+    let pascalcase_still_registered = hooks
+        .get("PreToolUse")
+        .and_then(|p| p.as_array())
+        .is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|e| e.get("command").and_then(|c| c.as_str()) == Some("rtk hook copilot"))
+        });
+    if !pascalcase_still_registered {
+        return false;
+    }
+    let Some(hooks) = config.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
+        return false;
+    };
+    hooks.shift_remove("preToolUse");
+
+    let stock = serde_json::from_str::<Value>(super::init::COPILOT_HOOK_JSON).ok();
+    let content = if stock.is_some_and(|s| s == config) {
+        super::init::COPILOT_HOOK_JSON.to_string()
+    } else {
+        let Ok(mut pretty) = serde_json::to_string_pretty(&config) else {
+            return false;
+        };
+        pretty.push('\n');
+        pretty
+    };
+    let tmp = path.with_extension(format!("heal.{}", std::process::id()));
+    std::fs::write(&tmp, content)
+        .and_then(|()| std::fs::rename(&tmp, path))
+        .map_err(|_| {
+            // Cleanup of our own temp file after a failed atomic write.
+            let _ = std::fs::remove_file(&tmp); // nosemgrep: filesystem-deletion
+        })
+        .is_ok()
 }
 
 fn get_rewritten(cmd: &str) -> Option<String> {
@@ -352,6 +438,68 @@ pub fn run_gemini() -> Result<()> {
     Ok(())
 }
 
+// ── Vibe hook ─────────────────────────────────────────────────
+
+/// Run the Mistral Vibe CLI pre_tool hook.
+///
+/// Vibe hook contract (https://docs.mistral.ai/vibe/code/cli/hooks):
+/// - stdin: JSON with `tool_name`, `tool_input`, `hook_event_name`, etc.
+/// - Passthrough: exit 0 with empty stdout.
+/// - Rewrite: emit `{"hook_specific_output": {"tool_input": {"command": "..."}}}`.
+/// - Deny: emit `{"decision": "deny", "reason": "..."}`.
+pub fn run_vibe() -> Result<()> {
+    let input = read_stdin_limited()?;
+    if let Some(output) = run_vibe_inner(&input) {
+        let _ = writeln!(io::stdout(), "{output}");
+    }
+    Ok(())
+}
+
+fn run_vibe_inner(input: &str) -> Option<String> {
+    let json: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return None;
+        }
+    };
+
+    let tool_name = json.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+    if tool_name != "bash" {
+        return None;
+    }
+
+    let cmd = json
+        .pointer("/tool_input/command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if cmd.is_empty() {
+        return None;
+    }
+
+    match decide_hook_action(cmd, permissions::Host::Vibe) {
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            Some(r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string())
+        }
+        HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten) => {
+            audit_log("rewrite", cmd, rewritten);
+            Some(vibe_rewrite_json(rewritten))
+        }
+        HookDecision::Defer => None,
+    }
+}
+
+fn vibe_rewrite_json(rewritten: &str) -> String {
+    serde_json::json!({
+        "hook_specific_output": {
+            "tool_input": { "command": rewritten }
+        },
+        "system_message": format!("rtk: rewrote to `{}`", rewritten),
+    })
+    .to_string()
+}
+
 fn print_allow() {
     let _ = writeln!(io::stdout(), r#"{{"decision":"allow"}}"#);
 }
@@ -416,10 +564,6 @@ enum PayloadAction {
         rewritten: String,
         output: Value,
     },
-    Deny {
-        cmd: String,
-        reason: String,
-    },
     Skip {
         reason: &'static str,
         cmd: String,
@@ -432,14 +576,6 @@ enum AskRewriteHandling {
     EmitWithoutAllow,
     Skip(&'static str),
 }
-
-#[derive(Clone, Copy)]
-enum DenyHandling {
-    Skip(&'static str),
-    Emit(&'static str),
-}
-
-const RTK_PERMISSION_DENY_REASON: &str = "Blocked by RTK permission rule";
 
 fn process_claude_payload(v: &Value) -> PayloadAction {
     let cmd = match v
@@ -456,7 +592,6 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         v,
         cmd,
         decision,
-        DenyHandling::Skip("skip:deny_rule"),
         AskRewriteHandling::EmitWithoutAllow,
     )
 }
@@ -465,24 +600,15 @@ fn process_pre_tool_use_payload_with_decision(
     v: &Value,
     cmd: &str,
     decision: HookDecision,
-    deny_handling: DenyHandling,
     ask_rewrite_handling: AskRewriteHandling,
 ) -> PayloadAction {
     let (rewritten, allow) = match decision {
-        HookDecision::Deny => match deny_handling {
-            DenyHandling::Skip(reason) => {
-                return PayloadAction::Skip {
-                    reason,
-                    cmd: cmd.to_string(),
-                }
+        HookDecision::Deny => {
+            return PayloadAction::Skip {
+                reason: "skip:deny_rule",
+                cmd: cmd.to_string(),
             }
-            DenyHandling::Emit(reason) => {
-                return PayloadAction::Deny {
-                    cmd: cmd.to_string(),
-                    reason: reason.to_string(),
-                }
-            }
-        },
+        }
         HookDecision::Defer => {
             return PayloadAction::Skip {
                 reason: "skip:defer",
@@ -539,8 +665,10 @@ fn process_codex_payload(v: &Value) -> PayloadAction {
         None => return PayloadAction::Ignore,
     };
 
-    let verdict = permissions::check_command_for(cmd, permissions::Host::Codex);
-    process_codex_payload_with_verdict(v, cmd, verdict)
+    // Codex owns approval and execpolicy rules. RTK intentionally does not
+    // duplicate them or load another host's settings, so production Codex
+    // traffic starts from the neutral verdict without running rule splitting.
+    process_codex_payload_with_verdict(v, cmd, permissions::PermissionVerdict::Default)
 }
 
 fn process_codex_payload_with_verdict(
@@ -548,7 +676,7 @@ fn process_codex_payload_with_verdict(
     cmd: &str,
     verdict: permissions::PermissionVerdict,
 ) -> PayloadAction {
-    let mut decision = decide_from_verdict(cmd, verdict.clone());
+    let mut decision = decide_from_verdict(cmd, verdict);
     if v.get("permission_mode").and_then(Value::as_str) == Some("bypassPermissions")
         && verdict == permissions::PermissionVerdict::Default
     {
@@ -561,19 +689,8 @@ fn process_codex_payload_with_verdict(
         v,
         cmd,
         decision,
-        DenyHandling::Emit(RTK_PERMISSION_DENY_REASON),
         AskRewriteHandling::Skip("skip:codex_requires_allow_for_updated_input"),
     )
-}
-
-fn pre_tool_use_deny_output(reason: &str) -> Value {
-    json!({
-        "hookSpecificOutput": {
-            "hookEventName": PRE_TOOL_USE_KEY,
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason
-        }
-    })
 }
 
 fn is_codex_bash_pre_tool_use(v: &Value) -> bool {
@@ -612,9 +729,6 @@ pub fn run_claude() -> Result<()> {
         PayloadAction::Skip { reason, cmd } => {
             audit_log(reason, &cmd, "");
         }
-        PayloadAction::Deny { reason, cmd, .. } => {
-            audit_log("deny", &cmd, &reason);
-        }
         PayloadAction::Ignore => {}
     }
 
@@ -636,16 +750,17 @@ fn run_claude_inner(input: &str) -> Option<String> {
 //   stdin  : {"hook_event_name":"PreToolUse","tool_name":"Bash",
 //             "tool_input":{"command":"..."}, session_id, turn_id, cwd, ...}
 //   stdout : {"hookSpecificOutput":{"hookEventName":"PreToolUse",
-//             "permissionDecision":"allow|deny", "updatedInput":{"command":"..."}}}
+//             "permissionDecision":"allow", "updatedInput":{"command":"..."}}}
 //
 // Codex rejects `updatedInput` unless the same hook output also carries
 // `permissionDecision: "allow"`. Claude can rewrite and still let its
 // native prompt run by omitting `permissionDecision`; Codex cannot. In
 // Codex's default and prompt modes, RTK therefore emits `{}` and leaves the
-// original command to Codex. Codex's `bypassPermissions` mode already
-// disables approval prompts, so safe RTK rewrites may be allowed there.
-// Codex's approval and execpolicy settings are intentionally not read as
-// Claude settings; Codex remains the authority for Codex commands.
+// original command to Codex. Only `bypassPermissions` promotes a neutral
+// rewrite to allow; `dontAsk` remains neutral because it is a distinct mode
+// and RTK must not turn lack of a prompt into approval. Codex's approval and
+// execpolicy settings are intentionally not duplicated or read as Claude
+// settings; Codex remains the authority for Codex commands.
 // Codex semantics permit multiple matching hooks to run concurrently —
 // unlike Claude #1515, there is no manifest fallthrough to engineer here.
 
@@ -688,11 +803,6 @@ pub fn run_codex() -> Result<()> {
             audit_log(reason, &cmd, "");
             let _ = writeln!(io::stdout(), "{{}}");
         }
-        PayloadAction::Deny { cmd, reason } => {
-            audit_log("deny", &cmd, &reason);
-            let output = pre_tool_use_deny_output(&reason);
-            let _ = writeln!(io::stdout(), "{output}");
-        }
         PayloadAction::Ignore => {
             let _ = writeln!(io::stdout(), "{{}}");
         }
@@ -709,7 +819,6 @@ fn run_codex_inner(input: &str) -> Option<String> {
     }
     match process_codex_payload(&v) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
-        PayloadAction::Deny { reason, .. } => Some(pre_tool_use_deny_output(&reason).to_string()),
         _ => None,
     }
 }
@@ -732,7 +841,6 @@ fn run_codex_inner_with_rules(
     let verdict = permissions::check_command_with_rules(cmd, deny, ask, allow);
     match process_codex_payload_with_verdict(&v, cmd, verdict) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
-        PayloadAction::Deny { reason, .. } => Some(pre_tool_use_deny_output(&reason).to_string()),
         _ => None,
     }
 }
@@ -1672,6 +1780,17 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_dont_ask_mode_keeps_neutral_rewrite_unapproved() {
+        assert!(run_codex_inner_with_rules(
+            &codex_input_with_mode("git status", "dontAsk"),
+            &[],
+            &[],
+            &[],
+        )
+        .is_none());
+    }
+
+    #[test]
     fn test_codex_bypass_mode_keeps_ask_verdict_out_of_allow() {
         for command in ["git status", "git log > /tmp/out.txt"] {
             let input: Value =
@@ -1712,26 +1831,6 @@ mod tests {
                 "{name}"
             );
         }
-    }
-
-    #[test]
-    fn test_codex_deny_emits_block_without_updated_input() {
-        let result = run_codex_inner_with_rules(
-            &codex_input("git status"),
-            &["git status".to_string()],
-            &[],
-            &["*".to_string()],
-        )
-        .unwrap();
-        let v: Value = serde_json::from_str(&result).unwrap();
-        let hook = &v["hookSpecificOutput"];
-        assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
-        assert_eq!(hook["permissionDecision"], "deny");
-        assert_eq!(
-            hook["permissionDecisionReason"],
-            "Blocked by RTK permission rule"
-        );
-        assert!(hook.get("updatedInput").is_none());
     }
 
     #[test]
@@ -1822,14 +1921,6 @@ mod tests {
         let minimal_out = run_codex_allowed(&minimal).unwrap();
         let full_out = run_codex_allowed(&full).unwrap();
         assert_eq!(minimal_out, full_out);
-    }
-
-    #[test]
-    fn test_codex_does_not_load_claude_permission_rules() {
-        assert_eq!(
-            permissions::check_command_for("git status", permissions::Host::Codex),
-            PermissionVerdict::Default
-        );
     }
 
     // --- Cursor handler ---
@@ -2425,5 +2516,64 @@ mod tests {
         // so Droid runs them unchanged.
         let input = droid_input("Execute", "definitely-not-a-real-binary --foo");
         assert!(run_droid_inner(&input).is_none());
+    }
+
+    fn vibe_input(tool: &str, cmd: &str) -> String {
+        json!({
+            "session_id": "abc123",
+            "hook_event_name": "pre_tool",
+            "tool_name": tool,
+            "tool_input": { "command": cmd }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_vibe_rewrites_bash_command() {
+        let input = vibe_input("bash", "git status");
+        let out = run_vibe_inner(&input).expect("rewrite expected");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let rewritten = v
+            .pointer("/hook_specific_output/tool_input/command")
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
+        assert!(
+            rewritten.starts_with("rtk "),
+            "expected rtk-prefixed rewrite, got `{rewritten}`"
+        );
+        assert!(
+            v.get("system_message").is_some(),
+            "expected system_message for UI visibility"
+        );
+    }
+
+    #[test]
+    fn test_vibe_ignores_non_bash_tool() {
+        let input = vibe_input("read_file", "irrelevant");
+        assert!(run_vibe_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_vibe_empty_command_passthrough() {
+        let input = vibe_input("bash", "");
+        assert!(run_vibe_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_vibe_malformed_json_returns_none() {
+        assert!(run_vibe_inner("not json at all").is_none());
+        assert!(run_vibe_inner("{ unterminated").is_none());
+    }
+
+    #[test]
+    fn test_vibe_unknown_binary_passthrough() {
+        let input = vibe_input("bash", "definitely-not-a-real-binary --foo");
+        assert!(run_vibe_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_vibe_substitution_defers() {
+        let input = vibe_input("bash", "echo $(rm -rf /)");
+        assert!(run_vibe_inner(&input).is_none());
     }
 }
