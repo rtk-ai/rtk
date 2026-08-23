@@ -146,6 +146,10 @@ fn extract_pattern_path<T: AsRef<str>>(args: &[T]) -> (Vec<String>, Vec<String>,
     let mut e_patterns: Vec<String> = Vec::new();
     let mut positionals: Vec<String> = Vec::new();
     let mut flags: Vec<String> = Vec::new();
+    // -f/--file read patterns from a file, so like -e they leave every
+    // positional as a path. Tracked during the scan rather than by inspecting
+    // `flags` afterwards, so another flag's *value* can't be mistaken for it.
+    let mut has_pattern_file = false;
     let mut past_dashdash = false;
     let mut i = 0;
 
@@ -177,6 +181,7 @@ fn extract_pattern_path<T: AsRef<str>>(args: &[T]) -> (Vec<String>, Vec<String>,
             }
             // Other long value-taking flags: consume next token as value.
             if VALUE_FLAGS_LONG.contains(&arg) {
+                has_pattern_file |= arg == "--file";
                 flags.push(arg.to_string());
                 if i + 1 < args.len() {
                     flags.push(args[i + 1].as_ref().to_string());
@@ -186,6 +191,7 @@ fn extract_pattern_path<T: AsRef<str>>(args: &[T]) -> (Vec<String>, Vec<String>,
                 }
                 continue;
             }
+            has_pattern_file |= arg.starts_with("--file=");
             flags.push(arg.to_string());
             i += 1;
             continue;
@@ -219,6 +225,7 @@ fn extract_pattern_path<T: AsRef<str>>(args: &[T]) -> (Vec<String>, Vec<String>,
                             i += 1;
                         }
                     } else {
+                        has_pattern_file |= flag == 'f';
                         flags.push(format!("-{}", flag));
                         if !inline.is_empty() {
                             flags.push(inline);
@@ -239,9 +246,10 @@ fn extract_pattern_path<T: AsRef<str>>(args: &[T]) -> (Vec<String>, Vec<String>,
         }
     }
 
-    // If -e/--regexp was used: all positionals are paths.
+    // If a pattern source was used (-e/--regexp, or -f/--file reading patterns
+    // from a file): all positionals are paths.
     // Otherwise: first positional is the pattern, rest are paths.
-    let (patterns, paths) = if !e_patterns.is_empty() {
+    let (patterns, paths) = if !e_patterns.is_empty() || has_pattern_file {
         (e_patterns, positionals)
     } else {
         let paths = positionals.iter().skip(1).cloned().collect();
@@ -850,6 +858,44 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `-f FILE` / `--file FILE` supply patterns *from a file* — the file-based
+    /// twin of `-e`, in grep and rg alike. Treating them as ordinary
+    /// value-taking flags consumed the search path as the pattern and left the
+    /// path list empty, so the engine silently read stdin instead.
+    #[test]
+    fn pattern_file_flag_leaves_positionals_as_paths() {
+        for form in [
+            vec!["-f", "pats.txt", "hay.txt"],
+            vec!["--file", "pats.txt", "hay.txt"],
+            vec!["--file=pats.txt", "hay.txt"],
+            vec!["-fpats.txt", "hay.txt"],
+        ] {
+            let (patterns, paths, _flags) = extract_pattern_path(&form);
+            assert!(
+                patterns.is_empty(),
+                "{form:?}: a pattern file must not turn a positional into the pattern, got {patterns:?}"
+            );
+            assert_eq!(paths, vec!["hay.txt"], "{form:?}: the search path must survive");
+        }
+    }
+
+    /// The pattern file must still reach the engine, otherwise the search runs
+    /// with no patterns at all.
+    #[test]
+    fn pattern_file_flag_is_forwarded_to_the_engine() {
+        let (_patterns, _paths, flags) = extract_pattern_path(&["-f", "pats.txt", "hay.txt"]);
+        assert_eq!(flags, vec!["-f", "pats.txt"]);
+    }
+
+    /// Guard the ordinary form: without a pattern source the first positional
+    /// is still the pattern.
+    #[test]
+    fn positional_pattern_still_wins_without_a_pattern_source() {
+        let (patterns, paths, _flags) = extract_pattern_path(&["needle", "hay.txt"]);
+        assert_eq!(patterns, vec!["needle"]);
+        assert_eq!(paths, vec!["hay.txt"]);
+    }
 
     #[test]
     fn test_clean_line() {
