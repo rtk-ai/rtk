@@ -209,6 +209,9 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
             let mut cmd = package_manager_exec(framework);
             let effective_args = build_vitest_effective_args(args);
             passthrough_requested = effective_args.passthrough;
+            if effective_args.dropped_watch {
+                eprintln!("rtk: vitest watch mode replaced with `run` (non-interactive)");
+            }
             cmd.args(effective_args.args);
             (framework, cmd)
         }
@@ -269,6 +272,9 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
 struct EffectiveVitestArgs {
     args: Vec<String>,
     passthrough: bool,
+    /// Set when a watch request was rewritten to `run`, so the substitution can
+    /// be reported rather than applied silently.
+    dropped_watch: bool,
 }
 
 struct FormattedTestOutput {
@@ -292,16 +298,31 @@ impl FormattedTestOutput {
     }
 }
 
+/// vitest subcommands that produce output and exit. `run` is handled
+/// separately because RTK supplies it; `watch`/`dev` are interactive and are
+/// rewritten to `run` so a non-interactive agent doesn't hang.
+const VITEST_SUBCOMMANDS: &[&str] = &["related", "bench", "list", "typecheck", "init"];
+
 fn build_vitest_effective_args(args: &[String]) -> EffectiveVitestArgs {
     let passthrough = has_explicit_vitest_reporter(args);
-    let mut effective = vec!["run".to_string()];
+
+    // The leading positional decides the mode. Burying a real subcommand under
+    // `run` silently changes which tests execute -- `vitest run related x` reads
+    // "related" as a filename filter, not as the `related` subcommand.
+    let leading = args.iter().find(|a| !a.starts_with('-')).map(String::as_str);
+    let subcommand = leading.filter(|a| VITEST_SUBCOMMANDS.contains(a));
+    let dropped_watch = leading == Some("watch")
+        || leading == Some("dev")
+        || args.iter().any(|a| a.starts_with("--watch"));
+
+    let mut effective = vec![subcommand.unwrap_or("run").to_string()];
 
     if !passthrough {
         effective.push("--reporter=json".to_string());
     }
 
     for arg in args {
-        if should_skip_vitest_arg(arg) {
+        if should_skip_vitest_arg(arg) || Some(arg.as_str()) == subcommand {
             continue;
         }
         effective.push(arg.clone());
@@ -310,6 +331,7 @@ fn build_vitest_effective_args(args: &[String]) -> EffectiveVitestArgs {
     EffectiveVitestArgs {
         args: effective,
         passthrough,
+        dropped_watch,
     }
 }
 
@@ -319,7 +341,11 @@ fn has_explicit_vitest_reporter(args: &[String]) -> bool {
 }
 
 fn should_skip_vitest_arg(arg: &str) -> bool {
-    arg == "run" || arg.starts_with("--json") || arg.starts_with("--watch")
+    arg == "run"
+        || arg == "watch"
+        || arg == "dev"
+        || arg.starts_with("--json")
+        || arg.starts_with("--watch")
 }
 
 fn format_test_output(
@@ -413,6 +439,65 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// vitest has subcommands of its own. Unconditionally prepending `run`
+    /// turned `vitest related src/a.ts` into
+    /// `vitest run --reporter=json related src/a.ts`, where `related` degrades
+    /// into a filename filter and a different set of tests runs.
+    #[test]
+    fn vitest_subcommands_are_not_buried_under_run() {
+        for sub in ["related", "bench", "list", "typecheck"] {
+            let args = vec![sub.to_string(), "src/a.ts".to_string()];
+            let built = build_vitest_effective_args(&args).args;
+            assert_eq!(
+                built.first().map(String::as_str),
+                Some(sub),
+                "{sub} must stay the leading subcommand, got {built:?}"
+            );
+            assert!(
+                !built.contains(&"run".to_string()),
+                "{sub} must not be run under `run`, got {built:?}"
+            );
+        }
+    }
+
+    /// No subcommand means the plain form, which still needs `run` so the
+    /// agent doesn't get a watcher.
+    #[test]
+    fn plain_invocation_still_gets_run() {
+        assert_eq!(
+            build_vitest_effective_args(&[]).args,
+            vec!["run".to_string(), "--reporter=json".to_string()]
+        );
+        let args = vec!["src/a.ts".to_string()];
+        let built = build_vitest_effective_args(&args).args;
+        assert_eq!(built.first().map(String::as_str), Some("run"), "{built:?}");
+        assert!(built.contains(&"src/a.ts".to_string()), "{built:?}");
+    }
+
+    /// An explicit `run` is honoured without being duplicated.
+    #[test]
+    fn explicit_run_is_not_duplicated() {
+        let args = vec!["run".to_string(), "src/a.ts".to_string()];
+        let built = build_vitest_effective_args(&args).args;
+        assert_eq!(built.iter().filter(|a| *a == "run").count(), 1, "{built:?}");
+    }
+
+    /// Watch mode would hang a non-interactive agent, so it is still replaced --
+    /// but the substitution is reported instead of being silent.
+    #[test]
+    fn watch_is_replaced_by_run_and_reported() {
+        let args = vec!["--watch".to_string()];
+        let built = build_vitest_effective_args(&args);
+        assert_eq!(built.args.first().map(String::as_str), Some("run"));
+        assert!(!built.args.iter().any(|a| a.starts_with("--watch")));
+        assert!(built.dropped_watch, "the substitution must be reportable");
+
+        let args = vec!["watch".to_string()];
+        let built = build_vitest_effective_args(&args);
+        assert_eq!(built.args.first().map(String::as_str), Some("run"));
+        assert!(built.dropped_watch);
+    }
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
