@@ -80,6 +80,13 @@ static GIT_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
 static HEAD_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^head\s+-(\d+)\s+(\S+)$").unwrap());
 static HEAD_LINES: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^head\s+--lines=(\d+)\s+(\S+)$").unwrap());
+// `head -n N file` / `head --lines N file` mirror the tail arms below. Without
+// them the most common spelling of head fell through unrewritten while the
+// matching tail spelling was handled.
+static HEAD_N_SPACE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^head\s+-n\s+(\d+)\s+(\S+)$").unwrap());
+static HEAD_LINES_SPACE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^head\s+--lines\s+(\d+)\s+(\S+)$").unwrap());
 static TAIL_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^tail\s+-(\d+)\s+(\S+)$").unwrap());
 static TAIL_N_SPACE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^tail\s+-n\s+(\d+)\s+(\S+)$").unwrap());
@@ -1143,7 +1150,7 @@ fn rewrite_compound(
 }
 
 fn rewrite_line_range(cmd: &str) -> Option<String> {
-    for re in [&*HEAD_N, &*HEAD_LINES] {
+    for re in [&*HEAD_N, &*HEAD_N_SPACE, &*HEAD_LINES, &*HEAD_LINES_SPACE] {
         if let Some(caps) = re.captures(cmd) {
             let n = caps.get(1)?.as_str();
             let file = caps.get(2)?.as_str();
@@ -1498,6 +1505,39 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
 mod tests {
     use super::super::report::RtkStatus;
     use super::*;
+
+    /// head and tail must be rewritten through the same set of spellings.
+    /// `tail -n N file` was handled while `head -n N file` -- the more common
+    /// of the two -- fell through unrewritten.
+    #[test]
+    fn head_and_tail_rewrite_the_same_spellings() {
+        let cases = [
+            ("head -20 f.txt", "rtk read f.txt --max-lines 20"),
+            ("head -n 20 f.txt", "rtk read f.txt --max-lines 20"),
+            ("head --lines=20 f.txt", "rtk read f.txt --max-lines 20"),
+            ("head --lines 20 f.txt", "rtk read f.txt --max-lines 20"),
+            ("tail -20 f.txt", "rtk read f.txt --tail-lines 20"),
+            ("tail -n 20 f.txt", "rtk read f.txt --tail-lines 20"),
+            ("tail --lines=20 f.txt", "rtk read f.txt --tail-lines 20"),
+            ("tail --lines 20 f.txt", "rtk read f.txt --tail-lines 20"),
+        ];
+        for (cmd, want) in cases {
+            assert_eq!(
+                rewrite_line_range(cmd).as_deref(),
+                Some(want),
+                "{cmd} should rewrite to {want}"
+            );
+        }
+    }
+
+    /// Forms `rtk read` cannot express must stay unrewritten rather than being
+    /// silently turned into a line count.
+    #[test]
+    fn unsupported_head_forms_are_left_alone() {
+        for cmd in ["head -c 500 f.txt", "head -3 a b c", "head"] {
+            assert_eq!(rewrite_line_range(cmd), None, "{cmd} must not be rewritten");
+        }
+    }
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
