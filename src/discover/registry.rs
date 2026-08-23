@@ -1499,6 +1499,64 @@ mod tests {
     use super::super::report::RtkStatus;
     use super::*;
 
+    mod pnpm_bare_scripts {
+        use super::rewrite_command_no_prefixes;
+
+        /// pnpm runs a bare script name directly (`pnpm test` == `pnpm run test`).
+        #[test]
+        fn bare_script_names_are_rewritten() {
+            for cmd in ["pnpm test", "pnpm build", "pnpm typecheck", "pnpm format"] {
+                assert_eq!(
+                    rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                    Some(format!("rtk {cmd}").as_str()),
+                    "{cmd} should route to rtk pnpm"
+                );
+            }
+        }
+
+        /// Long-running scripts must NOT be routed: they never terminate, and rtk
+        /// captures output rather than streaming it, so the agent would hang with
+        /// nothing on screen.
+        #[test]
+        fn long_running_scripts_are_left_alone() {
+            for cmd in ["pnpm dev", "pnpm start", "pnpm serve", "pnpm watch"] {
+                assert_eq!(
+                    rewrite_command_no_prefixes(cmd, &[]),
+                    None,
+                    "{cmd} must not be captured by rtk"
+                );
+            }
+        }
+
+        /// `pnpm lint` is deliberately NOT in the pnpm rule: it already routes to
+        /// the dedicated eslint/biome filter, which understands the tool's output
+        /// format rather than just stripping package-manager boilerplate.
+        #[test]
+        fn lint_keeps_its_dedicated_filter() {
+            assert_eq!(
+                rewrite_command_no_prefixes("pnpm lint", &[]).as_deref(),
+                Some("rtk lint"),
+                "pnpm lint should reach the eslint/biome filter, not rtk pnpm"
+            );
+        }
+
+        #[test]
+        fn existing_subcommands_still_rewrite() {
+            for cmd in ["pnpm install", "pnpm run build", "pnpm outdated", "pnpm ls"] {
+                assert!(rewrite_command_no_prefixes(cmd, &[]).is_some(), "{cmd}");
+            }
+        }
+
+        /// The rule had no word boundary, so a longer word starting with a listed
+        /// subcommand matched.
+        #[test]
+        fn similar_names_are_not_captured() {
+            for cmd in ["pnpm installer", "pnpm testify", "pnpm buildkite"] {
+                assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+            }
+        }
+    }
+
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
     }
