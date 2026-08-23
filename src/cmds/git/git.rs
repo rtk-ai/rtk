@@ -355,7 +355,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
                 hunk_skipped = 0;
             }
             if !current_file.is_empty() && (added > 0 || removed > 0) {
-                result.push(format!("  +{} -{}", added, removed));
+                result.push(format!("  (+{} -{})", added, removed));
             }
             current_file = line.split(" b/").nth(1).unwrap_or("unknown").to_string();
             result.push(format!("\n{}", current_file));
@@ -373,13 +373,18 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
             in_hunk = true;
             hunk_shown = 0;
             // Preserve the full unified diff hunk header, including trailing
-            // function / symbol context after the second @@ marker.
-            result.push(format!("  {}", line));
+            // function / symbol context after the second @@ marker. Hunk
+            // headers and hunk lines are emitted at column 0, exactly as git
+            // prints them: indenting them would move the `+`/`-`/`@@` marker
+            // off the line start and silently break every anchored consumer
+            // (`grep -E '^[+-]'`, `patch`, diff-aware tooling) that reads
+            // RTK's stdout through a pipe.
+            result.push(line.to_string());
         } else if in_hunk {
             if line.starts_with('+') && !line.starts_with("+++") {
                 added += 1;
                 if hunk_shown < max_hunk_lines {
-                    result.push(format!("  {}", line));
+                    result.push(line.to_string());
                     hunk_shown += 1;
                 } else {
                     hunk_skipped += 1;
@@ -387,7 +392,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
             } else if line.starts_with('-') && !line.starts_with("---") {
                 removed += 1;
                 if hunk_shown < max_hunk_lines {
-                    result.push(format!("  {}", line));
+                    result.push(line.to_string());
                     hunk_shown += 1;
                 } else {
                     hunk_skipped += 1;
@@ -395,7 +400,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
             } else if hunk_shown < max_hunk_lines && !line.starts_with("\\") {
                 // Context line
                 if hunk_shown > 0 {
-                    result.push(format!("  {}", line));
+                    result.push(line.to_string());
                     hunk_shown += 1;
                 }
             }
@@ -415,7 +420,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     }
 
     if !current_file.is_empty() && (added > 0 || removed > 0) {
-        result.push(format!("  +{} -{}", added, removed));
+        result.push(format!("  (+{} -{})", added, removed));
     }
 
     if was_truncated {
@@ -2428,6 +2433,58 @@ mod tests {
             "Expected full hunk header with trailing context, got:\n{}",
             result
         );
+    }
+
+    #[test]
+    fn test_compact_diff_keeps_diff_markers_at_column_zero() {
+        // Regression: compact_diff used to indent hunk lines by two spaces,
+        // so `rtk git diff | grep -E '^[+-]'` matched nothing (exit 1) even
+        // when the diff had changes — a silent false negative for any
+        // pipeline that parses the output like a unified diff.
+        let diff = r#"diff --git a/foo.rs b/foo.rs
+--- a/foo.rs
++++ b/foo.rs
+@@ -1,4 +1,4 @@
+ fn main() {
+-    println!("old");
++    println!("new");
+ }
+"#;
+        let result = compact_diff(diff, 100);
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(
+            lines.contains(&"@@ -1,4 +1,4 @@"),
+            "hunk header must start at column 0, got:\n{}",
+            result
+        );
+        assert!(
+            lines.contains(&"-    println!(\"old\");"),
+            "removed line must keep `-` at column 0, got:\n{}",
+            result
+        );
+        assert!(
+            lines.contains(&"+    println!(\"new\");"),
+            "added line must keep `+` at column 0, got:\n{}",
+            result
+        );
+        assert!(
+            lines.contains(&" }"),
+            "context line must keep its leading space, got:\n{}",
+            result
+        );
+        // The per-file summary must not be mistaken for an added line.
+        let anchored: Vec<&str> = lines
+            .iter()
+            .copied()
+            .filter(|l| l.starts_with('+') || l.starts_with('-'))
+            .collect();
+        assert_eq!(
+            anchored,
+            vec!["-    println!(\"old\");", "+    println!(\"new\");"],
+            "only real hunk lines may start with +/-, got:\n{}",
+            result
+        );
+        assert!(result.contains("  (+1 -1)"), "got:\n{}", result);
     }
 
     #[test]
