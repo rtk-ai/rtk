@@ -73,7 +73,7 @@ The token counts RTK reports are estimated as `bytes / 4` — RTK ships no token
 brew install rtk
 ```
 
-### Quick Install (Linux/macOS)
+### Quick Install (Linux/macOS/Git for Windows)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
@@ -361,6 +361,16 @@ rtk init -g
 **Prerequisites**: some filters shell out to [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`). Install it and keep it on your PATH (e.g. `winget install BurntSushi.ripgrep.MSVC`) to avoid `Binary 'rg' not found on PATH` warnings.
 
 **Important**: Do not double-click `rtk.exe` — it is a CLI tool that prints usage and exits immediately. Always run it from a terminal (Command Prompt, PowerShell, or Windows Terminal).
+
+#### Git for Windows
+
+If you use 'Git Bash' on Windows, you can follow the same install process as Linux/macOS by running the following command:
+
+```bash
+# Inside Git Bash
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+rtk init -g
+```
 
 ### WSL
 
