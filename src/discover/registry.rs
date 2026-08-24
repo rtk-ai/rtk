@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use super::lexer::{
-    shell_split, split_on_operators, tokenize, tokenize_with_newlines, ParsedToken, PipeKind,
+    shell_split, split_on_chain_operators, tokenize, tokenize_with_newlines, ParsedToken, PipeKind,
     TokenKind,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
@@ -260,7 +260,9 @@ pub fn split_command_chain(cmd: &str) -> Vec<&str> {
         return vec![trimmed];
     }
 
-    split_on_operators(trimmed, true)
+    // Discovery counts each pipeline as one unit because that is the unit the
+    // hook evaluates. Only split independent clauses joined by &&, ||, or ;.
+    split_on_chain_operators(trimmed)
 }
 
 fn normalize_php_tool_command(cmd: &str) -> String {
@@ -2190,8 +2192,19 @@ mod tests {
     }
 
     #[test]
-    fn test_split_pipe_first_only() {
-        assert_eq!(split_command_chain("a | b"), vec!["a"]);
+    fn test_split_pipeline_as_single_unit() {
+        assert_eq!(
+            split_command_chain("cargo test | tail -50"),
+            vec!["cargo test | tail -50"]
+        );
+    }
+
+    #[test]
+    fn test_split_pipeline_with_following_chain() {
+        assert_eq!(
+            split_command_chain("a | b && c ; d |& e"),
+            vec!["a | b", "c", "d |& e"]
+        );
     }
 
     #[test]

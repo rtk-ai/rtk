@@ -353,8 +353,9 @@ fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool {
     }
 }
 
-/// Like [`split_on_operators`] but also breaks on newline, background `&`, and
-/// subshell `( ... )`, and truncates each segment at its first redirect.
+/// Split a command for permission checks on chain operators, pipelines,
+/// newlines, background `&`, and subshell `( ... )`, truncating each segment
+/// at its first redirect.
 /// Callers must still gate on [`contains_unattestable_construct`] first.
 pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
     let trimmed = cmd.trim();
@@ -395,14 +396,9 @@ pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
     results
 }
 
-/// Split a shell command on operators (`&&`, `||`, `;`) and optionally pipes (`|`),
-/// respecting quoted strings via the lexer.
-///
-/// When `stop_at_pipe` is true, returns only segments before the first `|`
-/// (used by command rewriting — only the left side of a pipe gets rewritten).
-/// When false, splits through pipes too (used by permission checking —
-/// every segment must be validated).
-pub fn split_on_operators(cmd: &str, stop_at_pipe: bool) -> Vec<&str> {
+/// Split a shell command on chain operators (`&&`, `||`, `;`), respecting
+/// quoted strings and preserving each pipeline as a single segment.
+pub fn split_on_chain_operators(cmd: &str) -> Vec<&str> {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
         return vec![];
@@ -412,27 +408,15 @@ pub fn split_on_operators(cmd: &str, stop_at_pipe: bool) -> Vec<&str> {
     let mut results = Vec::new();
     let mut seg_start: usize = 0;
 
-    for tok in &tokens {
-        match tok.kind {
-            TokenKind::Operator => {
-                let segment = trimmed[seg_start..tok.offset].trim();
-                if !segment.is_empty() {
-                    results.push(segment);
-                }
-                seg_start = tok.offset + tok.value.len();
-            }
-            TokenKind::Pipe(_) => {
-                let segment = trimmed[seg_start..tok.offset].trim();
-                if !segment.is_empty() {
-                    results.push(segment);
-                }
-                if stop_at_pipe {
-                    return results;
-                }
-                seg_start = tok.offset + tok.value.len();
-            }
-            _ => {}
+    for tok in tokens
+        .iter()
+        .filter(|token| token.kind == TokenKind::Operator)
+    {
+        let segment = trimmed[seg_start..tok.offset].trim();
+        if !segment.is_empty() {
+            results.push(segment);
         }
+        seg_start = tok.offset + tok.value.len();
     }
 
     let tail = trimmed[seg_start..].trim();
@@ -1162,32 +1146,26 @@ mod tests {
     }
 
     #[test]
-    fn test_split_on_operators_stop_at_pipe() {
-        assert_eq!(split_on_operators("a | b | c", true), vec!["a"]);
-        assert_eq!(split_on_operators("a && b | c", true), vec!["a", "b"]);
-    }
-
-    #[test]
-    fn test_split_on_operators_through_pipes() {
-        assert_eq!(split_on_operators("a | b | c", false), vec!["a", "b", "c"]);
+    fn test_split_on_chain_operators_preserves_pipelines() {
+        assert_eq!(split_on_chain_operators("a | b | c"), vec!["a | b | c"]);
         assert_eq!(
-            split_on_operators("a && b | c ; d", false),
-            vec!["a", "b", "c", "d"]
+            split_on_chain_operators("a && b | c ; d"),
+            vec!["a", "b | c", "d"]
         );
     }
 
     #[test]
-    fn test_split_on_operators_quoted() {
+    fn test_split_on_chain_operators_quoted() {
         assert_eq!(
-            split_on_operators(r#"echo "a && b" && cargo test"#, false),
+            split_on_chain_operators(r#"echo "a && b" && cargo test"#),
             vec![r#"echo "a && b""#, "cargo test"]
         );
     }
 
     #[test]
-    fn test_split_on_operators_empty() {
-        assert!(split_on_operators("", false).is_empty());
-        assert!(split_on_operators("  ", true).is_empty());
+    fn test_split_on_chain_operators_empty() {
+        assert!(split_on_chain_operators("").is_empty());
+        assert!(split_on_chain_operators("  ").is_empty());
     }
 
     // --- contains_unattestable_construct (security) -------------------------
