@@ -373,7 +373,13 @@ pub fn run(
     }
 
     let shown = never_worse(&raw_output, &body);
-    print!("{}", shown);
+    if shown.is_empty() {
+        // no matches
+    } else if shown.ends_with('\n') {
+        print!("{}", shown);
+    } else {
+        println!("{}", shown);
+    }
     timer.track(
         &format!("find {} -name '{}'", path, effective_pattern),
         "rtk find",
