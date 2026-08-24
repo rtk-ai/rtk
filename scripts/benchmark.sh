@@ -13,9 +13,15 @@ fi
 BENCH_DIR="$(pwd)/scripts/benchmark"
 RTK_ROOT="$(pwd)"
 
+# Only the gitignored output subdirectories get wiped between local runs.
+# `$BENCH_DIR` itself is tracked — it also holds the TypeScript VM-benchmark
+# harness (run.ts, cleanup.ts, lib/) — so `rm -rf "$BENCH_DIR"` deleted that
+# harness from the working tree on every local run.
 if [ -z "$CI" ]; then
-  rm -rf "$BENCH_DIR"
-  mkdir -p "$BENCH_DIR/unix" "$BENCH_DIR/rtk" "$BENCH_DIR/diff"
+  for bench_output_dir in unix rtk diff; do
+    rm -rf "${BENCH_DIR:?}/$bench_output_dir"
+    mkdir -p "$BENCH_DIR/$bench_output_dir"
+  done
 fi
 
 safe_name() {
