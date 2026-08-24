@@ -3,11 +3,19 @@
 //! Nix commands produce extremely verbose output: download progress, hash prefixes,
 //! store path copies, and evaluation traces. This filter compresses that noise while
 //! preserving errors, warnings, and final build results.
+//!
+//! When the invocation wraps another command (`nix develop -c cargo test`,
+//! `nix-shell --run 'cargo test'`), this module detects the wrapped argv and
+//! respawns through nix with a nested rtk so the inner command is filtered by
+//! its own module while still executing inside the nix environment.
 
-use crate::core::runner;
+use crate::core::runner::{self, RunMode};
 use crate::core::utils::resolved_command;
+use crate::discover::lexer::shell_split;
+use crate::discover::registry::rewrite_command;
 use anyhow::Result;
 use regex::Regex;
+use std::path::Path;
 use std::sync::LazyLock;
 
 /// Matches nix store paths: /nix/store/<hash>-<name>
@@ -49,13 +57,37 @@ pub fn run_legacy(tool: &str, args: &[String], verbose: u8) -> Result<i32> {
 }
 
 fn run_tool(tool: &str, args: &[String], verbose: u8) -> Result<i32> {
+    let args_display = args.join(" ");
+
+    // Wrapped-command delegation: respawn through nix with a nested rtk so
+    // the inner command gets its own module's filter while still running
+    // inside the nix environment. The outer layer streams passthrough; the
+    // inner rtk does the real filtering and tracking.
+    let nested = std::env::current_exe()
+        .ok()
+        .and_then(|exe| nested_spawn_argv(tool, args, &exe));
+    if let Some(argv) = nested {
+        let mut cmd = resolved_command(tool);
+        for arg in &argv[1..] {
+            cmd.arg(arg);
+        }
+        if verbose > 0 {
+            eprintln!("Nested rtk: {} {}", tool, argv[1..].join(" "));
+        }
+        return runner::run(
+            cmd,
+            tool,
+            &args_display,
+            RunMode::Passthrough,
+            runner::RunOptions::default(),
+        );
+    }
+
     let mut cmd = resolved_command(tool);
 
     for arg in args {
         cmd.arg(arg);
     }
-
-    let args_display = args.join(" ");
 
     if verbose > 0 {
         eprintln!("Running: {} {}", tool, args_display);
@@ -68,6 +100,181 @@ fn run_tool(tool: &str, args: &[String], verbose: u8) -> Result<i32> {
         filter_nix_output,
         runner::RunOptions::default(),
     )
+}
+
+/// How the wrapper consumes its wrapped command.
+#[derive(Debug, PartialEq, Eq)]
+enum WrapForm {
+    /// `nix … (-c|--command) <argv…>`: the wrapped command is a sequence of
+    /// sibling argv tokens and nothing follows it.
+    ArgvTail,
+    /// Legacy `nix-shell (-c|--command|--run) '<string>' [more flags…]`: the
+    /// wrapped command arrives as one shell-string argument and further nix
+    /// flags may follow it.
+    ShellString,
+}
+
+/// Location of the wrapped command inside a wrapper invocation.
+#[derive(Debug, PartialEq, Eq)]
+struct WrapPoint {
+    /// Number of leading args kept verbatim, including the wrap marker itself.
+    prefix_len: usize,
+    /// Quote-resolved tokens of the wrapped command.
+    wrapped: Vec<String>,
+    /// How the wrapper consumes the wrapped command.
+    form: WrapForm,
+}
+
+/// Find where a wrapped inner command starts within `args`, or `None` when
+/// this invocation has no delegatable wrap point.
+fn find_wrap_point(tool: &str, args: &[String]) -> Option<WrapPoint> {
+    match tool {
+        "nix" => find_nix_wrap_point(args),
+        "nix-shell" => find_shell_wrap_point(args),
+        // nix-build and nix-env never execute a delegated command.
+        _ => None,
+    }
+}
+
+/// Modern `nix` CLI. Only `-c`/`--command` introduces an executed command.
+/// Post-`--` positionals are not one: `nix run` passes them to the flake's app
+/// and `nix shell` parses them as additional installables, and `nix develop --
+/// cmd` is rejected outright, so inserting rtk there would corrupt execution.
+fn find_nix_wrap_point(args: &[String]) -> Option<WrapPoint> {
+    if args.is_empty() {
+        return None;
+    }
+
+    let markers: Vec<usize> = args[1..]
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| arg.as_str() == "-c" || arg.as_str() == "--command")
+        .map(|(i, _)| i + 1)
+        .collect();
+
+    if markers.len() > 1 {
+        return None;
+    }
+
+    let idx = *markers.first()?;
+    wrap_point_at(args, idx + 1, WrapForm::ArgvTail)
+}
+
+/// Legacy `nix-shell`, whose `-c|--command|--run` each consume ONE following
+/// token holding a shell string.
+fn find_shell_wrap_point(args: &[String]) -> Option<WrapPoint> {
+    let markers: Vec<usize> = args
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| matches!(arg.as_str(), "-c" | "--command" | "--run"))
+        .map(|(i, _)| i)
+        .collect();
+
+    if markers.len() != 1 {
+        return None;
+    }
+
+    let idx = markers[0];
+    let raw = args.get(idx + 1)?;
+    // Resolve quoting so the inner rewrite sees plain argv words.
+    let wrapped = shell_split(raw);
+    if wrapped.is_empty() {
+        return None;
+    }
+    Some(WrapPoint {
+        prefix_len: idx + 1,
+        wrapped,
+        form: WrapForm::ShellString,
+    })
+}
+
+fn wrap_point_at(args: &[String], start: usize, form: WrapForm) -> Option<WrapPoint> {
+    if start >= args.len() {
+        return None;
+    }
+    let wrapped: Vec<String> = args[start..].to_vec();
+    if wrapped.iter().any(String::is_empty) {
+        return None;
+    }
+    Some(WrapPoint {
+        prefix_len: start,
+        wrapped,
+        form,
+    })
+}
+
+/// Build the nested `<exe> rtk <wrapped…>` argv, or `None` when the wrapped
+/// command cannot be safely delegated.
+///
+/// Acceptance is deliberately narrow: the rewrite must be a pure `"rtk "`
+/// prefix insertion over the whitespace-joined tokens, and re-splitting the
+/// rewritten line must reproduce exactly the original tokens plus the
+/// inserted `rtk`. Anything else (compound commands, unknown tools, output-
+/// tool specials, arguments whose spaces would not survive the round trip)
+/// falls back to the generic nix filter.
+fn nested_rtk_argv(wrapped_tokens: &[String], exe: &Path) -> Option<Vec<String>> {
+    let joined = wrapped_tokens.join(" ");
+
+    // Single commands only. Compound strings would nest rtk around at most
+    // one segment, leaving the others unfiltered, so they stay generic.
+    if joined.contains("&&")
+        || joined.contains("||")
+        || joined.contains(';')
+        || joined.contains('|')
+        || joined.contains(" & ")
+    {
+        return None;
+    }
+
+    let rewritten = rewrite_command(&joined, &[], &[])?;
+    if rewritten.strip_prefix("rtk ") != Some(joined.as_str()) {
+        return None;
+    }
+
+    // Corruption guard: surviving cases have whitespace-free tokens, which
+    // also makes the legacy shell-string re-join lossless.
+    let mut tokens = shell_split(&rewritten);
+    if tokens.len() != wrapped_tokens.len() + 1 || tokens[0] != "rtk" {
+        return None;
+    }
+    tokens[0] = exe.display().to_string();
+    Some(tokens)
+}
+
+/// Full child argv spawning `tool` around a nested rtk, or `None` when the
+/// invocation cannot be delegated and must keep the generic filter.
+fn nested_spawn_argv(tool: &str, args: &[String], exe: &Path) -> Option<Vec<String>> {
+    let wp = find_wrap_point(tool, args)?;
+    let mut inner = nested_rtk_argv(&wp.wrapped, exe)?;
+    let exe_arg = inner.remove(0);
+
+    let mut argv: Vec<String> = Vec::with_capacity(wp.prefix_len + inner.len() + 2);
+    argv.push(tool.to_string());
+    argv.extend(args[..wp.prefix_len].iter().cloned());
+
+    match wp.form {
+        WrapForm::ArgvTail => {
+            // nix hands each token straight to execvp: no shell, no quoting.
+            argv.push(exe_arg);
+            argv.extend(inner);
+        }
+        WrapForm::ShellString => {
+            // nix-shell hands the whole command to `bash -c`, so the nested
+            // argv goes back into a single string.
+            if exe_arg.chars().any(char::is_whitespace) {
+                return None;
+            }
+            let mut joined = exe_arg;
+            for tok in inner {
+                joined.push(' ');
+                joined.push_str(&tok);
+            }
+            argv.push(joined);
+            argv.extend(args[wp.prefix_len + 1..].iter().cloned());
+        }
+    }
+
+    Some(argv)
 }
 
 /// Filter nix output: strip download noise, compress store paths, keep errors/warnings/results.
@@ -434,5 +641,223 @@ error: something broke";
         assert!(!output.contains("trace:"));
         assert!(!output.contains("evaluating file"));
         assert!(output.contains("error: something broke"));
+    }
+
+    // Wrapped-command delegation tests
+
+    const TEST_EXE: &str = "/usr/local/bin/rtk";
+
+    fn svec(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn wp(tool: &str, args: &[&str]) -> Option<WrapPoint> {
+        find_wrap_point(tool, &svec(args))
+    }
+
+    #[test]
+    fn test_detects_modern_c_flag() {
+        assert_eq!(
+            wp("nix", &["develop", "-c", "cargo", "test"]),
+            Some(WrapPoint {
+                prefix_len: 2,
+                wrapped: svec(&["cargo", "test"]),
+                form: WrapForm::ArgvTail,
+            })
+        );
+    }
+
+    #[test]
+    fn test_detects_long_command_flag() {
+        assert_eq!(
+            wp("nix", &["develop", "--command", "git", "status"]),
+            Some(WrapPoint {
+                prefix_len: 2,
+                wrapped: svec(&["git", "status"]),
+                form: WrapForm::ArgvTail,
+            })
+        );
+    }
+
+    #[test]
+    fn test_modern_marker_after_other_flags() {
+        assert_eq!(
+            wp("nix", &["develop", "--unpack", "-c", "cargo", "test"]),
+            Some(WrapPoint {
+                prefix_len: 3,
+                wrapped: svec(&["cargo", "test"]),
+                form: WrapForm::ArgvTail,
+            })
+        );
+    }
+
+    #[test]
+    fn test_rejects_repeated_command_flags() {
+        // nix joins repeated --command values with '\n'; nesting would
+        // silently drop every segment after the first.
+        assert_eq!(
+            wp("nix", &["develop", "--command", "a", "--command", "b"]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rejects_marker_without_wrapped_args() {
+        assert_eq!(wp("nix", &["develop", "-c"]), None);
+        assert_eq!(wp("nix", &["develop", "--command"]), None);
+    }
+
+    #[test]
+    fn test_rejects_empty_wrapped_token() {
+        assert_eq!(wp("nix", &["develop", "-c", ""]), None);
+    }
+
+    #[test]
+    fn test_no_wrap_point_without_marker() {
+        assert_eq!(wp("nix", &[]), None);
+        assert_eq!(wp("nix", &["build"]), None);
+        assert_eq!(wp("nix", &["flake", "show"]), None);
+    }
+
+    #[test]
+    fn test_dashdash_positionals_are_not_a_wrap_point() {
+        // Verified against nix 2.34: post-`--` args belong to the flake's app
+        // (run) or parse as more installables (shell); inserting rtk there
+        // would corrupt execution.
+        assert_eq!(
+            wp(
+                "nix",
+                &["run", "nixpkgs#hello", "--", "hello", "--greeting"]
+            ),
+            None
+        );
+        assert_eq!(
+            wp("nix", &["shell", "nixpkgs#cargo", "--", "cargo", "test"]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_legacy_shell_single_token_forms() {
+        assert_eq!(
+            wp("nix-shell", &["--pure", "--run", "cargo test"]),
+            Some(WrapPoint {
+                prefix_len: 2,
+                wrapped: svec(&["cargo", "test"]),
+                form: WrapForm::ShellString,
+            })
+        );
+        assert_eq!(
+            wp("nix-shell", &["-c", "git status --short"]),
+            Some(WrapPoint {
+                prefix_len: 1,
+                wrapped: svec(&["git", "status", "--short"]),
+                form: WrapForm::ShellString,
+            })
+        );
+    }
+
+    #[test]
+    fn test_legacy_rejects_multiple_markers_and_missing_value() {
+        assert_eq!(wp("nix-shell", &["--command", "a b", "--run", "c d"]), None);
+        assert_eq!(wp("nix-shell", &["--command"]), None);
+    }
+
+    #[test]
+    fn test_nix_build_env_never_wrap() {
+        assert_eq!(wp("nix-build", &["-c", "cargo test"]), None);
+        assert_eq!(wp("nix-env", &["-c", "cargo test"]), None);
+    }
+
+    fn nrta(tokens: &[&str]) -> Option<Vec<String>> {
+        nested_rtk_argv(&svec(tokens), Path::new(TEST_EXE))
+    }
+
+    #[test]
+    fn test_nested_argv_accepts_routable_tool() {
+        // The leading "rtk" token is replaced by the current exe path, so the
+        // nested argv runs rtk even when it is not on the env's PATH.
+        assert_eq!(
+            nrta(&["cargo", "test"]),
+            Some(svec(&[TEST_EXE, "cargo", "test"]))
+        );
+    }
+
+    #[test]
+    fn test_nested_argv_rejects_compound_command() {
+        // rewrite_command rewrites compounds segment-wise; that is not a pure
+        // "rtk " prefix insertion, so delegation must not happen.
+        assert_eq!(nrta(&["cd", "x", "&&", "cargo", "test"]), None);
+    }
+
+    #[test]
+    fn test_nested_argv_rejects_compound_even_with_routable_first_segment() {
+        // When only the first segment is routable the rewrite inserts at
+        // position 0, which would pass the prefix check; compounds must fall
+        // back regardless so no command is left unfiltered.
+        assert_eq!(
+            nrta(&["git", "log", "--oneline", "-2", "&&", "echo", "done"]),
+            None
+        );
+        assert_eq!(nrta(&["cargo", "test", "|", "tee", "log.txt"]), None);
+        assert_eq!(nrta(&["git", "status", ";", "git", "diff"]), None);
+    }
+
+    #[test]
+    fn test_nested_argv_rejects_unknown_tool() {
+        // Interactive shells and unroutable programs stay on the generic path.
+        assert_eq!(nrta(&["zsh"]), None);
+        assert_eq!(nrta(&["zsh", "-l"]), None);
+    }
+
+    #[test]
+    fn test_nested_argv_rejects_whitespace_mangling() {
+        // Re-splitting must reproduce the original token shape plus the
+        // inserted "rtk"; a token with embedded spaces cannot survive.
+        assert_eq!(nrta(&["echo", "hello world"]), None);
+    }
+
+    #[test]
+    fn test_nested_argv_rejects_already_rtk_prefixed() {
+        assert_eq!(nrta(&["rtk", "cargo", "test"]), None);
+    }
+
+    #[test]
+    fn test_spawn_argv_modern_form() {
+        assert_eq!(
+            nested_spawn_argv(
+                "nix",
+                &svec(&["develop", "-c", "cargo", "test"]),
+                Path::new(TEST_EXE)
+            ),
+            Some(svec(&["nix", "develop", "-c", TEST_EXE, "cargo", "test"]))
+        );
+    }
+
+    #[test]
+    fn test_spawn_argv_shell_string_form_preserves_trailing_flags() {
+        assert_eq!(
+            nested_spawn_argv(
+                "nix-shell",
+                &svec(&["-p", "hello", "--run", "cargo test", "--pure"]),
+                Path::new(TEST_EXE)
+            ),
+            Some(svec(&[
+                "nix-shell",
+                "-p",
+                "hello",
+                "--run",
+                "/usr/local/bin/rtk cargo test",
+                "--pure"
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_spawn_argv_falls_back_for_unroutable_inner() {
+        assert_eq!(
+            nested_spawn_argv("nix", &svec(&["develop", "-c", "zsh"]), Path::new(TEST_EXE)),
+            None
+        );
     }
 }
