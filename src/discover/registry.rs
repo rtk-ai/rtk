@@ -2338,8 +2338,8 @@ mod tests {
 
     #[test]
     fn test_rewrite_dotnet_subcommands() {
-        // All four subcommands have dedicated `rtk dotnet` proxies, so the rewrite
-        // rule must route them (issue #1830 — only `build` was covered before).
+        // All four subcommands have dedicated `rtk dotnet` proxies, so the
+        // rewrite rule must route them.
         for sub in ["build", "test", "restore", "format"] {
             assert_eq!(
                 rewrite_command_no_prefixes(&format!("dotnet {}", sub), &[]),
