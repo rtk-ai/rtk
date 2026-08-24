@@ -81,6 +81,10 @@ struct Cli {
     /// Set SKIP_ENV_VALIDATION=1 for child processes (Next.js, tsc, lint, prisma)
     #[arg(long = "skip-env", global = true)]
     skip_env: bool,
+
+    /// Session id to attribute tracked commands to (grouped in `rtk gain --session`)
+    #[arg(long = "session-id", global = true)]
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -447,6 +451,9 @@ enum Commands {
         /// Show all time breakdowns (daily + weekly + monthly)
         #[arg(short, long)]
         all: bool,
+        /// Show breakdown grouped by session id (use global --session-id to scope)
+        #[arg(short = 's', long)]
+        session: bool,
         /// Output format: text, json, csv
         #[arg(short, long, default_value = "text")]
         format: String,
@@ -1593,6 +1600,14 @@ fn run_cli() -> Result<i32> {
         }
     };
 
+    // Make the session id ambient so tracking::record can attribute commands
+    // without threading it through every command's run(...) signature.
+    if let Some(ref sid) = cli.session_id {
+        if !sid.is_empty() {
+            std::env::set_var("RTK_SESSION_ID", sid);
+        }
+    }
+
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
     // Skip for Gain — it shows its own inline hook warning.
     if !matches!(cli.command, Commands::Gain { .. }) {
@@ -2149,6 +2164,7 @@ fn run_cli() -> Result<i32> {
             weekly,
             monthly,
             all,
+            session,
             format,
             failures,
             reset,
@@ -2164,6 +2180,8 @@ fn run_cli() -> Result<i32> {
                 weekly,
                 monthly,
                 all,
+                session,                   // added: grouped by-session view
+                cli.session_id.as_deref(), // added: session scope (global --session-id)
                 &format,
                 failures,
                 reset,
