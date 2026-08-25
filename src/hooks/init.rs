@@ -5614,6 +5614,38 @@ mod tests {
     }
 
     #[test]
+    fn test_agy_mode_dry_run_writes_nothing() {
+        let temp = TempDir::new().unwrap();
+        run_agy_mode_at(
+            temp.path(),
+            false,
+            InitContext {
+                dry_run: true,
+                ..InitContext::default()
+            },
+        )
+        .unwrap();
+
+        let plugin_dir = temp.path().join(".agents/plugins/rtk-agy");
+        assert!(
+            !plugin_dir.exists(),
+            "Plugin dir must not exist after dry run"
+        );
+    }
+
+    #[test]
+    fn test_agy_mode_reinstall_idempotent() {
+        let temp = TempDir::new().unwrap();
+        run_agy_mode_at(temp.path(), false, InitContext::default()).unwrap();
+        // Second install should succeed without errors
+        run_agy_mode_at(temp.path(), false, InitContext::default()).unwrap();
+
+        let plugin_dir = temp.path().join(".agents/plugins/rtk-agy");
+        assert!(plugin_dir.join("plugin.json").exists());
+        assert!(plugin_dir.join("hooks.json").exists());
+    }
+
+    #[test]
     fn test_agy_mode_uninstall_removes_plugin() {
         let temp = TempDir::new().unwrap();
         run_agy_mode_at(temp.path(), false, InitContext::default()).unwrap();
