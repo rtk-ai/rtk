@@ -122,7 +122,7 @@ const RTK_INSTRUCTIONS: &str = r##"<!-- rtk-instructions v2 -->
 
 ## Golden Rule
 
-**Always prefix commands with `rtk`**. If RTK has a dedicated filter, it uses it. If not, it passes through unchanged. This means RTK is always safe to use.
+**Always prefix commands with `rtk`**, except when using `env`: use `env X=Y rtk <command>` instead of `rtk env X=Y <command>`. If RTK has a dedicated filter, it uses it. If not, it passes through unchanged. This means RTK is always safe to use.
 
 **Important**: Even in command chains with `&&`, use `rtk`:
 ```bash
@@ -4819,7 +4819,7 @@ const COPILOT_INSTRUCTIONS: &str = r#"<!-- rtk-instructions v2 -->
 
 ## Rule
 
-Always prefix shell commands with `rtk`:
+Always prefix shell commands with `rtk`, except when using `env`: use `env X=Y rtk <command>` instead of `rtk env X=Y <command>`:
 
 ```bash
 # Instead of:              Use:
