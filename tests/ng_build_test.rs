@@ -337,7 +337,10 @@ fn signalled_build_flushes_both_streams_and_does_not_leave_its_child_running() {
     let out = child.wait_with_output().expect("collect signalled build");
     assert!(!ng_alive, "cancelled ng process survived rtk");
     assert_eq!(out.stdout, b"captured stdout before cancellation\n");
-    assert_eq!(out.stderr, b"important stderr before cancellation");
+    assert_eq!(
+        out.stderr,
+        b"[rtk] ng: process terminated by signal 15\nimportant stderr before cancellation"
+    );
     use std::os::unix::process::ExitStatusExt;
     assert_eq!(out.status.signal(), Some(15));
 }
