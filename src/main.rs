@@ -22,8 +22,8 @@ use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
-    summary, tree, wc_cmd,
+    deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, nix_cmd, pipe_cmd, read,
+    search, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -205,6 +205,14 @@ enum Commands {
     #[command(disable_help_flag = true)]
     Psql {
         /// psql arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Nix package manager with compact output
+    #[command(disable_help_flag = true)]
+    Nix {
+        /// nix arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1817,6 +1825,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Psql { args } => psql_cmd::run(&args, cli.verbose)?,
 
+        Commands::Nix { args } => nix_cmd::run(&args, cli.verbose)?,
+
         Commands::Pnpm { filter, command } => {
             // Warns user if filters are used with unsupported subcommands like typecheck
             if let Some(warning) = validate_pnpm_filters(&filter, &command) {
@@ -2767,6 +2777,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Cargo { .. }
             | Commands::Npm { .. }
             | Commands::Npx { .. }
+            | Commands::Nix { .. }
             | Commands::Curl { .. }
             | Commands::Ruff { .. }
             | Commands::Pytest { .. }
@@ -3143,6 +3154,7 @@ mod tests {
             "prisma",
             "tsc",
             "next",
+            "nix",
             "lint",
             "prettier",
             "format",

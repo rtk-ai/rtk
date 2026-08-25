@@ -898,6 +898,14 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^nix(\s|$)",
+        rtk_cmd: "rtk nix",
+        rewrite_prefixes: &["nix"],
+        category: "Infra",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^tofu\s+(fmt|init|plan|validate)(\s|$)",
         rtk_cmd: "rtk tofu",
         rewrite_prefixes: &["tofu"],
