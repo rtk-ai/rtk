@@ -680,8 +680,10 @@ function Invoke-GainGate {
     $env:CARGO_BUILD_JOBS = "4"
     try {
         $commands = @(
-            ,@("grep", "fn ", "src")
-            ,@("grep", "RTK_DISABLED", "src")
+            # Use two representative recursive rg searches so the gain sample stays
+            # portable on Windows and no single command dominates the benchmark.
+            ,@("rg", "fn ", "src")
+            ,@("rg", "test_", "src")
             ,@("cargo", "test", "hooks::hook_cmd", "--", "--test-threads=1")
             ,@("git", "log", "-n", "80", "--stat")
             ,@("git", "status")
