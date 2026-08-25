@@ -187,6 +187,32 @@ fn git_log_patch_output_matches_raw_git() {
 }
 
 #[test]
+fn git_log_dash_p_pathspec_after_double_dash_is_not_patch_flag() {
+    // Regression: `rtk git log -- -p` must not be misread as the real `-p`
+    // patch flag. Clap's `trailing_var_arg` strips the literal "--" before
+    // `run_log` sees `args`, so the pathspec-separator check must restore it
+    // (via restore_double_dash) before deciding whether to pass through raw
+    // patch output; otherwise a file literally named "-p" after "--" is
+    // wrongly treated as a request for `git log -p`.
+    let dir = init_git_repo();
+    std::fs::write(dir.path().join("-p"), "not a diff flag\n").expect("write -p file");
+    git_in_dir(dir.path(), &["add", "--", "-p"]);
+    git_in_dir(dir.path(), &["commit", "-q", "-m", "add dash-p file"]);
+
+    let (stdout, stderr, code) = rtk_output_in_dir(dir.path(), &["git", "log", "--", "-p"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert!(
+        !stdout.contains("diff --git") && !stdout.contains("@@"),
+        "-- -p should stay on RTK's filtered path, not raw patch output: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("add dash-p file"),
+        "expected the commit touching the -p pathspec: {stdout:?}"
+    );
+}
+
+#[test]
 fn git_stash_show_no_stash_emits_empty_and_propagates_failure() {
     // Regression: previously printed "Empty stash" and returned Ok(0), masking
     // the underlying `git stash show` failure.
