@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, and Mistral Vibe
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Antigravity CLI, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, and Mistral Vibe
 sidebar:
   order: 3
 ---
@@ -32,6 +32,7 @@ Agent runs "cargo test"
 | VS Code Copilot Chat | Shell hook (`PreToolUse`) | Yes |
 | GitHub Copilot CLI | Shell hook (`PreToolUse`) | Yes |
 | Cursor | Shell hook (`preToolUse`) | Yes |
+| Antigravity CLI (`agy`) | Rust binary (`PreToolUse` plugin) | Yes |
 | Gemini CLI | Rust binary (`BeforeTool`) | Yes |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | Yes |
 | OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
@@ -196,6 +197,22 @@ rtk init --agent antigravity    # creates .agents/rules/antigravity-rtk-rules.md
 ```
 
 Antigravity reads `.agents/rules/` as custom instructions. RTK adds guidance telling Antigravity to prefer `rtk <cmd>` over raw commands.
+
+### Antigravity CLI (`agy`)
+
+```bash
+rtk init -g --agent agy       # machine-scoped (~/.gemini/config/plugins/rtk-agy/)
+rtk init --agent agy          # workspace-scoped (<repo>/.agents/plugins/rtk-agy/)
+```
+
+Installs an Antigravity CLI plugin bundle with `hooks.json` mapping `PreToolUse` on `run_command` to the native `rtk hook agy` binary. Before any command executes, RTK rewrites the tool call arguments in place using `overwrite.CommandLine`.
+
+Uninstall:
+
+```bash
+rtk init --agent agy --uninstall       # workspace
+rtk init -g --agent agy --uninstall    # global
+```
 
 ### Mistral Vibe
 

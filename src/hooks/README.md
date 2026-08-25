@@ -30,6 +30,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Cline | `rtk init --agent cline` | `.clinerules` | -- |
 | Codex | `rtk init --codex` | RTK.md in `$CODEX_HOME` or `~/.codex` | AGENTS.md |
 | Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
+| Antigravity CLI (`agy`) | `rtk init --agent agy` / `rtk init -g --agent agy` | AGY Plugin in `plugins/rtk-agy/` | plugin.json, hooks.json |
 | Pi | `rtk init --agent pi` | `.pi/extensions/rtk.ts` | -- |
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |
 

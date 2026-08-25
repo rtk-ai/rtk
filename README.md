@@ -113,13 +113,14 @@ rtk gain        # Should show the savings dashboard
 ```bash
 # 1. Install for your AI tool
 rtk init -g                     # Claude Code / Copilot (default)
+rtk init -g --agent agy         # Antigravity CLI (agy)
 rtk init -g --gemini            # Gemini CLI
 rtk init -g --codex             # Codex (OpenAI)
 rtk init -g --agent cursor      # Cursor
 rtk init -g --agent windsurf    # Windsurf
 rtk init --agent cline          # Cline / Roo Code
 rtk init --agent kilocode       # Kilo Code
-rtk init --agent antigravity    # Google Antigravity
+rtk init --agent antigravity    # Google Antigravity (IDE)
 rtk init --agent kimi           # Kimi AI
 rtk init -g --agent pi          # Pi
 rtk init --agent hermes         # Hermes
@@ -381,7 +382,7 @@ rtk init -g
 
 ## Supported AI Tools
 
-RTK supports 16 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
+RTK supports 17 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -389,6 +390,7 @@ RTK supports 16 AI coding tools. Each integration rewrites shell commands to `rt
 | **GitHub Copilot (VS Code)** | `rtk init -g --copilot` | PreToolUse hook — transparent rewrite |
 | **GitHub Copilot CLI** | `rtk init -g --copilot` | PreToolUse deny-with-suggestion (CLI limitation) |
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
+| **Antigravity CLI (`agy`)** | `rtk init -g --agent agy` | PreToolUse hook in plugin (rtk hook agy) |
 | **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook |
 | **Codex** | `rtk init -g --codex` | AGENTS.md + RTK.md instructions |
 | **Windsurf** | `rtk init -g --agent windsurf` | .windsurfrules (project-scoped) |
