@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Antigravity CLI, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, and Mistral Vibe
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Antigravity CLI, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Google Antigravity (IDE), Factory Droid, and Mistral Vibe
 sidebar:
   order: 3
 ---
