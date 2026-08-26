@@ -1,7 +1,7 @@
 //! Shows users how many tokens RTK has saved them over time.
 
 use crate::core::display_helpers::{format_duration, print_period_table};
-use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
+use crate::core::tracking::{parse_error_reason, DayStats, MonthStats, Tracker, WeekStats};
 use crate::core::utils::{format_tokens, truncate};
 use crate::hooks::hook_check;
 use anyhow::{Context, Result};
@@ -721,6 +721,19 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
         println!();
     }
 
+    // ISSUE #3625: the command that fell back was already here; the reason it
+    // fell back was recorded and then dropped, so reading this screen you could
+    // only guess at the cause. Show the reason, and lead with the reasons, since
+    // a thousand fallbacks are usually a handful of causes.
+    if !summary.top_errors.is_empty() {
+        println!("{}", styled("Top Reasons (by frequency)", true));
+        println!("{}", "─".repeat(60));
+        for (reason, count) in &summary.top_errors {
+            println!("  {:>4}x  {}", count, truncate(reason, 50));
+        }
+        println!();
+    }
+
     if !summary.recent.is_empty() {
         println!("{}", styled("Recent Failures (last 10)", true));
         println!("{}", "─".repeat(60));
@@ -730,7 +743,9 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
             let ts_short = &rec.timestamp[..rec.timestamp.floor_char_boundary(16)];
             let status = if rec.fallback_succeeded { "ok" } else { "FAIL" };
             let cmd_display = truncate(&rec.raw_command, 40);
+            let reason = truncate(&parse_error_reason(&rec.error_message), 40);
             println!("  {} [{}] {}", ts_short, status, cmd_display);
+            println!("  {:>18}└─ {}", "", reason);
         }
         println!();
     }
