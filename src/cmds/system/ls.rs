@@ -51,6 +51,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("ls");
     cmd.env("LC_ALL", "C");
     cmd.arg("-la");
+    // Force English date format so LS_DATE_RE can parse the output reliably,
+    // regardless of the user's locale/LC_TIME setting.
+    cmd.env("LC_TIME", "C");
     for flag in &flags {
         if flag.starts_with("--") {
             if *flag != "--all" {
