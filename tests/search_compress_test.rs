@@ -307,8 +307,8 @@ fn small_grep_not_worse_than_plain() {
     let stdout = String::from_utf8_lossy(&out.stdout);
 
     assert!(
-        stdout.trim() == "1:foo",
-        "single-file grep must equal `grep -n` (position, no filename):\n{stdout}"
+        stdout.trim() == "foo",
+        "single-file grep must equal plain `grep` (content only, no position/filename):\n{stdout}"
     );
     assert!(
         !stdout.contains("matches in"),

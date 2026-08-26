@@ -117,15 +117,19 @@ impl ClaudeProvider {
 
     /// Encode a filesystem path to Claude Code's directory name format.
     ///
-    /// Claude Code replaces `/`, `.`, `_`, `\`, and any non-ASCII character
-    /// with `-` when computing the project directory slug under `~/.claude/projects/`.
+    /// Claude Code replaces `/`, `.`, `_`, `\`, `:`, ` `, `[`, `]`, and any
+    /// non-ASCII character with `-` when computing the project directory slug
+    /// under `~/.claude/projects/`.
     ///
     /// `/Users/foo/bar`          → `-Users-foo-bar`
     /// `/Users/first.last/bar`   → `-Users-first-last-bar`
     /// `/home/chris/2_project`   → `-home-chris-2-project`
-    /// `C:\Users\foo\bar`        → `C:-Users-foo-bar`
+    /// `C:\Users\foo\bar`        → `C--Users-foo-bar`
     pub fn encode_project_path(path: &str) -> String {
-        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\', ' ', '[', ']'];
+        // The drive-letter `:` matters on Windows: every cwd carries one, and if
+        // it isn't sanitized the slug (`C:-...`) never matches Claude's real
+        // folder (`C--...`), so `rtk discover` finds zero sessions (#2919).
+        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\', ' ', '[', ']', ':'];
 
         path.chars()
             .map(|c| {
@@ -403,10 +407,13 @@ mod tests {
 
     #[test]
     fn test_encode_project_path_windows() {
-        // Windows backslashes are also replaced with '-'
+        // Windows backslashes AND the drive-letter colon are replaced with '-'.
+        // A real `C:\Users\foo\bar` dir lands in ~/.claude/projects/C--Users-foo-bar,
+        // so keeping the colon (C:-...) made `rtk discover` find zero sessions on
+        // Windows (#2919).
         assert_eq!(
             ClaudeProvider::encode_project_path(r"C:\Users\foo\bar"),
-            "C:-Users-foo-bar"
+            "C--Users-foo-bar"
         );
     }
 

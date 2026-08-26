@@ -398,7 +398,9 @@ fn show_file(paths: &[String], extra_args: &[String]) -> bool {
 }
 
 fn show_line(extra_args: &[String]) -> bool {
-    !has_short_flag(extra_args, 'N')
+    (has_short_flag(extra_args, 'n')
+        || extra_args.iter().any(|f| f == "--line-number"))
+        && !has_short_flag(extra_args, 'N')
         && !extra_args.iter().any(|f| f == "--no-line-number")
 }
 
@@ -613,8 +615,6 @@ pub fn run(
     // -n. We force -nH--null for robust parsing, then drop what the engine itself
     // would not have shown.
     let show_file = by_file.len() > 1 || show_file(&paths, &extra_args);
-    // Always surface the line number (the openable position) unless the agent
-    // explicitly turned it off; the filename is the only conditional part.
     let show_line = show_line(&extra_args);
 
     // Faithful baseline: exactly what the real command prints, full content.
@@ -1416,6 +1416,52 @@ mod tests {
         assert!(!has_format_flag(&["-A", "3"]));
         assert!(!has_format_flag(&["-v"]));
         assert!(!has_format_flag(&["-rin"]));
+    }
+
+    fn flags(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn show_line_is_off_without_an_explicit_request() {
+        assert!(!show_line(&flags(&[])));
+        assert!(!show_line(&flags(&["-i"])));
+        assert!(!show_line(&flags(&["-r"])));
+        assert!(!show_line(&flags(&["-A", "3"])));
+    }
+
+    #[test]
+    fn show_line_honours_n_in_every_spelling() {
+        assert!(show_line(&flags(&["-n"])));
+        assert!(show_line(&flags(&["--line-number"])));
+        assert!(show_line(&flags(&["-rn"])));
+        assert!(show_line(&flags(&["-in"])));
+    }
+
+    #[test]
+    fn show_line_is_off_when_explicitly_negated() {
+        assert!(!show_line(&flags(&["-N"])));
+        assert!(!show_line(&flags(&["--no-line-number"])));
+    }
+
+    #[test]
+    fn match_block_stays_fully_qualified() {
+        let entries = vec![
+            (3usize, true, "line 3 needle".to_string()),
+            (4usize, false, "line 4 context".to_string()),
+        ];
+        let block = match_block("src/deep/file.rs", &entries);
+        assert_eq!(
+            block,
+            "src/deep/file.rs:3:line 3 needle\nsrc/deep/file.rs-4-line 4 context\n"
+        );
+    }
+
+    #[test]
+    fn match_block_keeps_position_when_display_drops_it() {
+        assert!(!show_line(&flags(&[])));
+        let entries = vec![(42usize, true, "hit".to_string())];
+        assert_eq!(match_block("f.txt", &entries), "f.txt:42:hit\n");
     }
 
     // Verify line numbers are always enabled in the engine invocation (parse_flags).

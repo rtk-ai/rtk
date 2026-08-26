@@ -314,7 +314,7 @@ Start here, then drill down into each README for file-level details.
 |-----------|-------|-------------------------------|
 | [`hooks/`](../hooks/README.md) | _(parent)_ | **All JSON formats**, rewrite registry overview, exit code contract, override controls |
 | [`claude/`](../hooks/claude/README.md) | Claude Code | Shell hook mechanism, `PreToolUse` JSON, test script |
-| [`copilot/`](../hooks/copilot/README.md) | GitHub Copilot | Rust binary hook, VS Code Chat vs Copilot CLI dual format |
+| [`copilot/`](../hooks/copilot/README.md) | GitHub Copilot | Rust binary hook, single `PreToolUse` schema shared by VS Code Chat and Copilot CLI |
 | [`cursor/`](../hooks/cursor/README.md) | Cursor IDE | Shell hook, empty JSON response requirement |
 | [`cline/`](../hooks/cline/README.md) | Cline / Roo Code | Rules file (prompt-level, no programmatic hook) |
 | [`windsurf/`](../hooks/windsurf/README.md) | Windsurf / Cascade | Rules file (workspace-scoped) |
@@ -331,7 +331,7 @@ RTK supports the following LLM agents through hook integrations:
 |-------|-----------|-----------|---------------------|
 | Claude Code | Shell hook | `PreToolUse` in `settings.json` | Yes (`updatedInput`) |
 | GitHub Copilot (VS Code) | Rust binary | `rtk hook copilot` reads JSON | Yes (`updatedInput`) |
-| GitHub Copilot CLI | Rust binary | `rtk hook copilot` reads JSON | No (deny + suggestion) |
+| GitHub Copilot CLI | Rust binary | `rtk hook copilot` reads JSON | Yes (`updatedInput`) |
 | Cursor | Rust binary | `rtk hook cursor` reads JSON | Yes (`updated_input`) |
 | Gemini CLI | Rust binary | `rtk hook gemini` reads JSON | Yes (`hookSpecificOutput`) |
 | Cline/Roo Code | Rules file | Prompt-level guidance | N/A (prompt) |

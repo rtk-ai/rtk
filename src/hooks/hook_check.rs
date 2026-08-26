@@ -113,7 +113,7 @@ fn check_and_warn() -> Option<()> {
     eprintln!("{}", warning);
 
     // Touch marker after warning is printed
-    let _ = std::fs::create_dir_all(marker.parent()?);
+    let _ = crate::core::utils::create_private_dir(marker.parent()?);
     let _ = std::fs::write(&marker, b"");
 
     Some(())

@@ -57,6 +57,8 @@ pub enum AgentTarget {
     Hermes,
     /// Factory Droid CLI
     Droid,
+    /// Mistral Vibe CLI
+    Vibe,
 }
 
 #[derive(Parser)]
@@ -870,6 +872,8 @@ enum HookCommands {
     Copilot,
     /// Process Factory Droid PreToolUse hook (reads JSON from stdin)
     Droid,
+    /// Process Mistral Vibe CLI pre_tool hook (reads JSON from stdin)
+    Vibe,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1344,8 +1348,8 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         match result {
             Ok(output) => {
                 let exit_code = core::utils::exit_code_from_output(&output, &raw_command);
-                let stdout_raw = String::from_utf8_lossy(&output.stdout);
-                let stderr_raw = String::from_utf8_lossy(&output.stderr);
+                let stdout_raw = core::utils::decode_process_output(&output.stdout);
+                let stderr_raw = core::utils::decode_process_output(&output.stderr);
 
                 // Merge stderr into the text to filter when filter_stderr is enabled;
                 // otherwise emit stderr directly so it is always visible.
@@ -1572,6 +1576,8 @@ where
         hooks::init::uninstall_trae_mode(global, ctx)
     } else if agent == Some(AgentTarget::Droid) {
         hooks::init::uninstall_droid(global, ctx)
+    } else if agent == Some(AgentTarget::Vibe) {
+        hooks::init::uninstall_vibe(ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -2076,6 +2082,15 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_hermes_mode(ctx)?;
             } else if agent == Some(AgentTarget::Droid) {
                 hooks::init::run_droid_mode(global, ctx)?;
+            } else if agent == Some(AgentTarget::Vibe) {
+                let patch_mode = if auto_patch {
+                    hooks::init::PatchMode::Auto
+                } else if no_patch {
+                    hooks::init::PatchMode::Skip
+                } else {
+                    hooks::init::PatchMode::Ask
+                };
+                hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2450,6 +2465,10 @@ fn run_cli() -> Result<i32> {
                 hooks::hook_cmd::run_droid()?;
                 0
             }
+            HookCommands::Vibe => {
+                hooks::hook_cmd::run_vibe()?;
+                0
+            }
             HookCommands::Check { agent: _, command } => {
                 use crate::discover::registry::rewrite_command;
                 let raw = command.join(" ");
@@ -2669,8 +2688,8 @@ fn run_cli() -> Result<i32> {
                 .join()
                 .map_err(|_| anyhow::anyhow!("stderr streaming thread panicked"))??;
 
-            let stdout = String::from_utf8_lossy(&stdout_bytes);
-            let stderr = String::from_utf8_lossy(&stderr_bytes);
+            let stdout = core::utils::decode_process_output(&stdout_bytes);
+            let stderr = core::utils::decode_process_output(&stderr_bytes);
             let full_output = format!("{}{}", stdout, stderr);
 
             // Track usage (input = output since no filtering)
