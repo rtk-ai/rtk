@@ -5557,6 +5557,94 @@ mod tests {
     }
 
     #[test]
+    fn test_zcode_mode_dry_run_does_not_write() {
+        let dry_run = InitContext {
+            dry_run: true,
+            ..InitContext::default()
+        };
+
+        let absent = TempDir::new().unwrap();
+        run_zcode_mode_at(absent.path(), dry_run).unwrap();
+        assert!(!absent.path().join(AGENTS_MD).exists());
+
+        let existing = TempDir::new().unwrap();
+        let agents_path = existing.path().join(AGENTS_MD);
+        fs::write(&agents_path, "# Team preferences\n\nPrefer cargo fmt.\n").unwrap();
+        run_zcode_mode_at(existing.path(), dry_run).unwrap();
+        let content = fs::read_to_string(&agents_path).unwrap();
+        assert_eq!(content, "# Team preferences\n\nPrefer cargo fmt.\n");
+    }
+
+    #[test]
+    fn test_zcode_uninstall_noop_when_file_missing() {
+        let temp = TempDir::new().unwrap();
+        uninstall_zcode_at(temp.path(), InitContext::default()).unwrap();
+        assert!(!temp.path().join(AGENTS_MD).exists());
+    }
+
+    #[test]
+    fn test_zcode_uninstall_noop_when_no_rtk_block() {
+        let temp = TempDir::new().unwrap();
+        let agents_path = temp.path().join(AGENTS_MD);
+        fs::write(&agents_path, "# Team preferences\n\nPrefer cargo fmt.\n").unwrap();
+
+        uninstall_zcode_at(temp.path(), InitContext::default()).unwrap();
+        let content = fs::read_to_string(&agents_path).unwrap();
+        assert_eq!(content, "# Team preferences\n\nPrefer cargo fmt.\n");
+    }
+
+    #[test]
+    fn test_zcode_uninstall_dry_run_keeps_block() {
+        let temp = TempDir::new().unwrap();
+        let agents_path = temp.path().join(AGENTS_MD);
+        run_zcode_mode_at(temp.path(), InitContext::default()).unwrap();
+        let before = fs::read_to_string(&agents_path).unwrap();
+
+        let dry_run = InitContext {
+            dry_run: true,
+            ..InitContext::default()
+        };
+        uninstall_zcode_at(temp.path(), dry_run).unwrap();
+
+        let after = fs::read_to_string(&agents_path).unwrap();
+        assert_eq!(before, after, "Dry-run uninstall must not modify the file");
+    }
+
+    #[test]
+    fn test_zcode_reinstall_after_uninstall_restores_block() {
+        let temp = TempDir::new().unwrap();
+        let agents_path = temp.path().join(AGENTS_MD);
+        fs::write(&agents_path, "# Team preferences\n\nPrefer cargo fmt.\n").unwrap();
+
+        run_zcode_mode_at(temp.path(), InitContext::default()).unwrap();
+        let first = fs::read_to_string(&agents_path).unwrap();
+
+        uninstall_zcode_at(temp.path(), InitContext::default()).unwrap();
+        run_zcode_mode_at(temp.path(), InitContext::default()).unwrap();
+        let second = fs::read_to_string(&agents_path).unwrap();
+
+        assert!(first.contains("Prefer cargo fmt."));
+        assert_eq!(
+            first, second,
+            "Reinstall should restore the identical block"
+        );
+    }
+
+    #[test]
+    fn test_zcode_instructions_match_embedded_payload() {
+        let temp = TempDir::new().unwrap();
+        run_zcode_mode_at(temp.path(), InitContext::default()).unwrap();
+        let content = fs::read_to_string(temp.path().join(AGENTS_MD)).unwrap();
+
+        assert!(content.contains(RTK_BLOCK_START));
+        assert!(content.contains(RTK_BLOCK_END));
+        assert!(content.contains(ZCODE_INSTRUCTIONS.trim()));
+        for meta in ["rtk gain", "rtk discover", "rtk proxy"] {
+            assert!(content.contains(meta), "instructions must mention `{meta}`");
+        }
+    }
+
+    #[test]
     fn test_patch_agents_md_creates_missing_file() {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");

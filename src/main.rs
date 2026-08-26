@@ -2968,6 +2968,26 @@ mod tests {
     }
 
     #[test]
+    fn test_try_parse_init_agent_zcode_uninstall() {
+        let cli =
+            Cli::try_parse_from(["rtk", "init", "--uninstall", "--agent", "zcode", "--global"])
+                .unwrap();
+        match cli.command {
+            Commands::Init {
+                agent,
+                global,
+                uninstall,
+                ..
+            } => {
+                assert_eq!(agent, Some(AgentTarget::Zcode));
+                assert!(global);
+                assert!(uninstall);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
     fn test_try_parse_kubectl_get_alias() {
         let cli = Cli::try_parse_from(["rtk", "kubectl", "get", "pods", "-n", "default"]).unwrap();
 
