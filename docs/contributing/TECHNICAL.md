@@ -319,7 +319,7 @@ Start here, then drill down into each README for file-level details.
 | [`cline/`](../hooks/cline/README.md) | Cline / Roo Code | Rules file (prompt-level, no programmatic hook) |
 | [`windsurf/`](../hooks/windsurf/README.md) | Windsurf / Cascade | Rules file (workspace-scoped) |
 | [`codex/`](../hooks/codex/README.md) | OpenAI Codex CLI | Awareness document, AGENTS.md integration |
-| [`opencode/`](../hooks/opencode/README.md) | OpenCode | TypeScript plugin, zx library, in-place mutation |
+| [`opencode/`](../hooks/opencode/README.md) | OpenCode | TypeScript plugin, Node `execFile`, in-place mutation |
 
 ---
 
