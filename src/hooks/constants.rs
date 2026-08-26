@@ -32,8 +32,8 @@ pub const COPILOT_INSTRUCTIONS_FILE: &str = "copilot-instructions.md";
 pub const COPILOT_USER_DIR: &str = ".copilot";
 pub const COPILOT_HOME_ENV: &str = "COPILOT_HOME";
 
-pub const PI_DIR: &str = ".pi/agent";
-pub const PI_LOCAL_DIR: &str = ".pi";
+pub const PI_DIR: &str = ".omp/agent";
+pub const PI_LOCAL_DIR: &str = ".omp";
 pub const PI_EXTENSIONS_SUBDIR: &str = "extensions";
 pub const PI_PLUGIN_FILE: &str = "rtk.ts";
 pub const PI_CODING_AGENT_DIR_ENV: &str = "PI_CODING_AGENT_DIR";
