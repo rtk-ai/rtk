@@ -261,6 +261,15 @@ rtk pulumi refresh              # Drift summary
 rtk pulumi stack                # Stack metadata (strips owner/timestamps)
 ```
 
+### System & Documents
+```bash
+rtk systemctl --user status app.service  # Compact service status
+rtk systemctl --user list-units --failed # Compact unit listings
+rtk journalctl -u app.service -n 200      # Bounded, deduplicated journal output
+rtk pandoc input.md -o output.pdf         # Warnings and errors without progress noise
+rtk pdfinfo document.pdf                  # Essential PDF metadata
+```
+
 ### Data & Analytics
 ```bash
 rtk json config.json            # Structure without values

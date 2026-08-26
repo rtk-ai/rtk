@@ -1,0 +1,32 @@
+[filters.systemctl-list]
+description = "Compact systemctl listings — strip legends and bound large unit tables"
+match_command = "^systemctl(?:\\s+--(?:user|system|global|no-pager|plain|full|all))*\\s+(?:list-units|list-unit-files|list-timers|list-sockets|list-jobs)\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*(?:LOAD|ACTIVE|SUB)\\s+(?:=|→)",
+  "^\\s*(?:LEGEND:|Legend:)",
+  "^\\s*To show all installed unit files use ",
+]
+truncate_lines_at = 240
+max_lines = 80
+on_empty = "0 units listed."
+
+[[tests.systemctl-list]]
+name = "unit rows remain while legend is stripped"
+input = """
+  UNIT                 LOAD   ACTIVE SUB     DESCRIPTION
+  dbus.service         loaded active running D-Bus System Message Bus
+  ssh.service          loaded failed failed  OpenBSD Secure Shell server
+
+LOAD   = Reflects whether the unit definition was properly loaded.
+ACTIVE = The high-level unit activation state.
+SUB    = The low-level unit activation state.
+2 loaded units listed.
+"""
+expected = "  UNIT                 LOAD   ACTIVE SUB     DESCRIPTION\n  dbus.service         loaded active running D-Bus System Message Bus\n  ssh.service          loaded failed failed  OpenBSD Secure Shell server\n2 loaded units listed."
+
+[[tests.systemctl-list]]
+name = "empty listing reports zero units"
+input = ""
+expected = "0 units listed."

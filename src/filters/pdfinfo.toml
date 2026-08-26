@@ -1,0 +1,39 @@
+[filters.pdfinfo]
+description = "Compact pdfinfo metadata — keep document identity and rendering-relevant fields"
+match_command = "^pdfinfo\\b"
+strip_ansi = true
+keep_lines_matching = [
+  "^(Title|Subject|Keywords|Author|Creator|Producer|CreationDate|ModDate|Tagged|Form|Pages|Encrypted|Page size|File size|PDF version):",
+  "^Syntax (Error|Warning):",
+  "^I/O Error:",
+]
+truncate_lines_at = 300
+max_lines = 40
+on_empty = "pdfinfo: no metadata"
+
+[[tests.pdfinfo]]
+name = "technical noise is dropped while useful metadata remains"
+input = """
+Title:           Thesis chapter
+Author:          Miko
+Custom Metadata: no
+Metadata Stream: yes
+Tagged:          yes
+UserProperties:  no
+Suspects:        no
+Form:            none
+JavaScript:      no
+Pages:           42
+Encrypted:       no
+Page size:       595.28 x 841.89 pts (A4)
+Page rot:        0
+File size:       123456 bytes
+Optimized:       yes
+PDF version:     1.7
+"""
+expected = "Title:           Thesis chapter\nAuthor:          Miko\nTagged:          yes\nForm:            none\nPages:           42\nEncrypted:       no\nPage size:       595.28 x 841.89 pts (A4)\nFile size:       123456 bytes\nPDF version:     1.7"
+
+[[tests.pdfinfo]]
+name = "errors remain visible"
+input = "I/O Error: Couldn't open file 'missing.pdf': No such file or directory.\n"
+expected = "I/O Error: Couldn't open file 'missing.pdf': No such file or directory."

@@ -1,0 +1,35 @@
+[filters.pandoc]
+description = "Compact Pandoc diagnostics — strip progress noise while preserving warnings and errors"
+match_command = "^pandoc\\b"
+strip_ansi = true
+filter_stderr = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\[INFO\\] Loaded ",
+  "^\\[INFO\\] Running filter ",
+  "^\\[INFO\\] Writing output ",
+  "^\\[INFO\\] Completed successfully",
+]
+truncate_lines_at = 500
+max_lines = 80
+on_empty = "pandoc: ok"
+
+[[tests.pandoc]]
+name = "informational progress is stripped but warnings survive"
+input = """
+[INFO] Loaded input.md
+[INFO] Running filter citeproc
+[WARNING] Could not fetch resource image.png
+[INFO] Writing output output.pdf
+"""
+expected = "[WARNING] Could not fetch resource image.png"
+
+[[tests.pandoc]]
+name = "quiet success becomes concise confirmation"
+input = ""
+expected = "pandoc: ok"
+
+[[tests.pandoc]]
+name = "errors remain visible"
+input = "pandoc: input.md: openBinaryFile: does not exist\n"
+expected = "pandoc: input.md: openBinaryFile: does not exist"
