@@ -386,7 +386,17 @@ impl StreamFilter for SearchStreamFilter {
     }
 }
 
+/// True when the agent asked for grep's `-h` / `--no-filename`. RTK forces `-H`
+/// on the engine so its own parser can split the output, so it has to drop the
+/// prefix itself rather than relying on the engine to omit it.
+fn suppress_filename(extra_args: &[String]) -> bool {
+    has_short_flag(extra_args, 'h') || extra_args.iter().any(|f| f == "--no-filename")
+}
+
 fn show_file(paths: &[String], extra_args: &[String]) -> bool {
+    if suppress_filename(extra_args) {
+        return false;
+    }
     paths.len() > 1
         || paths.iter().any(|p| std::path::Path::new(p).is_dir())
         || has_short_flag(extra_args, 'H')
@@ -505,10 +515,11 @@ pub fn run(
     // --version / --help: pass through to the engine without filtering.
     // Note: Clap strips `--` before populating trailing_var_arg, so both
     // `rtk grep --version` and `rtk grep -- --version` land here identically.
-    if args
-        .iter()
-        .any(|a| a == "--version" || a == "--help" || a == "-h")
-    {
+    // `-h` is help for rg but --no-filename for grep, so it only counts as a
+    // help request for rg.
+    if args.iter().any(|a| {
+        a == "--version" || a == "--help" || (matches!(engine, Engine::Rg) && a == "-h")
+    }) {
         let mut cmd = resolved_command(engine.bin());
         cmd.args(args);
         let result = exec_capture(&mut cmd).context("search failed")?;
@@ -614,7 +625,8 @@ pub fn run(
     // show one (multiple files, a directory, -r or -H), the line number only with
     // -n. We force -nH--null for robust parsing, then drop what the engine itself
     // would not have shown.
-    let show_file = by_file.len() > 1 || show_file(&paths, &extra_args);
+    let show_file =
+        !suppress_filename(&extra_args) && (by_file.len() > 1 || show_file(&paths, &extra_args));
     let show_line = show_line(&extra_args);
 
     // Faithful baseline: exactly what the real command prints, full content.
@@ -850,6 +862,7 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
 
     #[test]
     fn test_clean_line() {
@@ -1652,4 +1665,33 @@ mod tests {
         assert!(f(&["--context=1"]));
         assert!(!f(&["--color", "auto"]));
     }
+
+    /// grep's -h / --no-filename suppresses the filename prefix. RTK forces
+    /// -H on the engine for parsing, so it must drop the prefix itself when the
+    /// agent asked for -h.
+    #[test]
+    fn no_filename_flag_suppresses_the_prefix() {
+        let two_paths = vec!["a.log".to_string(), "b.log".to_string()];
+        assert!(
+            show_file(&two_paths, &[]),
+            "two paths normally show filenames"
+        );
+        assert!(
+            !show_file(&two_paths, &["-h".to_string()]),
+            "-h must suppress the filename prefix"
+        );
+        assert!(
+            !show_file(&two_paths, &["--no-filename".to_string()]),
+            "--no-filename must suppress the filename prefix"
+        );
+        assert!(
+            !show_file(&two_paths, &["-rh".to_string()]),
+            "-h inside a cluster must suppress the filename prefix"
+        );
+        assert!(
+            show_file(&two_paths, &["-H".to_string()]),
+            "-H still forces filenames on"
+        );
+    }
+
 }

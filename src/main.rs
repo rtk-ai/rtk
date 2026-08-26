@@ -86,6 +86,8 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// List directory contents with token-optimized output (proxy to native ls)
+    // ls -h is --human-readable, not a help request.
+    #[command(disable_help_flag = true)]
     Ls {
         /// Arguments passed to ls (supports all native ls flags like -l, -a, -h, -R)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -312,18 +314,22 @@ enum Commands {
     },
 
     /// Compact grep - strips whitespace, truncates, groups by file
+    // Every single letter belongs to the proxied engine, so rtk claims none of
+    // them: -l is grep's --files-with-matches, -m its --max-count, -t rg's
+    // --type, and -h grep's --no-filename. Long forms only, help flag off.
+    #[command(disable_help_flag = true)]
     Grep {
         /// Max line length
-        #[arg(short = 'l', long, default_value = "80")]
+        #[arg(long, default_value = "80")]
         max_len: usize,
         /// Max results to show
-        #[arg(short, long, default_value = "200")]
+        #[arg(long, default_value = "200")]
         max: usize,
         /// Show only match context (not full line)
         #[arg(long)]
         context_only: bool,
         /// Filter by file type (e.g., ts, py, rust)
-        #[arg(short = 't', long)]
+        #[arg(long)]
         file_type: Option<String>,
         /// Pattern, path, and any grep/rg flags (e.g. -v, -i, -A 3, --glob, --version)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -2793,6 +2799,67 @@ fn is_operational_command(cmd: &Commands) -> bool {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    /// A proxy subcommand must not own single letters that belong to the tool it
+    /// proxies. `rtk grep` claimed -l (--max-len), -m (--max), -t (--file-type)
+    /// and clap's automatic -h, so `grep -l 404 a.log b.log` searched b.log for
+    /// the literal "a.log", `grep -m 1` dropped --max-count, and `grep -h`
+    /// printed rtk's help instead of searching.
+    #[test]
+    fn grep_does_not_swallow_engine_short_flags() {
+        for flag in ["-l", "-m", "-t"] {
+            let cli = Cli::try_parse_from(["rtk", "grep", flag, "404", "a.log"])
+                .unwrap_or_else(|e| panic!("`rtk grep {flag} 404 a.log` must parse: {e}"));
+            match cli.command {
+                Commands::Grep { extra_args, .. } => assert!(
+                    extra_args.contains(&flag.to_string()),
+                    "{flag} was swallowed by rtk's own option; extra_args = {extra_args:?}"
+                ),
+                other => panic!("expected Grep, got {other:?}"),
+            }
+        }
+    }
+
+    /// grep's -h is --no-filename and ls's -h is --human-readable; neither is a
+    /// help request. clap claims -h unless the subcommand opts out.
+    #[test]
+    fn dash_h_reaches_the_proxied_tool() {
+        let cli = Cli::try_parse_from(["rtk", "grep", "-h", "ERROR", "a.log"])
+            .expect("`rtk grep -h` must parse, not trigger clap's help");
+        match cli.command {
+            Commands::Grep { extra_args, .. } => {
+                assert!(extra_args.contains(&"-h".to_string()), "got {extra_args:?}")
+            }
+            other => panic!("expected Grep, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["rtk", "ls", "-h"])
+            .expect("`rtk ls -h` must parse, not trigger clap's help");
+        match cli.command {
+            Commands::Ls { args } => assert!(args.contains(&"-h".to_string()), "got {args:?}"),
+            other => panic!("expected Ls, got {other:?}"),
+        }
+    }
+
+    /// The long forms stay available so rtk's own knobs are still reachable.
+    #[test]
+    fn grep_long_options_still_parse() {
+        let cli = Cli::try_parse_from(["rtk", "grep", "--max-len", "40", "--max", "5", "needle"])
+            .expect("long forms must still work");
+        match cli.command {
+            Commands::Grep {
+                max_len,
+                max,
+                extra_args,
+                ..
+            } => {
+                assert_eq!(max_len, 40);
+                assert_eq!(max, 5);
+                assert_eq!(extra_args, vec!["needle".to_string()]);
+            }
+            other => panic!("expected Grep, got {other:?}"),
+        }
+    }
     use std::cell::Cell;
 
     #[test]
