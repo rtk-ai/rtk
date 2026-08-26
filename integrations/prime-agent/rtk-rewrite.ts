@@ -1,5 +1,8 @@
-// RTK Pi / Prime Agent extension — rewrites bash commands to use rtk.
-// Requires: rtk >= 0.23.0 in PATH.
+// Prime Agent extension for RTK command rewriting.
+//
+// Prime Agent is built on Pi, so this uses the same `@earendil-works/pi-coding-agent`
+// ExtensionAPI (`pi.exec`, `pi.on("tool_call", ...)`). Shell execution is exposed
+// through the `ipython` tool as multi-line `%%bash` cells.
 //
 // This is a thin delegating extension: all rewrite logic lives in `rtk rewrite`,
 // which is the single source of truth (src/discover/registry.rs).
@@ -12,7 +15,6 @@
 //   2           Deny rule matched → pass through (this extension does not gate)
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
-import { isToolCallEventType } from "@earendil-works/pi-coding-agent"
 
 const REWRITE_TIMEOUT_MS = 2_000
 const MIN_SUPPORTED_RTK_MINOR = 23
@@ -115,27 +117,12 @@ export default async function (pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     try {
       if (process.env.RTK_DISABLED === "1") return
+      if (event.toolName !== "ipython" || typeof event.input?.code !== "string") return
 
-      // Pi: bash tool with a single command.
-      if (isToolCallEventType("bash", event)) {
-        const cmd = event.input.command
-        if (typeof cmd !== "string" || cmd.trim() === "") return
-        if (cmd.startsWith("rtk ")) return
-
-        const rewritten = await rewriteCommand(pi, cmd, ctx.signal)
-        if (rewritten && rewritten !== cmd) {
-          event.input.command = rewritten
-        }
-        return
-      }
-
-      // Prime Agent: ipython tool containing a %%bash cell.
-      if (event.toolName === "ipython" && typeof event.input?.code === "string") {
-        const original = event.input.code
-        const rewritten = await rewriteBashCell(pi, original, ctx.signal)
-        if (rewritten && rewritten !== original) {
-          event.input.code = rewritten
-        }
+      const original = event.input.code
+      const rewritten = await rewriteBashCell(pi, original, ctx.signal)
+      if (rewritten && rewritten !== original) {
+        event.input.code = rewritten
       }
     } catch (err) {
       // Fail open: never block execution on an unexpected error.

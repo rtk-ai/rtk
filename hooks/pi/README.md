@@ -15,11 +15,15 @@ with other Pi extensions.
 ## Specifics
 
 - TypeScript extension using Pi's `ExtensionAPI` (not a shell hook, no `zx` dependency)
-- Subscribes to `tool_call` event, narrows to `bash` tool via `isToolCallEventType`
-- Calls `rtk rewrite` via `pi.exec`; mutates `event.input.command` in-place if rewrite differs
+- Subscribes to `tool_call` event and handles two targets:
+  - Pi `bash` tool (`isToolCallEventType("bash", event)`)
+  - Prime Agent `ipython` tool with multi-line `%%bash` cells (`event.input.code`)
+- Calls `rtk rewrite` via `pi.exec`; mutates `event.input.command` / `event.input.code` in-place if rewrite differs
 - All error paths return `undefined` (pass through); RTK never blocks execution
 - Version guard at load time: checks `rtk >= 0.23.0`; warns and registers no-op if too old or missing
-- Installed to `.pi/extensions/rtk.ts` by `rtk init --agent pi` (project-local) or `~/.pi/agent/extensions/rtk.ts` by `rtk init --agent pi --global`
+- `RTK_DISABLED=1` bypass
+- Per-call `AbortSignal` support (`ctx.signal`) and a per-cell `MAX_BASH_LINES` guard
+- Installed to `.pi/extensions/rtk.ts` by `rtk init --agent pi` (project-local) or `~/.pi/agent/extensions/rtk.ts` by `rtk init --agent pi --global`. Because Prime Agent is Pi-based, the same file can be copied to `~/.prime/agent/extensions/rtk.ts` for Prime Agent.
 
 ## Uninstall
 

@@ -57,6 +57,8 @@ pub enum AgentTarget {
     Droid,
     /// Mistral Vibe CLI
     Vibe,
+    /// Prime Agent (built on Pi)
+    PrimeAgent,
 }
 
 #[derive(Parser)]
@@ -1572,6 +1574,8 @@ where
         hooks::init::uninstall_droid(global, ctx)
     } else if agent == Some(AgentTarget::Vibe) {
         hooks::init::uninstall_vibe(ctx)
+    } else if agent == Some(AgentTarget::PrimeAgent) {
+        hooks::init::uninstall_prime_agent(global, ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -2053,6 +2057,8 @@ fn run_cli() -> Result<i32> {
                 }
             } else if agent == Some(AgentTarget::Pi) {
                 hooks::init::run_pi_mode(global, ctx)?
+            } else if agent == Some(AgentTarget::PrimeAgent) {
+                hooks::init::run_prime_agent_mode(global, ctx)?
             } else if agent == Some(AgentTarget::Kilocode) {
                 if global {
                     anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");

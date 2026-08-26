@@ -38,6 +38,12 @@ pub const PI_EXTENSIONS_SUBDIR: &str = "extensions";
 pub const PI_PLUGIN_FILE: &str = "rtk.ts";
 pub const PI_CODING_AGENT_DIR_ENV: &str = "PI_CODING_AGENT_DIR";
 
+pub const PRIME_AGENT_DIR: &str = ".prime/agent";
+pub const PRIME_AGENT_LOCAL_DIR: &str = ".prime";
+pub const PRIME_AGENT_EXTENSIONS_SUBDIR: &str = "extensions";
+pub const PRIME_AGENT_PLUGIN_FILE: &str = "rtk.ts";
+pub const PRIME_AGENT_DIR_ENV: &str = "PRIME_AGENT_DIR";
+
 /// Factory Droid config directory, joined onto the resolved home directory.
 pub const DROID_DIR: &str = ".factory";
 /// Canonical Droid hooks file (Droid's own /hooks UI reads and writes this).
