@@ -7,14 +7,12 @@
 /// - `wc -c file.py`  → `978`
 /// - `wc -l *.py`     → table with common path prefix stripped
 use crate::core::runner::{self, RunOptions};
-use crate::core::utils::resolved_command;
+use crate::core::utils::{resolved_command, ChildArgExt};
 use anyhow::Result;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("wc");
-    for arg in args {
-        cmd.arg(arg);
-    }
+    cmd.child_args(args);
 
     if verbose > 0 {
         eprintln!("Running: wc {}", args.join(" "));
