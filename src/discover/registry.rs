@@ -28,6 +28,22 @@ pub enum Classification {
     Ignored,
 }
 
+/// Best-effort category guess for an unsupported base command (no rule matched,
+/// so no `category` from `Classification::Supported` is available). Feeds
+/// `category_avg_tokens` so unhandled commands get the same per-category output
+/// estimate as handled ones, instead of every unhandled command being treated
+/// as equally "big".
+pub fn guess_unsupported_category(base_command: &str) -> &'static str {
+    match base_command {
+        "find" | "ls" | "cat" | "head" | "tail" => "Files",
+        "grep" | "rg" | "ag" => "Files",
+        "curl" | "wget" | "ping" | "ssh" | "sshpass" => "Network",
+        "python3" | "python" | "node" | "go" | "make" => "Build",
+        "docker" | "kubectl" | "helm" | "terraform" | "ansible" => "Infra",
+        _ => "",
+    }
+}
+
 /// Average token counts per category for estimation when no output_len available.
 pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
     match category {

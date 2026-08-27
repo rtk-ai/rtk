@@ -46,6 +46,9 @@ pub struct UnsupportedEntry {
     pub base_command: String,
     pub count: usize,
     pub example: String,
+    /// call_frequency x avg_output_bytes -- rough impact score used to prioritize
+    /// which unhandled command is worth filing an issue for first.
+    pub estimated_impact_tokens: usize,
 }
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, Default)]
@@ -183,15 +186,16 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
         out.push_str(&"-".repeat(52));
         out.push('\n');
         out.push_str(&format!(
-            "{:<24} {:>5}    {}\n",
-            "Command", "Count", "Example"
+            "{:<24} {:>5}    {:>9}    {}\n",
+            "Command", "Count", "Priority", "Example"
         ));
 
         for entry in report.unsupported.iter().take(limit) {
             out.push_str(&format!(
-                "{:<24} {:>5}    {}\n",
+                "{:<24} {:>5}    ~{:<8}    {}\n",
                 truncate_str(&entry.base_command, 23),
                 entry.count,
+                format_tokens(entry.estimated_impact_tokens),
                 truncate_str(&entry.example, 40),
             ));
         }
