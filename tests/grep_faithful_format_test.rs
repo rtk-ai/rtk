@@ -184,3 +184,35 @@ fn piped_stdin_matches_grep() {
         assert_eq!(rtk, grep, "piped stdin mismatch for {args:?}");
     }
 }
+
+// Regression: the `-l` short used to be bound to RTK's --max-len, so `grep -l PAT`
+// made clap read PAT as a usize and error out (0% savings via raw fallback).
+// `-l` is GNU grep's --files-with-matches; `rtk grep -l` must match `grep -l`
+// byte-for-byte (explicit file args => deterministic order). Also covers `-l`
+// trailing (arg-order sensitivity) and `-L` (--files-without-match).
+#[test]
+fn dash_l_and_dash_cap_l_match_grep() {
+    let d = tempfile::tempdir().unwrap();
+    let f1 = write(d.path(), "hit1.txt", "alpha\ntenant_id here\n");
+    let f2 = write(d.path(), "miss.txt", "nothing to see\n");
+    let f3 = write(d.path(), "hit2.txt", "tenant_id again\n");
+
+    let cmp = |args: &[&str]| {
+        let (rtk, rc) = rtk_grep(args);
+        let out = Command::new("grep").args(args).output().expect("grep");
+        assert_eq!(
+            rtk,
+            String::from_utf8_lossy(&out.stdout),
+            "stdout mismatch for grep {args:?}"
+        );
+        assert_eq!(
+            rc,
+            out.status.code(),
+            "exit code mismatch for grep {args:?}"
+        );
+    };
+
+    cmp(&["-l", "tenant_id", &f1, &f2, &f3]); // -l leading (the token that broke)
+    cmp(&["tenant_id", &f1, &f2, &f3, "-l"]); // -l trailing
+    cmp(&["-L", "tenant_id", &f1, &f2, &f3]); // -L files-without-match
+}

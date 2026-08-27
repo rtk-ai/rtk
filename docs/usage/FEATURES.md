@@ -215,7 +215,7 @@ rtk grep <pattern> [chemin] [options]
 
 | Option | Court | Defaut | Description |
 |--------|-------|--------|-------------|
-| `--max-len` | `-l` | 80 | Longueur maximale de ligne |
+| `--max-len` |  | 80 | Longueur maximale de ligne (pas de raccourci, `-l` est reserve a `grep --files-with-matches`) |
 | `--max` | `-m` | 50 | Nombre maximum de resultats |
 | `--context-only` |  | non | Afficher uniquement le contexte du match (pas de raccourci, `-c` est reserve a `grep --count`) |
 | `--file-type` | `-t` | tous | Filtrer par type (ts, py, rust, etc.) |

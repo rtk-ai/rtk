@@ -314,7 +314,12 @@ enum Commands {
     /// Compact grep - strips whitespace, truncates, groups by file
     Grep {
         /// Max line length
-        #[arg(short = 'l', long, default_value = "80")]
+        // No short: `-l` is GNU grep's --files-with-matches. Binding it to
+        // --max-len made clap read the search pattern as a usize and error out,
+        // dropping `grep -l <pat>` to a raw-grep fallback (0% savings). Without
+        // the short, `-l` flows to extra_args where has_format_flag routes it to
+        // the grep passthrough, matching GNU semantics.
+        #[arg(long, default_value = "80")]
         max_len: usize,
         /// Max results to show
         #[arg(short, long, default_value = "200")]
@@ -2972,6 +2977,30 @@ mod tests {
                 command: OcCommands::Other(_),
             } => {}
             _ => panic!("Expected Oc Other command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_grep_dash_l_is_files_with_matches() {
+        // Regression: `-l` is GNU grep's --files-with-matches, not RTK's
+        // --max-len. It must parse (not error as an invalid usize), keep
+        // max_len at its default, and reach extra_args so has_format_flag
+        // routes it to the raw-grep passthrough.
+        let cli = Cli::try_parse_from(["rtk", "grep", "-l", "tenant_id", "src/"]).unwrap();
+
+        match cli.command {
+            Commands::Grep {
+                max_len,
+                extra_args,
+                ..
+            } => {
+                assert_eq!(
+                    max_len, 80,
+                    "max_len must stay default, not eat the pattern"
+                );
+                assert_eq!(extra_args, vec!["-l", "tenant_id", "src/"]);
+            }
+            _ => panic!("Expected Grep command"),
         }
     }
 

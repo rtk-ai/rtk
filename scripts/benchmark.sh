@@ -215,7 +215,7 @@ bench "git show" "git show HEAD --stat 2>/dev/null || true" "$RTK git show HEAD 
 section "grep"
 bench "grep fn" "grep -rn 'fn ' src/ || true" "$RTK grep -rn 'fn ' src/"
 bench "grep struct" "grep -rn 'struct ' src/ || true" "$RTK grep -rn 'struct ' src/"
-bench "grep -l 40" "grep -rn 'fn ' src/ || true" "$RTK grep -rn 'fn ' src/ -l 40"
+bench "grep --max-len 40" "grep -rn 'fn ' src/ || true" "$RTK grep -rn 'fn ' src/ --max-len 40"
 bench "grep -c" "grep -ron 'fn ' src/ || true" "$RTK grep -rc 'fn ' src/"
 
 # ===================
