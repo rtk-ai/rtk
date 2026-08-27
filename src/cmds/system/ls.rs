@@ -3,7 +3,7 @@
 use super::constants::NOISE_DIRS;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::{reduced, CAP_WARNINGS};
-use crate::core::utils::resolved_command;
+use crate::core::utils::{resolved_command, ChildArgExt};
 use anyhow::Result;
 use regex::Regex;
 use std::io::IsTerminal;
@@ -54,7 +54,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     for flag in &flags {
         if flag.starts_with("--") {
             if *flag != "--all" {
-                cmd.arg(flag);
+                cmd.child_arg(flag);
             }
         } else {
             let stripped = flag.trim_start_matches('-');
@@ -63,17 +63,15 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
                 .filter(|c| *c != 'l' && *c != 'a' && *c != 'h')
                 .collect();
             if !extra.is_empty() {
-                cmd.arg(format!("-{}", extra));
+                cmd.child_arg(format!("-{}", extra));
             }
         }
     }
 
     if paths.is_empty() {
-        cmd.arg(".");
+        cmd.child_arg(".");
     } else {
-        for p in &paths {
-            cmd.arg(p);
-        }
+        cmd.child_args(&paths);
     }
 
     let target_display = if paths.is_empty() {
