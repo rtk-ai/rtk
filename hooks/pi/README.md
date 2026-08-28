@@ -20,6 +20,7 @@ with other Pi extensions.
 - All error paths return `undefined` (pass through); RTK never blocks execution
 - Version guard at load time: checks `rtk >= 0.23.0`; warns and registers no-op if too old or missing
 - Installed to `.pi/extensions/rtk.ts` by `rtk init --agent pi` (project-local) or `~/.pi/agent/extensions/rtk.ts` by `rtk init --agent pi --global`
+- omp (Oh My Pi) shares this same extension API and file — install it there with `rtk init --agent omp [--global]` (see [`hooks/omp/README.md`](../omp/README.md))
 
 ## Uninstall
 

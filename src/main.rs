@@ -51,6 +51,8 @@ pub enum AgentTarget {
     Kimi,
     /// Pi coding agent
     Pi,
+    /// Oh My Pi (omp) coding agent
+    Omp,
     /// Hermes CLI
     Hermes,
     /// Factory Droid CLI
@@ -1564,7 +1566,7 @@ fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
-    UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
+    UninstallStandard: FnOnce(bool, bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
@@ -1575,7 +1577,8 @@ where
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
-        uninstall_standard(global, gemini, codex, cursor, pi, ctx)
+        let omp = agent == Some(AgentTarget::Omp);
+        uninstall_standard(global, gemini, codex, cursor, pi, omp, ctx)
     }
 }
 
@@ -2053,6 +2056,8 @@ fn run_cli() -> Result<i32> {
                 }
             } else if agent == Some(AgentTarget::Pi) {
                 hooks::init::run_pi_mode(global, ctx)?
+            } else if agent == Some(AgentTarget::Omp) {
+                hooks::init::run_omp_mode(global, ctx)?
             } else if agent == Some(AgentTarget::Kilocode) {
                 if global {
                     anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");
@@ -3010,7 +3015,7 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
-            |_, _, _, _, _, _| {
+            |_, _, _, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
             },

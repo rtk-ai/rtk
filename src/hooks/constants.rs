@@ -38,6 +38,14 @@ pub const PI_EXTENSIONS_SUBDIR: &str = "extensions";
 pub const PI_PLUGIN_FILE: &str = "rtk.ts";
 pub const PI_CODING_AGENT_DIR_ENV: &str = "PI_CODING_AGENT_DIR";
 
+/// Oh My Pi (omp) agent directory. omp is the successor to Pi and shares the
+/// same extension API; it resolves its agent directory via `PI_CODING_AGENT_DIR`
+/// (falling back to the same `~/.pi/agent` default), but conventionally stores
+/// extensions under `~/.omp/agent/extensions`.
+pub const OMP_DIR: &str = ".omp/agent";
+pub const OMP_EXTENSIONS_SUBDIR: &str = "extensions";
+pub const OMP_PLUGIN_FILE: &str = "rtk.ts";
+
 /// Factory Droid config directory, joined onto the resolved home directory.
 pub const DROID_DIR: &str = ".factory";
 /// Canonical Droid hooks file (Droid's own /hooks UI reads and writes this).

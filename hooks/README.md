@@ -4,7 +4,7 @@
 
 **Deployed hook artifacts** — the actual files installed on user machines by `rtk init`. These are shell scripts, TypeScript plugins, and rules files that run outside the Rust binary. They are **thin delegates**: parse agent-specific JSON, call `rtk rewrite` as a subprocess, format agent-specific response. Zero filtering logic lives here.
 
-Owns: per-agent hook scripts and configuration files for 10 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Mistral Vibe).
+Owns: per-agent hook scripts and configuration files for 11 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, omp, Mistral Vibe).
 
 Does **not** own: hook installation/uninstallation (that's `src/hooks/init.rs`), the rewrite pattern registry (that's `discover/registry`), or integrity verification (that's `src/hooks/integrity.rs`).
 
@@ -58,6 +58,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | Codex CLI | AGENTS.md / instructions | Prompt-level guidance | N/A |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | In-place mutation | Yes |
 | Pi | TypeScript extension (`tool_call` event) | In-place mutation | Yes |
+| omp | TypeScript extension (`tool_call` event) | In-place mutation | Yes |
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
 | Mistral Vibe | Rust binary (`rtk hook vibe`) | Transparent rewrite | Yes (`hook_specific_output.tool_input`) |
 
@@ -270,7 +271,7 @@ New integrations must follow the [Exit Code Contract](#exit-code-contract) and [
 | Tier | Mechanism | Maintenance | Examples |
 |------|-----------|-------------|----------|
 | **Full hook** | Shell script or Rust binary, intercepts commands via agent's hook API | High — must track agent API changes | Claude Code, Cursor, Copilot, Gemini |
-| **Plugin** | TypeScript/JS/Python plugin in agent's plugin system | Medium — agent manages loading | OpenCode, Hermes, Pi |
+| **Plugin** | TypeScript/JS/Python plugin in agent's plugin system | Medium — agent manages loading | OpenCode, Hermes, Pi, omp |
 | **Rules file** | Prompt-level instructions the agent reads | Low — no code to break | Cline, Windsurf, Codex |
 
 ### Eligibility

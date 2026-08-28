@@ -17,9 +17,10 @@ use super::constants::{
     DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR,
     DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
     HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
-    HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
-    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR,
-    VIBE_HOOKS_FILE, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
+    HOOKS_SUBDIR, OMP_DIR, OMP_EXTENSIONS_SUBDIR, OMP_PLUGIN_FILE, PI_CODING_AGENT_DIR_ENV,
+    PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE, PRE_TOOL_USE_KEY,
+    REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOKS_FILE,
+    VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
 };
 use super::integrity;
 use super::is_claude_hook_command;
@@ -645,6 +646,7 @@ pub fn uninstall(
     codex: bool,
     cursor: bool,
     pi: bool,
+    omp: bool,
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
@@ -685,6 +687,11 @@ pub fn uninstall(
 
     if pi {
         uninstall_pi(global, ctx)?;
+        return Ok(());
+    }
+
+    if omp {
+        uninstall_omp(global, ctx)?;
         return Ok(());
     }
 
@@ -3488,6 +3495,115 @@ pub fn run_pi_mode(global: bool, ctx: InitContext) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Resolve the omp agent directory. omp shares Pi's extension API and honors
+/// `PI_CODING_AGENT_DIR` when set; otherwise it falls back to `~/.omp/agent`.
+fn resolve_omp_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var(PI_CODING_AGENT_DIR_ENV) {
+        if !dir.is_empty() {
+            return Ok(PathBuf::from(dir));
+        }
+    }
+    resolve_home_subdir(OMP_DIR)
+}
+
+/// Return the path to the installed omp extension file.
+fn omp_plugin_path(omp_dir: &Path) -> PathBuf {
+    omp_dir.join(OMP_EXTENSIONS_SUBDIR).join(OMP_PLUGIN_FILE)
+}
+
+/// Uninstall the omp extension for the given scope.
+fn uninstall_omp(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+    let plugin_path = if global {
+        omp_plugin_path(&resolve_omp_dir()?)
+    } else {
+        PathBuf::from(OMP_DIR)
+            .join(OMP_EXTENSIONS_SUBDIR)
+            .join(OMP_PLUGIN_FILE)
+    };
+    let mut removed: Vec<String> = Vec::new();
+
+    if plugin_path.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove omp extension: {}",
+                plugin_path.display()
+            );
+        } else {
+            // nosemgrep: filesystem-deletion -- omp uninstall removes only the RTK-managed extension file.
+            fs::remove_file(&plugin_path).with_context(|| {
+                format!("Failed to remove omp extension: {}", plugin_path.display())
+            })?;
+            if verbose > 0 {
+                eprintln!("Removed omp extension: {}", plugin_path.display());
+            }
+            removed.push(format!("omp extension: {}", plugin_path.display()));
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    } else if !removed.is_empty() {
+        println!("RTK uninstalled (omp):");
+        for item in &removed {
+            println!("  - {}", item);
+        }
+        println!("\nRestart omp to apply changes.");
+    } else {
+        println!("RTK omp extension was not installed (nothing to remove)");
+    }
+    Ok(())
+}
+
+/// Install the omp extension (hook-only; no AGENTS.md injection). The extension
+/// file is identical to Pi's — omp and Pi expose the same extension API — but
+/// it lands in the omp agent directory.
+///
+/// global=true  → `$PI_CODING_AGENT_DIR/extensions/rtk.ts` (or `~/.omp/agent/extensions/rtk.ts`)
+/// global=false → `.omp/agent/extensions/rtk.ts` (project-local)
+pub fn run_omp_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let plugin_path = if global {
+        let omp_dir = resolve_omp_dir()?;
+        let path = omp_plugin_path(&omp_dir);
+        if let Some(parent) = path.parent() {
+            ensure_pi_extensions_dir(parent, "omp extensions directory", ctx)?;
+        }
+        path
+    } else {
+        let path = PathBuf::from(OMP_DIR)
+            .join(OMP_EXTENSIONS_SUBDIR)
+            .join(OMP_PLUGIN_FILE);
+        if let Some(parent) = path.parent() {
+            ensure_pi_extensions_dir(parent, "local omp extensions directory", ctx)?;
+        }
+        path
+    };
+
+    let installed = ensure_pi_plugin_installed(&plugin_path, ctx)?;
+
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        print_omp_result(&plugin_path, installed);
+    }
+
+    Ok(())
+}
+
+fn print_omp_result(plugin_path: &Path, installed: bool) {
+    let status = if installed {
+        "installed"
+    } else {
+        "already up to date"
+    };
+    println!("RTK omp extension {}:", status);
+    println!("  Extension: {}", plugin_path.display());
+    println!();
+    println!("omp will load the extension automatically on next start.");
+    println!("Verify: omp -e {} --no-session", plugin_path.display());
 }
 
 fn print_pi_result(plugin_path: &Path, installed: bool) {
@@ -7221,7 +7337,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
-            uninstall(true, false, false, false, false, InitContext::default()).unwrap();
+            uninstall(true, false, false, false, false, false, InitContext::default()).unwrap();
 
             assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
             let settings_content =
@@ -7349,7 +7465,7 @@ mod tests {
                 dry_run: true,
                 ..Default::default()
             };
-            uninstall(true, false, false, false, false, dry).unwrap();
+            uninstall(true, false, false, false, false, false, dry).unwrap();
 
             // Files must still exist with identical content
             assert!(
@@ -7582,7 +7698,7 @@ mod tests {
             let plugin = pi_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
             assert!(plugin.exists());
 
-            uninstall(true, false, false, false, true, InitContext::default()).unwrap();
+            uninstall(true, false, false, false, true, false, InitContext::default()).unwrap();
 
             assert!(!plugin.exists(), "plugin must be removed");
         });
@@ -7596,7 +7712,7 @@ mod tests {
         std::env::set_current_dir(tmp.path()).unwrap();
 
         run_pi_mode(false, InitContext::default()).unwrap();
-        let result = uninstall(false, false, false, false, true, InitContext::default());
+        let result = uninstall(false, false, false, false, true, false, InitContext::default());
         std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
@@ -7695,6 +7811,7 @@ mod tests {
                 false,
                 false,
                 true,
+                false,
                 InitContext {
                     verbose: 0,
                     dry_run: true,
@@ -7705,6 +7822,97 @@ mod tests {
             assert!(
                 plugin.exists(),
                 "dry-run uninstall must not remove the Pi extension"
+            );
+        });
+    }
+
+    #[test]
+    fn test_run_omp_mode_global_installs_plugin() {
+        let tmp = TempDir::new().unwrap();
+        with_pi_dir_override(&tmp, |omp_dir| {
+            run_omp_mode(true, InitContext::default()).unwrap();
+
+            let plugin = omp_dir.join(OMP_EXTENSIONS_SUBDIR).join(OMP_PLUGIN_FILE);
+            assert!(plugin.exists(), "global omp extension must be created");
+
+            let content = fs::read_to_string(&plugin).unwrap();
+            assert!(
+                content.contains("rtk rewrite"),
+                "extension must delegate to rtk rewrite"
+            );
+        });
+    }
+
+    #[test]
+    fn test_run_omp_mode_local_installs_plugin() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let result = run_omp_mode(false, InitContext::default());
+        std::env::set_current_dir(&cwd).unwrap();
+        result.unwrap();
+
+        let plugin = tmp
+            .path()
+            .join(OMP_DIR)
+            .join(OMP_EXTENSIONS_SUBDIR)
+            .join(OMP_PLUGIN_FILE);
+        assert!(plugin.exists(), "local omp extension must be created");
+    }
+
+    #[test]
+    fn test_run_omp_mode_global_does_not_create_agents_md() {
+        let tmp = TempDir::new().unwrap();
+        with_pi_dir_override(&tmp, |omp_dir| {
+            run_omp_mode(true, InitContext::default()).unwrap();
+
+            let agents_md = omp_dir.join(AGENTS_MD);
+            assert!(!agents_md.exists(), "AGENTS.md must not be created");
+        });
+    }
+
+    #[test]
+    fn test_omp_global_uninstall_removes_plugin() {
+        let tmp = TempDir::new().unwrap();
+        with_pi_dir_override(&tmp, |omp_dir| {
+            run_omp_mode(true, InitContext::default()).unwrap();
+
+            let plugin = omp_dir.join(OMP_EXTENSIONS_SUBDIR).join(OMP_PLUGIN_FILE);
+            assert!(plugin.exists());
+
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                InitContext::default(),
+            )
+            .unwrap();
+
+            assert!(!plugin.exists(), "omp plugin must be removed");
+        });
+    }
+
+    #[test]
+    fn test_run_omp_mode_global_dry_run_writes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        with_pi_dir_override(&tmp, |omp_dir| {
+            run_omp_mode(
+                true,
+                InitContext {
+                    verbose: 0,
+                    dry_run: true,
+                },
+            )
+            .unwrap();
+
+            assert!(
+                !omp_dir.join(OMP_EXTENSIONS_SUBDIR).exists(),
+                "dry-run must not create the omp extensions directory"
             );
         });
     }
@@ -7733,6 +7941,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             InitContext {
                 verbose: 0,
                 dry_run: true,
