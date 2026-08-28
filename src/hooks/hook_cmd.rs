@@ -571,6 +571,28 @@ enum PayloadAction {
     Ignore,
 }
 
+fn pre_tool_use_rewrite_output(
+    v: &Value,
+    rewritten: &str,
+    permission_decision: Option<&str>,
+) -> Value {
+    let mut updated_input = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+    if let Some(obj) = updated_input.as_object_mut() {
+        obj.insert("command".into(), Value::String(rewritten.to_string()));
+    }
+
+    let mut hook_output = json!({
+        "hookEventName": PRE_TOOL_USE_KEY,
+        "permissionDecisionReason": "RTK auto-rewrite",
+        "updatedInput": updated_input
+    });
+    if let Some(decision) = permission_decision {
+        hook_output["permissionDecision"] = Value::String(decision.to_string());
+    }
+
+    json!({ "hookSpecificOutput": hook_output })
+}
+
 fn process_claude_payload(v: &Value) -> PayloadAction {
     let cmd = match v
         .pointer("/tool_input/command")
@@ -598,31 +620,10 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         HookDecision::AskRewrite(r) => (r, false),
     };
 
-    let updated_input = {
-        let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
-        if let Some(obj) = ti.as_object_mut() {
-            obj.insert("command".into(), Value::String(rewritten.clone()));
-        }
-        ti
-    };
-
-    let mut hook_output = json!({
-        "hookEventName": PRE_TOOL_USE_KEY,
-        "permissionDecisionReason": "RTK auto-rewrite",
-        "updatedInput": updated_input
-    });
-
-    if allow {
-        hook_output
-            .as_object_mut()
-            .unwrap()
-            .insert("permissionDecision".into(), json!("allow"));
-    }
-
     PayloadAction::Rewrite {
         cmd: cmd.to_string(),
+        output: pre_tool_use_rewrite_output(v, &rewritten, allow.then_some("allow")),
         rewritten,
-        output: json!({ "hookSpecificOutput": hook_output }),
     }
 }
 
@@ -732,22 +733,10 @@ fn process_codex_payload(v: &Value) -> PayloadAction {
     // can add prompts for known-safe commands and obscure classifier signals
     // for wrapped mutating commands such as git push. Keep the passthrough gates
     // above conservative and revisit this boundary whenever coverage expands.
-    let mut updated_input = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
-    if let Some(obj) = updated_input.as_object_mut() {
-        obj.insert("command".into(), Value::String(rewritten.clone()));
-    }
-
     PayloadAction::Rewrite {
         cmd: cmd.to_string(),
+        output: pre_tool_use_rewrite_output(v, &rewritten, Some("allow")),
         rewritten,
-        output: json!({
-            "hookSpecificOutput": {
-                "hookEventName": PRE_TOOL_USE_KEY,
-                "permissionDecision": "allow",
-                "permissionDecisionReason": "RTK auto-rewrite",
-                "updatedInput": updated_input
-            }
-        }),
     }
 }
 
@@ -962,21 +951,7 @@ fn droid_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) ->
 
     audit_log("rewrite", cmd, &rewritten);
 
-    let updated_input = {
-        let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
-        if let Some(obj) = ti.as_object_mut() {
-            obj.insert("command".into(), Value::String(rewritten));
-        }
-        ti
-    };
-
-    Some(json!({
-        "hookSpecificOutput": {
-            "hookEventName": PRE_TOOL_USE_KEY,
-            "permissionDecisionReason": "RTK auto-rewrite",
-            "updatedInput": updated_input
-        }
-    }))
+    Some(pre_tool_use_rewrite_output(v, &rewritten, None))
 }
 
 /// Run the Factory Droid PreToolUse hook natively.
@@ -1507,6 +1482,32 @@ mod tests {
             rewrite_command_no_prefixes("RUST_LOG=debug cargo test", &[]),
             Some("RUST_LOG=debug rtk cargo test".into())
         );
+    }
+
+    #[test]
+    fn test_pre_tool_use_rewrite_output_merges_input_and_optional_decision() {
+        let input = json!({
+            "tool_input": {
+                "command": "git status",
+                "timeout": 30_000,
+                "description": "Inspect the working tree"
+            }
+        });
+
+        let ask = pre_tool_use_rewrite_output(&input, "rtk git status", None);
+        let ask_hook = &ask["hookSpecificOutput"];
+        assert_eq!(ask_hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(ask_hook["permissionDecisionReason"], "RTK auto-rewrite");
+        assert!(ask_hook.get("permissionDecision").is_none());
+        assert_eq!(ask_hook["updatedInput"]["command"], "rtk git status");
+        assert_eq!(ask_hook["updatedInput"]["timeout"], 30_000);
+        assert_eq!(
+            ask_hook["updatedInput"]["description"],
+            "Inspect the working tree"
+        );
+
+        let allow = pre_tool_use_rewrite_output(&input, "rtk git status", Some("allow"));
+        assert_eq!(allow["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
     // --- Claude handler ---
