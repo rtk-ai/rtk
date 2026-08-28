@@ -4773,27 +4773,8 @@ fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
 /// Patch ~/.cursor/hooks.json to add RTK preToolUse hook.
 /// Returns true if the file was modified.
 fn patch_cursor_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
-<<<<<<< HEAD
-    let InitContext {
-        verbose, dry_run, ..
-    } = ctx;
-    let mut root = if path.exists() {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read {}", path.display()))?;
-        let content = strip_leading_bom(&content);
-        if content.trim().is_empty() {
-            serde_json::json!({ "version": 1 })
-        } else {
-            from_json_str(content)
-                .with_context(|| format!("Failed to parse {} as JSON", path.display()))?
-        }
-    } else {
-        serde_json::json!({ "version": 1 })
-    };
-=======
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext { verbose, dry_run, .. } = ctx;
     let mut root = read_json_file(path)?.unwrap_or_else(|| serde_json::json!({ "version": 1 }));
->>>>>>> 53fc1b6 (refactor(hooks): centralize hook JSON file I/O)
 
     // Check idempotency
     if cursor_hook_already_present(&root) {
