@@ -2875,12 +2875,14 @@ fn remove_rtk_refs_from_md(
     let mut working_content = content.clone();
     let mut changed = false;
 
-    if has_rtk_reference(&working_content, refs) {
+    // Substring check (not exact line match) so a reference line carrying a
+    // trailing comment (e.g. `@RTK.md — see below`) still triggers cleanup.
+    if refs.iter().any(|r| working_content.contains(r)) {
         let new_content = working_content
             .lines()
             .filter(|line| {
                 let trimmed = line.trim();
-                !refs.contains(&trimmed)
+                !refs.iter().any(|r| trimmed.starts_with(r))
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -8692,6 +8694,56 @@ mod tests {
         assert!(codebuddy_md_content.contains("my rules"));
         let settings_content = fs::read_to_string(&settings).unwrap();
         assert!(!settings_content.contains(CODEBUDDY_HOOK_COMMAND));
+    }
+
+    // ── remove_rtk_refs_from_md ─────────────────────────────────
+
+    #[test]
+    fn test_remove_rtk_refs_from_md_strips_trailing_comment_reference() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+
+        // Only a reference line carrying a trailing comment — the exact-match
+        // regression left this behind, and it must be stripped (issue flagged
+        // by maintainer review).
+        let md = dir.join(CLAUDE_MD);
+        fs::write(
+            &md,
+            "my rules\n\n@RTK.md — see this for token-saving instructions\n",
+        )
+        .unwrap();
+
+        let removed =
+            remove_rtk_refs_from_md(&md, CLAUDE_MD, &[RTK_MD_REF], InitContext::default()).unwrap();
+
+        assert_eq!(
+            removed,
+            vec!["CLAUDE.md: removed @RTK.md reference".to_string()]
+        );
+        let content = fs::read_to_string(&md).unwrap();
+        assert!(!content.contains(RTK_MD_REF));
+        assert!(content.contains("my rules"));
+    }
+
+    #[test]
+    fn test_remove_rtk_refs_from_md_strips_mixed_reference_lines() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+
+        // A plain reference plus one with trailing text: both must go.
+        let md = dir.join(CLAUDE_MD);
+        fs::write(&md, "my rules\n\n@RTK.md\n@RTK.md — token notes\n").unwrap();
+
+        let removed =
+            remove_rtk_refs_from_md(&md, CLAUDE_MD, &[RTK_MD_REF], InitContext::default()).unwrap();
+
+        assert_eq!(
+            removed,
+            vec!["CLAUDE.md: removed @RTK.md reference".to_string()]
+        );
+        let content = fs::read_to_string(&md).unwrap();
+        assert!(!content.contains(RTK_MD_REF));
+        assert!(content.contains("my rules"));
     }
 
     #[test]
