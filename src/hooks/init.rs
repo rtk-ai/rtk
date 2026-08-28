@@ -3419,11 +3419,24 @@ pub fn uninstall_droid(global: bool, ctx: InitContext) -> Result<()> {
 
 fn uninstall_droid_at(droid_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
     let mut removed = Vec::new();
+    let mut errors = Vec::new();
     for candidate in droid_hook_file_candidates(droid_dir) {
-        if remove_droid_hook_from_file(&candidate, ctx)? {
-            removed.push(format!("Droid hook file: {}", candidate.path.display()));
+        match remove_droid_hook_from_file(&candidate, ctx) {
+            Ok(true) => {
+                removed.push(format!("Droid hook file: {}", candidate.path.display()));
+            }
+            Ok(false) => {}
+            Err(error) => errors.push(format!("{}: {error:#}", candidate.path.display())),
         }
     }
+
+    if !errors.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Failed to uninstall RTK from one or more Droid hook files:\n  - {}",
+            errors.join("\n  - ")
+        ));
+    }
+
     Ok(removed)
 }
 
@@ -3930,8 +3943,12 @@ fn remove_legacy_cursor_hook_entries_from_json(root: &mut serde_json::Value) -> 
 
 /// Remove Cursor RTK artifacts: hook script + hooks.json entry
 fn remove_cursor_hooks(ctx: InitContext) -> Result<Vec<String>> {
-    let InitContext { verbose, dry_run } = ctx;
     let cursor_dir = resolve_cursor_dir()?;
+    remove_cursor_hooks_at(&cursor_dir, ctx)
+}
+
+fn remove_cursor_hooks_at(cursor_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    let InitContext { verbose, dry_run } = ctx;
     let mut removed = Vec::new();
 
     // 1. Remove hook script
@@ -3953,7 +3970,17 @@ fn remove_cursor_hooks(ctx: InitContext) -> Result<Vec<String>> {
 
     // 2. Remove RTK entry from hooks.json
     let hooks_json_path = cursor_dir.join(HOOKS_JSON);
-    if let Some(mut root) = read_json_file(&hooks_json_path)? {
+    let root = match read_json_file(&hooks_json_path) {
+        Ok(root) => root,
+        Err(error) if error.downcast_ref::<serde_json::Error>().is_some() => {
+            eprintln!(
+                "rtk: warning: leaving malformed Cursor hooks.json unchanged during uninstall: {error:#}"
+            );
+            None
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(mut root) = root {
         if remove_cursor_hook_from_json(&mut root) {
             if dry_run {
                 println!(
@@ -6439,6 +6466,35 @@ mod tests {
     }
 
     #[test]
+    fn test_uninstall_droid_continues_after_candidate_failure() {
+        let temp = TempDir::new().unwrap();
+        let droid_dir = temp.path().join(DROID_DIR);
+        let root_path = droid_dir.join(DROID_HOOKS_FILE);
+        let legacy_path = droid_dir.join(DROID_HOOKS_SUBDIR).join(DROID_HOOKS_FILE);
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+
+        let hook_json = serde_json::to_string_pretty(&serde_json::json!({
+            "PreToolUse": [{
+                "matcher": DROID_EXECUTE_MATCHER,
+                "hooks": [{ "type": "command", "command": DROID_HOOK_COMMAND }]
+            }]
+        }))
+        .unwrap();
+        fs::write(&root_path, &hook_json).unwrap();
+        fs::write(&legacy_path, &hook_json).unwrap();
+        fs::create_dir(root_path.with_extension("json.bak")).unwrap();
+
+        let err = uninstall_droid_at(&droid_dir, InitContext::default()).unwrap_err();
+
+        assert!(format!("{err:#}").contains(&root_path.display().to_string()));
+        assert_eq!(fs::read_to_string(&root_path).unwrap(), hook_json);
+        let legacy: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&legacy_path).unwrap()).unwrap();
+        assert!(!droid_hook_already_present(&legacy, DroidLayout::Root));
+        assert!(legacy_path.with_extension("json.bak").exists());
+    }
+
+    #[test]
     fn test_droid_target_defaults_to_hooks_json() {
         // Fresh setup: the canonical hooks.json is created (Droid's own
         // /hooks UI location), not the settings.json fallback.
@@ -7377,6 +7433,38 @@ mod tests {
 
         assert!(format!("{err:#}").contains("backup"));
         assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn test_remove_cursor_hooks_keeps_malformed_json_best_effort() {
+        let temp = TempDir::new().unwrap();
+        let cursor_dir = temp.path().join(CURSOR_DIR);
+        let hook_path = cursor_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+        let hooks_json = cursor_dir.join(HOOKS_JSON);
+        fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+        fs::write(&hook_path, "legacy hook").unwrap();
+        fs::write(&hooks_json, "{").unwrap();
+
+        let removed = remove_cursor_hooks_at(&cursor_dir, InitContext::default()).unwrap();
+
+        assert!(!hook_path.exists());
+        assert_eq!(fs::read_to_string(hooks_json).unwrap(), "{");
+        assert_eq!(
+            removed,
+            vec![format!("Cursor hook: {}", hook_path.display())]
+        );
+    }
+
+    #[test]
+    fn test_remove_cursor_hooks_still_propagates_read_errors() {
+        let temp = TempDir::new().unwrap();
+        let cursor_dir = temp.path().join(CURSOR_DIR);
+        let hooks_json = cursor_dir.join(HOOKS_JSON);
+        fs::create_dir_all(&hooks_json).unwrap();
+
+        let err = remove_cursor_hooks_at(&cursor_dir, InitContext::default()).unwrap_err();
+
+        assert!(format!("{err:#}").contains(&hooks_json.display().to_string()));
     }
 
     #[test]
