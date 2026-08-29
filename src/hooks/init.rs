@@ -23,6 +23,7 @@ use super::constants::{
 };
 use super::integrity;
 use super::is_claude_hook_command;
+use crate::core::config::AwarenessLevel;
 
 // Embedded OpenCode plugin (auto-rewrite)
 const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
@@ -30,9 +31,10 @@ const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
 // Embedded Pi extension (auto-rewrite)
 const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
 
-// Embedded slim RTK awareness instructions
-const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
-const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
+// Embedded agent-neutral RTK awareness instructions, one file per `awareness.level`.
+const RTK_AWARENESS_DEFAULT: &str = include_str!("../../hooks/rtk-awareness.md");
+const RTK_AWARENESS_HIGH: &str = include_str!("../../hooks/rtk-awareness-high.md");
+const RTK_AWARENESS_FULL: &str = include_str!("../../hooks/rtk-awareness-full.md");
 
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
@@ -109,6 +111,41 @@ pub enum PatchResult {
 pub struct InitContext {
     pub verbose: u8,
     pub dry_run: bool,
+    /// `awareness.level` from config.toml. Agents with a command hook receive the matching
+    /// awareness file; agents without a hook always receive `full` (see `print_rules_only_awareness_note`).
+    pub awareness: AwarenessLevel,
+}
+
+fn awareness_content(level: AwarenessLevel) -> &'static str {
+    match level {
+        AwarenessLevel::Default => RTK_AWARENESS_DEFAULT,
+        AwarenessLevel::High => RTK_AWARENESS_HIGH,
+        AwarenessLevel::Full => RTK_AWARENESS_FULL,
+    }
+}
+
+/// Agents without a command hook must prefix `rtk` themselves, which only the `full` level
+/// teaches, so they always receive `RTK_AWARENESS_FULL`. This prints the one-line note that
+/// tells the user why their configured `awareness.level` was not applied.
+fn print_rules_only_awareness_note(agent: &str, ctx: InitContext) {
+    let prefix = if ctx.dry_run { "[dry-run] " } else { "  " };
+    let ignored = if ctx.awareness == AwarenessLevel::Full {
+        String::new()
+    } else {
+        format!(
+            " (config awareness.level = \"{}\" does not apply here)",
+            ctx.awareness
+        )
+    };
+    println!(
+        "{prefix}Awareness: full — {agent} has no command hook, so the agent is told to prefix rtk itself{ignored}"
+    );
+}
+
+/// Wrap an awareness file in the `<!-- rtk-instructions -->` markers used by
+/// `write_rtk_block`, so it can be upserted into a shared file like AGENTS.md.
+fn rtk_block(body: &str) -> String {
+    format!("{RTK_BLOCK_START} v2 -->\n{body}{RTK_BLOCK_END}\n")
 }
 
 /// Shared dry-run footer printed at the end of every init sub-mode.
@@ -353,7 +390,9 @@ pub fn run(
 /// Idempotent file write: create or update if content differs.
 /// When `dry_run` is true, prints the intended action and does not touch the filesystem.
 fn write_if_changed(path: &Path, content: &str, name: &str, ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     if path.exists() {
         let existing = fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}: {}", name, path.display()))?;
@@ -583,7 +622,9 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
 /// Remove RTK hook from settings.json file
 /// Backs up before modification, returns true if hook was found and removed
 fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let claude_dir = resolve_claude_dir()?;
     let settings_path = claude_dir.join(SETTINGS_JSON);
 
@@ -647,7 +688,9 @@ pub fn uninstall(
     pi: bool,
     ctx: InitContext,
 ) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     if codex {
         uninstall_codex(global, ctx)?;
         if dry_run {
@@ -897,7 +940,9 @@ fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
 }
 
 fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let mut removed = Vec::new();
     let absolute_rtk_md_ref = codex_rtk_md_ref(codex_dir);
 
@@ -958,7 +1003,9 @@ fn patch_settings_json_command(
     include_opencode: bool,
     ctx: InitContext,
 ) -> Result<PatchResult> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let claude_dir = resolve_claude_dir()?;
     let settings_path = claude_dir.join(SETTINGS_JSON);
 
@@ -1161,7 +1208,10 @@ fn run_default_mode(
     migrate_old_hook_script(ctx);
 
     // 2. Write RTK.md
-    write_if_changed(&rtk_md_path, RTK_SLIM, RTK_MD, ctx)?;
+    write_if_changed(&rtk_md_path, awareness_content(ctx.awareness), RTK_MD, ctx)?;
+    if dry_run {
+        println!("[dry-run] awareness level: {}", ctx.awareness);
+    }
 
     let opencode_plugin_path = if install_opencode {
         let path = prepare_opencode_plugin_path()?;
@@ -1178,7 +1228,11 @@ fn run_default_mode(
     if !dry_run {
         println!("\nRTK hook registered (global).\n");
         println!("  Command:   {}", CLAUDE_HOOK_COMMAND);
-        println!("  RTK.md:    {} (10 lines)", rtk_md_path.display());
+        println!(
+            "  RTK.md:    {} (awareness: {})",
+            rtk_md_path.display(),
+            ctx.awareness
+        );
         if let Some(path) = &opencode_plugin_path {
             println!("  OpenCode:  {}", path.display());
         }
@@ -1232,7 +1286,9 @@ fn run_default_mode(
 /// and removes the stale settings.json entry so the new `rtk hook claude` entry
 /// can be registered.
 fn migrate_old_hook_script(ctx: InitContext) {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     if let Some(home) = dirs::home_dir() {
         let old_hook = home
             .join(CLAUDE_DIR)
@@ -1294,7 +1350,9 @@ fn migrate_old_hook_script(ctx: InitContext) {
 /// Remove only legacy `rtk-rewrite.sh` entries from settings.json.
 /// Preserves any existing `rtk hook claude` entries (new format).
 fn remove_legacy_settings_entries(ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let claude_dir = resolve_claude_dir()?;
     let settings_path = claude_dir.join(SETTINGS_JSON);
 
@@ -1372,7 +1430,9 @@ fn remove_legacy_hook_entries_from_json(root: &mut serde_json::Value) -> bool {
 
 /// Generate .rtk/filters.toml template in the current directory if not present.
 fn generate_project_filters_template(ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let rtk_dir = std::path::Path::new(".rtk");
     let path = rtk_dir.join("filters.toml");
 
@@ -1405,7 +1465,9 @@ fn generate_project_filters_template(ctx: InitContext) -> Result<()> {
 
 /// Generate ~/.config/rtk/filters.toml template if not present.
 fn generate_global_filters_template(ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let config_dir = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from(".config"));
     let rtk_dir = config_dir.join(crate::core::constants::RTK_DATA_DIR);
     let path = rtk_dir.join("filters.toml");
@@ -1566,7 +1628,9 @@ fn run_hook_only_mode(
 
 /// Legacy mode: full 137-line injection into CLAUDE.md
 fn run_claude_md_mode(global: bool, install_opencode: bool, ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let path = if global {
         resolve_claude_dir()?.join(CLAUDE_MD)
     } else {
@@ -1624,16 +1688,12 @@ fn run_claude_md_mode(global: bool, install_opencode: bool, ctx: InitContext) ->
 
 // ─── Windsurf support ─────────────────────────────────────────
 
-/// Embedded Windsurf RTK rules
-const WINDSURF_RULES: &str = include_str!("../../hooks/windsurf/rules.md");
-
-/// Embedded Cline RTK rules
-const CLINE_RULES: &str = include_str!("../../hooks/cline/rules.md");
-
 // ─── Cline / Roo Code support ─────────────────────────────────
 
 fn run_cline_mode(ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     // Cline reads .clinerules from the project root (workspace-scoped)
     let rules_path = PathBuf::from(".clinerules");
 
@@ -1645,9 +1705,9 @@ fn run_cline_mode(ctx: InitContext) -> Result<()> {
         }
     } else {
         let new_content = if existing.trim().is_empty() {
-            CLINE_RULES.to_string()
+            RTK_AWARENESS_FULL.to_string()
         } else {
-            format!("{}\n\n{}", existing.trim(), CLINE_RULES)
+            format!("{}\n\n{}", existing.trim(), RTK_AWARENESS_FULL)
         };
         if dry_run {
             println!(
@@ -1668,6 +1728,7 @@ fn run_cline_mode(ctx: InitContext) -> Result<()> {
             println!("  Rules: .clinerules (installed)");
         }
     }
+    print_rules_only_awareness_note("Cline", ctx);
     if !dry_run {
         println!("  Cline will now use rtk commands for token savings.");
         println!("  Test with: git status\n");
@@ -1677,7 +1738,9 @@ fn run_cline_mode(ctx: InitContext) -> Result<()> {
 }
 
 fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     // Windsurf reads .windsurfrules from the project root (workspace-scoped).
     // Global rules (~/.codeium/windsurf/memories/global_rules.md) are unreliable.
     let rules_path = PathBuf::from(".windsurfrules");
@@ -1690,9 +1753,9 @@ fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
         }
     } else {
         let new_content = if existing.trim().is_empty() {
-            WINDSURF_RULES.to_string()
+            RTK_AWARENESS_FULL.to_string()
         } else {
-            format!("{}\n\n{}", existing.trim(), WINDSURF_RULES)
+            format!("{}\n\n{}", existing.trim(), RTK_AWARENESS_FULL)
         };
         if dry_run {
             println!(
@@ -1713,6 +1776,7 @@ fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
             println!("  Rules: .windsurfrules (installed)");
         }
     }
+    print_rules_only_awareness_note("Windsurf", ctx);
     if !dry_run {
         println!("  Cascade will now use rtk commands for token savings.");
         println!("  Restart Windsurf. Test with: git status\n");
@@ -1723,14 +1787,14 @@ fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
 
 // ─── Kilo Code support ────────────────────────────────────────
 
-const KILOCODE_RULES: &str = include_str!("../../hooks/kilocode/rules.md");
-
 pub fn run_kilocode_mode(ctx: InitContext) -> Result<()> {
     run_kilocode_mode_at(&std::env::current_dir()?, ctx)
 }
 
 fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     // Kilo Code reads .kilocode/rules/ from the project root (workspace-scoped)
     let target_dir = base_dir.join(".kilocode/rules");
     let rules_path = target_dir.join("rtk-rules.md");
@@ -1743,9 +1807,9 @@ fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
         }
     } else {
         let new_content = if existing.trim().is_empty() {
-            KILOCODE_RULES.to_string()
+            RTK_AWARENESS_FULL.to_string()
         } else {
-            format!("{}\n\n{}", existing.trim(), KILOCODE_RULES)
+            format!("{}\n\n{}", existing.trim(), RTK_AWARENESS_FULL)
         };
         if dry_run {
             println!(
@@ -1769,6 +1833,7 @@ fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
             println!("  Rules: .kilocode/rules/rtk-rules.md (installed)");
         }
     }
+    print_rules_only_awareness_note("Kilo Code", ctx);
     if dry_run {
         print_dry_run_footer();
     } else {
@@ -1781,14 +1846,14 @@ fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
 
 // ─── Google Antigravity support ───────────────────────────────
 
-const ANTIGRAVITY_RULES: &str = include_str!("../../hooks/antigravity/rules.md");
-
 pub fn run_antigravity_mode(ctx: InitContext) -> Result<()> {
     run_antigravity_mode_at(&std::env::current_dir()?, ctx)
 }
 
 fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     // Antigravity reads .agents/rules/ from the project root (workspace-scoped)
     let target_dir = base_dir.join(".agents/rules");
     let rules_path = target_dir.join("antigravity-rtk-rules.md");
@@ -1801,9 +1866,9 @@ fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
         }
     } else {
         let new_content = if existing.trim().is_empty() {
-            ANTIGRAVITY_RULES.to_string()
+            RTK_AWARENESS_FULL.to_string()
         } else {
-            format!("{}\n\n{}", existing.trim(), ANTIGRAVITY_RULES)
+            format!("{}\n\n{}", existing.trim(), RTK_AWARENESS_FULL)
         };
         if dry_run {
             println!(
@@ -1826,6 +1891,7 @@ fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
             println!("  Rules: .agents/rules/antigravity-rtk-rules.md (installed)");
         }
     }
+    print_rules_only_awareness_note("Antigravity", ctx);
     if dry_run {
         print_dry_run_footer();
     } else {
@@ -1942,7 +2008,7 @@ fn run_kimi_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
 
     write_rtk_block(
         &agents_md_path,
-        RTK_INSTRUCTIONS,
+        &rtk_block(RTK_AWARENESS_FULL),
         "RTK instructions",
         "rtk init --agent kimi",
         ctx,
@@ -1951,6 +2017,7 @@ fn run_kimi_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
     if !ctx.dry_run {
         println!("\nRTK configured for Kimi AI.\n");
         println!("  AGENTS.md: {}", agents_md_path.display());
+        print_rules_only_awareness_note("Kimi AI", ctx);
         println!("  Kimi AI will now use rtk commands for token savings.");
         println!("  Test with: git status\n");
     }
@@ -1959,7 +2026,9 @@ fn run_kimi_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
 }
 
 fn uninstall_hermes_at(hermes_home: &Path, ctx: InitContext) -> Result<Vec<String>> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let mut removed = Vec::new();
 
     let plugin_dir = hermes_plugin_dir(hermes_home);
@@ -2412,12 +2481,13 @@ fn run_codex_mode_with_paths(
         RTK_MD_REF.to_string()
     };
 
-    write_if_changed(&rtk_md_path, RTK_SLIM_CODEX, RTK_MD, ctx)?;
+    write_if_changed(&rtk_md_path, RTK_AWARENESS_FULL, RTK_MD, ctx)?;
     let added_ref = patch_agents_md(&agents_md_path, &rtk_md_ref, ctx)?;
 
     if !dry_run {
         println!("\nRTK configured for Codex CLI.\n");
         println!("  RTK.md:    {}", rtk_md_path.display());
+        print_rules_only_awareness_note("Codex CLI", ctx);
         if added_ref {
             println!("  AGENTS.md: {} reference added", rtk_md_ref);
         } else {
@@ -2583,7 +2653,9 @@ fn write_rtk_block(
 
 /// Patch CLAUDE.md: add @RTK.md, migrate if old block exists
 fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let mut content = if path.exists() {
         fs::read_to_string(path)?
     } else {
@@ -2650,7 +2722,9 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
 
 /// Patch AGENTS.md: add @RTK.md (or absolute path), migrate old inline block if present
 fn patch_agents_md(path: &Path, rtk_md_ref: &str, ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let mut content = if path.exists() {
         fs::read_to_string(path)
             .with_context(|| format!("Failed to read AGENTS.md: {}", path.display()))?
@@ -2743,7 +2817,9 @@ fn has_rtk_reference(content: &str, refs: &[&str]) -> bool {
 }
 
 fn remove_rtk_reference_from_agents(path: &Path, refs: &[&str], ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     if !path.exists() {
         return Ok(false);
     }
@@ -3100,7 +3176,9 @@ fn run_droid_mode_at(droid_dir: &Path, global: bool, ctx: InitContext) -> Result
 /// Insert RTK PreToolUse entry into a Droid hook file.
 /// Returns true if the file was modified.
 fn patch_droid_hook_file(file: &DroidHookFile, ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let path = &file.path;
     let mut root = read_droid_json(path)?.unwrap_or_else(|| serde_json::json!({}));
 
@@ -3258,7 +3336,9 @@ fn uninstall_droid_at(droid_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
 /// Strip the RTK entry from one Droid hook file. Returns true if the file
 /// held an RTK entry (and was rewritten, unless dry-run).
 fn remove_droid_hook_from_file(file: &DroidHookFile, ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let path = &file.path;
 
     let mut root = match read_droid_json(path)? {
@@ -3419,7 +3499,9 @@ fn ensure_pi_extensions_dir(parent: &Path, name: &str, ctx: InitContext) -> Resu
 /// Mirrors `uninstall_codex` / `uninstall_hermes`: extracted from the dispatcher
 /// so it can be tested and reasoned about independently.
 fn uninstall_pi(global: bool, ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let plugin_path = pi_plugin_path_for_scope(global)?;
     let mut removed: Vec<String> = Vec::new();
 
@@ -3460,10 +3542,7 @@ fn uninstall_pi(global: bool, ctx: InitContext) -> Result<()> {
 /// global=true  → `$PI_CODING_AGENT_DIR/extensions/rtk.ts`
 /// global=false → `.pi/extensions/rtk.ts`
 pub fn run_pi_mode(global: bool, ctx: InitContext) -> Result<()> {
-    let InitContext {
-        verbose: _,
-        dry_run,
-    } = ctx;
+    let InitContext { dry_run, .. } = ctx;
     let plugin_path = if global {
         let pi_dir = resolve_pi_dir()?;
         let path = pi_plugin_path(&pi_dir);
@@ -3535,7 +3614,9 @@ fn ensure_opencode_plugin_installed(path: &Path, ctx: InitContext) -> Result<boo
 
 /// Remove OpenCode plugin file
 fn remove_opencode_plugin(ctx: InitContext) -> Result<Vec<PathBuf>> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let opencode_dir = resolve_opencode_dir()?;
     let path = opencode_plugin_path(&opencode_dir);
     let mut removed = Vec::new();
@@ -3564,7 +3645,9 @@ fn resolve_cursor_dir() -> Result<PathBuf> {
 
 /// Install Cursor hooks: register binary command in hooks.json
 fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let cursor_dir = resolve_cursor_dir()?;
 
     // Migrate old hook script if present
@@ -3618,7 +3701,9 @@ fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
 /// Patch ~/.cursor/hooks.json to add RTK preToolUse hook.
 /// Returns true if the file was modified.
 fn patch_cursor_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let mut root = if path.exists() {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
@@ -3726,7 +3811,9 @@ fn insert_cursor_hook_entry(root: &mut serde_json::Value) -> Result<()> {
 /// Remove only legacy `rtk-rewrite.sh` entries from Cursor hooks.json.
 /// Preserves any existing `rtk hook cursor` entries (new format).
 fn remove_legacy_cursor_hooks_json_entries(path: &Path, ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     if !path.exists() {
         return Ok(());
     }
@@ -3788,7 +3875,9 @@ fn remove_legacy_cursor_hook_entries_from_json(root: &mut serde_json::Value) -> 
 
 /// Remove Cursor RTK artifacts: hook script + hooks.json entry
 fn remove_cursor_hooks(ctx: InitContext) -> Result<Vec<String>> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let cursor_dir = resolve_cursor_dir()?;
     let mut removed = Vec::new();
 
@@ -4235,8 +4324,12 @@ pub fn run_gemini(
     // 2. Install GEMINI.md (RTK awareness for Gemini)
     if !hook_only {
         let gemini_md_path = gemini_dir.join(GEMINI_MD);
-        // Reuse the same slim RTK awareness content
-        write_if_changed(&gemini_md_path, RTK_SLIM, GEMINI_MD, ctx)?;
+        write_if_changed(
+            &gemini_md_path,
+            awareness_content(ctx.awareness),
+            GEMINI_MD,
+            ctx,
+        )?;
     }
 
     // 3. Patch ~/.gemini/settings.json
@@ -4262,7 +4355,9 @@ fn patch_gemini_settings(
     patch_mode: PatchMode,
     ctx: InitContext,
 ) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let settings_path = gemini_dir.join(SETTINGS_JSON);
     let hook_cmd = hook_path.to_string_lossy().to_string();
 
@@ -4374,7 +4469,9 @@ fn patch_gemini_settings(
 
 /// Remove Gemini artifacts during uninstall
 fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let mut removed = Vec::new();
     let gemini_dir = match resolve_gemini_dir() {
         Ok(d) => d,
@@ -4496,7 +4593,12 @@ fn run_vibe_mode_at(
             })?;
         }
         let prompt_path = prompts_dir.join(VIBE_PROMPT_FILE);
-        write_if_changed(&prompt_path, RTK_SLIM, VIBE_PROMPT_FILE, ctx)?;
+        write_if_changed(
+            &prompt_path,
+            awareness_content(ctx.awareness),
+            VIBE_PROMPT_FILE,
+            ctx,
+        )?;
     }
 
     if dry_run {
@@ -4546,7 +4648,9 @@ fn patch_vibe_hooks_toml(
     patch_mode: PatchMode,
     ctx: InitContext,
 ) -> Result<VibeHookPatchOutcome> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
 
     let existing = if hooks_path.exists() {
         fs::read_to_string(hooks_path)
@@ -4691,7 +4795,9 @@ pub fn uninstall_vibe(ctx: InitContext) -> Result<()> {
 /// lines) from `~/.vibe/hooks.toml` and the sibling `~/.vibe/prompts/rtk.md`
 /// prompt file. Leaves any other user-declared hooks intact.
 fn uninstall_vibe_at(vibe_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let mut removed = Vec::new();
 
     let prompt_path = vibe_dir.join(VIBE_PROMPTS_SUBDIR).join(VIBE_PROMPT_FILE);
@@ -5199,15 +5305,114 @@ mod tests {
     }
 
     #[test]
-    fn test_default_mode_creates_rtk_md() {
+    fn test_awareness_content_maps_each_level_to_its_file() {
+        assert_eq!(
+            awareness_content(AwarenessLevel::Default),
+            RTK_AWARENESS_DEFAULT
+        );
+        assert_eq!(awareness_content(AwarenessLevel::High), RTK_AWARENESS_HIGH);
+        assert_eq!(awareness_content(AwarenessLevel::Full), RTK_AWARENESS_FULL);
+    }
+
+    #[test]
+    fn test_awareness_levels_nest() {
+        let contract = RTK_AWARENESS_DEFAULT.trim_end();
+        assert!(
+            RTK_AWARENESS_HIGH.starts_with(contract),
+            "high must start with the default output contract verbatim"
+        );
+        assert!(
+            RTK_AWARENESS_FULL.contains(contract),
+            "full must contain the default output contract verbatim"
+        );
+    }
+
+    #[test]
+    fn test_awareness_activation_rule_only_in_full() {
+        const ACTIVATION: &str = "Prefix every shell command with `rtk`";
+        assert!(!RTK_AWARENESS_DEFAULT.contains(ACTIVATION));
+        assert!(!RTK_AWARENESS_HIGH.contains(ACTIVATION));
+        assert!(RTK_AWARENESS_FULL.contains(ACTIVATION));
+    }
+
+    #[test]
+    fn test_awareness_meta_commands_present_above_default() {
+        for (name, content) in [
+            ("default", RTK_AWARENESS_DEFAULT),
+            ("high", RTK_AWARENESS_HIGH),
+            ("full", RTK_AWARENESS_FULL),
+        ] {
+            assert!(
+                content.contains("rtk proxy <cmd>"),
+                "{name} must mention rtk proxy"
+            );
+        }
+        for (name, content) in [("high", RTK_AWARENESS_HIGH), ("full", RTK_AWARENESS_FULL)] {
+            assert!(
+                content.contains("RTK_DISABLED=1"),
+                "{name} must mention RTK_DISABLED"
+            );
+            assert!(content.contains("rtk gain"), "{name} must mention rtk gain");
+        }
+        assert!(!RTK_AWARENESS_DEFAULT.contains("rtk gain"));
+    }
+
+    #[test]
+    fn test_awareness_files_stay_within_line_budget() {
+        assert!(RTK_AWARENESS_DEFAULT.lines().count() <= 10);
+        assert!(RTK_AWARENESS_HIGH.lines().count() <= 21);
+        assert!(RTK_AWARENESS_FULL.lines().count() <= 25);
+    }
+
+    #[test]
+    fn test_rtk_block_wraps_body_in_markers() {
+        let block = rtk_block(RTK_AWARENESS_FULL);
+        assert!(block.starts_with(&format!("{RTK_BLOCK_START} v2 -->\n")));
+        assert!(block.ends_with(&format!("{RTK_BLOCK_END}\n")));
+        assert!(block.contains(RTK_AWARENESS_FULL));
+    }
+
+    #[test]
+    fn test_write_if_changed_switches_awareness_level() {
         let temp = TempDir::new().unwrap();
         let rtk_md_path = temp.path().join("RTK.md");
 
-        fs::write(&rtk_md_path, RTK_SLIM).unwrap();
-        assert!(rtk_md_path.exists());
+        let default_ctx = InitContext::default();
+        assert!(write_if_changed(
+            &rtk_md_path,
+            awareness_content(default_ctx.awareness),
+            RTK_MD,
+            default_ctx
+        )
+        .unwrap());
+        assert_eq!(
+            fs::read_to_string(&rtk_md_path).unwrap(),
+            RTK_AWARENESS_DEFAULT
+        );
 
-        let content = fs::read_to_string(&rtk_md_path).unwrap();
-        assert_eq!(content, RTK_SLIM);
+        let high_ctx = InitContext {
+            awareness: AwarenessLevel::High,
+            ..Default::default()
+        };
+        assert!(write_if_changed(
+            &rtk_md_path,
+            awareness_content(high_ctx.awareness),
+            RTK_MD,
+            high_ctx
+        )
+        .unwrap());
+        assert_eq!(
+            fs::read_to_string(&rtk_md_path).unwrap(),
+            RTK_AWARENESS_HIGH
+        );
+
+        assert!(!write_if_changed(
+            &rtk_md_path,
+            awareness_content(high_ctx.awareness),
+            RTK_MD,
+            high_ctx
+        )
+        .unwrap());
     }
 
     #[test]
@@ -5344,7 +5549,54 @@ mod tests {
         let rules_path = temp.path().join(".kilocode/rules/rtk-rules.md");
         assert!(rules_path.exists(), "Rules file should be created");
         let content = fs::read_to_string(&rules_path).unwrap();
-        assert!(content.contains("RTK"), "Rules file should contain RTK");
+        assert_eq!(content, RTK_AWARENESS_FULL);
+    }
+
+    #[test]
+    fn test_rules_only_agents_get_full_awareness_at_every_level() {
+        for level in [
+            AwarenessLevel::Default,
+            AwarenessLevel::High,
+            AwarenessLevel::Full,
+        ] {
+            let ctx = InitContext {
+                awareness: level,
+                ..Default::default()
+            };
+            let temp = TempDir::new().unwrap();
+
+            run_kilocode_mode_at(temp.path(), ctx).unwrap();
+            assert_eq!(
+                fs::read_to_string(temp.path().join(".kilocode/rules/rtk-rules.md")).unwrap(),
+                RTK_AWARENESS_FULL,
+                "kilocode with level {level}"
+            );
+
+            run_antigravity_mode_at(temp.path(), ctx).unwrap();
+            assert_eq!(
+                fs::read_to_string(temp.path().join(".agents/rules/antigravity-rtk-rules.md"))
+                    .unwrap(),
+                RTK_AWARENESS_FULL,
+                "antigravity with level {level}"
+            );
+
+            run_kimi_mode_at(temp.path(), ctx).unwrap();
+            let agents_md = fs::read_to_string(temp.path().join(AGENTS_MD)).unwrap();
+            assert!(
+                agents_md.contains(RTK_AWARENESS_FULL),
+                "kimi with level {level}"
+            );
+
+            let codex_agents = temp.path().join("codex").join(AGENTS_MD);
+            let codex_rtk = temp.path().join("codex").join(RTK_MD);
+            fs::create_dir_all(temp.path().join("codex")).unwrap();
+            run_codex_mode_with_paths(codex_agents, codex_rtk.clone(), false, ctx).unwrap();
+            assert_eq!(
+                fs::read_to_string(&codex_rtk).unwrap(),
+                RTK_AWARENESS_FULL,
+                "codex with level {level}"
+            );
+        }
     }
 
     #[test]
@@ -5951,7 +6203,7 @@ mod tests {
         .unwrap();
 
         assert!(rtk_md.exists());
-        assert_eq!(fs::read_to_string(&rtk_md).unwrap(), RTK_SLIM_CODEX);
+        assert_eq!(fs::read_to_string(&rtk_md).unwrap(), RTK_AWARENESS_FULL);
         assert_eq!(
             fs::read_to_string(&agents_md).unwrap(),
             format!("{}\n", codex_rtk_md_ref(temp.path()))
@@ -6265,6 +6517,7 @@ mod tests {
         let ctx = InitContext {
             verbose: 0,
             dry_run: false,
+            ..Default::default()
         };
 
         run_droid_mode_at(&droid_dir, true, ctx).unwrap();
@@ -6311,6 +6564,7 @@ mod tests {
         let ctx = InitContext {
             verbose: 0,
             dry_run: false,
+            ..Default::default()
         };
         run_droid_mode_at(&droid_dir, true, ctx).unwrap();
 
@@ -7637,6 +7891,7 @@ mod tests {
                 InitContext {
                     verbose: 0,
                     dry_run: true,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -7667,6 +7922,7 @@ mod tests {
             InitContext {
                 verbose: 0,
                 dry_run: true,
+                ..Default::default()
             },
         );
         std::env::set_current_dir(&cwd).unwrap();
@@ -7698,6 +7954,7 @@ mod tests {
                 InitContext {
                     verbose: 0,
                     dry_run: true,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -7736,6 +7993,7 @@ mod tests {
             InitContext {
                 verbose: 0,
                 dry_run: true,
+                ..Default::default()
             },
         );
         std::env::set_current_dir(&cwd).unwrap();
@@ -8003,6 +8261,7 @@ mod tests {
         let ctx = InitContext {
             verbose: 0,
             dry_run: true,
+            ..Default::default()
         };
         uninstall_copilot_at(temp.path(), ctx).unwrap();
 
@@ -8209,6 +8468,7 @@ mod tests {
         let ctx = InitContext {
             verbose: 0,
             dry_run: true,
+            ..Default::default()
         };
         run_copilot_global_at(temp.path(), ctx).unwrap();
         assert!(!temp.path().join("hooks").join("rtk-rewrite.json").exists());

@@ -49,9 +49,33 @@ enabled = true              # anonymous daily ping — see Telemetry & Privacy f
 
 [hooks]
 exclude_commands = []       # commands to never auto-rewrite
+
+[awareness]
+level = "default"           # "default", "high", "full" — see Awareness level
 ```
 
 For full details on what is collected, opt-out options, and GDPR rights, see [Telemetry & Privacy](../resources/telemetry.md).
+
+## Awareness level
+
+`rtk init` writes a short instructions file for your agent (`~/.claude/RTK.md`, `~/.gemini/GEMINI.md`, …).
+`awareness.level` sets how much it says about RTK. Output is condensed the same way at every level.
+
+| Level | The agent is told | Pick it when |
+|-------|-------------------|--------------|
+| `default` | How to read condensed output. Nothing about RTK. | Hook-based agent, RTK stays invisible. |
+| `high` | `default` + what RTK is and `rtk gain`, `rtk proxy`, `RTK_DISABLED=1`, `rtk discover`. | You want to ask the agent about savings or to bypass RTK. |
+| `full` | `high` + "prefix every command with `rtk`". | Agent without a hook, or you want the agent to drive RTK itself. |
+
+```toml
+[awareness]
+level = "high"
+```
+
+Re-run `rtk init -g` (or your agent's init command) to rewrite the file.
+
+Agents without a hook (Codex CLI, Cline, Windsurf, Kilo Code, Antigravity, Kimi) always get `full`,
+since the agent must type `rtk` itself. `rtk init` prints a note when it does this.
 
 ## Environment variables
 

@@ -5,5 +5,5 @@
 ## Specifics
 
 - Prompt-level guidance via awareness document -- no programmatic hook
-- `rtk-awareness.md` is injected into `AGENTS.md` with an `@RTK.md` reference
+- `../rtk-awareness-full.md` is written to `RTK.md` and referenced from `AGENTS.md` via `@RTK.md`. No hook, so the `full` level is always used regardless of `awareness.level`
 - Installed to `$CODEX_HOME` when set, otherwise `~/.codex/`, by `rtk init --codex`
