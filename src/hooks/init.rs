@@ -385,6 +385,7 @@ fn write_if_changed(path: &Path, content: &str, name: &str, ctx: InitContext) ->
                 println!("[dry-run] content:\n{}", content);
             }
         } else {
+            ensure_parent_dir(path)?;
             atomic_write(path, content)
                 .with_context(|| format!("Failed to write {}: {}", name, path.display()))?;
             if verbose > 0 {
@@ -393,6 +394,19 @@ fn write_if_changed(path: &Path, content: &str, name: &str, ctx: InitContext) ->
         }
         Ok(true)
     }
+}
+
+fn ensure_parent_dir(path: &Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+
+    if parent.as_os_str().is_empty() {
+        return Ok(());
+    }
+
+    fs::create_dir_all(parent)
+        .with_context(|| format!("Failed to create directory: {}", parent.display()))
 }
 
 /// Resolve the final write target: if `path` is a symlink, follow it so
@@ -1035,6 +1049,7 @@ fn patch_settings_json_command(
     }
 
     // Atomic write
+    ensure_parent_dir(&settings_path)?;
     atomic_write(&settings_path, &serialized)?;
 
     println!("\n  settings.json: hook added");
@@ -7169,14 +7184,45 @@ mod tests {
     fn with_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
         let _guard = CLAUDE_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let claude_dir = tmp.path().join(CLAUDE_DIR);
+        let home_dir = tmp.path().join("home");
         fs::create_dir_all(&claude_dir).unwrap();
 
         let orig = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let orig_home = std::env::var_os("HOME");
         std::env::set_var("CLAUDE_CONFIG_DIR", &claude_dir);
+        std::env::set_var("HOME", &home_dir);
         f(&claude_dir);
         match orig {
             Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
             None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        match orig_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    fn with_missing_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
+        let _guard = CLAUDE_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let claude_dir = tmp.path().join(CLAUDE_DIR);
+        let home_dir = tmp.path().join("home");
+        assert!(
+            !claude_dir.exists(),
+            "test precondition: Claude config dir must be missing"
+        );
+
+        let orig = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let orig_home = std::env::var_os("HOME");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &claude_dir);
+        std::env::set_var("HOME", &home_dir);
+        f(&claude_dir);
+        match orig {
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        match orig_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
         }
     }
 
@@ -7212,6 +7258,28 @@ mod tests {
             assert!(
                 content.contains(CLAUDE_HOOK_COMMAND),
                 "settings.json must contain hook command"
+            );
+        });
+    }
+
+    #[test]
+    fn test_global_default_mode_creates_missing_claude_dir() {
+        let tmp = TempDir::new().unwrap();
+        with_missing_claude_dir_override(&tmp, |claude_dir| {
+            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+
+            assert!(
+                claude_dir.exists(),
+                "missing Claude config dir must be created"
+            );
+            assert!(claude_dir.join(RTK_MD).exists(), "RTK.md must be created");
+            assert!(
+                claude_dir.join(CLAUDE_MD).exists(),
+                "CLAUDE.md must be created"
+            );
+            assert!(
+                claude_dir.join(SETTINGS_JSON).exists(),
+                "settings.json must be created"
             );
         });
     }
@@ -7308,6 +7376,28 @@ mod tests {
     }
 
     #[test]
+    fn test_global_hook_only_mode_creates_missing_claude_dir() {
+        let tmp = TempDir::new().unwrap();
+        with_missing_claude_dir_override(&tmp, |claude_dir| {
+            run_hook_only_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+
+            assert!(
+                claude_dir.exists(),
+                "missing Claude config dir must be created"
+            );
+            assert!(
+                !claude_dir.join(RTK_MD).exists(),
+                "RTK.md must NOT be created in hook-only mode"
+            );
+            let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
+            assert!(
+                settings.contains(CLAUDE_HOOK_COMMAND),
+                "settings.json must contain hook command"
+            );
+        });
+    }
+
+    #[test]
     fn test_run_default_mode_dry_run_writes_nothing() {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
@@ -7328,6 +7418,23 @@ mod tests {
             assert!(
                 !claude_dir.join(SETTINGS_JSON).exists(),
                 "dry-run must not create settings.json"
+            );
+        });
+    }
+
+    #[test]
+    fn test_run_default_mode_dry_run_does_not_create_missing_claude_dir() {
+        let tmp = TempDir::new().unwrap();
+        with_missing_claude_dir_override(&tmp, |claude_dir| {
+            let dry = InitContext {
+                dry_run: true,
+                ..Default::default()
+            };
+            run_default_mode(true, PatchMode::Auto, false, dry).unwrap();
+
+            assert!(
+                !claude_dir.exists(),
+                "dry-run must not create missing Claude config dir"
             );
         });
     }
