@@ -359,7 +359,7 @@ fn detect_hook_type() -> String {
     let checks = [
         (claude_dir.join("hooks/rtk-rewrite.sh"), "claude"),
         (claude_dir.join("hooks/rtk-rewrite.json"), "claude"),
-        (home.join(".gemini/hooks/rtk-hook.sh"), "gemini"),
+        (home.join(".gemini/antigravity-cli/hooks/rtk-hook-gemini.sh"), "gemini"),
         (home.join(".codex/AGENTS.md"), "codex"),
         (home.join(".cursor/hooks/rtk-rewrite.json"), "cursor"),
         (home.join(".vibe/hooks.toml"), "vibe"),

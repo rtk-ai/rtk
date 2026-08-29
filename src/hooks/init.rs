@@ -4239,7 +4239,7 @@ pub fn run_gemini(
         write_if_changed(&gemini_md_path, RTK_SLIM, GEMINI_MD, ctx)?;
     }
 
-    // 3. Patch ~/.gemini/settings.json
+    // 3. Patch ~/.gemini/antigravity-cli/settings.json
     patch_gemini_settings(&gemini_dir, &hook_path, patch_mode, ctx)?;
 
     if dry_run {
@@ -4255,7 +4255,7 @@ pub fn run_gemini(
     Ok(())
 }
 
-/// Patch ~/.gemini/settings.json with the BeforeTool hook
+/// Patch ~/.gemini/antigravity-cli/settings.json with the BeforeTool hook
 fn patch_gemini_settings(
     gemini_dir: &Path,
     hook_path: &Path,
