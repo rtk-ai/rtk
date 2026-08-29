@@ -10,6 +10,7 @@ use tempfile::NamedTempFile;
 use crate::hooks::constants::{
     CONFIG_DIR, COPILOT_HOME_ENV, COPILOT_HOOK_FILE, COPILOT_INSTRUCTIONS_FILE, COPILOT_USER_DIR,
     CURSOR_DIR, GEMINI_DIR, GITHUB_DIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+    TRAE_CN_DIR, TRAE_DIR,
 };
 
 use super::constants::{
@@ -18,11 +19,12 @@ use super::constants::{
     DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
     HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
     HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
-    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR,
-    VIBE_HOOKS_FILE, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
+    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, TRAE_HOOK_COMMAND,
+    VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOKS_FILE, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME,
+    VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
 };
 use super::integrity;
-use super::is_claude_hook_command;
+use super::{is_claude_hook_command, is_trae_hook_command};
 
 // Embedded OpenCode plugin (auto-rewrite)
 const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
@@ -3868,6 +3870,364 @@ fn remove_cursor_hook_from_json(root: &mut serde_json::Value) -> bool {
     pre_tool_use.len() < original_len
 }
 
+// ─── Trae support ────────────────────────────────────────────────────
+
+/// Return the hook files Trae uses below `home`.
+///
+/// `~/.trae/hooks.json` is always managed for global installation. Trae CN is
+/// opt-in: it is updated too only when the user already has a `~/.trae-cn`
+/// directory.
+fn trae_hook_paths_at(home: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![home.join(TRAE_DIR).join(HOOKS_JSON)];
+    if home.join(TRAE_CN_DIR).is_dir() {
+        paths.push(home.join(TRAE_CN_DIR).join(HOOKS_JSON));
+    }
+    paths
+}
+
+fn resolve_trae_hook_paths(global: bool) -> Result<Vec<PathBuf>> {
+    if global {
+        let home = dirs::home_dir().context("Failed to resolve home directory for Trae")?;
+        Ok(trae_hook_paths_at(&home))
+    } else {
+        Ok(vec![PathBuf::from(TRAE_DIR).join(HOOKS_JSON)])
+    }
+}
+
+fn read_trae_hooks_json(path: &Path) -> Result<(serde_json::Value, bool)> {
+    if !path.exists() {
+        return Ok((serde_json::json!({ "version": 1 }), false));
+    }
+
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read Trae hooks file {}", path.display()))?;
+    if content.trim().is_empty() {
+        return Ok((serde_json::json!({ "version": 1 }), true));
+    }
+
+    let root = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse Trae hooks file {} as JSON", path.display()))?;
+    Ok((root, true))
+}
+
+fn validate_trae_hooks_json(root: &serde_json::Value) -> Result<()> {
+    let root_object = root
+        .as_object()
+        .context("Trae hooks.json root must be an object")?;
+    if root_object
+        .get("version")
+        .is_some_and(|version| version != &serde_json::json!(1))
+    {
+        anyhow::bail!("Trae hooks.json version must be 1");
+    }
+    if root_object
+        .get("hooks")
+        .is_some_and(|hooks| !hooks.is_object())
+    {
+        anyhow::bail!("Trae hooks value is not an object");
+    }
+    if root_object
+        .get("hooks")
+        .and_then(|hooks| hooks.get(PRE_TOOL_USE_KEY))
+        .is_some_and(|pre_tool_use| !pre_tool_use.is_array())
+    {
+        anyhow::bail!("Trae PreToolUse value is not an array");
+    }
+    Ok(())
+}
+
+/// Install RTK's Trae hook in every supplied target. All targets are read and
+/// parsed before any write, so malformed `.trae` or `.trae-cn` configuration
+/// cannot cause a partially-applied update.
+fn patch_trae_hooks_json_paths(paths: &[PathBuf], ctx: InitContext) -> Result<Vec<PatchResult>> {
+    struct PendingPatch {
+        path: PathBuf,
+        existed: bool,
+        serialized: String,
+    }
+
+    let mut results = Vec::with_capacity(paths.len());
+    let mut pending = Vec::new();
+
+    // Preflight every target before writing any one of them.
+    for path in paths {
+        let (mut root, existed) = read_trae_hooks_json(path)?;
+        validate_trae_hooks_json(&root)?;
+        let added_version = if root.get("version").is_none() {
+            root.as_object_mut()
+                .expect("validated object")
+                .insert("version".into(), serde_json::json!(1));
+            true
+        } else {
+            false
+        };
+
+        if trae_hook_already_present(&root) && !added_version {
+            results.push(PatchResult::AlreadyPresent);
+            continue;
+        }
+
+        if !trae_hook_already_present(&root) {
+            insert_trae_hook_entry(&mut root)?;
+        }
+        let serialized =
+            serde_json::to_string_pretty(&root).context("Failed to serialize Trae hooks.json")?;
+        pending.push(PendingPatch {
+            path: path.clone(),
+            existed,
+            serialized,
+        });
+        results.push(if ctx.dry_run {
+            PatchResult::WouldPatch
+        } else {
+            PatchResult::Patched
+        });
+    }
+
+    for patch in pending {
+        if ctx.dry_run {
+            println!(
+                "[dry-run] would patch Trae hooks.json: {}",
+                patch.path.display()
+            );
+            if ctx.verbose > 0 {
+                println!("[dry-run] content:\n{}", patch.serialized);
+            }
+            continue;
+        }
+
+        let parent = patch.path.parent().with_context(|| {
+            format!(
+                "Cannot write Trae hooks file {}: path has no parent directory",
+                patch.path.display()
+            )
+        })?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create Trae directory {}", parent.display()))?;
+
+        if patch.existed {
+            let backup_path = patch.path.with_extension("json.bak");
+            fs::copy(&patch.path, &backup_path)
+                .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+            if ctx.verbose > 0 {
+                eprintln!("Backup: {}", backup_path.display());
+            }
+        }
+
+        atomic_write(&patch.path, &patch.serialized)?;
+    }
+
+    Ok(results)
+}
+
+/// Check whether a Trae config already contains RTK's native command hook.
+fn trae_hook_already_present(root: &serde_json::Value) -> bool {
+    root.get("hooks")
+        .and_then(|hooks| hooks.get(PRE_TOOL_USE_KEY))
+        .and_then(|groups| groups.as_array())
+        .is_some_and(|groups| {
+            groups.iter().any(|group| {
+                if group.get("matcher").and_then(|matcher| matcher.as_str()) != Some("RunCommand") {
+                    return false;
+                }
+                group
+                    .get("hooks")
+                    .and_then(|hooks| hooks.as_array())
+                    .is_some_and(|hooks| {
+                        hooks.iter().any(|hook| {
+                            hook.get("type").and_then(|hook_type| hook_type.as_str())
+                                == Some("command")
+                                && hook
+                                    .get("command")
+                                    .and_then(|command| command.as_str())
+                                    .is_some_and(is_trae_hook_command)
+                                && hook.get("timeout") == Some(&serde_json::json!(30))
+                        })
+                    })
+            })
+        })
+}
+
+fn insert_trae_hook_entry(root: &mut serde_json::Value) -> Result<()> {
+    validate_trae_hooks_json(root)?;
+
+    let root_object = root.as_object_mut().expect("validated object");
+
+    root_object.entry("version").or_insert(serde_json::json!(1));
+    let hooks = root_object
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("Trae hooks value is not an object")?;
+    let pre_tool_use = hooks
+        .entry(PRE_TOOL_USE_KEY)
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .context("Trae PreToolUse value is not an array")?;
+
+    pre_tool_use.push(serde_json::json!({
+        "matcher": "RunCommand",
+        "hooks": [{
+            "type": "command",
+            "command": TRAE_HOOK_COMMAND,
+            "timeout": 30
+        }]
+    }));
+    Ok(())
+}
+
+/// Remove RTK commands from nested Trae PreToolUse groups. A group is pruned
+/// only when removing RTK made its nested `hooks` array empty.
+fn remove_trae_hook_from_json(root: &mut serde_json::Value) -> bool {
+    let Some(groups) = root
+        .get_mut("hooks")
+        .and_then(|hooks| hooks.get_mut(PRE_TOOL_USE_KEY))
+        .and_then(|groups| groups.as_array_mut())
+    else {
+        return false;
+    };
+
+    let mut removed = false;
+    groups.retain_mut(|group| {
+        if group.get("matcher").and_then(|matcher| matcher.as_str()) != Some("RunCommand") {
+            return true;
+        }
+        let Some(hooks) = group
+            .get_mut("hooks")
+            .and_then(|hooks| hooks.as_array_mut())
+        else {
+            return true;
+        };
+
+        let original_len = hooks.len();
+        hooks.retain(|hook| {
+            !(hook.get("type").and_then(|hook_type| hook_type.as_str()) == Some("command")
+                && hook
+                    .get("command")
+                    .and_then(|command| command.as_str())
+                    .is_some_and(is_trae_hook_command))
+        });
+        if hooks.len() == original_len {
+            return true;
+        }
+
+        removed = true;
+        !hooks.is_empty()
+    });
+
+    removed
+}
+
+/// Install Trae's native PreToolUse hook in the project or user configuration.
+pub fn run_trae_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let paths = resolve_trae_hook_paths(global)?;
+    let results = patch_trae_hooks_json_paths(&paths, ctx)?;
+
+    if ctx.dry_run {
+        print_dry_run_footer();
+        return Ok(());
+    }
+
+    let scope = if global { "global" } else { "project" };
+    println!("\nTrae hook registered ({scope}).\n");
+    println!("  Command: {}", TRAE_HOOK_COMMAND);
+    for (path, result) in paths.iter().zip(results) {
+        let status = match result {
+            PatchResult::Patched => "RTK PreToolUse entry added",
+            PatchResult::AlreadyPresent => "RTK PreToolUse entry already present",
+            _ => continue,
+        };
+        println!("  hooks.json: {} ({status})", path.display());
+    }
+    println!("  Test with: git status\n");
+    Ok(())
+}
+
+/// Remove Trae hooks from every selected config after parsing all configs
+/// first, so malformed selected configs cannot cause a partial uninstall.
+fn remove_trae_hooks_json_paths(paths: &[PathBuf], ctx: InitContext) -> Result<Vec<bool>> {
+    struct PendingRemoval {
+        path: PathBuf,
+        serialized: String,
+    }
+
+    let mut results = Vec::with_capacity(paths.len());
+    let mut pending = Vec::new();
+
+    for path in paths {
+        if !path.exists() {
+            results.push(false);
+            continue;
+        }
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read Trae hooks file {}", path.display()))?;
+        if content.trim().is_empty() {
+            results.push(false);
+            continue;
+        }
+
+        let mut root: serde_json::Value = serde_json::from_str(&content).with_context(|| {
+            format!("Failed to parse Trae hooks file {} as JSON", path.display())
+        })?;
+        let removed = remove_trae_hook_from_json(&mut root);
+        results.push(removed);
+        if removed {
+            pending.push(PendingRemoval {
+                path: path.clone(),
+                serialized: serde_json::to_string_pretty(&root)
+                    .context("Failed to serialize Trae hooks.json")?,
+            });
+        }
+    }
+
+    for removal in pending {
+        if ctx.dry_run {
+            println!(
+                "[dry-run] would remove RTK entry from Trae hooks.json: {}",
+                removal.path.display()
+            );
+            continue;
+        }
+
+        let backup_path = removal.path.with_extension("json.bak");
+        fs::copy(&removal.path, &backup_path)
+            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+        atomic_write(&removal.path, &removal.serialized)?;
+    }
+
+    Ok(results)
+}
+
+/// Uninstall Trae's native hook from project or selected global configs.
+pub fn uninstall_trae_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let paths = resolve_trae_hook_paths(global)?;
+    let removed = remove_trae_hooks_json_paths(&paths, ctx)?;
+
+    if removed.iter().any(|removed| *removed) {
+        let action = if ctx.dry_run {
+            "[dry-run] would uninstall RTK (Trae):"
+        } else {
+            "RTK uninstalled (Trae):"
+        };
+        println!("{action}");
+        for path in paths
+            .iter()
+            .zip(removed)
+            .filter(|(_, removed)| *removed)
+            .map(|(path, _)| path.display().to_string())
+        {
+            println!("  - Trae hooks.json: {path}");
+        }
+    } else {
+        println!("RTK Trae support was not installed (nothing to remove)");
+    }
+
+    if ctx.dry_run {
+        print_dry_run_footer();
+    }
+    Ok(())
+}
+
 /// Show current rtk configuration
 pub fn show_config(codex: bool) -> Result<()> {
     if codex {
@@ -7017,6 +7377,279 @@ mod tests {
 
         let removed = remove_cursor_hook_from_json(&mut json_content);
         assert!(!removed);
+    }
+
+    // ─── Trae hooks.json tests ───
+
+    #[test]
+    fn test_trae_hook_paths_include_trae_cn_only_when_its_directory_exists() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+
+        assert_eq!(
+            trae_hook_paths_at(home),
+            vec![home.join(".trae").join("hooks.json")]
+        );
+
+        fs::create_dir(home.join(".trae-cn")).unwrap();
+        assert_eq!(
+            trae_hook_paths_at(home),
+            vec![
+                home.join(".trae").join("hooks.json"),
+                home.join(".trae-cn").join("hooks.json"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_insert_trae_hook_preserves_unrelated_configuration() {
+        let mut root = serde_json::json!({
+            "custom": { "keep": true },
+            "hooks": {
+                "PostToolUse": [{ "matcher": "WriteFile", "hooks": [] }],
+                "PreToolUse": [{
+                    "matcher": "ReadFile",
+                    "hooks": [{ "type": "command", "command": "other read hook" }]
+                }]
+            }
+        });
+
+        insert_trae_hook_entry(&mut root).unwrap();
+
+        assert_eq!(root["version"], 1);
+        assert_eq!(root["custom"]["keep"], true);
+        assert_eq!(root["hooks"]["PostToolUse"][0]["matcher"], "WriteFile");
+        let groups = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[1]["matcher"], "RunCommand");
+        assert_eq!(groups[1]["hooks"][0]["type"], "command");
+        assert_eq!(groups[1]["hooks"][0]["command"], "rtk hook trae");
+        assert_eq!(groups[1]["hooks"][0]["timeout"], 30);
+    }
+
+    #[test]
+    fn test_insert_trae_hook_rejects_non_object_or_non_v1_roots_without_mutation() {
+        for mut root in [serde_json::json!(null), serde_json::json!({ "version": 2 })] {
+            let original = root.clone();
+            assert!(insert_trae_hook_entry(&mut root).is_err());
+            assert_eq!(root, original);
+        }
+    }
+
+    #[test]
+    fn test_trae_hook_detection_requires_run_command_group_and_command_hook_type() {
+        let mut root = serde_json::json!({
+            "version": 1,
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "ReadFile",
+                    "hooks": [{ "type": "command", "command": "rtk hook trae" }]
+                }, {
+                    "matcher": "RunCommand",
+                    "hooks": [{ "type": "prompt", "command": "rtk hook trae" }]
+                }]
+            }
+        });
+
+        assert!(!trae_hook_already_present(&root));
+        insert_trae_hook_entry(&mut root).unwrap();
+        assert_eq!(root["hooks"]["PreToolUse"].as_array().unwrap().len(), 3);
+        assert!(trae_hook_already_present(&root));
+    }
+
+    #[test]
+    fn test_trae_hook_detection_requires_timeout_30() {
+        let root = serde_json::json!({
+            "version": 1,
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "RunCommand",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "rtk hook trae",
+                        "timeout": 5
+                    }]
+                }]
+            }
+        });
+        assert!(!trae_hook_already_present(&root));
+    }
+
+    #[test]
+    fn test_remove_trae_hook_only_removes_rtk_and_prunes_its_empty_group() {
+        let mut root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "RunCommand",
+                        "hooks": [
+                            { "type": "command", "command": "rtk hook trae" },
+                            { "type": "command", "command": "other hook" }
+                        ]
+                    },
+                    {
+                        "matcher": "RunCommand",
+                        "hooks": [{ "type": "command", "command": "/opt/bin/rtk hook trae" }]
+                    }
+                ],
+                "PostToolUse": [{ "matcher": "WriteFile", "hooks": [] }]
+            }
+        });
+
+        assert!(remove_trae_hook_from_json(&mut root));
+
+        let groups = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["hooks"][0]["command"], "other hook");
+        assert_eq!(root["hooks"]["PostToolUse"][0]["matcher"], "WriteFile");
+    }
+
+    #[test]
+    fn test_trae_patch_preflights_all_global_targets_before_writing() {
+        let temp = TempDir::new().unwrap();
+        let trae = temp.path().join(".trae").join("hooks.json");
+        let trae_cn = temp.path().join(".trae-cn").join("hooks.json");
+        fs::create_dir_all(trae.parent().unwrap()).unwrap();
+        fs::create_dir_all(trae_cn.parent().unwrap()).unwrap();
+        let original = "{\n  \"existing\": true\n}\n";
+        fs::write(&trae, original).unwrap();
+        fs::write(&trae_cn, "not json").unwrap();
+
+        let result = patch_trae_hooks_json_paths(&[trae.clone(), trae_cn], InitContext::default());
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(trae).unwrap(), original);
+    }
+
+    #[test]
+    fn test_trae_patch_rejects_non_v1_config_before_idempotency_check() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(".trae").join("hooks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = r#"{
+            "version": 2,
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "RunCommand",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "rtk hook trae",
+                        "timeout": 30
+                    }]
+                }]
+            }
+        }"#;
+        fs::write(&path, original).unwrap();
+
+        assert!(
+            patch_trae_hooks_json_paths(std::slice::from_ref(&path), InitContext::default())
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn test_trae_patch_adds_missing_version_without_duplicating_matching_hook() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(".trae").join("hooks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "RunCommand",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "rtk hook trae",
+                            "timeout": 30
+                        }]
+                    }]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            patch_trae_hooks_json_paths(std::slice::from_ref(&path), InitContext::default())
+                .unwrap(),
+            vec![PatchResult::Patched]
+        );
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(root["version"], 1);
+        assert_eq!(root["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_trae_patch_updates_every_selected_target_and_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let trae = temp.path().join(".trae").join("hooks.json");
+        let trae_cn = temp.path().join(".trae-cn").join("hooks.json");
+        fs::create_dir_all(trae.parent().unwrap()).unwrap();
+        fs::write(&trae, r#"{ "custom": { "keep": true } }"#).unwrap();
+
+        let paths = vec![trae.clone(), trae_cn.clone()];
+        let results = patch_trae_hooks_json_paths(&paths, InitContext::default()).unwrap();
+        assert_eq!(results, vec![PatchResult::Patched, PatchResult::Patched]);
+        assert!(trae.with_extension("json.bak").exists());
+
+        for path in &paths {
+            let root: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+            assert!(trae_hook_already_present(&root));
+        }
+        let trae_root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&trae).unwrap()).unwrap();
+        assert_eq!(trae_root["custom"]["keep"], true);
+
+        let results = patch_trae_hooks_json_paths(&paths, InitContext::default()).unwrap();
+        assert_eq!(
+            results,
+            vec![PatchResult::AlreadyPresent, PatchResult::AlreadyPresent]
+        );
+    }
+
+    #[test]
+    fn test_trae_uninstall_updates_every_selected_target_and_preserves_siblings() {
+        let temp = TempDir::new().unwrap();
+        let paths = vec![
+            temp.path().join(".trae").join("hooks.json"),
+            temp.path().join(".trae-cn").join("hooks.json"),
+        ];
+        for path in &paths {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(
+                path,
+                r#"{
+                    "hooks": {
+                        "PreToolUse": [{
+                            "matcher": "RunCommand",
+                            "hooks": [
+                                { "type": "command", "command": "rtk hook trae" },
+                                { "type": "command", "command": "other hook" }
+                            ]
+                        }]
+                    }
+                }"#,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            remove_trae_hooks_json_paths(&paths, InitContext::default()).unwrap(),
+            vec![true, true]
+        );
+        for path in &paths {
+            assert!(path.with_extension("json.bak").exists());
+            let root: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+            assert!(!trae_hook_already_present(&root));
+            assert_eq!(
+                root["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+                "other hook"
+            );
+        }
     }
 
     // ─── Legacy migration tests ──────────────────────────────────────

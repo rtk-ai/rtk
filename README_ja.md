@@ -94,10 +94,12 @@ rtk gain        # トークン節約統計が表示されるはず
 ## クイックスタート
 
 ```bash
-# 1. Claude Code 用フックをインストール（推奨）
-rtk init --global
+# 1. 対応する AI ツール用のフックをインストール
+rtk init --global               # Claude Code（デフォルト）
+rtk init --agent trae           # Trae（プロジェクト）
+rtk init --global --agent trae  # Trae（グローバル）
 
-# 2. Claude Code を再起動してテスト
+# 2. 対応する AI ツールを再起動してテスト
 git status  # 自動的に rtk git status に書き換え
 ```
 

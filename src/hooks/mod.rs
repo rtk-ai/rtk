@@ -23,6 +23,15 @@ pub fn is_claude_hook_command(command: &str) -> bool {
     binary_name == "rtk" && hook == "hook" && claude == "claude"
 }
 
+pub fn is_trae_hook_command(command: &str) -> bool {
+    let parts = crate::discover::lexer::shell_split(command);
+    let [binary, hook, trae] = parts.as_slice() else {
+        return false;
+    };
+
+    binary.rsplit(['/', '\\']).next() == Some("rtk") && *hook == "hook" && *trae == "trae"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -41,5 +50,13 @@ mod tests {
         assert!(!is_claude_hook_command("not-rtk hook claude"));
         assert!(!is_claude_hook_command("/opt/homebrew/bin/rtk hook cursor"));
         assert!(!is_claude_hook_command("echo rtk hook claude"));
+    }
+
+    #[test]
+    fn trae_hook_command_matches_bare_and_absolute_rtk() {
+        assert!(is_trae_hook_command("rtk hook trae"));
+        assert!(is_trae_hook_command("/opt/homebrew/bin/rtk hook trae"));
+        assert!(is_trae_hook_command("\"/opt/homebrew/bin/rtk\" hook trae"));
+        assert!(!is_trae_hook_command("rtk hook claude"));
     }
 }
