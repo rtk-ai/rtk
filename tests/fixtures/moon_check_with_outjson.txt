@@ -1,0 +1,11 @@
+Warning: Package `user/example` does not declare `supported_targets`, but depends on `user/example/lib` which declares it. Consider declaring `supported_targets` explicitly
+{"$message_type":"diagnostic","level":"warning","error_code":29,"path":"/project/example/lib/moon.pkg","loc":"10:3-10:22","message":"Warning (unused_package): Unused package 'moonbitlang/async'"}
+{"$message_type":"diagnostic","level":"warning","error_code":29,"path":"/project/myapp1/src/moon.pkg","loc":"3:3-3:22","message":"Warning (unused_package): Unused package 'moonbitlang/async'"}
+{"$message_type":"diagnostic","level":"warning","error_code":2,"path":"/project/myapp1/src/myapp1.mbt","loc":"52:44-52:45","message":"Warning (unused_value): Unused variable 'e'"}
+{"$message_type":"diagnostic","level":"warning","error_code":20,"path":"/project/myapp1/src/myapp1.mbt","loc":"64:21-64:30","message":"Warning (deprecated): Use Debug instead of Show for debugging purposes. See https://github.com/moonbitlang/core/blob/main/debug/README.mbt.md"}
+{"$message_type":"diagnostic","level":"warning","error_code":20,"path":"/project/myapp1/src/myapp1.mbt","loc":"69:21-69:30","message":"Warning (deprecated): Use Debug instead of Show for debugging purposes. See https://github.com/moonbitlang/core/blob/main/debug/README.mbt.md"}
+{"$message_type":"diagnostic","level":"warning","error_code":20,"path":"/project/myapp1/src/myapp1.mbt","loc":"72:14-72:23","message":"Warning (deprecated): Use Debug instead of Show for debugging purposes. See https://github.com/moonbitlang/core/blob/main/debug/README.mbt.md"}
+{"$message_type":"diagnostic","level":"warning","error_code":20,"path":"/project/myapp1/src/myapp1.mbt","loc":"74:15-74:24","message":"Warning (deprecated): Use Debug instead of Show for debugging purposes. See https://github.com/moonbitlang/core/blob/main/debug/README.mbt.md"}
+{"$message_type":"diagnostic","level":"warning","error_code":29,"path":"/project/myapp1/src/moon.pkg","loc":"3:3-3:22","message":"Warning (unused_package): Unused package 'moonbitlang/async'"}
+{"$message_type":"diagnostic","level":"warning","error_code":29,"path":"/project/myapp1/src/moon.pkg","loc":"3:3-3:22","message":"Warning (unused_package): Unused package 'moonbitlang/async'"}
+Finished. moon: ran 5 tasks, now up to date (9 warnings, 0 errors)

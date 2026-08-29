@@ -952,6 +952,15 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 65.0,
         ..RtkRule::DEFAULT
     },
+    RtkRule {
+        pattern: r"^moon\s+(build|test|check)",
+        rtk_cmd: "rtk moon",
+        rewrite_prefixes: &["moon"],
+        category: "Build",
+        savings_pct: 60.0,
+        subcmd_savings: &[("build", 60.0), ("test", 60.0), ("check", 60.0)],
+        subcmd_status: &[],
+    },
 ];
 
 pub const IGNORED_PREFIXES: &[&str] = &[

@@ -1,0 +1,2 @@
+Warning: Package `user/example` does not declare `supported_targets`, but depends on `user/example/lib` which declares it. Consider declaring `supported_targets` explicitly
+Total tests: 45, passed: 45, failed: 0.

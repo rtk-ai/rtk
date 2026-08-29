@@ -16,6 +16,7 @@ use cmds::js::{
     vitest_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
+use cmds::moonbit::moonbit_cmd;
 use cmds::php::{ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpunit_cmd, pint_cmd};
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
@@ -829,6 +830,13 @@ enum Commands {
     #[command(name = "mvn")]
     Mvn {
         /// Maven goals and arguments (e.g., clean install, -DskipTests test, -X)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// MoonBit build tool commands with compact output (build, test, check)
+    #[command(name = "moon")]
+    Moonbit {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2433,6 +2441,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Mvn { args } => mvn_cmd::run(&args, cli.verbose)?,
 
+        Commands::Moonbit { args } => moonbit_cmd::run(&args, cli.verbose)?,
+
         Commands::HookAudit { since } => {
             hooks::hook_audit_cmd::run(since, cli.verbose)?;
             0
@@ -2792,6 +2802,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Sbt { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
+            | Commands::Moonbit { .. }
     )
 }
 
@@ -3196,6 +3207,7 @@ mod tests {
             "ecs",
             "pint",
             "uv",
+            "moon",
         ];
 
         let unclassified: Vec<String> = Cli::command()
