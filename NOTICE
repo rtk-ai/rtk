@@ -1,0 +1,54 @@
+RTK (Rust Token Killer)
+Copyright (c) rtk-ai contributors
+
+This product includes software developed by third parties, as listed below.
+
+================================================================================
+gitleaks
+================================================================================
+
+`src/core/rules/secrets.toml` contains secret-detection patterns and
+false-positive test cases derived from gitleaks:
+
+    https://github.com/gitleaks/gitleaks
+
+    version v8.30.1
+    commit  83d9cd684c87d95d656c1458ef04895a7f1cbd8e
+
+That commit is pinned in `scripts/secret-rules/build.py` and its config file is
+checksummed there, so the derivation is reproducible and this attribution names
+a specific revision rather than a moving branch.
+
+The patterns were curated and, in two documented cases, narrowed for scanning
+command output rather than repository contents. Some were also rewritten for
+the `regex` crate's syntax (explicit ASCII classes, escaped literal braces);
+those rewrites are behaviour-preserving on ASCII input and are described in
+`src/core/rules/README.md`. Each rule records its upstream rule id in its `id`
+field. Regeneration tooling lives in `scripts/secret-rules/`.
+
+gitleaks is distributed under the MIT License, which is compatible with rtk's
+Apache-2.0 licence. The MIT licence text follows.
+
+--------------------------------------------------------------------------------
+
+MIT License
+
+Copyright (c) 2019 Zachary Rice
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -55,6 +55,12 @@ windows-sys = { version = "0.59", features = [
 toml = "0.8"
 
 [dev-dependencies]
+# tests/secret_rules.rs models the anchor prefilter over the negative corpus.
+# regex, toml and serde are not repeated here: test and example targets already
+# see [dependencies]. aho-corasick is only a transitive dep of regex, so using
+# it directly needs this line -- but it is already in the graph, so no new
+# supply-chain surface either way.
+aho-corasick = "1"
 
 [profile.release]
 opt-level = 3

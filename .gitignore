@@ -46,5 +46,12 @@ claudedocs
 .vitals/
 .worktrees/
 
-# icm 
+# icm
 .fastembed_cache/
+
+# Upstream sources fetched by scripts/secret-rules/build.py
+scripts/secret-rules/.work/
+
+# Python bytecode from scripts/
+__pycache__/
+*.pyc
