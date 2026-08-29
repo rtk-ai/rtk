@@ -4270,7 +4270,8 @@ fn patch_gemini_settings(
     let mut settings: serde_json::Value = if settings_path.exists() {
         let content = fs::read_to_string(&settings_path)
             .with_context(|| format!("Failed to read {}", settings_path.display()))?;
-        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+        serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse {} as JSON", settings_path.display()))?
     } else {
         serde_json::json!({})
     };
