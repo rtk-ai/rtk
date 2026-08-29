@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 /// Verdict from checking a command against Claude Code's permission rules.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum PermissionVerdict {
     /// An explicit allow rule matched — safe to auto-allow.
     Allow,

@@ -874,6 +874,8 @@ enum HookCommands {
     Copilot,
     /// Process Factory Droid PreToolUse hook (reads JSON from stdin)
     Droid,
+    /// Process Codex CLI PreToolUse hook (reads JSON from stdin)
+    Codex,
     /// Process Mistral Vibe CLI pre_tool hook (reads JSON from stdin)
     Vibe,
     /// Check how a command would be rewritten by the hook engine (dry-run)
@@ -2457,6 +2459,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Droid => {
                 hooks::hook_cmd::run_droid()?;
+                0
+            }
+            HookCommands::Codex => {
+                hooks::hook_cmd::run_codex()?;
                 0
             }
             HookCommands::Vibe => {
