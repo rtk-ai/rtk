@@ -51,6 +51,15 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^chezmoi\s+(diff|apply|status|managed|add|re-add|update|unmanaged|doctor|git)",
+        rtk_cmd: "rtk chezmoi",
+        rewrite_prefixes: &["chezmoi"],
+        category: "Dotfiles",
+        savings_pct: 75.0,
+        subcmd_savings: &[("diff", 80.0), ("git", 70.0)],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^gh\s+(pr|issue|run|repo|api|release)",
         rtk_cmd: "rtk gh",
         rewrite_prefixes: &["gh"],

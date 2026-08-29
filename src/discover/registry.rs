@@ -35,6 +35,10 @@ pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
             "log" | "diff" | "show" => 200,
             _ => 40,
         },
+        "Dotfiles" => match subcmd {
+            "diff" => 200,
+            _ => 50,
+        },
         "Cargo" => match subcmd {
             "test" => 500,
             _ => 150,
@@ -1944,6 +1948,48 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("yadm status", &[]),
             Some("rtk git status".to_string())
+        );
+    }
+
+    #[test]
+    fn test_classify_chezmoi_diff() {
+        assert_eq!(
+            classify_command("chezmoi diff"),
+            Classification::Supported {
+                rtk_equivalent: "rtk chezmoi",
+                category: "Dotfiles",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_chezmoi_status() {
+        assert_eq!(
+            classify_command("chezmoi status"),
+            Classification::Supported {
+                rtk_equivalent: "rtk chezmoi",
+                category: "Dotfiles",
+                estimated_savings_pct: 75.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_chezmoi_status() {
+        assert_eq!(
+            rewrite_command_no_prefixes("chezmoi status", &[]),
+            Some("rtk chezmoi status".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_chezmoi_git_status_keeps_wrapper() {
+        assert_eq!(
+            rewrite_command_no_prefixes("chezmoi git status", &[]),
+            Some("rtk chezmoi git status".to_string())
         );
     }
 

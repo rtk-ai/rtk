@@ -22,8 +22,8 @@ use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
-    summary, tree, wc_cmd,
+    chezmoi_cmd, deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
+    read, search, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -166,6 +166,12 @@ enum Commands {
 
         #[command(subcommand)]
         command: GitCommands,
+    },
+
+    /// chezmoi dotfile manager commands with compact output
+    Chezmoi {
+        #[command(subcommand)]
+        command: ChezmoiCommands,
     },
 
     /// GitHub CLI (gh) commands with token-optimized output
@@ -970,6 +976,63 @@ enum GitCommands {
         args: Vec<String>,
     },
     /// Passthrough: runs any unsupported git subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Debug, Subcommand)]
+enum ChezmoiCommands {
+    /// Condensed chezmoi diff output
+    Diff {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compact apply output
+    Apply {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compact status output
+    Status {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compact managed file listing
+    Managed {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compact add output
+    Add {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compact re-add output
+    ReAdd {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compact update output
+    Update {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compact unmanaged file listing
+    Unmanaged {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compact doctor output
+    Doctor {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Route chezmoi git output through RTK's git filters
+    Git {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported chezmoi subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
 }
@@ -1795,6 +1858,38 @@ fn run_cli() -> Result<i32> {
                 GitCommands::Other(args) => git::run_passthrough(&args, &global_args, cli.verbose)?,
             }
         }
+
+        Commands::Chezmoi { command } => match command {
+            ChezmoiCommands::Diff { args } => {
+                chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::Diff, &args, cli.verbose)?
+            }
+            ChezmoiCommands::Apply { args } => {
+                chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::Apply, &args, cli.verbose)?
+            }
+            ChezmoiCommands::Status { args } => {
+                chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::Status, &args, cli.verbose)?
+            }
+            ChezmoiCommands::Managed { args } => {
+                chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::Managed, &args, cli.verbose)?
+            }
+            ChezmoiCommands::Add { args } => {
+                chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::Add, &args, cli.verbose)?
+            }
+            ChezmoiCommands::ReAdd { args } => {
+                chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::ReAdd, &args, cli.verbose)?
+            }
+            ChezmoiCommands::Update { args } => {
+                chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::Update, &args, cli.verbose)?
+            }
+            ChezmoiCommands::Unmanaged { args } => {
+                chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::Unmanaged, &args, cli.verbose)?
+            }
+            ChezmoiCommands::Doctor { args } => {
+                chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::Doctor, &args, cli.verbose)?
+            }
+            ChezmoiCommands::Git { args } => chezmoi_cmd::run_git(&args, cli.verbose)?,
+            ChezmoiCommands::Other(args) => chezmoi_cmd::run_passthrough(&args, cli.verbose)?,
+        },
 
         Commands::Gh { subcommand, args } => {
             gh_cmd::run(&subcommand, &args, cli.verbose, cli.ultra_compact)?
@@ -2744,6 +2839,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Read { .. }
             | Commands::Smart { .. }
             | Commands::Git { .. }
+            | Commands::Chezmoi { .. }
             | Commands::Gh { .. }
             | Commands::Glab { .. }
             | Commands::Pnpm { .. }
@@ -3143,6 +3239,7 @@ mod tests {
             "read",
             "rg",
             "git",
+            "chezmoi",
             "gh",
             "glab",
             "aws",
