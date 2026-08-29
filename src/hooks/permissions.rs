@@ -33,6 +33,7 @@ pub fn check_command(cmd: &str) -> PermissionVerdict {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Host {
     Claude,
+    Codex,
     Cursor,
     Gemini,
     Droid,
@@ -42,6 +43,7 @@ pub enum Host {
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
     let (deny_rules, ask_rules, allow_rules) = match host {
         Host::Claude => load_permission_rules(),
+        Host::Codex => hardcoded_codex_rules(),
         Host::Cursor => load_cursor_rules(),
         Host::Gemini => load_gemini_rules(),
         Host::Droid => load_droid_rules(),
@@ -228,6 +230,35 @@ fn append_wrapped_rules(rules_value: Option<&Value>, prefixes: &[&str], target: 
 // This keeps RTK's allow set a subset of the host's — never more permissive.
 fn global_config(dir: &str, file: &str) -> Option<Value> {
     read_json(&dirs::home_dir()?.join(dir).join(file))
+}
+
+/// Codex only applies a hook's `updatedInput` when the hook also returns an
+/// allow decision. Its hook protocol cannot rewrite while retaining native
+/// approval, so RTK hardcodes this small read-only command set it may
+/// auto-allow.
+fn hardcoded_codex_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
+    let allow = [
+        "git status",
+        "git log",
+        "git diff",
+        "git show",
+        "yadm status",
+        "yadm log",
+        "yadm diff",
+        "yadm show",
+        "cat",
+        "head",
+        "tail",
+        "ls",
+        "tree",
+        "grep",
+        "wc",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+
+    (Vec::new(), Vec::new(), allow)
 }
 
 fn load_cursor_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
