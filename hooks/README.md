@@ -4,7 +4,7 @@
 
 **Deployed hook artifacts** — the actual files installed on user machines by `rtk init`. These are shell scripts, TypeScript plugins, and rules files that run outside the Rust binary. They are **thin delegates**: parse agent-specific JSON, call `rtk rewrite` as a subprocess, format agent-specific response. Zero filtering logic lives here.
 
-Owns: per-agent hook scripts and configuration files for 10 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Mistral Vibe).
+Owns: per-agent hook scripts and configuration files for supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Grok, Mistral Vibe, …).
 
 Does **not** own: hook installation/uninstallation (that's `src/hooks/init.rs`), the rewrite pattern registry (that's `discover/registry`), or integrity verification (that's `src/hooks/integrity.rs`).
 
@@ -42,6 +42,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
 - **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, local `isBashToolCallEvent` guard, in-place mutation, `~/.pi/agent/extensions/`
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
+- **[`grok/`](grok/README.md)** — Rust binary hook (`rtk hook grok`), deny-with-suggestion, `$GROK_HOME/hooks/`, AGENTS.md + RTK.md
 - **[`vibe/`](vibe/README.md)** — Rust binary hook (`rtk hook vibe`), `pre_tool` entry in `~/.vibe/hooks.toml`, `hook_specific_output.tool_input` rewrite plus `system_message` for UI visibility
 
 ## Supported Agents
@@ -53,6 +54,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | GitHub Copilot CLI | Rust binary (`rtk hook copilot`) | Deny-with-suggestion | No (agent retries) |
 | Cursor | Rust binary | Transparent rewrite | Yes (`updated_input`) |
 | Gemini CLI | Rust binary (`rtk hook gemini`) | Transparent rewrite | Yes (`hookSpecificOutput`) |
+| Grok CLI (xAI) | Rust binary (`rtk hook grok`) | Deny-with-suggestion | No (agent retries) |
 | Cline / Roo Code | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Codex CLI | AGENTS.md / instructions | Prompt-level guidance | N/A |
@@ -158,6 +160,29 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 ```
 
 **No rewrite**: `{"decision": "allow"}`
+
+### Grok CLI (Rust Binary)
+
+**Input** (stdin, camelCase):
+
+```json
+{
+  "hookEventName": "pre_tool_use",
+  "toolName": "run_terminal_command",
+  "toolInput": { "command": "git status" }
+}
+```
+
+**Output** (deny-with-suggestion — Grok does not honor `updatedInput`):
+
+```json
+{
+  "decision": "deny",
+  "reason": "RTK auto-rewrite (token-optimized). Re-run this exact command: `rtk git status`"
+}
+```
+
+**Allow**: `{"decision": "allow"}`
 
 ### Mistral Vibe (Rust Binary)
 

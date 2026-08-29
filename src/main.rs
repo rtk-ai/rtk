@@ -55,6 +55,8 @@ pub enum AgentTarget {
     Hermes,
     /// Factory Droid CLI
     Droid,
+    /// Grok CLI (xAI)
+    Grok,
     /// Mistral Vibe CLI
     Vibe,
 }
@@ -874,6 +876,8 @@ enum HookCommands {
     Copilot,
     /// Process Factory Droid PreToolUse hook (reads JSON from stdin)
     Droid,
+    /// Process Grok CLI PreToolUse hook (reads JSON from stdin)
+    Grok,
     /// Process Mistral Vibe CLI pre_tool hook (reads JSON from stdin)
     Vibe,
     /// Check how a command would be rewritten by the hook engine (dry-run)
@@ -1576,6 +1580,13 @@ where
         uninstall_hermes(ctx)
     } else if agent == Some(AgentTarget::Droid) {
         hooks::init::uninstall_droid(global, ctx)
+    } else if agent == Some(AgentTarget::Grok) {
+        if !global {
+            anyhow::bail!(
+                "Grok CLI hooks are global-only. Use: rtk init -g --agent grok --uninstall"
+            );
+        }
+        hooks::init::uninstall_grok(ctx)
     } else if agent == Some(AgentTarget::Vibe) {
         hooks::init::uninstall_vibe(ctx)
     } else {
@@ -2080,6 +2091,11 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_hermes_mode(ctx)?;
             } else if agent == Some(AgentTarget::Droid) {
                 hooks::init::run_droid_mode(global, ctx)?;
+            } else if agent == Some(AgentTarget::Grok) {
+                if !global {
+                    anyhow::bail!("Grok CLI hooks are global-only. Use: rtk init -g --agent grok");
+                }
+                hooks::init::run_grok_mode(ctx)?;
             } else if agent == Some(AgentTarget::Vibe) {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -2457,6 +2473,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Droid => {
                 hooks::hook_cmd::run_droid()?;
+                0
+            }
+            HookCommands::Grok => {
+                hooks::hook_cmd::run_grok()?;
                 0
             }
             HookCommands::Vibe => {
@@ -3246,6 +3266,17 @@ mod tests {
             cli.command,
             Commands::Hook {
                 command: HookCommands::Claude
+            }
+        ));
+    }
+
+    #[test]
+    fn test_hook_grok_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "grok"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::Grok
             }
         ));
     }

@@ -892,6 +892,100 @@ fn run_droid_inner_with_rules(
     droid_response_from_decision(&v, cmd, decide_from_verdict(cmd, verdict)).map(|o| o.to_string())
 }
 
+// ── Grok CLI PreToolUse hook ───────────────────────────────────
+//
+// Grok does not honor Claude-style `updatedInput`. Strategy matches Copilot
+// IDE: deny-with-suggestion so the model re-runs the rewritten `rtk …` command.
+// Fail-open on all errors (Never Block).
+
+/// Run the Grok CLI PreToolUse hook (reads JSON from stdin).
+pub fn run_grok() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let input = strip_leading_bom(&input).trim();
+    let output = run_grok_inner(input);
+    let _ = writeln!(io::stdout(), "{output}");
+    Ok(())
+}
+
+/// Pure processor: always returns valid allow/deny JSON (fail-open).
+fn run_grok_inner(input: &str) -> String {
+    if input.is_empty() {
+        return grok_allow();
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return grok_allow();
+        }
+    };
+
+    let tool_name = v
+        .get("toolName")
+        .or_else(|| v.get("tool_name"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+
+    if !grok_is_shell_tool(tool_name) {
+        return grok_allow();
+    }
+
+    let Some(cmd) = grok_extract_command(&v) else {
+        return grok_allow();
+    };
+
+    if cmd.is_empty() {
+        return grok_allow();
+    }
+
+    // Already rtk-prefixed: allow without consulting rewrite registry.
+    let trimmed = cmd.trim_start();
+    if trimmed == "rtk" || trimmed.starts_with("rtk ") {
+        return grok_allow();
+    }
+
+    match decide_hook_action(cmd, permissions::Host::Claude) {
+        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => {
+            audit_log("rewrite", cmd, &rewritten);
+            grok_deny(&format!(
+                "RTK auto-rewrite (token-optimized). Re-run this exact command: `{rewritten}`"
+            ))
+        }
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            grok_deny("Blocked by RTK permission rule")
+        }
+        HookDecision::Defer => grok_allow(),
+    }
+}
+
+fn grok_is_shell_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "run_terminal_command" | "Bash" | "bash" | "Shell" | "shell"
+    )
+}
+
+/// Extract shell command from Grok camelCase or Claude snake_case payloads.
+fn grok_extract_command(json: &Value) -> Option<&str> {
+    json.pointer("/toolInput/command")
+        .or_else(|| json.pointer("/tool_input/command"))
+        .and_then(|c| c.as_str())
+}
+
+fn grok_allow() -> String {
+    json!({ "decision": "allow" }).to_string()
+}
+
+fn grok_deny(reason: &str) -> String {
+    json!({
+        "decision": "deny",
+        "reason": reason
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1675,6 +1769,105 @@ mod tests {
         assert_eq!(strip_leading_bom("\u{feff}\u{feff}\u{feff}hello"), "hello");
         // BOM in the middle is preserved (not "leading").
         assert_eq!(strip_leading_bom("a\u{feff}b"), "a\u{feff}b");
+    }
+
+    // --- Grok CLI handler ---
+
+    fn grok_input(cmd: &str) -> String {
+        json!({
+            "hookEventName": "pre_tool_use",
+            "toolName": "run_terminal_command",
+            "toolInput": { "command": cmd }
+        })
+        .to_string()
+    }
+
+    fn grok_decision(result: &str) -> String {
+        let v: Value = serde_json::from_str(result).unwrap();
+        v["decision"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn grok_denies_git_status() {
+        let result = run_grok_inner(&grok_input("git status"));
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["decision"], "deny");
+        let reason = v["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("rtk git status"),
+            "reason must suggest rewritten command, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn grok_allows_rtk_prefixed() {
+        let result = run_grok_inner(&grok_input("rtk git status"));
+        assert_eq!(grok_decision(&result), "allow");
+    }
+
+    #[test]
+    fn grok_allows_echo() {
+        let result = run_grok_inner(&grok_input("echo hi"));
+        assert_eq!(grok_decision(&result), "allow");
+    }
+
+    #[test]
+    fn grok_allows_wrong_tool() {
+        let input = json!({
+            "toolName": "read_file",
+            "toolInput": { "path": "README.md" }
+        })
+        .to_string();
+        let result = run_grok_inner(&input);
+        assert_eq!(grok_decision(&result), "allow");
+    }
+
+    #[test]
+    fn grok_allows_malformed() {
+        let result = run_grok_inner("not-json");
+        assert_eq!(grok_decision(&result), "allow");
+    }
+
+    #[test]
+    fn grok_allows_empty_cmd() {
+        let input = json!({
+            "toolName": "run_terminal_command",
+            "toolInput": { "command": "" }
+        })
+        .to_string();
+        let result = run_grok_inner(&input);
+        assert_eq!(grok_decision(&result), "allow");
+    }
+
+    #[test]
+    fn grok_compound_rewrite() {
+        let result = run_grok_inner(&grok_input("git status && ls"));
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["decision"], "deny");
+        let reason = v["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("rtk git status") && reason.contains("rtk ls"),
+            "compound rewrite expected both rtk prefixes, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn grok_accepts_snake_case_fallback() {
+        // Claude-shaped keys still extract when tool name is a shell tool.
+        let input = json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "git status" }
+        })
+        .to_string();
+        let result = run_grok_inner(&input);
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["decision"], "deny");
+        assert!(v["reason"].as_str().unwrap().contains("rtk git status"));
+    }
+
+    #[test]
+    fn grok_allows_empty_input() {
+        assert_eq!(grok_decision(&run_grok_inner("")), "allow");
     }
 
     // --- Audit logging ---
