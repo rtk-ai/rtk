@@ -61,6 +61,7 @@ rtk gain    # should now show token savings stats
    ```bash
    cat ~/.claude/settings.json | grep rtk
    ```
+   RTK also recognizes the hook in `settings.local.json`, or wrapped in a shell script or inline `sh -c "rtk hook claude"` command.
 
 ## RTK not found after `cargo install`
 

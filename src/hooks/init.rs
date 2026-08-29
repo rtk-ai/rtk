@@ -6859,6 +6859,43 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_hook_from_json_preserves_wrapper_form() {
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/Users/test/.claude/hooks/rtk-rewrite.sh"
+                        }]
+                    },
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "env RTK_LOG=1 rtk hook claude"
+                        }]
+                    }
+                ]
+            }
+        });
+
+        let removed = remove_hook_from_json(&mut json_content);
+        assert!(removed);
+
+        // Only the legacy script entry is removed — a wrapper-form command
+        // is not an exact `rtk hook claude` invocation, so uninstall must
+        // leave it in place.
+        let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool_use.len(), 1);
+        assert_eq!(
+            pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap(),
+            "env RTK_LOG=1 rtk hook claude"
+        );
+    }
+
+    #[test]
     fn test_remove_hook_when_not_present() {
         let mut json_content = serde_json::json!({
             "hooks": {
