@@ -223,24 +223,91 @@ impl TomlFilterRegistry {
     }
 
     fn parse_and_compile(content: &str, source: &str) -> Result<Vec<CompiledFilter>, String> {
-        let file: TomlFilterFile = toml::from_str(content)
-            .map_err(|e| format!("TOML parse error in {}: {}", source, e))?;
+        // Soft-fail individual filters: registry load must not abort on one bad entry.
+        compile_filters_from_str_inner(content, source, /* hard_fail */ false)
+    }
+}
 
-        if file.schema_version != 1 {
-            return Err(format!(
-                "unsupported schema_version {} in {} (expected 1)",
-                file.schema_version, source
-            ));
-        }
+/// Compile filters from a TOML file without consulting the trust store.
+///
+/// Intended for explicit `rtk pipe --toml <path>` draft preview. Does **not**
+/// mark the file trusted and does not inject it into the agent rewrite path.
+pub fn compile_filters_from_path(path: &std::path::Path) -> Result<Vec<CompiledFilter>, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    compile_filters_from_str(&content, &path.display().to_string())
+}
 
-        let mut compiled = Vec::new();
-        for (name, def) in file.filters {
-            match compile_filter(name.clone(), def) {
-                Ok(f) => compiled.push(f),
-                Err(e) => eprintln!("[rtk] warning: filter '{}' in {}: {}", name, source, e),
+/// Compile filters from TOML text without consulting the trust store.
+///
+/// Unlike registry load, a single filter compile error is a hard failure — draft
+/// preview should not silently drop the filter the user is iterating on.
+pub fn compile_filters_from_str(
+    content: &str,
+    source: &str,
+) -> Result<Vec<CompiledFilter>, String> {
+    compile_filters_from_str_inner(content, source, /* hard_fail */ true)
+}
+
+fn compile_filters_from_str_inner(
+    content: &str,
+    source: &str,
+    hard_fail: bool,
+) -> Result<Vec<CompiledFilter>, String> {
+    let file: TomlFilterFile =
+        toml::from_str(content).map_err(|e| format!("TOML parse error in {}: {}", source, e))?;
+
+    if file.schema_version != 1 {
+        return Err(format!(
+            "unsupported schema_version {} in {} (expected 1)",
+            file.schema_version, source
+        ));
+    }
+
+    if hard_fail && file.filters.is_empty() {
+        return Err(format!("no [filters.*] entries in {}", source));
+    }
+
+    let mut compiled = Vec::new();
+    for (name, def) in file.filters {
+        match compile_filter(name.clone(), def) {
+            Ok(f) => compiled.push(f),
+            Err(e) if hard_fail => {
+                return Err(format!("filter '{}' in {}: {}", name, source, e));
             }
+            Err(e) => eprintln!("[rtk] warning: filter '{}' in {}: {}", name, source, e),
         }
-        Ok(compiled)
+    }
+    if hard_fail && compiled.is_empty() {
+        return Err(format!("no usable filters compiled from {}", source));
+    }
+    Ok(compiled)
+}
+
+/// Pick one filter from a compiled list.
+///
+/// - `Some(name)` → that filter by name
+/// - `None` with exactly one filter → that filter
+/// - `None` with multiple → error listing available names
+pub fn select_compiled_filter<'a>(
+    filters: &'a [CompiledFilter],
+    name: Option<&str>,
+) -> Result<&'a CompiledFilter, String> {
+    let available = || {
+        let mut names: Vec<&str> = filters.iter().map(|f| f.name.as_str()).collect();
+        names.sort_unstable();
+        names.join(", ")
+    };
+    match name {
+        Some(n) => filters
+            .iter()
+            .find(|f| f.name == n)
+            .ok_or_else(|| format!("filter '{}' not found. Available: {}", n, available())),
+        None if filters.len() == 1 => Ok(&filters[0]),
+        None => Err(format!(
+            "multiple filters in file; pass -f <name> to select. Available: {}",
+            available()
+        )),
     }
 }
 
@@ -1964,5 +2031,43 @@ expected = "output line 1\noutput line 2"
             "Newly added filter must be discoverable via find_filter_in"
         );
         assert_eq!(found.unwrap().name, "my-new-tool");
+    }
+
+    #[test]
+    fn compile_filters_from_str_hard_fails_on_bad_regex() {
+        let toml = r#"
+schema_version = 1
+[filters.bad]
+match_command = "(unclosed"
+"#;
+        let err = compile_filters_from_str(toml, "test").expect_err("bad regex");
+        assert!(err.contains("bad"), "err={}", err);
+    }
+
+    #[test]
+    fn compile_filters_from_str_rejects_empty_filters() {
+        let err = compile_filters_from_str("schema_version = 1\n", "test").expect_err("empty");
+        assert!(err.contains("no [filters.*]"), "err={}", err);
+    }
+
+    #[test]
+    fn select_compiled_filter_single_without_name() {
+        let filters = make_filters(
+            "schema_version = 1\n[filters.only]\nmatch_command = \"^only\"\nmax_lines = 1\n",
+        );
+        let selected = select_compiled_filter(&filters, None).expect("single");
+        assert_eq!(selected.name, "only");
+    }
+
+    #[test]
+    fn select_compiled_filter_requires_name_when_multiple() {
+        let filters = make_filters(
+            "schema_version = 1\n[filters.a]\nmatch_command = \"^a\"\n[filters.b]\nmatch_command = \"^b\"\n",
+        );
+        let err = select_compiled_filter(&filters, None).expect_err("multi");
+        assert!(err.contains("multiple filters"), "err={}", err);
+
+        let selected = select_compiled_filter(&filters, Some("b")).expect("named");
+        assert_eq!(selected.name, "b");
     }
 }

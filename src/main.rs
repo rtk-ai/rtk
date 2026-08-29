@@ -654,9 +654,15 @@ enum Commands {
 
     /// Read stdin, apply filter, print filtered output (Unix pipe mode)
     Pipe {
-        /// Filter name (cargo-test, pytest, phpunit, phpstan, pint, grep, find, git-log, etc.)
+        /// Filter name (cargo-test, pytest, phpunit, phpstan, pint, grep, find, git-log, etc.).
+        /// With `--toml`, selects among filters defined in that file.
         #[arg(short, long)]
         filter: Option<String>,
+
+        /// Compile and apply filters from a TOML file (draft preview; no trust gate).
+        /// Does not write the path into the trust store.
+        #[arg(long, value_name = "PATH", conflicts_with = "passthrough")]
+        toml: Option<PathBuf>,
 
         /// Pass stdin through without filtering
         #[arg(long)]
@@ -2490,9 +2496,10 @@ fn run_cli() -> Result<i32> {
 
         Commands::Pipe {
             filter,
+            toml,
             passthrough,
         } => {
-            pipe_cmd::run(filter.as_deref(), passthrough)?;
+            pipe_cmd::run(filter.as_deref(), passthrough, toml.as_deref())?;
             0
         }
 
