@@ -100,7 +100,13 @@ fn detect_format(v: &Value) -> HookFormat {
     if let Some(tool_name) = v.get("tool_name").and_then(|t| t.as_str()) {
         if matches!(
             tool_name,
-            "runTerminalCommand" | "run_in_terminal" | "Bash" | "bash"
+            "runTerminalCommand"
+                | "run_in_terminal"
+                | "Bash"
+                | "bash"
+                | "powershell"
+                | "pwsh"
+                | "cmd"
         ) {
             if let Some(cmd) = v
                 .pointer("/tool_input/command")
@@ -398,7 +404,11 @@ fn copilot_cli_response_from_decision(
 pub fn run_gemini() -> Result<()> {
     let input = read_stdin_limited()?;
 
-    let json: Value = serde_json::from_str(&input).context("Failed to parse hook input as JSON")?;
+    // Strip leading BOM(s) before parsing: some Windows hosts prepend UTF-8
+    // BOMs to hook stdin, which serde_json rejects.
+    let input = strip_leading_bom(&input);
+
+    let json: Value = serde_json::from_str(input).context("Failed to parse hook input as JSON")?;
 
     let tool_name = json.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -465,7 +475,8 @@ fn run_vibe_inner(input: &str) -> Option<String> {
     };
 
     let tool_name = json.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
-    if tool_name != "bash" {
+    // Support both bash and PowerShell on Windows
+    if !matches!(tool_name, "bash" | "powershell" | "pwsh" | "cmd") {
         return None;
     }
 
@@ -535,8 +546,7 @@ fn sanitize_log_field(s: &str) -> String {
 }
 
 fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> {
-    let home = dirs::home_dir()?;
-    let dir = home.join(".local").join("share").join("rtk");
+    let dir = super::audit_dir()?;
     crate::core::utils::create_private_dir(&dir).ok()?;
     let path = dir.join("hook-audit.log");
     let mut file = crate::core::utils::open_private(
@@ -630,7 +640,9 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
 pub fn run_claude() -> Result<()> {
     let input = read_stdin_limited()?;
 
-    let input = input.trim();
+    // Strip leading BOM(s) before trimming: some Windows hosts prepend UTF-8
+    // BOMs to hook stdin (confirmed for Cursor/Copilot), which serde_json rejects.
+    let input = strip_leading_bom(&input).trim();
     if input.is_empty() {
         return Ok(());
     }
