@@ -77,8 +77,14 @@ impl BlockHandler for TscHandler {
         line.starts_with("  ") || line.starts_with('\t')
     }
 
-    fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+    fn format_summary(&self, exit_code: i32, _raw: &str) -> Option<String> {
         if self.error_count == 0 {
+            if exit_code != 0 {
+                return Some(format!(
+                    "TypeScript: compilation failed (exit {})\n",
+                    exit_code
+                ));
+            }
             return Some("TypeScript: No errors found\n".to_string());
         }
 
@@ -319,6 +325,19 @@ Found 3 errors in 2 files.
         let mut f = BlockStreamFilter::new(TscHandler::new());
         let result = run_block_filter(&mut f, input, 0);
         assert!(result.contains("No errors found"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_tsc_stream_nonzero_exit_without_diagnostics() {
+        let input = "This is not the tsc command you are looking for\n";
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, input, 1);
+        assert!(
+            result.contains("TypeScript: compilation failed (exit 1)"),
+            "got: {}",
+            result
+        );
+        assert!(!result.contains("No errors found"), "got: {}", result);
     }
 
     #[test]
