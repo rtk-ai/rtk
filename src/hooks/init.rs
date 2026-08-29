@@ -273,6 +273,40 @@ pub fn run(
     patch_mode: PatchMode,
     ctx: InitContext,
 ) -> Result<()> {
+    run_with_cursor_installer(
+        global,
+        install_claude,
+        install_opencode,
+        install_cursor,
+        install_windsurf,
+        install_cline,
+        claude_md,
+        hook_only,
+        codex,
+        patch_mode,
+        ctx,
+        install_cursor_hooks,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_with_cursor_installer<F>(
+    global: bool,
+    install_claude: bool,
+    install_opencode: bool,
+    install_cursor: bool,
+    install_windsurf: bool,
+    install_cline: bool,
+    claude_md: bool,
+    hook_only: bool,
+    codex: bool,
+    patch_mode: PatchMode,
+    ctx: InitContext,
+    install_cursor_hooks_fn: F,
+) -> Result<()>
+where
+    F: FnOnce(InitContext) -> Result<()>,
+{
     let InitContext { dry_run, .. } = ctx;
     // Validation: Codex mode conflicts
     if codex {
@@ -311,6 +345,7 @@ pub fn run(
         } else if install_cline {
             run_cline_mode(ctx)?;
         } else {
+            let install_claude = install_claude && !install_cursor;
             // Mode selection (Claude Code / OpenCode)
             match (install_claude, install_opencode, claude_md, hook_only) {
                 (false, true, _, _) => run_opencode_only_mode(ctx)?,
@@ -332,7 +367,7 @@ pub fn run(
 
             // Cursor hooks (additive, installed alongside Claude Code)
             if install_cursor {
-                install_cursor_hooks(ctx)?;
+                install_cursor_hooks_fn(ctx)?;
             }
         }
     }
@@ -3566,6 +3601,15 @@ fn resolve_cursor_dir() -> Result<PathBuf> {
 fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
     let cursor_dir = resolve_cursor_dir()?;
+    install_cursor_hooks_at(&cursor_dir, InitContext { verbose, dry_run })
+}
+
+fn install_cursor_hooks_at(cursor_dir: &Path, ctx: InitContext) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+    if !dry_run {
+        fs::create_dir_all(cursor_dir)
+            .with_context(|| format!("Failed to create {} directory", cursor_dir.display()))?;
+    }
 
     // Migrate old hook script if present
     let old_hook = cursor_dir.join("hooks").join(REWRITE_HOOK_FILE);
@@ -7166,17 +7210,27 @@ mod tests {
     /// Serialises all tests that mutate the process-wide working directory.
     static CWD_LOCK: Mutex<()> = Mutex::new(());
 
+    const CLAUDE_CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
+
     fn with_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
-        let _guard = CLAUDE_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let claude_dir = tmp.path().join(CLAUDE_DIR);
         fs::create_dir_all(&claude_dir).unwrap();
+        with_claude_config_dir_override(&claude_dir, f);
+    }
 
-        let orig = std::env::var_os("CLAUDE_CONFIG_DIR");
-        std::env::set_var("CLAUDE_CONFIG_DIR", &claude_dir);
-        f(&claude_dir);
+    fn with_missing_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
+        let claude_dir = tmp.path().join(CLAUDE_DIR);
+        with_claude_config_dir_override(&claude_dir, f);
+    }
+
+    fn with_claude_config_dir_override<F: FnOnce(&Path)>(claude_dir: &Path, f: F) {
+        let _guard = CLAUDE_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let orig = std::env::var_os(CLAUDE_CONFIG_DIR_ENV);
+        std::env::set_var(CLAUDE_CONFIG_DIR_ENV, claude_dir);
+        f(claude_dir);
         match orig {
-            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
-            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+            Some(v) => std::env::set_var(CLAUDE_CONFIG_DIR_ENV, v),
+            None => std::env::remove_var(CLAUDE_CONFIG_DIR_ENV),
         }
     }
 
@@ -7214,6 +7268,54 @@ mod tests {
                 "settings.json must contain hook command"
             );
         });
+    }
+
+    #[test]
+    fn test_cursor_global_init_does_not_require_claude_dir() {
+        let tmp = TempDir::new().unwrap();
+        let cursor_dir = tmp.path().join(CURSOR_DIR);
+        with_missing_claude_dir_override(&tmp, |claude_dir| {
+            run_with_cursor_installer(
+                true,
+                true,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                PatchMode::Auto,
+                InitContext::default(),
+                |_| {
+                    fs::create_dir_all(&cursor_dir).unwrap();
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+            assert!(
+                !claude_dir.exists(),
+                "Cursor init must not create Claude artifacts"
+            );
+            assert!(
+                cursor_dir.exists(),
+                "Cursor init must run the Cursor installer"
+            );
+        });
+    }
+
+    #[test]
+    fn test_install_cursor_hooks_creates_cursor_dir() {
+        let tmp = TempDir::new().unwrap();
+        let cursor_dir = tmp.path().join(CURSOR_DIR);
+
+        install_cursor_hooks_at(&cursor_dir, InitContext::default()).unwrap();
+
+        assert!(
+            cursor_dir.join(HOOKS_JSON).exists(),
+            "Cursor install must write hooks.json in the Cursor directory"
+        );
     }
 
     #[test]
