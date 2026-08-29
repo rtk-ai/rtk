@@ -8,6 +8,7 @@ mod parser;
 
 // Re-export command modules for routing
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use cmds::cpp::{cmake_cmd, ninja_cmd, xmake_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
@@ -551,6 +552,39 @@ enum Commands {
     /// Playwright E2E tests with compact output
     Playwright {
         /// Playwright arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// CMake configure with compact output (strip compiler probes, keep errors)
+    ///
+    /// Use `-S` to specify source dir, `-B` for build dir.
+    /// Example: rtk cmake -S . -B build -G Ninja
+    Cmake {
+        /// cmake arguments (-S, -B, -D, -G, etc.)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Ninja build with compact output (FAILED blocks only, progress stripped)
+    ///
+    /// Use this instead of `cmake --build` for filtered build output.
+    /// Example: rtk ninja -C build -j 8
+    Ninja {
+        /// Build directory (default: .)
+        #[arg(short = 'C', long, default_value = ".")]
+        directory: String,
+        /// Additional ninja arguments (-j, -k, targets, etc.)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// xmake build/configure with compact output (strip compiler commands, keep errors)
+    ///
+    /// Example: rtk xmake build
+    /// Example: rtk xmake f -c config.lua
+    Xmake {
+        /// xmake arguments (build, f, -c, etc.)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2248,6 +2282,12 @@ fn run_cli() -> Result<i32> {
 
         Commands::Playwright { args } => playwright_cmd::run(&args, cli.verbose)?,
 
+        Commands::Cmake { args } => cmake_cmd::run(&args, cli.verbose)?,
+
+        Commands::Ninja { directory, args } => ninja_cmd::run(&directory, &args, cli.verbose)?,
+
+        Commands::Xmake { args } => xmake_cmd::run(&args, cli.verbose)?,
+
         Commands::Cargo { command } => match command {
             CargoCommands::Build { args } => {
                 cargo_cmd::run(cargo_cmd::CargoCommand::Build, &args, cli.verbose)?
@@ -2770,6 +2810,9 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Lint { .. }
             | Commands::Prettier { .. }
             | Commands::Playwright { .. }
+            | Commands::Cmake { .. }
+            | Commands::Ninja { .. }
+            | Commands::Xmake { .. }
             | Commands::Cargo { .. }
             | Commands::Npm { .. }
             | Commands::Npx { .. }
@@ -3172,6 +3215,7 @@ mod tests {
             "format",
             "playwright",
             "cargo",
+            "cmake",
             "npm",
             "npx",
             "curl",
@@ -3187,6 +3231,7 @@ mod tests {
             "golangci-lint",
             "gradlew",
             "mvn",
+            "ninja",
             "sbt",
             "php",
             "phpunit",
@@ -3196,6 +3241,7 @@ mod tests {
             "ecs",
             "pint",
             "uv",
+            "xmake",
         ];
 
         let unclassified: Vec<String> = Cli::command()

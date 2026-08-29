@@ -174,25 +174,27 @@ Savings by ecosystem:
   CLOUD (cmds/cloud/)      60-80%    aws, docker/kubectl, curl, wget, psql
   SYSTEM (cmds/system/)    50-90%    ls, tree, read, grep, find, json, log, env, deps
   RUST (cmds/rust/)        60-99%    cargo test/build/clippy, err
+  CPP (cmds/cpp/)          60-97%    cmake configure, ninja build
 ```
 
-**Total: 64 modules** (42 command modules + 22 infrastructure modules)
+**Total: 66 modules** (44 command modules + 22 infrastructure modules)
 
 ### Module Breakdown
 
-- **Command Modules**: `src/cmds/` — organized by ecosystem (git, rust, js, python, go, dotnet, cloud, system, ruby). Each ecosystem README lists its files.
+- **Command Modules**: `src/cmds/` — organized by ecosystem (git, rust, js, python, go, dotnet, cloud, system, ruby, build).
 - **Core Infrastructure**: `src/core/` — utils, filter, tracking, tee, config, toml_filter, display_helpers, telemetry
 - **Hook System**: `src/hooks/` — init, rewrite, permissions, hook_cmd, hook_check, hook_audit, verify, trust, integrity
 - **Analytics**: `src/analytics/` — gain, cc_economics, ccusage, session_cmd
 
 ### Module Count Breakdown
 
-- **Command Modules**: 42 (directly exposed to users)
+- **Command Modules**: 44 (directly exposed to users)
 - **Infrastructure Modules**: 22 (utils, filter, tracking, tee, config, init, gain, toml_filter, verify_cmd, etc.)
 - **Git Commands**: 7 operations (status, diff, log, add, commit, push, branch/checkout)
 - **JS/TS Tooling**: 8 modules (modern frontend/fullstack development)
 - **Python Tooling**: 3 modules (ruff, pytest, pip)
 - **Go Tooling**: 2 modules (go test/build/vet, golangci-lint)
+- **C++ Build Tooling**: 2 modules (cmake configure, ninja build)
 
 ---
 
@@ -305,7 +307,14 @@ Strategy            Modules              Technique               Reduction
    └──────────────┘
 
    Used by: go test (NDJSON stream, interleaved package events)
-```
+
+13. C++ BUILD FILTERING
+   ┌──────────────┐
+   │ [N/M] lines  │  →  PROGRESS→FAILED_EDGE→DIAG   →  keep only errors  90%+
+   │ FAILED blocks │      State machine tracking
+   └──────────────┘
+
+   Used by: ninja (build failures), cmake (configure errors)
 
 ### Code Filtering Levels (src/core/filter.rs)
 
