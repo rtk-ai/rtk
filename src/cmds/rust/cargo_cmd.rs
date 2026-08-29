@@ -254,13 +254,70 @@ impl BlockHandler for CargoTestHandler {
         self.in_failure_section && !line.starts_with("---- ")
     }
 
-    fn format_summary(&self, _exit_code: i32, raw: &str) -> Option<String> {
-        // Same never-worse guard as CargoBuildHandler (#3430 review): if the
-        // compacted summary ends up larger than the raw output (e.g. a tiny
-        // `cargo test` run), keep the raw output instead of "compacting" it
-        // into something bigger.
-        let summary = self.compute_test_summary(raw)?;
-        Some(crate::core::guard::never_worse(raw, &summary).to_string())
+    fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String> {
+        if self.summary_lines.is_empty() {
+            let json = extract_json_diagnostics(raw);
+            if self.has_compile_errors || !json.errors.is_empty() {
+                // Content-based (exit 0): a real compile error yields "cargo test: N
+                // errors"; a bare "could not compile" leaves the raw tail fallback.
+                let build_filtered = filter_cargo_build_labeled(raw, "test", 0);
+                if build_filtered.contains("cargo test:") {
+                    return Some(format!("{}\n", build_filtered));
+                }
+                // Fallback: last 5 meaningful lines
+                let meaningful: Vec<&str> = raw
+                    .lines()
+                    .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("Compiling"))
+                    .collect();
+                let last5: Vec<&str> = meaningful.iter().rev().take(5).rev().copied().collect();
+                return Some(format!("{}\n", last5.join("\n")));
+            }
+        }
+
+        // No failures emitted — aggregate pass results
+        let mut aggregated: Option<AggregatedTestResult> = None;
+        let mut all_parsed = true;
+
+        for line in &self.summary_lines {
+            if let Some(parsed) = AggregatedTestResult::parse_line(line) {
+                if let Some(ref mut agg) = aggregated {
+                    agg.merge(&parsed);
+                } else {
+                    aggregated = Some(parsed);
+                }
+            } else {
+                all_parsed = false;
+                break;
+            }
+        }
+
+        if all_parsed {
+            if let Some(agg) = aggregated {
+                if agg.suites > 0 {
+                    let line = format!("{}\n", agg.format_compact());
+                    // "cargo test: N passed (M suites)" must never be rendered
+                    // for a non-zero child exit (killed mid-run, signal, etc.).
+                    return Some(crate::core::guard::guard_exit(
+                        raw,
+                        exit_code,
+                        "cargo test",
+                        &line,
+                    ));
+                }
+            }
+        }
+
+        // Fallback: show raw summary lines
+        if !self.summary_lines.is_empty() {
+            let mut s = String::new();
+            for line in &self.summary_lines {
+                s.push_str(line);
+                s.push('\n');
+            }
+            return Some(s);
+        }
+
+        None
     }
 }
 
@@ -423,7 +480,12 @@ fn run_install(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 fn run_nextest(args: &[String], verbose: u8) -> Result<i32> {
-    run_cargo_filtered("nextest", args, verbose, filter_cargo_nextest)
+    run_cargo_filtered_with_exit("nextest", args, verbose, |o, exit| {
+        let filtered = filter_cargo_nextest(o);
+        // nextest exits 1 on test failure; never render a green "N passed"
+        // verdict when the run actually failed.
+        crate::core::guard::guard_exit(o, exit, "cargo nextest", &filtered)
+    })
 }
 
 /// Format crate name + version into a display string
@@ -632,7 +694,7 @@ fn flush_failure_block(header: &mut String, body: &mut Vec<String>, failures: &m
 /// Filter cargo nextest output - show failures + compact summary
 fn filter_cargo_nextest(output: &str) -> String {
     let summary_re = regex::Regex::new(
-        r"Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run:\s+(\d+) passed(?:,\s+(\d+) failed)?(?:,\s+(\d+) skipped)?"
+        r"Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run:\s+(\d+) passed(?:,\s+(\d+) failed)?(?:,\s+(\d+) skipped)?(?:\s+\((\d+) slow\))?"
     ).expect("invalid nextest summary regex");
 
     let starting_re = regex::Regex::new(r"Starting \d+ tests? across (\d+) binar(?:y|ies)")
@@ -765,6 +827,7 @@ fn filter_cargo_nextest(output: &str) -> String {
             .get(5)
             .and_then(|m| m.as_str().parse().ok())
             .unwrap_or(0);
+        let slow: Option<u32> = caps.get(6).and_then(|m| m.as_str().parse().ok());
 
         let binary_text = match binaries.cmp(&1) {
             Ordering::Greater => format!("{} binaries", binaries),
@@ -775,6 +838,9 @@ fn filter_cargo_nextest(output: &str) -> String {
         if failed == 0 {
             // All pass - compact single line
             let mut parts = vec![format!("{} passed", passed)];
+            if let Some(slow) = slow {
+                parts.push(format!("{} slow", slow));
+            }
             if skipped > 0 {
                 parts.push(format!("{} skipped", skipped));
             }
@@ -799,6 +865,9 @@ fn filter_cargo_nextest(output: &str) -> String {
         }
 
         let mut summary_parts = vec![format!("{} passed", passed)];
+        if let Some(slow) = slow {
+            summary_parts.push(format!("{} slow", slow));
+        }
         if failed > 0 {
             summary_parts.push(format!("{} failed", failed));
         }
@@ -2125,6 +2194,55 @@ error: aborting due to 2 previous errors
     }
 
     #[test]
+    fn test_filter_cargo_nextest_slow_annotation() {
+        let output = r#"    Starting 301 tests across 1 binary
+────────────────────────────
+     Summary [   0.192s] 301 tests run: 301 passed, 0 skipped (0 slow)
+"#;
+        let result = filter_cargo_nextest(output);
+        assert_eq!(
+            result, "cargo nextest: 301 passed, 0 slow (1 binary, 0.192s)",
+            "got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_slow_annotation_with_slow() {
+        let output = r#"    Starting 50 tests across 1 binary
+────────────────────────────
+     Summary [   0.500s] 50 tests run: 50 passed, 3 skipped (2 slow)
+"#;
+        let result = filter_cargo_nextest(output);
+        assert_eq!(
+            result, "cargo nextest: 50 passed, 2 slow, 3 skipped (1 binary, 0.500s)",
+            "got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_cargo_nextest_nonzero_exit_never_says_passed() {
+        // nextest killed mid-run: green "N passed" verdict must be replaced.
+        let output = r#"    Starting 301 tests across 1 binary
+────────────────────────────
+     Summary [   0.192s] 301 tests run: 301 passed, 0 skipped
+"#;
+        let filtered = filter_cargo_nextest(output);
+        assert_eq!(
+            filtered, "cargo nextest: 301 passed (1 binary, 0.192s)",
+            "got: {}",
+            filtered
+        );
+        let result = crate::core::guard::guard_exit(output, 137, "cargo nextest", &filtered);
+        assert!(
+            result.contains("cargo nextest: failed (exit 137)"),
+            "got: {}",
+            result
+        );
+    }
+
+    #[test]
     fn test_filter_cargo_nextest_with_failures() {
         let output = r#"    Starting 4 tests across 1 binary (1 test skipped)
         PASS [   0.006s] (1/4) test-proj tests::passing_test
@@ -2757,6 +2875,30 @@ test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
             result
         );
         assert!(!result.contains("Compiling"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_cargo_test_stream_nonzero_exit_never_says_passed() {
+        // All summaries say ok but the child was killed mid-run (exit 137).
+        // "cargo test: N passed (M suites)" must never be rendered.
+        let input = r#"   Compiling rtk v0.5.0
+    Finished test [unoptimized + debuginfo] target(s) in 2.53s
+
+running 15 tests
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+"#;
+        let mut f = BlockStreamFilter::new(CargoTestHandler::new());
+        let result = run_block_filter(&mut f, input, 137);
+        assert!(
+            result.contains("cargo test: failed (exit 137)"),
+            "got: {}",
+            result
+        );
+        assert!(
+            !result.contains("cargo test: 15 passed"),
+            "must not render a green verdict: {}",
+            result
+        );
     }
 
     #[test]

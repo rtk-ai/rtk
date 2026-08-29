@@ -67,13 +67,13 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
         );
     }
 
-    let filter: fn(&str) -> String = if skip_json {
-        |s: &str| s.to_string()
+    let filter: fn(&str, i32) -> String = if skip_json {
+        |s, _| s.to_string()
     } else {
-        filter_go_test_json
+        |out, exit| crate::core::guard::guard_exit(out, exit, "go test", &filter_go_test_json(out))
     };
 
-    runner::run_filtered(
+    runner::run_filtered_with_exit(
         cmd,
         "go test",
         &args.join(" "),
@@ -115,11 +115,11 @@ pub fn run_vet(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: go vet {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_filtered_with_exit(
         cmd,
         "go vet",
         &args.join(" "),
-        filter_go_vet,
+        |out, exit| crate::core::guard::guard_exit(out, exit, "go vet", &filter_go_vet(out)),
         crate::core::runner::RunOptions::with_tee("go_vet"),
     )
 }
@@ -271,8 +271,12 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
         &*stdout
     };
 
+    let exit_code = exit_code_from_output(&output, "go tool golangci-lint");
+
     let filtered = golangci_cmd::filter_golangci_json(json_output, version);
-    let shown = never_worse(&raw, &filtered);
+    // "No issues found" must never be rendered for a non-zero exit.
+    let guarded = crate::core::guard::guard_exit(&raw, exit_code, "golangci-lint", &filtered);
+    let shown = never_worse(&raw, &guarded);
     println!("{}", shown);
 
     if !stderr.trim().is_empty() && verbose > 0 {
@@ -286,9 +290,10 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
         shown,
     );
 
-    // golangci-lint: exit 0 = clean, exit 1 = lint issues found (not an error),
-    // exit 2+ = config/build error, None = killed by signal (OOM, SIGKILL)
-    Ok(if exit_code == 1 { 0 } else { exit_code })
+    // golangci-lint: exit 0 = clean, exit 1 = lint issues found (a real
+    // failure for CI/agents — do not silently rewrite it to 0), exit 2+ =
+    // config/build error, None = killed by signal (OOM, SIGKILL).
+    Ok(exit_code)
 }
 
 /// Parse go test -json output (NDJSON format)
@@ -1048,6 +1053,38 @@ pattern ./...: directory prefix . does not contain modules listed in go.work or 
         let result = filter_go_vet(output);
         assert!(result.contains("Go vet"));
         assert!(result.contains("No issues found"));
+    }
+
+    #[test]
+    fn test_go_vet_nonzero_exit_never_says_no_issues() {
+        // go vet exits non-zero when it finds problems. A green "No issues
+        // found" verdict must never be rendered for it.
+        let raw = "go vet ran but produced no parseable issues";
+        let filtered = filter_go_vet(raw);
+        assert_eq!(filtered, "Go vet: No issues found");
+        let result = crate::core::guard::guard_exit(raw, 1, "go vet", &filtered);
+        assert!(result.contains("go vet: failed (exit 1)"), "got: {}", result);
+        assert!(!result.contains("No issues found"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_go_test_json_killed_mid_stream_shows_failure() {
+        // Killed mid-stream (SIGKILL/OOM, exit 137): partial JSON shows only
+        // passes — the green verdict must be replaced by the failure fallback.
+        let output = r#"{"Time":"2024-01-01T10:00:00Z","Action":"run","Package":"example.com/foo","Test":"TestFast"}
+{"Time":"2024-01-01T10:00:01Z","Action":"pass","Package":"example.com/foo","Test":"TestFast","Elapsed":0.1}"#;
+        let filtered = filter_go_test_json(output);
+        assert!(
+            filtered.contains("Go test"),
+            "expected a go test verdict, got: {}",
+            filtered
+        );
+        let result = crate::core::guard::guard_exit(output, 137, "go test", &filtered);
+        assert!(
+            result.contains("go test: failed (exit 137)"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]

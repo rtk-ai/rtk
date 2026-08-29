@@ -12,6 +12,12 @@ static TSC_ERROR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(.+?)\((\d+),(\d+)\):\s+(error|warning)\s+(TS\d+):\s+(.+)$").unwrap()
 });
 
+/// Position-less global errors like "error TS5083: Cannot read file 'x'." —
+/// no `file(line,col):` prefix, so `TSC_ERROR` never matches them.
+static TSC_GLOBAL_ERROR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:error|warning)\s+TS\d+:\s+.+$").unwrap()
+});
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let tsc_exists = tool_exists("tsc");
 
@@ -77,16 +83,37 @@ impl BlockHandler for TscHandler {
         line.starts_with("  ") || line.starts_with('\t')
     }
 
-    fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
-        if self.error_count == 0 {
+    fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String> {
+        // Global errors (position-less, e.g. TS5083) are dropped by the block
+        // stream — they carry no `file(line,col):` prefix. Surface them here.
+        let global_errors: Vec<&str> = raw
+            .lines()
+            .filter(|l| TSC_GLOBAL_ERROR.is_match(l.trim()))
+            .collect();
+
+        if self.error_count == 0 && global_errors.is_empty() {
+            // "TypeScript: No errors found" is an all-green verdict — it must
+            // never be rendered for a non-zero child exit.
+            if exit_code != 0 {
+                return Some(crate::core::guard::failure_fallback(
+                    "TypeScript",
+                    exit_code,
+                    raw,
+                ));
+            }
             return Some("TypeScript: No errors found\n".to_string());
         }
 
+        let total_errors = self.error_count + global_errors.len();
         let mut result = format!(
             "TypeScript: {} errors in {} files\n",
-            self.error_count,
+            total_errors,
             self.files.len()
         );
+
+        for err in &global_errors {
+            result.push_str(&format!("  {}\n", err));
+        }
 
         if self.code_counts.len() > 1 {
             let mut counts: Vec<_> = self.code_counts.iter().collect();
@@ -113,6 +140,7 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
     }
 
     let mut errors: Vec<TsError> = Vec::new();
+    let mut global_errors: Vec<String> = Vec::new();
     let lines: Vec<&str> = output.lines().collect();
     let mut i = 0;
 
@@ -143,12 +171,15 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
             }
 
             errors.push(err);
+        } else if TSC_GLOBAL_ERROR.is_match(line.trim()) {
+            global_errors.push(line.trim().to_string());
+            i += 1;
         } else {
             i += 1;
         }
     }
 
-    if errors.is_empty() {
+    if errors.is_empty() && global_errors.is_empty() {
         if output.contains("Found 0 errors") {
             return "TypeScript: No errors found".to_string();
         }
@@ -170,9 +201,16 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
     let mut result = String::new();
     result.push_str(&format!(
         "TypeScript: {} errors in {} files\n",
-        errors.len(),
+        errors.len() + global_errors.len(),
         by_file.len()
     ));
+
+    for err in &global_errors {
+        result.push_str(&format!("  {}\n", err));
+    }
+    if !global_errors.is_empty() && !errors.is_empty() {
+        result.push('\n');
+    }
 
     // Top error codes summary (compact, one line)
     let mut code_counts: Vec<_> = by_code.iter().collect();
@@ -292,6 +330,33 @@ src/app.tsx(20,5): error TS2345: Argument of type 'number' is not assignable to 
         assert!(result.contains("No errors found"));
     }
 
+    #[test]
+    fn test_filter_tsc_global_errors_shown() {
+        // Position-less global errors (no file(line,col): prefix) must surface.
+        let output = "\
+error TS5083: Cannot read file '/project/tsconfig.json'.
+error TS5058: The specified path does not exist.
+Found 2 errors.
+";
+        let result = filter_tsc_output(output);
+        assert!(result.contains("TypeScript: 2 errors in 0 files"));
+        assert!(result.contains("TS5083"), "got: {}", result);
+        assert!(result.contains("TS5058"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_tsc_global_and_positional_errors() {
+        let output = "\
+error TS5083: Cannot read file '/project/tsconfig.json'.
+src/api.ts(10,5): error TS2322: Type 'string' is not assignable to type 'number'.
+Found 2 errors.
+";
+        let result = filter_tsc_output(output);
+        assert!(result.contains("TypeScript: 2 errors in 1 files"));
+        assert!(result.contains("TS5083"), "got: {}", result);
+        assert!(result.contains("TS2322"), "got: {}", result);
+    }
+
     // --- Streaming handler tests ---
 
     use crate::core::stream::tests::run_block_filter;
@@ -319,6 +384,33 @@ Found 3 errors in 2 files.
         let mut f = BlockStreamFilter::new(TscHandler::new());
         let result = run_block_filter(&mut f, input, 0);
         assert!(result.contains("No errors found"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_tsc_stream_global_errors() {
+        // Position-less errors must surface even though the block stream only
+        // captures `file(line,col):` blocks.
+        let input = "error TS5083: Cannot read file '/project/tsconfig.json'.\nFound 1 errors.\n";
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, input, 1);
+        assert!(result.contains("TS5083"), "got: {}", result);
+        assert!(result.contains("1 errors"), "got: {}", result);
+        assert!(!result.contains("No errors found"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_tsc_stream_nonzero_exit_never_says_no_errors() {
+        // tsc exited non-zero but nothing parsed (e.g. a crash). "TypeScript:
+        // No errors found" must never be rendered.
+        let input = "Found 0 errors. Watching for file changes.\n";
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, input, 1);
+        assert!(
+            result.contains("TypeScript: failed (exit 1)"),
+            "got: {}",
+            result
+        );
+        assert!(!result.contains("No errors found"), "got: {}", result);
     }
 
     #[test]

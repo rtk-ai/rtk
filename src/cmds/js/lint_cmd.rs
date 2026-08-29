@@ -8,8 +8,15 @@ use crate::core::utils::{package_manager_exec, resolved_command, truncate};
 use crate::mypy_cmd;
 use crate::ruff_cmd;
 use anyhow::{Context, Result};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::LazyLock;
+
+/// "0 error"/"0 errors" only — must not match "10 errors" or "20 errors",
+/// whose counts merely end in a zero.
+static ZERO_ERRORS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(?:^|[^0-9])0 errors?").unwrap());
 
 #[derive(Debug, Deserialize, Serialize)]
 struct EslintMessage {
@@ -200,7 +207,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     };
 
     let hint = crate::core::tee::tee_and_hint(&raw, "lint", result.exit_code);
-    let shown = crate::core::runner::emit_guarded(&filtered, hint.as_deref(), &raw);
+    // Never render "No issues found" when the linter exited non-zero.
+    let guarded = crate::core::guard::guard_exit(&raw, result.exit_code, linter, &filtered);
+    let shown = crate::core::runner::emit_guarded(&guarded, hint.as_deref(), &raw);
 
     timer.track(
         &format!("{} {}", linter, args.join(" ")),
@@ -454,7 +463,7 @@ fn filter_generic_lint(output: &str) -> String {
             warnings += 1;
             issues.push(line.to_string());
         }
-        if line_lower.contains("error") && !line_lower.contains("0 error") {
+        if line_lower.contains("error") && !ZERO_ERRORS.is_match(&line_lower) {
             errors += 1;
             issues.push(line.to_string());
         }
@@ -704,5 +713,31 @@ mod tests {
         assert!(!is_python_linter("eslint"));
         assert!(!is_python_linter("biome"));
         assert!(!is_python_linter("unknown"));
+    }
+
+    #[test]
+    fn test_zero_errors_regex_does_not_match_counts_ending_in_zero() {
+        assert!(ZERO_ERRORS.is_match("0 error"));
+        assert!(ZERO_ERRORS.is_match("0 errors"));
+        assert!(ZERO_ERRORS.is_match("problem: 0 errors found"));
+        assert!(!ZERO_ERRORS.is_match("10 errors"));
+        assert!(!ZERO_ERRORS.is_match("20 errors"));
+        assert!(!ZERO_ERRORS.is_match("100 errors"));
+        assert!(!ZERO_ERRORS.is_match("1 error"));
+    }
+
+    #[test]
+    fn test_filter_generic_lint_counts_errors_ending_in_zero() {
+        let output = "lint: 10 errors\nlint: 20 errors\n";
+        let result = filter_generic_lint(output);
+        assert!(
+            result.contains("2 errors"),
+            "counts ending in 0 must count as errors: {}",
+            result
+        );
+
+        let clean = "Lint finished\n";
+        let result = filter_generic_lint(clean);
+        assert!(result.contains("No issues found"), "got: {}", result);
     }
 }

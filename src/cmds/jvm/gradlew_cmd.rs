@@ -139,32 +139,44 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             Box::new(BuildLineFilter),
             RunOptions::with_tee("gradlew_build"),
         ),
-        GradlewTask::Test => runner::run_filtered(
+        GradlewTask::Test => runner::run_filtered_with_exit(
             cmd,
             tool,
             &args_display,
-            filter_test,
+            |raw, exit_code| {
+                let filtered = filter_test(raw);
+                crate::core::guard::guard_exit(raw, exit_code, tool, &filtered)
+            },
             RunOptions::with_tee("gradlew_test"),
         ),
-        GradlewTask::ConnectedTest => runner::run_filtered(
+        GradlewTask::ConnectedTest => runner::run_filtered_with_exit(
             cmd,
             tool,
             &args_display,
-            filter_connected,
+            |raw, exit_code| {
+                let filtered = filter_connected(raw);
+                crate::core::guard::guard_exit(raw, exit_code, tool, &filtered)
+            },
             RunOptions::with_tee("gradlew_connected"),
         ),
-        GradlewTask::Lint => runner::run_filtered(
+        GradlewTask::Lint => runner::run_filtered_with_exit(
             cmd,
             tool,
             &args_display,
-            filter_lint,
+            |raw, exit_code| {
+                let filtered = filter_lint(raw);
+                crate::core::guard::guard_exit(raw, exit_code, tool, &filtered)
+            },
             RunOptions::with_tee("gradlew_lint"),
         ),
-        GradlewTask::Dependencies => runner::run_filtered(
+        GradlewTask::Dependencies => runner::run_filtered_with_exit(
             cmd,
             tool,
             &args_display,
-            filter_dependencies,
+            |raw, exit_code| {
+                let filtered = filter_dependencies(raw);
+                crate::core::guard::guard_exit(raw, exit_code, tool, &filtered)
+            },
             RunOptions::with_tee("gradlew_deps"),
         ),
         GradlewTask::Other => {
@@ -894,6 +906,23 @@ Tests run: 3, Failures: 1, Errors: 0, Skipped: 0"#;
         assert!(
             out.contains("No connected devices"),
             "Must show actionable error"
+        );
+    }
+
+    #[test]
+    fn test_connected_crash_guard_replaces_green_verdict() {
+        // Instrumentation crash: the only informative lines (INSTRUMENTATION_RESULT)
+        // are stripped, so filter_connected would render a green "ok ✓" verdict.
+        // With a non-zero exit the guard must replace it with a failure verdict.
+        let raw =
+            "> Task :app:connectedDebugAndroidTest\nINSTRUMENTATION_RESULT: shortMsg=Process crashed.\nINSTRUMENTATION_CODE: -1";
+        let filtered = filter_connected(raw);
+        assert_eq!(filtered, "ok ✓ (connected tests passed)");
+        let guarded = crate::core::guard::guard_exit(raw, 1, "./gradlew", &filtered);
+        assert!(
+            guarded.contains("./gradlew: failed (exit 1)"),
+            "expected failure verdict, got: {}",
+            guarded
         );
     }
 
