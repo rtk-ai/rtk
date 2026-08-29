@@ -22,8 +22,8 @@ use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
-    summary, tree, wc_cmd,
+    deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, resume,
+    search, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -603,6 +603,31 @@ enum Commands {
 
     /// Show RTK adoption across Claude Code sessions
     Session {},
+
+    /// Save or show compact repository execution context for the next agent session
+    Resume {
+        /// Persist supplied context fields for this repository
+        #[arg(long)]
+        save: bool,
+        /// Active plan path or identifier
+        #[arg(long)]
+        plan: Option<String>,
+        /// Completed step (repeat for multiple steps)
+        #[arg(long = "completed")]
+        completed_steps: Vec<String>,
+        /// Current blocker (repeat for multiple blockers)
+        #[arg(long = "blocker")]
+        blockers: Vec<String>,
+        /// Commit last reviewed by a human or reviewer
+        #[arg(long)]
+        last_reviewed: Option<String>,
+        /// Next action for the following session
+        #[arg(long)]
+        next: Option<String>,
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
 
     /// Manage telemetry consent and data (RGPD/GDPR)
     Telemetry {
@@ -2290,6 +2315,27 @@ fn run_cli() -> Result<i32> {
             0
         }
 
+        Commands::Resume {
+            save,
+            plan,
+            completed_steps,
+            blockers,
+            last_reviewed,
+            next,
+            format,
+        } => {
+            resume::run(
+                save,
+                plan,
+                completed_steps,
+                blockers,
+                last_reviewed,
+                next,
+                &format,
+            )?;
+            0
+        }
+
         Commands::Telemetry { command } => {
             core::telemetry_cmd::run(&command)?;
             0
@@ -3109,6 +3155,50 @@ mod tests {
             match cli.command {
                 Commands::Gain { failures, .. } => assert!(failures),
                 _ => panic!("Expected Gain command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_resume_save_flags_parse() {
+        let result = Cli::try_parse_from([
+            "rtk",
+            "resume",
+            "--save",
+            "--plan",
+            "docs/plans/42.md",
+            "--completed",
+            "tests pass",
+            "--blocker",
+            "review",
+            "--last-reviewed",
+            "abc123",
+            "--next",
+            "open PR",
+            "--format",
+            "json",
+        ]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Resume {
+                    save,
+                    plan,
+                    completed_steps,
+                    blockers,
+                    last_reviewed,
+                    next,
+                    format,
+                } => {
+                    assert!(save);
+                    assert_eq!(plan.as_deref(), Some("docs/plans/42.md"));
+                    assert_eq!(completed_steps, vec!["tests pass"]);
+                    assert_eq!(blockers, vec!["review"]);
+                    assert_eq!(last_reviewed.as_deref(), Some("abc123"));
+                    assert_eq!(next.as_deref(), Some("open PR"));
+                    assert_eq!(format, "json");
+                }
+                _ => panic!("Expected Resume command"),
             }
         }
     }
