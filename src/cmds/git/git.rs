@@ -2132,35 +2132,64 @@ fn diffstat_row(line: &str) -> Option<String> {
     Some(format!("{} {}{}", path, count, sign))
 }
 
-fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorktreeMode {
+    Action,
+    FilteredList,
+    NativeList,
+}
 
-    if verbose > 0 {
-        eprintln!("git worktree list");
+fn worktree_mode(args: &[String]) -> WorktreeMode {
+    if !matches!(args.first().map(String::as_str), None | Some("list")) {
+        return WorktreeMode::Action;
     }
 
-    // If args contain "add", "remove", "prune" etc., pass through
-    let has_action = args.iter().any(|a| {
-        a == "add" || a == "remove" || a == "prune" || a == "lock" || a == "unlock" || a == "move"
-    });
+    if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--porcelain" | "-z"))
+    {
+        WorktreeMode::NativeList
+    } else {
+        WorktreeMode::FilteredList
+    }
+}
 
-    if has_action {
-        let mut cmd = git_cmd(global_args);
-        cmd.arg("worktree");
-        for arg in args {
-            cmd.arg(arg);
-        }
+fn build_worktree_command(args: &[String], global_args: &[String]) -> Command {
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("worktree");
+    if args.is_empty() {
+        cmd.arg("list");
+    } else {
+        cmd.args(args);
+    }
+    cmd
+}
+
+fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+    let mode = worktree_mode(args);
+    let display_args = if args.is_empty() {
+        "list".to_string()
+    } else {
+        args.join(" ")
+    };
+    let original_cmd = format!("git worktree {display_args}");
+    let rtk_cmd = format!("rtk git worktree {display_args}");
+
+    if verbose > 0 {
+        eprintln!("{original_cmd}");
+    }
+
+    // Only `list` is filtered. Every current or future action subcommand must
+    // reach git unchanged instead of silently falling back to list mode.
+    if mode == WorktreeMode::Action {
+        let mut cmd = build_worktree_command(args, global_args);
         let result = exec_capture(&mut cmd).context("Failed to run git worktree")?;
         let combined = result.combined();
 
         let msg = if result.success() { "ok" } else { &combined };
 
-        timer.track(
-            &format!("git worktree {}", args.join(" ")),
-            &format!("rtk git worktree {}", args.join(" ")),
-            &combined,
-            msg,
-        );
+        timer.track(&original_cmd, &rtk_cmd, &combined, msg);
 
         if result.success() {
             println!("ok");
@@ -2174,33 +2203,29 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
         return Ok(0);
     }
 
-    // Default: list mode
-    let mut cmd = git_cmd(global_args);
-    cmd.args(["worktree", "list"]);
+    let mut cmd = build_worktree_command(args, global_args);
     let result = exec_capture(&mut cmd).context("Failed to run git worktree list")?;
 
     if !result.success() {
         if !result.stderr.trim().is_empty() {
             eprintln!("{}", result.stderr);
         }
-        timer.track(
-            "git worktree list",
-            "rtk git worktree",
-            &result.stdout,
-            &result.stderr,
-        );
+        timer.track(&original_cmd, &rtk_cmd, &result.stdout, &result.stderr);
         return Ok(result.exit_code);
+    }
+
+    if mode == WorktreeMode::NativeList {
+        print!("{}", result.stdout);
+        eprint!("{}", result.stderr);
+        let combined = result.combined();
+        timer.track(&original_cmd, &rtk_cmd, &combined, &combined);
+        return Ok(0);
     }
 
     let filtered = filter_worktree_list(&result.stdout);
     let filtered = never_worse(&result.stdout, &filtered).to_string();
     println!("{}", filtered);
-    timer.track(
-        "git worktree list",
-        "rtk git worktree",
-        &result.stdout,
-        &filtered,
-    );
+    timer.track(&original_cmd, &rtk_cmd, &result.stdout, &filtered);
 
     Ok(0)
 }
@@ -2672,6 +2697,125 @@ mod tests {
         assert!(result.contains("abc1234"));
         assert!(result.contains("[main]"));
         assert!(result.contains("[feature]"));
+    }
+
+    #[test]
+    fn test_worktree_mode_uses_only_the_subcommand_slot() {
+        assert_eq!(worktree_mode(&[]), WorktreeMode::FilteredList);
+        assert_eq!(
+            worktree_mode(&["list".to_string(), "move".to_string()]),
+            WorktreeMode::FilteredList
+        );
+        assert_eq!(
+            worktree_mode(&["repair".to_string(), "/tmp/wt".to_string()]),
+            WorktreeMode::Action
+        );
+        assert_eq!(
+            worktree_mode(&["future-subcommand".to_string()]),
+            WorktreeMode::Action
+        );
+    }
+
+    #[test]
+    fn test_worktree_machine_formats_use_native_list_output() {
+        assert_eq!(
+            worktree_mode(&["list".to_string(), "--porcelain".to_string()]),
+            WorktreeMode::NativeList
+        );
+        assert_eq!(
+            worktree_mode(&[
+                "list".to_string(),
+                "--porcelain".to_string(),
+                "-z".to_string(),
+            ]),
+            WorktreeMode::NativeList
+        );
+    }
+
+    #[test]
+    fn test_build_worktree_command_preserves_arguments() {
+        let default_cmd = build_worktree_command(&[], &[]);
+        let default_args: Vec<_> = default_cmd.get_args().collect();
+        assert_eq!(default_args, vec!["worktree", "list"]);
+
+        let args = vec!["list".to_string(), "--porcelain".to_string()];
+        let porcelain_cmd = build_worktree_command(&args, &[]);
+        let porcelain_args: Vec<_> = porcelain_cmd.get_args().collect();
+        assert_eq!(porcelain_args, vec!["worktree", "list", "--porcelain"]);
+
+        let args = vec!["repair".to_string(), "/tmp/wt".to_string()];
+        let repair_cmd = build_worktree_command(&args, &[]);
+        let repair_args: Vec<_> = repair_cmd.get_args().collect();
+        assert_eq!(repair_args, vec!["worktree", "repair", "/tmp/wt"]);
+    }
+
+    #[test]
+    fn test_run_worktree_repair_updates_moved_repository_pointer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let original = dir.path().join("A");
+        let moved = dir.path().join("B");
+        let linked = dir.path().join("linked");
+        std::fs::create_dir(&original).expect("create original repository");
+
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&original)
+                .args(["init", "-q"])
+                .status()
+                .expect("git init")
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&original)
+                .args([
+                    "-c",
+                    "user.name=RTK Tests",
+                    "-c",
+                    "user.email=rtk-tests@example.invalid",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    "init",
+                ])
+                .status()
+                .expect("git commit")
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&original)
+                .args(["worktree", "add", "-q", "-b", "linked"])
+                .arg(&linked)
+                .status()
+                .expect("git worktree add")
+                .success()
+        );
+
+        std::fs::rename(&original, &moved).expect("move repository");
+        let stale = std::fs::read_to_string(linked.join(".git")).expect("read stale pointer");
+        let stale = stale.replace('\\', "/");
+        let original_path = original.to_string_lossy().replace('\\', "/");
+        assert!(stale.contains(&original_path), "pointer should still reference A");
+
+        let args = vec![
+            "repair".to_string(),
+            linked.to_string_lossy().into_owned(),
+        ];
+        let global = vec!["-C".to_string(), moved.to_string_lossy().into_owned()];
+        let code = run_worktree(&args, 0, &global).expect("run_worktree repair");
+        assert_eq!(code, 0, "git worktree repair should succeed");
+
+        let repaired =
+            std::fs::read_to_string(linked.join(".git")).expect("read repaired pointer");
+        let repaired = repaired.replace('\\', "/");
+        let moved_path = moved.to_string_lossy().replace('\\', "/");
+        assert!(repaired.contains(&moved_path), "pointer should reference B");
+        assert!(!repaired.contains(&original_path), "stale A pointer must be gone");
     }
 
     #[test]
