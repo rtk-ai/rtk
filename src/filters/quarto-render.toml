@@ -13,7 +13,7 @@ strip_lines_matching = [
   "^  Resolving",
 ]
 match_output = [
-  { pattern = "Output created:", message = "ok (output created)" },
+  { pattern = "Output created:", message = "ok (output created)", unless = "ERROR|error:" },
 ]
 max_lines = 20
 
@@ -39,3 +39,16 @@ caused by:
   syntax error at line 10
 """
 expected = "ERROR: Render failed\ncaused by:\n  syntax error at line 10"
+
+[[tests.quarto-render]]
+name = "errors not swallowed when output created is also present"
+input = """
+processing file: retry.qmd
+  Validating schema
+ERROR: Render failed on first attempt
+
+caused by:
+  syntax error at line 10
+Output created: _site/retry.html
+"""
+expected = "ERROR: Render failed on first attempt\ncaused by:\n  syntax error at line 10\nOutput created: _site/retry.html"

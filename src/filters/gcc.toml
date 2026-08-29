@@ -1,6 +1,6 @@
 [filters.gcc]
 description = "Compact gcc/g++ compiler output — strip notes, keep errors and warnings"
-match_command = "^g(cc|\\+\\+)\\b"
+match_command = "^g(cc|\\+\\+)(-[0-9.]+)?(\\s|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

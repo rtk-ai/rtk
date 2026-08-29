@@ -9,7 +9,7 @@ strip_lines_matching = [
   "^Resolving dependencies",
 ]
 match_output = [
-  { pattern = "Bundle complete!", message = "ok bundle: complete" },
+  { pattern = "Bundle complete!", message = "ok bundle: complete", unless = "Installing " },
   { pattern = "Bundle updated!", message = "ok bundle: updated" },
 ]
 max_lines = 30
@@ -41,7 +41,7 @@ Fetching simplecov 0.22.0
 Installing simplecov 0.22.0
 Bundle complete! 85 Gemfile dependencies, 202 gems now installed.
 """
-expected = "ok bundle: complete"
+expected = "Fetching rspec 3.13.0\nInstalling rspec 3.13.0\nFetching simplecov 0.22.0\nInstalling simplecov 0.22.0\nBundle complete! 85 Gemfile dependencies, 202 gems now installed."
 
 [[tests.bundle-install]]
 name = "update output"
