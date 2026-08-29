@@ -4,6 +4,7 @@ use crate::core::guard::never_worse;
 use crate::core::tracking;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
@@ -92,8 +93,85 @@ pub fn run_stdin(max_depth: usize, schema_only: bool, verbose: u8) -> Result<()>
 /// Parse a JSON string and return compact representation with values preserved.
 /// Long strings are truncated, arrays are summarized.
 pub fn filter_json_compact(json_str: &str, max_depth: usize) -> Result<String> {
-    let value: Value = serde_json::from_str(json_str).context("Failed to parse JSON")?;
+    let value = parse_json_lenient(json_str)?;
     Ok(compact_json(&value, 0, max_depth))
+}
+
+/// Parse JSON, tolerating raw (unescaped) control characters inside strings.
+///
+/// serde_json correctly rejects U+0000–U+001F appearing literally inside a
+/// string (RFC 8259 §7 requires them escaped). Some real-world producers emit
+/// them anyway — e.g. an API echoing a user-supplied newline verbatim into a
+/// field. Strict parsing then fails and `rtk json` prints *nothing*, losing the
+/// whole payload and forcing the user to re-fetch with a raw passthrough. To
+/// degrade gracefully we retry once with those control characters escaped to
+/// their equivalent `\uXXXX` form. Valid input takes the fast path untouched,
+/// and genuinely malformed input still surfaces the original strict error.
+fn parse_json_lenient(json_str: &str) -> Result<Value> {
+    match serde_json::from_str::<Value>(json_str) {
+        Ok(value) => Ok(value),
+        Err(strict_err) => {
+            // Only worth retrying if escaping actually changed something.
+            if let Cow::Owned(sanitized) = escape_raw_control_chars(json_str) {
+                if let Ok(value) = serde_json::from_str::<Value>(&sanitized) {
+                    return Ok(value);
+                }
+            }
+            Err(strict_err).context("Failed to parse JSON")
+        }
+    }
+}
+
+/// Escape raw control characters (U+0000–U+001F) that appear *inside* JSON
+/// string literals, leaving everything else — including the insignificant
+/// whitespace between tokens — byte-for-byte identical. Returns
+/// `Cow::Borrowed` when there is nothing to escape so the common valid-JSON
+/// path never allocates.
+fn escape_raw_control_chars(input: &str) -> Cow<'_, str> {
+    // Fast path: no control bytes at all means nothing to escape.
+    if !input.bytes().any(|b| b < 0x20) {
+        return Cow::Borrowed(input);
+    }
+
+    let mut out = String::with_capacity(input.len());
+    let mut in_string = false;
+    let mut prev_backslash = false;
+    let mut changed = false;
+
+    for ch in input.chars() {
+        if in_string {
+            if prev_backslash {
+                // This char is part of an escape sequence (e.g. \n, \"); emit verbatim.
+                out.push(ch);
+                prev_backslash = false;
+            } else if ch == '\\' {
+                out.push(ch);
+                prev_backslash = true;
+            } else if ch == '"' {
+                out.push(ch);
+                in_string = false;
+            } else if (ch as u32) < 0x20 {
+                // Raw control char inside a string: rewrite to its \uXXXX escape.
+                out.push_str(&format!("\\u{:04x}", ch as u32));
+                changed = true;
+            } else {
+                out.push(ch);
+            }
+        } else {
+            if ch == '"' {
+                in_string = true;
+            }
+            // Control chars outside strings are either valid JSON whitespace or
+            // a structural error we cannot fix here — pass them through unchanged.
+            out.push(ch);
+        }
+    }
+
+    if changed {
+        Cow::Owned(out)
+    } else {
+        Cow::Borrowed(input)
+    }
 }
 
 fn compact_json(value: &Value, depth: usize, max_depth: usize) -> String {
@@ -183,7 +261,7 @@ fn compact_json(value: &Value, depth: usize, max_depth: usize) -> String {
 /// Parse a JSON string and return its schema representation (types only, no values).
 /// Useful for piping JSON from other commands (e.g., `gh api`, `curl`).
 pub fn filter_json_string(json_str: &str, max_depth: usize) -> Result<String> {
-    let value: Value = serde_json::from_str(json_str).context("Failed to parse JSON")?;
+    let value = parse_json_lenient(json_str)?;
     Ok(extract_schema(&value, 0, max_depth))
 }
 
@@ -363,5 +441,90 @@ mod tests {
     #[test]
     fn test_compact_truncates_mixed_ascii_multibyte_string() {
         assert_value_truncated(&("a".repeat(76) + &"日本語".repeat(5)));
+    }
+
+    // --- graceful recovery from raw control characters inside strings ---
+
+    #[test]
+    fn test_compact_recovers_raw_control_char() {
+        // Real newline + tab inside a string value — strict serde_json rejects
+        // these, but rtk should still render the payload instead of printing
+        // nothing.
+        let json = "{\"body\":\"line1\nline2\ttab\"}";
+        let out = filter_json_compact(json, 5)
+            .expect("control chars inside strings must not abort the render");
+        assert!(out.contains("body"), "got: {out}");
+    }
+
+    #[test]
+    fn test_schema_recovers_raw_control_char() {
+        let json = "{\"msg\":\"a\nb\"}";
+        let out = filter_json_string(json, 5)
+            .expect("control chars inside strings must not abort the schema");
+        assert!(out.contains("msg"), "got: {out}");
+    }
+
+    #[test]
+    fn test_raw_control_char_in_key_recovered() {
+        // Control chars are illegal in keys too; the same string-aware pass fixes them.
+        let json = "{\"a\nb\":1}";
+        let out = filter_json_compact(json, 5).expect("control char in key must recover");
+        assert!(out.contains("a") && out.contains("1"), "got: {out}");
+    }
+
+    #[test]
+    fn test_valid_json_unaffected_by_lenient_parse() {
+        let json = r#"{"name":"test","n":42,"ok":true}"#;
+        let strict: Value = serde_json::from_str(json).unwrap();
+        assert_eq!(parse_json_lenient(json).unwrap(), strict);
+    }
+
+    #[test]
+    fn test_malformed_json_still_errors() {
+        // A structural error (not a control char) must still fail loudly.
+        let err = filter_json_compact("{not valid", 5).unwrap_err();
+        assert!(err.to_string().contains("Failed to parse JSON"));
+    }
+
+    #[test]
+    fn test_escape_fast_path_borrows_clean_input() {
+        // Pretty-printed JSON has newlines *between* tokens (valid whitespace)
+        // but none inside strings — and serde parses it fine, so escaping is
+        // never even invoked. Here we assert the escaper itself leaves any
+        // control-free input borrowed.
+        assert!(matches!(
+            escape_raw_control_chars(r#"{"a":1}"#),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn test_escape_leaves_whitespace_between_tokens() {
+        // Newlines outside strings are valid JSON whitespace and must survive
+        // unchanged; only in-string control chars get rewritten.
+        let pretty = "{\n  \"a\": 1\n}";
+        assert!(matches!(escape_raw_control_chars(pretty), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn test_escape_preserves_existing_backslash_escapes() {
+        // An already-escaped \n must not be double-processed.
+        let json = r#"{"a":"x\ny"}"#;
+        assert!(matches!(escape_raw_control_chars(json), Cow::Borrowed(_)));
+        // And it still parses to the real newline value.
+        let v = parse_json_lenient(json).unwrap();
+        assert_eq!(v["a"], "x\ny");
+    }
+
+    #[test]
+    fn test_escape_rewrites_only_in_string_control() {
+        let json = "{\"a\":\"b\tc\"}";
+        match escape_raw_control_chars(json) {
+            Cow::Owned(s) => {
+                assert!(s.contains("\\u0009"), "tab should be escaped: {s}");
+                assert!(!s.contains('\t'), "no raw tab should remain: {s:?}");
+            }
+            Cow::Borrowed(_) => panic!("expected rewrite for in-string control char"),
+        }
     }
 }
