@@ -904,7 +904,101 @@ fn new_mvn_command(args: &[String]) -> Command {
         resolved_command("mvn")
     };
     cmd.args(args);
+    inject_quiet_flags(&mut cmd, args);
     cmd
+}
+
+// ── Source-level noise suppression ──────────────────────────────────────────
+//
+// Maven emits two big noise sources that are cheaper to kill at the source than
+// to filter post-hoc:
+//   * interactive/ANSI output  → `-B` (batch mode)
+//   * per-artifact download log → `--no-transfer-progress` (Maven ≥ 3.6.1)
+//
+// `--no-transfer-progress` is version-gated because older Maven hard-errors on
+// the unknown flag, and the whole behaviour is escapable via
+// `RTK_NO_INJECT_FLAGS` for users who need raw invocation semantics.
+
+/// Returns true when flag injection is disabled via `RTK_NO_INJECT_FLAGS`
+/// (any value other than empty or `0`).
+fn injection_disabled() -> bool {
+    match std::env::var("RTK_NO_INJECT_FLAGS") {
+        Ok(v) => !v.is_empty() && v != "0",
+        Err(_) => false,
+    }
+}
+
+/// Parse the `(major, minor, patch)` triple from `mvn --version` output.
+/// Patch defaults to 0 when absent. Returns None if the version line or the
+/// major/minor components can't be parsed.
+fn parse_mvn_version_string(text: &str) -> Option<(u32, u32, u32)> {
+    let line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("Apache Maven "))?;
+    let after_label = line.trim_start().trim_start_matches("Apache Maven ");
+    let version_token = after_label.split_whitespace().next()?;
+    let mut parts = version_token.split('.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next()?.parse().ok()?;
+    let patch: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// Probe `mvn --version` for the resolved binary, caching the result per binary
+/// path so repeated invocations don't re-spawn the process.
+fn probe_mvn_version(command: &Command) -> Option<(u32, u32, u32)> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    type VersionTriple = (u32, u32, u32);
+    lazy_static::lazy_static! {
+        static ref CACHE: Mutex<HashMap<std::ffi::OsString, Option<VersionTriple>>> =
+            Mutex::new(HashMap::new());
+    }
+
+    let bin = command.get_program().to_os_string();
+
+    if let Ok(cache) = CACHE.lock() {
+        if let Some(cached) = cache.get(&bin) {
+            return *cached;
+        }
+    }
+
+    let parsed = Command::new(&bin)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| parse_mvn_version_string(&String::from_utf8_lossy(&o.stdout)));
+
+    if let Ok(mut cache) = CACHE.lock() {
+        cache.insert(bin, parsed);
+    }
+    parsed
+}
+
+/// `--no-transfer-progress` was introduced in Maven 3.6.1. Fail CLOSED: if the
+/// version can't be determined, don't inject — losing a small win is better
+/// than breaking the build on an unknown flag.
+fn supports_no_transfer_progress(command: &Command) -> bool {
+    matches!(probe_mvn_version(command), Some(v) if v >= (3, 6, 1))
+}
+
+/// Inject `-B` and (when supported) `--no-transfer-progress`, unless the user
+/// already passed them or `RTK_NO_INJECT_FLAGS` is set.
+fn inject_quiet_flags(command: &mut Command, args: &[String]) {
+    if injection_disabled() {
+        return;
+    }
+    let already_has = |flag: &str, short: &str| {
+        args.iter()
+            .any(|a| a == flag || a == short || a.starts_with(&format!("{}=", flag)))
+    };
+    if !already_has("--no-transfer-progress", "-ntp") && supports_no_transfer_progress(command) {
+        command.arg("--no-transfer-progress");
+    }
+    if !already_has("--batch-mode", "-B") {
+        command.arg("-B");
+    }
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────
@@ -2111,6 +2205,81 @@ mod tests {
             "unclassified ERROR line preserved; got:\n{}",
             o
         );
+    }
+
+    // ── Flag injection (A1) ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_mvn_version_string_full() {
+        let text = "Apache Maven 3.9.6 (bc0240f3c744dd6b6ec2920b3cd08dcc295161ae)\n\
+                    Maven home: /opt/maven\n";
+        assert_eq!(parse_mvn_version_string(text), Some((3, 9, 6)));
+    }
+
+    #[test]
+    fn test_parse_mvn_version_string_missing_patch_defaults_zero() {
+        assert_eq!(parse_mvn_version_string("Apache Maven 4.0"), Some((4, 0, 0)));
+    }
+
+    #[test]
+    fn test_parse_mvn_version_string_junk_is_none() {
+        assert_eq!(parse_mvn_version_string("not maven output"), None);
+        assert_eq!(parse_mvn_version_string("Apache Maven x.y.z"), None);
+    }
+
+    #[test]
+    fn test_no_transfer_progress_threshold() {
+        // Boundary at 3.6.1.
+        let mk = |t: &str| parse_mvn_version_string(t).is_some_and(|v| v >= (3, 6, 1));
+        assert!(!mk("Apache Maven 3.6.0"));
+        assert!(mk("Apache Maven 3.6.1"));
+        assert!(mk("Apache Maven 3.9.6"));
+        assert!(mk("Apache Maven 4.0.0"));
+        assert!(!mk("Apache Maven 3.5.4"));
+    }
+
+    #[test]
+    fn test_injection_disabled_env_semantics() {
+        use std::env;
+        // Snapshot + restore so the test is order-independent.
+        let prev = env::var("RTK_NO_INJECT_FLAGS").ok();
+        env::remove_var("RTK_NO_INJECT_FLAGS");
+        assert!(!injection_disabled(), "unset → enabled");
+        env::set_var("RTK_NO_INJECT_FLAGS", "");
+        assert!(!injection_disabled(), "empty → enabled");
+        env::set_var("RTK_NO_INJECT_FLAGS", "0");
+        assert!(!injection_disabled(), "0 → enabled");
+        env::set_var("RTK_NO_INJECT_FLAGS", "1");
+        assert!(injection_disabled(), "1 → disabled");
+        match prev {
+            Some(v) => env::set_var("RTK_NO_INJECT_FLAGS", v),
+            None => env::remove_var("RTK_NO_INJECT_FLAGS"),
+        }
+    }
+
+    #[test]
+    fn test_inject_skips_when_flag_already_present() {
+        // already_has must recognise long, short, and key=value forms so we
+        // never double-inject the user's own flags.
+        let cases = [
+            vec!["--batch-mode".to_string(), "test".to_string()],
+            vec!["-B".to_string(), "test".to_string()],
+            vec!["--no-transfer-progress".to_string(), "test".to_string()],
+            vec!["-ntp".to_string(), "test".to_string()],
+        ];
+        for args in cases {
+            let already = |flag: &str, short: &str| {
+                args.iter()
+                    .any(|a| a == flag || a == short || a.starts_with(&format!("{}=", flag)))
+            };
+            let has_b = already("--batch-mode", "-B");
+            let has_ntp = already("--no-transfer-progress", "-ntp");
+            assert!(
+                has_b || has_ntp,
+                "expected a managed flag to be detected in {:?}",
+                args
+            );
+        }
     }
 }
 
