@@ -53,6 +53,7 @@ RTK intercepts shell commands and compresses their output before your agent read
 | `ruff check` | Grouped by rule and file |
 | `pytest` | Failures only, traceback trimmed |
 | `go test` | NDJSON parsed, failures only |
+| `make` / `gmake` | Drop `Entering/Leaving directory` chatter, keep sub-tool output |
 | `docker ps` | Essential fields only |
 
 ## How Savings Work
@@ -197,6 +198,7 @@ rtk rake test                   # Ruby minitest (-90%)
 rtk rspec                       # RSpec tests (JSON, -60%+)
 rtk err <cmd>                   # Filter errors only from any command
 rtk test <cmd>                  # Generic test wrapper - failures only (-90%)
+rtk make                        # make/gmake: drop directory chatter, keep sub-tool output
 ```
 
 ### Build & Lint
