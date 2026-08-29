@@ -2126,9 +2126,10 @@ mod tests {
 
     #[test]
     fn test_registry_covers_all_cargo_subcommands() {
-        // Verify that every CargoCommand variant (Build, Test, Clippy, Check, Fmt)
-        // except Other has a matching pattern in the registry
-        for subcmd in ["build", "test", "clippy", "check", "fmt"] {
+        // Verify that every CargoCommand variant except Other has a matching pattern in the registry.
+        for subcmd in [
+            "build", "test", "clippy", "check", "fmt", "install", "nextest",
+        ] {
             let cmd = format!("cargo {subcmd}");
             match classify_command(&cmd) {
                 Classification::Supported { .. } => {}
@@ -2312,6 +2313,14 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("cargo test", &[]),
             Some("rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_cargo_nextest_run() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo nextest run", &[]),
+            Some("rtk cargo nextest run".into())
         );
     }
 
