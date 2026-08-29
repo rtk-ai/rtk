@@ -54,6 +54,9 @@ windows-sys = { version = "0.59", features = [
 [build-dependencies]
 toml = "0.8"
 
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0"
+
 [dev-dependencies]
 
 [profile.release]

@@ -10,6 +10,16 @@ fn main() {
         // the CLI binary so `rtk.exe --version`, `--help`, and hook entry
         // points start reliably without requiring ad-hoc RUSTFLAGS.
         println!("cargo:rustc-link-arg=/STACK:8388608");
+
+        // Embed publisher/product VERSIONINFO into the compiled .exe. An
+        // unsigned binary with no version metadata is a documented contributing
+        // factor to AV heuristic false positives (#3124) — this doesn't replace
+        // code signing (tracked separately in #2989), but it's a real, cheap
+        // improvement over shipping a "faceless" binary.
+        println!("cargo:rerun-if-changed=rtk.rc");
+        embed_resource::compile("rtk.rc", embed_resource::NONE)
+            .manifest_optional()
+            .unwrap();
     }
 
     let filters_dir = Path::new("src/filters");
