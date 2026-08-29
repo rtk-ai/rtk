@@ -797,6 +797,25 @@ pub fn find_matching_filter(command: &str) -> Option<&'static CompiledFilter> {
     result
 }
 
+/// Find a loaded filter by its exact name, ignoring `match_command`.
+///
+/// Only built-in TOML filters and trusted project/global custom filters are
+/// present in the registry, so untrusted custom filters are never returned.
+/// On duplicate names the load order wins (project > global > built-in),
+/// matching the precedence used by `find_matching_filter`.
+pub fn find_filter_by_name(name: &str) -> Option<&'static CompiledFilter> {
+    REGISTRY.filters.iter().find(|f| f.name == name)
+}
+
+/// Sorted, de-duplicated names of every loaded filter (built-in + trusted
+/// custom). Used to surface available filter names in error messages.
+pub fn loaded_filter_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = REGISTRY.filters.iter().map(|f| f.name.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
