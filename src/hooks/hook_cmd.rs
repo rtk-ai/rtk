@@ -275,14 +275,12 @@ fn decide_hook_action(cmd: &str, host: permissions::Host) -> HookDecision {
 }
 
 fn handle_vscode(cmd: &str) -> Result<()> {
-    if let Some(output) = vscode_response(cmd) {
+    let decision = decide_hook_action(cmd, permissions::Host::Claude);
+    audit_decision(&decision, cmd);
+    if let Some(output) = vscode_response_from_decision(decision) {
         let _ = writeln!(io::stdout(), "{output}");
     }
     Ok(())
-}
-
-fn vscode_response(cmd: &str) -> Option<Value> {
-    vscode_response_from_decision(decide_hook_action(cmd, permissions::Host::Claude), cmd)
 }
 
 /// Build the VS Code Copilot Chat / Copilot CLI (PascalCase compat) hook response.
@@ -293,18 +291,12 @@ fn vscode_response(cmd: &str) -> Option<Value> {
 /// the host's own native prompt/allowlist flow in control — see #3037, where
 /// asserting `"ask"` here made Copilot CLI 1.0.66+ force a blocking dialog with
 /// no "remember" option on every rewritten command.
-fn vscode_response_from_decision(decision: HookDecision, cmd: &str) -> Option<Value> {
+fn vscode_response_from_decision(decision: HookDecision) -> Option<Value> {
     let (rewritten, allow) = match decision {
-        HookDecision::Deny => {
-            audit_log("deny", cmd, "");
-            return None;
-        }
-        HookDecision::Defer => return None,
+        HookDecision::Deny | HookDecision::Defer => return None,
         HookDecision::AllowRewrite(r) => (r, true),
         HookDecision::AskRewrite(r) => (r, false),
     };
-
-    audit_log("rewrite", cmd, &rewritten);
 
     let mut hook_output = json!({
         "hookEventName": PRE_TOOL_USE_KEY,
@@ -318,30 +310,28 @@ fn vscode_response_from_decision(decision: HookDecision, cmd: &str) -> Option<Va
 }
 
 fn handle_copilot_cli(cmd: &str, args: &Value) -> Result<()> {
-    if let Some(response) = copilot_cli_response(cmd, args) {
+    let decision = decide_hook_action(cmd, permissions::Host::Claude);
+    audit_decision(&decision, cmd);
+    if let Some(response) = copilot_cli_response_from_decision(args, decision) {
         let _ = writeln!(io::stdout(), "{response}");
     }
     Ok(())
 }
 
 fn handle_copilot_ide(cmd: &str) -> Result<()> {
-    if let Some(response) =
-        copilot_ide_response_from_decision(decide_hook_action(cmd, permissions::Host::Claude), cmd)
-    {
+    let decision = decide_hook_action(cmd, permissions::Host::Claude);
+    audit_decision(&decision, cmd);
+    if let Some(response) = copilot_ide_response_from_decision(decision) {
         let _ = writeln!(io::stdout(), "{response}");
     }
     Ok(())
 }
 
-fn copilot_ide_response_from_decision(decision: HookDecision, cmd: &str) -> Option<Value> {
+fn copilot_ide_response_from_decision(decision: HookDecision) -> Option<Value> {
     let reason = match decision {
         HookDecision::Defer => return None,
-        HookDecision::Deny => {
-            audit_log("deny", cmd, "");
-            "Blocked by RTK permission rule".to_string()
-        }
+        HookDecision::Deny => "Blocked by RTK permission rule".to_string(),
         HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => {
-            audit_log("rewrite", cmd, &rewritten);
             format!("RTK token optimization: re-run this command as `{rewritten}` instead.")
         }
     };
@@ -352,30 +342,17 @@ fn copilot_ide_response_from_decision(decision: HookDecision, cmd: &str) -> Opti
     }))
 }
 
+#[cfg(test)]
 fn copilot_cli_response(cmd: &str, args: &Value) -> Option<Value> {
-    copilot_cli_response_from_decision(
-        args,
-        decide_hook_action(cmd, permissions::Host::Claude),
-        cmd,
-    )
+    copilot_cli_response_from_decision(args, decide_hook_action(cmd, permissions::Host::Claude))
 }
 
-fn copilot_cli_response_from_decision(
-    args: &Value,
-    decision: HookDecision,
-    cmd: &str,
-) -> Option<Value> {
+fn copilot_cli_response_from_decision(args: &Value, decision: HookDecision) -> Option<Value> {
     let (rewritten, allow) = match decision {
-        HookDecision::Deny => {
-            audit_log("deny", cmd, "");
-            return None;
-        }
-        HookDecision::Defer => return None,
+        HookDecision::Deny | HookDecision::Defer => return None,
         HookDecision::AllowRewrite(r) => (r, true),
         HookDecision::AskRewrite(r) => (r, false),
     };
-
-    audit_log("rewrite", cmd, &rewritten);
 
     let mut modified = args.clone();
     if let Some(obj) = modified.as_object_mut() {
@@ -400,42 +377,37 @@ pub fn run_gemini() -> Result<()> {
 
     let json: Value = serde_json::from_str(&input).context("Failed to parse hook input as JSON")?;
 
-    let tool_name = json.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
-
-    if tool_name != "run_shell_command" {
+    let Some(cmd) = gemini_shell_command(&json) else {
         print_allow();
         return Ok(());
-    }
+    };
 
-    let cmd = json
-        .pointer("/tool_input/command")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    if cmd.is_empty() {
-        print_allow();
-        return Ok(());
-    }
-
-    match decide_hook_action(cmd, permissions::Host::Gemini) {
-        HookDecision::Deny => {
-            let _ = writeln!(
-                io::stdout(),
-                r#"{{"decision":"deny","reason":"Blocked by RTK permission rule"}}"#
-            );
-        }
-        HookDecision::AllowRewrite(ref rewritten) => {
-            audit_log("rewrite", cmd, rewritten);
-            print_gemini("allow", Some(rewritten));
-        }
-        HookDecision::AskRewrite(ref rewritten) => {
-            audit_log("ask", cmd, rewritten);
-            print_gemini("ask_user", Some(rewritten));
-        }
-        HookDecision::Defer => print_gemini("ask_user", None),
-    }
+    let decision = decide_hook_action(cmd, permissions::Host::Gemini);
+    audit_gemini_decision(&decision, cmd);
+    let _ = writeln!(io::stdout(), "{}", gemini_response_from_decision(&decision));
 
     Ok(())
+}
+
+/// Extract the shell command when the payload targets Gemini's shell tool.
+fn gemini_shell_command(v: &Value) -> Option<&str> {
+    if v.get("tool_name").and_then(|t| t.as_str()) != Some("run_shell_command") {
+        return None;
+    }
+    v.pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+}
+
+fn gemini_response_from_decision(decision: &HookDecision) -> String {
+    match decision {
+        HookDecision::Deny => {
+            r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string()
+        }
+        HookDecision::AllowRewrite(rewritten) => gemini_json("allow", Some(rewritten)),
+        HookDecision::AskRewrite(rewritten) => gemini_json("ask_user", Some(rewritten)),
+        HookDecision::Defer => gemini_json("ask_user", None),
+    }
 }
 
 // ── Vibe hook ─────────────────────────────────────────────────
@@ -449,13 +421,19 @@ pub fn run_gemini() -> Result<()> {
 /// - Deny: emit `{"decision": "deny", "reason": "..."}`.
 pub fn run_vibe() -> Result<()> {
     let input = read_stdin_limited()?;
-    if let Some(output) = run_vibe_inner(&input) {
+    let Some(cmd) = vibe_command(&input) else {
+        return Ok(());
+    };
+    let decision = decide_hook_action(&cmd, permissions::Host::Vibe);
+    audit_decision(&decision, &cmd);
+    if let Some(output) = vibe_response_from_decision(decision) {
         let _ = writeln!(io::stdout(), "{output}");
     }
     Ok(())
 }
 
-fn run_vibe_inner(input: &str) -> Option<String> {
+/// Extract the shell command when the payload targets Vibe's bash tool.
+fn vibe_command(input: &str) -> Option<String> {
     let json: Value = match serde_json::from_str(input) {
         Ok(v) => v,
         Err(e) => {
@@ -464,30 +442,32 @@ fn run_vibe_inner(input: &str) -> Option<String> {
         }
     };
 
-    let tool_name = json.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
-    if tool_name != "bash" {
+    if json.get("tool_name").and_then(|v| v.as_str()) != Some("bash") {
         return None;
     }
 
-    let cmd = json
-        .pointer("/tool_input/command")
+    json.pointer("/tool_input/command")
         .and_then(|v| v.as_str())
-        .unwrap_or("");
-    if cmd.is_empty() {
-        return None;
-    }
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
+}
 
-    match decide_hook_action(cmd, permissions::Host::Vibe) {
+fn vibe_response_from_decision(decision: HookDecision) -> Option<String> {
+    match decision {
         HookDecision::Deny => {
-            audit_log("deny", cmd, "");
             Some(r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string())
         }
         HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten) => {
-            audit_log("rewrite", cmd, rewritten);
             Some(vibe_rewrite_json(rewritten))
         }
         HookDecision::Defer => None,
     }
+}
+
+#[cfg(test)]
+fn run_vibe_inner(input: &str) -> Option<String> {
+    let cmd = vibe_command(input)?;
+    vibe_response_from_decision(decide_hook_action(&cmd, permissions::Host::Vibe))
 }
 
 fn vibe_rewrite_json(rewritten: &str) -> String {
@@ -512,18 +492,49 @@ fn gemini_json(decision: &str, rewrite: Option<&str>) -> String {
     output.to_string()
 }
 
-fn print_gemini(decision: &str, rewrite: Option<&str>) {
-    let _ = writeln!(io::stdout(), "{}", gemini_json(decision, rewrite));
-}
-
 // ── Audit logging ─────────────────────────────────────────────
 
 /// Best-effort audit log when RTK_HOOK_AUDIT=1.
 fn audit_log(action: &str, original: &str, rewritten: &str) {
-    if std::env::var("RTK_HOOK_AUDIT").as_deref() != Ok("1") {
+    let Some(dir) = audit_dir() else {
         return;
+    };
+    let _ = audit_log_to_dir(&dir, action, original, rewritten);
+}
+
+/// Audit destination, or `None` when auditing is off.
+fn audit_dir() -> Option<std::path::PathBuf> {
+    if std::env::var("RTK_HOOK_AUDIT").as_deref() != Ok("1") {
+        return None;
     }
-    let _ = audit_log_inner(action, original, rewritten);
+    Some(dirs::home_dir()?.join(".local").join("share").join("rtk"))
+}
+
+/// Log a decision from the shared flow, mirroring what the host is about to be told.
+///
+/// Hook entry points own this call so the `*_response_from_decision` builders
+/// stay pure: they are what the unit tests exercise, and a builder that logged
+/// would append to the developer's real `$HOME` on any machine with
+/// `RTK_HOOK_AUDIT=1` set. Gemini keeps its own mapping in
+/// [`audit_gemini_decision`].
+fn audit_decision(decision: &HookDecision, cmd: &str) {
+    match decision {
+        HookDecision::Deny => audit_log("deny", cmd, ""),
+        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => {
+            audit_log("rewrite", cmd, rewritten)
+        }
+        HookDecision::Defer => {}
+    }
+}
+
+/// Gemini logs `ask` where the shared mapping logs `rewrite`, and stays silent
+/// on Deny because it emits the denial itself rather than stepping aside.
+fn audit_gemini_decision(decision: &HookDecision, cmd: &str) {
+    match decision {
+        HookDecision::AllowRewrite(rewritten) => audit_log("rewrite", cmd, rewritten),
+        HookDecision::AskRewrite(rewritten) => audit_log("ask", cmd, rewritten),
+        HookDecision::Deny | HookDecision::Defer => {}
+    }
 }
 
 /// Escape newlines to prevent log-line injection in the pipe-delimited audit log.
@@ -534,10 +545,15 @@ fn sanitize_log_field(s: &str) -> String {
         .replace('\r', "\\r")
 }
 
-fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> {
-    let home = dirs::home_dir()?;
-    let dir = home.join(".local").join("share").join("rtk");
-    crate::core::utils::create_private_dir(&dir).ok()?;
+/// Append one record to `dir/hook-audit.log`. The directory is a parameter so
+/// tests cover the real write path without touching the developer's home.
+fn audit_log_to_dir(
+    dir: &std::path::Path,
+    action: &str,
+    original: &str,
+    rewritten: &str,
+) -> Option<()> {
+    crate::core::utils::create_private_dir(dir).ok()?;
     let path = dir.join("hook-audit.log");
     let mut file = crate::core::utils::open_private(
         std::fs::OpenOptions::new().create(true).append(true),
@@ -796,7 +812,9 @@ fn run_cursor_inner_with_rules(
 
 fn process_droid_payload(v: &Value) -> Option<Value> {
     let cmd = droid_execute_command(v)?;
-    droid_response_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::Droid))
+    let decision = decide_hook_action(cmd, permissions::Host::Droid);
+    audit_decision(&decision, cmd);
+    droid_response_from_decision(v, decision)
 }
 
 /// Extract the shell command when the payload targets Droid's Execute tool.
@@ -821,17 +839,11 @@ fn droid_execute_command(v: &Value) -> Option<&str> {
 /// Rewrites land via `updatedInput` alone — never a `permissionDecision`:
 /// RTK can't reproduce the verdict Droid would emit for a command it renames
 /// to `rtk …` (updatedInput-without-decision verified on Droid v0.140–0.164).
-fn droid_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) -> Option<Value> {
+fn droid_response_from_decision(v: &Value, decision: HookDecision) -> Option<Value> {
     let rewritten = match decision {
-        HookDecision::Deny => {
-            audit_log("deny", cmd, "");
-            return None;
-        }
-        HookDecision::Defer => return None,
+        HookDecision::Deny | HookDecision::Defer => return None,
         HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r) => r,
     };
-
-    audit_log("rewrite", cmd, &rewritten);
 
     let updated_input = {
         let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
@@ -889,7 +901,24 @@ fn run_droid_inner_with_rules(
     let v: Value = serde_json::from_str(input).ok()?;
     let cmd = droid_execute_command(&v)?;
     let verdict = permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
-    droid_response_from_decision(&v, cmd, decide_from_verdict(cmd, verdict)).map(|o| o.to_string())
+    droid_response_from_decision(&v, decide_from_verdict(cmd, verdict)).map(|o| o.to_string())
+}
+
+/// Hermetic Gemini test path: rules injected, no ambient host settings read.
+/// `None` is the "not a shell command" case, where the host gets a bare allow.
+#[cfg(test)]
+fn run_gemini_inner_with_rules(
+    input: &str,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    let cmd = gemini_shell_command(&v)?;
+    let verdict = permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
+    Some(gemini_response_from_decision(&decide_from_verdict(
+        cmd, verdict,
+    )))
 }
 
 #[cfg(test)]
@@ -1035,11 +1064,8 @@ mod tests {
 
     #[test]
     fn test_vscode_allow_rewrite_sets_permission_allow() {
-        let r = vscode_response_from_decision(
-            HookDecision::AllowRewrite("rtk git status".into()),
-            "git status",
-        )
-        .unwrap();
+        let r = vscode_response_from_decision(HookDecision::AllowRewrite("rtk git status".into()))
+            .unwrap();
         assert_eq!(r["hookSpecificOutput"]["permissionDecision"], "allow");
         assert_eq!(
             r["hookSpecificOutput"]["updatedInput"]["command"],
@@ -1054,11 +1080,8 @@ mod tests {
         // hook (process_claude_payload). Asserting "ask" is what caused #3037:
         // Copilot CLI 1.0.66+ treats it as authoritative and forces a blocking
         // dialog with no "remember" option on every rewritten command.
-        let r = vscode_response_from_decision(
-            HookDecision::AskRewrite("rtk cargo test".into()),
-            "cargo test",
-        )
-        .unwrap();
+        let r = vscode_response_from_decision(HookDecision::AskRewrite("rtk cargo test".into()))
+            .unwrap();
         assert!(
             r["hookSpecificOutput"]
                 .as_object()
@@ -1075,12 +1098,12 @@ mod tests {
 
     #[test]
     fn test_vscode_deny_returns_none() {
-        assert!(vscode_response_from_decision(HookDecision::Deny, "cargo test").is_none());
+        assert!(vscode_response_from_decision(HookDecision::Deny).is_none());
     }
 
     #[test]
     fn test_vscode_defer_returns_none() {
-        assert!(vscode_response_from_decision(HookDecision::Defer, "cargo test").is_none());
+        assert!(vscode_response_from_decision(HookDecision::Defer).is_none());
     }
 
     // --- Copilot CLI handler: transparent rewrite via modifiedArgs ---
@@ -1098,7 +1121,6 @@ mod tests {
         let r = copilot_cli_response_from_decision(
             &cli_args("cargo test"),
             HookDecision::AskRewrite("rtk cargo test".into()),
-            "cargo test",
         )
         .unwrap();
         assert!(
@@ -1113,7 +1135,6 @@ mod tests {
         let r = copilot_cli_response_from_decision(
             &cli_args("cargo test"),
             HookDecision::AllowRewrite("rtk cargo test".into()),
-            "cargo test",
         )
         .unwrap();
         assert_eq!(r["permissionDecision"], "allow");
@@ -1122,12 +1143,10 @@ mod tests {
 
     #[test]
     fn test_copilot_cli_deny_returns_none() {
-        assert!(copilot_cli_response_from_decision(
-            &cli_args("cargo test"),
-            HookDecision::Deny,
-            "cargo test",
-        )
-        .is_none());
+        assert!(
+            copilot_cli_response_from_decision(&cli_args("cargo test"), HookDecision::Deny)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1137,18 +1156,15 @@ mod tests {
         assert!(copilot_cli_response_from_decision(
             &cli_args("git status & rm -rf /tmp/x"),
             HookDecision::Defer,
-            "git status & rm -rf /tmp/x",
         )
         .is_none());
     }
 
     #[test]
     fn test_copilot_ide_rewrite_returns_deny_with_suggestion() {
-        let response = copilot_ide_response_from_decision(
-            HookDecision::AskRewrite("rtk git status".into()),
-            "git status",
-        )
-        .unwrap();
+        let response =
+            copilot_ide_response_from_decision(HookDecision::AskRewrite("rtk git status".into()))
+                .unwrap();
         assert_eq!(response["permissionDecision"], "deny");
         assert!(response["permissionDecisionReason"]
             .as_str()
@@ -1161,11 +1177,9 @@ mod tests {
     fn test_copilot_ide_allow_rewrite_returns_deny_with_suggestion() {
         // The IDE host ignores modifiedArgs, so an Allow-with-rewrite decision
         // must still surface as a deny-with-suggestion, exactly like AskRewrite.
-        let response = copilot_ide_response_from_decision(
-            HookDecision::AllowRewrite("rtk git status".into()),
-            "git status",
-        )
-        .unwrap();
+        let response =
+            copilot_ide_response_from_decision(HookDecision::AllowRewrite("rtk git status".into()))
+                .unwrap();
         assert_eq!(response["permissionDecision"], "deny");
         assert!(response["permissionDecisionReason"]
             .as_str()
@@ -1176,8 +1190,7 @@ mod tests {
 
     #[test]
     fn test_copilot_ide_permission_deny_is_enforced() {
-        let response =
-            copilot_ide_response_from_decision(HookDecision::Deny, "rm -rf /protected").unwrap();
+        let response = copilot_ide_response_from_decision(HookDecision::Deny).unwrap();
         assert_eq!(response["permissionDecision"], "deny");
         assert_eq!(
             response["permissionDecisionReason"],
@@ -1187,7 +1200,7 @@ mod tests {
 
     #[test]
     fn test_copilot_ide_defer_is_silent() {
-        assert!(copilot_ide_response_from_decision(HookDecision::Defer, "htop").is_none());
+        assert!(copilot_ide_response_from_decision(HookDecision::Defer).is_none());
     }
 
     #[test]
@@ -1230,7 +1243,6 @@ mod tests {
         let r = copilot_cli_response_from_decision(
             &args,
             HookDecision::AskRewrite("rtk cargo install ripgrep".into()),
-            "cargo install ripgrep",
         )
         .unwrap();
         let modified = &r["modifiedArgs"];
@@ -1247,7 +1259,7 @@ mod tests {
             &[],
             &["Bash(git:*)".to_string()],
         );
-        copilot_cli_response_from_decision(&cli_args(cmd), decide_from_verdict(cmd, verdict), cmd)
+        copilot_cli_response_from_decision(&cli_args(cmd), decide_from_verdict(cmd, verdict))
     }
 
     #[test]
@@ -1680,41 +1692,35 @@ mod tests {
     // --- Audit logging ---
 
     #[test]
-    fn test_audit_log_silent_when_disabled() {
-        std::env::remove_var("RTK_HOOK_AUDIT");
-        audit_log("test", "git status", "rtk git status");
-    }
+    fn test_audit_log_writes_four_sanitized_fields() {
+        // PID-scoped like heal_legacy_hook_file's temp file: a fixed name is
+        // shared by every concurrent `cargo test` process, so one run's cleanup
+        // deletes another's file mid-write.
+        let dir = std::env::temp_dir().join(format!("rtk-test-audit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir); // nosemgrep: filesystem-deletion
 
-    #[test]
-    fn test_audit_log_format_four_fields() {
-        let tmp = std::env::temp_dir().join("rtk-test-audit");
-        let _ = std::fs::create_dir_all(&tmp);
-        let log_path = tmp.join("hook-audit.log");
-        let _ = std::fs::remove_file(&log_path);
+        audit_log_to_dir(
+            &dir,
+            "rewrite",
+            "git status\nrm -rf /tmp/x",
+            "rtk git log | head",
+        )
+        .expect("audit write must succeed");
 
-        {
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-                .unwrap();
-            let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S");
-            writeln!(file, "{} | rewrite | git status | rtk git status", ts).unwrap();
-        }
+        let content = std::fs::read_to_string(dir.join("hook-audit.log")).expect("log must exist");
+        let _ = std::fs::remove_dir_all(&dir); // nosemgrep: filesystem-deletion
 
-        let content = std::fs::read_to_string(&log_path).unwrap();
         let parts: Vec<&str> = content.trim().split(" | ").collect();
         assert_eq!(
             parts.len(),
             4,
-            "Expected 4 pipe-delimited fields, got: {:?}",
-            parts
+            "Expected 4 pipe-delimited fields, got: {parts:?}"
         );
         assert_eq!(parts[1], "rewrite");
-        assert_eq!(parts[2], "git status");
-        assert_eq!(parts[3], "rtk git status");
-
-        let _ = std::fs::remove_dir_all(&tmp);
+        // The writer sanitizes before formatting, so neither the smuggled
+        // newline nor the smuggled delimiter can forge extra fields.
+        assert_eq!(parts[2], "git status\\nrm -rf /tmp/x");
+        assert_eq!(parts[3], "rtk git log \\| head");
     }
 
     // --- Adversarial tests ---
@@ -1856,14 +1862,62 @@ mod tests {
     // --- Gemini rendering ---
 
     fn gemini_render(cmd: &str, deny: &[String], ask: &[String], allow: &[String]) -> String {
-        match decide_with_rules(cmd, deny, ask, allow) {
-            HookDecision::Deny => {
-                r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string()
-            }
-            HookDecision::AllowRewrite(r) => gemini_json("allow", Some(&r)),
-            HookDecision::AskRewrite(r) => gemini_json("ask_user", Some(&r)),
-            HookDecision::Defer => gemini_json("ask_user", None),
-        }
+        gemini_response_from_decision(&decide_with_rules(cmd, deny, ask, allow))
+    }
+
+    fn gemini_input(tool: &str, cmd: &str) -> String {
+        json!({
+            "tool_name": tool,
+            "tool_input": { "command": cmd }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_gemini_payload_rewrites_shell_command() {
+        // Covers run_gemini's own wiring — payload parse, tool gate, dispatch —
+        // which the decision-level tests above bypass.
+        let out = run_gemini_inner_with_rules(
+            &gemini_input("run_shell_command", "git status"),
+            &[],
+            &[],
+            &all_allowed(),
+        )
+        .expect("shell command must produce a decision");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(
+            v["hookSpecificOutput"]["tool_input"]["command"],
+            "rtk git status"
+        );
+    }
+
+    #[test]
+    fn test_gemini_payload_ignores_non_shell_tool() {
+        // No shell command in the payload → the host gets a bare allow.
+        assert!(run_gemini_inner_with_rules(
+            &gemini_input("read_file", "irrelevant"),
+            &[],
+            &[],
+            &all_allowed()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn test_gemini_payload_ignores_empty_command() {
+        assert!(run_gemini_inner_with_rules(
+            &gemini_input("run_shell_command", ""),
+            &[],
+            &[],
+            &all_allowed()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn test_gemini_payload_malformed_json_ignored() {
+        assert!(run_gemini_inner_with_rules("not json at all", &[], &[], &all_allowed()).is_none());
     }
 
     #[test]
@@ -2059,7 +2113,7 @@ mod tests {
         // in the test environment.
         let v: Value = serde_json::from_str(&droid_input("Execute", "git push --force")).unwrap();
         assert!(
-            droid_response_from_decision(&v, "git push --force", HookDecision::Deny).is_none(),
+            droid_response_from_decision(&v, HookDecision::Deny).is_none(),
             "deny must step aside (no output), not emit an RTK block"
         );
     }
@@ -2070,7 +2124,6 @@ mod tests {
         let v: Value = serde_json::from_str(&droid_input("Execute", "git status")).unwrap();
         let out = droid_response_from_decision(
             &v,
-            "git status",
             HookDecision::AllowRewrite("rtk git status".to_string()),
         )
         .expect("rewrite expected");
