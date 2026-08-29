@@ -144,6 +144,26 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^journalctl(?:\s|$)",
+        rtk_cmd: "rtk journalctl",
+        rewrite_prefixes: &["journalctl"],
+        category: "System",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+        pipeline_final_safe: false,
+    },
+    RtkRule {
+        pattern: r"^fs_cli(?:\s|$)",
+        rtk_cmd: "rtk fs_cli",
+        rewrite_prefixes: &["fs_cli"],
+        category: "System",
+        savings_pct: 40.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+        pipeline_final_safe: false,
+    },
+    RtkRule {
         pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?tsc(\s|$)",
         rtk_cmd: "rtk tsc",
         rewrite_prefixes: &[

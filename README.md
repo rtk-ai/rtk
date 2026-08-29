@@ -164,6 +164,8 @@ rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
 rtk grep "pattern" .            # Grouped search results
 rtk diff file1 file2            # Condensed diff (exit 1 if files differ)
+rtk journalctl -u app -n 100    # Compact systemd logs
+rtk fs_cli -x "sofia status"    # Compact FreeSWITCH tables
 ```
 
 ### Git
