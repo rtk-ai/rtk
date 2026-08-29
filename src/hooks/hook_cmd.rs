@@ -9,7 +9,8 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::{self, Read, Write};
 
-use crate::discover::registry::{has_heredoc, rewrite_command};
+use crate::discover::lexer::first_unattestable_construct;
+use crate::discover::registry::{has_heredoc, rewrite_command_with_policy, RewriteResult};
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
 
@@ -231,7 +232,7 @@ fn heal_legacy_hook_file(path: &std::path::Path) -> bool {
         .is_ok()
 }
 
-fn get_rewritten(cmd: &str) -> Option<String> {
+fn get_rewrite_result(cmd: &str) -> Option<RewriteResult> {
     if has_heredoc(cmd) {
         return None;
     }
@@ -240,13 +241,18 @@ fn get_rewritten(cmd: &str) -> Option<String> {
         .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
         .unwrap_or_default();
 
-    let rewritten = rewrite_command(cmd, &excluded, &transparent_prefixes)?;
+    let rewritten = rewrite_command_with_policy(cmd, &excluded, &transparent_prefixes)?;
 
-    if rewritten == cmd {
+    if rewritten.command == cmd {
         return None;
     }
 
     Some(rewritten)
+}
+
+#[cfg(test)]
+fn get_rewritten(cmd: &str) -> Option<String> {
+    get_rewrite_result(cmd).map(|result| result.command)
 }
 
 enum HookDecision {
@@ -260,12 +266,12 @@ fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
     }
-    if crate::discover::lexer::contains_unattestable_construct(cmd) {
-        return HookDecision::Defer;
-    }
-    match get_rewritten(cmd) {
-        Some(r) if verdict == PermissionVerdict::Allow => HookDecision::AllowRewrite(r),
-        Some(r) => HookDecision::AskRewrite(r),
+    let attestable = first_unattestable_construct(cmd).is_none();
+    match get_rewrite_result(cmd) {
+        Some(r) if attestable && !r.requires_ask && verdict == PermissionVerdict::Allow => {
+            HookDecision::AllowRewrite(r.command)
+        }
+        Some(r) => HookDecision::AskRewrite(r.command),
         None => HookDecision::Defer,
     }
 }
@@ -1301,19 +1307,25 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_cli_cve_file_redirect_amp_returns_none() {
-        assert!(
-            end_to_end("git status >& /tmp/evil").is_none(),
-            ">&file redirect must not produce modifiedArgs"
+    fn test_copilot_cli_cve_file_redirect_amp_is_ask_rewrite() {
+        let response = end_to_end("git status >& /tmp/evil")
+            .expect("file redirect should produce an ask-only rewrite");
+        assert_eq!(
+            response["modifiedArgs"]["command"],
+            "rtk git status >& /tmp/evil"
         );
+        assert!(response.get("permissionDecision").is_none());
     }
 
     #[test]
-    fn test_copilot_cli_cve_file_redirect_returns_none() {
-        assert!(
-            end_to_end("git status > /tmp/evil").is_none(),
-            ">file redirect must not produce modifiedArgs"
+    fn test_copilot_cli_cve_file_redirect_is_ask_rewrite() {
+        let response = end_to_end("git status > /tmp/evil")
+            .expect("file redirect should produce an ask-only rewrite");
+        assert_eq!(
+            response["modifiedArgs"]["command"],
+            "rtk git status > /tmp/evil"
         );
+        assert!(response.get("permissionDecision").is_none());
     }
 
     // --- Gemini format ---
@@ -1439,8 +1451,18 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_file_redirect_not_rewritten() {
-        assert!(run_claude_inner(&claude_input("git log > /tmp/out.txt")).is_none());
+    fn test_claude_file_redirect_is_ask_rewrite() {
+        let output = run_claude_inner(&claude_input("git log > /tmp/out.txt"))
+            .expect("file redirect should produce an ask-only rewrite");
+        let v: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            v.pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(|c| c.as_str()),
+            Some("rtk git log > /tmp/out.txt")
+        );
+        assert!(v
+            .pointer("/hookSpecificOutput/permissionDecision")
+            .is_none());
     }
 
     #[test]
@@ -1497,14 +1519,8 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_pipeline_rewrites_only_safe_final_stage() {
-        let result = run_claude_inner(&claude_input("cargo test | grep FAILED")).unwrap();
-        let v: Value = serde_json::from_str(&result).unwrap();
-        let cmd = v
-            .pointer("/hookSpecificOutput/updatedInput/command")
-            .and_then(|c| c.as_str())
-            .unwrap();
-        assert_eq!(cmd, "cargo test | rtk grep FAILED");
+    fn test_claude_pipeline_preserves_raw_content_consumer() {
+        assert!(run_claude_inner(&claude_input("cargo test | grep FAILED")).is_none());
     }
 
     #[test]
@@ -1838,10 +1854,21 @@ mod tests {
     }
 
     #[test]
-    fn test_decide_defer_for_file_redirect() {
+    fn test_decide_ask_for_bundle_with_substitution_even_when_allowed() {
+        let command = "grep -rn foo src\nf=$(whoami)";
         assert!(matches!(
-            decide_with_rules("git log > /tmp/out.txt", &[], &[], &all_allowed()),
-            HookDecision::Defer
+            decide_with_rules(command, &[], &[], &all_allowed()),
+            HookDecision::AskRewrite(rewritten)
+                if rewritten == "rtk grep -rn foo src\nf=$(whoami)"
+        ));
+    }
+
+    #[test]
+    fn test_decide_ask_for_file_redirect() {
+        let decision = decide_with_rules("git log > /tmp/out.txt", &[], &[], &all_allowed());
+        assert!(matches!(
+            decision,
+            HookDecision::AskRewrite(rewritten) if rewritten == "rtk git log > /tmp/out.txt"
         ));
     }
 
@@ -2100,12 +2127,18 @@ mod tests {
     }
 
     #[test]
-    fn test_droid_file_redirect_defers() {
+    fn test_droid_file_redirect_is_ask_rewrite() {
         let input = droid_input("Execute", "git log > /tmp/out.txt");
-        assert!(
-            run_droid_inner(&input).is_none(),
-            "file redirects must defer (no output)"
+        let output = run_droid_inner(&input).expect("file redirect should produce a rewrite");
+        let v: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            v.pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(|c| c.as_str()),
+            Some("rtk git log > /tmp/out.txt")
         );
+        assert!(v
+            .pointer("/hookSpecificOutput/permissionDecision")
+            .is_none());
     }
 
     #[test]

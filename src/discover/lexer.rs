@@ -22,13 +22,53 @@ pub struct ParsedToken {
     pub offset: usize,
 }
 
+#[derive(Default)]
+struct LexerState {
+    quote: Option<char>,
+    escaped: bool,
+    in_comment: bool,
+    at_word_start: bool,
+    at_command_start: bool,
+    case_header: bool,
+    in_case: bool,
+    case_pattern: bool,
+}
+
+impl LexerState {
+    fn new() -> Self {
+        Self {
+            at_word_start: true,
+            at_command_start: true,
+            ..Default::default()
+        }
+    }
+
+    fn flush_word(&mut self, tokens: &mut Vec<ParsedToken>, current: &mut String, offset: usize) {
+        if !current.is_empty() {
+            self.record_shell_keyword(current);
+        }
+        flush_arg(tokens, current, offset);
+    }
+
+    fn record_shell_keyword(&mut self, word: &str) {
+        if self.at_command_start && word == "case" {
+            self.case_header = true;
+        } else if self.case_header && word == "in" {
+            self.case_header = false;
+            self.in_case = true;
+            self.case_pattern = true;
+        } else if self.in_case && self.at_command_start && word == "esac" {
+            self.in_case = false;
+            self.case_pattern = false;
+        }
+        self.at_command_start = false;
+    }
+}
+
 pub fn tokenize(input: &str) -> Vec<ParsedToken> {
     tokenize_inner(input, false)
 }
 
-/// Like [`tokenize`] but emits a `\n` operator token for each newline that
-/// sits outside quotes. Newlines inside quoted strings stay part of their
-/// argument, so callers can use the emitted offsets as safe line-split points.
 pub fn tokenize_with_newlines(input: &str) -> Vec<ParsedToken> {
     tokenize_inner(input, true)
 }
@@ -39,21 +79,50 @@ fn tokenize_inner(input: &str, emit_newline: bool) -> Vec<ParsedToken> {
     let mut current_start: usize = 0;
     let mut byte_pos: usize = 0;
     let mut chars = input.chars().peekable();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
+    let mut state = LexerState::new();
 
     while let Some(c) = chars.next() {
         let char_len = c.len_utf8();
 
-        if escaped {
+        if state.in_comment {
+            if matches!(c, '\n' | '\r') {
+                state.in_comment = false;
+                if emit_newline {
+                    let start = byte_pos;
+                    let mut value = c.to_string();
+                    byte_pos += char_len;
+                    if c == '\r' && chars.peek() == Some(&'\n') {
+                        chars.next();
+                        value.push('\n');
+                        byte_pos += 1;
+                    }
+                    tokens.push(ParsedToken {
+                        kind: TokenKind::Operator,
+                        value,
+                        offset: start,
+                    });
+                } else {
+                    byte_pos += char_len;
+                }
+                current_start = byte_pos;
+                state.at_word_start = true;
+                state.at_command_start = true;
+            } else {
+                byte_pos += char_len;
+            }
+            continue;
+        }
+
+        if state.escaped {
             current.push('\\');
             current.push(c);
             byte_pos += char_len;
-            escaped = false;
+            state.escaped = false;
+            state.at_word_start = false;
             continue;
         }
-        if c == '\\' && quote != Some('\'') {
-            escaped = true;
+        if c == '\\' && state.quote != Some('\'') {
+            state.escaped = true;
             if current.is_empty() {
                 current_start = byte_pos;
             }
@@ -61,16 +130,17 @@ fn tokenize_inner(input: &str, emit_newline: bool) -> Vec<ParsedToken> {
             continue;
         }
 
-        if let Some(q) = quote {
+        if let Some(q) = state.quote {
             if c == q {
-                quote = None;
+                state.quote = None;
             }
             current.push(c);
             byte_pos += char_len;
+            state.at_word_start = false;
             continue;
         }
         if c == '\'' || c == '"' {
-            quote = Some(c);
+            state.quote = Some(c);
             if current.is_empty() {
                 current_start = byte_pos;
             }
@@ -80,8 +150,14 @@ fn tokenize_inner(input: &str, emit_newline: bool) -> Vec<ParsedToken> {
         }
 
         match c {
+            '#' if state.at_word_start => {
+                state.in_comment = true;
+                byte_pos += char_len;
+                current_start = byte_pos;
+                state.at_word_start = true;
+            }
             '$' => {
-                flush_arg(&mut tokens, &mut current, current_start);
+                state.flush_word(&mut tokens, &mut current, current_start);
                 let start = byte_pos;
                 byte_pos += char_len;
                 if chars
@@ -110,9 +186,10 @@ fn tokenize_inner(input: &str, emit_newline: bool) -> Vec<ParsedToken> {
                     });
                 }
                 current_start = byte_pos;
+                state.at_word_start = false;
             }
-            '*' | '?' | '`' | '(' | ')' | '{' | '}' | '!' => {
-                flush_arg(&mut tokens, &mut current, current_start);
+            ')' if state.case_pattern => {
+                state.flush_word(&mut tokens, &mut current, current_start);
                 tokens.push(ParsedToken {
                     kind: TokenKind::Shellism,
                     value: c.to_string(),
@@ -120,9 +197,35 @@ fn tokenize_inner(input: &str, emit_newline: bool) -> Vec<ParsedToken> {
                 });
                 byte_pos += char_len;
                 current_start = byte_pos;
+                state.at_word_start = true;
+                state.at_command_start = true;
+                state.case_pattern = false;
+            }
+            '*' | '?' | '`' | '(' | ')' | '{' | '}' | '!' => {
+                state.flush_word(&mut tokens, &mut current, current_start);
+                tokens.push(ParsedToken {
+                    kind: TokenKind::Shellism,
+                    value: c.to_string(),
+                    offset: byte_pos,
+                });
+                byte_pos += char_len;
+                current_start = byte_pos;
+                state.at_word_start = false;
+                if matches!(c, '(' | '{') {
+                    state.at_command_start = true;
+                }
             }
             '|' => {
-                flush_arg(&mut tokens, &mut current, current_start);
+                if state.case_pattern {
+                    if current.is_empty() {
+                        current_start = byte_pos;
+                    }
+                    current.push(c);
+                    byte_pos += char_len;
+                    state.at_word_start = false;
+                    continue;
+                }
+                state.flush_word(&mut tokens, &mut current, current_start);
                 let start = byte_pos;
                 byte_pos += char_len;
                 if chars.peek() == Some(&'|') {
@@ -149,19 +252,31 @@ fn tokenize_inner(input: &str, emit_newline: bool) -> Vec<ParsedToken> {
                     });
                 }
                 current_start = byte_pos;
+                state.at_word_start = true;
+                state.at_command_start = true;
             }
             ';' => {
-                flush_arg(&mut tokens, &mut current, current_start);
+                state.flush_word(&mut tokens, &mut current, current_start);
+                let start = byte_pos;
+                let mut value = c.to_string();
+                byte_pos += char_len;
+                if state.in_case && chars.peek() == Some(&';') {
+                    chars.next();
+                    value.push(';');
+                    byte_pos += 1;
+                    state.case_pattern = true;
+                }
                 tokens.push(ParsedToken {
                     kind: TokenKind::Operator,
-                    value: ";".into(),
-                    offset: byte_pos,
+                    value,
+                    offset: start,
                 });
-                byte_pos += char_len;
                 current_start = byte_pos;
+                state.at_word_start = true;
+                state.at_command_start = true;
             }
             '&' => {
-                flush_arg(&mut tokens, &mut current, current_start);
+                state.flush_word(&mut tokens, &mut current, current_start);
                 let start = byte_pos;
                 byte_pos += char_len;
                 if chars.peek() == Some(&'&') {
@@ -194,13 +309,15 @@ fn tokenize_inner(input: &str, emit_newline: bool) -> Vec<ParsedToken> {
                     });
                 }
                 current_start = byte_pos;
+                state.at_word_start = true;
+                state.at_command_start = true;
             }
             '>' => {
                 let fd_prefix =
                     if !current.is_empty() && current.chars().all(|ch| ch.is_ascii_digit()) {
                         Some(std::mem::take(&mut current))
                     } else {
-                        flush_arg(&mut tokens, &mut current, current_start);
+                        state.flush_word(&mut tokens, &mut current, current_start);
                         None
                     };
                 let redir_start = if fd_prefix.is_some() {
@@ -235,9 +352,10 @@ fn tokenize_inner(input: &str, emit_newline: bool) -> Vec<ParsedToken> {
                     offset: redir_start,
                 });
                 current_start = byte_pos;
+                state.at_word_start = true;
             }
             '<' => {
-                flush_arg(&mut tokens, &mut current, current_start);
+                state.flush_word(&mut tokens, &mut current, current_start);
                 let start = byte_pos;
                 let mut val = String::from("<");
                 byte_pos += char_len;
@@ -252,9 +370,29 @@ fn tokenize_inner(input: &str, emit_newline: bool) -> Vec<ParsedToken> {
                     offset: start,
                 });
                 current_start = byte_pos;
+                state.at_word_start = true;
             }
-            '\n' | '\r' if emit_newline => {
-                flush_arg(&mut tokens, &mut current, current_start);
+            '\r' if emit_newline => {
+                state.flush_word(&mut tokens, &mut current, current_start);
+                let start = byte_pos;
+                let mut value = c.to_string();
+                byte_pos += char_len;
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                    value.push('\n');
+                    byte_pos += 1;
+                }
+                tokens.push(ParsedToken {
+                    kind: TokenKind::Operator,
+                    value,
+                    offset: start,
+                });
+                current_start = byte_pos;
+                state.at_word_start = true;
+                state.at_command_start = true;
+            }
+            '\n' if emit_newline => {
+                state.flush_word(&mut tokens, &mut current, current_start);
                 tokens.push(ParsedToken {
                     kind: TokenKind::Operator,
                     value: "\n".into(),
@@ -262,11 +400,14 @@ fn tokenize_inner(input: &str, emit_newline: bool) -> Vec<ParsedToken> {
                 });
                 byte_pos += char_len;
                 current_start = byte_pos;
+                state.at_word_start = true;
+                state.at_command_start = true;
             }
             c if c.is_whitespace() => {
-                flush_arg(&mut tokens, &mut current, current_start);
+                state.flush_word(&mut tokens, &mut current, current_start);
                 byte_pos += c.len_utf8();
                 current_start = byte_pos;
+                state.at_word_start = true;
             }
             _ => {
                 if current.is_empty() {
@@ -274,14 +415,15 @@ fn tokenize_inner(input: &str, emit_newline: bool) -> Vec<ParsedToken> {
                 }
                 current.push(c);
                 byte_pos += char_len;
+                state.at_word_start = false;
             }
         }
     }
 
-    if escaped {
+    if state.escaped {
         current.push('\\');
     }
-    flush_arg(&mut tokens, &mut current, current_start);
+    state.flush_word(&mut tokens, &mut current, current_start);
     tokens
 }
 
@@ -295,19 +437,138 @@ fn flush_arg(tokens: &mut Vec<ParsedToken>, current: &mut String, offset: usize)
     }
 }
 
-/// True for constructs the permission gate can't decompose, so they must never
-/// be auto-allowed: command/process substitution, or a real file-target redirect
-/// (fd-dup like `2>&1` and `/dev/null` are exempt). Separators and subshells are
-/// handled by [`split_for_permissions`], not flagged here.
-pub fn contains_unattestable_construct(cmd: &str) -> bool {
+/// Returns `true` when the input contains a top-level shell boundary that can
+/// separate commands. Newlines are included because an AI hook can receive a
+/// complete command list rather than one physical line.
+pub(super) fn contains_compound_boundary_tokens(tokens: &[ParsedToken]) -> bool {
+    tokens.iter().any(|token| {
+        matches!(token.kind, TokenKind::Operator | TokenKind::Pipe(_))
+            || (token.kind == TokenKind::Shellism && token.value == "&")
+    })
+}
+
+/// Control-flow blocks are parsed by the shell, not by the command registry.
+/// Rewriting one inner command would risk changing conditions, loop status, or
+/// case-pattern syntax, so callers preserve the complete block verbatim.
+pub(super) fn contains_shell_block(cmd: &str) -> bool {
+    contains_shell_block_tokens(&tokenize_with_newlines(cmd))
+}
+
+pub(super) fn contains_shell_block_tokens(tokens: &[ParsedToken]) -> bool {
+    let mut command_start = true;
+    let mut substitution_depth = 0usize;
+    let mut dollar_before_paren = false;
+    let mut close_paren = false;
+    for token in tokens {
+        match token.kind {
+            TokenKind::Arg => {
+                if substitution_depth == 0
+                    && command_start
+                    && is_shell_control_keyword(token.value.as_str())
+                {
+                    return true;
+                }
+                command_start = false;
+                close_paren = false;
+            }
+            TokenKind::Operator | TokenKind::Pipe(_) => {
+                command_start = true;
+                close_paren = false;
+            }
+            TokenKind::Shellism => match token.value.as_str() {
+                "$" => dollar_before_paren = true,
+                "(" if dollar_before_paren => {
+                    substitution_depth += 1;
+                    dollar_before_paren = false;
+                }
+                "(" if command_start => {
+                    return true;
+                }
+                "(" => {
+                    command_start = false;
+                    close_paren = false;
+                    dollar_before_paren = false;
+                }
+                ")" if substitution_depth > 0 => {
+                    substitution_depth -= 1;
+                    dollar_before_paren = false;
+                }
+                "!" => return true,
+                "{" if command_start || close_paren => return true,
+                "{" => {
+                    command_start = false;
+                    close_paren = false;
+                    dollar_before_paren = false;
+                }
+                "}" if command_start => return true,
+                "}" => {
+                    command_start = false;
+                    close_paren = false;
+                    dollar_before_paren = false;
+                }
+                ")" => {
+                    close_paren = true;
+                    command_start = false;
+                    dollar_before_paren = false;
+                }
+                _ => {
+                    dollar_before_paren = false;
+                    command_start = false;
+                    close_paren = false;
+                }
+            },
+            TokenKind::Redirect => {}
+        }
+    }
+    false
+}
+
+fn is_shell_control_keyword(value: &str) -> bool {
+    matches!(
+        value,
+        "case"
+            | "do"
+            | "done"
+            | "elif"
+            | "else"
+            | "esac"
+            | "fi"
+            | "for"
+            | "function"
+            | "if"
+            | "select"
+            | "then"
+            | "until"
+            | "while"
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnattestableConstruct {
+    Substitution,
+    FileTargetRedirect,
+}
+
+/// Returns the first construct the permission gate cannot decompose. These
+/// constructs must never be auto-allowed: command/process substitution, or a
+/// real file-target redirect. Separators and subshells are handled by
+/// [`split_for_permissions`].
+pub(crate) fn first_unattestable_construct(cmd: &str) -> Option<UnattestableConstruct> {
     if contains_substitution(cmd) {
-        return true;
+        return Some(UnattestableConstruct::Substitution);
     }
     let tokens = tokenize(cmd);
     tokens
         .iter()
         .enumerate()
         .any(|(i, tok)| tok.kind == TokenKind::Redirect && redirect_has_file_target(&tokens, i))
+        .then_some(UnattestableConstruct::FileTargetRedirect)
+}
+
+/// True for constructs the permission gate cannot decompose, so they must never
+/// be auto-allowed.
+pub fn contains_unattestable_construct(cmd: &str) -> bool {
+    first_unattestable_construct(cmd).is_some()
 }
 
 /// Quote-aware: bash runs backtick/`$(...)` unquoted and inside double quotes,
@@ -316,20 +577,45 @@ fn contains_substitution(cmd: &str) -> bool {
     let bytes = cmd.as_bytes();
     let mut in_single = false;
     let mut in_double = false;
+    let mut in_comment = false;
+    let mut at_word_start = true;
     let mut i = 0;
     while i < bytes.len() {
+        if in_comment {
+            if matches!(bytes[i], b'\n' | b'\r') {
+                in_comment = false;
+                at_word_start = true;
+            }
+            i += 1;
+            continue;
+        }
         match bytes[i] {
             b'\\' if !in_single => {
                 i += 2;
+                at_word_start = false;
                 continue;
             }
-            b'\'' if !in_double => in_single = !in_single,
-            b'"' if !in_single => in_double = !in_double,
+            b'\'' if !in_double => {
+                in_single = !in_single;
+                at_word_start = false;
+            }
+            b'"' if !in_single => {
+                in_double = !in_double;
+                at_word_start = false;
+            }
+            b'#' if !in_single && !in_double && at_word_start => {
+                in_comment = true;
+                i += 1;
+                continue;
+            }
             b'`' if !in_single => return true,
             b'$' if !in_single && bytes.get(i + 1) == Some(&b'(') => return true,
             b'<' | b'>' if !in_single && !in_double && bytes.get(i + 1) == Some(&b'(') => {
                 return true
             }
+            b' ' | b'\t' | b'\n' | b'\r' if !in_single && !in_double => at_word_start = true,
+            b';' | b'|' | b'&' if !in_single && !in_double => at_word_start = true,
+            _ if !in_single && !in_double => at_word_start = false,
             _ => {}
         }
         i += 1;
@@ -339,13 +625,18 @@ fn contains_substitution(cmd: &str) -> bool {
 
 // `>&N`/`>&-` (and `N>&M`) is fd-dup/close; bare `>&` before a word is
 // `>word 2>&1` — a file target.
+pub(super) fn redirect_is_fd_dup_or_close(value: &str) -> bool {
+    let Some(pos) = value.find(">&") else {
+        return false;
+    };
+    let tail = &value[pos + 2..];
+    !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit() || c == '-')
+}
+
 fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool {
     let value = &tokens[i].value;
-    if let Some(pos) = value.find(">&") {
-        let tail = &value[pos + 2..];
-        if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit() || c == '-') {
-            return false;
-        }
+    if redirect_is_fd_dup_or_close(value) {
+        return false;
     }
     match tokens.get(i + 1) {
         Some(next) if next.kind == TokenKind::Arg => next.value != "/dev/null",
@@ -367,7 +658,7 @@ pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
     let mut seg_start: usize = 0;
     let mut seg_end: Option<usize> = None;
 
-    for tok in &tokens {
+    for tok in tokens {
         let is_boundary = match tok.kind {
             TokenKind::Operator | TokenKind::Pipe(_) => true,
             TokenKind::Shellism => matches!(tok.value.as_str(), "&" | "(" | ")"),
@@ -408,11 +699,19 @@ pub fn split_on_operators(cmd: &str, stop_at_pipe: bool) -> Vec<&str> {
         return vec![];
     }
 
-    let tokens = tokenize(trimmed);
+    let tokens = tokenize_with_newlines(trimmed);
+    split_on_operator_tokens(trimmed, &tokens, stop_at_pipe)
+}
+
+pub(super) fn split_on_operator_tokens<'a>(
+    trimmed: &'a str,
+    tokens: &[ParsedToken],
+    stop_at_pipe: bool,
+) -> Vec<&'a str> {
     let mut results = Vec::new();
     let mut seg_start: usize = 0;
 
-    for tok in &tokens {
+    for tok in tokens {
         match tok.kind {
             TokenKind::Operator => {
                 let segment = trimmed[seg_start..tok.offset].trim();
@@ -1185,6 +1484,59 @@ mod tests {
     }
 
     #[test]
+    fn test_split_on_operators_newline_boundaries() {
+        assert_eq!(
+            split_on_operators("git status\ngit log", false),
+            vec!["git status", "git log"]
+        );
+        assert_eq!(
+            split_on_operators("git status\r\ngit log", false),
+            vec!["git status", "git log"]
+        );
+    }
+
+    #[test]
+    fn test_comments_hide_operator_text() {
+        let tokens = tokenize("git status # && cargo test | grep hidden");
+        assert!(
+            !tokens
+                .iter()
+                .any(|token| { matches!(token.kind, TokenKind::Operator | TokenKind::Pipe(_)) }),
+            "comment text must not create shell boundaries: {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn test_hash_comment_requires_unquoted_word_boundary() {
+        let tokens = tokenize("echo \"# |\" \\# foo#bar # && hidden");
+        assert!(tokens.iter().any(|token| token.value == "\"# |\""));
+        assert!(tokens.iter().any(|token| token.value == "\\#"));
+        assert!(tokens.iter().any(|token| token.value == "foo#bar"));
+        assert!(!tokens
+            .iter()
+            .any(|token| matches!(token.kind, TokenKind::Operator | TokenKind::Pipe(_))));
+    }
+
+    #[test]
+    fn test_escaped_newline_is_not_a_command_boundary() {
+        assert_eq!(
+            split_on_operators("git status \\\ngit log", false),
+            vec!["git status \\\ngit log"]
+        );
+    }
+
+    #[test]
+    fn test_case_pattern_alternatives_are_not_pipelines() {
+        let tokens = tokenize("case \"$mode\" in fast|safe) git status;; esac");
+        assert!(
+            !tokens
+                .iter()
+                .any(|token| matches!(token.kind, TokenKind::Pipe(_))),
+            "case alternatives must not be classified as pipelines: {tokens:?}"
+        );
+    }
+
+    #[test]
     fn test_split_on_operators_empty() {
         assert!(split_on_operators("", false).is_empty());
         assert!(split_on_operators("  ", true).is_empty());
@@ -1348,18 +1700,5 @@ mod tests {
     fn test_split_perms_empty() {
         assert!(split_for_permissions("").is_empty());
         assert!(split_for_permissions("   ").is_empty());
-    }
-
-    #[test]
-    fn test_tokenize_with_newlines_emits_operator_outside_quotes_only() {
-        let newline_ops = |input: &str| {
-            tokenize_with_newlines(input)
-                .iter()
-                .filter(|t| t.kind == TokenKind::Operator && t.value == "\n")
-                .count()
-        };
-        assert_eq!(newline_ops("git status\ngit log"), 1);
-        assert_eq!(newline_ops("echo 'line1\nline2'"), 0);
-        assert_eq!(newline_ops("git status\r\ngit log"), 2);
     }
 }
