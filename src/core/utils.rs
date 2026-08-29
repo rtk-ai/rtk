@@ -365,6 +365,23 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
     which::which(name).context(format!("Binary '{}' not found on PATH", name))
 }
 
+/// Resolve the caller's own binary path from `RTK_BIN`, when it names `name`.
+///
+/// A user who runs `.venv/bin/pytest` means that pytest, not whichever one PATH
+/// happens to resolve first. The rewrite layer records the path it was given in
+/// `RTK_BIN`, and this is where handlers pick it back up (#1053).
+///
+/// The basename must match the requested tool, so a stale `RTK_BIN` left over
+/// from another command can never redirect an unrelated binary.
+fn rtk_bin_override(name: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(std::env::var_os("RTK_BIN")?);
+    if path.file_name()? == std::ffi::OsStr::new(name) {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 /// Create a `Command` with PATHEXT-aware binary resolution.
 ///
 /// Drop-in replacement for `Command::new(name)` that works on Windows
@@ -379,6 +396,10 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
 /// # Returns
 /// A `Command` configured with the resolved binary path.
 pub fn resolved_command(name: &str) -> Command {
+    if let Some(path) = rtk_bin_override(name) {
+        return Command::new(path); // nosemgrep: dynamic-command-execution
+    }
+
     match resolve_binary(name) {
         Ok(path) => Command::new(path),
         Err(e) => {
@@ -456,7 +477,16 @@ fn read_composer_bin_dir(composer_json: &str) -> Option<PathBuf> {
 /// Check if a tool exists on PATH (PATHEXT-aware on Windows).
 ///
 /// Replaces manual `Command::new("which").arg(tool)` checks that fail on Windows.
+///
+/// A tool reached through `RTK_BIN` counts as present even when it is absent
+/// from PATH, which is the normal case for a virtualenv or `node_modules/.bin`
+/// binary: handlers that branch on availability must see the same tool that
+/// `resolved_command` would run.
 pub fn tool_exists(name: &str) -> bool {
+    if rtk_bin_override(name).is_some_and(|path| path.exists()) {
+        return true;
+    }
+
     which::which(name).is_ok()
 }
 
@@ -624,6 +654,50 @@ fn output_codepage() -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_rtk_bin_override_targets_only_the_named_tool() {
+        // The running test binary is a file that is certainly on disk, so the
+        // fixture needs no filesystem setup or cleanup of its own.
+        let real = std::env::current_exe().expect("current exe");
+        let name = real
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("exe file name")
+            .to_string();
+        let missing = std::env::temp_dir().join("rtk-fixture-absent-tool");
+
+        // Read every result before restoring the environment so a failed
+        // assertion can never leak RTK_BIN into the rest of the suite.
+        std::env::set_var("RTK_BIN", &real);
+        let program = resolved_command(&name).get_program().to_os_string();
+        let named_tool_exists = tool_exists(&name);
+        let other_tool = resolved_command("rtk-fixture-other")
+            .get_program()
+            .to_os_string();
+        std::env::set_var("RTK_BIN", &missing);
+        let missing_tool_exists = tool_exists("rtk-fixture-absent-tool");
+        std::env::remove_var("RTK_BIN");
+
+        assert_eq!(
+            program,
+            real.as_os_str(),
+            "resolved_command should run the RTK_BIN path when the basename matches"
+        );
+        assert!(
+            named_tool_exists,
+            "tool_exists should report a binary reachable only through RTK_BIN"
+        );
+        assert_ne!(
+            other_tool,
+            real.as_os_str(),
+            "a different tool must not inherit another command's RTK_BIN"
+        );
+        assert!(
+            !missing_tool_exists,
+            "tool_exists should not report a RTK_BIN path that is not on disk"
+        );
+    }
 
     #[test]
     fn test_truncate_short_string() {
