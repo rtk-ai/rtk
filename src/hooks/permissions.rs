@@ -1,6 +1,6 @@
 use super::constants::{
-    CLAUDE_DIR, CURSOR_DIR, DROID_DIR, DROID_HOME_ENV, DROID_SETTINGS_FILE, GEMINI_DIR,
-    SETTINGS_JSON, SETTINGS_LOCAL_JSON,
+    CLAUDE_DIR, CODEBUDDY_DIR, CURSOR_DIR, DROID_DIR, DROID_HOME_ENV, DROID_SETTINGS_FILE,
+    GEMINI_DIR, SETTINGS_JSON, SETTINGS_LOCAL_JSON,
 };
 use crate::core::stream::exec_capture;
 use crate::discover::lexer::split_for_permissions;
@@ -37,6 +37,7 @@ pub enum Host {
     Gemini,
     Droid,
     Vibe,
+    CodeBuddy,
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
@@ -46,6 +47,7 @@ pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
         Host::Gemini => load_gemini_rules(),
         Host::Droid => load_droid_rules(),
         Host::Vibe => (Vec::new(), Vec::new(), Vec::new()),
+        Host::CodeBuddy => load_codebuddy_rules(),
     };
     check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
 }
@@ -131,31 +133,7 @@ pub(crate) fn check_command_with_rules(
 ///
 /// Missing files and malformed JSON are silently skipped.
 fn load_permission_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
-    let mut deny_rules = Vec::new();
-    let mut ask_rules = Vec::new();
-    let mut allow_rules = Vec::new();
-
-    for path in get_settings_paths() {
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(json) = serde_json::from_str::<Value>(&content) else {
-            eprintln!(
-                "[rtk] warning: failed to parse permissions from {}",
-                path.display()
-            );
-            continue;
-        };
-        let Some(permissions) = json.get("permissions") else {
-            continue;
-        };
-
-        append_bash_rules(permissions.get("deny"), &mut deny_rules);
-        append_bash_rules(permissions.get("ask"), &mut ask_rules);
-        append_bash_rules(permissions.get("allow"), &mut allow_rules);
-    }
-
-    (deny_rules, ask_rules, allow_rules)
+    load_rules_from_paths(&get_settings_paths())
 }
 
 /// Extract Bash-scoped patterns from a JSON array and append them to `target`.
@@ -178,13 +156,72 @@ fn append_bash_rules(rules_value: Option<&Value>, target: &mut Vec<String>) {
 fn get_settings_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    if let Some(root) = find_project_root() {
+    if let Some(root) = find_project_root(CLAUDE_DIR) {
         paths.push(root.join(CLAUDE_DIR).join(SETTINGS_JSON));
         paths.push(root.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON));
     }
     if let Some(home) = dirs::home_dir() {
         paths.push(home.join(CLAUDE_DIR).join(SETTINGS_JSON));
         paths.push(home.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON));
+    }
+
+    paths
+}
+
+/// Load deny, ask, and allow Bash rules from CodeBuddy settings files.
+///
+/// CodeBuddy uses the same `Bash(pattern)` syntax as Claude Code,
+/// stored under `permissions.deny` / `permissions.ask` / `permissions.allow`
+/// in `.codebuddy/settings.json` and `.codebuddy/settings.local.json`.
+fn load_codebuddy_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
+    load_rules_from_paths(&get_codebuddy_settings_paths())
+}
+
+/// Load deny, ask, and allow Bash rules from an ordered list of settings files.
+///
+/// Shared by Claude (`load_permission_rules`) and CodeBuddy
+/// (`load_codebuddy_rules`), which differ only in which settings paths they
+/// resolve. Missing files and malformed JSON are silently skipped; later files
+/// are merged with earlier ones (all rules accumulate).
+fn load_rules_from_paths(paths: &[PathBuf]) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut deny_rules = Vec::new();
+    let mut ask_rules = Vec::new();
+    let mut allow_rules = Vec::new();
+
+    for path in paths {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<Value>(&content) else {
+            eprintln!(
+                "[rtk] warning: failed to parse permissions from {}",
+                path.display()
+            );
+            continue;
+        };
+        let Some(permissions) = json.get("permissions") else {
+            continue;
+        };
+
+        append_bash_rules(permissions.get("deny"), &mut deny_rules);
+        append_bash_rules(permissions.get("ask"), &mut ask_rules);
+        append_bash_rules(permissions.get("allow"), &mut allow_rules);
+    }
+
+    (deny_rules, ask_rules, allow_rules)
+}
+
+/// Return the ordered list of CodeBuddy settings file paths to check.
+fn get_codebuddy_settings_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Some(root) = find_project_root(CODEBUDDY_DIR) {
+        paths.push(root.join(CODEBUDDY_DIR).join(SETTINGS_JSON));
+        paths.push(root.join(CODEBUDDY_DIR).join(SETTINGS_LOCAL_JSON));
+    }
+    if let Some(home) = dirs::home_dir() {
+        paths.push(home.join(CODEBUDDY_DIR).join(SETTINGS_JSON));
+        paths.push(home.join(CODEBUDDY_DIR).join(SETTINGS_LOCAL_JSON));
     }
 
     paths
@@ -258,7 +295,7 @@ fn gemini_settings() -> Option<Value> {
             })
             .unwrap_or(false);
     if trusted {
-        if let Some(root) = find_project_root() {
+        if let Some(root) = find_project_root(GEMINI_DIR) {
             if let Some(v) = read_json(&root.join(GEMINI_DIR).join(SETTINGS_JSON)) {
                 return Some(v);
             }
@@ -290,7 +327,7 @@ fn droid_settings_scopes() -> Vec<Value> {
     {
         dirs_to_read.push(home.join(DROID_DIR));
     }
-    if let Some(root) = find_project_root() {
+    if let Some(root) = find_project_root(DROID_DIR) {
         dirs_to_read.push(root.join(DROID_DIR));
     }
 
@@ -336,14 +373,19 @@ pub(crate) fn droid_rules_from_settings(
     (deny, Vec::new(), Vec::new())
 }
 
-/// Locate the project root by walking up from CWD looking for `.claude/`.
+/// Locate the project root by walking up from CWD looking for `agent_dir`.
+///
+/// Only the caller's own agent config dir is considered, so a sibling agent's
+/// dir (e.g. `.codebuddy/` in a subdir) never steals the root from another
+/// host (e.g. Claude's `.claude/` at the repo root) — each host's deny/ask
+/// rules keep applying independently.
 ///
 /// Falls back to `git rev-parse --show-toplevel` if not found via directory walk.
-fn find_project_root() -> Option<PathBuf> {
-    // Fast path: walk up CWD looking for .claude/ — no subprocess needed.
+fn find_project_root(agent_dir: &str) -> Option<PathBuf> {
+    // Fast path: walk up CWD looking for the agent's config dir — no subprocess needed.
     let mut dir = std::env::current_dir().ok()?;
     loop {
-        if dir.join(CLAUDE_DIR).exists() {
+        if dir.join(agent_dir).exists() {
             return Some(dir);
         }
         if !dir.pop() {

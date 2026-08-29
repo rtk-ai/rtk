@@ -91,6 +91,7 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 | Copilot CLI (rtk hook copilot) | No updatedInput | deny-with-suggestion (unchanged) |
 | Codex | ask parsed but no-op | allow (limitation — fails open) |
 | Mistral Vibe (rtk hook vibe) | No native ask surface | passthrough — Vibe's own approval prompt fires on the rewritten command |
+| CodeBuddy (rtk hook codebuddy) | Yes | `permissionDecision: "ask"` — user prompted |
 
 ### Implementation
 

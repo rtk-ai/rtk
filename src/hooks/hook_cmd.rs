@@ -598,13 +598,7 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         HookDecision::AskRewrite(r) => (r, false),
     };
 
-    let updated_input = {
-        let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
-        if let Some(obj) = ti.as_object_mut() {
-            obj.insert("command".into(), Value::String(rewritten.clone()));
-        }
-        ti
-    };
+    let updated_input = build_updated_input(v, rewritten.clone());
 
     let mut hook_output = json!({
         "hookEventName": PRE_TOOL_USE_KEY,
@@ -624,6 +618,17 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         rewritten,
         output: json!({ "hookSpecificOutput": hook_output }),
     }
+}
+
+/// Build an `updatedInput` object by cloning the original `tool_input`
+/// and overriding the `command` field. Preserves sibling fields like
+/// `timeout` and `description` that may be present in the hook payload.
+fn build_updated_input(v: &Value, rewritten: String) -> Value {
+    let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+    if let Some(obj) = ti.as_object_mut() {
+        obj.insert("command".into(), Value::String(rewritten));
+    }
+    ti
 }
 
 /// Run the Claude Code PreToolUse hook natively.
@@ -668,6 +673,109 @@ fn run_claude_inner(input: &str) -> Option<String> {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
         _ => None,
     }
+}
+
+// ── CodeBuddy native hook ─────────────────────────────────
+//
+// CodeBuddy (Tencent Cloud AI code editor) uses a hook protocol compatible
+// with Claude Code's specification, with these differences in the output JSON:
+// 1. Requires top-level `"continue": true`
+// 2. Reads `"updatedInput"` (CodeBuddy's older IDE builds used `modifiedInput`;
+//    upstream has converged on `updatedInput`, so RTK emits `updatedInput`)
+// 3. Mirrors RTK's verdict: AllowRewrite -> `"allow"`, AskRewrite -> `"ask"`.
+//    Earlier IDE builds ignored the rewritten input when `permissionDecision`
+//    was `"ask"` (an upstream Bug fixed in a later release), so RTK briefly
+//    collapsed both to `"allow"`. With the fix in place the distinction is
+//    honored again.
+
+/// Run the CodeBuddy PreToolUse hook natively.
+pub fn run_codebuddy() -> Result<()> {
+    let input = read_stdin_limited()?;
+
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    let cmd = match codebuddy_execute_command(&v) {
+        Some(c) => c.to_string(),
+        None => return Ok(()),
+    };
+
+    // Use CodeBuddy's own permission settings, not Claude's.
+    let decision = decide_hook_action(&cmd, permissions::Host::CodeBuddy);
+
+    if let Some(response) = codebuddy_response_from_decision(&v, &cmd, decision) {
+        let _ = writeln!(io::stdout(), "{response}");
+    }
+    Ok(())
+}
+
+/// Extract the shell command when the payload targets CodeBuddy's shell tool.
+///
+/// CodeBuddy uses `Bash` in CLI mode and `execute_command` in IDE mode (the
+/// installed matcher is `Bash|execute_command`). Tolerate a missing `tool_name`
+/// defensively, mirroring `droid_execute_command`.
+fn codebuddy_execute_command(v: &Value) -> Option<&str> {
+    let tool_name = v.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
+    if !matches!(tool_name, "Bash" | "execute_command" | "") {
+        return None;
+    }
+
+    v.pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+}
+
+/// Build the CodeBuddy `PreToolUse` hook response for a verdict, mirroring RTK's
+/// own ask/allow distinction. `Deny`/`AllowRewrite`/`AskRewrite` return a
+/// response; `Defer` returns `None` (no output, command untouched).
+///
+/// CodeBuddy differs from Claude Code by requiring top-level `"continue": true`.
+/// It reads the same `updatedInput` field as Claude Code (CodeBuddy's older IDE
+/// builds used `modifiedInput`, but upstream has converged on `updatedInput`, so
+/// RTK emits `updatedInput` for both). Earlier IDE builds ignored the rewritten
+/// input when `permissionDecision` was `"ask"` — an upstream Bug fixed in a
+/// later release — so RTK briefly collapsed both rewrites to `"allow"`. With the
+/// fix in place the ask/allow distinction is honored again.
+fn codebuddy_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) -> Option<Value> {
+    let (permission, reason, rewritten) = match decision {
+        HookDecision::Defer => return None,
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            ("deny", "Blocked by RTK permission rule", None)
+        }
+        HookDecision::AllowRewrite(r) => {
+            audit_log("rewrite", cmd, &r);
+            ("allow", "RTK auto-rewrite", Some(r))
+        }
+        HookDecision::AskRewrite(r) => {
+            audit_log("ask", cmd, &r);
+            ("ask", "RTK auto-rewrite", Some(r))
+        }
+    };
+
+    let mut hook_output = json!({
+        "hookEventName": PRE_TOOL_USE_KEY,
+        "permissionDecision": permission,
+        "permissionDecisionReason": reason,
+    });
+    if let Some(rewritten) = rewritten {
+        hook_output["updatedInput"] = build_updated_input(v, rewritten);
+    }
+    Some(json!({
+        "continue": true,
+        "permissionDecision": permission,
+        "hookSpecificOutput": hook_output,
+    }))
 }
 
 // ── Cursor native hook ─────────────────────────────────────────
@@ -833,13 +941,7 @@ fn droid_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) ->
 
     audit_log("rewrite", cmd, &rewritten);
 
-    let updated_input = {
-        let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
-        if let Some(obj) = ti.as_object_mut() {
-            obj.insert("command".into(), Value::String(rewritten));
-        }
-        ti
-    };
+    let updated_input = build_updated_input(v, rewritten);
 
     Some(json!({
         "hookSpecificOutput": {
@@ -1563,6 +1665,66 @@ mod tests {
         // `continue: true` keeps the Cursor preToolUse panel from collapsing
         // to `Output: {}`; without it the rewrite is invisible to users.
         assert_eq!(v["continue"], true);
+    }
+
+    // ── CodeBuddy hook ──────────────────────────────────────────
+
+    fn codebuddy_payload(cmd: &str) -> Value {
+        json!({ "tool_name": "Bash", "tool_input": { "command": cmd } })
+    }
+
+    #[test]
+    fn test_codebuddy_allow_rewrite_sets_allow_with_updated_input() {
+        let v = codebuddy_payload("git status");
+        let r = codebuddy_response_from_decision(
+            &v,
+            "git status",
+            HookDecision::AllowRewrite("rtk git status".into()),
+        )
+        .unwrap();
+        assert_eq!(r["continue"], true);
+        assert_eq!(r["permissionDecision"], "allow");
+        assert_eq!(r["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(
+            r["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk git status"
+        );
+    }
+
+    #[test]
+    fn test_codebuddy_ask_rewrite_sets_ask_with_updated_input() {
+        let v = codebuddy_payload("git status");
+        let r = codebuddy_response_from_decision(
+            &v,
+            "git status",
+            HookDecision::AskRewrite("rtk git status".into()),
+        )
+        .unwrap();
+        assert_eq!(r["continue"], true);
+        assert_eq!(r["permissionDecision"], "ask");
+        assert_eq!(r["hookSpecificOutput"]["permissionDecision"], "ask");
+        assert_eq!(
+            r["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk git status"
+        );
+    }
+
+    #[test]
+    fn test_codebuddy_deny_omits_updated_input() {
+        let v = codebuddy_payload("git status");
+        let r = codebuddy_response_from_decision(&v, "git status", HookDecision::Deny).unwrap();
+        assert_eq!(r["permissionDecision"], "deny");
+        assert_eq!(
+            r["hookSpecificOutput"]["permissionDecisionReason"],
+            "Blocked by RTK permission rule"
+        );
+        assert!(r["hookSpecificOutput"].get("updatedInput").is_none());
+    }
+
+    #[test]
+    fn test_codebuddy_defer_returns_none() {
+        let v = codebuddy_payload("git status");
+        assert!(codebuddy_response_from_decision(&v, "git status", HookDecision::Defer).is_none());
     }
 
     #[test]
