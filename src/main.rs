@@ -22,8 +22,8 @@ use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
-    summary, tree, wc_cmd,
+    deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
+    powershell_cmd, read, search, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -420,6 +420,17 @@ enum Commands {
     /// Word/line/byte count with compact output (strips paths and padding)
     Wc {
         /// Arguments passed to wc (files, flags like -l, -w, -c)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// PowerShell with compact table and list output
+    #[command(visible_alias = "pwsh")]
+    Powershell {
+        /// PowerShell executable selected by hook rewriting
+        #[arg(long, hide = true, default_value = "pwsh")]
+        executable: String,
+        /// Arguments passed to PowerShell
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2145,6 +2156,10 @@ fn run_cli() -> Result<i32> {
 
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
 
+        Commands::Powershell { executable, args } => {
+            powershell_cmd::run(&executable, &args, cli.verbose)?
+        }
+
         Commands::Gain {
             project, // added
             graph,
@@ -2774,6 +2789,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Npm { .. }
             | Commands::Npx { .. }
             | Commands::Curl { .. }
+            | Commands::Powershell { .. }
             | Commands::Ruff { .. }
             | Commands::Pytest { .. }
             | Commands::Php { .. }
@@ -3162,6 +3178,7 @@ mod tests {
             "grep",
             "wget",
             "wc",
+            "powershell",
             "jest",
             "vitest",
             "prisma",
@@ -3640,6 +3657,27 @@ mod tests {
                 );
             }
             _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_powershell_proxy_parses_hidden_executable_and_native_flags() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "powershell",
+            "--executable",
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            "Get-Date",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Powershell { executable, args } => {
+                assert_eq!(executable, "powershell.exe");
+                assert_eq!(args, vec!["-NoProfile", "-Command", "Get-Date"]);
+            }
+            _ => panic!("Expected Powershell command"),
         }
     }
 
