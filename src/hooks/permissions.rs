@@ -140,10 +140,12 @@ fn load_permission_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
             continue;
         };
         let Ok(json) = serde_json::from_str::<Value>(&content) else {
-            eprintln!(
-                "[rtk] warning: failed to parse permissions from {}",
-                path.display()
-            );
+            if !crate::core::utils::in_hook_mode() {
+                eprintln!(
+                    "[rtk] warning: failed to parse permissions from {}",
+                    path.display()
+                );
+            }
             continue;
         };
         let Some(permissions) = json.get("permissions") else {

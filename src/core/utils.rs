@@ -301,6 +301,15 @@ pub fn count_tokens(text: &str) -> usize {
     text.split_whitespace().count()
 }
 
+/// Returns true when rtk is executing as a Claude Code (or other AI IDE) hook.
+/// Set by each hook entry point before any other work so that diagnostic
+/// eprintln! calls in filter/trust paths are suppressed — any stderr output
+/// during hook execution triggers Claude Code bug #4669 and permanently
+/// disables the hook for the session.
+pub fn in_hook_mode() -> bool {
+    std::env::var("RTK_HOOK_MODE").is_ok()
+}
+
 /// Detect the package manager used in the current directory.
 /// Returns "pnpm", "yarn", or "npm" based on lockfile presence.
 ///
@@ -1097,6 +1106,22 @@ mod tests {
     #[test]
     fn test_human_bytes_tb() {
         assert_eq!(human_bytes(1_099_511_627_776), "1.0 TB");
+    }
+
+    #[test]
+    fn test_in_hook_mode_unset() {
+        std::env::remove_var("RTK_HOOK_MODE");
+        assert!(!in_hook_mode(), "in_hook_mode() must return false when RTK_HOOK_MODE is unset");
+    }
+
+    #[test]
+    fn test_in_hook_mode_set() {
+        #[allow(deprecated)]
+        std::env::set_var("RTK_HOOK_MODE", "1");
+        let result = in_hook_mode();
+        #[allow(deprecated)]
+        std::env::remove_var("RTK_HOOK_MODE");
+        assert!(result, "in_hook_mode() must return true when RTK_HOOK_MODE=1");
     }
 
     #[test]
