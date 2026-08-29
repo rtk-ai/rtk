@@ -36,6 +36,7 @@ pub enum Host {
     Cursor,
     Gemini,
     Droid,
+    Vibe,
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
@@ -44,6 +45,7 @@ pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
         Host::Cursor => load_cursor_rules(),
         Host::Gemini => load_gemini_rules(),
         Host::Droid => load_droid_rules(),
+        Host::Vibe => (Vec::new(), Vec::new(), Vec::new()),
     };
     check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
 }
@@ -381,6 +383,11 @@ pub(crate) fn extract_bash_pattern(rule: &str) -> &str {
 /// - `* suffix`, `pre * suf` → glob matching where `*` matches any sequence of characters
 /// - `pattern` → exact match or prefix match (cmd must equal pattern or start with `{pattern} `)
 pub(crate) fn command_matches_pattern(cmd: &str, pattern: &str) -> bool {
+    let cmd_norm = cmd.split_whitespace().collect::<Vec<_>>().join(" ");
+    let pattern_norm = pattern.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cmd = cmd_norm.as_str();
+    let pattern = pattern_norm.as_str();
+
     // 1. Global wildcard
     if pattern == "*" {
         return true;
@@ -554,6 +561,34 @@ mod tests {
     }
 
     #[test]
+    fn test_extra_whitespace_still_matches() {
+        assert!(command_matches_pattern("git  push", "git push"));
+        assert!(command_matches_pattern("git\tpush origin", "git push"));
+        assert!(command_matches_pattern(
+            "git   push   --force",
+            "git push --force"
+        ));
+    }
+
+    #[test]
+    fn test_extra_whitespace_deny_not_evaded() {
+        let deny = vec!["git push".to_string()];
+        assert_eq!(
+            check_command_with_rules("git  push origin main", &deny, &[], &[]),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
+    fn test_extra_whitespace_preserves_word_boundary() {
+        assert!(!command_matches_pattern(
+            "git  push  --forceful",
+            "git push --force"
+        ));
+        assert!(!command_matches_pattern("sudoedit /etc/hosts", "sudo:*"));
+    }
+
+    #[test]
     fn test_compound_command_deny() {
         let deny = vec!["git push --force".to_string()];
         assert_eq!(
@@ -596,6 +631,15 @@ mod tests {
         let deny = vec!["rm -rf".to_string()];
         assert_eq!(
             check_command_with_rules("cat file | rm -rf /", &deny, &[], &[]),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
+    fn test_stderr_pipe_segments_checked() {
+        let deny = vec!["rm -rf".to_string()];
+        assert_eq!(
+            check_command_with_rules("cat file |& rm -rf /", &deny, &[], &[]),
             PermissionVerdict::Deny
         );
     }

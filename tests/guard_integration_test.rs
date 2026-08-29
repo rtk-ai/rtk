@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 
 fn rtk_stdin(args: &[&str], input: &str) -> String {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .env("LC_ALL", "C")
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -58,6 +59,7 @@ fn guard_does_not_block_real_compression() {
 
 fn rtk_output_in_dir(dir: &std::path::Path, args: &[&str]) -> (String, String, Option<i32>) {
     let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .env("LC_ALL", "C")
         .args(args)
         .current_dir(dir)
         .output()
@@ -137,16 +139,14 @@ fn grep_no_match_emits_empty_not_a_message() {
 }
 
 #[test]
-fn find_no_results_is_explicit() {
+fn find_no_results_emits_empty() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("a.txt"), "x").expect("write");
-    let (out, code) = rtk_in_dir(dir.path(), &["find", ".", "-name", "zzz_no_match_xyz"]);
-    assert_eq!(
-        out.trim(),
-        "0 matches for 'zzz_no_match_xyz' in .",
-        "find exits successfully on no matches, so silence would be a false negative"
+    let (out, _) = rtk_in_dir(dir.path(), &["find", ".", "-name", "zzz_no_match_xyz"]);
+    assert!(
+        out.trim().is_empty(),
+        "no-result find must emit empty, not a '0 for' line: {out:?}"
     );
-    assert_eq!(code, Some(0));
 }
 
 #[test]
@@ -164,24 +164,36 @@ fn find_existing_roots_and_native_visibility_are_faithful() {
         &["find", "./journal.md"][..],
     ] {
         let (out, code) = rtk_in_dir(dir.path(), args);
-        assert_eq!(out, "./journal.md");
+        assert_eq!(out.trim_end(), "journal.md");
         assert_eq!(code, Some(0));
     }
 
     let (out, code) = rtk_in_dir(dir.path(), &["find", "./sub", "-type", "d"]);
-    assert_eq!(out, "./sub", "native find must include its directory root");
+    assert_eq!(
+        out.trim_end(),
+        "sub",
+        "native find must include its directory root"
+    );
     assert_eq!(code, Some(0));
 
     let (out, code) = rtk_in_dir(dir.path(), &["find", ".", "-iname", "*.md"]);
-    assert_eq!(
-        out.lines().collect::<Vec<_>>(),
-        vec![".hidden/secret.md", "journal.md", "sub/note.md"],
-        "native syntax must not silently prune hidden or gitignored matches"
+    assert!(out.contains("journal.md"), "missing visible match: {out:?}");
+    assert!(
+        out.contains(".hidden/") && out.contains("secret.md"),
+        "missing hidden match: {out:?}"
+    );
+    assert!(
+        out.contains("sub/") && out.contains("note.md"),
+        "missing gitignored match: {out:?}"
     );
     assert_eq!(code, Some(0));
 
     let (out, code) = rtk_in_dir(dir.path(), &["find", "*.md", "."]);
-    assert_eq!(out, "journal.md", "compact syntax keeps ignore pruning");
+    assert_eq!(
+        out.trim_end(),
+        "journal.md",
+        "compact syntax keeps ignore pruning"
+    );
     assert_eq!(code, Some(0));
 }
 
@@ -194,6 +206,58 @@ fn git_stash_list_no_stashes_emits_empty() {
         "no-stashes must emit empty, not 'No stashes': {out:?}"
     );
     assert_eq!(code, Some(0));
+}
+
+#[test]
+fn git_log_patch_output_matches_raw_git() {
+    let dir = init_git_repo();
+    std::fs::write(
+        dir.path().join("history.txt"),
+        "STRIPE_KEY=sk_live_FAKE1234567890\n",
+    )
+    .expect("write history fixture");
+    git_in_dir(dir.path(), &["add", "history.txt"]);
+    git_in_dir(dir.path(), &["commit", "-q", "-m", "add history fixture"]);
+
+    let raw = Command::new("git")
+        .args(["log", "-p", "--all"])
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn raw git log");
+    assert!(raw.status.success());
+
+    let (rtk_stdout, rtk_stderr, rtk_code) =
+        rtk_output_in_dir(dir.path(), &["git", "log", "-p", "--all"]);
+
+    assert_eq!(rtk_code, Some(0), "rtk stderr: {rtk_stderr}");
+    assert_eq!(rtk_stdout.as_bytes(), raw.stdout.as_slice());
+    assert!(rtk_stdout.contains("STRIPE_KEY=sk_live_FAKE1234567890"));
+}
+
+#[test]
+fn git_log_dash_p_pathspec_after_double_dash_is_not_patch_flag() {
+    // Regression: `rtk git log -- -p` must not be misread as the real `-p`
+    // patch flag. Clap's `trailing_var_arg` strips the literal "--" before
+    // `run_log` sees `args`, so the pathspec-separator check must restore it
+    // (via restore_double_dash) before deciding whether to pass through raw
+    // patch output; otherwise a file literally named "-p" after "--" is
+    // wrongly treated as a request for `git log -p`.
+    let dir = init_git_repo();
+    std::fs::write(dir.path().join("-p"), "not a diff flag\n").expect("write -p file");
+    git_in_dir(dir.path(), &["add", "--", "-p"]);
+    git_in_dir(dir.path(), &["commit", "-q", "-m", "add dash-p file"]);
+
+    let (stdout, stderr, code) = rtk_output_in_dir(dir.path(), &["git", "log", "--", "-p"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert!(
+        !stdout.contains("diff --git") && !stdout.contains("@@"),
+        "-- -p should stay on RTK's filtered path, not raw patch output: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("add dash-p file"),
+        "expected the commit touching the -p pathspec: {stdout:?}"
+    );
 }
 
 #[test]

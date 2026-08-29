@@ -524,6 +524,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Bug Fixes
 
 * **cargo:** preserve compile diagnostics when `cargo test` fails before any test suites run
+
 ## [0.31.0](https://github.com/rtk-ai/rtk/compare/v0.30.1...v0.31.0) (2026-03-19)
 
 

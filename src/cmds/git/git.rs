@@ -4,17 +4,17 @@ use crate::core::args_utils;
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::stream::{
-    self, exec_capture, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode,
+    self, exec_capture, exec_capture_stdin, CaptureResult, FilterMode, LineHandler,
+    LineStreamFilter, StdinMode,
 };
 use crate::core::tracking;
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{
-    exit_code_from_output, exit_code_from_status, join_with_overflow, resolved_command, strip_ansi,
+    exit_code_from_status, join_with_overflow, resolved_command, strip_ansi,
 };
 use anyhow::{Context, Result};
 use std::ffi::OsString;
 use std::process::Command;
-use std::process::Stdio;
 
 #[derive(Debug, Clone)]
 pub enum GitCommand {
@@ -431,20 +431,40 @@ fn run_log(
     verbose: u8,
     global_args: &[String],
 ) -> Result<i32> {
+    // Re-insert `--` when clap's trailing_var_arg consumed it (issue #1215):
+    // without this, `rtk git log -- -p` loses its literal "--" and
+    // `requests_raw_log_output`/`log_arg_tokens` can no longer tell that
+    // `-p` is a pathspec, not the real patch flag.
+    let args = &args_utils::restore_double_dash(args);
+
+    if requests_raw_log_output(args) {
+        let passthrough_args: Vec<OsString> = std::iter::once(OsString::from("log"))
+            .chain(args.iter().map(OsString::from))
+            .collect();
+        return run_passthrough(&passthrough_args, global_args, verbose);
+    }
+
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = git_cmd(global_args);
     cmd.arg("log");
 
+    // Tokenize once and share it: flag-vs-value classification is reused
+    // below by both the flag-presence checks and the limit parsing, and a
+    // value belonging to --grep/--author/etc. (e.g. `--grep --pretty`) must
+    // not be misread as one of the flags below.
+    let tokens = log_arg_tokens(args);
+    let flag_args = flag_args_from_tokens(&tokens);
+
     // Check if user provided format flags
-    let has_format_flag = args.iter().any(|arg| {
+    let has_format_flag = flag_args.iter().any(|arg| {
         arg.starts_with("--oneline") || arg.starts_with("--pretty") || arg.starts_with("--format")
     });
 
     // Check if user provided limit flag (-N, -n N, --max-count=N, --max-count N)
-    let has_limit_flag = args.iter().any(|arg| {
+    let has_limit_flag = flag_args.iter().any(|arg| {
         (arg.starts_with('-') && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit()))
-            || arg == "-n"
+            || *arg == "-n"
             || arg.starts_with("--max-count")
     });
 
@@ -458,7 +478,7 @@ fn run_log(
     // Determine limit: respect user's explicit -N flag, use sensible defaults otherwise
     let (limit, user_set_limit) = if has_limit_flag {
         // User explicitly passed -N / -n N / --max-count=N → respect their choice
-        let n = parse_user_limit(args).unwrap_or(10);
+        let n = parse_limit_from_tokens(&tokens).unwrap_or(10);
         (n, true)
     } else if has_format_flag {
         // --oneline / --pretty without -N: user wants compact output, allow more
@@ -471,9 +491,9 @@ fn run_log(
     };
 
     // Only add --no-merges if user didn't explicitly request merge commits
-    let wants_merges = args
+    let wants_merges = flag_args
         .iter()
-        .any(|arg| arg == "--merges" || arg == "--min-parents=2" || arg == "--no-merges");
+        .any(|arg| *arg == "--merges" || *arg == "--min-parents=2" || *arg == "--no-merges");
     // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
     if !wants_merges && !has_limit_flag {
         cmd.arg("--no-merges");
@@ -510,42 +530,186 @@ fn run_log(
     Ok(0)
 }
 
-/// Filter git log output: truncate long messages, cap lines
+/// True for git log/diff options that take their value as a separate,
+/// space-delimited token (e.g. `--grep -p` searches messages for the
+/// literal string "-p"; it does not request patch output). Consuming
+/// that value token keeps flag-lookalike values from being misread as
+/// the corresponding boolean flag.
+fn consumes_next_token_as_value(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--after"
+            | "--anchored"
+            | "--author"
+            | "--before"
+            | "--color-moved-ws"
+            | "--committer"
+            | "--date"
+            | "--decorate-refs"
+            | "--decorate-refs-exclude"
+            | "--diff-algorithm"
+            | "--diff-filter"
+            | "--diff-merges"
+            | "--dst-prefix"
+            | "--encoding"
+            | "--exclude"
+            | "--find-object"
+            | "--glob"
+            | "--grep"
+            | "--grep-reflog"
+            | "--inter-hunk-context"
+            | "--line-prefix"
+            | "--max-depth"
+            | "--output"
+            | "--output-indicator-context"
+            | "--output-indicator-new"
+            | "--output-indicator-old"
+            | "--rotate-to"
+            | "--since"
+            | "--since-as-filter"
+            | "--skip"
+            | "--skip-to"
+            | "--src-prefix"
+            | "--stat-count"
+            | "--stat-name-width"
+            | "--stat-width"
+            | "--until"
+            | "--word-diff-regex"
+            | "--ws-error-highlight"
+            | "-G"
+            | "-I"
+            | "-L"
+            | "-O"
+            | "-S"
+            | "-l"
+            | "-n"
+    )
+}
+
+/// A git log argument, classified as either a flag or the value consumed
+/// by the preceding flag.
+enum LogArg<'a> {
+    Flag(&'a str),
+    Value { flag: &'a str, value: &'a str },
+}
+
+/// Tokenizes git log `args` into [`LogArg`]s, stopping at the `--` pathspec
+/// separator (tokens after it are paths, never flags or their values —
+/// e.g. `git log -- -5` means "history for the path literally named -5").
+/// `-n`/`--max-count`'s own count and every option in
+/// [`consumes_next_token_as_value`] are paired with the flag that consumes
+/// them. Shared by every git-log flag/value/limit check in [`run_log`] so
+/// `--`-handling and option-value handling live in one place instead of
+/// being reimplemented per check.
+fn log_arg_tokens(args: &[String]) -> Vec<LogArg<'_>> {
+    let mut tokens = Vec::with_capacity(args.len());
+    let mut iter = args.iter().take_while(|arg| *arg != "--");
+    while let Some(arg) = iter.next() {
+        let arg_str = arg.as_str();
+        if arg_str == "--max-count" || consumes_next_token_as_value(arg_str) {
+            if let Some(value) = iter.next() {
+                tokens.push(LogArg::Value {
+                    flag: arg_str,
+                    value: value.as_str(),
+                });
+                continue;
+            }
+        }
+        tokens.push(LogArg::Flag(arg_str));
+    }
+    tokens
+}
+
+/// Filters `tokens` down to the flags themselves, dropping every value
+/// consumed by the preceding option.
+fn flag_args_from_tokens<'a>(tokens: &[LogArg<'a>]) -> Vec<&'a str> {
+    tokens
+        .iter()
+        .map(|token| match token {
+            LogArg::Flag(flag) | LogArg::Value { flag, .. } => *flag,
+        })
+        .collect()
+}
+
+/// Filters `args` down to the tokens that are actual flags, dropping every
+/// token consumed as a value by the preceding option. `run_log` shares a
+/// single tokenization via [`flag_args_from_tokens`] instead; this
+/// convenience wrapper exists for tests that only care about the flags.
+#[cfg(test)]
+fn real_flag_args(args: &[String]) -> Vec<&str> {
+    flag_args_from_tokens(&log_arg_tokens(args))
+}
+
+/// True for git log/diff flags that change the *shape* of git's raw output
+/// (patch text, diffstat, name lists) in a way RTK's injected
+/// `--pretty=format` + `---END---` markers can't coexist with — matching
+/// this must request the untouched passthrough path instead of RTK's
+/// filtered one (see [`requests_raw_log_output`]).
+fn requests_raw_diff_shape(flag: &str) -> bool {
+    matches!(
+        flag,
+        "-p" | "-u"
+            | "--dirstat"
+            | "--name-only"
+            | "--name-status"
+            | "--numstat"
+            | "--patch"
+            | "--patch-with-raw"
+            | "--patch-with-stat"
+            | "--raw"
+            | "--shortstat"
+            | "--stat"
+            | "--summary"
+    ) || flag.starts_with("--stat=")
+        || flag.starts_with("--dirstat=")
+}
+
+fn requests_raw_log_output(args: &[String]) -> bool {
+    log_arg_tokens(args)
+        .iter()
+        .any(|token| matches!(token, LogArg::Flag(flag) if requests_raw_diff_shape(flag)))
+}
+
 /// Parse the user-specified limit from git log args.
 /// Handles: -20, -n 20, --max-count=20, --max-count 20
+/// `run_log` shares a single tokenization via [`parse_limit_from_tokens`]
+/// instead; this convenience wrapper exists for tests.
+#[cfg(test)]
 fn parse_user_limit(args: &[String]) -> Option<usize> {
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        // -20 (combined digit form)
-        if arg.starts_with('-')
-            && arg.len() > 1
-            && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
-        {
-            if let Ok(n) = arg[1..].parse::<usize>() {
-                return Some(n);
-            }
-        }
-        // -n 20 (two-token form)
-        if arg == "-n" {
-            if let Some(next) = iter.next() {
-                if let Ok(n) = next.parse::<usize>() {
+    parse_limit_from_tokens(&log_arg_tokens(args))
+}
+
+fn parse_limit_from_tokens(tokens: &[LogArg<'_>]) -> Option<usize> {
+    for token in tokens {
+        match token {
+            // -20 (combined digit form)
+            LogArg::Flag(flag)
+                if flag.starts_with('-')
+                    && flag.len() > 1
+                    && flag.chars().nth(1).is_some_and(|c| c.is_ascii_digit()) =>
+            {
+                if let Ok(n) = flag[1..].parse::<usize>() {
                     return Some(n);
                 }
             }
-        }
-        // --max-count=20
-        if let Some(rest) = arg.strip_prefix("--max-count=") {
-            if let Ok(n) = rest.parse::<usize>() {
-                return Some(n);
-            }
-        }
-        // --max-count 20 (two-token form)
-        if arg == "--max-count" {
-            if let Some(next) = iter.next() {
-                if let Ok(n) = next.parse::<usize>() {
+            // -n 20 / --max-count 20 (two-token form)
+            LogArg::Value {
+                flag: "-n" | "--max-count",
+                value,
+            } => {
+                if let Ok(n) = value.parse::<usize>() {
                     return Some(n);
                 }
             }
+            // --max-count=20
+            LogArg::Flag(flag) => {
+                if let Some(rest) = flag.strip_prefix("--max-count=") {
+                    if let Ok(n) = rest.parse::<usize>() {
+                        return Some(n);
+                    }
+                }
+            }
+            LogArg::Value { .. } => {}
         }
     }
     None
@@ -1009,15 +1173,24 @@ fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
 /// Handles: `[main abc1234def] message`, `[main (root-commit) abc1234def] msg`,
 /// localized variants, and multibyte branch names.
 fn parse_commit_output(line: &str) -> String {
-    if let Some(bracket_end) = line.find(']') {
-        let bracket_content = &line[1..bracket_end];
-        let hash = bracket_content.split_whitespace().next_back().unwrap_or("");
-        if !hash.is_empty() && hash.len() >= 7 {
-            let short_hash: String = hash.chars().take(7).collect();
-            format!("ok {}", short_hash)
-        } else {
-            "ok".to_string()
-        }
+    // Locate the summary's own brackets rather than assuming the line starts
+    // with '['. git prints hook output before its summary, so the first line
+    // is often something else entirely; slicing from byte 1 panics outright
+    // when that line opens with a multi-byte character ("✅ lint passed]"),
+    // and a line decoded from non-UTF-8 bytes starts with a multi-byte U+FFFD.
+    // Both indices come from `find`, so both land on character boundaries.
+    let (Some(open), Some(bracket_end)) = (line.find('['), line.find(']')) else {
+        return "ok".to_string();
+    };
+    if open >= bracket_end {
+        return "ok".to_string();
+    }
+
+    let bracket_content = &line[open + 1..bracket_end];
+    let hash = bracket_content.split_whitespace().next_back().unwrap_or("");
+    if hash.chars().count() >= 7 {
+        let short_hash: String = hash.chars().take(7).collect();
+        format!("ok {}", short_hash)
     } else {
         "ok".to_string()
     }
@@ -1032,17 +1205,17 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         eprintln!("{}", original_cmd);
     }
 
-    let output = build_commit_command(args, global_args)
-        .stdin(Stdio::inherit())
-        .output()
+    // stdin is inherited so an interactive editor, GPG passphrase prompt or
+    // credential helper still reaches the terminal.
+    let CaptureResult {
+        stdout,
+        stderr,
+        exit_code,
+    } = exec_capture_stdin(&mut build_commit_command(args, global_args))
         .context("Failed to run git commit")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let exit_code = exit_code_from_output(&output, "git commit");
     let raw_output = format!("{}\n{}", stdout, stderr);
 
-    match classify_commit_outcome(output.status.success(), &stdout, exit_code) {
+    match classify_commit_outcome(exit_code == 0, &stdout, exit_code) {
         CommitOutcome::Ok(compact) => {
             println!("{}", compact);
             timer.track(&original_cmd, "rtk git commit", &raw_output, &compact);
@@ -1117,7 +1290,11 @@ fn format_checkout_output(args: &[String], raw: &str, exit_code: i32) -> String 
 
 fn format_checkout_success(args: &[String], raw: &str) -> String {
     if let Some(restored) = checkout_restored_count(args) {
-        return format!("ok {} {}", restored, pluralize(restored, "file restored", "files restored"));
+        return format!(
+            "ok {} {}",
+            restored,
+            pluralize(restored, "file restored", "files restored")
+        );
     }
     if let Some(branch) = checkout_reset_branch_arg(args) {
         return format!("ok {}", branch);
@@ -1215,7 +1392,11 @@ fn quoted_suffix<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 fn pluralize<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
-    if count == 1 { singular } else { plural }
+    if count == 1 {
+        singular
+    } else {
+        plural
+    }
 }
 
 fn filter_checkout_failure(raw: &str) -> String {
@@ -1233,8 +1414,9 @@ fn filter_checkout_failure(raw: &str) -> String {
             || trimmed.starts_with("CONFLICT");
 
         if is_header {
-            in_file_list =
-                trimmed.contains("following") && trimmed.contains("files") && trimmed.ends_with(':');
+            in_file_list = trimmed.contains("following")
+                && trimmed.contains("files")
+                && trimmed.ends_with(':');
             important.push(trimmed.to_string());
             continue;
         }
@@ -1768,7 +1950,12 @@ fn run_stash(
                 compact_stash_stat(&result.stdout)
             };
             let shown = crate::core::runner::emit_guarded(&filtered, None, &result.stdout);
-            timer.track("git stash show", "rtk git stash show", &result.stdout, &shown);
+            timer.track(
+                "git stash show",
+                "rtk git stash show",
+                &result.stdout,
+                &shown,
+            );
         }
         Some("apply") | Some("branch") | Some("clear") | Some("create") | Some("drop")
         | Some("export") | Some("import") | Some("pop") | Some("store") => {
@@ -1902,7 +2089,7 @@ fn compress_stat_summary(summary: &str) -> String {
         .replace("deletion(-)", "-")
         .replace("files changed", "changed")
         .replace("file changed", "changed")
-		.replace(",", "")
+        .replace(",", "")
 }
 
 fn parse_stash_stat(stat: &str) -> (Vec<String>, String) {
@@ -2358,7 +2545,12 @@ mod tests {
         let (files, summary) = parse_stash_stat(raw);
         assert_eq!(
             files,
-            vec!["del.md 2 -", "keep.md 5 +-", "logo.bin (binary)", "new.rs 40 +"]
+            vec![
+                "del.md 2 -",
+                "keep.md 5 +-",
+                "logo.bin (binary)",
+                "new.rs 40 +"
+            ]
         );
         assert_eq!(summary, "4 files changed, 44 insertions(+), 3 deletions(-)");
     }
@@ -2372,7 +2564,10 @@ mod tests {
     #[test]
     fn test_compact_stash_stat_passthrough_numstat() {
         let raw = "0\t1\tdel.md\n3\t2\tkeep.md\n1\t0\tn1.rs\n";
-        assert_eq!(compact_stash_stat(raw), "0\t1\tdel.md\n3\t2\tkeep.md\n1\t0\tn1.rs");
+        assert_eq!(
+            compact_stash_stat(raw),
+            "0\t1\tdel.md\n3\t2\tkeep.md\n1\t0\tn1.rs"
+        );
     }
 
     #[test]
@@ -2446,7 +2641,11 @@ mod tests {
         let compact = format!("{}\n{}", files.join("\n"), summary);
         let savings =
             100.0 - (estimate_tokens(&compact) as f64 / estimate_tokens(raw) as f64 * 100.0);
-        assert!(savings >= 40.0, "expected >=40% savings, got {:.1}%", savings);
+        assert!(
+            savings >= 40.0,
+            "expected >=40% savings, got {:.1}%",
+            savings
+        );
     }
 
     #[test]
@@ -2732,6 +2931,226 @@ A  added.rs
     }
 
     #[test]
+    fn test_patch_log_flags_request_raw_output() {
+        for flag in [
+            "-p",
+            "-u",
+            "--patch",
+            "--patch-with-raw",
+            "--patch-with-stat",
+        ] {
+            let args = vec![flag.to_string()];
+            assert!(requests_raw_log_output(&args), "{flag} should pass through");
+        }
+    }
+
+    #[test]
+    fn test_patch_flag_after_pathspec_separator_is_ignored() {
+        // `git log -- -p` means "show history for a path literally named -p",
+        // not "show patches" — the flag lookalike appears after `--`.
+        let args = vec!["--".to_string(), "-p".to_string()];
+        assert!(
+            !requests_raw_log_output(&args),
+            "-p after -- is a pathspec, not a patch flag, and should stay on the filtered path"
+        );
+    }
+
+    #[test]
+    fn test_non_patch_log_flags_remain_filtered() {
+        for flag in ["--no-patch", "--oneline", "--format=%H"] {
+            let args = vec![flag.to_string()];
+            assert!(
+                !requests_raw_log_output(&args),
+                "{flag} should remain on the filtered log path"
+            );
+        }
+    }
+
+    #[test]
+    fn test_diff_shape_flags_request_raw_output() {
+        // These change the shape of git's raw output (diffstat, name lists)
+        // the same way -p does — RTK's injected --pretty=format markers
+        // can't coexist with them, so they must stay on the raw path too.
+        for flag in [
+            "--dirstat",
+            "--dirstat=files",
+            "--name-only",
+            "--name-status",
+            "--numstat",
+            "--raw",
+            "--shortstat",
+            "--stat",
+            "--stat=80",
+            "--summary",
+        ] {
+            let args = vec![flag.to_string()];
+            assert!(
+                requests_raw_log_output(&args),
+                "{flag} changes output shape and should request raw output"
+            );
+        }
+    }
+
+    #[test]
+    fn test_diff_shape_flag_as_value_of_grep_is_not_misdetected() {
+        // `git log --grep --stat` searches for the literal string
+        // "--stat"; git consumes it as --grep's value, not the --stat flag.
+        let args = vec!["--grep".to_string(), "--stat".to_string()];
+        assert!(
+            !requests_raw_log_output(&args),
+            "--stat as the value of --grep should stay on the filtered path"
+        );
+    }
+
+    #[test]
+    fn test_patch_flag_as_value_of_grep_is_not_misdetected() {
+        // `git log --grep -p` searches commit messages for the literal
+        // string "-p"; git does not treat it as the patch flag.
+        for opt in [
+            "--author",
+            "--committer",
+            "--diff-algorithm",
+            "--diff-filter",
+            "--grep",
+            "-G",
+            "-S",
+        ] {
+            let args = vec![opt.to_string(), "-p".to_string()];
+            assert!(
+                !requests_raw_log_output(&args),
+                "-p as the value of {opt} should stay on the filtered path"
+            );
+        }
+    }
+
+    #[test]
+    fn test_patch_flag_still_detected_after_value_taking_option() {
+        // The value-taking option consumes only its own value token;
+        // a genuine -p later in the args still triggers the raw path.
+        let args = vec!["--grep".to_string(), "fix".to_string(), "-p".to_string()];
+        assert!(
+            requests_raw_log_output(&args),
+            "a real -p after --grep's value should still request raw output"
+        );
+    }
+
+    #[test]
+    fn test_optional_value_options_do_not_consume_next_token() {
+        // These options only take an attached value (-U3, --unified=3,
+        // --expand-tabs=4, --max-parents=2); a bare separate token after
+        // them is not their value, so it must not be swallowed. Confirmed
+        // against git 2.53.0: e.g. `git log --expand-tabs 4` fails with
+        // "fatal: ambiguous argument '4'" rather than treating 4 as the
+        // option's value.
+        for opt in [
+            "-U",
+            "--unified",
+            "--expand-tabs",
+            "--max-parents",
+            "--min-parents",
+        ] {
+            let args = vec![opt.to_string(), "-p".to_string()];
+            assert!(
+                requests_raw_log_output(&args),
+                "a real -p after {opt} should still request raw output"
+            );
+        }
+    }
+
+    #[test]
+    fn test_real_flag_args_drops_value_taking_option_values() {
+        // `--grep`'s value is not itself a flag and must not appear in the
+        // filtered set, even when it looks like -N, --pretty, or --merges.
+        let args = vec!["--grep".to_string(), "-5".to_string()];
+        assert_eq!(real_flag_args(&args), vec!["--grep"]);
+    }
+
+    #[test]
+    fn test_real_flag_args_keeps_limit_flag_drops_its_value() {
+        let args = vec!["-n".to_string(), "15".to_string()];
+        assert_eq!(real_flag_args(&args), vec!["-n"]);
+
+        let args = vec!["--max-count".to_string(), "25".to_string()];
+        assert_eq!(real_flag_args(&args), vec!["--max-count"]);
+    }
+
+    #[test]
+    fn test_real_flag_args_keeps_genuine_flags() {
+        let args = vec!["--grep".to_string(), "fix".to_string(), "--oneline".to_string()];
+        assert_eq!(real_flag_args(&args), vec!["--grep", "--oneline"]);
+    }
+
+    #[test]
+    fn test_grep_value_looking_like_limit_flag_is_not_misdetected() {
+        // `git log --grep -5` searches commit messages for the literal
+        // string "-5"; it is not a request to limit output to 5 commits.
+        let args = vec!["--grep".to_string(), "-5".to_string()];
+        assert!(
+            !real_flag_args(&args)
+                .iter()
+                .any(|arg| arg.starts_with('-') && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit())),
+            "-5 as the value of --grep should not be seen as a limit flag"
+        );
+        assert_eq!(
+            parse_user_limit(&args),
+            None,
+            "-5 as the value of --grep should not be parsed as a limit"
+        );
+    }
+
+    #[test]
+    fn test_grep_value_looking_like_format_flag_is_not_misdetected() {
+        // `git log --grep --pretty` searches for the literal string
+        // "--pretty"; git consumes it as --grep's value, not a format flag.
+        let args = vec!["--grep".to_string(), "--pretty".to_string()];
+        assert!(
+            !real_flag_args(&args)
+                .iter()
+                .any(|arg| arg.starts_with("--pretty")),
+            "--pretty as the value of --grep should not be seen as a format flag"
+        );
+    }
+
+    #[test]
+    fn test_grep_value_looking_like_merges_flag_is_not_misdetected() {
+        // `git log --grep --merges` searches for the literal string
+        // "--merges"; git consumes it as --grep's value, not --merges.
+        let args = vec!["--grep".to_string(), "--merges".to_string()];
+        assert!(
+            !real_flag_args(&args).contains(&"--merges"),
+            "--merges as the value of --grep should not be seen as the --merges flag"
+        );
+    }
+
+    #[test]
+    fn test_parse_user_limit_skips_foreign_option_values() {
+        // A real limit later in the args is still found after a
+        // value-taking option's value is skipped.
+        let args = vec![
+            "--grep".to_string(),
+            "-5".to_string(),
+            "-20".to_string(),
+        ];
+        assert_eq!(parse_user_limit(&args), Some(20));
+    }
+
+    #[test]
+    fn test_log_arg_tokens_stop_at_pathspec_separator() {
+        // `git log -- -5` means "history for the path literally named -5",
+        // not a limit flag — tokens after `--` must be ignored entirely.
+        let args = vec!["--".to_string(), "-5".to_string()];
+        assert!(
+            real_flag_args(&args).is_empty(),
+            "-5 after -- is a pathspec, not a flag"
+        );
+        assert_eq!(
+            parse_user_limit(&args),
+            None,
+            "-5 after -- should not be parsed as a limit"
+        );
+    }
+
+    #[test]
     fn test_filter_log_output_token_savings() {
         fn count_tokens(text: &str) -> usize {
             text.split_whitespace().count()
@@ -2849,6 +3268,37 @@ no changes added to commit (use "git add" and/or "git commit -a")
     fn test_parse_commit_output_thai_branch() {
         let line = "[สาขา abc1234def] commit message";
         assert_eq!(parse_commit_output(line), "ok abc1234");
+    }
+
+    /// Regression: git prints hook output before its own summary. A first line
+    /// that opens with a multi-byte character and contains ']' used to panic on
+    /// `line[1..]` ("byte index 1 is not a char boundary").
+    #[test]
+    fn test_parse_commit_output_multibyte_prefix_does_not_panic() {
+        assert_eq!(parse_commit_output("✅ lint passed]"), "ok");
+        assert_eq!(parse_commit_output("→ hook] done"), "ok");
+    }
+
+    /// The same shape as above, but with a real summary after the hook text —
+    /// the hash must still be found via the bracket pair.
+    #[test]
+    fn test_parse_commit_output_after_multibyte_hook_prefix() {
+        assert_eq!(
+            parse_commit_output("✅ [main abc1234def] add feature"),
+            "ok abc1234"
+        );
+    }
+
+    /// A U+FFFD from lossily decoded output is itself multi-byte.
+    #[test]
+    fn test_parse_commit_output_replacement_char_prefix() {
+        assert_eq!(parse_commit_output("\u{FFFD}oops]"), "ok");
+    }
+
+    /// A closing bracket before any opening one must not slice backwards.
+    #[test]
+    fn test_parse_commit_output_close_before_open() {
+        assert_eq!(parse_commit_output("] stray [main abc1234def]"), "ok");
     }
 
     #[test]

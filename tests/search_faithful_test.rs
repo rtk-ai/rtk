@@ -3,8 +3,10 @@
 //! with its own regex dialect and ignore semantics. rtk filters output noise only;
 //! it never substitutes one engine for the other (the bug this PR removes).
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 fn rtk() -> Command {
     Command::new(env!("CARGO_BIN_EXE_rtk"))
@@ -30,6 +32,44 @@ fn rtk_stdin(input: &str, args: &[&str]) -> (String, Option<i32>) {
         String::from_utf8_lossy(&out.stdout).into_owned(),
         out.status.code(),
     )
+}
+
+fn assert_streams_before_stdin_closes(args: &[&str], expected: &str) {
+    let mut child = rtk()
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn streaming search");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut line = String::new();
+        BufReader::new(stdout)
+            .read_line(&mut line)
+            .expect("read streamed match");
+        tx.send(line).ok();
+    });
+
+    writeln!(stdin, "ERROR live").expect("write match");
+    stdin.flush().expect("flush match");
+
+    let streamed = rx.recv_timeout(Duration::from_secs(5));
+    drop(stdin);
+    if streamed.is_err() {
+        child.kill().ok();
+    }
+    let status = child.wait().expect("wait for streaming search");
+    reader.join().expect("join stdout reader");
+
+    let line = streamed.expect("match should be emitted before stdin closes");
+    assert!(line.contains(expected), "unexpected output: {line}");
+    assert!(
+        status.success(),
+        "streaming search should exit successfully"
+    );
 }
 
 fn rg_available() -> bool {
@@ -242,6 +282,30 @@ fn grep_reads_piped_stdin() {
         !out.contains("Is a directory"),
         "RTK must not inject '.' and break a stdin pipe:\n{out}"
     );
+}
+
+#[test]
+fn grep_streams_matches_before_stdin_closes() {
+    assert_streams_before_stdin_closes(&["grep", "ERROR"], "ERROR live");
+}
+
+#[test]
+fn rg_streams_matches_before_stdin_closes() {
+    if rg_available() {
+        assert_streams_before_stdin_closes(&["rg", "ERROR"], "ERROR live");
+    }
+}
+
+#[test]
+fn grep_passthrough_streams_before_stdin_closes() {
+    assert_streams_before_stdin_closes(&["grep", "-o", "ERROR"], "ERROR");
+}
+
+#[test]
+fn rg_passthrough_streams_before_stdin_closes() {
+    if rg_available() {
+        assert_streams_before_stdin_closes(&["rg", "-o", "ERROR"], "ERROR");
+    }
 }
 
 #[test]

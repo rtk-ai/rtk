@@ -1,17 +1,17 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, and Factory Droid
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, and Mistral Vibe
 sidebar:
   order: 3
 ---
 
 # Supported Agents
 
-RTK supports all major AI coding agents across 3 integration tiers. Mistral Vibe support is planned.
+RTK supports all major AI coding agents across 3 integration tiers.
 
 ## How it works
 
-Each agent integration intercepts CLI commands before execution and rewrites them to their RTK equivalent. The agent runs `rtk cargo test` instead of `cargo test`, sees filtered output, and uses up to 90% fewer tokens — without any change to your workflow.
+Each agent integration intercepts CLI commands before execution and rewrites them to their RTK equivalent. The agent runs `rtk cargo test` instead of `cargo test`, sees filtered output, and reads up to 90% fewer bash output bytes — without any change to your workflow.
 
 All rewrite logic lives in the RTK binary (`rtk rewrite`). Agent hooks are thin delegates that parse the agent-specific JSON format and call `rtk rewrite` for the actual decision.
 
@@ -21,7 +21,7 @@ Agent runs "cargo test"
   -> Calls rtk rewrite "cargo test"
   -> Returns "rtk cargo test"
   -> Agent executes filtered command
-  -> LLM sees 90% fewer tokens
+  -> LLM reads up to 90% fewer bash output bytes
 ```
 
 ## Supported agents
@@ -30,7 +30,7 @@ Agent runs "cargo test"
 |-------|-----------------|---------------------------|
 | Claude Code | Shell hook (`PreToolUse`) | Yes |
 | VS Code Copilot Chat | Shell hook (`PreToolUse`) | Yes |
-| GitHub Copilot CLI | Shell hook (`preToolUse` `modifiedArgs`) | Yes |
+| GitHub Copilot CLI | Shell hook (`PreToolUse`) | Yes |
 | Cursor | Shell hook (`preToolUse`) | Yes |
 | Gemini CLI | Rust binary (`BeforeTool`) | Yes |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | Yes |
@@ -43,7 +43,7 @@ Agent runs "cargo test"
 | Codex CLI | AGENTS.md instructions | N/A |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
-| Mistral Vibe | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Pending upstream |
+| Mistral Vibe | Rust binary (`pre_tool`) | Yes |
 
 ## Installation by agent
 
@@ -74,7 +74,9 @@ rtk init --copilot            # project-scoped (.github/hooks/)
 rtk init --global --copilot   # user-scoped (~/.copilot/hooks/, respects $COPILOT_HOME)
 ```
 
-Project-scoped writes `.github/hooks/rtk-rewrite.json` (both hosts get transparent rewrite — VS Code Chat via `updatedInput`, Copilot CLI via `modifiedArgs`) plus the RTK block in `.github/copilot-instructions.md`. User-scoped writes the same hook config to `~/.copilot/hooks/rtk-rewrite.json` and the RTK block to `~/.copilot/copilot-instructions.md` (both respect `$COPILOT_HOME` if set).
+Project-scoped writes `.github/hooks/rtk-rewrite.json` — a single `PreToolUse` entry shared by both hosts, each getting transparent rewrite via `updatedInput` — plus the RTK block in `.github/copilot-instructions.md`. User-scoped writes the same hook config to `~/.copilot/hooks/rtk-rewrite.json` and the RTK block to `~/.copilot/copilot-instructions.md` (both respect `$COPILOT_HOME` if set).
+
+Earlier `rtk` versions also registered a second, camelCase `preToolUse` entry for Copilot CLI's native schema. Copilot CLI treats `PreToolUse`/`preToolUse` as independent hooks and runs both sequentially for the same tool call — a redundant process spawn with no behavioral benefit, since Copilot CLI honors the single `PreToolUse` schema on its own. Re-run `rtk init --copilot` (or `--global --copilot`) to upgrade an existing install to the single-hook config.
 
 Uninstall:
 
@@ -195,9 +197,28 @@ rtk init --agent antigravity    # creates .agents/rules/antigravity-rtk-rules.md
 
 Antigravity reads `.agents/rules/` as custom instructions. RTK adds guidance telling Antigravity to prefer `rtk <cmd>` over raw commands.
 
-### Mistral Vibe (planned)
+### Mistral Vibe
 
-Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://github.com/mistralai/mistral-vibe/issues/531)). Tracked in [#800](https://github.com/rtk-ai/rtk/issues/800).
+```bash
+rtk init -g --agent vibe                # user-scoped (~/.vibe/hooks.toml)
+rtk init -g --agent vibe --hook-only    # skip the ~/.vibe/prompts/rtk.md prompt file
+```
+
+Installs a `pre_tool` hook entry (`match = "bash"`, `command = "rtk hook vibe"`, `strict = false`) into `~/.vibe/hooks.toml`, following the contract at [docs.mistral.ai/vibe/code/cli/hooks](https://docs.mistral.ai/vibe/code/cli/hooks). Vibe invokes the native `rtk hook vibe` binary before every bash tool call; RTK reads Vibe's stdin JSON payload and emits `{"hook_specific_output": {"tool_input": {"command": "rtk ..."}}}` to rewrite the command in place. The Vibe UI surfaces `[rtk-rewrite] rtk: rewrote to \`…\`` via RTK's `system_message` field so the rewrite is visible.
+
+Unlike Droid, Vibe does not yet expose a denylist / allowlist surface in `hooks.toml` for RTK to honor. RTK therefore rewrites every bash command it knows how to compress and defers to Vibe's own permission prompt on the rewritten command; commands RTK doesn't handle pass through unchanged. `strict = false` ensures a hook crash degrades to a warning rather than blocking the tool call.
+
+Alongside the hook, RTK drops a system prompt at `~/.vibe/prompts/rtk.md` describing the RTK conventions to Vibe as a belt-and-suspenders fallback. Use `--hook-only` to skip it.
+
+Install is global-only (Vibe's hook registry is user-scoped). Re-running the installer is a no-op; the RTK entry is detected by its `name = "rtk-rewrite"` field and never duplicated.
+
+Uninstall:
+
+```bash
+rtk init -g --agent vibe --uninstall
+```
+
+Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any other user-declared hooks in `hooks.toml` are preserved byte-for-byte. `hooks.toml` is removed only when the RTK entry was the sole content.
 
 ## Integration tiers explained
 

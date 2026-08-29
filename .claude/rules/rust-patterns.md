@@ -8,7 +8,7 @@ These override general Rust conventions:
 
 1. **No async** — Zero `tokio`, `async-std`, `futures`. Single-threaded by design. Async adds 5-10ms startup.
 2. **No `unwrap()` in production** — Use `.context("description")?`. Tests: use `expect("reason")`.
-3. **Lazy regex** — `Regex::new()` inside a function recompiles on every call. Always `lazy_static!`.
+3. **Lazy regex** — Put fixed patterns reused across calls in `LazyLock<Regex>`; keep runtime-dependent patterns local.
 4. **Fallback pattern** — If filter fails, execute raw command unchanged. Never block the user.
 5. **Exit code propagation** — `std::process::exit(code)` if underlying command fails.
 
@@ -63,16 +63,16 @@ pub fn run(args: MyArgs) -> Result<()> {
 }
 ```
 
-## Regex — Always lazy_static
+## Regex — Use LazyLock for Fixed, Reused Patterns
 
 ```rust
-use lazy_static::lazy_static;
 use regex::Regex;
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref ERROR_RE: Regex = Regex::new(r"^error\[").unwrap();
-    static ref HASH_RE: Regex = Regex::new(r"^[0-9a-f]{7,40}").unwrap();
-}
+static ERROR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^error\[").unwrap());
+static HASH_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[0-9a-f]{7,40}").unwrap());
 
 // ✅ Correct — regex compiled once at first use
 fn is_error_line(line: &str) -> bool {
@@ -86,7 +86,7 @@ fn is_error_line(line: &str) -> bool {
 }
 ```
 
-Note: `lazy_static!` with `.unwrap()` for initialization is the **established RTK pattern** — it's acceptable because a bad regex literal is a programming error caught at first use.
+Note: `LazyLock<Regex>` with `.unwrap()` in its initializer is an **established RTK pattern** — it's acceptable because a bad regex literal is a programming error caught at first use.
 
 ## Ownership — Borrow Over Clone
 
@@ -216,14 +216,14 @@ Every `*_cmd.rs` follows this pattern:
 ```rust
 // 1. Imports
 use anyhow::{Context, Result};
-use lazy_static::lazy_static;
 use regex::Regex;
+use std::sync::LazyLock;
 
 // 2. Types (args struct)
 pub struct MyArgs { ... }
 
 // 3. Lazy regexes
-lazy_static! { static ref MY_RE: Regex = ...; }
+static MY_RE: LazyLock<Regex> = LazyLock::new(|| ...);
 
 // 4. Public entry point
 pub fn run(args: MyArgs) -> Result<()> { ... }
@@ -244,7 +244,7 @@ mod tests {
 
 | Pattern | Problem | Fix |
 |---------|---------|-----|
-| `Regex::new()` in function | Recompiles every call | `lazy_static!` |
+| Fixed `Regex::new()` in hot function | Recompiles every call | `LazyLock<Regex>` |
 | `unwrap()` in production | Panic breaks user workflow | `.context()?` |
 | `tokio::main` or `async fn` | +5-10ms startup | Blocking I/O only |
 | Silent match `Err(_) => {}` | User gets no output | Log warning + fallback |
