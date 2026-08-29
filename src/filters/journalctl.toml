@@ -1,0 +1,32 @@
+[filters.journalctl]
+description = "Compact journalctl output — strip boilerplate and bound long log lines"
+match_command = "^journalctl\\b"
+strip_ansi = true
+filter_stderr = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^-- No entries --$",
+  "^Hint: You are currently not seeing messages from other users and the system\\.$",
+  "^\\s+Users in groups 'adm', 'systemd-journal' can see all messages\\.$",
+  "^\\s+Pass -q to turn off this notice\\.$",
+]
+truncate_lines_at = 500
+max_lines = 120
+on_empty = "-- No entries --"
+
+[[tests.journalctl]]
+name = "permission hint and blank lines are stripped"
+input = """
+Hint: You are currently not seeing messages from other users and the system.
+      Users in groups 'adm', 'systemd-journal' can see all messages.
+      Pass -q to turn off this notice.
+
+Aug 26 10:00:00 host service[123]: started
+Aug 26 10:00:01 host service[123]: ready
+"""
+expected = "Aug 26 10:00:00 host service[123]: started\nAug 26 10:00:01 host service[123]: ready"
+
+[[tests.journalctl]]
+name = "no entries remains explicit"
+input = "-- No entries --\n"
+expected = "-- No entries --"

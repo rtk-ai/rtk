@@ -1405,6 +1405,45 @@ make[1]: Leaving directory '/home/user/project/docs'
         );
     }
 
+    #[test]
+    fn test_new_toml_filters_save_at_least_20pct() {
+        let filters = make_filters(BUILTIN_TOML);
+        let cases = [
+            (
+                "journalctl --user -u app.service",
+                "Hint: You are currently not seeing messages from other users and the system.\n      Users in groups 'adm', 'systemd-journal' can see all messages.\n      Pass -q to turn off this notice.\n\nAug 26 10:00:00 host app[123]: started\nAug 26 10:00:01 host app[123]: ready\n",
+            ),
+            (
+                "systemctl --user list-units --failed",
+                "  UNIT          LOAD   ACTIVE SUB    DESCRIPTION\n  app.service   loaded failed failed Application\n\nLOAD   = Reflects whether the unit definition was properly loaded.\nACTIVE = The high-level unit activation state.\nSUB    = The low-level unit activation state.\n1 loaded units listed.\n",
+            ),
+            (
+                "pandoc --verbose input.md -o output.pdf",
+                "[INFO] Loaded input.md\n[INFO] Running filter citeproc\n[WARNING] Could not fetch resource image.png\n[INFO] Writing output output.pdf\n[INFO] Completed successfully\n",
+            ),
+            (
+                "pdfinfo manuscript.pdf",
+                "Title: Thesis chapter\nAuthor: Miko\nCustom Metadata: no\nMetadata Stream: yes\nTagged: yes\nUserProperties: no\nSuspects: no\nForm: none\nJavaScript: no\nPages: 42\nEncrypted: no\nPage size: 595.28 x 841.89 pts (A4)\nPage rot: 0\nFile size: 123456 bytes\nOptimized: yes\nPDF version: 1.7\n",
+            ),
+        ];
+
+        for (command, input) in cases {
+            let filter = find_filter_in(command, &filters).expect("new built-in filter");
+            let output = apply_filter(filter, input);
+            let input_words = input.split_whitespace().count();
+            let output_words = output.split_whitespace().count();
+            let savings = 100.0 - (output_words as f64 / input_words as f64 * 100.0);
+            assert!(
+                savings >= 20.0,
+                "{} filter: expected >=20% savings, got {:.1}% (in={} out={})",
+                filter.name,
+                savings,
+                input_words,
+                output_words
+            );
+        }
+    }
+
     // --- Edge cases ---
 
     #[test]
@@ -1844,10 +1883,13 @@ match_command = "^make\\b"
             "hadolint",
             "helm",
             "iptables",
+            "journalctl",
             "liquibase",
             "make",
             "markdownlint",
             "mix-compile",
+            "pandoc",
+            "pdfinfo",
             "mix-format",
             "ping",
             "pio-run",
@@ -1860,6 +1902,7 @@ match_command = "^make\\b"
             "pulumi-stack",
             "pulumi-up",
             "quarto-render",
+            "systemctl-list",
             "rsync",
             "shellcheck",
             "shopify-theme",
@@ -1892,8 +1935,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            63,
-            "Expected exactly 63 built-in filters, got {}. \
+            67,
+            "Expected exactly 67 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -1950,11 +1993,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 63 existing filters still present + 1 new = 64
+        // All 67 existing filters still present + 1 new = 68
         assert_eq!(
             filters.len(),
-            64,
-            "Expected 64 filters after concat (63 built-in + 1 new)"
+            68,
+            "Expected 68 filters after concat (67 built-in + 1 new)"
         );
 
         // New filter is discoverable

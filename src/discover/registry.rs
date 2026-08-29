@@ -2400,6 +2400,33 @@ mod tests {
             Some("rtk just build".into())
         );
     }
+    #[test]
+    fn test_rewrite_scientific_and_system_toml_filters() {
+        for (raw, rewritten) in [
+            (
+                "journalctl --user -u litellm-proxy.service -n 200",
+                "rtk journalctl --user -u litellm-proxy.service -n 200",
+            ),
+            (
+                "systemctl --user list-units --failed",
+                "rtk systemctl --user list-units --failed",
+            ),
+            (
+                "systemctl --user status litellm-proxy.service",
+                "rtk systemctl --user status litellm-proxy.service",
+            ),
+            (
+                "pandoc manuscript.md -o manuscript.pdf",
+                "rtk pandoc manuscript.md -o manuscript.pdf",
+            ),
+            ("pdfinfo manuscript.pdf", "rtk pdfinfo manuscript.pdf"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(raw, &[]),
+                Some(rewritten.into())
+            );
+        }
+    }
 
     #[test]
     fn test_rewrite_toml_absolute_path() {
