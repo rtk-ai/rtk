@@ -136,6 +136,20 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"(?i)^powershell(?:\.exe)?(?:\s|$)",
+        rtk_cmd: "rtk powershell",
+        rewrite_prefixes: &["powershell.exe", "powershell"],
+        category: "System",
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"(?i)^pwsh(?:\.exe)?(?:\s|$)",
+        rtk_cmd: "rtk pwsh",
+        rewrite_prefixes: &["pwsh.exe", "pwsh"],
+        category: "System",
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^find\s+",
         rtk_cmd: "rtk find",
         rewrite_prefixes: &["find"],

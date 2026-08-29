@@ -10,10 +10,10 @@ use crate::core::stream::{
     self, exec_capture, exec_capture_stdin, CaptureResult, FilterMode, StdinMode, StreamFilter,
 };
 use crate::core::tracking;
-use crate::core::utils::{resolved_command, strip_ansi};
+use crate::core::utils::{resolved_command, strip_ansi, tool_exists};
 use crate::core::{args_utils, config};
 use anyhow::{Context, Result};
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::process::Command;
@@ -296,12 +296,20 @@ impl Engine {
 
 /// Runs the agent's exact engine + flags for the grouping path, appending only the
 /// parse aids (see `Engine::parse_flags`).
+///
+/// Falls back to a pure-Rust walk+match (`fallback_capture`) when the requested
+/// engine's binary isn't on PATH at all (plain Windows PowerShell with no
+/// rg/grep/Git Bash, see #Windows-no-binary). This never substitutes grep for rg
+/// or vice versa — it only engages when the *requested* binary is missing.
 fn engine_capture<T: AsRef<str>>(
     engine: Engine,
     extra_args: &[T],
     patterns: &[String],
     paths: &[String],
 ) -> Result<CaptureResult> {
+    if !tool_exists(engine.bin()) {
+        return fallback_capture(extra_args, patterns, paths);
+    }
     let mut cmd = engine_command(engine, extra_args, patterns, paths, false);
     exec_capture_stdin(&mut cmd).context("search failed")
 }
@@ -437,6 +445,93 @@ fn run_streaming_search(
     Ok(result.exit_code)
 }
 
+/// Pure-Rust walk+match used only when the requested engine's binary is missing
+/// from PATH entirely. Emits the exact `file\0line_number:content` shape
+/// `parse_match_line` expects (always the match separator `:`, never `-`), so
+/// the rest of `run()`'s grouping/truncation/display logic is untouched.
+///
+/// Degraded relative to a real engine: no -A/-B/-C context-line support
+/// (context lines are only extra non-match lines shown around a hit, so
+/// skipping them is a completeness gap, not a correctness bug — add if
+/// requested). `-i`/`--ignore-case` and `-v`/`--invert-match` are honored from
+/// `extra_args`; other flags (glob/type filters, max-count, etc.) are ignored in
+/// this mode.
+fn fallback_capture<T: AsRef<str>>(
+    extra_args: &[T],
+    patterns: &[String],
+    paths: &[String],
+) -> Result<CaptureResult> {
+    let case_insensitive =
+        has_short_flag(extra_args, 'i') || extra_args.iter().any(|f| f.as_ref() == "--ignore-case");
+    let invert_match =
+        has_short_flag(extra_args, 'v') || extra_args.iter().any(|f| f.as_ref() == "--invert-match");
+
+    // Multiple -e/patterns are OR'd together, same semantics as the real
+    // engines' multiple -e flags.
+    let combined = patterns
+        .iter()
+        .map(|p| format!("(?:{})", p))
+        .collect::<Vec<_>>()
+        .join("|");
+    let re = RegexBuilder::new(&combined)
+        .case_insensitive(case_insensitive)
+        .build()
+        .with_context(|| format!("Invalid pattern for fallback search: {}", combined))?;
+
+    let search_paths: Vec<String> = if paths.is_empty() {
+        vec![".".to_string()]
+    } else {
+        paths.to_vec()
+    };
+
+    let mut stdout = String::new();
+    for root in &search_paths {
+        // Mirrors find_cmd.rs: respect .gitignore/global/local excludes so
+        // fallback results line up with what rg's default already does.
+        let walker = ignore::WalkBuilder::new(root)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .build();
+
+        for entry in walker {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if entry.file_type().is_some_and(|t| !t.is_file()) {
+                continue;
+            }
+
+            let path = entry.path();
+            // Unreadable/non-UTF8 (likely binary) files: skip silently, same
+            // spirit as the real engines' -I binary-file skip.
+            let Ok(contents) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let display = path.to_string_lossy();
+
+            for (idx, line) in contents.lines().enumerate() {
+                if re.is_match(line) != invert_match {
+                    stdout.push_str(&display);
+                    stdout.push('\0');
+                    stdout.push_str(&(idx + 1).to_string());
+                    stdout.push(':');
+                    stdout.push_str(line);
+                    stdout.push('\n');
+                }
+            }
+        }
+    }
+
+    let exit_code = if stdout.is_empty() { 1 } else { 0 };
+    Ok(CaptureResult {
+        stdout,
+        stderr: String::new(),
+        exit_code,
+    })
+}
+
 /// Runs the agent's command verbatim for forms RTK does not group: format/shape
 /// flags and pattern-less modes (`--files`, `--type-list`).
 fn passthrough<T: AsRef<str>>(
@@ -472,10 +567,11 @@ fn passthrough<T: AsRef<str>>(
     Ok(exit_code)
 }
 
-fn has_short_flag(flags: &[String], ch: char) -> bool {
-    flags
-        .iter()
-        .any(|f| f.starts_with('-') && !f.starts_with("--") && f[1..].contains(ch))
+fn has_short_flag<T: AsRef<str>>(flags: &[T], ch: char) -> bool {
+    flags.iter().any(|f| {
+        let f = f.as_ref();
+        f.starts_with('-') && !f.starts_with("--") && f[1..].contains(ch)
+    })
 }
 
 fn has_context_flag(flags: &[String]) -> bool {
@@ -1637,6 +1733,91 @@ mod tests {
         assert!(f(&["-C", "1"]));
         assert!(!f(&["-rn"]));
         assert!(!f(&["-i", "-w"]));
+    }
+
+    // --- fallback_capture (Windows: no rg/grep on PATH) ---
+
+    #[test]
+    fn test_fallback_capture_finds_matches_in_temp_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("a.txt"), "hello world\nfoo bar\n").expect("write a.txt");
+        std::fs::write(tmp.path().join("b.txt"), "nothing here\n").expect("write b.txt");
+
+        let patterns = vec!["hello".to_string()];
+        let paths = vec![tmp.path().to_string_lossy().to_string()];
+        let result =
+            fallback_capture::<&str>(&[], &patterns, &paths).expect("fallback_capture ok");
+
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("a.txt"));
+        assert!(result.stdout.contains("hello world"));
+        assert!(!result.stdout.contains("nothing here"));
+    }
+
+    #[test]
+    fn test_fallback_capture_case_insensitive() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("a.txt"), "HELLO world\n").expect("write a.txt");
+
+        let patterns = vec!["hello".to_string()];
+        let paths = vec![tmp.path().to_string_lossy().to_string()];
+
+        // Without -i: no match.
+        let no_flag =
+            fallback_capture::<&str>(&[], &patterns, &paths).expect("fallback_capture ok");
+        assert_eq!(no_flag.exit_code, 1);
+        assert!(no_flag.stdout.is_empty());
+
+        // With -i: matches regardless of case.
+        let with_flag =
+            fallback_capture(&["-i"], &patterns, &paths).expect("fallback_capture ok");
+        assert_eq!(with_flag.exit_code, 0);
+        assert!(with_flag.stdout.contains("HELLO world"));
+    }
+
+    #[test]
+    fn test_fallback_capture_invert_match() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("a.txt"),
+            "matching line\nline selected by NotMatch\n",
+        )
+        .expect("write a.txt");
+
+        let patterns = vec!["matching".to_string()];
+        let paths = vec![tmp.path().to_string_lossy().to_string()];
+
+        let result =
+            fallback_capture(&["-v"], &patterns, &paths).expect("fallback_capture ok");
+
+        assert_eq!(result.exit_code, 0);
+        assert!(!result.stdout.contains("matching line"));
+        assert!(result.stdout.contains("line selected by NotMatch"));
+    }
+
+    #[test]
+    fn test_fallback_capture_output_round_trips_through_parse_match_line() {
+        // The seam that keeps this change minimal: fallback_capture's stdout
+        // must be fully consumable by the existing parse_match_line parser.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("c.txt"), "line one\nmatch here\nline three\n")
+            .expect("write c.txt");
+
+        let patterns = vec!["match".to_string()];
+        let paths = vec![tmp.path().to_string_lossy().to_string()];
+        let result =
+            fallback_capture::<&str>(&[], &patterns, &paths).expect("fallback_capture ok");
+
+        assert!(!result.stdout.is_empty());
+        for line in result.stdout.lines() {
+            let parsed = parse_match_line(line);
+            assert!(parsed.is_some(), "unparseable fallback line: {:?}", line);
+            let (file, line_num, is_match, content) = parsed.unwrap();
+            assert!(file.ends_with("c.txt"));
+            assert_eq!(line_num, 2);
+            assert!(is_match);
+            assert_eq!(content, "match here");
+        }
     }
 
     #[test]
