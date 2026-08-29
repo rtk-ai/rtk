@@ -952,6 +952,15 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 65.0,
         ..RtkRule::DEFAULT
     },
+    RtkRule {
+        pattern: r"^textutil(?:\s|$)",
+        rtk_cmd: "rtk textutil",
+        rewrite_prefixes: &["textutil"],
+        category: "Files",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
 ];
 
 pub const IGNORED_PREFIXES: &[&str] = &[

@@ -23,7 +23,7 @@ use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
     deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
-    summary, tree, wc_cmd,
+    summary, textutil_cmd, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -95,6 +95,13 @@ enum Commands {
     /// Directory tree with token-optimized output (proxy to native tree)
     Tree {
         /// Arguments passed to tree (supports all native tree flags like -L, -d, -a)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Convert documents to text with token-optimized output (proxy to macOS textutil)
+    Textutil {
+        /// Arguments passed to textutil (supports native flags like -convert, -stdout, -cat, -info)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1617,6 +1624,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Tree { args } => tree::run(&args, cli.verbose)?,
 
+        Commands::Textutil { args } => textutil_cmd::run(&args, cli.verbose)?,
+
         // ISSUE #989: support multiple files (cat file1 file2 → rtk read file1 file2)
         Commands::Read {
             files,
@@ -2741,6 +2750,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
         cmd,
         Commands::Ls { .. }
             | Commands::Tree { .. }
+            | Commands::Textutil { .. }
             | Commands::Read { .. }
             | Commands::Smart { .. }
             | Commands::Git { .. }
@@ -3140,6 +3150,7 @@ mod tests {
         const PASSTHROUGH: &[&str] = &[
             "ls",
             "tree",
+            "textutil",
             "read",
             "rg",
             "git",

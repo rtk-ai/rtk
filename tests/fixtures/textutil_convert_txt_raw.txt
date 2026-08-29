@@ -1,0 +1,92 @@
+Quarterly Platform Reliability Review
+
+Prepared by the Infrastructure team for the engineering leadership group. This
+document summarizes the availability work completed during the quarter, the
+incidents we learned from, and the commitments we are carrying into the next
+planning cycle.
+
+
+Summary
+
+Overall availability for the customer-facing API finished the quarter at 99.94
+percent, slightly ahead of the 99.9 percent target. The improvement came from
+three areas: faster failover in the data layer, a more conservative deploy
+process, and better saturation alerting. Latency at the 99th percentile dropped
+from 740 milliseconds to 510 milliseconds after the connection-pool changes
+shipped in week six.
+
+We still carry meaningful risk in the background job system, which remains a
+single region and accounted for the longest incident of the quarter. A migration
+plan is described in the roadmap section below.
+
+
+Availability by service
+
+The payments service held at 99.98 percent and was unaffected by the two platform
+incidents. The search service saw the largest regression, dropping to 99.86
+percent during the indexing outage on the twelfth. The notification service
+recovered fully after we moved its queue consumers off the shared cluster.
+
+Read traffic was served almost entirely from cache during both incidents, which
+is the main reason customer impact stayed low even when write paths were
+degraded. The cache hit rate averaged 96 percent across the quarter.
+
+
+Incident review
+
+There were two incidents that breached the error budget.
+
+The first was the indexing outage. A schema migration acquired a lock that the
+indexer needed, and the indexer retried aggressively instead of backing off. The
+retries amplified load on the primary database until connection limits were hit.
+We have since added jittered backoff and a circuit breaker around the indexer,
+and the migration tooling now runs lock-sensitive steps during low-traffic
+windows.
+
+The second incident was the job-system stall. A single worker leaked file
+descriptors over several days until the host ran out, and because all workers run
+in one region the backlog could not drain elsewhere. We shipped a descriptor
+guard and a per-worker recycle policy, but the structural fix is multi-region,
+which is not yet done.
+
+
+What went well
+
+The conservative deploy process caught three bad releases before they reached
+full production. Each was rolled back automatically within four minutes based on
+the new saturation signals rather than waiting for error-rate alarms.
+
+The on-call rotation reported lower fatigue this quarter. Paging volume fell by
+about a third after we tuned the noisier alerts and removed several that were not
+actionable.
+
+
+What did not go well
+
+Our runbooks were out of date for the job system, which slowed the response to
+the second incident. The first responder spent nearly twenty minutes confirming
+basic facts that a current runbook would have answered immediately.
+
+We also discovered that our synthetic checks did not cover the search write path,
+so the indexing outage was detected by a customer report rather than by our own
+monitoring. That gap is now closed.
+
+
+Roadmap
+
+The headline item for next quarter is moving the job system to multiple regions.
+This is the largest remaining single point of failure and the source of our
+longest incidents. The work is scoped into three phases: replicate the queue,
+make the workers region-aware, and finally cut over with a controlled drain.
+
+Secondary items include extending synthetic coverage to every write path,
+finishing the runbook refresh, and rolling the connection-pool changes out to the
+remaining internal services that have not yet adopted them.
+
+
+Commitments
+
+We commit to keeping customer-facing availability at or above 99.9 percent, to
+completing phase one of the job-system migration, and to closing every synthetic
+coverage gap identified during the incident reviews. Progress will be reported in
+the monthly operations meeting.
