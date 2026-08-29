@@ -695,6 +695,39 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^nix\s+(build|develop|flake|shell|run|eval|profile|store|log|search)",
+        rtk_cmd: "rtk nix",
+        rewrite_prefixes: &["nix"],
+        category: "Nix",
+        savings_pct: 75.0,
+        subcmd_savings: &[("build", 80.0), ("develop", 70.0), ("flake", 75.0)],
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^nix-build(\s|$)",
+        rtk_cmd: "rtk nix-build",
+        rewrite_prefixes: &["nix-build"],
+        category: "Nix",
+        savings_pct: 80.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^nix-shell(\s|$)",
+        rtk_cmd: "rtk nix-shell",
+        rewrite_prefixes: &["nix-shell"],
+        category: "Nix",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^nix-env(\s|$)",
+        rtk_cmd: "rtk nix-env",
+        rewrite_prefixes: &["nix-env"],
+        category: "Nix",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^du\b",
         rtk_cmd: "rtk du",
         rewrite_prefixes: &["du"],
