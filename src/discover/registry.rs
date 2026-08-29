@@ -4278,6 +4278,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_rewrite_qmd_ls() {
+        for command in ["qmd ls", "qmd ls notes", "qmd ls qmd://notes/archive"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(format!("rtk {command}")),
+                "Failed for command: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_qmd_non_listing_commands_are_not_rewritten() {
+        for command in ["qmd search auth", "qmd get notes/readme.md", "qmd status"] {
+            assert_eq!(rewrite_command_no_prefixes(command, &[]), None);
+        }
+    }
+
     // --- Gradle ---
 
     #[test]

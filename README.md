@@ -219,6 +219,7 @@ rtk sbt run                     # Strip SBT preamble noise
 ### Package Managers
 ```bash
 rtk pnpm list                   # Compact dependency tree
+rtk qmd ls notes                # Compact QMD virtual-file listing
 rtk uv run pytest               # Preserve uv env, keep program output
 rtk pip list                    # Python packages (auto-detect uv)
 rtk pip outdated                # Outdated packages

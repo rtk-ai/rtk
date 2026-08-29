@@ -136,6 +136,14 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^qmd\s+ls(?:\s|$)",
+        rtk_cmd: "rtk qmd",
+        rewrite_prefixes: &["qmd"],
+        category: "Files",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^find\s+",
         rtk_cmd: "rtk find",
         rewrite_prefixes: &["find"],
