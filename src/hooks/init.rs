@@ -4092,6 +4092,27 @@ fn show_claude_config() -> Result<()> {
         println!("[--] Cursor: home dir not found");
     }
 
+    // Check GitHub Copilot hook (user-global: $COPILOT_HOME or ~/.copilot)
+    match copilot_user_dir() {
+        Ok(copilot_dir) => {
+            let copilot_hook = copilot_dir.join(HOOKS_SUBDIR).join(COPILOT_HOOK_FILE);
+            if super::hook_check::copilot_hook_registered(&copilot_dir) {
+                println!(
+                    "[ok] GitHub Copilot hook: registered ({})",
+                    copilot_hook.display()
+                );
+            } else if copilot_hook.exists() {
+                println!(
+                    "[warn] GitHub Copilot hook: {} (invalid or outdated — run `rtk init -g --copilot` to repair)",
+                    copilot_hook.display()
+                );
+            } else {
+                println!("[--] GitHub Copilot hook: not found");
+            }
+        }
+        Err(_) => println!("[--] GitHub Copilot: home dir not found"),
+    }
+
     println!("\nUsage:");
     println!("  rtk init              # Full injection into local CLAUDE.md");
     println!("  rtk init -g           # Hook + RTK.md + @RTK.md + settings.json (recommended)");
@@ -4104,6 +4125,8 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --codex         # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
     println!("  rtk init -g --opencode      # OpenCode plugin only");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
+    println!("  rtk init --copilot          # GitHub Copilot hook + instructions (project)");
+    println!("  rtk init -g --copilot       # GitHub Copilot hook + instructions (user-global)");
 
     Ok(())
 }
