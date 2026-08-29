@@ -1,5 +1,6 @@
 //! Filters npm output and auto-injects the "run" subcommand when appropriate.
 
+use super::vite_cmd;
 use crate::core::runner;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
@@ -123,7 +124,7 @@ fn run_filtered(name: &str, args: &[String], verbose: u8, skip_env: bool) -> Res
         eprintln!("Running: {} {}", name, args_display);
     }
 
-    runner::run_filtered(
+    runner::run_filtered_with_exit(
         cmd,
         name,
         &args_display,
@@ -133,7 +134,11 @@ fn run_filtered(name: &str, args: &[String], verbose: u8, skip_env: bool) -> Res
 }
 
 /// Filter npm run output - strip boilerplate, progress bars, npm WARN
-fn filter_npm_output(output: &str) -> String {
+fn filter_npm_output(output: &str, exit_code: i32) -> String {
+    if vite_cmd::looks_like_vite_build_output(output) {
+        return vite_cmd::filter_vite_output(output, exit_code);
+    }
+
     let mut result = Vec::new();
 
     for line in output.lines() {
@@ -183,7 +188,7 @@ npm notice
    Creating an optimized production build...
    ✓ Build completed
 "#;
-        let result = filter_npm_output(output);
+        let result = filter_npm_output(output, 0);
         assert!(!result.contains("npm WARN"));
         assert!(!result.contains("npm notice"));
         assert!(!result.contains("> project@"));
@@ -231,7 +236,24 @@ npm notice
     #[test]
     fn test_filter_npm_output_empty() {
         let output = "\n\n\n";
-        let result = filter_npm_output(output);
+        let result = filter_npm_output(output, 0);
         assert_eq!(result, "ok");
+    }
+
+    #[test]
+    fn test_filter_npm_delegates_vite_build_output() {
+        let output = r#"> app@1.0.0 build
+> vite build
+
+vite v6.3.5 building for production...
+✓ 12 modules transformed.
+dist/index.js  20.00 kB │ gzip: 5.00 kB
+✓ built in 120ms"#;
+        let result = filter_npm_output(output, 0);
+
+        assert!(result.contains("Vite v6.3.5 build: ok | 12 modules"));
+        assert!(result.contains("1 asset, 20.0 kB"));
+        assert!(result.contains("Largest asset:"));
+        assert!(!result.contains("> app@1.0.0 build"));
     }
 }

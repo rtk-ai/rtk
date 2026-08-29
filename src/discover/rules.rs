@@ -266,6 +266,32 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?vite\s+build(?:\s|$)",
+        rtk_cmd: "rtk vite",
+        rewrite_prefixes: &[
+            "npm exec vite",
+            "npm rum vite",
+            "npm run vite",
+            "npm run-script vite",
+            "npm urn vite",
+            "npm vite",
+            "npm x vite",
+            "npx vite",
+            "pnpm dlx vite",
+            "pnpm exec vite",
+            "pnpm run vite",
+            "pnpm run-script vite",
+            "pnpm vite",
+            "pnpx vite",
+            "vite",
+        ],
+        category: "Build",
+        savings_pct: 85.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+        pipeline_final_safe: false,
+    },
+    RtkRule {
         pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?jest(\s+run)?(\s|$)",
         rtk_cmd: "rtk jest",
         rewrite_prefixes: &[

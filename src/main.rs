@@ -13,7 +13,7 @@ use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
     lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
-    vitest_cmd,
+    vite_cmd, vitest_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpunit_cmd, pint_cmd};
@@ -503,6 +503,13 @@ enum Commands {
     /// Vitest commands with compact output
     Vitest {
         /// Additional vitest arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Vite production builds with compact asset summaries
+    Vite {
+        /// Vite arguments (e.g., build, build --mode staging, build --full)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2204,6 +2211,8 @@ fn run_cli() -> Result<i32> {
             vitest_cmd::run_test(&cli.command, args, cli.verbose)?
         }
 
+        Commands::Vite { args } => vite_cmd::run(&args, cli.verbose)?,
+
         Commands::Prisma { command } => match command {
             PrismaCommands::Generate { args } => {
                 prisma_cmd::run(prisma_cmd::PrismaCommand::Generate, &args, cli.verbose)?
@@ -2764,6 +2773,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Rg { .. }
             | Commands::Wget { .. }
             | Commands::Vitest { .. }
+            | Commands::Vite { .. }
             | Commands::Prisma { .. }
             | Commands::Tsc { .. }
             | Commands::Next { .. }
@@ -3164,6 +3174,7 @@ mod tests {
             "wc",
             "jest",
             "vitest",
+            "vite",
             "prisma",
             "tsc",
             "next",
@@ -3619,6 +3630,16 @@ mod tests {
             }
             _ => panic!("Expected Commands::Npx for unknown tool"),
         }
+    }
+
+    #[test]
+    fn test_vite_build_full_flag_parses_as_native_arg() {
+        let cli = Cli::try_parse_from(["rtk", "vite", "build", "--full"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Vite { args }
+                if args == ["build".to_string(), "--full".to_string()]
+        ));
     }
 
     #[test]
