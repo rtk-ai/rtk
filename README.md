@@ -269,6 +269,8 @@ rtk env -f AWS                  # Filtered env vars
 rtk log app.log                 # Deduplicated logs
 rtk curl <url>                  # Truncate + save full output
 rtk wget <url>                  # Download, strip progress bars
+rtk tmux list-sessions          # Compact session state
+rtk tmux capture-pane -p -t dev # Trim and cap captured pane output
 rtk summary <long command>      # Heuristic summary
 rtk proxy <command>             # Raw passthrough + tracking
 ```

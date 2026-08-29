@@ -144,6 +144,21 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^tmux\s+(?:(?:-(?:[cLfST])(?:\s+\S+|[^\s]+)|-[2CDluvV]+)\s+)*(list-sessions|ls|new-session|new|kill-session|kill|capture-pane|capturep)(?:\s|$)",
+        rtk_cmd: "rtk tmux",
+        rewrite_prefixes: &["tmux"],
+        category: "Infra",
+        savings_pct: 65.0,
+        subcmd_savings: &[("capture-pane", 80.0), ("capturep", 80.0)],
+        subcmd_status: &[
+            ("new-session", RtkStatus::Passthrough),
+            ("new", RtkStatus::Passthrough),
+            ("kill-session", RtkStatus::Passthrough),
+            ("kill", RtkStatus::Passthrough),
+        ],
+        pipeline_final_safe: false,
+    },
+    RtkRule {
         pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?tsc(\s|$)",
         rtk_cmd: "rtk tsc",
         rewrite_prefixes: &[

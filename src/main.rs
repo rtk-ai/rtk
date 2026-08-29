@@ -23,7 +23,7 @@ use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
     deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
-    summary, tree, wc_cmd,
+    summary, tmux_cmd, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -420,6 +420,13 @@ enum Commands {
     /// Word/line/byte count with compact output (strips paths and padding)
     Wc {
         /// Arguments passed to wc (files, flags like -l, -w, -c)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// tmux commands with compact session and pane output
+    Tmux {
+        /// Arguments passed to tmux
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2145,6 +2152,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
 
+        Commands::Tmux { args } => tmux_cmd::run(&args, cli.verbose)?,
+
         Commands::Gain {
             project, // added
             graph,
@@ -2774,6 +2783,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Npm { .. }
             | Commands::Npx { .. }
             | Commands::Curl { .. }
+            | Commands::Tmux { .. }
             | Commands::Ruff { .. }
             | Commands::Pytest { .. }
             | Commands::Php { .. }
@@ -3162,6 +3172,7 @@ mod tests {
             "grep",
             "wget",
             "wc",
+            "tmux",
             "jest",
             "vitest",
             "prisma",
@@ -3640,6 +3651,28 @@ mod tests {
                 );
             }
             _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_tmux_capture_pane_parses_native_flags() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "tmux",
+            "capture-pane",
+            "-p",
+            "-S",
+            "-200",
+            "-t",
+            "build",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Tmux { args } => assert_eq!(
+                args,
+                vec!["capture-pane", "-p", "-S", "-200", "-t", "build"]
+            ),
+            _ => panic!("Expected Tmux command"),
         }
     }
 
