@@ -656,6 +656,15 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^ssh(\s|$)",
+        rtk_cmd: "rtk ssh",
+        rewrite_prefixes: &["ssh"],
+        category: "Infra",
+        savings_pct: 60.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^ansible-playbook\b",
         rtk_cmd: "rtk ansible-playbook",
         rewrite_prefixes: &["ansible-playbook"],
