@@ -15,7 +15,7 @@ use cmds::js::{
     lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
     vitest_cmd,
 };
-use cmds::jvm::{gradlew_cmd, mvn_cmd};
+use cmds::jvm::{gradlew_cmd, jar_cmd, javap_cmd, mvn_cmd};
 use cmds::php::{ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpunit_cmd, pint_cmd};
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
@@ -829,6 +829,20 @@ enum Commands {
     #[command(name = "mvn")]
     Mvn {
         /// Maven goals and arguments (e.g., clean install, -DskipTests test, -X)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// JAR archive operations with compact listings and lossless extraction
+    Jar {
+        /// jar arguments (e.g., tf app.jar, xf app.jar)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Java class inspection with bounded output
+    Javap {
+        /// javap arguments (e.g., -p com.example.Widget, -c Widget.class)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2433,6 +2447,10 @@ fn run_cli() -> Result<i32> {
 
         Commands::Mvn { args } => mvn_cmd::run(&args, cli.verbose)?,
 
+        Commands::Jar { args } => jar_cmd::run(&args, cli.verbose)?,
+
+        Commands::Javap { args } => javap_cmd::run(&args, cli.verbose)?,
+
         Commands::HookAudit { since } => {
             hooks::hook_audit_cmd::run(since, cli.verbose)?;
             0
@@ -3062,6 +3080,23 @@ mod tests {
     }
 
     #[test]
+    fn test_jar_and_javap_commands_parse_native_flags() {
+        let cli = Cli::try_parse_from(["rtk", "jar", "-tf", "app.jar"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Jar { args }
+                if args == ["-tf".to_string(), "app.jar".to_string()]
+        ));
+
+        let cli = Cli::try_parse_from(["rtk", "javap", "-p", "java.lang.String"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Javap { args }
+                if args == ["-p".to_string(), "java.lang.String".to_string()]
+        ));
+    }
+
+    #[test]
     fn test_try_parse_unknown_subcommand_is_error() {
         match Cli::try_parse_from(["rtk", "nonexistent-command"]) {
             Err(e) => assert!(!matches!(
@@ -3187,6 +3222,8 @@ mod tests {
             "golangci-lint",
             "gradlew",
             "mvn",
+            "jar",
+            "javap",
             "sbt",
             "php",
             "phpunit",

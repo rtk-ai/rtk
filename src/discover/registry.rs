@@ -4369,6 +4369,29 @@ mod tests {
         );
     }
 
+    // --- JVM inspection ---
+
+    #[test]
+    fn test_classify_and_rewrite_jar_list() {
+        assert_eq!(
+            classify_command("jar tf app.jar"),
+            Classification::Supported {
+                rtk_equivalent: "rtk jar",
+                category: "Files",
+                estimated_savings_pct: 90.0,
+                status: RtkStatus::Existing,
+            }
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("jar -tf app.jar", &[]),
+            Some("rtk jar -tf app.jar".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("jar tvf app.jar", &[]),
+            Some("rtk jar tvf app.jar".into())
+        );
+    }
+
     #[test]
     fn test_rewrite_sbt_test_only() {
         assert_eq!(
@@ -4386,6 +4409,40 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("sbt testQuick", &[]),
             Some("rtk sbt testQuick".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_and_rewrite_jar_extract_passthrough() {
+        assert_eq!(
+            classify_command("jar xf app.jar"),
+            Classification::Supported {
+                rtk_equivalent: "rtk jar",
+                category: "Files",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("jar xf app.jar", &[]),
+            Some("rtk jar xf app.jar".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_and_rewrite_javap() {
+        assert_eq!(
+            classify_command("javap -p com.example.Widget"),
+            Classification::Supported {
+                rtk_equivalent: "rtk javap",
+                category: "Files",
+                estimated_savings_pct: 75.0,
+                status: RtkStatus::Existing,
+            }
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("javap -p com.example.Widget", &[]),
+            Some("rtk javap -p com.example.Widget".into())
         );
     }
 

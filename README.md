@@ -216,6 +216,13 @@ rtk sbt compile                 # Compilation errors only (-75%)
 rtk sbt run                     # Strip SBT preamble noise
 ```
 
+### JVM Inspection
+```bash
+rtk jar tf app.jar              # First 50 archive entries + total
+rtk jar xf app.jar              # Lossless extraction passthrough
+rtk javap -p com.example.Widget # Bounded class/member inspection
+```
+
 ### Package Managers
 ```bash
 rtk pnpm list                   # Compact dependency tree
