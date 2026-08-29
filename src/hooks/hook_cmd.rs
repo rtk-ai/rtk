@@ -571,6 +571,28 @@ enum PayloadAction {
     Ignore,
 }
 
+fn pre_tool_use_rewrite_output(
+    v: &Value,
+    rewritten: &str,
+    permission_decision: Option<&str>,
+) -> Value {
+    let mut updated_input = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+    if let Some(obj) = updated_input.as_object_mut() {
+        obj.insert("command".into(), Value::String(rewritten.to_string()));
+    }
+
+    let mut hook_output = json!({
+        "hookEventName": PRE_TOOL_USE_KEY,
+        "permissionDecisionReason": "RTK auto-rewrite",
+        "updatedInput": updated_input
+    });
+    if let Some(decision) = permission_decision {
+        hook_output["permissionDecision"] = Value::String(decision.to_string());
+    }
+
+    json!({ "hookSpecificOutput": hook_output })
+}
+
 fn process_claude_payload(v: &Value) -> PayloadAction {
     let cmd = match v
         .pointer("/tool_input/command")
@@ -598,31 +620,10 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         HookDecision::AskRewrite(r) => (r, false),
     };
 
-    let updated_input = {
-        let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
-        if let Some(obj) = ti.as_object_mut() {
-            obj.insert("command".into(), Value::String(rewritten.clone()));
-        }
-        ti
-    };
-
-    let mut hook_output = json!({
-        "hookEventName": PRE_TOOL_USE_KEY,
-        "permissionDecisionReason": "RTK auto-rewrite",
-        "updatedInput": updated_input
-    });
-
-    if allow {
-        hook_output
-            .as_object_mut()
-            .unwrap()
-            .insert("permissionDecision".into(), json!("allow"));
-    }
-
     PayloadAction::Rewrite {
         cmd: cmd.to_string(),
+        output: pre_tool_use_rewrite_output(v, &rewritten, allow.then_some("allow")),
         rewritten,
-        output: json!({ "hookSpecificOutput": hook_output }),
     }
 }
 
@@ -665,6 +666,123 @@ pub fn run_claude() -> Result<()> {
 fn run_claude_inner(input: &str) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;
     match process_claude_payload(&v) {
+        PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        _ => None,
+    }
+}
+
+// ── Codex CLI native hook ─────────────────────────────────────
+
+fn is_supported_codex_permission_mode(v: &Value) -> bool {
+    matches!(
+        v.get("permission_mode").and_then(Value::as_str),
+        Some("default" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions")
+    )
+}
+
+fn process_codex_payload(v: &Value) -> PayloadAction {
+    if v.get("hook_event_name").and_then(Value::as_str) != Some(PRE_TOOL_USE_KEY)
+        || !matches!(
+            v.get("tool_name").and_then(Value::as_str),
+            Some("Bash" | "bash")
+        )
+    {
+        return PayloadAction::Ignore;
+    }
+
+    let cmd = match v
+        .pointer("/tool_input/command")
+        .and_then(Value::as_str)
+        .filter(|cmd| !cmd.is_empty())
+    {
+        Some(cmd) => cmd,
+        None => return PayloadAction::Ignore,
+    };
+
+    // Codex deliberately includes this field in every hook event. Fail open
+    // for missing or future modes instead of assuming their approval semantics.
+    if !is_supported_codex_permission_mode(v) {
+        return PayloadAction::Skip {
+            reason: "skip:unsupported_permission_mode",
+            cmd: cmd.to_string(),
+        };
+    }
+
+    if crate::discover::lexer::contains_unattestable_construct(cmd) {
+        return PayloadAction::Skip {
+            reason: "skip:defer",
+            cmd: cmd.to_string(),
+        };
+    }
+
+    let rewritten = match get_rewritten(cmd) {
+        Some(rewritten) => rewritten,
+        None => {
+            return PayloadAction::Skip {
+                reason: "skip:no_rewrite",
+                cmd: cmd.to_string(),
+            }
+        }
+    };
+
+    // Codex requires `permissionDecision: allow` alongside `updatedInput`.
+    // Its runtime applies the replacement before native approval and sandbox
+    // checks, so this is a protocol-level allow rather than RTK approving the
+    // command. Those checks inspect the rewritten argv, however, and Codex's
+    // safe/dangerous-command classifiers do not currently unwrap `rtk`. This
+    // can add prompts for known-safe commands and obscure classifier signals
+    // for wrapped mutating commands such as git push. Keep the passthrough gates
+    // above conservative and revisit this boundary whenever coverage expands.
+    PayloadAction::Rewrite {
+        cmd: cmd.to_string(),
+        output: pre_tool_use_rewrite_output(v, &rewritten, Some("allow")),
+        rewritten,
+    }
+}
+
+/// Run the Codex CLI PreToolUse hook natively.
+pub fn run_codex() -> Result<()> {
+    let input = match read_stdin_limited() {
+        Ok(input) => input,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to read JSON input: {e}");
+            return Ok(());
+        }
+    };
+    let input = strip_leading_bom(&input).trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    match process_codex_payload(&v) {
+        PayloadAction::Rewrite {
+            cmd,
+            rewritten,
+            output,
+        } => {
+            audit_log("rewrite", &cmd, &rewritten);
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        PayloadAction::Skip { reason, cmd } => audit_log(reason, &cmd, ""),
+        PayloadAction::Ignore => {}
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_codex_inner(input: &str) -> Option<String> {
+    let input = strip_leading_bom(input).trim();
+    let v: Value = serde_json::from_str(input).ok()?;
+    match process_codex_payload(&v) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
         _ => None,
     }
@@ -833,21 +951,7 @@ fn droid_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) ->
 
     audit_log("rewrite", cmd, &rewritten);
 
-    let updated_input = {
-        let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
-        if let Some(obj) = ti.as_object_mut() {
-            obj.insert("command".into(), Value::String(rewritten));
-        }
-        ti
-    };
-
-    Some(json!({
-        "hookSpecificOutput": {
-            "hookEventName": PRE_TOOL_USE_KEY,
-            "permissionDecisionReason": "RTK auto-rewrite",
-            "updatedInput": updated_input
-        }
-    }))
+    Some(pre_tool_use_rewrite_output(v, &rewritten, None))
 }
 
 /// Run the Factory Droid PreToolUse hook natively.
@@ -1380,6 +1484,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_pre_tool_use_rewrite_output_merges_input_and_optional_decision() {
+        let input = json!({
+            "tool_input": {
+                "command": "git status",
+                "timeout": 30_000,
+                "description": "Inspect the working tree"
+            }
+        });
+
+        let ask = pre_tool_use_rewrite_output(&input, "rtk git status", None);
+        let ask_hook = &ask["hookSpecificOutput"];
+        assert_eq!(ask_hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(ask_hook["permissionDecisionReason"], "RTK auto-rewrite");
+        assert!(ask_hook.get("permissionDecision").is_none());
+        assert_eq!(ask_hook["updatedInput"]["command"], "rtk git status");
+        assert_eq!(ask_hook["updatedInput"]["timeout"], 30_000);
+        assert_eq!(
+            ask_hook["updatedInput"]["description"],
+            "Inspect the working tree"
+        );
+
+        let allow = pre_tool_use_rewrite_output(&input, "rtk git status", Some("allow"));
+        assert_eq!(allow["hookSpecificOutput"]["permissionDecision"], "allow");
+    }
+
     // --- Claude handler ---
 
     fn claude_input(cmd: &str) -> String {
@@ -1525,6 +1655,150 @@ mod tests {
     fn test_claude_no_tool_input_passthrough() {
         let input = json!({ "tool_name": "Bash" }).to_string();
         assert!(run_claude_inner(&input).is_none());
+    }
+
+    // --- Codex handler ---
+
+    fn codex_input_with_permission_mode(cmd: &str, permission_mode: Option<&str>) -> String {
+        let mut input = json!({
+            "session_id": "session-1",
+            "turn_id": "turn-1",
+            "hook_event_name": PRE_TOOL_USE_KEY,
+            "tool_name": "Bash",
+            "tool_use_id": "tool-1",
+            "tool_input": { "command": cmd }
+        });
+        if let Some(permission_mode) = permission_mode {
+            input["permission_mode"] = json!(permission_mode);
+        }
+        input.to_string()
+    }
+
+    // Normal Codex payloads include `default`; missing permission_mode is
+    // covered deliberately by the dedicated fail-open test below.
+    fn codex_input(cmd: &str) -> String {
+        codex_input_with_permission_mode(cmd, Some("default"))
+    }
+
+    #[test]
+    fn test_codex_rewrite_uses_required_allow_shape() {
+        let result = run_codex_inner(&codex_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(hook["permissionDecision"], "allow");
+        assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
+        assert_eq!(hook["updatedInput"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_codex_rewrites_all_documented_permission_modes() {
+        for permission_mode in [
+            "default",
+            "acceptEdits",
+            "plan",
+            "dontAsk",
+            "bypassPermissions",
+        ] {
+            assert!(
+                run_codex_inner(&codex_input_with_permission_mode(
+                    "git status",
+                    Some(permission_mode)
+                ))
+                .is_some(),
+                "documented permission mode should rewrite: {permission_mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_codex_unknown_or_missing_permission_mode_passes_through() {
+        assert!(run_codex_inner(&codex_input_with_permission_mode("git status", None)).is_none());
+        assert!(run_codex_inner(&codex_input_with_permission_mode(
+            "git status",
+            Some("futureMode")
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn test_codex_rewrites_commands_that_still_need_native_approval() {
+        let result = run_codex_inner(&codex_input("cargo test")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(
+            v.pointer("/hookSpecificOutput/updatedInput/command"),
+            Some(&json!("rtk cargo test"))
+        );
+    }
+
+    #[test]
+    fn test_codex_rewrite_preserves_tool_input_fields() {
+        let input = json!({
+            "hook_event_name": PRE_TOOL_USE_KEY,
+            "tool_name": "Bash",
+            "permission_mode": "default",
+            "tool_input": {
+                "command": "git status --short",
+                "timeout": 30_000,
+                "description": "Inspect the working tree"
+            }
+        })
+        .to_string();
+        let result = run_codex_inner(&input).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let updated = &v["hookSpecificOutput"]["updatedInput"];
+
+        assert_eq!(updated["command"], "rtk git status --short");
+        assert_eq!(updated["timeout"], 30_000);
+        assert_eq!(updated["description"], "Inspect the working tree");
+    }
+
+    #[test]
+    fn test_codex_ignores_other_events_and_tools() {
+        let other_event = json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": { "command": "git status" }
+        })
+        .to_string();
+        let other_tool = json!({
+            "hook_event_name": PRE_TOOL_USE_KEY,
+            "tool_name": "apply_patch",
+            "tool_input": { "command": "git status" }
+        })
+        .to_string();
+
+        assert!(run_codex_inner(&other_event).is_none());
+        assert!(run_codex_inner(&other_tool).is_none());
+    }
+
+    #[test]
+    fn test_codex_passthrough_for_unsupported_or_unattestable_commands() {
+        assert!(run_codex_inner(&codex_input("rtk git status")).is_none());
+        assert!(run_codex_inner(&codex_input("htop")).is_none());
+        assert!(run_codex_inner(&codex_input("rm -rf /tmp/rtk-safety-test")).is_none());
+        assert!(run_codex_inner(&codex_input("sudo rm -rf /tmp/rtk-safety-test")).is_none());
+        assert!(run_codex_inner(&codex_input("git status > /tmp/status")).is_none());
+        assert!(run_codex_inner(&codex_input("git status $(touch /tmp/x)")).is_none());
+    }
+
+    #[test]
+    fn test_codex_rewrites_compound_command_directly() {
+        let result = run_codex_inner(&codex_input("git add . && cargo test")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(
+            v.pointer("/hookSpecificOutput/updatedInput/command"),
+            Some(&json!("rtk git add . && rtk cargo test"))
+        );
+    }
+
+    #[test]
+    fn test_codex_malformed_json_and_empty_command_pass_through() {
+        assert!(run_codex_inner("not valid json {{{").is_none());
+        assert!(run_codex_inner(&codex_input("")).is_none());
     }
 
     // --- Cursor handler ---
