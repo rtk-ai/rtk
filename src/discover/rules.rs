@@ -975,6 +975,177 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 65.0,
         ..RtkRule::DEFAULT
     },
+    // PowerShell cmdlets. Each cmdlet gets its own rule with the cmdlet name
+    // baked into `rtk_cmd` (not a shared prefix) because `strip_word_prefix`
+    // strips whatever matches `rewrite_prefixes` and rebuilds as
+    // `format!("{} {}", rtk_cmd, rest)` — a shared `rtk_cmd: "rtk powershell"`
+    // would drop the cmdlet name from the rewritten command entirely.
+    //
+    // Only unambiguous Verb-Noun cmdlet names are registered here. Short
+    // PowerShell aliases (`ls`/`dir`, `cat`/`type`, `ps`, `gc`, `gi`, `cd`,
+    // `pwd`, `cp`, `mv`, `rm`, `kill`, ...) are deliberately NOT registered as
+    // rewrite triggers: those words already belong to other rules (or
+    // `IGNORED_PREFIXES`/`IGNORED_EXACT`) above, and a second competing rule
+    // for the same trigger word would be an ambiguous-match bug, not a
+    // feature. `rtk powershell` itself still accepts those aliases when a
+    // user types `rtk powershell <alias>` explicitly — this only concerns
+    // which raw commands the hook auto-rewrites.
+    RtkRule {
+        pattern: r"^Get-ChildItem(\s|$)",
+        rtk_cmd: "rtk powershell Get-ChildItem",
+        rewrite_prefixes: &["Get-ChildItem"],
+        category: "PowerShell",
+        savings_pct: 65.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^Get-Item(\s|$)",
+        rtk_cmd: "rtk powershell Get-Item",
+        rewrite_prefixes: &["Get-Item"],
+        category: "PowerShell",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^Get-Process(\s|$)",
+        rtk_cmd: "rtk powershell Get-Process",
+        rewrite_prefixes: &["Get-Process"],
+        category: "PowerShell",
+        savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^Get-Service(\s|$)",
+        rtk_cmd: "rtk powershell Get-Service",
+        rewrite_prefixes: &["Get-Service"],
+        category: "PowerShell",
+        savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^Get-Content(\s|$)",
+        rtk_cmd: "rtk powershell Get-Content",
+        rewrite_prefixes: &["Get-Content"],
+        category: "PowerShell",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^Select-String(\s|$)",
+        rtk_cmd: "rtk powershell Select-String",
+        rewrite_prefixes: &["Select-String"],
+        category: "PowerShell",
+        savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^Get-WinEvent(\s|$)",
+        rtk_cmd: "rtk powershell Get-WinEvent",
+        rewrite_prefixes: &["Get-WinEvent"],
+        category: "PowerShell",
+        savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^Get-EventLog(\s|$)",
+        rtk_cmd: "rtk powershell Get-EventLog",
+        rewrite_prefixes: &["Get-EventLog"],
+        category: "PowerShell",
+        savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^Get-ItemProperty(\s|$)",
+        rtk_cmd: "rtk powershell Get-ItemProperty",
+        rewrite_prefixes: &["Get-ItemProperty"],
+        category: "PowerShell",
+        savings_pct: 65.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^Test-NetConnection(\s|$)",
+        rtk_cmd: "rtk powershell Test-NetConnection",
+        rewrite_prefixes: &["Test-NetConnection"],
+        category: "PowerShell",
+        savings_pct: 80.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^Get-NetAdapter(\s|$)",
+        rtk_cmd: "rtk powershell Get-NetAdapter",
+        rewrite_prefixes: &["Get-NetAdapter"],
+        category: "PowerShell",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^Get-NetTCPConnection(\s|$)",
+        rtk_cmd: "rtk powershell Get-NetTCPConnection",
+        rewrite_prefixes: &["Get-NetTCPConnection"],
+        category: "PowerShell",
+        savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^Get-ComputerInfo(\s|$)",
+        rtk_cmd: "rtk powershell Get-ComputerInfo",
+        rewrite_prefixes: &["Get-ComputerInfo"],
+        category: "PowerShell",
+        savings_pct: 85.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        // Get-SystemInfo is not a real PowerShell cmdlet -- rtk aliases it to
+        // Get-ComputerInfo for convenience (see powershell_cmd.rs::run). The
+        // rewrite rule mirrors that alias so the hook honors it too.
+        pattern: r"^Get-SystemInfo(\s|$)",
+        rtk_cmd: "rtk powershell Get-SystemInfo",
+        rewrite_prefixes: &["Get-SystemInfo"],
+        category: "PowerShell",
+        savings_pct: 85.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^Get-Package(\s|$)",
+        rtk_cmd: "rtk powershell Get-Package",
+        rewrite_prefixes: &["Get-Package"],
+        category: "PowerShell",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^Install-Package(\s|$)",
+        rtk_cmd: "rtk powershell Install-Package",
+        rewrite_prefixes: &["Install-Package"],
+        category: "PowerShell",
+        savings_pct: 60.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^Get-Counter(\s|$)",
+        rtk_cmd: "rtk powershell Get-Counter",
+        rewrite_prefixes: &["Get-Counter"],
+        category: "PowerShell",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
 ];
 
 pub const IGNORED_PREFIXES: &[&str] = &[

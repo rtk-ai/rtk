@@ -7,6 +7,7 @@ pub mod go;
 pub mod js;
 pub mod jvm;
 pub mod php;
+pub mod powershell;
 pub mod python;
 pub mod ruby;
 pub mod rust;

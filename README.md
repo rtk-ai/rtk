@@ -253,6 +253,18 @@ rtk oc get services             # OpenShift service list
 rtk oc logs <pod>               # Deduplicated logs
 ```
 
+### PowerShell (Windows)
+```bash
+rtk powershell Get-ChildItem    # Directory listing, capped rows
+rtk powershell Get-Process      # Process list (Name/Id/CPU/WorkingSet)
+rtk powershell Get-Service      # Service status overview
+rtk powershell Get-Content log  # Large files: head/tail window
+rtk powershell Select-String x  # Text search, capped matches
+rtk powershell Get-WinEvent     # Windows event log, capped rows
+rtk powershell Get-ComputerInfo # System info (5 fields, not 180+)
+rtk powershell Test-NetConnection host  # Ping/TCP test, essentials only
+```
+
 ### Infrastructure as Code
 ```bash
 rtk pulumi preview              # Strip header/URL/duration noise

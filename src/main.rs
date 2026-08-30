@@ -17,6 +17,7 @@ use cmds::js::{
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpunit_cmd, pint_cmd};
+use cmds::powershell::powershell_cmd;
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
@@ -760,6 +761,16 @@ enum Commands {
     /// Laravel Pint (PHP-CS-Fixer) code style fixer with compact output
     Pint {
         /// Pint arguments (e.g., --test, app/)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// PowerShell cmdlets with token-optimized output (Windows PowerShell 5.1
+    /// via `powershell.exe`, or PowerShell 7+ via `pwsh` when available)
+    Powershell {
+        /// PowerShell cmdlet name (e.g., Get-ChildItem, Get-Process, Get-Service)
+        cmdlet: String,
+        /// Additional arguments passed to the cmdlet
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2411,6 +2422,12 @@ fn run_cli() -> Result<i32> {
 
         Commands::Pint { args } => pint_cmd::run(&args, cli.verbose)?,
 
+        Commands::Powershell { cmdlet, args } => {
+            let mut all_args = vec![cmdlet];
+            all_args.extend(args);
+            powershell_cmd::run(&all_args, cli.verbose)?
+        }
+
         Commands::Rake { args } => rake_cmd::run(&args, cli.verbose)?,
 
         Commands::Rubocop { args } => rubocop_cmd::run(&args, cli.verbose)?,
@@ -2804,6 +2821,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Paratest { .. }
             | Commands::Ecs { .. }
             | Commands::Pint { .. }
+            | Commands::Powershell { .. }
             | Commands::Rake { .. }
             | Commands::Rubocop { .. }
             | Commands::Rspec { .. }
@@ -3218,6 +3236,7 @@ mod tests {
             "paratest",
             "ecs",
             "pint",
+            "powershell",
             "uv",
         ];
 
