@@ -335,6 +335,20 @@ fn is_blob_show_arg(arg: &str) -> bool {
     !arg.starts_with('-') && arg.contains(':')
 }
 
+/// Render the note for change lines dropped past `max_hunk_lines`, split by
+/// sign so an anchored `^-` / `^+` audit can tell what it did not see.
+fn hunk_truncation_note(deletions: usize, additions: usize) -> Option<String> {
+    match (deletions, additions) {
+        (0, 0) => None,
+        (0, a) => Some(format!("  ... ({} additions truncated)", a)),
+        (d, 0) => Some(format!("  ... ({} deletions truncated)", d)),
+        (d, a) => Some(format!(
+            "  ... ({} deletions, {} additions truncated)",
+            d, a
+        )),
+    }
+}
+
 pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     let mut result = Vec::new();
     let mut current_file = String::new();
@@ -342,17 +356,23 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     let mut removed = 0;
     let mut in_hunk = false;
     let mut hunk_shown = 0;
-    let mut hunk_skipped = 0usize;
+    let mut skipped_add = 0usize;
+    let mut skipped_del = 0usize;
+    let mut leading_context = 0usize;
     let max_hunk_lines = 100;
+    // Context before a hunk's first change gets its own budget so it cannot
+    // crowd the change itself out of `max_hunk_lines`.
+    let max_leading_context = 3;
     let mut was_truncated = false;
 
     for line in diff.lines() {
         if line.starts_with("diff --git") {
             // Flush hunk truncation before starting a new file
-            if hunk_skipped > 0 {
-                result.push(format!("  ... ({} lines truncated)", hunk_skipped));
+            if let Some(note) = hunk_truncation_note(skipped_del, skipped_add) {
+                result.push(note);
                 was_truncated = true;
-                hunk_skipped = 0;
+                skipped_del = 0;
+                skipped_add = 0;
             }
             if !current_file.is_empty() && (added > 0 || removed > 0) {
                 result.push(format!("  +{} -{}", added, removed));
@@ -363,49 +383,53 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
             removed = 0;
             in_hunk = false;
             hunk_shown = 0;
+            leading_context = 0;
         } else if line.starts_with("@@") {
             // Flush hunk truncation before starting a new hunk
-            if hunk_skipped > 0 {
-                result.push(format!("  ... ({} lines truncated)", hunk_skipped));
+            if let Some(note) = hunk_truncation_note(skipped_del, skipped_add) {
+                result.push(note);
                 was_truncated = true;
-                hunk_skipped = 0;
+                skipped_del = 0;
+                skipped_add = 0;
             }
             in_hunk = true;
             hunk_shown = 0;
+            leading_context = 0;
             // Preserve the full unified diff hunk header, including trailing
             // function / symbol context after the second @@ marker.
-            //
-            // Hunk-body lines below are emitted at column 0, in git's own
-            // unified shape. An earlier revision indented them two spaces to
-            // nest them under the filename, which silently broke every
-            // `git diff | grep '^-'` audit: the content was all there, but the
-            // `^` anchor no longer matched, so "was anything removed?" answered
-            // a confident, wrong "no". rtk's own annotations (the `+N -M` tally
-            // and `... (N lines truncated)`) keep the indent precisely so they
-            // are not mistaken for diff lines by the same greps.
             result.push(line.to_string());
         } else if in_hunk {
-            if line.starts_with('+') && !line.starts_with("+++") {
+            // Hunk bodies emit at column 0 in git's own unified shape, so
+            // `^+` / `^-` anchor. rtk's own annotations stay indented so those
+            // same anchors never match them. Inside a hunk every `+`/`-` line
+            // is content: the `---` / `+++` file headers only ever appear
+            // before the first `@@`, where `in_hunk` is still false.
+            if line.starts_with('+') {
                 added += 1;
                 if hunk_shown < max_hunk_lines {
                     result.push(line.to_string());
                     hunk_shown += 1;
                 } else {
-                    hunk_skipped += 1;
+                    skipped_add += 1;
                 }
-            } else if line.starts_with('-') && !line.starts_with("---") {
+            } else if line.starts_with('-') {
                 removed += 1;
                 if hunk_shown < max_hunk_lines {
                     result.push(line.to_string());
                     hunk_shown += 1;
                 } else {
-                    hunk_skipped += 1;
+                    skipped_del += 1;
                 }
-            } else if hunk_shown < max_hunk_lines && !line.starts_with("\\") {
+            } else if !line.starts_with('\\') {
                 // Context line (git already prefixes it with a space).
                 if hunk_shown > 0 {
+                    if hunk_shown < max_hunk_lines {
+                        result.push(line.to_string());
+                        hunk_shown += 1;
+                    }
+                } else if leading_context < max_leading_context {
                     result.push(line.to_string());
-                    hunk_shown += 1;
+                    leading_context += 1;
                 }
             }
         }
@@ -418,8 +442,8 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     }
 
     // Flush last hunk
-    if hunk_skipped > 0 {
-        result.push(format!("  ... ({} lines truncated)", hunk_skipped));
+    if let Some(note) = hunk_truncation_note(skipped_del, skipped_add) {
+        result.push(note);
         was_truncated = true;
     }
 
@@ -2236,11 +2260,6 @@ mod tests {
 
     #[test]
     fn test_compact_diff_hunk_lines_are_grep_anchorable() {
-        // Regression: hunk-body lines were indented two spaces, so
-        // `git diff | grep '^-'` matched nothing and an audit of "was anything
-        // removed?" got a confident, wrong "no". The content was never missing;
-        // the `^` anchor was what broke. Added lines were equally affected, so
-        // this is not a deletions-only defect.
         let diff = "diff --git a/f.txt b/f.txt\n\
                     --- a/f.txt\n\
                     +++ b/f.txt\n\
@@ -2263,7 +2282,82 @@ mod tests {
         assert!(result.contains("  +1 -2"), "tally must stay indented");
 
         // Context lines keep git's leading space, so they are not `^-`/`^+`.
+        // Both are emitted: the one before the first change as well as the one
+        // between changes.
+        assert!(
+            result.lines().any(|l| l == " keep1"),
+            "leading context must survive, got:\n{}",
+            result
+        );
         assert!(result.lines().any(|l| l == " keep2"));
+    }
+
+    #[test]
+    fn test_compact_diff_keeps_content_starting_with_plus_or_minus() {
+        // `---` / `+++` are file headers only before the first `@@`. Inside a
+        // hunk, `++i;` and `-- sql comment` are content and must be neither
+        // dropped from the body nor missing from the tally.
+        let diff = "diff --git a/f.sql b/f.sql\n\
+                    --- a/f.sql\n\
+                    +++ b/f.sql\n\
+                    @@ -1,2 +1,2 @@\n\
+                    --- sql comment\n\
+                    +++i;\n";
+        let result = compact_diff(diff, 100);
+
+        assert!(
+            result.lines().any(|l| l == "--- sql comment"),
+            "deleted SQL comment must survive, got:\n{}",
+            result
+        );
+        assert!(
+            result.lines().any(|l| l == "+++i;"),
+            "added `++i;` must survive, got:\n{}",
+            result
+        );
+        assert!(result.contains("  +1 -1"), "tally must count both, got:\n{}", result);
+    }
+
+    #[test]
+    fn test_compact_diff_leading_context_has_its_own_budget() {
+        // Leading context must not consume the 100-line change budget: a hunk
+        // opening with more context than the budget still shows every change.
+        let mut diff = String::from("diff --git a/f.rs b/f.rs\n@@ -1,120 +1,120 @@\n");
+        for i in 0..20 {
+            diff.push_str(&format!(" ctx{}\n", i));
+        }
+        for i in 0..100 {
+            diff.push_str(&format!("-del{}\n", i));
+        }
+        let result = compact_diff(&diff, 1000);
+
+        let ctx = result.lines().filter(|l| l.starts_with(" ctx")).count();
+        let dels = result.lines().filter(|l| l.starts_with("-del")).count();
+        assert_eq!(ctx, 3, "leading context is capped, got:\n{}", result);
+        assert_eq!(dels, 100, "every change must still be shown, got:\n{}", result);
+        assert!(
+            !result.contains("truncated"),
+            "no change was dropped, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_compact_diff_truncation_note_splits_by_sign() {
+        // An anchored `^-` audit needs to know how many deletions it did not
+        // see, which a merged "N lines truncated" cannot tell it.
+        let mut diff = String::from("diff --git a/f.rs b/f.rs\n@@ -1,160 +1,160 @@\n");
+        for i in 0..80 {
+            diff.push_str(&format!("-del{}\n", i));
+            diff.push_str(&format!("+add{}\n", i));
+        }
+        let result = compact_diff(&diff, 1000);
+
+        assert!(
+            result.contains("  ... (30 deletions, 30 additions truncated)"),
+            "expected per-sign truncation note, got:\n{}",
+            result
+        );
     }
 
     #[test]
@@ -3191,8 +3285,8 @@ no changes added to commit (use "git add" and/or "git commit -a")
         }
         let result = compact_diff(&diff, 500);
         assert!(
-            result.contains("50 lines truncated"),
-            "Expected '50 lines truncated' (150 - 100 = 50), got:\n{}",
+            result.contains("50 additions truncated"),
+            "Expected '50 additions truncated' (150 - 100 = 50), got:\n{}",
             result
         );
     }
