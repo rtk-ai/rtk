@@ -1030,11 +1030,20 @@ enum DockerCommands {
     Ps {
         #[arg(short = 'a', long)]
         all: bool,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// List images
-    Images,
+    Images {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Show container logs (deduplicated)
-    Logs { container: String },
+    Logs {
+        container: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Docker Compose commands with compact output
     Compose {
         #[command(subcommand)]
@@ -1933,19 +1942,25 @@ fn run_cli() -> Result<i32> {
         },
 
         Commands::Docker { command } => match command {
-            DockerCommands::Ps { all } => {
+            DockerCommands::Ps { all, args } => {
                 let cmd = if all {
                     container::ContainerCmd::DockerPsAll
                 } else {
                     container::ContainerCmd::DockerPs
                 };
-                container::run(cmd, &[], cli.verbose)?
+                container::run(cmd, &args, cli.verbose)?
             }
-            DockerCommands::Images => {
-                container::run(container::ContainerCmd::DockerImages, &[], cli.verbose)?
+            DockerCommands::Images { args } => {
+                container::run(container::ContainerCmd::DockerImages, &args, cli.verbose)?
             }
-            DockerCommands::Logs { container: c } => {
-                container::run(container::ContainerCmd::DockerLogs, &[c], cli.verbose)?
+            DockerCommands::Logs { container: c, args } => {
+                let mut docker_args = vec![c];
+                docker_args.extend(args);
+                container::run(
+                    container::ContainerCmd::DockerLogs,
+                    &docker_args,
+                    cli.verbose,
+                )?
             }
             DockerCommands::Compose { command: compose } => match compose {
                 ComposeCommands::Ps { all } => container::run_compose_ps(all, cli.verbose)?,
@@ -3693,6 +3708,56 @@ mod tests {
                 assert!(global);
             }
             _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn docker_ps_accepts_value_taking_flags() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "docker",
+            "ps",
+            "--filter",
+            "name=web",
+            "--format",
+            "{{.Names}}",
+        ])
+        .expect("docker ps flags should parse");
+
+        match cli.command {
+            Commands::Docker {
+                command: DockerCommands::Ps { args, .. },
+            } => assert_eq!(args, ["--filter", "name=web", "--format", "{{.Names}}"]),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn docker_images_accepts_format_flag() {
+        let cli = Cli::try_parse_from(["rtk", "docker", "images", "--format", "{{.Repository}}"])
+            .expect("docker images flags should parse");
+
+        match cli.command {
+            Commands::Docker {
+                command: DockerCommands::Images { args },
+            } => assert_eq!(args, ["--format", "{{.Repository}}"]),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn docker_logs_accepts_tail_flag() {
+        let cli = Cli::try_parse_from(["rtk", "docker", "logs", "web", "--tail", "3"])
+            .expect("docker logs flags should parse");
+
+        match cli.command {
+            Commands::Docker {
+                command: DockerCommands::Logs { container, args },
+            } => {
+                assert_eq!(container, "web");
+                assert_eq!(args, ["--tail", "3"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
         }
     }
 }
