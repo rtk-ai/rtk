@@ -72,6 +72,9 @@ impl<'a> RunOptions<'a> {
         self
     }
 
+    // Only the external-proxy path uses this; Windows always takes the
+    // pure-Rust path, so it is dead there but still compiled and unit-tested.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn inherit_stdin(mut self) -> Self {
         self.inherit_stdin = true;
         self

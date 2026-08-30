@@ -1,17 +1,27 @@
 //! Filters directory listings into a compact tree format.
 
 use super::constants::NOISE_DIRS;
-use crate::core::runner::{self, RunOptions};
+use super::native_ls::run_native_ls;
 use crate::core::truncate::{reduced, CAP_WARNINGS};
-use crate::core::utils::resolved_command;
 use anyhow::Result;
 use regex::Regex;
-use std::io::IsTerminal;
 use std::sync::LazyLock;
+
+// Windows always takes the pure-Rust path below, so the pieces that only drive
+// the external `ls` proxy would be dead imports there.
+#[cfg(not(target_os = "windows"))]
+use crate::core::runner::{self, RunOptions};
+#[cfg(not(target_os = "windows"))]
+use crate::core::utils::resolved_command;
+#[cfg(not(target_os = "windows"))]
+use std::io::IsTerminal;
 
 /// Matches the date+time portion in `ls -la` output, which serves as a
 /// stable anchor regardless of owner/group column width.
 /// E.g.: " Mar 31 16:18 " or " Dec 25  2024 "
+// Only the external-proxy path uses this; Windows always takes the
+// pure-Rust path, so it is dead there but still compiled and unit-tested.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 static LS_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(?:\d{4}|\d{2}:\d{2})\s+"
@@ -20,113 +30,123 @@ static LS_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let show_all = args
-        .iter()
-        .any(|a| (a.starts_with('-') && !a.starts_with("--") && a.contains('a')) || a == "--all");
-
-    // Per `man ls`, the long listing is triggered by `-l` and also implied by
-    // `-g`, `-n`, `-o`, `--full-time` or GNU `--format=long` and `--format=verbose`.
-    // In any of those cases we preserve permission info as octal.
-    let show_long = args.iter().any(|a| {
-        if a == "--full-time" || a == "--format=long" || a == "--format=verbose" {
-            return true;
-        }
-        if a.starts_with('-') && !a.starts_with("--") {
-            return a.chars().any(|c| matches!(c, 'l' | 'g' | 'n' | 'o'));
-        }
-        false
-    });
-
-    let flags: Vec<&str> = args
-        .iter()
-        .filter(|a| a.starts_with('-'))
-        .map(|s| s.as_str())
-        .collect();
-    let paths: Vec<&str> = args
-        .iter()
-        .filter(|a| !a.starts_with('-'))
-        .map(|s| s.as_str())
-        .collect();
-
-    let mut cmd = resolved_command("ls");
-    cmd.env("LC_ALL", "C");
-    cmd.arg("-la");
-    for flag in &flags {
-        if flag.starts_with("--") {
-            if *flag != "--all" {
-                cmd.arg(flag);
-            }
-        } else {
-            let stripped = flag.trim_start_matches('-');
-            let extra: String = stripped
-                .chars()
-                .filter(|c| *c != 'l' && *c != 'a' && *c != 'h')
-                .collect();
-            if !extra.is_empty() {
-                cmd.arg(format!("-{}", extra));
-            }
-        }
+    // On Windows, always use native Rust ls to avoid missing GNU ls
+    #[cfg(target_os = "windows")]
+    {
+        run_native_ls(args, verbose)
     }
 
-    if paths.is_empty() {
-        cmd.arg(".");
-    } else {
-        for p in &paths {
-            cmd.arg(p);
-        }
-    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let show_all = args
+            .iter()
+            .any(|a| (a.starts_with('-') && !a.starts_with("--") && a.contains('a')) || a == "--all");
 
-    let target_display = if paths.is_empty() {
-        ".".to_string()
-    } else {
-        paths.join(" ")
-    };
-
-    runner::run_filtered(
-        cmd,
-        "ls",
-        &format!("-la {}", target_display),
-        |raw| {
-            let (entries, summary, parsed_count) = compact_ls(raw, show_all, show_long);
-
-            // If no lines were parsed (e.g., unrecognized locale), fall back to raw output.
-            // This is safer than returning "(empty)" for a non-empty directory.
-            let has_real_content = raw
-                .lines()
-                .any(|l| !l.starts_with("total ") && !l.is_empty() && !is_dotdir(l));
-            if parsed_count == 0 && has_real_content {
-                return raw.to_string();
+        // Per `man ls`, the long listing is triggered by `-l` and also implied by
+        // `-g`, `-n`, `-o`, `--full-time` or GNU `--format=long` and `--format=verbose`.
+        // In any of those cases we preserve permission info as octal.
+        let show_long = args.iter().any(|a| {
+            if a == "--full-time" || a == "--format=long" || a == "--format=verbose" {
+                return true;
             }
+            if a.starts_with('-') && !a.starts_with("--") {
+                return a.chars().any(|c| matches!(c, 'l' | 'g' | 'n' | 'o'));
+            }
+            false
+        });
 
-            // Only show summary in interactive mode (not when piped)
-            let is_tty = std::io::stdout().is_terminal();
-            let filtered = if is_tty {
-                format!("{}{}", entries, summary)
+        let flags: Vec<&str> = args
+            .iter()
+            .filter(|a| a.starts_with('-'))
+            .map(|s| s.as_str())
+            .collect();
+        let paths: Vec<&str> = args
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .map(|s| s.as_str())
+            .collect();
+
+        let mut cmd = resolved_command("ls");
+        cmd.env("LC_ALL", "C");
+        cmd.arg("-la");
+        for flag in &flags {
+            if flag.starts_with("--") {
+                if *flag != "--all" {
+                    cmd.arg(flag);
+                }
             } else {
-                entries
-            };
-
-            if verbose > 0 {
-                eprintln!(
-                    "Chars: {} → {} ({}% reduction)",
-                    raw.len(),
-                    filtered.len(),
-                    if !raw.is_empty() {
-                        100 - (filtered.len() * 100 / raw.len())
-                    } else {
-                        0
-                    }
-                );
+                let stripped = flag.trim_start_matches('-');
+                let extra: String = stripped
+                    .chars()
+                    .filter(|c| *c != 'l' && *c != 'a' && *c != 'h')
+                    .collect();
+                if !extra.is_empty() {
+                    cmd.arg(format!("-{}", extra));
+                }
             }
-            filtered
-        },
-        RunOptions::stdout_only()
-            .early_exit_on_failure()
-            .no_trailing_newline(),
-    )
+        }
+
+        if paths.is_empty() {
+            cmd.arg(".");
+        } else {
+            for p in &paths {
+                cmd.arg(p);
+            }
+        }
+
+        let target_display = if paths.is_empty() {
+            ".".to_string()
+        } else {
+            paths.join(" ")
+        };
+
+        runner::run_filtered(
+            cmd,
+            "ls",
+            &format!("-la {}", target_display),
+            |raw| {
+                let (entries, summary, parsed_count) = compact_ls(raw, show_all, show_long);
+
+                // If no lines were parsed (e.g., unrecognized locale), fall back to raw output.
+                // This is safer than returning "(empty)" for a non-empty directory.
+                let has_real_content = raw
+                    .lines()
+                    .any(|l| !l.starts_with("total ") && !l.is_empty() && !is_dotdir(l));
+                if parsed_count == 0 && has_real_content {
+                    return raw.to_string();
+                }
+
+                // Only show summary in interactive mode (not when piped)
+                let is_tty = std::io::stdout().is_terminal();
+                let filtered = if is_tty {
+                    format!("{}{}", entries, summary)
+                } else {
+                    entries
+                };
+
+                if verbose > 0 {
+                    eprintln!(
+                        "Chars: {} → {} ({}% reduction)",
+                        raw.len(),
+                        filtered.len(),
+                        if !raw.is_empty() {
+                            100 - (filtered.len() * 100 / raw.len())
+                        } else {
+                            0
+                        }
+                    );
+                }
+                filtered
+            },
+            RunOptions::stdout_only()
+                .early_exit_on_failure()
+                .no_trailing_newline(),
+        )
+    }
 }
 
 /// Format bytes into human-readable size
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn human_size(bytes: u64) -> String {
     if bytes >= 1_048_576 {
         format!("{:.1}M", bytes as f64 / 1_048_576.0)
@@ -147,6 +167,7 @@ fn human_size(bytes: u64) -> String {
 /// with a regex, then extract size (rightmost number before the date) and
 /// filename (everything after the date). This handles owner/group names that
 /// contain spaces, which break the old fixed-column approach.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn parse_ls_line(line: &str) -> Option<(char, String, u64, String)> {
     // Skip . and .. entries before date parsing (works for non-English locales too)
     if is_dotdir(line) {
@@ -185,6 +206,7 @@ fn parse_ls_line(line: &str) -> Option<(char, String, u64, String)> {
 /// entries for "." (the directory itself) and ".." (its parent). These entries
 /// always appear in `ls -la` output and are skipped during parsing since they
 /// carry no meaningful content for token reduction.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn is_dotdir(line: &str) -> bool {
     line.trim().ends_with('.') || line.trim().ends_with("..")
 }
@@ -195,6 +217,7 @@ fn is_dotdir(line: &str) -> bool {
 /// Returns `None` if the input does not look like a permission field.
 /// Special bits (setuid/setgid/sticky) are encoded as a leading 4th digit when
 /// any are set; otherwise we emit a 3-digit value to stay compact.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn perms_to_octal(perms: &str) -> Option<String> {
     if perms.len() < 10 || !perms.is_ascii() {
         return None;
@@ -238,6 +261,7 @@ fn perms_to_octal(perms: &str) -> Option<String> {
 /// Returns (entries, summary, parsed_count) so caller can suppress summary when piped.
 /// parsed_count tracks how many non-header lines were successfully parsed.
 /// If parsed_count == 0 but raw had content, caller should fall back to raw output.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, usize) {
     use std::collections::HashMap;
 
