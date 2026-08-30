@@ -1431,6 +1431,22 @@ fn rewrite_segment_inner(
         return Some(rewritten);
     }
 
+    if rule.rtk_cmd == "rtk kubectl" {
+        for (resource, alias) in [("pods", "pods"), ("services", "services")] {
+            let prefix = format!("kubectl get {resource}");
+            if let Some(rest) = strip_word_prefix(cmd_part, &prefix) {
+                if kubectl_alias_args_supported(rest) {
+                    let rewritten = if rest.is_empty() {
+                        format!("rtk kubectl {alias}{redirect_suffix}")
+                    } else {
+                        format!("rtk kubectl {alias} {rest}{redirect_suffix}")
+                    };
+                    return Some(rewritten);
+                }
+            }
+        }
+    }
+
     // #196: gh with --json/--jq/--template produces structured output that
     // rtk gh would corrupt — skip rewrite so the caller gets raw JSON.
     if rule.rtk_cmd == "rtk gh" {
@@ -1492,6 +1508,47 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
     } else {
         None
     }
+}
+
+fn kubectl_alias_args_supported(args: &str) -> bool {
+    let tokens = tokenize(args);
+    let mut index = 0;
+
+    while index < tokens.len() {
+        let token = &tokens[index];
+        if token.kind != TokenKind::Arg {
+            return false;
+        }
+
+        match token.value.as_str() {
+            "-A" | "--all-namespaces" => index += 1,
+            "-n" | "--namespace" | "--context" | "--kubeconfig" | "--as" | "-l" | "--selector" => {
+                let Some(value) = tokens.get(index + 1) else {
+                    return false;
+                };
+                if value.kind != TokenKind::Arg || value.value.starts_with('-') {
+                    return false;
+                }
+                index += 2;
+            }
+            value
+                if [
+                    "--namespace=",
+                    "--context=",
+                    "--kubeconfig=",
+                    "--as=",
+                    "--selector=",
+                ]
+                .iter()
+                .any(|prefix| value.strip_prefix(prefix).is_some_and(|v| !v.is_empty())) =>
+            {
+                index += 1;
+            }
+            _ => return false,
+        }
+    }
+
+    true
 }
 
 #[cfg(test)]
@@ -3254,6 +3311,38 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("kubectl describe pod mypod", &[]),
             Some("rtk kubectl describe pod mypod".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_kubectl_get_pods_to_direct_alias() {
+        assert_eq!(
+            rewrite_command_no_prefixes("kubectl get pods -n default", &[]),
+            Some("rtk kubectl pods -n default".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_kubectl_get_services_to_direct_alias() {
+        assert_eq!(
+            rewrite_command_no_prefixes("kubectl get services -A", &[]),
+            Some("rtk kubectl services -A".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_kubectl_get_pods_with_output_flag_preserves_get() {
+        assert_eq!(
+            rewrite_command_no_prefixes("kubectl get pods -o json", &[]),
+            Some("rtk kubectl get pods -o json".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_kubectl_get_named_pod_preserves_get() {
+        assert_eq!(
+            rewrite_command_no_prefixes("kubectl get pods my-pod", &[]),
+            Some("rtk kubectl get pods my-pod".into())
         );
     }
 
