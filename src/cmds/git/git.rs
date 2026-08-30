@@ -335,6 +335,17 @@ fn is_blob_show_arg(arg: &str) -> bool {
     !arg.starts_with('-') && arg.contains(':')
 }
 
+/// Path named by a diff section header.
+///
+/// `diff --git a/p b/p` carries the path twice; `diff --cc p` and
+/// `diff --combined p` carry it once, at the end.
+fn diff_header_path(line: &str) -> String {
+    match line.split(" b/").nth(1) {
+        Some(path) => path.to_string(),
+        None => line.rsplit(' ').next().unwrap_or("unknown").to_string(),
+    }
+}
+
 /// Render the note for change lines dropped past `max_hunk_lines`, split by
 /// sign so an anchored `^-` / `^+` audit can tell what it did not see.
 fn hunk_truncation_note(deletions: usize, additions: usize) -> Option<String> {
@@ -359,14 +370,23 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     let mut skipped_add = 0usize;
     let mut skipped_del = 0usize;
     let mut leading_context = 0usize;
+    let mut leading_context_total = 0usize;
     let max_hunk_lines = 100;
-    // Context before a hunk's first change gets its own budget so it cannot
-    // crowd the change itself out of `max_hunk_lines`.
+    // Context before a hunk's first change, up to three lines per hunk and
+    // `max_lines / 10` across the diff. It does not count against `max_lines`,
+    // so it cannot displace change lines, and the diff-wide cap is what bounds
+    // the overrun that exemption would otherwise allow: a diff of many small
+    // hunks would otherwise spend three exempt lines on every one of them.
     let max_leading_context = 3;
+    let leading_context_cap = max_lines / 10;
     let mut was_truncated = false;
 
     for line in diff.lines() {
-        if line.starts_with("diff --git") {
+        // `diff --cc` / `diff --combined` head the sections git emits for
+        // unmerged paths. Matching only `diff --git` left `in_hunk` set from
+        // the previous section, so the `---` / `+++` headers of every combined
+        // section after the first were counted and printed as hunk content.
+        if line.starts_with("diff --") {
             // Flush hunk truncation before starting a new file
             if let Some(note) = hunk_truncation_note(skipped_del, skipped_add) {
                 result.push(note);
@@ -377,7 +397,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
             if !current_file.is_empty() && (added > 0 || removed > 0) {
                 result.push(format!("  +{} -{}", added, removed));
             }
-            current_file = line.split(" b/").nth(1).unwrap_or("unknown").to_string();
+            current_file = diff_header_path(line);
             result.push(format!("\n{}", current_file));
             added = 0;
             removed = 0;
@@ -427,14 +447,17 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
                         result.push(line.to_string());
                         hunk_shown += 1;
                     }
-                } else if leading_context < max_leading_context {
+                } else if leading_context < max_leading_context
+                    && leading_context_total < leading_context_cap
+                {
                     result.push(line.to_string());
                     leading_context += 1;
+                    leading_context_total += 1;
                 }
             }
         }
 
-        if result.len() >= max_lines {
+        if result.len() - leading_context_total >= max_lines {
             result.push("\n... (more changes truncated)".to_string());
             was_truncated = true;
             break;
@@ -2338,6 +2361,100 @@ mod tests {
         assert!(
             !result.contains("truncated"),
             "no change was dropped, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_compact_diff_combined_diff_headers_are_not_hunk_content() {
+        // `diff --cc` sections (unmerged paths during a merge / rebase /
+        // cherry-pick / stash pop) do not match `diff --git`, so `in_hunk`
+        // stayed true from the previous section and the `---` / `+++` headers
+        // of every later file were printed at column 0 and counted.
+        let diff = "diff --cc a.txt\n\
+                    index ba2906d,e45c9c2..0000000\n\
+                    --- a/a.txt\n\
+                    +++ b/a.txt\n\
+                    @@@ -1,1 -1,1 +1,5 @@@\n\
+                    ++<<<<<<< HEAD\n\
+                    \x20+main\n\
+                    diff --cc z.txt\n\
+                    index ba2906d,e45c9c2..0000000\n\
+                    --- a/z.txt\n\
+                    +++ b/z.txt\n\
+                    @@@ -1,1 -1,1 +1,5 @@@\n\
+                    ++<<<<<<< HEAD\n\
+                    \x20+main\n";
+        let result = compact_diff(diff, 500);
+
+        let removed: Vec<&str> = result.lines().filter(|l| l.starts_with('-')).collect();
+        assert!(
+            removed.is_empty(),
+            "no deletions in this diff, got {:?} in:\n{}",
+            removed,
+            result
+        );
+        assert!(
+            !result.lines().any(|l| l.starts_with("+++ b/")),
+            "file headers must not reach the hunk body, got:\n{}",
+            result
+        );
+        assert!(result.contains("z.txt"), "got:\n{}", result);
+    }
+
+    #[test]
+    fn test_compact_diff_leading_context_does_not_displace_change_lines() {
+        // Leading context is exempt from `max_lines`, so the same number of
+        // change lines survives whether or not the hunks open with context.
+        let build = |with_context: bool| {
+            let mut diff = String::new();
+            for f in 0..30 {
+                diff.push_str(&format!("diff --git a/f{}.rs b/f{}.rs\n", f, f));
+                diff.push_str("@@ -1,20 +1,20 @@\n");
+                if with_context {
+                    for c in 0..3 {
+                        diff.push_str(&format!(" ctx{}_{}\n", f, c));
+                    }
+                }
+                for i in 0..12 {
+                    diff.push_str(&format!("-del{}_{}\n", f, i));
+                }
+            }
+            diff
+        };
+        let count_changes =
+            |out: &str| out.lines().filter(|l| l.starts_with("-del")).count();
+
+        let without = compact_diff(&build(false), 500);
+        let with = compact_diff(&build(true), 500);
+        assert_eq!(
+            count_changes(&with),
+            count_changes(&without),
+            "leading context displaced change lines:\n{}",
+            with
+        );
+    }
+
+    #[test]
+    fn test_compact_diff_leading_context_is_capped_across_the_diff() {
+        // The diff-wide cap is what bounds the exemption: without it, a diff of
+        // many small hunks would spend three exempt lines on each one.
+        let mut diff = String::new();
+        for f in 0..200 {
+            diff.push_str(&format!("diff --git a/f{}.rs b/f{}.rs\n", f, f));
+            diff.push_str("@@ -1,4 +1,4 @@\n");
+            for c in 0..3 {
+                diff.push_str(&format!(" ctx{}_{}\n", f, c));
+            }
+            diff.push_str(&format!("-del{}\n", f));
+        }
+        let result = compact_diff(&diff, 500);
+
+        let ctx = result.lines().filter(|l| l.starts_with(" ctx")).count();
+        assert!(
+            ctx <= 50,
+            "leading context must stay within max_lines / 10, got {} in:\n{}",
+            ctx,
             result
         );
     }
