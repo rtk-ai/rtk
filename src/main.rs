@@ -1051,19 +1051,23 @@ enum ComposeCommands {
     Ps {
         #[arg(short = 'a', long)]
         all: bool,
+        /// Extra docker compose ps flags/args (e.g. --format, service names)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Show compose logs (deduplicated)
     Logs {
         /// Optional service name
         service: Option<String>,
-        /// Number of log lines to fetch
-        #[arg(long, default_value_t = 100)]
-        tail: u32,
+        /// Extra docker compose logs flags (e.g. --tail, --no-log-prefix)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Build compose services (summary)
     Build {
-        /// Optional service name
-        service: Option<String>,
+        /// Extra docker compose build flags/args (e.g. --progress, service names)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Passthrough: runs any unsupported compose subcommand directly
     #[command(external_subcommand)]
@@ -1948,12 +1952,14 @@ fn run_cli() -> Result<i32> {
                 container::run(container::ContainerCmd::DockerLogs, &[c], cli.verbose)?
             }
             DockerCommands::Compose { command: compose } => match compose {
-                ComposeCommands::Ps { all } => container::run_compose_ps(all, cli.verbose)?,
-                ComposeCommands::Logs { service, tail } => {
-                    container::run_compose_logs(service.as_deref(), tail, cli.verbose)?
+                ComposeCommands::Ps { all, args } => {
+                    container::run_compose_ps(all, &args, cli.verbose)?
                 }
-                ComposeCommands::Build { service } => {
-                    container::run_compose_build(service.as_deref(), cli.verbose)?
+                ComposeCommands::Logs { service, args } => {
+                    container::run_compose_logs(service.as_deref(), &args, cli.verbose)?
+                }
+                ComposeCommands::Build { args } => {
+                    container::run_compose_build(&args, cli.verbose)?
                 }
                 ComposeCommands::Other(args) => {
                     container::run_compose_passthrough(&args, cli.verbose)?
@@ -3693,6 +3699,91 @@ mod tests {
                 assert!(global);
             }
             _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_compose_ps_accepts_format_flag() {
+        // rtk-ai/rtk#2945 (compose subtree): `docker compose ps --format ...`
+        // was rejected as an unrecognized argument and fell back to raw output.
+        let cli = Cli::try_parse_from(["rtk", "docker", "compose", "ps", "--format", "{{.Name}}"])
+            .expect("compose ps --format should parse");
+        match cli.command {
+            Commands::Docker {
+                command:
+                    DockerCommands::Compose {
+                        command: ComposeCommands::Ps { all, args },
+                    },
+            } => {
+                assert!(!all);
+                assert_eq!(args, ["--format", "{{.Name}}"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_compose_ps_accepts_service_filter() {
+        let cli = Cli::try_parse_from(["rtk", "docker", "compose", "ps", "web", "api"])
+            .expect("compose ps with service names should parse");
+        match cli.command {
+            Commands::Docker {
+                command:
+                    DockerCommands::Compose {
+                        command: ComposeCommands::Ps { args, .. },
+                    },
+            } => assert_eq!(args, ["web", "api"]),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_compose_logs_accepts_no_log_prefix_flag() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "docker",
+            "compose",
+            "logs",
+            "cms",
+            "--no-log-prefix",
+            "--tail",
+            "200",
+        ])
+        .expect("compose logs --no-log-prefix should parse");
+        match cli.command {
+            Commands::Docker {
+                command:
+                    DockerCommands::Compose {
+                        command: ComposeCommands::Logs { service, args },
+                    },
+            } => {
+                assert_eq!(service.as_deref(), Some("cms"));
+                assert_eq!(args, ["--no-log-prefix", "--tail", "200"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_compose_build_accepts_progress_flag_and_multiple_services() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "docker",
+            "compose",
+            "build",
+            "--progress=plain",
+            "control-plane",
+            "cms",
+        ])
+        .expect("compose build --progress and multiple services should parse");
+        match cli.command {
+            Commands::Docker {
+                command:
+                    DockerCommands::Compose {
+                        command: ComposeCommands::Build { args },
+                    },
+            } => assert_eq!(args, ["--progress=plain", "control-plane", "cms"]),
+            other => panic!("unexpected command: {other:?}"),
         }
     }
 }
