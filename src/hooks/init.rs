@@ -1037,11 +1037,12 @@ fn patch_settings_json_command(
         let root = if path.exists() {
             let content = fs::read_to_string(path)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
+            let content = strip_leading_bom(&content);
 
             if content.trim().is_empty() {
                 serde_json::json!({})
             } else {
-                serde_json::from_str(&content)
+                serde_json::from_str(content)
                     .with_context(|| format!("Failed to parse {} as JSON", path.display()))?
             }
         } else {
