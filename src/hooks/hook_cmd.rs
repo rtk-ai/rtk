@@ -9,9 +9,76 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::{self, Read, Write};
 
+use crate::discover::lexer::{tokenize, TokenKind};
 use crate::discover::registry::{has_heredoc, rewrite_command};
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
+
+#[derive(Clone, Copy, Default)]
+struct HookRewriteOptions {
+    ultra_compact: bool,
+    skip_env: bool,
+}
+
+fn command_segment_ranges(command: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+
+    for token in tokenize(command) {
+        let separates_commands = matches!(token.kind, TokenKind::Operator | TokenKind::Pipe)
+            || token.kind == TokenKind::Shellism && token.value == "&";
+        if separates_commands {
+            ranges.push((start, token.offset));
+            start = token.offset + token.value.len();
+        }
+    }
+    ranges.push((start, command.len()));
+    ranges
+}
+
+fn apply_rewrite_options(original: &str, rewritten: &str, options: HookRewriteOptions) -> String {
+    let mut flags = String::new();
+    if options.ultra_compact {
+        flags.push_str(" --ultra-compact");
+    }
+    if options.skip_env {
+        flags.push_str(" --skip-env");
+    }
+    if flags.is_empty() {
+        return rewritten.to_string();
+    }
+
+    let original_segments = command_segment_ranges(original);
+    let rewritten_segments = command_segment_ranges(rewritten);
+    if original_segments.len() != rewritten_segments.len() {
+        return rewritten.to_string();
+    }
+
+    let mut insertion_offsets = Vec::new();
+    for ((original_start, original_end), (rewritten_start, rewritten_end)) in
+        original_segments.into_iter().zip(rewritten_segments)
+    {
+        if original[original_start..original_end].trim()
+            == rewritten[rewritten_start..rewritten_end].trim()
+        {
+            continue;
+        }
+
+        let segment = &rewritten[rewritten_start..rewritten_end];
+        if let Some(token) = tokenize(segment)
+            .into_iter()
+            .find(|token| token.kind == TokenKind::Arg && token.value == "rtk")
+        {
+            insertion_offsets.push(rewritten_start + token.offset + token.value.len());
+        }
+    }
+
+    let mut output = rewritten.to_string();
+    for offset in insertion_offsets.into_iter().rev() {
+        output.insert_str(offset, &flags);
+    }
+    output
+}
 
 fn read_stdin_limited() -> Result<String> {
     let mut input = String::new();
@@ -571,7 +638,7 @@ enum PayloadAction {
     Ignore,
 }
 
-fn process_claude_payload(v: &Value) -> PayloadAction {
+fn process_claude_payload(v: &Value, options: HookRewriteOptions) -> PayloadAction {
     let cmd = match v
         .pointer("/tool_input/command")
         .and_then(|c| c.as_str())
@@ -594,8 +661,8 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
                 cmd: cmd.to_string(),
             }
         }
-        HookDecision::AllowRewrite(r) => (r, true),
-        HookDecision::AskRewrite(r) => (r, false),
+        HookDecision::AllowRewrite(r) => (apply_rewrite_options(cmd, &r, options), true),
+        HookDecision::AskRewrite(r) => (apply_rewrite_options(cmd, &r, options), false),
     };
 
     let updated_input = {
@@ -627,7 +694,7 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
 }
 
 /// Run the Claude Code PreToolUse hook natively.
-pub fn run_claude() -> Result<()> {
+pub fn run_claude(ultra_compact: bool, skip_env: bool) -> Result<()> {
     let input = read_stdin_limited()?;
 
     let input = input.trim();
@@ -643,7 +710,11 @@ pub fn run_claude() -> Result<()> {
         }
     };
 
-    match process_claude_payload(&v) {
+    let options = HookRewriteOptions {
+        ultra_compact,
+        skip_env,
+    };
+    match process_claude_payload(&v, options) {
         PayloadAction::Rewrite {
             cmd,
             rewritten,
@@ -663,8 +734,13 @@ pub fn run_claude() -> Result<()> {
 
 #[cfg(test)]
 fn run_claude_inner(input: &str) -> Option<String> {
+    run_claude_inner_with_options(input, HookRewriteOptions::default())
+}
+
+#[cfg(test)]
+fn run_claude_inner_with_options(input: &str, options: HookRewriteOptions) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;
-    match process_claude_payload(&v) {
+    match process_claude_payload(&v, options) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
         _ => None,
     }
@@ -1411,6 +1487,63 @@ mod tests {
             .and_then(|c| c.as_str())
             .unwrap();
         assert_eq!(cmd, "rtk git status");
+    }
+
+    #[test]
+    fn test_claude_rewrite_propagates_ultra_compact() {
+        let result = run_claude_inner_with_options(
+            &claude_input("next build"),
+            HookRewriteOptions {
+                ultra_compact: true,
+                skip_env: false,
+            },
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk --ultra-compact next");
+    }
+
+    #[test]
+    fn test_claude_rewrite_propagates_both_flags_to_compound_commands() {
+        let result = run_claude_inner_with_options(
+            &claude_input("NODE_ENV=test next build && git status"),
+            HookRewriteOptions {
+                ultra_compact: true,
+                skip_env: true,
+            },
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(
+            cmd,
+            "NODE_ENV=test rtk --ultra-compact --skip-env next && rtk --ultra-compact --skip-env git status"
+        );
+    }
+
+    #[test]
+    fn test_claude_rewrite_flags_do_not_modify_raw_pipe_arguments() {
+        let result = run_claude_inner_with_options(
+            &claude_input("grep rtk src | grep rtk"),
+            HookRewriteOptions {
+                ultra_compact: true,
+                skip_env: false,
+            },
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk --ultra-compact grep rtk src | grep rtk");
     }
 
     #[test]
