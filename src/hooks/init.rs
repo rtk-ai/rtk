@@ -10,7 +10,8 @@ use tempfile::NamedTempFile;
 use crate::core::utils::{from_json_str, strip_leading_bom};
 use crate::hooks::constants::{
     CONFIG_DIR, COPILOT_HOME_ENV, COPILOT_HOOK_FILE, COPILOT_INSTRUCTIONS_FILE, COPILOT_USER_DIR,
-    CURSOR_DIR, GEMINI_DIR, GITHUB_DIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+    CURSOR_DIR, GEMINI_DIR, GITHUB_DIR, KILOCODE_PLUGIN_FILE, KILOCODE_PLUGIN_SUBDIR,
+    KILOCODE_SUBDIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
 };
 
 use super::constants::{
@@ -30,6 +31,9 @@ const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
 
 // Embedded Pi extension (auto-rewrite)
 const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
+
+// Embedded Kilo Code plugin (auto-rewrite)
+const KILOCODE_PLUGIN: &str = include_str!("../../hooks/kilocode/rtk.ts");
 
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
@@ -1725,61 +1729,102 @@ fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
-// ─── Kilo Code support ────────────────────────────────────────
-
-const KILOCODE_RULES: &str = include_str!("../../hooks/kilocode/rules.md");
-
 pub fn run_kilocode_mode(ctx: InitContext) -> Result<()> {
-    run_kilocode_mode_at(&std::env::current_dir()?, ctx)
+    run_kilocode_mode_at(&resolve_kilocode_dir()?, ctx)
 }
 
-fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
-    // Kilo Code reads .kilocode/rules/ from the project root (workspace-scoped)
-    let target_dir = base_dir.join(".kilocode/rules");
-    let rules_path = target_dir.join("rtk-rules.md");
+fn run_kilocode_mode_at(kilocode_dir: &Path, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let plugin_path = kilocode_plugin_path(kilocode_dir);
+    let installed = ensure_kilocode_plugin_installed(&plugin_path, ctx)?;
 
-    let existing = fs::read_to_string(&rules_path).unwrap_or_default();
-    if existing.contains("RTK") || existing.contains("rtk") {
-        if !dry_run {
-            println!("\nRTK already configured for Kilo Code in this project.\n");
-            println!("  Rules: .kilocode/rules/rtk-rules.md (already present)");
-        }
-    } else {
-        let new_content = if existing.trim().is_empty() {
-            KILOCODE_RULES.to_string()
-        } else {
-            format!("{}\n\n{}", existing.trim(), KILOCODE_RULES)
-        };
-        if dry_run {
-            println!(
-                "[dry-run] would write {}: (and create parent dir if missing)",
-                rules_path.display()
-            );
-            if verbose > 0 {
-                println!("[dry-run] content:\n{}", new_content);
-            }
-        } else {
-            fs::create_dir_all(&target_dir)
-                .context("Failed to create .kilocode/rules directory")?;
-            fs::write(&rules_path, &new_content)
-                .context("Failed to write .kilocode/rules/rtk-rules.md")?;
-
-            if verbose > 0 {
-                eprintln!("Wrote .kilocode/rules/rtk-rules.md");
-            }
-
-            println!("\nRTK configured for Kilo Code.\n");
-            println!("  Rules: .kilocode/rules/rtk-rules.md (installed)");
-        }
-    }
     if dry_run {
         print_dry_run_footer();
     } else {
-        println!("  Kilo Code will now use rtk commands for token savings.");
-        println!("  Test with: git status\n");
+        let status = if installed {
+            "installed"
+        } else {
+            "already current"
+        };
+        println!("\nKilo Code plugin {status}.\n");
+        println!("  Plugin: {}", plugin_path.display());
+        println!("  Restart Kilo Code. Test with: git status\n");
     }
 
+    Ok(())
+}
+
+fn resolve_kilocode_dir() -> Result<PathBuf> {
+    if let Some(config_dir) = std::env::var_os("KILO_CONFIG_DIR").filter(|value| !value.is_empty())
+    {
+        return Ok(PathBuf::from(config_dir));
+    }
+
+    let home = dirs::home_dir().context(if cfg!(windows) {
+        "Cannot determine home directory. Is %USERPROFILE% set?"
+    } else {
+        "Cannot determine home directory. Is $HOME set?"
+    })?;
+    let config_dir = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(CONFIG_DIR));
+
+    Ok(config_dir.join(KILOCODE_SUBDIR))
+}
+
+fn kilocode_plugin_path(kilocode_dir: &Path) -> PathBuf {
+    kilocode_dir
+        .join(KILOCODE_PLUGIN_SUBDIR)
+        .join(KILOCODE_PLUGIN_FILE)
+}
+
+pub fn kilocode_plugin_installed() -> bool {
+    resolve_kilocode_dir()
+        .map(|path| kilocode_plugin_path(&path).is_file())
+        .unwrap_or(false)
+}
+
+fn ensure_kilocode_plugin_installed(path: &Path, ctx: InitContext) -> Result<bool> {
+    let InitContext { dry_run, .. } = ctx;
+    if !dry_run {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create Kilo Code plugin directory: {}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+    write_if_changed(path, KILOCODE_PLUGIN, "Kilo Code plugin", ctx)
+}
+
+pub fn uninstall_kilocode(ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let plugin_path = kilocode_plugin_path(&resolve_kilocode_dir()?);
+
+    if !plugin_path.exists() {
+        println!("RTK Kilo Code plugin was not installed (nothing to remove)");
+        return Ok(());
+    }
+
+    if dry_run {
+        println!(
+            "[dry-run] would remove Kilo Code plugin: {}",
+            plugin_path.display()
+        );
+        print_dry_run_footer();
+        return Ok(());
+    }
+
+    fs::remove_file(&plugin_path).with_context(|| {
+        format!(
+            "Failed to remove Kilo Code plugin: {}",
+            plugin_path.display()
+        )
+    })?;
+    println!("RTK Kilo Code plugin removed: {}", plugin_path.display());
     Ok(())
 }
 
@@ -5383,14 +5428,14 @@ mod tests {
     }
 
     #[test]
-    fn test_kilocode_mode_creates_rules_file() {
+    fn test_kilocode_mode_creates_plugin_file() {
         let temp = TempDir::new().unwrap();
         run_kilocode_mode_at(temp.path(), InitContext::default()).unwrap();
 
-        let rules_path = temp.path().join(".kilocode/rules/rtk-rules.md");
-        assert!(rules_path.exists(), "Rules file should be created");
-        let content = fs::read_to_string(&rules_path).unwrap();
-        assert!(content.contains("RTK"), "Rules file should contain RTK");
+        let plugin_path = temp.path().join("plugin/rtk.ts");
+        assert!(plugin_path.exists(), "Plugin file should be created");
+        let content = fs::read_to_string(&plugin_path).unwrap();
+        assert!(content.contains("@kilocode/plugin"));
     }
 
     #[test]
@@ -5398,13 +5443,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         run_kilocode_mode_at(temp.path(), InitContext::default()).unwrap();
 
-        let path = temp.path().join(".kilocode/rules/rtk-rules.md");
+        let path = temp.path().join("plugin/rtk.ts");
         let first = fs::read_to_string(&path).unwrap();
 
-        // Second run should not overwrite
         run_kilocode_mode_at(temp.path(), InitContext::default()).unwrap();
         let second = fs::read_to_string(&path).unwrap();
-        assert_eq!(first, second, "Idempotent: content should not change");
+        assert_eq!(first, second);
     }
 
     #[test]

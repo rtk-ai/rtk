@@ -41,7 +41,7 @@ Agent runs "cargo test"
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | AGENTS.md instructions | N/A |
-| Kilo Code | Rules file (prompt-level) | N/A |
+| Kilo Code | TypeScript plugin (`tool.execute.before`) | Yes |
 | Google Antigravity | Rules file (prompt-level) | N/A |
 | Mistral Vibe | Rust binary (`pre_tool`) | Yes |
 
@@ -184,10 +184,16 @@ rtk init --global --codex  # user-global (~/.codex/AGENTS.md)
 ### Kilo Code
 
 ```bash
-rtk init --agent kilocode    # creates .kilocode/rules/rtk-rules.md in current project
+rtk init -g --agent kilocode
 ```
 
-Kilo Code reads `.kilocode/rules/` as custom instructions. RTK adds guidance telling Kilo Code to prefer `rtk <cmd>` over raw commands.
+Installs `~/.config/kilo/plugin/rtk.ts`. The plugin intercepts eligible Bash and shell tool calls, runs `rtk rewrite`, and mutates the command in place. Commands with machine-readable output flags pass through unchanged. Re-run the command to update the plugin.
+
+Uninstall:
+
+```bash
+rtk init -g --agent kilocode --uninstall
+```
 
 ### Google Antigravity
 
@@ -228,7 +234,7 @@ Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any o
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Codex, and Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Kilo Code, and Pi) use in-place mutation via the agent's TypeScript extension API.
 
 ## Windows support
 

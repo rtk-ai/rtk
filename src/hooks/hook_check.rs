@@ -1,7 +1,7 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
 use super::constants::{HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON};
-use super::init::resolve_claude_dir;
+use super::init::{kilocode_plugin_installed, resolve_claude_dir};
 use super::is_claude_hook_command;
 use crate::core::constants::RTK_DATA_DIR;
 use crate::core::utils::from_json_str;
@@ -17,13 +17,17 @@ pub enum HookStatus {
     Ok,
     /// Hook exists but is outdated or unreadable.
     Outdated,
-    /// No hook file found (but Claude Code is installed).
+    /// No supported integration was found while Claude Code is installed.
     Missing,
 }
 
 /// Return the current hook status without printing anything.
-/// Returns `Ok` if no Claude Code is detected (not applicable).
+/// Returns `Ok` when a supported integration is installed or no Claude Code is detected.
 pub fn status() -> HookStatus {
+    if kilocode_plugin_installed() {
+        return HookStatus::Ok;
+    }
+
     // Don't warn users who don't have Claude Code installed
     let claude_dir = match resolve_claude_dir() {
         Ok(d) => d,

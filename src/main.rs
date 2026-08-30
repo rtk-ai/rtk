@@ -2048,6 +2048,11 @@ fn run_cli() -> Result<i32> {
                 } else {
                     hooks::init::uninstall_copilot(ctx)?;
                 }
+            } else if uninstall && agent == Some(AgentTarget::Kilocode) {
+                if !global {
+                    anyhow::bail!("Kilo Code plugin is user-scoped. Use: rtk init -g --agent kilocode --uninstall");
+                }
+                hooks::init::uninstall_kilocode(ctx)?;
             } else if uninstall {
                 uninstall_init_dispatch(
                     agent,
@@ -2076,8 +2081,10 @@ fn run_cli() -> Result<i32> {
             } else if agent == Some(AgentTarget::Pi) {
                 hooks::init::run_pi_mode(global, ctx)?
             } else if agent == Some(AgentTarget::Kilocode) {
-                if global {
-                    anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");
+                if !global {
+                    anyhow::bail!(
+                        "Kilo Code plugin is user-scoped. Use: rtk init -g --agent kilocode"
+                    );
                 }
                 hooks::init::run_kilocode_mode(ctx)?;
             } else if agent == Some(AgentTarget::Antigravity) {
