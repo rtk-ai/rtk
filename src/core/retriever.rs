@@ -1266,9 +1266,9 @@ mod tests {
         let _guard = crate::core::utils::TEST_ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
-        std::env::set_var("RTK_RECALL", "0");
-        record_tee_recall_with(&cfg, "grep", "/tee/1_grep.log");
-        std::env::remove_var("RTK_RECALL");
+        temp_env::with_var("RTK_RECALL", Some("0"), || {
+            record_tee_recall_with(&cfg, "grep", "/tee/1_grep.log");
+        });
         assert!(
             !dir.path().join("recall_test.db").exists(),
             "RTK_RECALL=0 must prevent any recall.db write from the hook path"

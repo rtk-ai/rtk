@@ -144,7 +144,7 @@ cargo build --release
 cargo install --path . --force
 ```
 
-Minimum required Rust version: 1.70+.
+Minimum required Rust version: 1.91 (edition 2024 needs Cargo 1.85 or newer).
 
 ## OpenCode not using RTK
 

@@ -1346,13 +1346,14 @@ mod tests {
     #[test]
     fn native_run_returns_zero_on_success() {
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("RTK_TEE_DIR", tmp.path());
-        std::fs::write(tmp.path().join("a.txt"), "x").unwrap();
-        let root = tmp.path().to_string_lossy().into_owned();
-        assert_eq!(
-            run("*.txt", &root, 10, false, None, "f", false, 0).unwrap(),
-            0
-        );
+        temp_env::with_var("RTK_TEE_DIR", Some(tmp.path()), || {
+            std::fs::write(tmp.path().join("a.txt"), "x").unwrap();
+            let root = tmp.path().to_string_lossy().into_owned();
+            assert_eq!(
+                run("*.txt", &root, 10, false, None, "f", false, 0).unwrap(),
+                0
+            );
+        });
     }
 
     #[test]
@@ -1411,28 +1412,29 @@ mod tests {
     #[test]
     fn disclosure_survives_the_output_guard() {
         let tee = tempfile::tempdir().unwrap();
-        std::env::set_var("RTK_TEE_DIR", tee.path());
-        let timer = tracking::TimedExecution::start();
-        let shown = render(
-            vec!["visible.txt".to_string()],
-            50,
-            false,
-            &["secret.txt".to_string()],
-            "find . -name '*.txt'",
-            "visible.txt",
-            &timer,
-        );
-        assert!(shown.contains("(1 filtered"), "{shown}");
-        let shown = render(
-            vec![],
-            50,
-            false,
-            &["secret.txt".to_string()],
-            "find . -name secret.txt",
-            "",
-            &timer,
-        );
-        assert!(shown.contains("(1 filtered"), "{shown}");
+        temp_env::with_var("RTK_TEE_DIR", Some(tee.path()), || {
+            let timer = tracking::TimedExecution::start();
+            let shown = render(
+                vec!["visible.txt".to_string()],
+                50,
+                false,
+                &["secret.txt".to_string()],
+                "find . -name '*.txt'",
+                "visible.txt",
+                &timer,
+            );
+            assert!(shown.contains("(1 filtered"), "{shown}");
+            let shown = render(
+                vec![],
+                50,
+                false,
+                &["secret.txt".to_string()],
+                "find . -name secret.txt",
+                "",
+                &timer,
+            );
+            assert!(shown.contains("(1 filtered"), "{shown}");
+        });
     }
 
     #[cfg(unix)]

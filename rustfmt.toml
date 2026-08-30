@@ -1,1 +1,6 @@
+# cargo fmt passes --edition from Cargo.toml, but a bare `rustfmt` invocation --
+# editor format-on-save, rust-analyzer.rustfmt.overrideCommand, a pre-commit
+# hook -- has no crate context and falls back to edition 2015, which cannot even
+# parse this crate's let-chains. Pin it here so those agree with CI.
+edition = "2024"
 style_edition = "2024"

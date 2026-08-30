@@ -287,11 +287,17 @@ mod signal_relay {
     unsafe extern "C" fn relay(sig: libc::c_int) {
         let pid = CHILD_PID.load(Ordering::SeqCst);
         if pid == 0 || RELAYED.swap(sig, Ordering::SeqCst) != 0 {
-            libc::signal(sig, libc::SIG_DFL);
-            libc::raise(sig);
+            // nosemgrep: unsafe-block
+            unsafe {
+                libc::signal(sig, libc::SIG_DFL);
+                libc::raise(sig);
+            }
             return;
         }
-        libc::kill(pid as libc::pid_t, sig);
+        // nosemgrep: unsafe-block
+        unsafe {
+            libc::kill(pid as libc::pid_t, sig);
+        }
     }
 
     fn escalate(pid: u32) {

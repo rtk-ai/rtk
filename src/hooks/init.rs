@@ -5087,70 +5087,72 @@ fn show_claude_config() -> Result<()> {
     }
 
     // Check OpenCode plugin
-    if let Ok(opencode_dir) = resolve_opencode_dir() {
-        let plugin = opencode_plugin_path(&opencode_dir);
-        if plugin.exists() {
-            println!("[ok] OpenCode: plugin installed ({})", plugin.display());
-        } else {
-            println!("[--] OpenCode: plugin not found");
+    match resolve_opencode_dir() {
+        Ok(opencode_dir) => {
+            let plugin = opencode_plugin_path(&opencode_dir);
+            if plugin.exists() {
+                println!("[ok] OpenCode: plugin installed ({})", plugin.display());
+            } else {
+                println!("[--] OpenCode: plugin not found");
+            }
         }
-    } else {
-        println!("[--] OpenCode: config dir not found");
+        _ => println!("[--] OpenCode: config dir not found"),
     }
 
     // Check Cursor hooks
-    if let Ok(cursor_dir) = resolve_cursor_dir() {
-        let cursor_hook = cursor_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
-        let cursor_hooks_json = cursor_dir.join(HOOKS_JSON);
+    match resolve_cursor_dir() {
+        Ok(cursor_dir) => {
+            let cursor_hook = cursor_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+            let cursor_hooks_json = cursor_dir.join(HOOKS_JSON);
 
-        // Check for binary command in hooks.json first
-        let cursor_binary_registered = if cursor_hooks_json.exists() {
-            let content = fs::read_to_string(&cursor_hooks_json).unwrap_or_default();
-            if let Ok(root) = from_json_str::<serde_json::Value>(&content) {
-                cursor_hook_already_present(&root)
+            // Check for binary command in hooks.json first
+            let cursor_binary_registered = if cursor_hooks_json.exists() {
+                let content = fs::read_to_string(&cursor_hooks_json).unwrap_or_default();
+                if let Ok(root) = from_json_str::<serde_json::Value>(&content) {
+                    cursor_hook_already_present(&root)
+                } else {
+                    false
+                }
             } else {
                 false
-            }
-        } else {
-            false
-        };
+            };
 
-        if cursor_binary_registered {
-            println!("[ok] Cursor hook: registered in hooks.json");
-        } else if cursor_hook.exists() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let meta = fs::metadata(&cursor_hook)?;
-                let is_executable = meta.permissions().mode() & 0o111 != 0;
-                let content = fs::read_to_string(&cursor_hook)?;
-                let _is_thin = content.contains("rtk rewrite");
+            if cursor_binary_registered {
+                println!("[ok] Cursor hook: registered in hooks.json");
+            } else if cursor_hook.exists() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let meta = fs::metadata(&cursor_hook)?;
+                    let is_executable = meta.permissions().mode() & 0o111 != 0;
+                    let content = fs::read_to_string(&cursor_hook)?;
+                    let _is_thin = content.contains("rtk rewrite");
 
-                if !is_executable {
-                    println!(
-                        "[warn] Cursor hook: {} (legacy script, NOT executable)",
-                        cursor_hook.display()
-                    );
-                } else {
+                    if !is_executable {
+                        println!(
+                            "[warn] Cursor hook: {} (legacy script, NOT executable)",
+                            cursor_hook.display()
+                        );
+                    } else {
+                        println!(
+                            "[warn] Cursor hook: {} (legacy script — run `rtk init -g --agent cursor` to upgrade)",
+                            cursor_hook.display()
+                        );
+                    }
+                }
+
+                #[cfg(not(unix))]
+                {
                     println!(
                         "[warn] Cursor hook: {} (legacy script — run `rtk init -g --agent cursor` to upgrade)",
                         cursor_hook.display()
                     );
                 }
+            } else {
+                println!("[--] Cursor hook: not found");
             }
-
-            #[cfg(not(unix))]
-            {
-                println!(
-                    "[warn] Cursor hook: {} (legacy script — run `rtk init -g --agent cursor` to upgrade)",
-                    cursor_hook.display()
-                );
-            }
-        } else {
-            println!("[--] Cursor hook: not found");
         }
-    } else {
-        println!("[--] Cursor: home dir not found");
+        _ => println!("[--] Cursor: home dir not found"),
     }
 
     println!("\nUsage:");
@@ -8456,52 +8458,30 @@ mod tests {
     }
 
     use std::sync::Mutex;
-    static CLAUDE_DIR_LOCK: Mutex<()> = Mutex::new(());
-    static PI_DIR_LOCK: Mutex<()> = Mutex::new(());
     /// Serialises all tests that mutate the process-wide working directory.
     static CWD_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
-        let _guard = CLAUDE_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let claude_dir = tmp.path().join(CLAUDE_DIR);
         fs::create_dir_all(&claude_dir).unwrap();
 
-        let orig = std::env::var_os("CLAUDE_CONFIG_DIR");
-        std::env::set_var("CLAUDE_CONFIG_DIR", &claude_dir);
-        f(&claude_dir);
-        match orig {
-            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
-            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
-        }
+        temp_env::with_var("CLAUDE_CONFIG_DIR", Some(&claude_dir), || f(&claude_dir));
     }
 
     fn with_pi_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
-        let _guard = PI_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let pi_dir = tmp.path().join("pi_agent");
         fs::create_dir_all(&pi_dir).unwrap();
 
-        let orig = std::env::var_os(PI_CODING_AGENT_DIR_ENV);
-        std::env::set_var(PI_CODING_AGENT_DIR_ENV, &pi_dir);
-        f(&pi_dir);
-        match orig {
-            Some(v) => std::env::set_var(PI_CODING_AGENT_DIR_ENV, v),
-            None => std::env::remove_var(PI_CODING_AGENT_DIR_ENV),
-        }
+        temp_env::with_var(PI_CODING_AGENT_DIR_ENV, Some(&pi_dir), || f(&pi_dir));
     }
 
+    // OMP reuses PI_CODING_AGENT_DIR, so this overrides the same variable as
+    // with_pi_dir_override; temp-env serialises the two against each other.
     fn with_omp_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
-        // OMP reuses PI_CODING_AGENT_DIR, so share the Pi environment lock.
-        let _guard = PI_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let omp_dir = tmp.path().join("omp_agent");
         fs::create_dir_all(&omp_dir).unwrap();
 
-        let orig = std::env::var_os(PI_CODING_AGENT_DIR_ENV);
-        std::env::set_var(PI_CODING_AGENT_DIR_ENV, &omp_dir);
-        f(&omp_dir);
-        match orig {
-            Some(v) => std::env::set_var(PI_CODING_AGENT_DIR_ENV, v),
-            None => std::env::remove_var(PI_CODING_AGENT_DIR_ENV),
-        }
+        temp_env::with_var(PI_CODING_AGENT_DIR_ENV, Some(&omp_dir), || f(&omp_dir));
     }
 
     #[test]
@@ -9034,18 +9014,10 @@ mod tests {
     fn test_run_pi_mode_global_creates_plugin_when_dir_absent() {
         let tmp = TempDir::new().unwrap();
         let absent_dir = tmp.path().join("no_such_pi_dir");
-        let _guard = PI_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let orig = std::env::var_os(PI_CODING_AGENT_DIR_ENV);
-        std::env::set_var(PI_CODING_AGENT_DIR_ENV, &absent_dir);
-
-        let result = run_pi_mode(true, InitContext::default());
-
-        match orig {
-            Some(v) => std::env::set_var(PI_CODING_AGENT_DIR_ENV, v),
-            None => std::env::remove_var(PI_CODING_AGENT_DIR_ENV),
-        }
-
-        result.unwrap();
+        temp_env::with_var(PI_CODING_AGENT_DIR_ENV, Some(&absent_dir), || {
+            run_pi_mode(true, InitContext::default())
+        })
+        .unwrap();
 
         let plugin = absent_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
         assert!(

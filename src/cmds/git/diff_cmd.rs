@@ -7342,13 +7342,13 @@ diff --git a/b.rs b/b.rs
         for _ in 0..3_000 {
             let n = (lcg(&mut seed) % 12) as usize;
             let m = (lcg(&mut seed) % 12) as usize;
-            let mut gen = |k: usize| -> Vec<String> {
+            let mut make_lines = |k: usize| -> Vec<String> {
                 (0..k)
                     .map(|_| format!("key{} = {}", lcg(&mut seed) % 3, lcg(&mut seed) % 5))
                     .collect()
             };
-            let a_lines = gen(n);
-            let b_lines = gen(m);
+            let a_lines = make_lines(n);
+            let b_lines = make_lines(m);
             let a: Vec<&str> = a_lines.iter().map(|s| s.as_str()).collect();
             let b: Vec<&str> = b_lines.iter().map(|s| s.as_str()).collect();
 

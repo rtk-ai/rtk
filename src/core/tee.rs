@@ -113,12 +113,14 @@ mod tests {
     #[test]
     fn test_disabled_env_emits_nothing() {
         let _guard = crate::core::utils::TEST_ENV_LOCK.lock().unwrap();
-        std::env::set_var("RTK_RECALL", "0");
         let big = "x".repeat(1000);
-        let hint = tee_and_hint(&big, "cmd", 1);
-        let forced = force_tee_hint(&big, "cmd");
-        let tail = force_tee_tail_hint(&big, "cmd", 5);
-        std::env::remove_var("RTK_RECALL");
+        let (hint, forced, tail) = temp_env::with_var("RTK_RECALL", Some("0"), || {
+            (
+                tee_and_hint(&big, "cmd", 1),
+                force_tee_hint(&big, "cmd"),
+                force_tee_tail_hint(&big, "cmd", 5),
+            )
+        });
         assert!(hint.is_none(), "disabled must never emit tokens");
         assert!(forced.is_none());
         assert!(tail.is_none());

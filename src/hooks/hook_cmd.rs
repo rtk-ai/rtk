@@ -1900,8 +1900,9 @@ mod tests {
 
     #[test]
     fn test_audit_log_silent_when_disabled() {
-        std::env::remove_var("RTK_HOOK_AUDIT");
-        audit_log("test", "git status", "rtk git status");
+        temp_env::with_var_unset("RTK_HOOK_AUDIT", || {
+            audit_log("test", "git status", "rtk git status");
+        });
     }
 
     #[test]

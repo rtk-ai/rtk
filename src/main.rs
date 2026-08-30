@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 mod analytics;
 mod cmds;
 mod core;
@@ -2929,11 +2930,17 @@ fn run_cli() -> Result<i32> {
                 unsafe extern "C" fn handle_signal(sig: libc::c_int) {
                     let pid = PROXY_CHILD_PID.load(Ordering::SeqCst);
                     if pid != 0 {
-                        libc::kill(pid as libc::pid_t, libc::SIGTERM);
-                        libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), 0);
+                        // nosemgrep: unsafe-block
+                        unsafe {
+                            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                            libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), 0);
+                        }
                     }
-                    libc::signal(sig, libc::SIG_DFL);
-                    libc::raise(sig);
+                    // nosemgrep: unsafe-block
+                    unsafe {
+                        libc::signal(sig, libc::SIG_DFL);
+                        libc::raise(sig);
+                    }
                 }
                 // nosemgrep: unsafe-block
                 unsafe {
