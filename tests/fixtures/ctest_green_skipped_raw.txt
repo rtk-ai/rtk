@@ -1,0 +1,19 @@
+Test project /tmp/build
+    Start 1: pass_fast
+1/5 Test #1: pass_fast ........................   Passed    0.00 sec
+    Start 2: pass_slow
+2/5 Test #2: pass_slow ........................   Passed    0.31 sec
+    Start 3: pass_medium
+3/5 Test #3: pass_medium ......................   Passed    0.12 sec
+    Start 5: skipped_case
+4/5 Test #5: skipped_case .....................***Skipped   0.01 sec
+    Start 6: disabled_case
+5/5 Test #6: disabled_case ....................***Not Run (Disabled)   0.00 sec
+
+100% tests passed, 0 tests failed out of 4
+
+Total Test time (real) =   0.45 sec
+
+The following tests did not run:
+	  5 - skipped_case (Skipped)
+	  6 - disabled_case (Disabled)

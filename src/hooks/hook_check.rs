@@ -6,6 +6,7 @@ use super::constants::{
 };
 use super::init::resolve_claude_dir;
 use crate::core::constants::RTK_DATA_DIR;
+use crate::core::utils::from_json_str;
 use std::path::{Path, PathBuf};
 
 const CURRENT_HOOK_VERSION: u8 = 3;
@@ -157,7 +158,7 @@ fn hook_command_registered_in_json(path: &Path, command: &str) -> bool {
         Ok(c) if !c.trim().is_empty() => c,
         _ => return false,
     };
-    let root: serde_json::Value = match serde_json::from_str(&content) {
+    let root: serde_json::Value = match from_json_str(&content) {
         Ok(v) => v,
         Err(_) => return false,
     };

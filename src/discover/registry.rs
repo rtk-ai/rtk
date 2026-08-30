@@ -2808,6 +2808,19 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_ctest() {
+        assert_eq!(
+            classify_command("ctest -R smoke --output-on-failure"),
+            Classification::Supported {
+                rtk_equivalent: "rtk ctest",
+                category: "Tests",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
     fn test_rewrite_rg_files_pipeline_rewrites_safe_final_filter() {
         assert_eq!(
             rewrite_command_no_prefixes("rg --files docs scratch scripts . | rg summary", &[]),
@@ -2828,6 +2841,14 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes(r#"rg -n "DB_HOST" server/src -g "*.ts""#, &[]),
             Some(r#"rtk rg -n "DB_HOST" server/src -g "*.ts""#.into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_ctest() {
+        assert_eq!(
+            rewrite_command_no_prefixes("ctest -R smoke --output-on-failure", &[]),
+            Some("rtk ctest -R smoke --output-on-failure".into())
         );
     }
 

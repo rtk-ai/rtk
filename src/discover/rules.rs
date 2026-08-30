@@ -369,6 +369,14 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^ctest(?:\s|$)",
+        rtk_cmd: "rtk ctest",
+        rewrite_prefixes: &["ctest"],
+        category: "Tests",
+        savings_pct: 80.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?playwright",
         rtk_cmd: "rtk playwright",
         rewrite_prefixes: &[

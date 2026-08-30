@@ -432,7 +432,7 @@ pub fn runtime_check() -> Result<()> {
 }
 
 fn settings_has_claude_hook(content: &str) -> bool {
-    let Ok(root) = serde_json::from_str::<serde_json::Value>(content) else {
+    let Ok(root) = crate::core::utils::from_json_str::<serde_json::Value>(content) else {
         return false;
     };
 

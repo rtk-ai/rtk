@@ -23,8 +23,8 @@ use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
-    summary, tree, wc_cmd,
+    ctest_cmd, deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
+    read, search, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -318,7 +318,13 @@ enum Commands {
         #[arg(short = 'l', long, default_value = "80")]
         max_len: usize,
         /// Max results to show
-        #[arg(short, long, default_value = "200")]
+        // No short: `-m` is GNU grep's --max-count (stop after N matches per
+        // file). Deriving it to RTK's --max (a display cap) silently swallowed
+        // `-m N` so grep never saw the real --max-count. Without the short, `-m`
+        // flows to extra_args and is forwarded verbatim to grep/rg, which applies
+        // genuine --max-count while RTK still compacts (matches how `rtk rg -m`
+        // already behaves). --max keeps its long form.
+        #[arg(long, default_value = "200")]
         max: usize,
         /// Show only match context (not full line)
         #[arg(long)]
@@ -501,6 +507,14 @@ enum Commands {
     /// Vitest commands with compact output
     Vitest {
         /// Additional vitest arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// CTest with compact output
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Ctest {
+        /// Additional ctest arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2207,6 +2221,8 @@ fn run_cli() -> Result<i32> {
             vitest_cmd::run_test(&cli.command, args, cli.verbose)?
         }
 
+        Commands::Ctest { args } => ctest_cmd::run(&args, cli.verbose)?,
+
         Commands::Prisma { command } => match command {
             PrismaCommands::Generate { args } => {
                 prisma_cmd::run(prisma_cmd::PrismaCommand::Generate, &args, cli.verbose)?
@@ -2771,6 +2787,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Rg { .. }
             | Commands::Wget { .. }
             | Commands::Vitest { .. }
+            | Commands::Ctest { .. }
             | Commands::Prisma { .. }
             | Commands::Tsc { .. }
             | Commands::Next { .. }
@@ -3005,6 +3022,24 @@ mod tests {
     }
 
     #[test]
+    fn test_try_parse_grep_dash_m_is_max_count() {
+        // Regression: `-m` is GNU grep's --max-count, not RTK's --max. It must
+        // parse (not consume the pattern), keep `max` at its default, and reach
+        // extra_args so it is forwarded to grep as a real --max-count.
+        let cli = Cli::try_parse_from(["rtk", "grep", "-m", "5", "pattern", "file"]).unwrap();
+
+        match cli.command {
+            Commands::Grep {
+                max, extra_args, ..
+            } => {
+                assert_eq!(max, 200, "max must stay at its default, not consume `-m`");
+                assert_eq!(extra_args, vec!["-m", "5", "pattern", "file"]);
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    #[test]
     fn test_try_parse_init_agent_hermes_uninstall() {
         let cli = Cli::try_parse_from(["rtk", "init", "--agent", "hermes", "--uninstall"]).unwrap();
         match cli.command {
@@ -3184,6 +3219,7 @@ mod tests {
             "wc",
             "jest",
             "vitest",
+            "ctest",
             "prisma",
             "tsc",
             "next",
@@ -3256,6 +3292,17 @@ mod tests {
                 assert_eq!(args, vec!["echo", "hello"]);
             }
             _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_ctest_help_and_version_passthrough_args() {
+        for flag in ["--help", "--version"] {
+            let cli = Cli::try_parse_from(["rtk", "ctest", flag]).unwrap();
+            match cli.command {
+                Commands::Ctest { args } => assert_eq!(args, vec![flag]),
+                _ => panic!("Expected Ctest command"),
+            }
         }
     }
 

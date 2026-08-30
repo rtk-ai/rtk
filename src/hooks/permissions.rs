@@ -139,7 +139,7 @@ fn load_permission_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let Ok(json) = serde_json::from_str::<Value>(&content) else {
+        let Ok(json) = crate::core::utils::from_json_str::<Value>(&content) else {
             eprintln!(
                 "[rtk] warning: failed to parse permissions from {}",
                 path.display()
@@ -192,7 +192,7 @@ fn get_settings_paths() -> Vec<PathBuf> {
 
 fn read_json(path: &std::path::Path) -> Option<Value> {
     let content = std::fs::read_to_string(path).ok()?;
-    match serde_json::from_str::<Value>(&content) {
+    match crate::core::utils::from_json_str::<Value>(&content) {
         Ok(v) => Some(v),
         Err(_) => {
             eprintln!(

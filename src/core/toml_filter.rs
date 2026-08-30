@@ -274,6 +274,7 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "wc",
     "gain",
     "config",
+    "ctest",
     "vitest",
     "prisma",
     "tsc",
@@ -856,6 +857,17 @@ mod tests {
         );
         assert!(filter_parse_error("[filters.a]\nmatch_command = \"^a\"\n").is_some());
         assert!(filter_parse_error("this is { not toml").is_some());
+    }
+
+    #[test]
+    fn test_toml_parse_tolerates_utf8_bom() {
+        // Hand-edited filter files on Windows often carry a BOM. The toml
+        // crate tolerates it natively — this pin is why the TOML file-read
+        // sites (config.rs, toml_filter.rs) deliberately skip
+        // strip_leading_bom; if a crate upgrade regresses this, add it there.
+        let bom = "\u{feff}schema_version = 1\n[filters.a]\nmatch_command = \"^a\"\n";
+        assert!(filter_parse_error(bom).is_none());
+        assert_eq!(match_patterns_in(bom), vec!["^a".to_string()]);
     }
 
     #[test]
