@@ -689,9 +689,19 @@ fn process_codex_payload(v: &Value) -> PayloadAction {
         Some(c) => c,
         None => return PayloadAction::Ignore,
     };
-    let action =
-        process_payload_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::Claude));
+    // Codex's own no-prompt mode is authoritative, but still route it through
+    // RTK's normal rewrite classifier so unsupported or unsafe shapes defer.
+    let decision = if codex_bypasses_permissions(v) {
+        decide_from_verdict(cmd, PermissionVerdict::Allow)
+    } else {
+        decide_hook_action(cmd, permissions::Host::Claude)
+    };
+    let action = process_payload_from_decision(v, cmd, decision);
     adapt_codex_payload(action)
+}
+
+fn codex_bypasses_permissions(v: &Value) -> bool {
+    v.get("permission_mode").and_then(Value::as_str) == Some("bypassPermissions")
 }
 
 #[cfg(test)]
@@ -704,7 +714,12 @@ fn process_codex_payload_for_verdict(v: &Value, verdict: PermissionVerdict) -> P
         Some(c) => c,
         None => return PayloadAction::Ignore,
     };
-    let action = process_payload_from_decision(v, cmd, decide_from_verdict(cmd, verdict));
+    let effective_verdict = if codex_bypasses_permissions(v) {
+        PermissionVerdict::Allow
+    } else {
+        verdict
+    };
+    let action = process_payload_from_decision(v, cmd, decide_from_verdict(cmd, effective_verdict));
     adapt_codex_payload(action)
 }
 
@@ -1756,6 +1771,25 @@ Remove-Item -LiteralPath $temporaryScreenshots -Force -ErrorAction SilentlyConti
                 "Codex cannot apply updatedInput without allow, and ask/default must not be escalated"
             );
         }
+    }
+
+    #[test]
+    fn test_codex_bypass_permissions_rewrites_without_claude_allow_rule() {
+        let input = json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "git status" },
+            "permission_mode": "bypassPermissions"
+        });
+
+        let PayloadAction::Rewrite { output, .. } =
+            process_codex_payload_for_verdict(&input, PermissionVerdict::Default)
+        else {
+            panic!("host-authorized bypassPermissions payload must rewrite");
+        };
+
+        let hook = &output["hookSpecificOutput"];
+        assert_eq!(hook["permissionDecision"], "allow");
+        assert_eq!(hook["updatedInput"]["command"], "rtk git status");
     }
 
     #[test]

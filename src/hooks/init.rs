@@ -6655,6 +6655,12 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_awareness_documents_app_manual_fallback() {
+        assert!(RTK_SLIM_CODEX.contains("Codex App"));
+        assert!(RTK_SLIM_CODEX.contains("prefix eligible external CLI commands with `rtk`"));
+    }
+
+    #[test]
     fn test_resolve_codex_dir_prefers_codex_home_and_ignores_empty_value() {
         let codex_home = PathBuf::from("/tmp/custom-codex-home");
         let home_dir = PathBuf::from("/tmp/home");

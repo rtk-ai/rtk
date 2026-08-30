@@ -168,6 +168,7 @@ function Invoke-HookCase {
         [string]$Agent,
         [object]$Payload,
         [AllowNull()][object]$Expected,
+        [AllowNull()][object]$ExpectedPermissionDecision = $null,
         [string]$RtkPath,
         [string]$Out
     )
@@ -187,12 +188,12 @@ function Invoke-HookCase {
         $result.exitCode -eq 0 -and
         $stdoutBytes -eq 0 -and
         $null -eq $rewritten -and
-        $null -eq $permissionDecision
+        $permissionDecision -eq $ExpectedPermissionDecision
     } else {
         (-not $result.timedOut) -and
         $result.exitCode -eq 0 -and
         $rewritten -eq $Expected -and
-        $null -eq $permissionDecision
+        $permissionDecision -eq $ExpectedPermissionDecision
     }
     [pscustomobject]@{
         name = $Name
@@ -205,6 +206,7 @@ function Invoke-HookCase {
         expected = $Expected
         expectsNoRewrite = $expectsNoRewrite
         permissionDecision = $permissionDecision
+        expectedPermissionDecision = $ExpectedPermissionDecision
         defaultDoesNotAutoAllow = $null -eq $permissionDecision
         pass = $pass
         payload = $payloadPath
@@ -783,6 +785,7 @@ $hookCases = @(
     Invoke-HookCase -Name "claude_powershell_get_content" -Agent "claude" -Payload ([pscustomobject]@{ tool_name="PowerShell"; tool_input=[pscustomobject]@{ command="Get-Content -LiteralPath Cargo.toml -TotalCount 3" } }) -Expected $null -RtkPath $rtkPath -Out $out
     Invoke-HookCase -Name "claude_powershell_instruction_passthrough" -Agent "claude" -Payload ([pscustomobject]@{ tool_name="PowerShell"; tool_input=[pscustomobject]@{ command="Get-Content -LiteralPath C:\validation\SKILL.md" } }) -Expected $null -RtkPath $rtkPath -Out $out
     Invoke-HookCase -Name "codex_bash_git_status" -Agent "codex" -Payload ([pscustomobject]@{ tool_name="Bash"; tool_input=[pscustomobject]@{ command="git status" } }) -Expected $null -RtkPath $rtkPath -Out $out
+    Invoke-HookCase -Name "codex_bypass_permissions_git_status" -Agent "codex" -Payload ([pscustomobject]@{ tool_name="Bash"; tool_input=[pscustomobject]@{ command="git status" }; permission_mode="bypassPermissions" }) -Expected "rtk git status" -ExpectedPermissionDecision "allow" -RtkPath $rtkPath -Out $out
     Invoke-HookCase -Name "codex_shell_git_status" -Agent "codex" -Payload ([pscustomobject]@{ tool_name="Shell"; tool_input=[pscustomobject]@{ command="git status" } }) -Expected $null -RtkPath $rtkPath -Out $out
     Invoke-HookCase -Name "codex_powershell_get_content" -Agent "codex" -Payload ([pscustomobject]@{ tool_name="PowerShell"; tool_input=[pscustomobject]@{ command="Get-Content -LiteralPath Cargo.toml -TotalCount 3" } }) -Expected $null -RtkPath $rtkPath -Out $out
     Invoke-HookCase -Name "codex_powershell_instruction_passthrough" -Agent "codex" -Payload ([pscustomobject]@{ tool_name="PowerShell"; tool_input=[pscustomobject]@{ command="Get-Content -LiteralPath C:\validation\SKILL.md" } }) -Expected $null -RtkPath $rtkPath -Out $out
