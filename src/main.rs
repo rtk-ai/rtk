@@ -111,8 +111,14 @@ enum Commands {
         #[arg(short, long, conflicts_with = "tail_lines")]
         max_lines: Option<usize>,
         /// Keep only last N lines
-        #[arg(long, conflicts_with = "max_lines")]
+        #[arg(long, conflicts_with = "max_lines", conflicts_with = "offset")]
         tail_lines: Option<usize>,
+        /// Start reading from line N (1-based); combine with --max-lines for windowed reads
+        #[arg(long, conflicts_with = "tail_lines")]
+        offset: Option<usize>,
+        /// Exact line count to read from the current position (no smart truncation); combine with --offset for a precise window
+        #[arg(long, conflicts_with = "tail_lines")]
+        limit: Option<usize>,
         /// Show line numbers
         #[arg(short = 'n', long)]
         line_numbers: bool,
@@ -1553,6 +1559,42 @@ fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<S
     }
 }
 
+/// Detect and reinterpret trailing numeric positionals in `files` as a line range.
+///
+/// Claude emits `rtk read <file> <start> [<end>]` when instructed to prefer `rtk read`
+/// over its built-in Read tool (issue #1104). Clap greedily captures the integers into
+/// `files`; this function pops them and sets `offset`/`limit` when exactly one real path
+/// remains, leaving multi-file invocations untouched.
+fn resolve_positional_line_range(
+    files: &mut Vec<PathBuf>,
+    offset: &mut Option<usize>,
+    limit: &mut Option<usize>,
+) {
+    let num_args: Vec<usize> = files
+        .iter()
+        .rev()
+        .take(2)
+        .filter_map(|pb| {
+            pb.to_str()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|_| !pb.exists())
+        })
+        .collect();
+
+    match num_args[..] {
+        [end_line, start_line] if files.len() == 3 => {
+            *offset = Some(start_line);
+            *limit = Some(end_line.saturating_sub(start_line).saturating_add(1));
+            files.truncate(1);
+        }
+        [start_line] if files.len() == 2 => {
+            *offset = Some(start_line);
+            files.truncate(1);
+        }
+        _ => {}
+    }
+}
+
 fn main() {
     // Reset SIGPIPE to default handler so writing to a closed pipe
     // e.g `rtk git log | head` exits silently instead of panicking.
@@ -1635,12 +1677,19 @@ fn run_cli() -> Result<i32> {
 
         // ISSUE #989: support multiple files (cat file1 file2 → rtk read file1 file2)
         Commands::Read {
-            files,
+            mut files,
             level,
             max_lines,
             tail_lines,
+            mut offset,
+            mut limit,
             line_numbers,
         } => {
+            // Support positional `rtk read <file> <start> [<end>]` emitted by Claude when
+            // instructed to prefer rtk read over its built-in Read tool (issue #1104).
+            if offset.is_none() && limit.is_none() {
+                resolve_positional_line_range(&mut files, &mut offset, &mut limit);
+            }
             let mut had_error = false;
             let mut stdin_seen = false;
             for file in &files {
@@ -1650,13 +1699,23 @@ fn run_cli() -> Result<i32> {
                         continue;
                     }
                     stdin_seen = true;
-                    read::run_stdin(level, max_lines, tail_lines, line_numbers, cli.verbose)
+                    read::run_stdin(
+                        level,
+                        max_lines,
+                        tail_lines,
+                        offset,
+                        limit,
+                        line_numbers,
+                        cli.verbose,
+                    )
                 } else {
                     read::run(
                         file,
                         level,
                         max_lines,
                         tail_lines,
+                        offset,
+                        limit,
                         line_numbers,
                         cli.verbose,
                     )
@@ -3694,5 +3753,75 @@ mod tests {
             }
             _ => panic!("Expected Init command"),
         }
+    }
+
+    // ── resolve_positional_line_range ─────────────────────────────────────────
+
+    fn pb(s: &str) -> PathBuf {
+        PathBuf::from(s)
+    }
+
+    #[test]
+    fn test_positional_start_end() {
+        let mut files = vec![pb("file.rs"), pb("10"), pb("20")];
+        let mut offset = None;
+        let mut limit = None;
+        resolve_positional_line_range(&mut files, &mut offset, &mut limit);
+        assert_eq!(files, vec![pb("file.rs")]);
+        assert_eq!(offset, Some(10));
+        assert_eq!(limit, Some(11)); // 20 - 10 + 1
+    }
+
+    #[test]
+    fn test_positional_start_only() {
+        let mut files = vec![pb("file.rs"), pb("10")];
+        let mut offset = None;
+        let mut limit = None;
+        resolve_positional_line_range(&mut files, &mut offset, &mut limit);
+        assert_eq!(files, vec![pb("file.rs")]);
+        assert_eq!(offset, Some(10));
+        assert_eq!(limit, None);
+    }
+
+    #[test]
+    fn test_positional_multi_file_untouched() {
+        let mut files = vec![pb("a.rs"), pb("b.rs"), pb("10"), pb("20")];
+        let mut offset = None;
+        let mut limit = None;
+        resolve_positional_line_range(&mut files, &mut offset, &mut limit);
+        assert_eq!(files, vec![pb("a.rs"), pb("b.rs"), pb("10"), pb("20")]);
+        assert_eq!(offset, None);
+        assert_eq!(limit, None);
+    }
+
+    #[test]
+    fn test_positional_no_numerics_untouched() {
+        let mut files = vec![pb("file.rs")];
+        let mut offset = None;
+        let mut limit = None;
+        resolve_positional_line_range(&mut files, &mut offset, &mut limit);
+        assert_eq!(files, vec![pb("file.rs")]);
+        assert_eq!(offset, None);
+        assert_eq!(limit, None);
+    }
+
+    #[test]
+    fn test_positional_end_equals_start() {
+        let mut files = vec![pb("file.rs"), pb("5"), pb("5")];
+        let mut offset = None;
+        let mut limit = None;
+        resolve_positional_line_range(&mut files, &mut offset, &mut limit);
+        assert_eq!(offset, Some(5));
+        assert_eq!(limit, Some(1)); // single line
+    }
+
+    #[test]
+    fn test_positional_end_less_than_start_saturates() {
+        let mut files = vec![pb("file.rs"), pb("10"), pb("5")];
+        let mut offset = None;
+        let mut limit = None;
+        resolve_positional_line_range(&mut files, &mut offset, &mut limit);
+        assert_eq!(offset, Some(10));
+        assert_eq!(limit, Some(1)); // saturating_sub(10) = 0, +1 = 1
     }
 }
