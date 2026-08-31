@@ -19,6 +19,59 @@ static LS_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
+/// Build the argv passed to `ls`, given the user's args.
+///
+/// Forces `-la` (long format with hidden entries) so the parser sees a
+/// predictable layout, then merges the user's flags while stripping ones
+/// that conflict with `-la`. Returns `(argv, paths)` so the caller can
+/// build a display string for tracking.
+fn build_ls_args(args: &[String]) -> (Vec<String>, Vec<&str>) {
+    let flags: Vec<&str> = args
+        .iter()
+        .filter(|a| a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
+    let paths: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
+
+    let mut argv: Vec<String> = vec!["-la".to_string()];
+    for flag in &flags {
+        if flag.starts_with("--") {
+            if *flag != "--all" {
+                argv.push((*flag).to_string());
+            }
+        } else {
+            let stripped = flag.trim_start_matches('-');
+            // Strip flags that conflict with the forced `-la` long format.
+            // `-l`/`-a`/`-h`: already enforced. `-1`/`-C`/`-m`/`-x`: alternate
+            // display formats that override `-l` (last flag wins on BSD ls),
+            // producing filename-only output that the parser can't decode.
+            // RTK's compact output is one-per-line anyway, so dropping these
+            // gives users the format they wanted.
+            let extra: String = stripped
+                .chars()
+                .filter(|c| !matches!(*c, 'l' | 'a' | 'h' | '1' | 'C' | 'm' | 'x'))
+                .collect();
+            if !extra.is_empty() {
+                argv.push(format!("-{}", extra));
+            }
+        }
+    }
+
+    if paths.is_empty() {
+        argv.push(".".to_string());
+    } else {
+        for p in &paths {
+            argv.push((*p).to_string());
+        }
+    }
+
+    (argv, paths)
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let show_all = args
         .iter()
@@ -37,43 +90,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         false
     });
 
-    let flags: Vec<&str> = args
-        .iter()
-        .filter(|a| a.starts_with('-'))
-        .map(|s| s.as_str())
-        .collect();
-    let paths: Vec<&str> = args
-        .iter()
-        .filter(|a| !a.starts_with('-'))
-        .map(|s| s.as_str())
-        .collect();
+    let (argv, paths) = build_ls_args(args);
 
     let mut cmd = resolved_command("ls");
     cmd.env("LC_ALL", "C");
-    cmd.arg("-la");
-    for flag in &flags {
-        if flag.starts_with("--") {
-            if *flag != "--all" {
-                cmd.arg(flag);
-            }
-        } else {
-            let stripped = flag.trim_start_matches('-');
-            let extra: String = stripped
-                .chars()
-                .filter(|c| *c != 'l' && *c != 'a' && *c != 'h')
-                .collect();
-            if !extra.is_empty() {
-                cmd.arg(format!("-{}", extra));
-            }
-        }
-    }
-
-    if paths.is_empty() {
-        cmd.arg(".");
-    } else {
-        for p in &paths {
-            cmd.arg(p);
-        }
+    for arg in &argv {
+        cmd.arg(arg);
     }
 
     let target_display = if paths.is_empty() {
@@ -634,6 +656,172 @@ mod tests {
         assert_eq!(perms, "-rw-r--r--");
         assert_eq!(size, 5678);
         assert_eq!(name, "old.tar.gz");
+    }
+
+    // Regression coverage for #2058: `rtk ls -1 path/` returned "(empty)"
+    // (or raw filenames on the fallback path) because BSD `/bin/ls`
+    // honors the last format flag — `ls -la -1` produces filename-only
+    // output the parser can't decode. The fix strips conflicting display
+    // flags before invoking ls, so the forced `-la` format survives.
+
+    fn build(args: &[&str]) -> Vec<String> {
+        let owned: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        build_ls_args(&owned).0
+    }
+
+    #[test]
+    fn test_build_ls_args_no_args_uses_dot() {
+        assert_eq!(build(&[]), vec!["-la", "."]);
+    }
+
+    #[test]
+    fn test_build_ls_args_path_only() {
+        assert_eq!(build(&["src/"]), vec!["-la", "src/"]);
+    }
+
+    #[test]
+    fn test_build_ls_args_strips_la_short_flags() {
+        // -l, -a, -h are already enforced by -la; never re-pass them.
+        assert_eq!(build(&["-l", "src/"]), vec!["-la", "src/"]);
+        assert_eq!(build(&["-a", "src/"]), vec!["-la", "src/"]);
+        assert_eq!(build(&["-h", "src/"]), vec!["-la", "src/"]);
+        assert_eq!(build(&["-lah", "src/"]), vec!["-la", "src/"]);
+    }
+
+    #[test]
+    fn test_build_ls_args_strips_all_long_flag() {
+        assert_eq!(build(&["--all", "src/"]), vec!["-la", "src/"]);
+    }
+
+    // The actual regression: #2058. Every variant of `-1` placement must
+    // result in argv that doesn't include `-1`, otherwise BSD ls falls
+    // back to filename-only output and the parser returns "(empty)".
+    #[test]
+    fn test_build_ls_args_strips_dash_one_issue_2058() {
+        assert_eq!(
+            build(&["-1", "path/"]),
+            vec!["-la", "path/"],
+            "issue #2058: bare -1 must be stripped"
+        );
+        assert_eq!(
+            build(&["-1"]),
+            vec!["-la", "."],
+            "issue #2058: -1 without path must be stripped"
+        );
+        assert_eq!(
+            build(&["path/", "-1"]),
+            vec!["-la", "path/"],
+            "issue #2058: -1 after path must be stripped"
+        );
+    }
+
+    #[test]
+    fn test_build_ls_args_strips_other_format_flags() {
+        // -C (multi-column), -m (comma-separated), -x (across rows) have
+        // the same conflict with -l as -1 does.
+        assert_eq!(build(&["-C", "src/"]), vec!["-la", "src/"]);
+        assert_eq!(build(&["-m", "src/"]), vec!["-la", "src/"]);
+        assert_eq!(build(&["-x", "src/"]), vec!["-la", "src/"]);
+    }
+
+    #[test]
+    fn test_build_ls_args_preserves_harmless_flags() {
+        // -r (reverse), -t (mtime sort), -S (size sort) don't break parsing.
+        assert_eq!(build(&["-r", "src/"]), vec!["-la", "-r", "src/"]);
+        assert_eq!(build(&["-t", "src/"]), vec!["-la", "-t", "src/"]);
+        assert_eq!(build(&["-S", "src/"]), vec!["-la", "-S", "src/"]);
+    }
+
+    // Guards against future refactors that might make the char filter
+    // order-sensitive: combining multiple format flags in one short-flag
+    // group must still result in all of them being stripped.
+    #[test]
+    fn test_build_ls_args_multiple_format_flags_combined() {
+        assert_eq!(build(&["-1C", "src/"]), vec!["-la", "src/"]);
+        assert_eq!(build(&["-1m", "src/"]), vec!["-la", "src/"]);
+        assert_eq!(build(&["-Cm", "src/"]), vec!["-la", "src/"]);
+        assert_eq!(build(&["-1Cm", "src/"]), vec!["-la", "src/"]);
+        assert_eq!(build(&["-1Cmx", "src/"]), vec!["-la", "src/"]);
+    }
+
+    // Mixing format flags with already-enforced -l/-a/-h in one group.
+    // All four chars are in the strip list, so the whole group collapses
+    // to nothing extra — order inside the group must not matter.
+    #[test]
+    fn test_build_ls_args_format_flag_mixed_with_la() {
+        assert_eq!(build(&["-la1", "src/"]), vec!["-la", "src/"]);
+        assert_eq!(build(&["-1la", "src/"]), vec!["-la", "src/"]);
+        assert_eq!(build(&["-1ah", "src/"]), vec!["-la", "src/"]);
+        assert_eq!(build(&["-l1a", "src/"]), vec!["-la", "src/"]);
+    }
+
+    // Compound flag with several harmless chars after the stripped one.
+    // The kept chars must come through in the order they appeared, since
+    // some ls flags (like -r vs -R) are case-sensitive.
+    #[test]
+    fn test_build_ls_args_compound_keeps_multiple_safe_chars() {
+        assert_eq!(build(&["-1rt", "src/"]), vec!["-la", "-rt", "src/"]);
+        assert_eq!(build(&["-1rS", "src/"]), vec!["-la", "-rS", "src/"]);
+        assert_eq!(build(&["-1tS", "src/"]), vec!["-la", "-tS", "src/"]);
+        // Stripped chars interleaved with kept ones.
+        assert_eq!(build(&["-l1r", "src/"]), vec!["-la", "-r", "src/"]);
+        assert_eq!(build(&["-r1t", "src/"]), vec!["-la", "-rt", "src/"]);
+    }
+
+    // Each flag arg is processed independently, so a repeated format flag
+    // must collapse to nothing (no `-1` smuggled through via repetition).
+    #[test]
+    fn test_build_ls_args_repeated_format_flag() {
+        assert_eq!(build(&["-1", "-1", "path/"]), vec!["-la", "path/"]);
+        assert_eq!(build(&["-1", "-C", "-m", "path/"]), vec!["-la", "path/"]);
+        // Repetition mixed with a kept flag — `-r` must survive once.
+        assert_eq!(
+            build(&["-1", "-1", "-r", "path/"]),
+            vec!["-la", "-r", "path/"]
+        );
+    }
+
+    #[test]
+    fn test_build_ls_args_compound_flags_keep_safe_chars() {
+        // -1r: drop the format flag, keep -r.
+        assert_eq!(build(&["-1r", "src/"]), vec!["-la", "-r", "src/"]);
+        // -lar: -l and -a already enforced, keep -r.
+        assert_eq!(build(&["-lar", "src/"]), vec!["-la", "-r", "src/"]);
+        // -lat: same pattern, keep -t.
+        assert_eq!(build(&["-lat", "src/"]), vec!["-la", "-t", "src/"]);
+    }
+
+    #[test]
+    fn test_build_ls_args_preserves_long_flags() {
+        // Long flags pass through (except --all which is enforced).
+        assert_eq!(
+            build(&["--reverse", "src/"]),
+            vec!["-la", "--reverse", "src/"]
+        );
+    }
+
+    #[test]
+    fn test_build_ls_args_multiple_paths() {
+        assert_eq!(
+            build(&["src/", "tests/"]),
+            vec!["-la", "src/", "tests/"]
+        );
+    }
+
+    // End-to-end regression: simulate the BSD `ls -la -1` output that
+    // caused #2058 and confirm compact_ls would also handle it gracefully
+    // via the fallback path. Combined with the build_ls_args tests above,
+    // this proves both the primary fix (don't trigger the bad output) and
+    // the safety net (handle it if it ever reappears).
+    #[test]
+    fn test_bsd_ls_minus_one_output_falls_back_cleanly() {
+        let bsd_minus_one_output = ".\n..\na.txt\nb.txt\nc.txt\n";
+        let (entries, _summary, parsed_count) = compact_ls(bsd_minus_one_output, false, false);
+        assert_eq!(parsed_count, 0, "filename-only lines are unparseable");
+        assert!(
+            entries.is_empty(),
+            "should return empty entries so run() can fall back to raw, not '(empty)'"
+        );
     }
 
     #[test]
