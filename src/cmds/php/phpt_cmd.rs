@@ -12,6 +12,7 @@ use crate::core::runner;
 use crate::core::utils::{resolved_command, strip_ansi};
 use anyhow::Result;
 use regex::Regex;
+use std::sync::LazyLock;
 
 const MAX_FAILURES_SHOWN: usize = 20;
 const MAX_DIFF_LINES_PER_FAILURE: usize = 6;
@@ -159,24 +160,26 @@ impl Parsed {
 }
 
 fn parse(stripped: &str) -> Parsed {
-    lazy_static::lazy_static! {
-        // Matches a status line. Anchor: either start-of-line ("FAIL desc [x.phpt]")
-        // or immediately after the test bracket ("TEST N/M [x.phpt]PASS desc [x.phpt]").
-        // We only accept the token after `]` or at line start so that prose like
-        // "FAILED TEST SUMMARY" does not match.
-        static ref STATUS_RE: Regex = Regex::new(
-            r"(?:^|\])(PASS|FAIL|SKIP|BORK|WARN|XLEAK|LEAK|XFAIL)\s+(.*?)\s*\[([^\[\]]+\.phpt)\]"
-        ).unwrap();
-        static ref STAT_RE: Regex = Regex::new(
-            r"^\s*(Tests passed|Tests failed|Tests skipped|Tests warned|Expected fail|Expected leak|Tests leaked|Tests borked)\s*:\s*(\d+)"
-        ).unwrap();
-        static ref NUMBER_OF_TESTS_RE: Regex = Regex::new(
-            r"^\s*Number of tests\s*:\s*(\d+)"
-        ).unwrap();
-        static ref TIME_RE: Regex = Regex::new(
-            r"^\s*Time taken\s*:\s*([0-9.]+)"
-        ).unwrap();
-    }
+    // Matches a status line. Anchor: either start-of-line ("FAIL desc [x.phpt]")
+    // or immediately after the test bracket ("TEST N/M [x.phpt]PASS desc [x.phpt]").
+    // We only accept the token after `]` or at line start so that prose like
+    // "FAILED TEST SUMMARY" does not match.
+    static STATUS_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"(?:^|\])(PASS|FAIL|SKIP|BORK|WARN|XLEAK|LEAK|XFAIL)\s+(.*?)\s*\[([^\[\]]+\.phpt)\]",
+        )
+        .unwrap()
+    });
+    static STAT_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"^\s*(Tests passed|Tests failed|Tests skipped|Tests warned|Expected fail|Expected leak|Tests leaked|Tests borked)\s*:\s*(\d+)",
+        )
+        .unwrap()
+    });
+    static NUMBER_OF_TESTS_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^\s*Number of tests\s*:\s*(\d+)").unwrap());
+    static TIME_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^\s*Time taken\s*:\s*([0-9.]+)").unwrap());
 
     let mut p = Parsed::default();
     let mut diff_buf: Vec<String> = Vec::new();
