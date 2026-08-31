@@ -5187,6 +5187,12 @@ fn uninstall_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<V
     Ok(removed)
 }
 
+/// Serialises tests that mutate the process-wide config-dir env vars
+/// (`CLAUDE_CONFIG_DIR`, `KILO_CONFIG_DIR`). Shared with `hook_check` tests
+/// because both modules read and write these vars in one test binary.
+#[cfg(test)]
+pub(crate) static CLAUDE_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7251,7 +7257,6 @@ mod tests {
     }
 
     use std::sync::Mutex;
-    static CLAUDE_DIR_LOCK: Mutex<()> = Mutex::new(());
     static PI_DIR_LOCK: Mutex<()> = Mutex::new(());
     /// Serialises all tests that mutate the process-wide working directory.
     static CWD_LOCK: Mutex<()> = Mutex::new(());

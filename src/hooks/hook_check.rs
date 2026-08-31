@@ -17,17 +17,19 @@ pub enum HookStatus {
     Ok,
     /// Hook exists but is outdated or unreadable.
     Outdated,
-    /// No supported integration was found while Claude Code is installed.
+    /// Neither the Claude Code hook nor the Kilo Code plugin was found while
+    /// Claude Code is installed.
     Missing,
 }
 
 /// Return the current hook status without printing anything.
-/// Returns `Ok` when a supported integration is installed or no Claude Code is detected.
+///
+/// Only the Claude Code hook and the Kilo Code plugin are consulted: `Ok` when
+/// Claude Code is absent or one of the two is installed and current, `Missing`
+/// when neither is, and `Outdated` when a Claude Code hook exists but is
+/// outdated, unreadable, or only partially migrated — the plugin does not
+/// suppress that state.
 pub fn status() -> HookStatus {
-    if kilocode_plugin_installed() {
-        return HookStatus::Ok;
-    }
-
     // Don't warn users who don't have Claude Code installed
     let claude_dir = match resolve_claude_dir() {
         Ok(d) => d,
@@ -50,6 +52,9 @@ pub fn status() -> HookStatus {
 
     // Fall back to legacy script file check
     let Some(hook_path) = hook_installed_path() else {
+        if kilocode_plugin_installed() {
+            return HookStatus::Ok;
+        }
         return HookStatus::Missing;
     };
     let Ok(content) = std::fs::read_to_string(&hook_path) else {
@@ -157,7 +162,8 @@ mod tests {
     use crate::hooks::constants::{
         CODEX_DIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HERMES_DIR,
         HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
-        OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+        KILOCODE_PLUGIN_FILE, KILOCODE_PLUGIN_SUBDIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR,
+        PLUGIN_SUBDIR,
     };
 
     fn other_integration_installed(home: &std::path::Path) -> bool {
@@ -342,5 +348,74 @@ mod tests {
             "Expected valid HookStatus variant, got {:?}",
             s
         );
+    }
+
+    fn with_env_overrides<F: FnOnce(&std::path::Path, &std::path::Path)>(f: F) {
+        // Shared with init.rs tests: both modules mutate CLAUDE_CONFIG_DIR in
+        // the same test binary, so they must hold one lock, not two.
+        let _guard = crate::hooks::init::CLAUDE_DIR_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp_claude = tempfile::tempdir().expect("claude tempdir");
+        let tmp_kilo = tempfile::tempdir().expect("kilo tempdir");
+
+        let orig_claude = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let orig_kilo = std::env::var_os("KILO_CONFIG_DIR");
+
+        std::env::set_var("CLAUDE_CONFIG_DIR", tmp_claude.path());
+        std::env::set_var("KILO_CONFIG_DIR", tmp_kilo.path());
+
+        f(tmp_claude.path(), tmp_kilo.path());
+
+        match orig_claude {
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        match orig_kilo {
+            Some(v) => std::env::set_var("KILO_CONFIG_DIR", v),
+            None => std::env::remove_var("KILO_CONFIG_DIR"),
+        }
+    }
+
+    #[test]
+    fn test_status_outdated_claude_hook_not_suppressed_by_kilocode_plugin() {
+        with_env_overrides(|claude_dir, kilo_dir| {
+            // Install outdated Claude hook (v2)
+            let claude_hooks = claude_dir.join(HOOKS_SUBDIR);
+            std::fs::create_dir_all(&claude_hooks).unwrap();
+            std::fs::write(
+                claude_hooks.join(REWRITE_HOOK_FILE),
+                b"#!/bin/bash\n# rtk-hook-version: 2\n",
+            )
+            .unwrap();
+
+            // Install Kilo Code plugin
+            let kilo_plugin_dir = kilo_dir.join(KILOCODE_PLUGIN_SUBDIR);
+            std::fs::create_dir_all(&kilo_plugin_dir).unwrap();
+            std::fs::write(kilo_plugin_dir.join(KILOCODE_PLUGIN_FILE), b"// plugin").unwrap();
+
+            assert_eq!(status(), HookStatus::Outdated);
+        });
+    }
+
+    #[test]
+    fn test_status_missing_claude_hook_returns_ok_when_kilocode_plugin_installed() {
+        with_env_overrides(|_claude_dir, kilo_dir| {
+            // Claude dir exists but has no hooks installed (Missing in Claude)
+            // Install Kilo Code plugin
+            let kilo_plugin_dir = kilo_dir.join(KILOCODE_PLUGIN_SUBDIR);
+            std::fs::create_dir_all(&kilo_plugin_dir).unwrap();
+            std::fs::write(kilo_plugin_dir.join(KILOCODE_PLUGIN_FILE), b"// plugin").unwrap();
+
+            assert_eq!(status(), HookStatus::Ok);
+        });
+    }
+
+    #[test]
+    fn test_status_missing_claude_hook_returns_missing_when_no_kilocode_plugin() {
+        with_env_overrides(|_claude_dir, _kilo_dir| {
+            // Claude dir exists but has no hooks, and no Kilo plugin
+            assert_eq!(status(), HookStatus::Missing);
+        });
     }
 }

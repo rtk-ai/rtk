@@ -2,6 +2,7 @@ import type { Plugin, PluginModule } from "@kilocode/plugin"
 import { execFile } from "node:child_process"
 import { join } from "node:path"
 import { appendFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 
 const MACHINE_READABLE_FLAGS =
   /(?:^|\s)(?:--(?:json|porcelain|output|format|template)(?:=[^\s]*)?|-[zZ0])(?=\s|$)/
@@ -111,9 +112,11 @@ const rtkPlugin: Plugin = async () => {
     return {}
   }
 
+  // Per-process filename: a fixed name in a world-writable tmpdir could be
+  // pre-planted as a symlink by another local user when debug mode is enabled.
   const logPath = join(
-    process.env.TEMP ?? process.env.HOME ?? process.env.USERPROFILE ?? "/tmp",
-    "rtk-plugin-debug.log",
+    tmpdir(),
+    `rtk-plugin-debug-${process.pid}.log`,
   )
 
   if (DEBUG) console.log(`${TAG} RTK found at ${rtkBin} — plugin active`)
