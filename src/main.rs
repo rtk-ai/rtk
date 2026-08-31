@@ -1538,27 +1538,11 @@ fn merge_pnpm_args_os(filters: &[String], args: &[OsString]) -> Vec<OsString> {
         .collect()
 }
 
-/// Validate that pnpm filters are only used in the global context, not before subcommands like tsc.
-fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<String> {
-    // Check if this is a Build or Typecheck command with filters
-    match command {
-        PnpmCommands::Typecheck { .. } => {
-            // FIXME: if filters are present, we should find out which workspaces are selected before running rtk dedicated commands
-            if !filters.is_empty() {
-                let cmd_name = match command {
-                    PnpmCommands::Typecheck { .. } => "tsc",
-                    _ => unreachable!(),
-                };
-                let msg = format!(
-                    "[rtk] warning: --filter is not yet supported for pnpm {}, filters preceding the subcommand will be ignored",
-                    cmd_name
-                );
-                return Some(msg);
-            }
-            None
-        }
-        _ => None,
-    }
+/// Warn about pnpm filters a subcommand cannot honour. Empty now that `typecheck` runs the caller's own
+/// pnpm command with its filters attached; kept as the place any future dedicated subcommand that drops
+/// them says so.
+fn validate_pnpm_filters(_filters: &[String], _command: &PnpmCommands) -> Option<String> {
+    None
 }
 
 fn main() {
@@ -1869,7 +1853,17 @@ fn run_cli() -> Result<i32> {
                     &merge_pnpm_args(&filter, &args),
                     cli.verbose,
                 )?,
-                PnpmCommands::Typecheck { args } => tsc_cmd::run(&args, cli.verbose)?,
+                PnpmCommands::Typecheck { args } => {
+                    // The caller's own command, filters and all — see tsc_cmd::run_pnpm_typecheck for
+                    // what running `tsc` here instead used to report.
+                    let mut pnpm_args: Vec<String> = filter
+                        .iter()
+                        .map(|value| format!("--filter={}", value))
+                        .collect();
+                    pnpm_args.push("typecheck".to_string());
+                    pnpm_args.extend(args.iter().cloned());
+                    tsc_cmd::run_pnpm_typecheck(&pnpm_args, cli.verbose)?
+                }
                 PnpmCommands::Other(args) => {
                     pnpm_cmd::run_passthrough(&merge_pnpm_args_os(&filter, &args), cli.verbose)?
                 }
@@ -3578,7 +3572,9 @@ mod tests {
     }
 
     #[test]
-    fn test_pnpm_typecheck_with_filters() {
+    fn test_pnpm_typecheck_forwards_its_filters() {
+        // Filters used to be parsed, warned about and dropped, so `pnpm --filter X typecheck` quietly
+        // type-checked something else. They are the caller's scope: they have to reach pnpm.
         let cli = Cli::try_parse_from([
             "rtk",
             "pnpm",
@@ -3587,20 +3583,19 @@ mod tests {
             "--filter",
             "@app2",
             "typecheck",
-            "--filter",
-            "@app3",
-            "--filter",
-            "@app4",
+            "--noEmit",
         ])
         .unwrap();
         match cli.command {
             Commands::Pnpm { filter, command } => {
-                let warning = validate_pnpm_filters(&filter, &command).unwrap();
-
                 assert_eq!(filter, vec!["@app1", "@app2"]);
-                assert_eq!(warning, "[rtk] warning: --filter is not yet supported for pnpm tsc, filters preceding the subcommand will be ignored")
+                assert_eq!(validate_pnpm_filters(&filter, &command), None, "nothing is dropped now");
+                match command {
+                    PnpmCommands::Typecheck { args } => assert_eq!(args, vec!["--noEmit"]),
+                    _ => panic!("Expected Pnpm Typecheck command"),
+                }
             }
-            _ => panic!("Expected Pnpm Build command"),
+            _ => panic!("Expected Pnpm command"),
         }
     }
 

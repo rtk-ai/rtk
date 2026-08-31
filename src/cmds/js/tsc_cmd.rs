@@ -105,6 +105,34 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
+/// `pnpm typecheck` is a SCRIPT, not a tsc invocation. In a workspace it usually runs one tsc per
+/// package (`pnpm -r typecheck`, or a chain of per-package runs), and it may run `vue-tsc`, `tsc -b`, or
+/// something else entirely. Substituting `tsc` in the current directory answers a different question —
+/// and where the root holds no tsconfig, `tsc` prints its HELP, which carries no diagnostics, so the
+/// filter concluded "No errors found" for a typecheck that had in fact failed. Only the propagated exit
+/// code disagreed, and a summary line is what a reader believes. Run the script the caller asked for and
+/// filter what IT prints.
+///
+/// `args` is the whole pnpm argument list, filters included, so `--filter` works here as anywhere else.
+pub fn run_pnpm_typecheck(args: &[String], verbose: u8) -> Result<i32> {
+    let mut cmd = resolved_command("pnpm");
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    if verbose > 0 {
+        eprintln!("Running: pnpm {}", args.join(" "));
+    }
+
+    runner::run_streamed(
+        cmd,
+        "tsc",
+        &args.join(" "),
+        Box::new(BlockStreamFilter::new(TscHandler::new())),
+        runner::RunOptions::with_tee("tsc"),
+    )
+}
+
 struct TscHandler {
     error_count: usize,
     files: HashSet<String>,
