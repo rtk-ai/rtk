@@ -111,7 +111,7 @@ pub fn run(
 
 fn run_diff(
     args: &[String],
-    max_lines: Option<usize>,
+    _max_lines: Option<usize>,
     verbose: u8,
     global_args: &[String],
 ) -> Result<i32> {
@@ -195,7 +195,7 @@ fn run_diff(
     let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git diff")?;
 
     let printed = if !diff_result.stdout.is_empty() {
-        let compacted = compact_diff(&diff_result.stdout, max_lines.unwrap_or(500));
+        let compacted = compact_diff(&diff_result.stdout);
         format!("{}\n\nChanges:\n{}", result.stdout.trim(), compacted)
     } else {
         result.stdout.trim().to_string()
@@ -217,7 +217,7 @@ fn run_diff(
 
 fn run_show(
     args: &[String],
-    max_lines: Option<usize>,
+    _max_lines: Option<usize>,
     verbose: u8,
     global_args: &[String],
 ) -> Result<i32> {
@@ -312,7 +312,7 @@ fn run_show(
         if verbose > 0 {
             printed.push_str("\n\nChanges:");
         }
-        let compacted = compact_diff(diff_text, max_lines.unwrap_or(500));
+        let compacted = compact_diff(diff_text);
         printed.push('\n');
         printed.push_str(&compacted);
     }
@@ -335,25 +335,25 @@ fn is_blob_show_arg(arg: &str) -> bool {
     !arg.starts_with('-') && arg.contains(':')
 }
 
-pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
+/// Compacts a unified diff by stripping metadata (index/mode/rename lines,
+/// `---`/`+++` file markers) while preserving every `+`/`-`/context line and
+/// hunk header in full.
+///
+/// This never drops diff content. Silent truncation caused agents (and users)
+/// to make decisions on incomplete diffs and to get empty results when piping
+/// the compacted output into `grep`/`rg` — see #827, which applied the same
+/// "never truncate" rule to the sibling `condense_unified_diff` (stdin path).
+/// The only compression here is lossless: dropping diff metadata and appending
+/// a per-file `+N -M` summary.
+pub(crate) fn compact_diff(diff: &str) -> String {
     let mut result = Vec::new();
     let mut current_file = String::new();
     let mut added = 0;
     let mut removed = 0;
     let mut in_hunk = false;
-    let mut hunk_shown = 0;
-    let mut hunk_skipped = 0usize;
-    let max_hunk_lines = 100;
-    let mut was_truncated = false;
 
     for line in diff.lines() {
         if line.starts_with("diff --git") {
-            // Flush hunk truncation before starting a new file
-            if hunk_skipped > 0 {
-                result.push(format!("  ... ({} lines truncated)", hunk_skipped));
-                was_truncated = true;
-                hunk_skipped = 0;
-            }
             if !current_file.is_empty() && (added > 0 || removed > 0) {
                 result.push(format!("  +{} -{}", added, removed));
             }
@@ -362,64 +362,27 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
             added = 0;
             removed = 0;
             in_hunk = false;
-            hunk_shown = 0;
         } else if line.starts_with("@@") {
-            // Flush hunk truncation before starting a new hunk
-            if hunk_skipped > 0 {
-                result.push(format!("  ... ({} lines truncated)", hunk_skipped));
-                was_truncated = true;
-                hunk_skipped = 0;
-            }
             in_hunk = true;
-            hunk_shown = 0;
             // Preserve the full unified diff hunk header, including trailing
             // function / symbol context after the second @@ marker.
             result.push(format!("  {}", line));
         } else if in_hunk {
             if line.starts_with('+') && !line.starts_with("+++") {
                 added += 1;
-                if hunk_shown < max_hunk_lines {
-                    result.push(format!("  {}", line));
-                    hunk_shown += 1;
-                } else {
-                    hunk_skipped += 1;
-                }
+                result.push(format!("  {}", line));
             } else if line.starts_with('-') && !line.starts_with("---") {
                 removed += 1;
-                if hunk_shown < max_hunk_lines {
-                    result.push(format!("  {}", line));
-                    hunk_shown += 1;
-                } else {
-                    hunk_skipped += 1;
-                }
-            } else if hunk_shown < max_hunk_lines && !line.starts_with("\\") {
-                // Context line
-                if hunk_shown > 0 {
-                    result.push(format!("  {}", line));
-                    hunk_shown += 1;
-                }
+                result.push(format!("  {}", line));
+            } else if !line.starts_with('\\') {
+                // Context line — kept in full (including leading context, #1852).
+                result.push(format!("  {}", line));
             }
         }
-
-        if result.len() >= max_lines {
-            result.push("\n... (more changes truncated)".to_string());
-            was_truncated = true;
-            break;
-        }
-    }
-
-    // Flush last hunk
-    if hunk_skipped > 0 {
-        result.push(format!("  ... ({} lines truncated)", hunk_skipped));
-        was_truncated = true;
     }
 
     if !current_file.is_empty() && (added > 0 || removed > 0) {
         result.push(format!("  +{} -{}", added, removed));
-    }
-
-    if was_truncated {
-        result.push("[full diff: rtk git diff --no-compact]".to_string());
     }
 
     result.join("\n")
@@ -1945,7 +1908,7 @@ fn run_stash(
             }
 
             let filtered = if patch_mode {
-                compact_diff(&result.stdout, 100)
+                compact_diff(&result.stdout)
             } else {
                 compact_stash_stat(&result.stdout)
             };
@@ -2407,7 +2370,7 @@ mod tests {
 +    println!("hello");
  }
 "#;
-        let result = compact_diff(diff, 100);
+        let result = compact_diff(diff);
         assert!(result.contains("foo.rs"));
         assert!(result.contains("+"));
     }
@@ -2422,7 +2385,7 @@ mod tests {
 +    println!("hello");
  }
 "#;
-        let result = compact_diff(diff, 100);
+        let result = compact_diff(diff);
         assert!(
             result.contains("@@ -10,3 +10,4 @@ fn important_context() {"),
             "Expected full hunk header with trailing context, got:\n{}",
@@ -2431,36 +2394,49 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_diff_increased_hunk_limit() {
-        // Build a hunk with 25 changed lines — should NOT be truncated with limit 30
+    fn test_compact_diff_large_hunk_not_truncated() {
+        // A single hunk far larger than the old 100-line per-hunk cap must be
+        // emitted in full — no content dropped, no truncation marker.
         let mut diff =
-            "diff --git a/big.rs b/big.rs\n--- a/big.rs\n+++ b/big.rs\n@@ -1,25 +1,25 @@\n"
+            "diff --git a/big.rs b/big.rs\n--- a/big.rs\n+++ b/big.rs\n@@ -1,250 +1,250 @@\n"
                 .to_string();
-        for i in 1..=25 {
+        for i in 1..=250 {
             diff.push_str(&format!("+line{}\n", i));
         }
-        let result = compact_diff(&diff, 500);
+        let result = compact_diff(&diff);
         assert!(
-            !result.contains("... (truncated)"),
-            "25 lines should not be truncated with max_hunk_lines=30"
+            !result.contains("truncated"),
+            "large hunk must not be truncated, got:\n{}",
+            result
         );
-        assert!(result.contains("+line25"));
+        assert!(result.contains("+line1"));
+        assert!(
+            result.contains("+line250"),
+            "last line of a 250-line hunk must survive"
+        );
     }
 
     #[test]
-    fn test_compact_diff_increased_total_limit() {
-        // Build a diff with 150 output result lines across multiple files — should NOT be cut at 100
+    fn test_compact_diff_many_files_not_truncated() {
+        // A diff whose compacted output far exceeds the old 500-line global cap
+        // must be emitted in full — the last file's content must survive so a
+        // downstream `grep` over the compacted output still matches (#827).
         let mut diff = String::new();
-        for f in 1..=5 {
+        for f in 1..=40 {
             diff.push_str(&format!("diff --git a/file{f}.rs b/file{f}.rs\n--- a/file{f}.rs\n+++ b/file{f}.rs\n@@ -1,20 +1,20 @@\n"));
             for i in 1..=20 {
                 diff.push_str(&format!("+line{f}_{i}\n"));
             }
         }
-        let result = compact_diff(&diff, 500);
+        let result = compact_diff(&diff);
         assert!(
             !result.contains("more changes truncated"),
-            "5 files × 20 lines should not exceed max_lines=500"
+            "40 files must not be truncated"
+        );
+        assert!(
+            result.contains("+line40_20"),
+            "content in the last file (past the old 500-line cap) must survive, got tail:\n{}",
+            &result[result.len().saturating_sub(200)..]
         );
     }
 
@@ -3569,9 +3545,9 @@ no changes added to commit (use "git add" and/or "git commit -a")
     }
 
     #[test]
-    fn test_compact_diff_recovery_hint_present() {
-        // A hunk with 110 lines exceeds max_hunk_lines (100), triggers truncation
-        // The recovery hint must appear so LLMs can re-fetch the full diff
+    fn test_compact_diff_no_recovery_hint_when_complete() {
+        // compact_diff no longer truncates (#827), so it must never emit the
+        // "[full diff: ...]" recovery hint — the content is already complete.
         let mut diff = String::new();
         diff.push_str("diff --git a/large.rs b/large.rs\n");
         diff.push_str("--- a/large.rs\n");
@@ -3580,30 +3556,52 @@ no changes added to commit (use "git add" and/or "git commit -a")
         for i in 0..110 {
             diff.push_str(&format!("+added line {}\n", i));
         }
-        let result = compact_diff(&diff, 500);
+        let result = compact_diff(&diff);
         assert!(
-            result.contains("[full diff: rtk git diff --no-compact]"),
-            "Expected recovery hint when hunk is truncated, got:\n{}",
+            !result.contains("[full diff:"),
+            "no recovery hint should appear when nothing is dropped, got:\n{}",
             result
         );
     }
 
     #[test]
-    fn test_compact_diff_hunk_truncation_count_accurate() {
-        // 150 change lines in one hunk: 100 shown, 50 silently dropped
-        // Must report the exact count, not just "(truncated)"
+    fn test_compact_diff_all_hunk_lines_preserved() {
+        // 150 change lines in one hunk: all 150 must survive (previously 100
+        // shown, 50 silently dropped with a "50 lines truncated" marker).
         let mut diff = String::from(
             "diff --git a/large.rs b/large.rs\n--- a/large.rs\n+++ b/large.rs\n@@ -1,150 +1,150 @@\n",
         );
         for i in 0..150 {
             diff.push_str(&format!("+line {}\n", i));
         }
-        let result = compact_diff(&diff, 500);
+        let result = compact_diff(&diff);
         assert!(
-            result.contains("50 lines truncated"),
-            "Expected '50 lines truncated' (150 - 100 = 50), got:\n{}",
+            !result.contains("truncated"),
+            "no truncation marker expected, got:\n{}",
             result
         );
+        for i in 0..150 {
+            assert!(
+                result.contains(&format!("+line {}", i)),
+                "line {} must be present in full diff",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_compact_diff_keeps_leading_context() {
+        // Regression for #1852: context lines that appear *before* the first
+        // +/- change in a hunk must be kept, not dropped.
+        let diff = "diff --git a/foo.rs b/foo.rs\n--- a/foo.rs\n+++ b/foo.rs\n@@ -1,5 +1,5 @@\n ctx above 1\n ctx above 2\n-old\n+new\n ctx below\n";
+        let result = compact_diff(diff);
+        assert!(
+            result.contains("ctx above 1") && result.contains("ctx above 2"),
+            "leading context before the first change must be preserved, got:\n{}",
+            result
+        );
+        assert!(result.contains("-old") && result.contains("+new"));
+        assert!(result.contains("ctx below"));
     }
 
     #[test]

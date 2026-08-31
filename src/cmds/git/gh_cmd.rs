@@ -949,7 +949,7 @@ fn pr_diff(args: &[String], _verbose: u8) -> Result<i32> {
             if raw.trim().is_empty() {
                 "No diff".to_string()
             } else {
-                git::compact_diff(raw, 500)
+                git::compact_diff(raw)
             }
         },
         RunOptions::stdout_only().early_exit_on_failure(),

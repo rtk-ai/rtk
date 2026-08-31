@@ -321,3 +321,40 @@ fn git_checkout_dirty_tree_error_keeps_file_list() {
         "dirty checkout failure should keep abort line: {combined:?}"
     );
 }
+
+#[test]
+fn git_diff_large_change_preserves_all_content() {
+    // Regression for #827: `rtk git diff` routes through compact_diff, which
+    // previously capped output at 500 lines / 100 lines-per-hunk and silently
+    // dropped the rest. A large diff must survive in full so that content near
+    // the end is still present (and a downstream grep over the compacted output
+    // still matches). This is the same code path `gh pr diff` uses.
+    let dir = init_git_repo();
+
+    // Commit a large baseline file, then rewrite every line so the diff is huge.
+    let baseline: String = (0..1200).map(|i| format!("line_{i} = {i}\n")).collect();
+    std::fs::write(dir.path().join("big.py"), &baseline).expect("write baseline");
+    git_in_dir(dir.path(), &["add", "big.py"]);
+    git_in_dir(dir.path(), &["commit", "-q", "-m", "add big.py"]);
+
+    let mut changed: String = (0..1200).map(|i| format!("CHANGED_{i} = {i}\n")).collect();
+    // A distinctive marker near the very end — well past the old 500-line cap.
+    changed.push_str("def _finalize(x):\n    return x + 1\n");
+    std::fs::write(dir.path().join("big.py"), &changed).expect("write changed");
+
+    let (out, code) = rtk_in_dir(dir.path(), &["git", "diff"]);
+
+    assert_eq!(code, Some(0), "rtk git diff should succeed");
+    assert!(
+        !out.contains("more changes truncated") && !out.contains("lines truncated"),
+        "large diff must not be truncated, got tail:\n{}",
+        &out[out.len().saturating_sub(300)..]
+    );
+    assert!(
+        out.contains("_finalize"),
+        "a marker near the end of a large diff must survive compaction"
+    );
+    // First and last changed lines both present → nothing dropped from either end.
+    assert!(out.contains("CHANGED_0 = 0"));
+    assert!(out.contains("CHANGED_1199 = 1199"));
+}

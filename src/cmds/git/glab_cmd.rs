@@ -487,7 +487,7 @@ fn mr_diff(args: &[String], _verbose: u8) -> Result<i32> {
             if stdout.trim().is_empty() {
                 "No diff\n".to_string()
             } else {
-                git::compact_diff(stdout, 500)
+                git::compact_diff(stdout)
             }
         },
         RunOptions::stdout_only().early_exit_on_failure(),
