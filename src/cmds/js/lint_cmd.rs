@@ -9,7 +9,8 @@ use crate::mypy_cmd;
 use crate::ruff_cmd;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde_json::Value;
+use std::{collections::HashMap, fs};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct EslintMessage {
@@ -87,6 +88,89 @@ fn detect_linter(args: &[String]) -> (&str, bool) {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct InferredLinter {
+    name: &'static str,
+    args: Vec<String>,
+}
+
+fn infer_linter_from_current_package_json() -> Option<InferredLinter> {
+    let raw = fs::read_to_string("package.json").ok()?;
+    let package_json: Value = serde_json::from_str(&raw).ok()?;
+    infer_linter_from_package_json(&package_json)
+}
+
+fn infer_linter_from_package_json(package_json: &Value) -> Option<InferredLinter> {
+    if let Some(script) = package_json
+        .get("scripts")
+        .and_then(|scripts| scripts.get("lint"))
+        .and_then(Value::as_str)
+    {
+        if let Some(inferred) = infer_linter_from_script(script) {
+            return Some(inferred);
+        }
+    }
+
+    if package_has_dependency(package_json, "@biomejs/biome")
+        || package_has_dependency(package_json, "biome")
+    {
+        return Some(InferredLinter {
+            name: "biome",
+            args: vec!["check".to_string()],
+        });
+    }
+
+    if package_has_dependency(package_json, "eslint") {
+        return Some(InferredLinter {
+            name: "eslint",
+            args: Vec::new(),
+        });
+    }
+
+    None
+}
+
+fn infer_linter_from_script(script: &str) -> Option<InferredLinter> {
+    let tokens = crate::discover::lexer::shell_split(script);
+    for (idx, token) in tokens.iter().enumerate() {
+        let tool = normalized_tool_name(token);
+        let name = match tool {
+            "biome" => "biome",
+            "eslint" => "eslint",
+            "ruff" => "ruff",
+            "pylint" => "pylint",
+            "mypy" => "mypy",
+            _ => continue,
+        };
+        return Some(InferredLinter {
+            name,
+            args: tokens[idx + 1..].to_vec(),
+        });
+    }
+    None
+}
+
+fn normalized_tool_name(token: &str) -> &str {
+    let basename = token.rsplit(['/', '\\']).next().unwrap_or(token);
+    basename
+        .strip_suffix(".cmd")
+        .or_else(|| basename.strip_suffix(".CMD"))
+        .or_else(|| basename.strip_suffix(".exe"))
+        .or_else(|| basename.strip_suffix(".EXE"))
+        .unwrap_or(basename)
+}
+
+fn package_has_dependency(package_json: &Value, name: &str) -> bool {
+    ["dependencies", "devDependencies", "peerDependencies"]
+        .iter()
+        .any(|section| {
+            package_json
+                .get(*section)
+                .and_then(Value::as_object)
+                .is_some_and(|deps| deps.contains_key(name))
+        })
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -94,6 +178,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let effective_args = &args[skip..];
 
     let (linter, explicit) = detect_linter(effective_args);
+    let inferred = if explicit {
+        None
+    } else {
+        infer_linter_from_current_package_json()
+    };
+    let linter = inferred.as_ref().map(|i| i.name).unwrap_or(linter);
 
     // Python linters use resolved_command() directly (they're on PATH via pip/pipx)
     // JS linters use package_manager_exec (npx/pnpm exec)
@@ -138,7 +228,15 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         1
     };
 
-    for arg in &effective_args[start_idx..] {
+    let forwarded_args: Vec<String> = inferred
+        .as_ref()
+        .map(|i| i.args.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .chain(effective_args[start_idx..].iter().cloned())
+        .collect();
+
+    for arg in &forwarded_args {
         // Skip --output-format if we already added it
         if linter == "ruff" && arg.starts_with("--output-format") {
             continue;
@@ -151,9 +249,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     // Default to current directory if no path specified (for ruff/pylint/mypy/eslint)
     if matches!(linter, "ruff" | "pylint" | "mypy" | "eslint") {
-        let has_path = effective_args
+        let has_path = forwarded_args
             .iter()
-            .skip(start_idx)
             .any(|a| !a.starts_with('-') && !a.contains('='));
         if !has_path {
             cmd.arg(".");
@@ -693,6 +790,35 @@ mod tests {
         let effective = &full_args[skip..];
         let (linter, _) = detect_linter(effective);
         assert_eq!(linter, "biome");
+    }
+
+    #[test]
+    fn test_infer_linter_from_package_json_lint_script_biome() {
+        let package_json = serde_json::json!({
+            "scripts": {
+                "lint": "biome check --diagnostic-level=warn"
+            },
+            "devDependencies": {
+                "eslint": "^9.0.0"
+            }
+        });
+
+        let inferred = infer_linter_from_package_json(&package_json).unwrap();
+        assert_eq!(inferred.name, "biome");
+        assert_eq!(inferred.args, vec!["check", "--diagnostic-level=warn"]);
+    }
+
+    #[test]
+    fn test_infer_linter_from_package_json_dependencies() {
+        let package_json = serde_json::json!({
+            "devDependencies": {
+                "@biomejs/biome": "^2.0.0"
+            }
+        });
+
+        let inferred = infer_linter_from_package_json(&package_json).unwrap();
+        assert_eq!(inferred.name, "biome");
+        assert_eq!(inferred.args, vec!["check"]);
     }
 
     #[test]

@@ -1467,16 +1467,29 @@ fn rewrite_segment_inner(
     // Try each rewrite prefix (longest first) with word-boundary check
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(strip_target, prefix) {
+            let rtk_cmd = rtk_command_for_rewrite_prefix(rule.rtk_cmd, prefix);
             let rewritten = if rest.is_empty() {
-                format!("{}{}", rule.rtk_cmd, redirect_suffix)
+                format!("{}{}", rtk_cmd, redirect_suffix)
             } else {
-                format!("{} {}{}", rule.rtk_cmd, rest, redirect_suffix)
+                format!("{} {}{}", rtk_cmd, rest, redirect_suffix)
             };
             return Some(rewritten);
         }
     }
 
     None
+}
+
+fn rtk_command_for_rewrite_prefix(rtk_cmd: &str, prefix: &str) -> String {
+    if rtk_cmd != "rtk lint" {
+        return rtk_cmd.to_string();
+    }
+
+    match prefix.split_whitespace().next_back() {
+        Some("biome") => "rtk lint biome".to_string(),
+        Some("eslint") => "rtk lint eslint".to_string(),
+        _ => rtk_cmd.to_string(),
+    }
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -3957,13 +3970,36 @@ mod tests {
             "lint",
         ];
         for command in commands {
+            let expected = if command.split_whitespace().any(|part| part == "biome") {
+                "rtk lint biome"
+            } else if command.split_whitespace().any(|part| part == "eslint") {
+                "rtk lint eslint"
+            } else {
+                "rtk lint"
+            };
             assert_eq!(
                 rewrite_command_no_prefixes(command, &[]),
-                Some("rtk lint".into()),
+                Some(expected.into()),
                 "Failed for command: {}",
                 command
             );
         }
+    }
+
+    #[test]
+    fn test_rewrite_lint_preserves_explicit_linter_name() {
+        assert_eq!(
+            rewrite_command_no_prefixes("biome check", &[]),
+            Some("rtk lint biome check".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("npm exec biome check", &[]),
+            Some("rtk lint biome check".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("eslint src --max-warnings=0", &[]),
+            Some("rtk lint eslint src --max-warnings=0".into())
+        );
     }
 
     #[test]
