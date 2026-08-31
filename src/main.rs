@@ -17,7 +17,7 @@ use cmds::js::{
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpunit_cmd, pint_cmd};
-use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
+use cmds::python::{mypy_cmd, pip_cmd, poetry_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
@@ -803,6 +803,13 @@ enum Commands {
     /// uv run with compact output while preserving uv-managed environment semantics
     Uv {
         /// uv arguments (e.g., run pytest, run --project backend python script.py)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// poetry run with compact output while preserving poetry-managed environment semantics
+    Poetry {
+        /// poetry arguments (e.g., run pytest, run ruff check .)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2428,6 +2435,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Uv { args } => uv_cmd::run(&args, cli.verbose)?,
 
+        Commands::Poetry { args } => poetry_cmd::run(&args, cli.verbose)?,
+
         Commands::Go { command } => match command {
             GoCommands::Test { args } => go_cmd::run_test(&args, cli.verbose)?,
             GoCommands::Build { args } => go_cmd::run_build(&args, cli.verbose)?,
@@ -2816,6 +2825,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Rspec { .. }
             | Commands::Pip { .. }
             | Commands::Uv { .. }
+            | Commands::Poetry { .. }
             | Commands::Go { .. }
             | Commands::Sbt { .. }
             | Commands::GolangciLint { .. }
@@ -3226,6 +3236,7 @@ mod tests {
             "ecs",
             "pint",
             "uv",
+            "poetry",
         ];
 
         let unclassified: Vec<String> = Cli::command()

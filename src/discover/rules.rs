@@ -497,6 +497,15 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^poetry\s+run(?:\s|$)",
+        rtk_cmd: "rtk poetry",
+        rewrite_prefixes: &["poetry"],
+        category: "Python",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^go\s+(test|build|vet)",
         rtk_cmd: "rtk go",
         rewrite_prefixes: &["go"],
