@@ -1,6 +1,7 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
 use crate::core::args_utils;
+use crate::core::filter::{self, FilterLevel, Language};
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::stream::{
@@ -14,6 +15,7 @@ use crate::core::utils::{
 };
 use anyhow::{Context, Result};
 use std::ffi::OsString;
+use std::path::Path;
 use std::process::Command;
 
 #[derive(Debug, Clone)]
@@ -232,9 +234,47 @@ fn run_show(
         .iter()
         .any(|arg| arg.starts_with("--pretty") || arg.starts_with("--format"));
 
-    // `git show rev:path` prints a blob, not a commit diff. In this mode we should
-    // pass through directly to avoid duplicated output from compact-show steps.
+    // `git show rev:path` prints a blob (a file at a revision), not a commit diff.
     let wants_blob_show = args.iter().any(|arg| is_blob_show_arg(arg));
+
+    // The blob form is really a file read, so route it through the same filtering
+    // `rtk read` applies instead of dumping the file uncompressed (issue #3116).
+    // `--stat`/`--format` reshape the output, so only the plain blob form is filtered;
+    // blob combined with either keeps the previous passthrough below.
+    let filter_blob = wants_blob_show && !wants_stat_only && !wants_format;
+
+    if filter_blob {
+        let mut cmd = git_cmd(global_args);
+        cmd.arg("show");
+        for arg in args {
+            cmd.arg(arg);
+        }
+        let result = exec_capture(&mut cmd).context("Failed to run git show")?;
+        if !result.success() {
+            eprintln!("{}", result.stderr);
+            return Ok(result.exit_code);
+        }
+
+        let blob_arg = args
+            .iter()
+            .find(|arg| is_blob_show_arg(arg))
+            .map(String::as_str)
+            .unwrap_or_default();
+        let shown = filter_blob_show(&result.stdout, blob_arg, max_lines);
+        print!("{}", shown);
+        if !shown.ends_with('\n') {
+            println!();
+        }
+
+        timer.track(
+            &format!("git show {}", args.join(" ")),
+            &format!("rtk git show {}", args.join(" ")),
+            &result.stdout,
+            &shown,
+        );
+
+        return Ok(0);
+    }
 
     if wants_stat_only || wants_format || wants_blob_show {
         let mut cmd = git_cmd(global_args);
@@ -333,6 +373,44 @@ fn run_show(
 fn is_blob_show_arg(arg: &str) -> bool {
     // Detect `rev:path` style arguments while ignoring flags like `--pretty=format:...`.
     !arg.starts_with('-') && arg.contains(':')
+}
+
+/// Extract the `<path>` component of a `git show <rev>:<path>` blob argument.
+/// Returns `None` for flags or plain revs (no `:`, or nothing after it).
+fn blob_show_path(arg: &str) -> Option<&str> {
+    if arg.starts_with('-') {
+        return None;
+    }
+    let (_rev, path) = arg.split_once(':')?;
+    (!path.is_empty()).then_some(path)
+}
+
+/// Line cap applied to a filtered blob, matching the default the diff form of
+/// `git show` already uses (`max_lines.unwrap_or(500)`).
+const BLOB_SHOW_MAX_LINES: usize = 500;
+
+/// Filter the raw stdout of `git show <rev>:<path>` the way `rtk read` filters a
+/// file: strip comments and blank lines (minimal level), cap long files, and never
+/// emit more tokens than the raw output. Language is detected from the blob path's
+/// extension; an unknown extension keeps the content faithful.
+fn filter_blob_show(raw: &str, blob_arg: &str, max_lines: Option<usize>) -> String {
+    let lang = blob_show_path(blob_arg)
+        .and_then(|p| Path::new(p).extension().and_then(|e| e.to_str()))
+        .map(Language::from_extension)
+        .unwrap_or(Language::Unknown);
+
+    let filtered = filter::get_filter(FilterLevel::Minimal).filter(raw, &lang);
+
+    // Mirror `rtk read`: if the filter emptied a non-empty blob, keep the raw content.
+    let filtered = if filtered.trim().is_empty() && !raw.trim().is_empty() {
+        raw.to_string()
+    } else {
+        filtered
+    };
+
+    let capped = filter::smart_truncate(&filtered, max_lines.unwrap_or(BLOB_SHOW_MAX_LINES), &lang);
+
+    never_worse(raw, &capped).to_string()
 }
 
 pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
@@ -2471,6 +2549,70 @@ mod tests {
         assert!(!is_blob_show_arg("--pretty=format:%h"));
         assert!(!is_blob_show_arg("--format=short"));
         assert!(!is_blob_show_arg("HEAD"));
+    }
+
+    #[test]
+    fn test_blob_show_path() {
+        assert_eq!(blob_show_path("HEAD:src/main.rs"), Some("src/main.rs"));
+        assert_eq!(blob_show_path("origin/main:a/b/c.py"), Some("a/b/c.py"));
+        assert_eq!(blob_show_path("--pretty=format:%h"), None);
+        assert_eq!(blob_show_path("HEAD"), None);
+        assert_eq!(blob_show_path("HEAD:"), None);
+    }
+
+    #[test]
+    fn test_filter_blob_show_strips_comments() {
+        let raw = "// a leading comment\nfn main() {\n    // an inner comment\n    println!(\"hi\");\n}\n";
+        let out = filter_blob_show(raw, "HEAD:src/main.rs", None);
+        assert!(!out.contains("a leading comment"), "comments should be stripped:\n{out}");
+        assert!(!out.contains("an inner comment"));
+        assert!(out.contains("fn main()"), "code should be kept:\n{out}");
+        assert!(out.contains("println!"));
+    }
+
+    #[test]
+    fn test_filter_blob_show_caps_large_file() {
+        let raw: String = (0..1000).map(|i| format!("let x{i} = {i};\n")).collect();
+        let out = filter_blob_show(&raw, "HEAD:big.rs", None);
+        assert!(
+            out.lines().count() < 1000,
+            "1000-line blob should be capped, got {} lines",
+            out.lines().count()
+        );
+        assert!(out.contains("more lines]"), "expected a truncation marker:\n{out}");
+    }
+
+    #[test]
+    fn test_filter_blob_show_unknown_extension_is_faithful() {
+        let raw = "some plain text\nwithout any comment syntax\n";
+        let out = filter_blob_show(raw, "HEAD:notes.unknownext", None);
+        assert!(out.contains("some plain text"));
+        assert!(out.contains("without any comment syntax"));
+    }
+
+    #[test]
+    fn test_filter_blob_show_never_worse_on_tiny_input() {
+        let raw = "x\n";
+        let out = filter_blob_show(raw, "HEAD:a.rs", None);
+        assert!(
+            out.split_whitespace().count() <= raw.split_whitespace().count(),
+            "filtered output must never be larger than raw"
+        );
+    }
+
+    #[test]
+    fn test_filter_blob_show_savings() {
+        fn count_tokens(s: &str) -> usize {
+            s.split_whitespace().count()
+        }
+        let mut raw = String::new();
+        for i in 0..20 {
+            raw.push_str(&format!("// explanatory comment number {i}\n"));
+        }
+        raw.push_str("fn main() {\n    println!(\"hi\");\n}\n");
+        let out = filter_blob_show(&raw, "HEAD:src/main.rs", None);
+        let savings = 100.0 - (count_tokens(&out) as f64 / count_tokens(&raw) as f64 * 100.0);
+        assert!(savings >= 60.0, "expected >=60% savings, got {savings:.1}%");
     }
 
     #[test]
