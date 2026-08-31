@@ -455,6 +455,26 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^python3(?:\s|$)",
+        rtk_cmd: "rtk python --executable python3",
+        rewrite_prefixes: &["python3"],
+        category: "Python",
+        savings_pct: 60.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+        pipeline_final_safe: false,
+    },
+    RtkRule {
+        pattern: r"^python(?:\s|$)",
+        rtk_cmd: "rtk python --executable python",
+        rewrite_prefixes: &["python"],
+        category: "Python",
+        savings_pct: 60.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+        pipeline_final_safe: false,
+    },
+    RtkRule {
         pattern: r"^(python3?\s+-m\s+)?mypy(\s|$)",
         rtk_cmd: "rtk mypy",
         rewrite_prefixes: &["python3 -m mypy", "python -m mypy", "mypy"],
@@ -977,6 +997,7 @@ pub const RULES: &[RtkRule] = &[
     },
 ];
 
+#[rustfmt::skip]
 pub const IGNORED_PREFIXES: &[&str] = &[
     "cd ",
     "cd\t",
@@ -1007,8 +1028,6 @@ pub const IGNORED_PREFIXES: &[&str] = &[
     "cut ",
     "awk ",
     "sed ",
-    "python3 -c",
-    "python -c",
     "node -e",
     "ruby -e",
     "rtk ",

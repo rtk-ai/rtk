@@ -270,6 +270,7 @@ rtk env -f AWS                  # Filtered env vars
 rtk log app.log                 # Deduplicated logs
 rtk curl <url>                  # Truncate + save full output
 rtk wget <url>                  # Download, strip progress bars
+rtk python script.py            # Summarize output only above 1 KiB
 rtk summary <long command>      # Heuristic summary
 rtk proxy <command>             # Raw passthrough + tracking
 ```

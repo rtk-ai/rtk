@@ -40,7 +40,7 @@ pub fn run(command: &str, verbose: u8) -> Result<i32> {
     Ok(result.exit_code)
 }
 
-fn summarize_output(output: &str, command: &str, success: bool) -> String {
+pub(crate) fn summarize_output(output: &str, command: &str, success: bool) -> String {
     let lines: Vec<&str> = output.lines().collect();
     let mut result = Vec::new();
 

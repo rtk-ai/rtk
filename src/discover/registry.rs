@@ -1329,6 +1329,9 @@ fn rewrite_segment_inner(
             if let Some(rewritten) =
                 rewrite_segment_inner(rest, excluded, transparent_prefixes, context, depth + 1)
             {
+                if prefix == "uv run" && rewritten.starts_with("rtk python --executable ") {
+                    break;
+                }
                 return Some(format!("{} {}", prefix, rewritten));
             }
             // #2768: falling through re-tests the full prefixed string, which is
@@ -5081,6 +5084,50 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("wc src/*.rs", &[]),
             Some("rtk wc src/*.rs".into())
+        );
+    }
+
+    // --- #2312: generic Python proxy ---
+
+    #[test]
+    fn test_classify_generic_python_commands() {
+        for command in [
+            "python3 script.py",
+            "python3 -c 'print(1)'",
+            "python --version",
+        ] {
+            assert!(matches!(
+                classify_command(command),
+                Classification::Supported {
+                    rtk_equivalent: "rtk python --executable python3"
+                        | "rtk python --executable python",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn test_rewrite_generic_python_preserves_executable() {
+        assert_eq!(
+            rewrite_command_no_prefixes("python3 -c 'print(1)'", &[]),
+            Some("rtk python --executable python3 -c 'print(1)'".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("python script.py", &[]),
+            Some("rtk python --executable python script.py".into())
+        );
+    }
+
+    #[test]
+    fn test_specific_python_module_routing_still_wins() {
+        assert_eq!(
+            rewrite_command_no_prefixes("python3 -m pytest tests/", &[]),
+            Some("rtk pytest tests/".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("python -m mypy src/", &[]),
+            Some("rtk mypy src/".into())
         );
     }
 
