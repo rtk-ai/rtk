@@ -3589,7 +3589,11 @@ mod tests {
         match cli.command {
             Commands::Pnpm { filter, command } => {
                 assert_eq!(filter, vec!["@app1", "@app2"]);
-                assert_eq!(validate_pnpm_filters(&filter, &command), None, "nothing is dropped now");
+                assert_eq!(
+                    validate_pnpm_filters(&filter, &command),
+                    None,
+                    "nothing is dropped now"
+                );
                 match command {
                     PnpmCommands::Typecheck { args } => assert_eq!(args, vec!["--noEmit"]),
                     _ => panic!("Expected Pnpm Typecheck command"),

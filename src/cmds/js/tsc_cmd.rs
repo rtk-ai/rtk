@@ -5,6 +5,7 @@ use crate::core::stream::{BlockHandler, BlockStreamFilter};
 use crate::core::truncate::{reduced, CAP_WARNINGS};
 use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
+use std::process::Command;
 use regex::Regex;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -115,10 +116,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 ///
 /// `args` is the whole pnpm argument list, filters included, so `--filter` works here as anywhere else.
 pub fn run_pnpm_typecheck(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("pnpm");
-    for arg in args {
-        cmd.arg(arg);
-    }
+    let cmd = pnpm_typecheck_command(args);
 
     if verbose > 0 {
         eprintln!("Running: pnpm {}", args.join(" "));
@@ -131,6 +129,16 @@ pub fn run_pnpm_typecheck(args: &[String], verbose: u8) -> Result<i32> {
         Box::new(BlockStreamFilter::new(TscHandler::new())),
         runner::RunOptions::with_tee("tsc"),
     )
+}
+
+/// Split out so a test can assert WHICH program this path runs without spawning it — the defect was
+/// never in the filtering, it was in running the wrong command.
+fn pnpm_typecheck_command(args: &[String]) -> Command {
+    let mut cmd = resolved_command("pnpm");
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd
 }
 
 struct TscHandler {
@@ -402,6 +410,30 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The regression: this path used to run `tsc` in the current directory instead of the caller's
+    /// `pnpm typecheck`. Where the directory holds no tsconfig, `tsc` prints its help, which parses to
+    /// zero diagnostics — so a failing typecheck was reported as "No errors found".
+    #[test]
+    fn pnpm_typecheck_runs_pnpm_with_the_callers_arguments() {
+        let args = vec![
+            "--filter=@app/web".to_string(),
+            "typecheck".to_string(),
+            "--noEmit".to_string(),
+        ];
+        let cmd = pnpm_typecheck_command(&args);
+
+        let program = cmd.get_program().to_string_lossy().into_owned();
+        assert!(
+            program == "pnpm" || program.ends_with("/pnpm"),
+            "expected pnpm, ran {program}"
+        );
+        let forwarded: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(forwarded, args, "filters and arguments reach pnpm unchanged");
+    }
 
     #[test]
     fn test_filter_tsc_output() {
