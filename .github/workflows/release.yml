@@ -32,6 +32,9 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    outputs:
+      # Set only by the windows-msvc leg (see "Expose Windows exe artifact id").
+      windows-exe-artifact-id: ${{ steps.win-artifact.outputs.id }}
     strategy:
       fail-fast: false
       matrix:
@@ -105,6 +108,56 @@ jobs:
           name: rtk-${{ matrix.target }}
           path: rtk-${{ matrix.target }}.${{ matrix.archive }}
 
+      # The bare exe is uploaded separately for SignPath: its artifact
+      # configuration signs a single pe-file, and the signed exe is re-zipped
+      # by the sign-windows job below.
+      - name: Upload unsigned Windows exe (for signing)
+        if: matrix.os == 'windows-latest'
+        id: upload-exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtk-windows-exe-unsigned
+          path: target/${{ matrix.target }}/release/rtk.exe
+
+      - name: Expose Windows exe artifact id
+        if: matrix.os == 'windows-latest'
+        id: win-artifact
+        shell: bash
+        run: echo "id=${{ steps.upload-exe.outputs.artifact-id }}" >> "$GITHUB_OUTPUT"
+
+  # Signs rtk.exe via SignPath, then replaces the unsigned windows zip with a
+  # signed one under the same artifact name so the release job needs no change.
+  # Skipped entirely (unsigned release, previous behaviour) when the
+  # SIGNPATH_ORGANIZATION_ID repository variable is not configured.
+  sign-windows:
+    name: Sign Windows binary (SignPath)
+    needs: build
+    if: vars.SIGNPATH_ORGANIZATION_ID != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Submit signing request
+        uses: signpath/github-action-submit-signing-request@v1.2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: rtk
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ needs.build.outputs.windows-exe-artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      - name: Repackage signed exe
+        run: |
+          cd signed
+          7z a ../rtk-x86_64-pc-windows-msvc.zip rtk.exe
+
+      - name: Replace Windows artifact with signed zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtk-x86_64-pc-windows-msvc
+          path: rtk-x86_64-pc-windows-msvc.zip
+          overwrite: true
+
   build-deb:
     name: Build DEB package
     runs-on: ubuntu-latest
@@ -162,7 +215,15 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build, build-deb, build-rpm]
+    needs: [build, sign-windows, build-deb, build-rpm]
+    # sign-windows may be skipped (no SignPath config) — release anyway with
+    # the unsigned zip, but never release if signing was attempted and failed.
+    if: >-
+      !cancelled() &&
+      needs.build.result == 'success' &&
+      needs.build-deb.result == 'success' &&
+      needs.build-rpm.result == 'success' &&
+      (needs.sign-windows.result == 'success' || needs.sign-windows.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/create-github-app-token@v3
