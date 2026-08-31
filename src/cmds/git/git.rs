@@ -340,14 +340,26 @@ fn run_show(
 /// no-newline annotation, and one whose content happens to start `diff --`
 /// opens a new file section. There is nothing to compact faithfully, so these
 /// modes pass through.
+///
+/// `--word-diff=none` is the mode that turns a word diff back off, leaving an
+/// ordinary unified diff to compact. Modes are last-one-wins, which is what
+/// that mode is for: overriding an alias or an earlier flag on the same line.
 fn emits_word_diff(args: &[String]) -> bool {
-    args.iter().any(|arg| {
-        arg == "--word-diff"
-            || arg.starts_with("--word-diff=")
+    let mut word_diff = false;
+    for arg in args {
+        if let Some(mode) = arg.strip_prefix("--word-diff=") {
+            word_diff = mode != "none";
+        } else if arg == "--word-diff"
             || arg.starts_with("--word-diff-regex")
             || arg == "--color-words"
             || arg.starts_with("--color-words=")
-    })
+        {
+            // `--color-words[=<regex>]` takes a regex rather than a mode, so
+            // there is no `none` to honour on that spelling.
+            word_diff = true;
+        }
+    }
+    word_diff
 }
 
 fn is_blob_show_arg(arg: &str) -> bool {
@@ -358,36 +370,36 @@ fn is_blob_show_arg(arg: &str) -> bool {
 /// Path named by a diff section header.
 ///
 /// `diff --git a/p b/p` carries the path twice; `diff --cc p` and
-/// `diff --combined p` carry it once, as the whole remainder of the line.
+/// `diff --combined p` carry it once, as the whole remainder of the line. Only
+/// the two-path form can be split at its midpoint, so the header kind decides
+/// which shape to read: `diff --cc dup dup` names one file called `dup dup`,
+/// not the file `dup` twice.
 ///
-/// Under the default `core.quotepath`, git wraps a path in `"` and escapes it
-/// when it holds a non-ASCII byte, a control character or a quote — but not
-/// when it merely holds a space. So the separator is ` b/` for a plain path and
-/// ` "b/` for a quoted one, and a path with a space in it needs neither form
-/// handled specially.
+/// Under the default `core.quotepath`, git wraps a path in `"` and escapes any
+/// non-ASCII byte, control character, quote or backslash inside it — but not a
+/// space. The quoting is undone here, so the header carries the path as it is
+/// on disk and a `grep` over the output finds it by name.
 fn diff_header_path(line: &str) -> String {
-    if let Some(path) = line
+    let Some(rest) = line.splitn(3, ' ').nth(2) else {
+        return "unknown".to_string();
+    };
+    if !line.starts_with("diff --git ") {
+        return unquote_path(rest);
+    }
+    if let Some(path) = same_path_twice(rest) {
+        return path;
+    }
+    // A rename names two different paths, and the destination is the second.
+    if let Some(quoted) = rest
         .split(" \"b/")
         .nth(1)
-        .and_then(|rest| rest.strip_suffix('"'))
+        .and_then(|dst| dst.strip_suffix('"'))
     {
-        return path.to_string();
-    }
-    let rest = match line.splitn(3, ' ').nth(2) {
-        Some(rest) => rest,
-        None => return "unknown".to_string(),
-    };
-    if let Some(path) = same_path_twice(rest) {
-        return path.to_string();
+        return unescape_path(quoted);
     }
     match rest.split(" b/").nth(1) {
         Some(path) => path.to_string(),
-        // A single-path header (`diff --cc`) carries the quoting too.
-        None => rest
-            .strip_prefix('"')
-            .and_then(|r| r.strip_suffix('"'))
-            .unwrap_or(rest)
-            .to_string(),
+        None => unquote_path(rest),
     }
 }
 
@@ -396,12 +408,16 @@ fn diff_header_path(line: &str) -> String {
 /// Anything but a rename names the same path on both sides, so the two halves
 /// are the same length and the separating space sits dead centre. Splitting
 /// there instead of on the first ` b/` keeps a path that contains that
-/// substring — a file under a directory named `x b` — and it does not care what
-/// the prefixes are, so `--no-prefix` and a custom `--src-prefix` work too.
+/// substring — a file under a directory named `x b`. Prefixes are then dropped
+/// by matching the halves against each other rather than by name, so
+/// `--no-prefix` and any custom `--src-prefix` / `--dst-prefix` read alike.
 ///
-/// `None` for a rename, whose halves differ in length, and for a single-path
-/// header; both fall through to the ` b/` split.
-fn same_path_twice(rest: &str) -> Option<&str> {
+/// `None` for a rename, whose halves differ past their first component, and for
+/// anything else the two halves disagree on; both fall through to the ` b/`
+/// split. A `--no-prefix` rename between two directories is the one shape this
+/// cannot tell from a prefix pair — space-separated paths with no prefix are
+/// ambiguous by construction — and it reads as the shared trailing path.
+fn same_path_twice(rest: &str) -> Option<String> {
     if rest.len().is_multiple_of(2) {
         return None;
     }
@@ -410,14 +426,74 @@ fn same_path_twice(rest: &str) -> Option<&str> {
     if rest.as_bytes().get(mid) != Some(&b' ') {
         return None;
     }
-    let (left, right) = (&rest[..mid], &rest[mid + 1..]);
+    let (left, right) = (unquote_path(&rest[..mid]), unquote_path(&rest[mid + 1..]));
     if left == right {
         return Some(left);
     }
-    match (left.strip_prefix("a/"), right.strip_prefix("b/")) {
-        (Some(p1), Some(p2)) if p1 == p2 => Some(p1),
-        _ => None,
+    let (_, left_path) = left.split_once('/')?;
+    let (_, right_path) = right.split_once('/')?;
+    (left_path == right_path).then(|| right_path.to_string())
+}
+
+/// Undo git's `core.quotepath` quoting: `"a/\303\251.txt"` becomes `a/é.txt`.
+///
+/// A path git did not quote is returned as-is, so either form can be passed.
+fn unquote_path(raw: &str) -> String {
+    match raw.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+        Some(quoted) => unescape_path(quoted),
+        None => raw.to_string(),
     }
+}
+
+/// Decode the C escapes inside a quoted path.
+///
+/// The octal escapes spell out the path's bytes one at a time, so a multi-byte
+/// character arrives as several of them; they are collected as bytes and
+/// decoded once at the end rather than per escape. A path whose bytes are not
+/// UTF-8 keeps replacement characters, which is as close as a `String` gets.
+fn unescape_path(quoted: &str) -> String {
+    let bytes = quoted.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' || i + 1 == bytes.len() {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        let escape = bytes[i + 1];
+        if escape.is_ascii_digit() {
+            let end = (i + 4).min(bytes.len());
+            let octal = std::str::from_utf8(&bytes[i + 1..end])
+                .ok()
+                .and_then(|digits| u8::from_str_radix(digits, 8).ok());
+            match octal {
+                Some(byte) => {
+                    out.push(byte);
+                    i = end;
+                }
+                // Not an octal escape after all: keep the backslash verbatim.
+                None => {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        out.push(match escape {
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b't' => b'\t',
+            b'n' => b'\n',
+            b'v' => 0x0b,
+            b'f' => 0x0c,
+            b'r' => b'\r',
+            // `\"` and `\\` stand for themselves.
+            other => other,
+        });
+        i += 2;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Line budget a hunk header declares, and how wide its body prefix is.
@@ -2781,6 +2857,38 @@ mod tests {
     }
 
     #[test]
+    fn test_diff_header_path_unescapes_gits_default_quoting() {
+        // What git actually emits under the default `core.quotepath`: one octal
+        // escape per byte, so the header has to be decoded rather than merely
+        // unwrapped, or `rtk git diff | grep été` finds nothing.
+        assert_eq!(
+            diff_header_path(r#"diff --git "a/\303\251t\303\251.txt" "b/\303\251t\303\251.txt""#),
+            "été.txt"
+        );
+        assert_eq!(
+            diff_header_path(r#"diff --cc "\303\251t\303\251.txt""#),
+            "été.txt"
+        );
+        assert_eq!(
+            diff_header_path(r#"diff --git a/plain.txt "b/\303\251t.txt""#),
+            "ét.txt"
+        );
+        // The single-character escapes, and a backslash standing for itself.
+        assert_eq!(
+            diff_header_path(r#"diff --cc "tab\there.txt""#),
+            "tab\there.txt"
+        );
+        assert_eq!(
+            diff_header_path(r#"diff --cc "quote\"here.txt""#),
+            "quote\"here.txt"
+        );
+        assert_eq!(
+            diff_header_path(r#"diff --cc "back\\slash.txt""#),
+            r"back\slash.txt"
+        );
+    }
+
+    #[test]
     fn test_emits_word_diff_detects_every_form() {
         for flag in [
             "--word-diff",
@@ -2799,6 +2907,25 @@ mod tests {
         assert!(!emits_word_diff(&["--stat".to_string()]));
         assert!(!emits_word_diff(&["-U10".to_string()]));
         assert!(!emits_word_diff(&[]));
+    }
+
+    #[test]
+    fn test_emits_word_diff_honours_the_none_mode() {
+        // `--word-diff=none` leaves an ordinary unified diff, which compacts
+        // like any other. Treating it as a word diff passed the whole raw diff
+        // through, so a defensive `--word-diff=none` lost every saving.
+        assert!(!emits_word_diff(&["--word-diff=none".to_string()]));
+        // Modes are last-one-wins, which is what `none` exists to do.
+        assert!(!emits_word_diff(&[
+            "--word-diff".to_string(),
+            "--word-diff=none".to_string()
+        ]));
+        assert!(emits_word_diff(&[
+            "--word-diff=none".to_string(),
+            "--word-diff".to_string()
+        ]));
+        // `--color-words` takes a regex, so `none` there is a pattern.
+        assert!(emits_word_diff(&["--color-words=none".to_string()]));
     }
 
     #[test]
@@ -2850,9 +2977,22 @@ mod tests {
             diff_header_path("diff --git src/main.rs src/main.rs"),
             "src/main.rs"
         );
-        // A rename's halves differ in length, so the ` b/` split still names
-        // the destination.
+        // Prefixes are matched against each other, not by name, so a custom
+        // `--dst-prefix` reads like any other pair.
+        assert_eq!(diff_header_path("diff --git a/f.txt w/f.txt"), "f.txt");
+        assert_eq!(diff_header_path("diff --git i/f.txt w/f.txt"), "f.txt");
+        // A rename's halves disagree past their first component, so the ` b/`
+        // split still names the destination.
         assert_eq!(diff_header_path("diff --git a/old.txt b/new.txt"), "new.txt");
+    }
+
+    #[test]
+    fn test_diff_header_path_does_not_split_single_path_headers() {
+        // `diff --cc` names one path. Splitting its remainder at the midpoint
+        // would read a file called `dup dup` as the file `dup` named twice.
+        assert_eq!(diff_header_path("diff --cc dup dup"), "dup dup");
+        assert_eq!(diff_header_path("diff --combined dup dup"), "dup dup");
+        assert_eq!(diff_header_path("diff --cc a/x b/x"), "a/x b/x");
     }
 
     #[test]
