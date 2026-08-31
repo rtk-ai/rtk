@@ -54,6 +54,37 @@ fn git_cmd_c_locale(global_args: &[String]) -> Command {
     cmd
 }
 
+/// Flags that pin git's diff rendering to plain unified diff.
+///
+/// `git diff` output is user-configurable and RTK parses it. `diff.external`,
+/// `GIT_EXTERNAL_DIFF` or a `.gitattributes` `diff=<driver>` attribute replace the
+/// diff wholesale (difftastic, delta, ...), `textconv` drivers rewrite file contents
+/// before diffing, and `diff.noprefix` / `diff.mnemonicPrefix` change the `a/` `b/`
+/// path prefixes `compact_diff()` reads filenames from. Any of them makes the parse
+/// silently yield nothing.
+///
+/// These are subcommand flags, not git global options -- `git --no-ext-diff status`
+/// is an error -- so they are applied per-subcommand, never in `git_cmd()`.
+const DIFF_HARDENING: &[&str] = &[
+    "--no-ext-diff",
+    "--no-textconv",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+];
+
+/// `git_cmd()` plus a diff-producing subcommand and [`DIFF_HARDENING`].
+///
+/// Only for paths whose output RTK parses. Passthrough paths deliberately do not
+/// use this: they print git's bytes verbatim, so they must keep honouring the
+/// user's diff configuration. Hardening is applied before the user's own args so
+/// an explicit `--ext-diff` / `--textconv` still wins (git is last-flag-wins).
+fn git_diff_cmd(global_args: &[String], subcommand: &[&str]) -> Command {
+    let mut cmd = git_cmd(global_args);
+    cmd.args(subcommand);
+    cmd.args(DIFF_HARDENING);
+    cmd
+}
+
 fn uses_compact_status_path(args: &[String]) -> bool {
     if args.is_empty() {
         return true;
@@ -159,8 +190,7 @@ fn run_diff(
     }
 
     // Default RTK behavior: stat first, then compacted diff
-    let mut cmd = git_cmd(global_args);
-    cmd.arg("diff").arg("--stat");
+    let mut cmd = git_diff_cmd(global_args, &["diff", "--stat"]);
 
     for arg in args {
         cmd.arg(arg);
@@ -186,8 +216,7 @@ fn run_diff(
     }
 
     // Now get actual diff but compact it
-    let mut diff_cmd = git_cmd(global_args);
-    diff_cmd.arg("diff");
+    let mut diff_cmd = git_diff_cmd(global_args, &["diff"]);
     for arg in args {
         diff_cmd.arg(arg);
     }
@@ -263,9 +292,10 @@ fn run_show(
         return Ok(0);
     }
 
-    // Get raw output for tracking
-    let mut raw_cmd = git_cmd(global_args);
-    raw_cmd.arg("show");
+    // Get raw output for tracking. Hardened like the parsed passes below so
+    // `never_worse()` compares unified diff against unified diff, and so the
+    // tracked savings baseline is not inflated by an external driver's rendering.
+    let mut raw_cmd = git_diff_cmd(global_args, &["show"]);
     for arg in args {
         raw_cmd.arg(arg);
     }
@@ -274,8 +304,10 @@ fn run_show(
         .unwrap_or_default();
 
     // Step 1: one-line commit summary
-    let mut summary_cmd = git_cmd(global_args);
-    summary_cmd.args(["show", "--no-patch", "--pretty=format:%h %s (%ar) <%an>"]);
+    let mut summary_cmd = git_diff_cmd(
+        global_args,
+        &["show", "--no-patch", "--pretty=format:%h %s (%ar) <%an>"],
+    );
     for arg in args {
         summary_cmd.arg(arg);
     }
@@ -287,8 +319,7 @@ fn run_show(
     let mut printed = summary_result.stdout.trim().to_string();
 
     // Step 2: --stat summary
-    let mut stat_cmd = git_cmd(global_args);
-    stat_cmd.args(["show", "--stat", "--pretty=format:"]);
+    let mut stat_cmd = git_diff_cmd(global_args, &["show", "--stat", "--pretty=format:"]);
     for arg in args {
         stat_cmd.arg(arg);
     }
@@ -300,8 +331,7 @@ fn run_show(
     }
 
     // Step 3: compacted diff
-    let mut diff_cmd = git_cmd(global_args);
-    diff_cmd.args(["show", "--pretty=format:"]);
+    let mut diff_cmd = git_diff_cmd(global_args, &["show", "--pretty=format:"]);
     for arg in args {
         diff_cmd.arg(arg);
     }
@@ -416,6 +446,16 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
 
     if !current_file.is_empty() && (added > 0 || removed > 0) {
         result.push(format!("  +{} -{}", added, removed));
+    }
+
+    // Nothing was ever pushed, so no `diff --git` and no `@@` was seen: this is not
+    // unified diff. Returning the empty join here would silently drop the whole diff
+    // while the surrounding stat summary still looks authoritative. Fall back to the
+    // raw text instead, and let `never_worse()` at the call site pick the cheaper of
+    // the two. Reachable when an external diff driver slips past DIFF_HARDENING, and
+    // for the `gh` / `glab` callers, which have no equivalent flag.
+    if result.is_empty() && !diff.trim().is_empty() {
+        return diff.to_string();
     }
 
     if was_truncated {
@@ -1117,8 +1157,8 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
 
     if result.success() {
         // Count what was added
-        let mut stat_cmd = git_cmd(global_args);
-        stat_cmd.args(["diff", "--cached", "--stat", "--shortstat"]);
+        let mut stat_cmd =
+            git_diff_cmd(global_args, &["diff", "--cached", "--stat", "--shortstat"]);
         let stat_result = exec_capture(&mut stat_cmd).context("Failed to check staged files")?;
 
         // Mirror git's own behaviour: a no-op `git add` is silent. Emitting a
@@ -1929,8 +1969,7 @@ fn run_stash(
         Some("show") => {
             let patch_mode = args.iter().any(|a| a == "-p" || a == "--patch");
 
-            let mut cmd = git_cmd(global_args);
-            cmd.args(["stash", "show"]);
+            let mut cmd = git_diff_cmd(global_args, &["stash", "show"]);
             for arg in args {
                 cmd.arg(arg);
             }
@@ -2284,6 +2323,44 @@ mod tests {
     }
 
     #[test]
+    fn test_git_diff_cmd_applies_hardening_after_subcommand() {
+        let cmd = git_diff_cmd(&[], &["diff"]);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(
+            args,
+            vec![
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_git_diff_cmd_keeps_globals_before_subcommand() {
+        // Global options must stay ahead of the subcommand, and the hardening
+        // flags must stay behind it: `git --no-ext-diff diff` is a git error.
+        let global_args = vec!["-C".to_string(), "/tmp".to_string()];
+        let cmd = git_diff_cmd(&global_args, &["stash", "show"]);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(
+            args,
+            vec![
+                "-C",
+                "/tmp",
+                "stash",
+                "show",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+            ]
+        );
+    }
+
+    #[test]
     fn test_git_cmd_with_multiple_global_args() {
         let global_args = vec![
             "-C".to_string(),
@@ -2410,6 +2487,36 @@ mod tests {
         let result = compact_diff(diff, 100);
         assert!(result.contains("foo.rs"));
         assert!(result.contains("+"));
+    }
+
+    #[test]
+    fn test_compact_diff_passes_through_non_unified_input() {
+        // Real `git diff` output from a repo with `diff.external = difft`. It has
+        // no `diff --git` and no `@@`, so the parser matches nothing. Dropping it
+        // would silently lose the entire diff, so it must come back verbatim.
+        let raw = include_str!("../../../tests/fixtures/git_diff_external_driver_raw.txt");
+        assert!(
+            !raw.contains("diff --git"),
+            "fixture must not be unified diff"
+        );
+
+        let result = compact_diff(raw, 500);
+        assert_eq!(result, raw);
+    }
+
+    #[test]
+    fn test_compact_diff_empty_input_stays_empty() {
+        assert_eq!(compact_diff("", 500), "");
+        assert_eq!(compact_diff("   \n\n", 500), "");
+    }
+
+    #[test]
+    fn test_compact_diff_rename_only_is_not_treated_as_unparseable() {
+        // A pure rename has a `diff --git` marker but no hunks, so `result` is
+        // non-empty and the passthrough fallback must not fire.
+        let diff = "diff --git a/old.rs b/new.rs\nsimilarity index 100%\nrename from old.rs\nrename to new.rs\n";
+        let result = compact_diff(diff, 500);
+        assert_eq!(result.trim(), "new.rs");
     }
 
     #[test]
