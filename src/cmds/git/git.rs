@@ -126,7 +126,7 @@ fn run_diff(
         .any(|arg| arg == "--stat" || arg == "--numstat" || arg == "--shortstat");
 
     // Check if user wants compact diff (default RTK behavior)
-    let wants_compact = !args.iter().any(|arg| arg == "--no-compact");
+    let wants_compact = !args.iter().any(|arg| arg == "--no-compact") && !emits_word_diff(args);
 
     if wants_stat || !wants_compact {
         // User wants stat or explicitly no compacting - pass through directly
@@ -236,7 +236,7 @@ fn run_show(
     // pass through directly to avoid duplicated output from compact-show steps.
     let wants_blob_show = args.iter().any(|arg| is_blob_show_arg(arg));
 
-    if wants_stat_only || wants_format || wants_blob_show {
+    if wants_stat_only || wants_format || wants_blob_show || emits_word_diff(args) {
         let mut cmd = git_cmd(global_args);
         cmd.arg("show");
         for arg in args {
@@ -330,6 +330,26 @@ fn run_show(
     Ok(0)
 }
 
+/// Whether these args make git emit a word diff rather than a line diff.
+///
+/// `compact_diff` reads a unified or combined diff: a body line's first column
+/// (or columns) is a marker and the rest is content. A word diff drops the
+/// marker entirely and puts `[-removed-]` / `{+added+}` inline, so its body
+/// lines are arbitrary content in the marker position. A line starting with `+`
+/// then counts as an addition, one starting with `\` is dropped as a
+/// no-newline annotation, and one whose content happens to start `diff --`
+/// opens a new file section. There is nothing to compact faithfully, so these
+/// modes pass through.
+fn emits_word_diff(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg == "--word-diff"
+            || arg.starts_with("--word-diff=")
+            || arg.starts_with("--word-diff-regex")
+            || arg == "--color-words"
+            || arg.starts_with("--color-words=")
+    })
+}
+
 fn is_blob_show_arg(arg: &str) -> bool {
     // Detect `rev:path` style arguments while ignoring flags like `--pretty=format:...`.
     !arg.starts_with('-') && arg.contains(':')
@@ -353,16 +373,50 @@ fn diff_header_path(line: &str) -> String {
     {
         return path.to_string();
     }
-    match line.split(" b/").nth(1) {
+    let rest = match line.splitn(3, ' ').nth(2) {
+        Some(rest) => rest,
+        None => return "unknown".to_string(),
+    };
+    if let Some(path) = same_path_twice(rest) {
+        return path.to_string();
+    }
+    match rest.split(" b/").nth(1) {
         Some(path) => path.to_string(),
-        None => {
-            let rest = line.splitn(3, ' ').nth(2).unwrap_or("unknown");
-            // A single-path header (`diff --cc`) carries the quoting too.
-            rest.strip_prefix('"')
-                .and_then(|r| r.strip_suffix('"'))
-                .unwrap_or(rest)
-                .to_string()
-        }
+        // A single-path header (`diff --cc`) carries the quoting too.
+        None => rest
+            .strip_prefix('"')
+            .and_then(|r| r.strip_suffix('"'))
+            .unwrap_or(rest)
+            .to_string(),
+    }
+}
+
+/// The path a `diff --git` header names twice, split at the midpoint.
+///
+/// Anything but a rename names the same path on both sides, so the two halves
+/// are the same length and the separating space sits dead centre. Splitting
+/// there instead of on the first ` b/` keeps a path that contains that
+/// substring — a file under a directory named `x b` — and it does not care what
+/// the prefixes are, so `--no-prefix` and a custom `--src-prefix` work too.
+///
+/// `None` for a rename, whose halves differ in length, and for a single-path
+/// header; both fall through to the ` b/` split.
+fn same_path_twice(rest: &str) -> Option<&str> {
+    if rest.len().is_multiple_of(2) {
+        return None;
+    }
+    let mid = rest.len() / 2;
+    // A space at the midpoint is a char boundary, so both halves are valid.
+    if rest.as_bytes().get(mid) != Some(&b' ') {
+        return None;
+    }
+    let (left, right) = (&rest[..mid], &rest[mid + 1..]);
+    if left == right {
+        return Some(left);
+    }
+    match (left.strip_prefix("a/"), right.strip_prefix("b/")) {
+        (Some(p1), Some(p2)) if p1 == p2 => Some(p1),
+        _ => None,
     }
 }
 
@@ -434,7 +488,7 @@ fn parse_hunk_header(line: &str) -> Option<HunkHeader> {
     }
     let body = line[at_run..].split('@').next()?;
 
-    let mut parents = Vec::new();
+    let mut parents: Vec<usize> = Vec::new();
     let mut new = None;
     for group in body.split_whitespace() {
         let Some(rest) = group.strip_prefix(['-', '+']) else {
@@ -453,11 +507,22 @@ fn parse_hunk_header(line: &str) -> Option<HunkHeader> {
         }
     }
 
+    // `@@` has one marker column, `@@@` two, and so on for more parents.
+    let prefix_width = at_run - 1;
+    // A well-formed header lists exactly one range per marker column. When it
+    // does not, only the columns can be charged, so trust them: an untracked
+    // parent would otherwise sit at its declared count forever and the hunk
+    // would never close, while a parent with no column of its own would be
+    // charged against nothing. A missing range gets `usize::MAX`, which keeps
+    // the hunk open to the next header rather than dropping its body.
+    if parents.len() != prefix_width {
+        parents.resize(prefix_width, usize::MAX);
+    }
+
     Some(HunkHeader {
         parents,
         new: new.unwrap_or(0),
-        // `@@` has one marker column, `@@@` two, and so on for more parents.
-        prefix_width: at_run - 1,
+        prefix_width,
     })
 }
 
@@ -2008,8 +2073,10 @@ fn run_stash(
                 return Ok(result.exit_code);
             }
 
-            let filtered = if patch_mode {
+            let filtered = if patch_mode && !emits_word_diff(args) {
                 compact_diff(&result.stdout, 100)
+            } else if patch_mode {
+                result.stdout.clone()
             } else {
                 compact_stash_stat(&result.stdout)
             };
@@ -2711,6 +2778,81 @@ mod tests {
             diff_header_path(r#"diff --git "a/Ã©t.txt" b/plain.txt"#),
             "plain.txt"
         );
+    }
+
+    #[test]
+    fn test_emits_word_diff_detects_every_form() {
+        for flag in [
+            "--word-diff",
+            "--word-diff=plain",
+            "--word-diff=porcelain",
+            "--word-diff-regex=.",
+            "--color-words",
+            "--color-words=.",
+        ] {
+            assert!(
+                emits_word_diff(&[flag.to_string()]),
+                "{} must pass through",
+                flag
+            );
+        }
+        assert!(!emits_word_diff(&["--stat".to_string()]));
+        assert!(!emits_word_diff(&["-U10".to_string()]));
+        assert!(!emits_word_diff(&[]));
+    }
+
+    #[test]
+    fn test_parse_hunk_header_reconciles_ranges_with_marker_columns() {
+        // A well-formed header lists one range per marker column. When it does
+        // not, only the columns can be charged. A missing range must not leave
+        // an untracked parent holding the hunk open forever, and an extra one
+        // must not sit at its declared count with no column to spend it.
+        let h = parse_hunk_header("@@@ -1 +1 @@@").expect("two columns, one range");
+        assert_eq!(h.prefix_width, 2);
+        assert_eq!(h.parents, vec![1, usize::MAX]);
+
+        let h = parse_hunk_header("@@@ -1 -1 -1 +0,0 @@@").expect("two columns, three ranges");
+        assert_eq!(h.prefix_width, 2);
+        assert_eq!(h.parents, vec![1, 1]);
+    }
+
+    #[test]
+    fn test_compact_diff_extra_range_does_not_strand_a_hunk() {
+        // With the third range untracked, `--x` left it at 1 forever, so the
+        // hunk never closed and the mbox signature became its content.
+        let out = compact_diff("diff --cc f\n@@@ -1 -1 -1 +0,0 @@@\n--x\n-- \n2.40.0\n", 100);
+        assert!(out.contains("--x"), "got:\n{}", out);
+        assert!(!out.contains("2.40.0"), "got:\n{}", out);
+        assert!(!out.contains("-- "), "got:\n{}", out);
+        // One line, removed from both parents, is one deletion.
+        assert!(out.contains("+0 -1"), "got:\n{}", out);
+    }
+
+    #[test]
+    fn test_compact_diff_missing_range_keeps_the_body() {
+        // One range for two columns: the untracked parent gets `usize::MAX`, so
+        // the hunk stays open to the next header rather than closing early and
+        // dropping ` -lost`.
+        let out = compact_diff("diff --cc f\n@@@ -1 +1 @@@\n +kept\n -lost\n", 100);
+        assert!(out.contains(" +kept"), "got:\n{}", out);
+        assert!(out.contains(" -lost"), "got:\n{}", out);
+        assert!(out.contains("+1 -1"), "got:\n{}", out);
+    }
+
+    #[test]
+    fn test_diff_header_path_splits_the_pair_at_its_midpoint() {
+        // A file under a directory named `x b` puts the ` b/` separator inside
+        // the path, so the first match is the wrong one.
+        assert_eq!(diff_header_path("diff --git a/x b/y b/x b/y"), "x b/y");
+        // `--no-prefix` and custom prefixes leave no ` b/` at all.
+        assert_eq!(diff_header_path("diff --git x x"), "x");
+        assert_eq!(
+            diff_header_path("diff --git src/main.rs src/main.rs"),
+            "src/main.rs"
+        );
+        // A rename's halves differ in length, so the ` b/` split still names
+        // the destination.
+        assert_eq!(diff_header_path("diff --git a/old.txt b/new.txt"), "new.txt");
     }
 
     #[test]
