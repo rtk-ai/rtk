@@ -605,13 +605,21 @@ fn parse_hunk_header(line: &str) -> Option<HunkHeader> {
 /// Render the note for change lines dropped past `max_hunk_lines`, split by
 /// sign so an anchored `^-` / `^+` audit can tell what it did not see.
 fn hunk_truncation_note(deletions: usize, additions: usize) -> Option<String> {
+    fn count(n: usize, noun: &str) -> String {
+        if n == 1 {
+            format!("{} {}", n, noun)
+        } else {
+            format!("{} {}s", n, noun)
+        }
+    }
     match (deletions, additions) {
         (0, 0) => None,
-        (0, a) => Some(format!("  ... ({} additions truncated)", a)),
-        (d, 0) => Some(format!("  ... ({} deletions truncated)", d)),
+        (0, a) => Some(format!("  ... ({} truncated)", count(a, "addition"))),
+        (d, 0) => Some(format!("  ... ({} truncated)", count(d, "deletion"))),
         (d, a) => Some(format!(
-            "  ... ({} deletions, {} additions truncated)",
-            d, a
+            "  ... ({}, {} truncated)",
+            count(d, "deletion"),
+            count(a, "addition")
         )),
     }
 }
@@ -3125,6 +3133,23 @@ mod tests {
             ctx,
             result
         );
+    }
+
+    #[test]
+    fn test_hunk_truncation_note_counts_one_as_singular() {
+        assert_eq!(
+            hunk_truncation_note(1, 0).as_deref(),
+            Some("  ... (1 deletion truncated)")
+        );
+        assert_eq!(
+            hunk_truncation_note(0, 1).as_deref(),
+            Some("  ... (1 addition truncated)")
+        );
+        assert_eq!(
+            hunk_truncation_note(1, 2).as_deref(),
+            Some("  ... (1 deletion, 2 additions truncated)")
+        );
+        assert_eq!(hunk_truncation_note(0, 0), None);
     }
 
     #[test]
