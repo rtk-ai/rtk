@@ -1467,16 +1467,33 @@ fn rewrite_segment_inner(
     // Try each rewrite prefix (longest first) with word-boundary check
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(strip_target, prefix) {
-            let rewritten = if rest.is_empty() {
-                format!("{}{}", rule.rtk_cmd, redirect_suffix)
-            } else {
-                format!("{} {}{}", rule.rtk_cmd, rest, redirect_suffix)
+            let explicit_linter = explicit_linter_from_prefix(rule.rtk_cmd, prefix);
+            let rewritten = match (explicit_linter, rest.is_empty()) {
+                (Some(linter), true) => {
+                    format!("{} {}{}", rule.rtk_cmd, linter, redirect_suffix)
+                }
+                (Some(linter), false) => {
+                    format!("{} {} {}{}", rule.rtk_cmd, linter, rest, redirect_suffix)
+                }
+                (None, true) => format!("{}{}", rule.rtk_cmd, redirect_suffix),
+                (None, false) => format!("{} {}{}", rule.rtk_cmd, rest, redirect_suffix),
             };
             return Some(rewritten);
         }
     }
 
     None
+}
+
+fn explicit_linter_from_prefix<'a>(rtk_cmd: &str, prefix: &'a str) -> Option<&'a str> {
+    if rtk_cmd != "rtk lint" {
+        return None;
+    }
+
+    match prefix.split_whitespace().last() {
+        Some(linter @ ("biome" | "eslint")) => Some(linter),
+        _ => None,
+    }
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -3957,13 +3974,35 @@ mod tests {
             "lint",
         ];
         for command in commands {
+            let linter = command.split_whitespace().last().unwrap();
+            let expected = match linter {
+                "biome" | "eslint" => format!("rtk lint {linter}"),
+                "lint" => "rtk lint".to_string(),
+                _ => unreachable!(),
+            };
             assert_eq!(
                 rewrite_command_no_prefixes(command, &[]),
-                Some("rtk lint".into()),
+                Some(expected),
                 "Failed for command: {}",
                 command
             );
         }
+    }
+
+    #[test]
+    fn test_rewrite_lint_preserves_explicit_linter_arguments() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm exec biome ci .", &[]),
+            Some("rtk lint biome ci .".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm exec eslint --version", &[]),
+            Some("rtk lint eslint --version".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("RAYON_NUM_THREADS=2 pnpm exec biome ci .", &[]),
+            Some("RAYON_NUM_THREADS=2 rtk lint biome ci .".into())
+        );
     }
 
     #[test]
