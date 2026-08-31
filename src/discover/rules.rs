@@ -584,8 +584,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["php run-tests.php"],
         category: "Tests",
         savings_pct: 99.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^(?:php\s+)?(?:\./)?(?:(?:vendor/)?bin/)?phpunit(?:\s|$)",
