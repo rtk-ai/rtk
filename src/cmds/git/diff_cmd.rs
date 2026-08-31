@@ -6,8 +6,13 @@ use anyhow::Result;
 use std::fs;
 use std::path::Path;
 
+/// POSIX diff "trouble" exit code: returned when an operand cannot be read
+/// (missing or unreadable file), distinct from 1 (files differ) and 0 (same).
+const DIFF_EXIT_TROUBLE: i32 = 2;
+
 /// Ultra-condensed diff - only changed lines, no context.
-/// Returns the diff-convention exit code: 0 if identical, 1 if files differ.
+/// Returns the diff-convention exit code: 0 if identical, 1 if files differ,
+/// 2 if an operand cannot be read.
 pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -15,8 +20,10 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
         eprintln!("Comparing: {} vs {}", file1.display(), file2.display());
     }
 
-    let content1 = fs::read_to_string(file1)?;
-    let content2 = fs::read_to_string(file2)?;
+    let (content1, content2) = match read_operands(file1, file2) {
+        Ok(contents) => contents,
+        Err(code) => return Ok(code),
+    };
     let raw = format!("{}\n---\n{}", content1, content2);
 
     let (rtk, exit_code) = render_file_diff(file1, file2, &content1, &content2);
@@ -30,6 +37,20 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
         shown,
     );
     Ok(exit_code)
+}
+
+/// Reads both operands. On any I/O error, prints a diff-style message to
+/// stderr and returns `DIFF_EXIT_TROUBLE` (2) as the error variant. Reading
+/// via `?` in `run` would collapse to exit 1 in main's error handler, which
+/// is indistinguishable from "files differ" — masking the failure (#2446).
+fn read_operands(file1: &Path, file2: &Path) -> std::result::Result<(String, String), i32> {
+    let read = |path: &Path| {
+        fs::read_to_string(path).map_err(|e| {
+            eprintln!("rtk diff: {}: {}", path.display(), e);
+            DIFF_EXIT_TROUBLE
+        })
+    };
+    Ok((read(file1)?, read(file2)?))
 }
 
 /// Renders the condensed file comparison and returns it with the
@@ -355,6 +376,42 @@ mod tests {
         let (out, code) = render_file_diff(Path::new("t1.txt"), Path::new("t2.txt"), "x\n", "y\n");
         assert!(out.contains("+1 added, -1 removed"));
         assert_eq!(code, 1);
+    }
+
+    // --- read_operands error exit code (issue #2446) ---
+
+    #[test]
+    fn test_read_operands_first_file_missing_exits_2() {
+        let existing = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        let missing = concat!(env!("CARGO_MANIFEST_DIR"), "/rtk-no-such-file-2446.tmp");
+        assert_eq!(
+            read_operands(Path::new(missing), Path::new(existing)).unwrap_err(),
+            DIFF_EXIT_TROUBLE
+        );
+    }
+
+    #[test]
+    fn test_read_operands_second_file_missing_exits_2() {
+        let existing = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        let missing = concat!(env!("CARGO_MANIFEST_DIR"), "/rtk-no-such-file-2446.tmp");
+        assert_eq!(
+            read_operands(Path::new(existing), Path::new(missing)).unwrap_err(),
+            DIFF_EXIT_TROUBLE
+        );
+    }
+
+    #[test]
+    fn test_read_operands_both_exist_ok() {
+        let a = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        let b = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.lock");
+        let (c1, c2) = read_operands(Path::new(a), Path::new(b)).expect("both files readable");
+        assert!(!c1.is_empty() && !c2.is_empty());
+    }
+
+    #[test]
+    fn test_diff_trouble_distinct_from_differ_and_same() {
+        assert_ne!(DIFF_EXIT_TROUBLE, 0);
+        assert_ne!(DIFF_EXIT_TROUBLE, 1);
     }
 
     // --- condense_unified_diff ---
