@@ -1,6 +1,7 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
 use crate::core::args_utils;
+use crate::core::filter::{self, FilterLevel, Language};
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::stream::{
@@ -14,6 +15,7 @@ use crate::core::utils::{
 };
 use anyhow::{Context, Result};
 use std::ffi::OsString;
+use std::path::Path;
 use std::process::Command;
 
 #[derive(Debug, Clone)]
@@ -247,17 +249,30 @@ fn run_show(
             eprintln!("{}", result.stderr);
             return Ok(result.exit_code);
         }
-        if wants_blob_show {
-            print!("{}", result.stdout);
+
+        let shown = if wants_blob_show {
+            filter_blob_show(&result.stdout, args)
         } else {
-            println!("{}", result.stdout.trim());
+            result.stdout.clone()
+        };
+
+        if wants_blob_show {
+            print!("{}", shown);
+        } else {
+            println!("{}", shown.trim());
         }
+
+        let label = if wants_blob_show && shown.len() < result.stdout.len() {
+            format!("rtk git show {} (blob-filtered)", args.join(" "))
+        } else {
+            format!("rtk git show {} (passthrough)", args.join(" "))
+        };
 
         timer.track(
             &format!("git show {}", args.join(" ")),
-            &format!("rtk git show {} (passthrough)", args.join(" ")),
+            &label,
             &result.stdout,
-            &result.stdout,
+            &shown,
         );
 
         return Ok(0);
@@ -333,6 +348,33 @@ fn run_show(
 fn is_blob_show_arg(arg: &str) -> bool {
     // Detect `rev:path` style arguments while ignoring flags like `--pretty=format:...`.
     !arg.starts_with('-') && arg.contains(':')
+}
+
+/// Blobs at or under this many lines stay raw passthrough — not worth the filter pass.
+const BLOB_FILTER_LINE_THRESHOLD: usize = 200;
+
+/// `git show <rev>:<path>` prints a file at a revision, not a diff — unlike the diff
+/// form (auto-compacted below), it was falling straight through with zero token
+/// savings even on huge files. For blobs past the threshold, run the same
+/// comment-stripping filter `rtk read -l minimal` uses, keyed off the path's
+/// extension, and let `never_worse` fall back to raw if filtering doesn't help.
+fn filter_blob_show(raw: &str, args: &[String]) -> String {
+    if raw.lines().count() <= BLOB_FILTER_LINE_THRESHOLD {
+        return raw.to_string();
+    }
+
+    let lang = args
+        .iter()
+        .find(|arg| is_blob_show_arg(arg))
+        .and_then(|arg| arg.rsplit_once(':'))
+        .map(|(_, path)| path)
+        .and_then(|path| Path::new(path).extension())
+        .and_then(|ext| ext.to_str())
+        .map(Language::from_extension)
+        .unwrap_or(Language::Unknown);
+
+    let filtered = filter::get_filter(FilterLevel::Minimal).filter(raw, &lang);
+    never_worse(raw, &filtered).to_string()
 }
 
 pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
@@ -2471,6 +2513,40 @@ mod tests {
         assert!(!is_blob_show_arg("--pretty=format:%h"));
         assert!(!is_blob_show_arg("--format=short"));
         assert!(!is_blob_show_arg("HEAD"));
+    }
+
+    #[test]
+    fn test_filter_blob_show_passthrough_under_threshold() {
+        let raw = "fn main() {\n    // a comment\n    println!(\"hi\");\n}\n";
+        let args = vec!["HEAD:src/main.rs".to_string()];
+        // Well under BLOB_FILTER_LINE_THRESHOLD, must stay byte-identical.
+        assert_eq!(filter_blob_show(raw, &args), raw);
+    }
+
+    #[test]
+    fn test_filter_blob_show_strips_comments_over_threshold() {
+        let mut raw = String::new();
+        for i in 0..250 {
+            raw.push_str(&format!("// comment {}\nlet x{} = {};\n", i, i, i));
+        }
+        let args = vec!["HEAD:src/main.rs".to_string()];
+        let filtered = filter_blob_show(&raw, &args);
+        assert!(filtered.len() < raw.len(), "filtered output should be smaller");
+        assert!(!filtered.contains("// comment"));
+        assert!(filtered.contains("let x0 = 0;"));
+        assert!(filtered.contains("let x249 = 249;"));
+    }
+
+    #[test]
+    fn test_filter_blob_show_unknown_extension_still_bounded_by_never_worse() {
+        // No recognized extension (Language::Unknown) — filter must never grow the output.
+        let mut raw = String::new();
+        for i in 0..250 {
+            raw.push_str(&format!("line {}\n", i));
+        }
+        let args = vec!["HEAD:README".to_string()];
+        let filtered = filter_blob_show(&raw, &args);
+        assert!(filtered.len() <= raw.len());
     }
 
     #[test]
