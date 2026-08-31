@@ -3,7 +3,7 @@
 use super::constants::{CONFIG_TOML, DEFAULT_HISTORY_DAYS, RTK_DATA_DIR};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -150,12 +150,29 @@ pub fn limits() -> LimitsConfig {
     Config::load().map(|c| c.limits).unwrap_or_default()
 }
 
+/// Get filters config. Falls back to defaults if config can't be loaded.
+pub fn filters() -> FilterConfig {
+    match get_config_path() {
+        Ok(path) => filters_at(&path),
+        Err(_) => FilterConfig::default(),
+    }
+}
+
+/// Load filter config from an explicit config.toml path.
+pub(crate) fn filters_at(path: &Path) -> FilterConfig {
+    Config::load_from(path)
+        .map(|c| c.filters)
+        .unwrap_or_default()
+}
+
 impl Config {
     pub fn load() -> Result<Self> {
-        let path = get_config_path()?;
+        Self::load_from(&get_config_path()?)
+    }
 
+    fn load_from(path: &Path) -> Result<Self> {
         if path.exists() {
-            let content = std::fs::read_to_string(&path)?;
+            let content = std::fs::read_to_string(path)?;
             let config: Config = toml::from_str(&content)?;
             Ok(config)
         } else {

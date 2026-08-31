@@ -1260,6 +1260,8 @@ emoji = true                # Utiliser les emojis
 max_width = 120             # Largeur maximale de sortie
 
 [filters]
+# Ces regles s'appliquent aux commandes qui parcourent les repertoires
+# (rtk ls, rtk tree, rtk find et les recherches rtk grep/rg).
 ignore_dirs = [".git", "node_modules", "target", "__pycache__", ".venv", "vendor"]
 ignore_files = ["*.lock", "*.min.js", "*.min.css"]
 

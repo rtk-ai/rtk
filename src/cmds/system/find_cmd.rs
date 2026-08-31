@@ -4,28 +4,10 @@ use crate::core::tracking;
 use crate::core::truncate::CAP_INVENTORY;
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
+use super::constants::{configured_ignore_patterns, glob_match};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
-
-/// Match a filename against a glob pattern (supports `*` and `?`).
-fn glob_match(pattern: &str, name: &str) -> bool {
-    glob_match_inner(pattern.as_bytes(), name.as_bytes())
-}
-
-fn glob_match_inner(pat: &[u8], name: &[u8]) -> bool {
-    match (pat.first(), name.first()) {
-        (None, None) => true,
-        (Some(b'*'), _) => {
-            // '*' matches zero or more characters
-            glob_match_inner(&pat[1..], name)
-                || (!name.is_empty() && glob_match_inner(pat, &name[1..]))
-        }
-        (Some(b'?'), Some(_)) => glob_match_inner(&pat[1..], &name[1..]),
-        (Some(&p), Some(&n)) if p == n => glob_match_inner(&pat[1..], &name[1..]),
-        _ => false,
-    }
-}
 
 /// Parsed arguments from either native find or RTK find syntax.
 #[derive(Debug)]
@@ -428,6 +410,19 @@ pub fn run(
         .git_ignore(true) // respect .gitignore
         .git_global(true)
         .git_exclude(true);
+    let ignore_patterns = configured_ignore_patterns();
+    builder.filter_entry(move |entry| {
+        if entry.depth() == 0 {
+            return true;
+        }
+        match entry.file_name().to_str() {
+            Some(name) => {
+                let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+                !ignore_patterns.is_ignored_name(name, is_dir)
+            }
+            None => true,
+        }
+    });
     if let Some(depth) = max_depth {
         builder.max_depth(Some(depth));
     }
@@ -611,6 +606,7 @@ fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmds::system::constants::IgnorePatterns;
 
     /// Convert string slices to Vec<String> for test convenience.
     fn args(values: &[&str]) -> Vec<String> {
@@ -1173,5 +1169,19 @@ mod tests {
         assert!(result.is_ok());
         // We can't easily capture stdout in unit tests, but at least
         // verify it runs without error. The smoke tests verify content.
+    }
+
+    #[test]
+    fn configured_ignore_patterns_skip_matching_names() {
+        let patterns = IgnorePatterns {
+            noise: vec![],
+            dirs: vec!["canary".to_string()],
+            files: vec!["*.lock".to_string()],
+        };
+
+        assert!(patterns.is_ignored_name("canary", true));
+        assert!(patterns.is_ignored_name("package.lock", false));
+        assert!(!patterns.is_ignored_name("src", false));
+        assert!(!patterns.is_ignored_name("canary", false));
     }
 }
