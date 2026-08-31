@@ -1377,6 +1377,10 @@ fn rewrite_segment_inner(
         }
     }
 
+    if let Some(rewritten) = rewrite_npm_run_with_workspace_selector(cmd_part, redirect_suffix) {
+        return Some(rewritten);
+    }
+
     // Use classify_command for correct ignore/prefix handling
     let rtk_equivalent = match classify_command(cmd_part) {
         Classification::Supported { rtk_equivalent, .. } => {
@@ -1477,6 +1481,49 @@ fn rewrite_segment_inner(
     }
 
     None
+}
+
+fn rewrite_npm_run_with_workspace_selector(
+    cmd_part: &str,
+    redirect_suffix: &str,
+) -> Option<String> {
+    let tokens = tokenize(cmd_part);
+    let args: Vec<&str> = tokens
+        .iter()
+        .filter(|tok| tok.kind == TokenKind::Arg)
+        .map(|tok| tok.value.as_str())
+        .collect();
+
+    if args.len() < 4 || args.first() != Some(&"npm") {
+        return None;
+    }
+
+    let subcommand = args.get(1)?;
+    if !matches!(*subcommand, "run" | "run-script" | "rum" | "urn") {
+        return None;
+    }
+
+    if !has_npm_workspace_selector(&args[3..]) {
+        return None;
+    }
+
+    let npm_args = strip_word_prefix(cmd_part, "npm")?;
+    Some(format!("rtk npm {}{}", npm_args, redirect_suffix))
+}
+
+fn has_npm_workspace_selector(args: &[&str]) -> bool {
+    for arg in args {
+        match *arg {
+            "--" => return false,
+            "-w" | "--workspace" | "--workspaces" | "-ws" => return true,
+            _ if arg.starts_with("-w=") => return true,
+            _ if arg.starts_with("--workspace=") => return true,
+            _ if arg.starts_with("--workspaces=") => return true,
+            _ => {}
+        }
+    }
+
+    false
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -4288,6 +4335,44 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("npm exec vitest", &[]),
             Some("rtk vitest".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_run_workspace_flags_stay_on_npm_runner() {
+        let commands = [
+            ("npm run tsc -w backend", "rtk npm run tsc -w backend"),
+            (
+                "npm run tsc --workspace backend",
+                "rtk npm run tsc --workspace backend",
+            ),
+            ("npm run tsc -w=backend", "rtk npm run tsc -w=backend"),
+            (
+                "npm run-script tsc -w backend",
+                "rtk npm run-script tsc -w backend",
+            ),
+            (
+                "npm run vitest --workspace=backend",
+                "rtk npm run vitest --workspace=backend",
+            ),
+            ("npm run lint -w backend", "rtk npm run lint -w backend"),
+        ];
+
+        for (command, expected) in commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.to_string()),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_npm_run_script_args_after_double_dash_stay_specialized() {
+        assert_eq!(
+            rewrite_command_no_prefixes("npm run tsc -- -w", &[]),
+            Some("rtk tsc -- -w".to_string()),
         );
     }
 
