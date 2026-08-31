@@ -1,0 +1,16 @@
+ Volume in drive C has no label.
+ Volume Serial Number is 1234-5678
+
+ Directory of C:\work
+
+08/28/2026  10:01 AM             2,438 grouped.txt
+               1 File(s)          2,438 bytes
+               1 Dir(s)  123,456,789 bytes free
+
+ Directory of C:\work\nested
+
+08/28/2026  10:02 AM                 7 deep.txt
+               1 File(s)              7 bytes
+
+     Total Files Listed:
+               2 File(s)          2,445 bytes

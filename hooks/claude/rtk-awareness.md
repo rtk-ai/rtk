@@ -1,6 +1,8 @@
 # RTK - Rust Token Killer
 
-**Usage**: Token-optimized CLI proxy (cuts up to 90% of bash output)
+**Usage**: Token-optimized CLI proxy (cuts up to 90% of command output)
+
+{{RTK_DIRECT_FIRST_POLICY}}
 
 ## Meta Commands (always use rtk directly)
 
@@ -21,9 +23,10 @@ which rtk             # Verify correct binary
 
 ⚠️ **Name collision**: If `rtk gain` fails, you may have reachingforthejack/rtk (Rust Type Kit) installed instead.
 
-## Hook-Based Usage
+## Hook Safety Net
 
-All other commands are automatically rewritten by the Claude Code hook.
+Call supported RTK commands directly. The Claude Code hook rewrites accidental
+unprefixed commands as a fallback.
 Example: `git status` → `rtk git status` (transparent, 0 tokens overhead)
 
 Refer to CLAUDE.md for full command reference.

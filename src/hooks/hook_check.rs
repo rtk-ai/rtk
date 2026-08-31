@@ -21,6 +21,71 @@ pub enum HookStatus {
     Missing,
 }
 
+/// Return true when any supported RTK integration is present for this user.
+///
+/// `rtk gain` must not report a missing Claude hook when the active agent uses
+/// a plugin or a different native hook integration.
+pub fn any_integration_installed() -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    integration_installed_in(&home)
+}
+
+fn integration_installed_in(home: &std::path::Path) -> bool {
+    let paths = [
+        home.join(super::constants::CONFIG_DIR)
+            .join(super::constants::OPENCODE_SUBDIR)
+            .join(super::constants::PLUGIN_SUBDIR)
+            .join(super::constants::OPENCODE_PLUGIN_FILE),
+        home.join(super::constants::CURSOR_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(REWRITE_HOOK_FILE),
+        home.join(super::constants::GEMINI_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(super::constants::GEMINI_HOOK_FILE),
+        home.join(super::constants::HERMES_DIR)
+            .join(super::constants::HERMES_PLUGINS_SUBDIR)
+            .join(super::constants::HERMES_PLUGIN_NAME)
+            .join(super::constants::HERMES_PLUGIN_MANIFEST_FILE),
+    ];
+    paths.iter().any(|path| path.is_file()) || codex_integration_installed(home)
+}
+
+fn codex_integration_installed(home: &std::path::Path) -> bool {
+    let codex_dir = home.join(super::constants::CODEX_DIR);
+    let agents_has_rtk = std::fs::read_to_string(codex_dir.join("AGENTS.md"))
+        .ok()
+        .is_some_and(|content| {
+            content.contains("RTK.md") || content.contains("<!-- rtk-instructions")
+        });
+    let instructions_are_rtk = std::fs::read_to_string(codex_dir.join("RTK.md"))
+        .ok()
+        .is_some_and(|content| content.contains("<!-- rtk-instructions"));
+
+    if crate::service::debug_enabled() {
+        eprintln!(
+            "[rtk-debug] hook_check.codex decision={} agents_reference={} instructions_marker={}",
+            if agents_has_rtk || instructions_are_rtk {
+                "installed"
+            } else {
+                "not-installed"
+            },
+            agents_has_rtk,
+            instructions_are_rtk
+        );
+    }
+    agents_has_rtk || instructions_are_rtk
+}
+
+pub(crate) fn claude_hook_installed_in(claude_dir: &std::path::Path) -> bool {
+    binary_hook_registered(claude_dir)
+        || claude_dir
+            .join(HOOKS_SUBDIR)
+            .join(REWRITE_HOOK_FILE)
+            .is_file()
+}
+
 /// Return the current hook status without printing anything.
 /// Returns `Ok` if no Claude Code is detected (not applicable).
 pub fn status() -> HookStatus {
@@ -46,7 +111,11 @@ pub fn status() -> HookStatus {
 
     // Fall back to legacy script file check
     let Some(hook_path) = hook_installed_path() else {
-        return HookStatus::Missing;
+        return if any_integration_installed() {
+            HookStatus::Ok
+        } else {
+            HookStatus::Missing
+        };
     };
     let Ok(content) = std::fs::read_to_string(&hook_path) else {
         return HookStatus::Outdated; // exists but unreadable — treat as needs-update
@@ -59,7 +128,7 @@ pub fn status() -> HookStatus {
 }
 
 /// Check if the native binary command is registered in settings.json
-fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
+pub(crate) fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
     let settings_path = claude_dir.join(SETTINGS_JSON);
     let content = match std::fs::read_to_string(&settings_path) {
         Ok(c) if !c.trim().is_empty() => c,
@@ -156,27 +225,6 @@ mod tests {
         OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
     };
 
-    fn other_integration_installed(home: &std::path::Path) -> bool {
-        let paths = [
-            home.join(CONFIG_DIR)
-                .join(OPENCODE_SUBDIR)
-                .join(PLUGIN_SUBDIR)
-                .join(OPENCODE_PLUGIN_FILE),
-            home.join(CURSOR_DIR)
-                .join(HOOKS_SUBDIR)
-                .join(REWRITE_HOOK_FILE),
-            home.join(CODEX_DIR).join("AGENTS.md"),
-            home.join(GEMINI_DIR)
-                .join(HOOKS_SUBDIR)
-                .join(GEMINI_HOOK_FILE),
-            home.join(HERMES_DIR)
-                .join(HERMES_PLUGINS_SUBDIR)
-                .join(HERMES_PLUGIN_NAME)
-                .join(HERMES_PLUGIN_MANIFEST_FILE),
-        ];
-        paths.iter().any(|p| p.exists())
-    }
-
     #[test]
     fn test_parse_hook_version_present() {
         let content = "#!/usr/bin/env bash\n# rtk-hook-version: 2\n# some comment\n";
@@ -237,7 +285,7 @@ mod tests {
     #[test]
     fn test_other_integration_none() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        assert!(!other_integration_installed(tmp.path()));
+        assert!(!integration_installed_in(tmp.path()));
     }
 
     #[test]
@@ -251,7 +299,7 @@ mod tests {
             .join(OPENCODE_PLUGIN_FILE);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"plugin").unwrap();
-        assert!(other_integration_installed(tmp.path()));
+        assert!(integration_installed_in(tmp.path()));
     }
 
     #[test]
@@ -264,7 +312,7 @@ mod tests {
             .join(REWRITE_HOOK_FILE);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"hook").unwrap();
-        assert!(other_integration_installed(tmp.path()));
+        assert!(integration_installed_in(tmp.path()));
     }
 
     #[test]
@@ -272,8 +320,20 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join(CODEX_DIR).join("AGENTS.md");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"agents").unwrap();
-        assert!(other_integration_installed(tmp.path()));
+        std::fs::write(&path, b"unrelated agent instructions").unwrap();
+        assert!(!integration_installed_in(tmp.path()));
+
+        std::fs::write(&path, b"@RTK.md").unwrap();
+        assert!(integration_installed_in(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_codex_rtk_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join(CODEX_DIR).join("RTK.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"<!-- rtk-instructions v2 -->").unwrap();
+        assert!(integration_installed_in(tmp.path()));
     }
 
     #[test]
@@ -286,7 +346,7 @@ mod tests {
             .join(GEMINI_HOOK_FILE);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"hook").unwrap();
-        assert!(other_integration_installed(tmp.path()));
+        assert!(integration_installed_in(tmp.path()));
     }
 
     #[test]
@@ -300,7 +360,7 @@ mod tests {
             .join(HERMES_PLUGIN_MANIFEST_FILE);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"plugin").unwrap();
-        assert!(other_integration_installed(tmp.path()));
+        assert!(integration_installed_in(tmp.path()));
     }
 
     #[test]
@@ -316,7 +376,7 @@ mod tests {
                 .join(HERMES_PLUGIN_NAME),
         )
         .unwrap();
-        assert!(!other_integration_installed(tmp.path()));
+        assert!(!integration_installed_in(tmp.path()));
     }
 
     #[test]

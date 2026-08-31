@@ -307,7 +307,6 @@ cat > /tmp/rtk_bench.json << 'JSONEOF'
 JSONEOF
 bench "json" "cat /tmp/rtk_bench.json" "$RTK json /tmp/rtk_bench.json"
 bench "json -d 2" "cat /tmp/rtk_bench.json" "$RTK json /tmp/rtk_bench.json -d 2"
-rm -f /tmp/rtk_bench.json
 
 # ===================
 # deps
@@ -474,6 +473,7 @@ if command -v python3 &> /dev/null; then
     sleep "$NET_HTTP_READY_DELAY"
   done
 fi
+rm -f /tmp/rtk_bench.json
 
 section "curl"
 if command -v curl &> /dev/null; then

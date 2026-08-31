@@ -799,11 +799,28 @@ pub(crate) fn format_status_output(porcelain: &str) -> String {
     format_status_inner(porcelain, None)
 }
 
+#[allow(dead_code)]
 pub(crate) fn format_status_output_detached(porcelain: &str, detached_ref: &str) -> String {
     format_status_inner(porcelain, Some(detached_ref))
 }
 
+pub(crate) fn format_status_output_with_limits(
+    porcelain: &str,
+    detached_ref: Option<&str>,
+    limits: &crate::core::config::LimitsConfig,
+) -> String {
+    format_status_inner_with_limits(porcelain, detached_ref, Some(limits))
+}
+
 fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
+    format_status_inner_with_limits(porcelain, detached, None)
+}
+
+fn format_status_inner_with_limits(
+    porcelain: &str,
+    detached: Option<&str>,
+    limits: Option<&crate::core::config::LimitsConfig>,
+) -> String {
     let lines: Vec<&str> = porcelain
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -825,8 +842,44 @@ fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
         }
     }
 
+    let mut changed_seen = 0usize;
+    let mut untracked_seen = 0usize;
+    let mut changed_omitted = 0usize;
+    let mut untracked_omitted = 0usize;
+
     for line in lines.iter().skip(1) {
-        output.push((*line).to_string());
+        let is_untracked = line.starts_with("??");
+        let limit = limits.map(|config| {
+            if is_untracked {
+                config.status_max_untracked
+            } else {
+                config.status_max_files
+            }
+        });
+        let seen = if is_untracked {
+            &mut untracked_seen
+        } else {
+            &mut changed_seen
+        };
+        let omitted = if is_untracked {
+            &mut untracked_omitted
+        } else {
+            &mut changed_omitted
+        };
+
+        if limit.is_none_or(|limit| *seen < limit) {
+            output.push((*line).to_string());
+            *seen += 1;
+        } else {
+            *omitted += 1;
+        }
+    }
+
+    if changed_omitted > 0 {
+        output.push(format!("... {} changed files omitted", changed_omitted));
+    }
+    if untracked_omitted > 0 {
+        output.push(format!("... {} untracked files omitted", untracked_omitted));
     }
 
     if lines.len() == 1 && lines[0].starts_with("##") {
@@ -1060,9 +1113,14 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         return Ok(result.exit_code);
     }
 
+    let limits = crate::core::config::limits();
     let formatted = match extract_detached_head(&raw_output) {
-        Some(detached_ref) => format_status_output_detached(&result.stdout, &detached_ref),
-        None => format_status_output(&result.stdout),
+        Some(detached_ref) => format_status_output_with_limits(
+            &result.stdout,
+            Some(&detached_ref),
+            &limits,
+        ),
+        None => format_status_output_with_limits(&result.stdout, None, &limits),
     };
 
     // Surface in-progress state (rebase/merge/cherry-pick/bisect/am) from the
@@ -2371,6 +2429,41 @@ mod tests {
         let cmd = build_status_command(&args, &[]);
         let cmd_args: Vec<_> = cmd.get_args().collect();
         assert_eq!(cmd_args, vec!["status", "--porcelain", "-uno"]);
+    }
+
+    #[test]
+    fn status_limits_preserve_branch_and_report_omitted_entries() {
+        let porcelain = concat!(
+            "## main...origin/main [ahead 1]\n",
+            " M changed-a.rs\n",
+            " M changed-b.rs\n",
+            "?? untracked-a.txt\n",
+            "?? untracked-b.txt\n",
+        );
+        let limits = crate::core::config::LimitsConfig {
+            status_max_files: 1,
+            status_max_untracked: 1,
+            ..Default::default()
+        };
+
+        let output = format_status_output_with_limits(porcelain, None, &limits);
+        assert!(output.contains("* main...origin/main [ahead 1]"));
+        assert!(output.contains(" M changed-a.rs"));
+        assert!(!output.contains("changed-b.rs"));
+        assert!(output.contains("... 1 changed files omitted"));
+        assert!(output.contains("?? untracked-a.txt"));
+        assert!(output.contains("... 1 untracked files omitted"));
+    }
+
+    #[test]
+    fn status_limits_preserve_detached_head_label() {
+        let limits = crate::core::config::LimitsConfig {
+            status_max_files: 0,
+            ..Default::default()
+        };
+        let output = format_status_output_with_limits("## HEAD\n M file.rs\n", Some("abc123"), &limits);
+        assert!(output.starts_with("* abc123"));
+        assert!(output.contains("... 1 changed files omitted"));
     }
 
     #[test]

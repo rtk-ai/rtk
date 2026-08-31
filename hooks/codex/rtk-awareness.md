@@ -2,17 +2,17 @@
 
 **Usage**: Token-optimized CLI proxy for shell commands.
 
-## Rule
-
-Always prefix shell commands with `rtk`.
-
-Examples:
+{{RTK_DIRECT_FIRST_POLICY}}
 
 ```bash
+# Wrong
+rtk proxy pwsh -Command "git status"
+
+# Correct
 rtk git status
 rtk cargo test
-rtk npm run build
-rtk pytest -q
+rtk read src/main.rs
+rtk rg "TODO" src
 ```
 
 ## Meta Commands

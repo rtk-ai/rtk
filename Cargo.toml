@@ -1,6 +1,6 @@
 [package]
 name = "rtk"
-version = "0.42.4"
+version = "0.46.1-dev.2"
 edition = "2021"
 rust-version = "1.91"
 authors = ["Patrick Szymkowiak"]
@@ -14,6 +14,8 @@ categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+crossterm = "0.29"
+ratatui = "0.29"
 anyhow = "1.0"
 # Console code page decoding for child-process output. Kept off the
 # cfg(windows) target so the mapping and the incremental UTF-8 walk stay

@@ -160,9 +160,36 @@ jobs:
           name: rtk-rpm
           path: target/generate-rpm/*.rpm
 
+  # These Desktop certification runners are provisioned separately. Because
+  # this workflow has no pull_request trigger, they are release/manual gates
+  # and cannot block ordinary hosted pull-request CI before that provisioning.
+  windows-desktop-parity:
+    name: Desktop CMD parity (${{ matrix.desktop }})
+    runs-on: [self-hosted, Windows, X64, ${{ matrix.runner_label }}]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - desktop: Windows 10
+            runner_label: windows-10
+          - desktop: Windows 11
+            runner_label: windows-11
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Parser and catalog parity
+        shell: pwsh
+        run: |
+          cargo test "cmds::windows::tests::" --bin rtk
+      - name: Exit-code and side-effect parity
+        shell: pwsh
+        run: |
+          cargo test --test windows_cmd_e2e
+
   release:
     name: Create Release
-    needs: [build, build-deb, build-rpm]
+    needs: [build, build-deb, build-rpm, windows-desktop-parity]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/create-github-app-token@v3

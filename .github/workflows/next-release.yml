@@ -9,7 +9,8 @@ permissions: {}
 
 jobs:
   update-next-release:
-    if: github.event.pull_request.merged == true
+    # Intentionally strict: this job edits the upstream release PR using upstream secrets.
+    if: github.repository == 'rtk-ai/rtk' && github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1

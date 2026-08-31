@@ -127,6 +127,7 @@ Every percentage below measures **bash output bytes removed** — the only thing
 |---------|----------------------|--------------|
 | `aws` | 70% | JSON condensed, relevant fields only |
 | `psql` | 65% | Query results without decoration |
+| `sqlite3` batch text queries | varies | Compact results preserved; blank rows removed and large output capped with a recovery hint |
 | `curl` | 60% | Response body only, headers stripped |
 
 ## Global flags

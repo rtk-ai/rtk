@@ -4,9 +4,13 @@ use super::constants::NOISE_DIRS;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::{reduced, CAP_WARNINGS};
 use crate::core::utils::resolved_command;
+#[cfg(windows)]
+use crate::core::utils::{resolve_host_command, HostCommand};
 use anyhow::Result;
 use regex::Regex;
 use std::io::IsTerminal;
+#[cfg(windows)]
+use std::path::Path;
 use std::sync::LazyLock;
 
 /// Matches the date+time portion in `ls -la` output, which serves as a
@@ -20,6 +24,13 @@ static LS_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    #[cfg(windows)]
+    if !matches!(resolve_host_command("ls"), HostCommand::Executable(_))
+        && windows_ls_args_supported(args)
+    {
+        return run_windows_native(args, verbose);
+    }
+
     let show_all = args
         .iter()
         .any(|a| (a.starts_with('-') && !a.starts_with("--") && a.contains('a')) || a == "--all");
@@ -124,6 +135,126 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             .early_exit_on_failure()
             .no_trailing_newline(),
     )
+}
+
+#[cfg(windows)]
+fn windows_ls_args_supported(args: &[String]) -> bool {
+    args.iter().all(|arg| {
+        if !arg.starts_with('-') {
+            return true;
+        }
+        matches!(
+            arg.as_str(),
+            "-a" | "-A" | "-l" | "-al" | "-la" | "--all" | "--almost-all"
+        ) || (arg.starts_with('-')
+            && !arg.starts_with("--")
+            && arg[1..].chars().all(|flag| matches!(flag, 'a' | 'A' | 'l' | 'h'))
+            && !arg[1..].is_empty())
+    })
+}
+
+#[cfg(windows)]
+fn run_windows_native(args: &[String], verbose: u8) -> Result<i32> {
+    let show_all = windows_ls_show_all(args);
+    let show_long = args.iter().any(|arg| {
+        arg == "-l"
+            || (!arg.starts_with("--")
+                && arg.starts_with('-')
+                && arg[1..].contains('l'))
+    });
+    let paths = args
+        .iter()
+        .filter(|arg| !arg.starts_with('-'))
+        .map(Path::new)
+        .collect::<Vec<_>>();
+    let paths = if paths.is_empty() {
+        vec![Path::new(".")]
+    } else {
+        paths
+    };
+
+    let mut output = Vec::new();
+    for (path_index, path) in paths.iter().enumerate() {
+        let metadata = std::fs::metadata(path)
+            .map_err(|error| anyhow::anyhow!("ls: {}: {}", path.display(), error))?;
+        if metadata.is_file() {
+            output.push(format_windows_entry(path, metadata.len(), false, show_long));
+            continue;
+        }
+
+        if paths.len() > 1 {
+            if path_index > 0 {
+                output.push(String::new());
+            }
+            output.push(format!("{}:", path.display()));
+        }
+        let mut entries = std::fs::read_dir(path)
+            .map_err(|error| anyhow::anyhow!("ls: {}: {}", path.display(), error))?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !show_all && name.starts_with('.') {
+                    return None;
+                }
+                let metadata = entry.metadata().ok()?;
+                Some((name, metadata.len(), metadata.is_dir()))
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.0.to_lowercase());
+        output.extend(entries.into_iter().map(|(name, size, is_dir)| {
+            format_windows_entry(Path::new(&name), size, is_dir, show_long)
+        }));
+    }
+
+    let rendered = output.join("\n");
+    if verbose > 0 {
+        eprintln!(
+            "[rtk-debug] windows-ls backend=native entries={} bytes={}",
+            output.len(),
+            rendered.len()
+        );
+    }
+    println!("{}", rendered);
+    let timer = crate::core::tracking::TimedExecution::start();
+    timer.track(
+        &format!("ls {}", args.join(" ")),
+        &format!("rtk ls {}", args.join(" ")),
+        &rendered,
+        &rendered,
+    );
+    Ok(0)
+}
+
+#[cfg(windows)]
+fn windows_ls_show_all(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg == "--all"
+            || arg == "--almost-all"
+            || arg == "-a"
+            || arg == "-A"
+            || (!arg.starts_with("--")
+                && arg.starts_with('-')
+                && arg[1..].chars().any(|flag| matches!(flag, 'a' | 'A')))
+    })
+}
+
+#[cfg(windows)]
+fn format_windows_entry(path: &Path, size: u64, is_dir: bool, show_long: bool) -> String {
+    let name = path.to_string_lossy();
+    let name = if is_dir {
+        format!("{name}/")
+    } else {
+        name.into_owned()
+    };
+    if show_long {
+        if is_dir {
+            format!("<DIR> {name}")
+        } else {
+            format!("{:>8} {}", human_size(size), name)
+        }
+    } else {
+        name
+    }
 }
 
 /// Format bytes into human-readable size
@@ -352,6 +483,15 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn native_windows_almost_all_flags_show_dot_entries() {
+        for flag in ["-A", "--almost-all", "-lA", "-Al"] {
+            assert!(windows_ls_show_all(&[flag.to_string()]), "{flag}");
+        }
+        assert!(!windows_ls_show_all(&["-l".to_string()]));
+    }
 
     #[test]
     fn test_compact_basic() {

@@ -1,0 +1,343 @@
+# source-url: https://raw.githubusercontent.com/MicrosoftDocs/windowsserverdocs/refs/heads/main/WindowsServerDocs/administration/windows-commands/windows-commands.md
+# fetched-on: 2026-08-29
+# source-sha256: b177c3014e3fa42294ed6fd5356d4bfa08e1a58a8b841e383dd5bcdc01837cc7
+# format: official A-Z name<TAB>native family or source-name<TAB>disposition
+active	diskpart	subcommand-only
+add	diskshadow	subcommand-only
+add alias	diskshadow	subcommand-only
+add volume	diskshadow	subcommand-only
+adprep	adprep	server-only
+append	append	unsupported-desktop
+arp	arp	desktop-external
+assign	diskpart	subcommand-only
+assoc	assoc	cmd-builtin
+at	at	unsupported-desktop
+atmadm	atmadm	server-only
+attach-vdisk	diskpart	subcommand-only
+attrib	attrib	desktop-external
+attributes	diskpart	subcommand-only
+auditpol	auditpol	desktop-external
+autochk	autochk	desktop-external
+autoconv	diskpart	subcommand-only
+autofmt	diskpart	subcommand-only
+automount	diskpart	subcommand-only
+bcdboot	bcdboot	desktop-external
+bcdedit	bcdedit	desktop-external
+bdehdcfg	bdehdcfg	desktop-external
+begin backup	wbadmin	subcommand-only
+begin restore	wbadmin	subcommand-only
+bitsadmin	bitsadmin	desktop-external
+bootcfg	bootcfg	unsupported-desktop
+break	break	cmd-builtin
+cacls	cacls	desktop-external
+call	call	cmd-builtin
+cd	cd	cmd-builtin
+certreq	certreq	desktop-external
+certutil	certutil	desktop-external
+change	change	desktop-external
+chcp	chcp	cmd-builtin
+chdir	chdir	cmd-builtin
+chglogon	change	desktop-external
+chgport	change	desktop-external
+chgusr	change	desktop-external
+chkdsk	chkdsk	desktop-external
+chkntfs	chkntfs	desktop-external
+choice	choice	desktop-external
+cipher	cipher	desktop-external
+clean	diskpart	subcommand-only
+cleanmgr	cleanmgr	desktop-external
+clip	clip	desktop-external
+cls	cls	cmd-builtin
+cmd	cmd	desktop-external
+cmdkey	cmdkey	desktop-external
+cmstp	cmstp	desktop-external
+color	color	cmd-builtin
+comp	comp	desktop-external
+compact	compact	desktop-external
+compact vdisk	diskpart	subcommand-only
+convert	convert	desktop-external
+copy	copy	cmd-builtin
+create	diskpart	subcommand-only
+cscript	cscript	desktop-external
+date	date	cmd-builtin
+dcdiag	dcdiag	server-only
+dcgpofix	dcgpofix	server-only
+dcpromo	dcpromo	unsupported-desktop
+defrag	defrag	desktop-external
+del	del	cmd-builtin
+delete	diskpart	subcommand-only
+detach vdisk	diskpart	subcommand-only
+detail	diskpart	subcommand-only
+dfsdiag	dfsdiag	server-only
+dfsrmig	dfsrmig	server-only
+diantz	diantz	desktop-external
+dir	dir	cmd-builtin
+diskcomp	diskcomp	desktop-external
+diskcopy	diskcopy	desktop-external
+diskpart	diskpart	desktop-external
+diskperf	diskperf	desktop-external
+diskraid	diskraid	server-only
+diskshadow	diskshadow	desktop-external
+dispdiag	dispdiag	desktop-external
+dnscmd	dnscmd	server-only
+doskey	doskey	desktop-external
+driverquery	driverquery	desktop-external
+dtrace	dtrace	separate-install
+echo	echo	cmd-builtin
+edit	edit	unsupported-desktop
+endlocal	endlocal	cmd-builtin
+end restore	wbadmin	subcommand-only
+erase	erase	cmd-builtin
+eventcreate	eventcreate	desktop-external
+Evntcmd	evntcmd	unsupported-desktop
+exec	diskshadow	subcommand-only
+exit	exit	cmd-builtin
+expand	expand	desktop-external
+expand vdisk	diskpart	subcommand-only
+expose	diskshadow	subcommand-only
+extend	diskpart	subcommand-only
+extract	extract	unsupported-desktop
+fc	fc	desktop-external
+filesystems	diskpart	subcommand-only
+find	find	desktop-external
+findstr	findstr	desktop-external
+finger	finger	optional-feature
+flattemp	flattemp	server-only
+fondue	fondue	desktop-external
+for	for	cmd-builtin
+forfiles	forfiles	desktop-external
+format	format	desktop-external
+freedisk	freedisk	unsupported-desktop
+fsutil	fsutil	desktop-external
+ftp	ftp	desktop-external
+ftype	ftype	cmd-builtin
+fveupdate	fveupdate	desktop-external
+getmac	getmac	desktop-external
+gettype	gettype	unsupported-desktop
+goto	goto	cmd-builtin
+gpfixup	gpfixup	server-only
+gpresult	gpresult	desktop-external
+gpt	diskpart	subcommand-only
+gpupdate	gpupdate	desktop-external
+graftabl	graftabl	unsupported-desktop
+help	help	cmd-builtin
+helpctr	helpctr	unsupported-desktop
+hostname	hostname	desktop-external
+icacls	icacls	desktop-external
+if	if	cmd-builtin
+import (shadowdisk)	diskshadow	subcommand-only
+import (diskpart)	diskpart	subcommand-only
+inactive	diskpart	subcommand-only
+ipconfig	ipconfig	desktop-external
+ipxroute	ipxroute	unsupported-desktop
+irftp	irftp	unsupported-desktop
+jetpack	jetpack	unsupported-desktop
+klist	klist	desktop-external
+ksetup	ksetup	server-only
+ktmutil	ktmutil	unsupported-desktop
+ktpass	ktpass	server-only
+label	label	desktop-external
+list	diskpart	subcommand-only
+load metadata	diskshadow	subcommand-only
+lodctr	lodctr	desktop-external
+logman	logman	desktop-external
+logoff	logoff	desktop-external
+lpq	lpq	unsupported-desktop
+lpr	lpr	unsupported-desktop
+macfile	macfile	server-only
+makecab	makecab	desktop-external
+manage bde	manage-bde	desktop-external
+mapadmin	mapadmin	server-only
+md	md	cmd-builtin
+merge vdisk	diskpart	subcommand-only
+mkdir	mkdir	cmd-builtin
+mklink	mklink	cmd-builtin
+mmc	mmc	desktop-external
+mode	mode	desktop-external
+more	more	desktop-external
+mount	mount	optional-feature
+mountvol	mountvol	desktop-external
+move	move	cmd-builtin
+mqbkup	mqbkup	server-only
+mqsvc	mqsvc	server-only
+mqtgsvc	mqtgsvc	server-only
+msdt	msdt	unsupported-desktop
+msg	msg	desktop-external
+msiexec	msiexec	desktop-external
+msinfo32	msinfo32	desktop-external
+mstsc	mstsc	desktop-external
+nbtstat	nbtstat	desktop-external
+netcfg	netcfg	desktop-external
+netdom	netdom	server-only
+net print	net	subcommand-only
+net user	net	subcommand-only
+netsh	netsh	desktop-external
+netstat	netstat	desktop-external
+nfsadmin	nfsadmin	server-only
+nfsshare	nfsshare	server-only
+nfsstat	nfsstat	server-only
+nlbmgr	nlbmgr	server-only
+nltest	nltest	server-only
+nslookup	nslookup	desktop-external
+ntbackup	ntbackup	unsupported-desktop
+ntcmdprompt	ntcmdprompt	unsupported-desktop
+ntfrsutl	ntfrsutl	server-only
+offline	diskpart	subcommand-only
+online	diskpart	subcommand-only
+openfiles	openfiles	desktop-external
+pagefileconfig	pagefileconfig	server-only
+path	path	cmd-builtin
+pathping	pathping	desktop-external
+pause	pause	cmd-builtin
+pbadmin	pbadmin	server-only
+pentnt	pentnt	unsupported-desktop
+perfmon	perfmon	desktop-external
+ping	ping	desktop-external
+pktmon	pktmon	desktop-external
+pnpunattend	pnpunattend	unsupported-desktop
+pnputil	pnputil	desktop-external
+popd	popd	cmd-builtin
+powershell	powershell	desktop-external
+powershell ise	powershell_ise	desktop-external
+print	print	desktop-external
+prncnfg	prncnfg	unsupported-desktop
+prndrvr	prndrvr	unsupported-desktop
+prnjobs	prnjobs	unsupported-desktop
+prnmngr	prnmngr	unsupported-desktop
+prnport	prnport	unsupported-desktop
+prnqctl	prnqctl	unsupported-desktop
+prompt	prompt	cmd-builtin
+pubprn	pubprn	unsupported-desktop
+pushd	pushd	cmd-builtin
+pushprinterconnections	pushprinterconnections	unsupported-desktop
+pwlauncher	pwlauncher	server-only
+pwsh	pwsh	separate-install
+qappsrv	query	desktop-external
+qprocess	query	desktop-external
+query	query	desktop-external
+quser	query	desktop-external
+qwinsta	query	desktop-external
+rd	rd	cmd-builtin
+rdpsign	rdpsign	desktop-external
+recover	recover	desktop-external
+recover disk group	diskpart	subcommand-only
+refsutil	refsutil	unsupported-desktop
+reg	reg	desktop-external
+regini	regini	desktop-external
+regsvr32	regsvr32	desktop-external
+relog	relog	desktop-external
+rem	rem	cmd-builtin
+remove	diskpart	subcommand-only
+ren	ren	cmd-builtin
+rename	ren	cmd-builtin
+repadmin	repadmin	server-only
+repair	diskpart	subcommand-only
+replace	replace	desktop-external
+rescan	diskpart	subcommand-only
+reset	diskshadow	subcommand-only
+retain	diskpart	subcommand-only
+revert	diskshadow	subcommand-only
+rexec	rexec	unsupported-desktop
+risetup	risetup	unsupported-desktop
+rmdir	rmdir	cmd-builtin
+robocopy	robocopy	desktop-external
+route ws2008	route	desktop-external
+rpcinfo	rpcinfo	server-only
+rpcping	rpcping	desktop-external
+rsh	rsh	optional-feature
+rundll32	rundll32	desktop-external
+rundll32 printui	rundll32	subcommand-only
+rwinsta	rwinsta	desktop-external
+san	diskpart	subcommand-only
+sc config	sc	subcommand-only
+sc create	sc	subcommand-only
+sc delete	sc	subcommand-only
+sc query	sc	subcommand-only
+schtasks	schtasks	desktop-external
+scwcmd	scwcmd	server-only
+secedit	secedit	desktop-external
+select	diskpart	subcommand-only
+serverceipoptin	serverceipoptin	server-only
+servermanagercmd	servermanagercmd	server-only
+serverweroptin	serverweroptin	server-only
+set environmental variables	set	cmd-builtin
+set shadow copy	diskshadow	subcommand-only
+setlocal	setlocal	cmd-builtin
+setspn	setspn	desktop-external
+setx	setx	desktop-external
+sfc	sfc	desktop-external
+shadow	shadow	desktop-external
+shift	shift	cmd-builtin
+showmount	showmount	optional-feature
+shrink	diskpart	subcommand-only
+shutdown	shutdown	desktop-external
+simulate restore	diskshadow	subcommand-only
+sort	sort	desktop-external
+start	start	cmd-builtin
+subcommand set device	wdsutil	subcommand-only
+subcommand set drivergroup	wdsutil	subcommand-only
+subcommand set drivergroupfilter	wdsutil	subcommand-only
+subcommand set driverpackage	wdsutil	subcommand-only
+subcommand set image	wdsutil	subcommand-only
+subcommand set imagegroup	wdsutil	subcommand-only
+subcommand set server	wdsutil	subcommand-only
+subcommand set transportserver	wdsutil	subcommand-only
+subcommand set multicasttransmission	wdsutil	subcommand-only
+subcommand start namespace	wdsutil	subcommand-only
+subcommand start server	wdsutil	subcommand-only
+subcommand start transportserver	wdsutil	subcommand-only
+subcommand stop server	wdsutil	subcommand-only
+subcommand stop transportserver	wdsutil	subcommand-only
+subst	subst	desktop-external
+sxstrace	sxstrace	desktop-external
+sysmon	sysmon	separate-install
+sysocmgr	sysocmgr	unsupported-desktop
+systeminfo	systeminfo	desktop-external
+takeown	takeown	desktop-external
+tapicfg	tapicfg	server-only
+taskkill	taskkill	desktop-external
+tasklist	tasklist	desktop-external
+tcmsetup	tcmsetup	unsupported-desktop
+telnet	telnet	optional-feature
+tftp	tftp	optional-feature
+time	time	cmd-builtin
+timeout	timeout	desktop-external
+title	title	cmd-builtin
+tlntadmn	tlntadmn	server-only
+tpmtool	tpmtool	desktop-external
+tpmvscmgr	tpmvscmgr	desktop-external
+tracerpt	tracerpt	desktop-external
+tracert	tracert	desktop-external
+tree	tree	desktop-external
+tscon	tscon	desktop-external
+tsdiscon	tsdiscon	desktop-external
+tsecimp	tsecimp	unsupported-desktop
+tskill	tskill	desktop-external
+tsprof	tsprof	unsupported-desktop
+type	type	cmd-builtin
+typeperf	typeperf	desktop-external
+tzutil	tzutil	desktop-external
+unexpose	diskshadow	subcommand-only
+uniqueid	diskpart	subcommand-only
+unlodctr	unlodctr	desktop-external
+ver	ver	cmd-builtin
+verifier	verifier	desktop-external
+verify	verify	cmd-builtin
+vol	vol	cmd-builtin
+vssadmin	vssadmin	desktop-external
+waitfor	waitfor	desktop-external
+wbadmin	wbadmin	desktop-external
+wdsutil	wdsutil	server-only
+wecutil	wecutil	desktop-external
+wevtutil	wevtutil	desktop-external
+where	where	desktop-external
+whoami	whoami	desktop-external
+winnt	winnt	unsupported-desktop
+winnt32	winnt32	unsupported-desktop
+winrs	winrs	desktop-external
+winsat mem	winsat	desktop-external
+winsat mfmedia	winsat	desktop-external
+wmic	wmic	version-conditional
+writer	writer	unsupported-desktop
+wscript	wscript	desktop-external
+xcopy	xcopy	desktop-external

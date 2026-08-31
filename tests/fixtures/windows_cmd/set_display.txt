@@ -1,0 +1,2 @@
+RTK_HOME=C:\rtk
+RTK_MODE=test

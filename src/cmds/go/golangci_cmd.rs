@@ -279,7 +279,7 @@ pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
     let issues = golangci_output.issues;
 
     if issues.is_empty() {
-        return "golangci-lint: No issues found".to_string();
+        return "No issues.".to_string();
     }
 
     let total_issues = issues.len();
@@ -393,11 +393,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_filter_golangci_no_issues() {
+    fn test_filter_golangci_no_issues_does_not_expand_clean_output() {
         let output = r#"{"Issues":[]}"#;
         let result = filter_golangci_json(output, 1);
-        assert!(result.contains("golangci-lint"));
-        assert!(result.contains("No issues found"));
+        let raw_clean_tokens = "0 issues.".len().div_ceil(4);
+        let filtered_tokens = result.len().div_ceil(4);
+
+        assert!(result.contains("No issues"));
+        assert!(
+            filtered_tokens <= raw_clean_tokens,
+            "clean output expanded from {raw_clean_tokens} to {filtered_tokens} tokens: {result}"
+        );
     }
 
     #[test]

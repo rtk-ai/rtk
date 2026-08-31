@@ -1,10 +1,9 @@
+<!-- rtk-instructions v3 -->
 # RTK - Rust Token Killer (Kilo Code)
 
 **Usage**: Token-optimized CLI proxy for shell commands.
 
-## Rule
-
-Always prefix shell commands with `rtk` to minimize token consumption.
+{{RTK_DIRECT_FIRST_POLICY}}
 
 Examples:
 
@@ -29,4 +28,5 @@ rtk proxy <cmd>       # Run raw (no filtering, for debugging)
 
 ## Why
 
-RTK filters and compresses command output before it reaches the LLM context, cutting up to 90% of the bash output on common operations. Always use `rtk <cmd>` instead of raw commands.
+RTK filters and compresses command output before it reaches the LLM context, cutting up to 90% of common command output. Always use `rtk <cmd>` instead of raw commands.
+<!-- /rtk-instructions -->

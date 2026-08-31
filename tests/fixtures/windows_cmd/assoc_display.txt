@@ -1,0 +1,2 @@
+.rs=RustFile
+.txt=txtfile

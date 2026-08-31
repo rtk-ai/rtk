@@ -75,11 +75,11 @@ rtk gain  # MUST show the savings dashboard, not "command not found"
   Do you want RTK active across ALL Claude Code projects?
   │
   ├─ YES → rtk init -g              (recommended)
-  │         Hook + RTK.md (~10 tokens in context)
+  │         Hook + RTK.md + local MCP registration
   │         Commands auto-rewritten transparently
   │
   ├─ YES, minimal → rtk init -g --hook-only
-  │         Hook only, nothing added to CLAUDE.md
+  │         Hook only, no RTK.md or MCP registration
   │         Zero tokens in context
   │
   └─ NO, single project → rtk init
@@ -93,21 +93,30 @@ rtk gain  # MUST show the savings dashboard, not "command not found"
 
 ```bash
 rtk init -g
-# → Installs hook to ~/.claude/hooks/rtk-rewrite.sh
-# → Creates ~/.claude/RTK.md (10 lines, meta commands only)
+# → Registers the native `rtk hook claude` hook
+# → Creates ~/.claude/RTK.md (compact direct-first command policy)
 # → Adds @RTK.md reference to ~/.claude/CLAUDE.md
 # → Prompts: "Patch settings.json? [y/N]"
 # → If yes: patches + creates backup (~/.claude/settings.json.bak)
+# → Registers the local stdio MCP server in ~/.claude.json
 
 # Automated alternatives:
 rtk init -g --auto-patch    # Patch without prompting
 rtk init -g --no-patch      # Print manual instructions instead
+rtk init -g --no-mcp        # Skip MCP registration
 
 # Verify installation
 rtk init --show  # Check hook is installed and executable
 ```
 
-**Context cost**: the hook adds a 10-line `RTK.md` to your context instead of a full command reference, and rewrites commands transparently at no per-command context cost.
+**Agent command priority**: generated instructions tell the agent to use direct
+RTK routes first (`rtk read`, `rtk rg`, `rtk git`, `rtk cargo`, and the other
+commands shown by `rtk --help`). `rtk proxy <program>` is reserved for
+unsupported programs or exact raw output. On Windows, `rtk proxy pwsh` and
+`rtk proxy cmd` are last-resort options for shell built-ins, scripts, and
+control flow—not wrappers around RTK-supported commands.
+
+**Context cost**: the hook adds a compact `RTK.md` policy to your context instead of a full command reference, and rewrites accidental unprefixed commands transparently.
 
 **What is settings.json?**
 Claude Code's hook registry. RTK adds a PreToolUse hook that rewrites commands transparently. Without this, Claude won't invoke the hook automatically.

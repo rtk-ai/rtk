@@ -55,7 +55,7 @@ Download from [GitHub releases](https://github.com/rtk-ai/rtk/releases):
 - Linux: `rtk-x86_64-unknown-linux-musl.tar.gz` / `rtk-aarch64-unknown-linux-gnu.tar.gz`
 - Windows: `rtk-x86_64-pc-windows-msvc.zip`
 
-**Windows users**: Extract the zip and place `rtk.exe` in a directory on your PATH. Run RTK from Command Prompt, PowerShell, or Windows Terminal — do not double-click the `.exe` (it prints usage and exits immediately). For full hook support, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) instead.
+**Windows users**: Extract the zip and place `rtk.exe` in a directory on your PATH. Run RTK from Command Prompt, PowerShell, or Windows Terminal — do not double-click the `.exe` (it prints usage and exits immediately). Native binary hooks work without WSL. Use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) only when Linux shell semantics or Linux-only tools are required.
 
 ## Verify installation
 
@@ -86,10 +86,16 @@ For a global install that patches `settings.json` automatically:
 rtk init --global
 ```
 
+Initialization also registers RTK's local stdio MCP server for the selected AI
+tool. The MCP entry launches the installed executable as `rtk mcp`; rerunning
+the init command refreshes it without duplicating or replacing other servers.
+Use `--no-mcp` to skip MCP registration, or `--hook-only` for a Claude hook
+without RTK.md or MCP.
+
 ## Uninstall
 
 ```bash
-rtk init -g --uninstall    # remove hook, RTK.md, and settings.json entry
+rtk init -g --uninstall    # remove hook, RTK.md, settings, and RTK's MCP entry
 cargo uninstall rtk         # remove binary (if installed via Cargo)
 brew uninstall rtk          # remove binary (if installed via Homebrew)
 ```

@@ -1,0 +1,27 @@
+[filters.sqlite3]
+description = "Compact sqlite3 output — remove blank rows and bound large result sets"
+match_command = "^sqlite3(\\s|$)"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$"]
+truncate_lines_at = 240
+max_lines = 40
+
+[[tests.sqlite3]]
+name = "preserves compact query rows"
+input = "2026-08-28|rtk rg|699200\n2026-08-28|rtk read|82600"
+expected = "2026-08-28|rtk rg|699200\n2026-08-28|rtk read|82600"
+
+[[tests.sqlite3]]
+name = "removes blank rows from table output"
+input = "timestamp|command|saved_tokens\n\n2026-08-28|rtk rg|699200\n\n"
+expected = "timestamp|command|saved_tokens\n2026-08-28|rtk rg|699200"
+
+[[tests.sqlite3]]
+name = "caps oversized result sets with a recovery marker"
+input = "01\n02\n03\n04\n05\n06\n07\n08\n09\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n21\n22\n23\n24\n25\n26\n27\n28\n29\n30\n31\n32\n33\n34\n35\n36\n37\n38\n39\n40\n41\n42"
+expected = "01\n02\n03\n04\n05\n06\n07\n08\n09\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n21\n22\n23\n24\n25\n26\n27\n28\n29\n30\n31\n32\n33\n34\n35\n36\n37\n38\n39\n40\n... (2 lines truncated)"
+
+[[tests.sqlite3]]
+name = "empty output stays empty"
+input = ""
+expected = ""

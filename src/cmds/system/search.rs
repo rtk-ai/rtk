@@ -397,11 +397,16 @@ fn show_file(paths: &[String], extra_args: &[String]) -> bool {
             .any(|f| f == "--with-filename" || f == "--recursive")
 }
 
-fn show_line(extra_args: &[String]) -> bool {
-    (has_short_flag(extra_args, 'n')
-        || extra_args.iter().any(|f| f == "--line-number"))
-        && !has_short_flag(extra_args, 'N')
-        && !extra_args.iter().any(|f| f == "--no-line-number")
+fn show_line(engine: Engine, extra_args: &[String], stdout_is_tty: bool) -> bool {
+    if has_short_flag(extra_args, 'N')
+        || extra_args.iter().any(|f| f == "--no-line-number")
+    {
+        return false;
+    }
+
+    has_short_flag(extra_args, 'n')
+        || extra_args.iter().any(|f| f == "--line-number")
+        || (matches!(engine, Engine::Rg) && stdout_is_tty)
 }
 
 fn run_streaming_search(
@@ -415,7 +420,7 @@ fn run_streaming_search(
 ) -> Result<i32> {
     let filter = SearchStreamFilter {
         show_file: show_file(paths, extra_args),
-        show_line: show_line(extra_args),
+        show_line: show_line(engine, extra_args, std::io::stdout().is_terminal()),
         max_results,
         shown: 0,
         cap_reported: false,
@@ -615,7 +620,7 @@ pub fn run(
     // -n. We force -nH--null for robust parsing, then drop what the engine itself
     // would not have shown.
     let show_file = by_file.len() > 1 || show_file(&paths, &extra_args);
-    let show_line = show_line(&extra_args);
+    let show_line = show_line(engine, &extra_args, std::io::stdout().is_terminal());
 
     // Faithful baseline: exactly what the real command prints, full content.
     let mut plain = String::new();
@@ -1424,24 +1429,39 @@ mod tests {
 
     #[test]
     fn show_line_is_off_without_an_explicit_request() {
-        assert!(!show_line(&flags(&[])));
-        assert!(!show_line(&flags(&["-i"])));
-        assert!(!show_line(&flags(&["-r"])));
-        assert!(!show_line(&flags(&["-A", "3"])));
+        assert!(!show_line(Engine::Grep, &flags(&[]), true));
+        assert!(!show_line(Engine::Rg, &flags(&[]), false));
+        assert!(!show_line(Engine::Grep, &flags(&["-i"]), true));
+        assert!(!show_line(Engine::Grep, &flags(&["-r"]), true));
+        assert!(!show_line(Engine::Grep, &flags(&["-A", "3"]), true));
+    }
+
+    #[test]
+    fn show_line_preserves_ripgrep_tty_default() {
+        assert!(show_line(Engine::Rg, &flags(&[]), true));
+        assert!(!show_line(Engine::Rg, &flags(&[]), false));
     }
 
     #[test]
     fn show_line_honours_n_in_every_spelling() {
-        assert!(show_line(&flags(&["-n"])));
-        assert!(show_line(&flags(&["--line-number"])));
-        assert!(show_line(&flags(&["-rn"])));
-        assert!(show_line(&flags(&["-in"])));
+        assert!(show_line(Engine::Grep, &flags(&["-n"]), false));
+        assert!(show_line(
+            Engine::Grep,
+            &flags(&["--line-number"]),
+            false
+        ));
+        assert!(show_line(Engine::Grep, &flags(&["-rn"]), false));
+        assert!(show_line(Engine::Grep, &flags(&["-in"]), false));
     }
 
     #[test]
     fn show_line_is_off_when_explicitly_negated() {
-        assert!(!show_line(&flags(&["-N"])));
-        assert!(!show_line(&flags(&["--no-line-number"])));
+        assert!(!show_line(Engine::Rg, &flags(&["-N"]), true));
+        assert!(!show_line(
+            Engine::Rg,
+            &flags(&["--no-line-number"]),
+            true
+        ));
     }
 
     #[test]
@@ -1459,7 +1479,7 @@ mod tests {
 
     #[test]
     fn match_block_keeps_position_when_display_drops_it() {
-        assert!(!show_line(&flags(&[])));
+        assert!(!show_line(Engine::Grep, &flags(&[]), false));
         let entries = vec![(42usize, true, "hit".to_string())];
         assert_eq!(match_block("f.txt", &entries), "f.txt:42:hit\n");
     }

@@ -37,7 +37,7 @@ impl Default for RtkRule {
 
 pub const RULES: &[RtkRule] = &[
     RtkRule {
-        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|checkout|push|pull|branch|fetch|stash|worktree)",
+        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|checkout|push|pull|branch|fetch|stash|worktree|remote)(?:\s|$)",
         rtk_cmd: "rtk git",
         rewrite_prefixes: &["git", "yadm"],
         category: "Git",
@@ -47,16 +47,19 @@ pub const RULES: &[RtkRule] = &[
             ("show", 80.0),
             ("add", 59.0),
             ("commit", 59.0),
+            ("remote", 0.0),
         ],
+        subcmd_status: &[("remote", RtkStatus::Passthrough)],
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^gh\s+(pr|issue|run|repo|api|release)",
+        pattern: r"^gh\s+(pr|issue|run|repo|api|release|auth)(?:\s|$)",
         rtk_cmd: "rtk gh",
         rewrite_prefixes: &["gh"],
         category: "GitHub",
         savings_pct: 82.0,
-        subcmd_savings: &[("pr", 87.0), ("run", 82.0), ("issue", 80.0)],
+        subcmd_savings: &[("pr", 87.0), ("run", 82.0), ("issue", 80.0), ("auth", 0.0)],
+        subcmd_status: &[("auth", RtkStatus::Passthrough)],
         ..RtkRule::DEFAULT
     },
     RtkRule {
@@ -661,6 +664,14 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["psql"],
         category: "Infra",
         savings_pct: 75.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^sqlite3(\s|$)",
+        rtk_cmd: "rtk sqlite3",
+        rewrite_prefixes: &["sqlite3"],
+        category: "Database",
+        savings_pct: 65.0,
         ..RtkRule::DEFAULT
     },
     RtkRule {

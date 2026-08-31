@@ -1,0 +1,2 @@
+RustFile="C:\Tools\rust.exe" "%1"
+txtfile=%SystemRoot%\system32\NOTEPAD.EXE %1

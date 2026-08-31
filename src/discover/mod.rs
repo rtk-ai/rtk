@@ -18,6 +18,21 @@ use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
 use crate::discover::registry::prefix_contains_rtk_disabled;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct SupportedBucketKey {
+    rtk_equivalent: &'static str,
+    status: report::RtkStatus,
+}
+
+impl SupportedBucketKey {
+    fn new(rtk_equivalent: &'static str, status: report::RtkStatus) -> Self {
+        Self {
+            rtk_equivalent,
+            status,
+        }
+    }
+}
+
 /// Aggregation bucket for supported commands.
 struct SupportedBucket {
     rtk_equivalent: &'static str,
@@ -77,7 +92,7 @@ pub fn run(
     let mut parse_errors: usize = 0;
     let mut rtk_disabled_count: usize = 0;
     let mut rtk_disabled_cmds: HashMap<String, usize> = HashMap::new();
-    let mut supported_map: HashMap<&'static str, SupportedBucket> = HashMap::new();
+    let mut supported_map: HashMap<SupportedBucketKey, SupportedBucket> = HashMap::new();
     let mut unsupported_map: HashMap<String, UnsupportedBucket> = HashMap::new();
 
     for session_path in &sessions {
@@ -121,16 +136,16 @@ pub fn run(
                         estimated_savings_pct,
                         status,
                     } => {
-                        let bucket = supported_map.entry(rtk_equivalent).or_insert_with(|| {
-                            SupportedBucket {
+                        let bucket = supported_map
+                            .entry(SupportedBucketKey::new(rtk_equivalent, status))
+                            .or_insert_with(|| SupportedBucket {
                                 rtk_equivalent,
                                 category,
                                 count: 0,
                                 total_output_tokens: 0,
                                 total_raw_output_tokens: 0,
                                 command_counts: HashMap::new(),
-                            }
-                        });
+                            });
 
                         bucket.count += 1;
 
@@ -254,6 +269,8 @@ pub fn run(
     };
 
     let report = DiscoverReport {
+        command_source: "claude_pre_hook_transcript",
+        hook_rewrites_visible: false,
         sessions_scanned: sessions.len(),
         total_commands,
         already_rtk,
@@ -267,7 +284,7 @@ pub fn run(
     };
 
     match format {
-        "json" => println!("{}", report::format_json(&report)),
+        "json" => println!("{}", report::format_json(&report, limit)),
         _ => print!("{}", report::format_text(&report, limit, verbose > 0)),
     }
 
@@ -293,5 +310,20 @@ fn truncate_command(cmd: &str) -> String {
         0 => String::new(),
         1 => parts[0].to_string(),
         _ => format!("{} {}", parts[0], parts[1]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supported_bucket_keys_keep_filtered_and_passthrough_usage_separate() {
+        let filtered = SupportedBucketKey::new("rtk git", report::RtkStatus::Existing);
+        let passthrough = SupportedBucketKey::new("rtk git", report::RtkStatus::Passthrough);
+
+        assert_ne!(filtered, passthrough);
+        let buckets = HashMap::from([(filtered, 1usize), (passthrough, 1usize)]);
+        assert_eq!(buckets.len(), 2);
     }
 }

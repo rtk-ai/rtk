@@ -41,6 +41,71 @@ pub fn restore_double_dash_with_raw(parsed_args: &[String], raw_args: &[String])
     raw_args[user_region_start..].to_vec()
 }
 
+/// Returns true when a sqlite3 argv is a finite, human-readable batch invocation.
+///
+/// Interactive shells and explicit machine-readable output modes must stay on the
+/// native passthrough path: the TOML runner captures stdout until process exit and
+/// may truncate long lines or result sets.
+pub fn sqlite3_output_is_filterable(argv: &[String]) -> bool {
+    if argv.len() < 3 {
+        return false;
+    }
+
+    let has_unsafe_mode = argv.iter().skip(1).any(|arg| {
+        let flag = arg
+            .trim_start_matches('-')
+            .split('=')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        matches!(
+            flag.as_str(),
+            "ascii"
+                | "cmd"
+                | "init"
+                | "csv"
+                | "html"
+                | "insert"
+                | "json"
+                | "markdown"
+                | "newline"
+                | "nullvalue"
+                | "quote"
+                | "separator"
+                | "tabs"
+        )
+    });
+    if has_unsafe_mode {
+        return false;
+    }
+
+    let Some(batch_command) = argv.last().map(|arg| arg.trim_start()) else {
+        return false;
+    };
+
+    if batch_command.starts_with('.') {
+        let dot_command = batch_command
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        return matches!(
+            dot_command.as_str(),
+            ".databases" | ".dbinfo" | ".indexes" | ".schema" | ".show" | ".tables"
+        );
+    }
+
+    let sql_keyword = batch_command
+        .split(|ch: char| ch.is_whitespace() || ch == '(')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    matches!(
+        sql_keyword.as_str(),
+        "EXPLAIN" | "PRAGMA" | "SELECT" | "VALUES" | "WITH"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,5 +309,57 @@ mod tests {
             restore_with_raw(&parsed, &raw),
             vec!["--", "file1", "file2", "file3"]
         );
+    }
+
+    #[test]
+    fn test_sqlite3_filterability_requires_safe_batch_text_output() {
+        let argv = |parts: &[&str]| {
+            parts
+                .iter()
+                .map(|part| part.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert!(!sqlite3_output_is_filterable(&argv(&["sqlite3"])));
+        assert!(!sqlite3_output_is_filterable(&argv(&[
+            "sqlite3",
+            "history.db"
+        ])));
+        assert!(!sqlite3_output_is_filterable(&argv(&[
+            "sqlite3",
+            "-json",
+            "history.db",
+            "SELECT * FROM commands",
+        ])));
+        assert!(!sqlite3_output_is_filterable(&argv(&[
+            "sqlite3",
+            "-ascii",
+            "history.db",
+            "SELECT * FROM commands",
+        ])));
+        assert!(!sqlite3_output_is_filterable(&argv(&[
+            "sqlite3",
+            "-cmd",
+            ".mode csv",
+            "history.db",
+            "SELECT * FROM commands",
+        ])));
+        assert!(!sqlite3_output_is_filterable(&argv(&[
+            "sqlite3",
+            "history.db",
+            ".dump",
+        ])));
+        assert!(sqlite3_output_is_filterable(&argv(&[
+            "sqlite3",
+            "-header",
+            "-column",
+            "history.db",
+            ".tables",
+        ])));
+        assert!(sqlite3_output_is_filterable(&argv(&[
+            "sqlite3",
+            "history.db",
+            "SELECT timestamp FROM commands",
+        ])));
     }
 }

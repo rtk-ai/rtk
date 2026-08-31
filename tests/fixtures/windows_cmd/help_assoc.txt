@@ -1,0 +1,6 @@
+Displays or modifies file extension associations.
+
+ASSOC [extension[=[fileType]]]
+
+  extension    Specifies the file extension to associate the file type with.
+  fileType     Specifies the file type to associate with the file extension.
