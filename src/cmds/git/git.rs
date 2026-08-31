@@ -215,14 +215,8 @@ fn run_diff(
     Ok(0)
 }
 
-fn run_show(
-    args: &[String],
-    max_lines: Option<usize>,
-    verbose: u8,
-    global_args: &[String],
-) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
-
+/// When true, `run_show` invokes a single `git show` and skips the compact multi-step flow.
+fn show_should_passthrough(args: &[String]) -> bool {
     // If user wants --stat or --format only, pass through
     let wants_stat_only = args
         .iter()
@@ -232,11 +226,37 @@ fn run_show(
         .iter()
         .any(|arg| arg.starts_with("--pretty") || arg.starts_with("--format"));
 
+    let wants_name_only = args
+        .iter()
+        .any(|arg| arg == "--name-only" || arg == "--name-status");
+    let wants_check = args.iter().any(|arg| arg == "--check");
+    let wants_no_patch = args.iter().any(|arg| arg == "--no-patch");
+    let wants_s = args.iter().any(|arg| arg == "-s");
+
     // `git show rev:path` prints a blob, not a commit diff. In this mode we should
     // pass through directly to avoid duplicated output from compact-show steps.
     let wants_blob_show = args.iter().any(|arg| is_blob_show_arg(arg));
 
-    if wants_stat_only || wants_format || wants_blob_show {
+    wants_stat_only
+        || wants_format
+        || wants_blob_show
+        || wants_name_only
+        || wants_check
+        || wants_no_patch
+        || wants_s
+}
+
+fn run_show(
+    args: &[String],
+    max_lines: Option<usize>,
+    verbose: u8,
+    global_args: &[String],
+) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    if show_should_passthrough(args) {
+        let wants_blob_show = args.iter().any(|arg| is_blob_show_arg(arg));
+
         let mut cmd = git_cmd(global_args);
         cmd.arg("show");
         for arg in args {
@@ -2471,6 +2491,53 @@ mod tests {
         assert!(!is_blob_show_arg("--pretty=format:%h"));
         assert!(!is_blob_show_arg("--format=short"));
         assert!(!is_blob_show_arg("HEAD"));
+    }
+
+    #[test]
+    fn test_show_should_passthrough_name_only_and_name_status() {
+        assert!(show_should_passthrough(&[
+            "--name-only".to_string(),
+            "HEAD".to_string(),
+        ]));
+        assert!(show_should_passthrough(&[
+            "--name-status".to_string(),
+            "HEAD".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn test_show_should_passthrough_check_no_patch_and_s() {
+        assert!(show_should_passthrough(&[
+            "--check".to_string(),
+            "HEAD".to_string()
+        ]));
+        assert!(show_should_passthrough(&[
+            "--no-patch".to_string(),
+            "HEAD".to_string(),
+        ]));
+        assert!(show_should_passthrough(&[
+            "-s".to_string(),
+            "HEAD".to_string()
+        ]));
+    }
+
+    #[test]
+    fn test_show_should_passthrough_stat_format_blob() {
+        assert!(show_should_passthrough(&[
+            "--stat".to_string(),
+            "HEAD".to_string()
+        ]));
+        assert!(show_should_passthrough(&[
+            "--pretty=medium".to_string(),
+            "HEAD".to_string(),
+        ]));
+        assert!(show_should_passthrough(&["HEAD:README.md".to_string()]));
+    }
+
+    #[test]
+    fn test_show_should_passthrough_compact_show_default_rev() {
+        assert!(!show_should_passthrough(&["HEAD".to_string()]));
+        assert!(!show_should_passthrough(&["abc1234".to_string()]));
     }
 
     #[test]
