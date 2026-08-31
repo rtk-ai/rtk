@@ -364,9 +364,9 @@ index 765936a..7abfb4f 100644
  }
 ```
 
-`rtk git diff`, 15 lignes :
+`rtk git diff`, 24 lignes :
 ```
- git.rs  | 2 +-
+git.rs  | 2 +-
  main.rs | 4 ++--
  2 files changed, 3 insertions(+), 3 deletions(-)
 
@@ -392,18 +392,29 @@ main.rs
   +2 -2
 ```
 
+Sur un diff aussi petit, rtk economise peu : 440 octets bruts contre 392
+filtres, soit 11 %. La compression vient des diffs ou les en-tetes par fichier
+et les plafonds par hunk pesent. Sur un diff de 4 fichiers dont un hunk de 300
+lignes changees, la sortie passe de 335 a 140 lignes et de 13 262 a 4 880
+octets, soit 63 % de reduction, avec la note de troncature et le rappel
+`[full diff: rtk git diff --no-compact]`.
+
 Les lignes de hunk et les en-tetes `@@` sortent en colonne 0, dans la forme
 unifiee de git, donc `rtk git diff | grep "^-"` fonctionne. Les annotations
 propres a rtk restent indentees de deux espaces pour que ces memes greps ne
 les comptent pas : le total par fichier (`  +2 -2`) et la note de troncature
 (`  ... (30 deletions, 20 additions truncated)`).
 
-Deux limites de l'audit ancre. Au-dela de 100 lignes de changement par hunk,
+Trois limites de l'audit ancre. Au-dela de 100 lignes de changement par hunk,
 `grep -c "^-"` plafonne a ce qui est affiche ; la note de troncature indique
 le reste, par signe, mais elle est indentee et donc invisible au meme grep.
-Et la sortie n'est pas un patch applicable : rtk supprime les en-tetes
-`diff --git` / `---` / `+++`. Utilisez `rtk proxy git diff` pour un patch
-fidele.
+Sur un diff combine (`diff --cc`, ce que git produit pour chaque chemin en
+conflit pendant un merge, rebase, cherry-pick ou stash pop), le marqueur peut
+occuper la deuxieme colonne : ` +ours` est compte dans le total `+N -M` mais
+reste invisible a `grep "^+"`. Et la sortie n'est pas un patch applicable :
+rtk supprime les en-tetes `diff --git` / `---` / `+++`. Utilisez
+`rtk proxy git diff` pour un patch fidele, ou `rtk gh pr diff --patch`, qui
+passe sans filtrage.
 
 ---
 

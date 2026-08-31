@@ -338,12 +338,64 @@ fn is_blob_show_arg(arg: &str) -> bool {
 /// Path named by a diff section header.
 ///
 /// `diff --git a/p b/p` carries the path twice; `diff --cc p` and
-/// `diff --combined p` carry it once, at the end.
+/// `diff --combined p` carry it once, as the whole remainder of the line. git
+/// does not quote spaces in these headers, so the remainder is taken as-is.
 fn diff_header_path(line: &str) -> String {
     match line.split(" b/").nth(1) {
         Some(path) => path.to_string(),
-        None => line.rsplit(' ').next().unwrap_or("unknown").to_string(),
+        None => line.splitn(3, ' ').nth(2).unwrap_or("unknown").to_string(),
     }
+}
+
+/// Line budget a hunk header declares, and how wide its body prefix is.
+struct HunkHeader {
+    /// Lines the hunk spans in the first parent.
+    old: usize,
+    /// Lines the hunk spans in the result file.
+    new: usize,
+    /// Marker columns: 1 for `@@`, and one per parent for a combined `@@@`.
+    prefix_width: usize,
+}
+
+/// Parse `@@ -a,b +c,d @@` and the combined `@@@ -a,b -c,d +e,f @@@`.
+///
+/// The counts bound the hunk body, which is what lets the body end where the
+/// hunk ends rather than running on until the next header. Anything after it —
+/// an mbox envelope, a `--` signature, trailing prose — is then outside every
+/// hunk and cannot be read as diff content. A count is 1 when the header omits
+/// it (`@@ -1 +1 @@`).
+fn parse_hunk_header(line: &str) -> Option<HunkHeader> {
+    let at_run = line.len() - line.trim_start_matches('@').len();
+    if at_run < 2 {
+        return None;
+    }
+    let body = line[at_run..].split('@').next()?;
+
+    let mut old = None;
+    let mut new = None;
+    for group in body.split_whitespace() {
+        let Some(rest) = group.strip_prefix(['-', '+']) else {
+            continue;
+        };
+        let count = match rest.split_once(',') {
+            Some((_, c)) => c.parse::<usize>().ok()?,
+            None => 1,
+        };
+        if group.starts_with('-') {
+            // A combined header lists one range per parent; the first is the
+            // one whose line numbers the `-` column tracks.
+            old.get_or_insert(count);
+        } else {
+            new = Some(count);
+        }
+    }
+
+    Some(HunkHeader {
+        old: old.unwrap_or(0),
+        new: new.unwrap_or(0),
+        // `@@` has one marker column, `@@@` two, and so on for more parents.
+        prefix_width: at_run - 1,
+    })
 }
 
 /// Render the note for change lines dropped past `max_hunk_lines`, split by
@@ -365,11 +417,11 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     let mut current_file = String::new();
     let mut added = 0;
     let mut removed = 0;
-    let mut in_hunk = false;
+    let mut hunk: Option<HunkHeader> = None;
     let mut hunk_shown = 0;
     let mut skipped_add = 0usize;
     let mut skipped_del = 0usize;
-    let mut leading_context = 0usize;
+    let mut leading_context: Vec<String> = Vec::new();
     let mut leading_context_total = 0usize;
     let max_hunk_lines = 100;
     // Context before a hunk's first change, up to three lines per hunk and
@@ -382,12 +434,10 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     let mut was_truncated = false;
 
     for line in diff.lines() {
-        // `diff --cc` / `diff --combined` head the sections git emits for
-        // unmerged paths. Matching only `diff --git` left `in_hunk` set from
-        // the previous section, so the `---` / `+++` headers of every combined
-        // section after the first were counted and printed as hunk content.
+        // Every diff section header (`--git`, `--cc`, `--combined`) opens a new
+        // file and closes any open hunk, so the `---` / `+++` headers that
+        // follow it are never read as hunk content.
         if line.starts_with("diff --") {
-            // Flush hunk truncation before starting a new file
             if let Some(note) = hunk_truncation_note(skipped_del, skipped_add) {
                 result.push(note);
                 was_truncated = true;
@@ -401,63 +451,98 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
             result.push(format!("\n{}", current_file));
             added = 0;
             removed = 0;
-            in_hunk = false;
+            hunk = None;
             hunk_shown = 0;
-            leading_context = 0;
-        } else if line.starts_with("@@") {
-            // Flush hunk truncation before starting a new hunk
+            leading_context.clear();
+        } else if let Some(header) = parse_hunk_header(line) {
             if let Some(note) = hunk_truncation_note(skipped_del, skipped_add) {
                 result.push(note);
                 was_truncated = true;
                 skipped_del = 0;
                 skipped_add = 0;
             }
-            in_hunk = true;
+            hunk = Some(header);
             hunk_shown = 0;
-            leading_context = 0;
+            leading_context.clear();
             // Preserve the full unified diff hunk header, including trailing
             // function / symbol context after the second @@ marker.
             result.push(line.to_string());
-        } else if in_hunk {
+        } else if let Some(header) = hunk.as_mut() {
+            if header.old == 0 && header.new == 0 {
+                hunk = None;
+                continue;
+            }
+            if line.starts_with('\\') {
+                // "\ No newline at end of file" annotates the line above and
+                // occupies no line in either file.
+                continue;
+            }
+
+            let width = header.prefix_width.min(line.len());
+            let markers = &line[..width];
+            // A combined diff carries one marker column per parent, so a line
+            // changed against only one of them has its marker in column 2.
+            let is_add = markers.contains('+');
+            let is_del = markers.contains('-');
+            // Present in the result file unless it is a pure deletion, and in
+            // the first parent unless it is a pure addition.
+            header.new = header.new.saturating_sub(if is_del && !is_add { 0 } else { 1 });
+            header.old = header.old.saturating_sub(if is_add && !is_del { 0 } else { 1 });
+
             // Hunk bodies emit at column 0 in git's own unified shape, so
             // `^+` / `^-` anchor. rtk's own annotations stay indented so those
             // same anchors never match them. Inside a hunk every `+`/`-` line
             // is content: the `---` / `+++` file headers only ever appear
-            // before the first `@@`, where `in_hunk` is still false.
-            if line.starts_with('+') {
-                added += 1;
+            // before the first hunk header.
+            if is_add || is_del {
+                if is_add {
+                    added += 1;
+                }
+                if is_del {
+                    removed += 1;
+                }
                 if hunk_shown < max_hunk_lines {
+                    // The context immediately preceding the change, so the body
+                    // reads as contiguous with it. The diff-wide budget is
+                    // charged here rather than on buffering, so a line the ring
+                    // evicted never costs anything.
+                    let room = leading_context_cap.saturating_sub(leading_context_total);
+                    let keep = leading_context.len().min(room);
+                    let skip = leading_context.len() - keep;
+                    for ctx in leading_context.drain(..).skip(skip) {
+                        result.push(ctx);
+                    }
+                    leading_context_total += keep;
                     result.push(line.to_string());
                     hunk_shown += 1;
+                } else if is_del {
+                    skipped_del += 1;
                 } else {
                     skipped_add += 1;
                 }
-            } else if line.starts_with('-') {
-                removed += 1;
+                leading_context.clear();
+            } else if hunk_shown > 0 {
                 if hunk_shown < max_hunk_lines {
                     result.push(line.to_string());
                     hunk_shown += 1;
-                } else {
-                    skipped_del += 1;
                 }
-            } else if !line.starts_with('\\') {
-                // Context line (git already prefixes it with a space).
-                if hunk_shown > 0 {
-                    if hunk_shown < max_hunk_lines {
-                        result.push(line.to_string());
-                        hunk_shown += 1;
-                    }
-                } else if leading_context < max_leading_context
-                    && leading_context_total < leading_context_cap
-                {
-                    result.push(line.to_string());
-                    leading_context += 1;
-                    leading_context_total += 1;
+            } else if leading_context_total < leading_context_cap {
+                // Keep the last `max_leading_context` lines rather than the
+                // first: with `-U10` or `--function-context` the first ones sit
+                // ten lines above the change and would imply an adjacency the
+                // file does not have.
+                if leading_context.len() == max_leading_context {
+                    leading_context.remove(0);
                 }
+                leading_context.push(line.to_string());
+            }
+
+            if header.old == 0 && header.new == 0 {
+                hunk = None;
             }
         }
 
-        if result.len() - leading_context_total >= max_lines {
+        if result.len().saturating_sub(leading_context_total) >= max_lines {
             result.push("\n... (more changes truncated)".to_string());
             was_truncated = true;
             break;
@@ -2367,10 +2452,9 @@ mod tests {
 
     #[test]
     fn test_compact_diff_combined_diff_headers_are_not_hunk_content() {
-        // `diff --cc` sections (unmerged paths during a merge / rebase /
-        // cherry-pick / stash pop) do not match `diff --git`, so `in_hunk`
-        // stayed true from the previous section and the `---` / `+++` headers
-        // of every later file were printed at column 0 and counted.
+        // `diff --cc` sections do not match `diff --git`, so the reset fires on
+        // the `diff --` prefix and the `---` / `+++` headers of every section
+        // stay outside the hunk body.
         let diff = "diff --cc a.txt\n\
                     index ba2906d,e45c9c2..0000000\n\
                     --- a/a.txt\n\
@@ -2378,28 +2462,143 @@ mod tests {
                     @@@ -1,1 -1,1 +1,5 @@@\n\
                     ++<<<<<<< HEAD\n\
                     \x20+main\n\
+                    ++=======\n\
+                    + side\n\
+                    ++>>>>>>> side\n\
                     diff --cc z.txt\n\
                     index ba2906d,e45c9c2..0000000\n\
                     --- a/z.txt\n\
                     +++ b/z.txt\n\
                     @@@ -1,1 -1,1 +1,5 @@@\n\
                     ++<<<<<<< HEAD\n\
-                    \x20+main\n";
+                    \x20+main\n\
+                    ++=======\n\
+                    + side\n\
+                    ++>>>>>>> side\n";
         let result = compact_diff(diff, 500);
 
-        let removed: Vec<&str> = result.lines().filter(|l| l.starts_with('-')).collect();
-        assert!(
-            removed.is_empty(),
-            "no deletions in this diff, got {:?} in:\n{}",
-            removed,
-            result
-        );
         assert!(
             !result.lines().any(|l| l.starts_with("+++ b/")),
             "file headers must not reach the hunk body, got:\n{}",
             result
         );
         assert!(result.contains("z.txt"), "got:\n{}", result);
+        // A combined diff carries one marker column per parent, so ` +main` is
+        // an addition against the second parent. The tally counts all five
+        // added lines per file; an anchored `^+` sees only the four whose
+        // marker sits in column 1. That gap is documented in FEATURES.md.
+        assert_eq!(
+            result.matches("  +5 -0").count(),
+            2,
+            "column-2 markers must be counted, got:\n{}",
+            result
+        );
+        let anchored = result.lines().filter(|l| l.starts_with('+')).count();
+        assert_eq!(anchored, 8, "four per file anchor, got:\n{}", result);
+    }
+
+    #[test]
+    fn test_compact_diff_mbox_signature_is_not_a_deletion() {
+        // `gh pr diff --patch` yields an mbox: a bare `---` before the diffstat
+        // and a `-- ` signature after each patch, both at column 0. The hunk
+        // ends where its declared line counts run out, so neither is read as
+        // hunk content.
+        let diff = "From abc Mon Sep 17 00:00:00 2001\n\
+                    Subject: [PATCH 1/2] one\n\
+                    \n\
+                    ---\n\
+                    \x20f.txt | 2 +-\n\
+                    \n\
+                    diff --git a/f.txt b/f.txt\n\
+                    --- a/f.txt\n\
+                    +++ b/f.txt\n\
+                    @@ -1,2 +1,2 @@\n\
+                    -old1\n\
+                    +new1\n\
+                    \x20tail1\n\
+                    -- \n\
+                    2.40.0\n\
+                    \n\
+                    From def Mon Sep 17 00:00:00 2001\n\
+                    Subject: [PATCH 2/2] two\n\
+                    \n\
+                    ---\n\
+                    diff --git a/g.txt b/g.txt\n\
+                    --- a/g.txt\n\
+                    +++ b/g.txt\n\
+                    @@ -1,2 +1,2 @@\n\
+                    -old2\n\
+                    +new2\n\
+                    \x20tail2\n\
+                    -- \n\
+                    2.40.0\n";
+        let result = compact_diff(diff, 500);
+
+        let removed: Vec<&str> = result.lines().filter(|l| l.starts_with('-')).collect();
+        assert_eq!(
+            removed,
+            vec!["-old1", "-old2"],
+            "only real deletions anchor, got:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("Subject:"),
+            "mbox envelope must stay out of the body, got:\n{}",
+            result
+        );
+        assert!(result.contains("  +1 -1"), "tally counts real changes only, got:\n{}", result);
+    }
+
+    #[test]
+    fn test_compact_diff_leading_context_is_adjacent_to_the_change() {
+        // With `-U10` the first context lines sit ten lines above the change.
+        // Emitting those would tell the reader that ctx3 precedes the deletion
+        // when ctx10 does.
+        let mut diff = String::from("diff --git a/f.rs b/f.rs\n@@ -1,11 +1,11 @@\n");
+        for i in 1..=10 {
+            diff.push_str(&format!(" ctx{}\n", i));
+        }
+        diff.push_str("-old\n+new\n");
+        let result = compact_diff(&diff, 500);
+
+        let ctx: Vec<&str> = result.lines().filter(|l| l.starts_with(" ctx")).collect();
+        assert_eq!(
+            ctx,
+            vec![" ctx8", " ctx9", " ctx10"],
+            "the last context lines, not the first, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_diff_header_path_keeps_spaces() {
+        assert_eq!(
+            diff_header_path("diff --git a/my file.txt b/my file.txt"),
+            "my file.txt"
+        );
+        assert_eq!(diff_header_path("diff --cc my file.txt"), "my file.txt");
+        assert_eq!(
+            diff_header_path("diff --combined my file.txt"),
+            "my file.txt"
+        );
+    }
+
+    #[test]
+    fn test_parse_hunk_header_counts() {
+        let h = parse_hunk_header("@@ -10,3 +10,4 @@ fn ctx() {").expect("unified header");
+        assert_eq!((h.old, h.new, h.prefix_width), (3, 4, 1));
+
+        // Omitted counts mean one line.
+        let h = parse_hunk_header("@@ -1 +1 @@").expect("single-line header");
+        assert_eq!((h.old, h.new), (1, 1));
+
+        // A combined header lists one range per parent; `old` tracks the first.
+        let h = parse_hunk_header("@@@ -1,1 -1,1 +1,5 @@@").expect("combined header");
+        assert_eq!((h.old, h.new, h.prefix_width), (1, 5, 2));
+
+        assert!(parse_hunk_header("@ -1,1 +1,1 @").is_none());
+        assert!(parse_hunk_header("-- ").is_none());
+        assert!(parse_hunk_header("---").is_none());
     }
 
     #[test]
