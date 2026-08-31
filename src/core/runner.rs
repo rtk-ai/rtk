@@ -40,6 +40,12 @@ pub struct RunOptions<'a> {
     /// can read from a pipe (e.g. `cat file | rtk wc`); without it the child
     /// gets an empty stdin and reports zero.
     pub inherit_stdin: bool,
+    tracking_baseline: Option<TrackingBaseline<'a>>,
+}
+
+struct TrackingBaseline<'a> {
+    command: &'a str,
+    output: &'a str,
 }
 
 impl<'a> RunOptions<'a> {
@@ -74,6 +80,13 @@ impl<'a> RunOptions<'a> {
 
     pub fn inherit_stdin(mut self) -> Self {
         self.inherit_stdin = true;
+        self
+    }
+
+    /// Track savings against the command/output the user would have produced,
+    /// while still using the executed command output for filtering and guards.
+    pub fn tracking_baseline(mut self, command: &'a str, output: &'a str) -> Self {
+        self.tracking_baseline = Some(TrackingBaseline { command, output });
         self
     }
 }
@@ -147,13 +160,26 @@ where
         guarded
     };
 
+    let (tracking_command, tracking_output) = tracking_context(&opts, cmd_label, raw_for_tracking);
+
     timer.track(
-        cmd_label,
-        &format!("rtk {}", cmd_label),
-        raw_for_tracking,
+        tracking_command,
+        &format!("rtk {}", tracking_command),
+        tracking_output,
         &shown,
     );
     Ok(exit_code)
+}
+
+fn tracking_context<'a>(
+    opts: &'a RunOptions<'a>,
+    command: &'a str,
+    output: &'a str,
+) -> (&'a str, &'a str) {
+    opts.tracking_baseline
+        .as_ref()
+        .map(|baseline| (baseline.command, baseline.output))
+        .unwrap_or((command, output))
 }
 
 pub fn run(
@@ -283,4 +309,29 @@ pub fn run_streamed(
         RunMode::Streamed(filter),
         opts,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tracking_context_uses_executed_command_by_default() {
+        let options = RunOptions::default();
+
+        assert_eq!(
+            tracking_context(&options, "ls -la .", "enriched output"),
+            ("ls -la .", "enriched output")
+        );
+    }
+
+    #[test]
+    fn tracking_context_prefers_explicit_baseline() {
+        let options = RunOptions::default().tracking_baseline("ls", "plain output");
+
+        assert_eq!(
+            tracking_context(&options, "ls -la .", "enriched output"),
+            ("ls", "plain output")
+        );
+    }
 }

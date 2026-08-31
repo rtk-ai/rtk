@@ -20,6 +20,9 @@ static LS_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    let baseline_output = capture_ls_baseline(args);
+    let baseline_command = baseline_command(args);
+
     let show_all = args
         .iter()
         .any(|a| (a.starts_with('-') && !a.starts_with("--") && a.contains('a')) || a == "--all");
@@ -82,6 +85,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         paths.join(" ")
     };
 
+    let mut run_options = RunOptions::stdout_only()
+        .early_exit_on_failure()
+        .no_trailing_newline();
+    if let Some(output) = baseline_output.as_deref() {
+        run_options = run_options.tracking_baseline(&baseline_command, output);
+    }
+
     runner::run_filtered(
         cmd,
         "ls",
@@ -120,10 +130,31 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             }
             filtered
         },
-        RunOptions::stdout_only()
-            .early_exit_on_failure()
-            .no_trailing_newline(),
+        run_options,
     )
+}
+
+fn capture_ls_baseline(args: &[String]) -> Option<String> {
+    let mut cmd = resolved_command("ls");
+    cmd.env("LC_ALL", "C");
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn baseline_command(args: &[String]) -> String {
+    if args.is_empty() {
+        "ls".to_string()
+    } else {
+        format!("ls {}", args.join(" "))
+    }
 }
 
 /// Format bytes into human-readable size
@@ -352,6 +383,15 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_baseline_command_matches_user_invocation() {
+        assert_eq!(baseline_command(&[]), "ls");
+        assert_eq!(
+            baseline_command(&["-a".to_string(), "src".to_string()]),
+            "ls -a src"
+        );
+    }
 
     #[test]
     fn test_compact_basic() {
