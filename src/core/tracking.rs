@@ -33,8 +33,9 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde::Serialize;
+use std::cell::Cell;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 // ── Project path helpers ── // added: project-scoped tracking support
@@ -90,6 +91,9 @@ use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB, RTK_DATA_DIR};
 /// ```
 pub struct Tracker {
     conn: Connection,
+    /// Set when the database was created before incremental auto_vacuum was
+    /// enabled, so the next cleanup that frees pages converts it with a VACUUM.
+    needs_full_vacuum: Cell<bool>,
 }
 
 /// Individual command record from tracking history.
@@ -247,7 +251,11 @@ impl Tracker {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn new() -> Result<Self> {
-        let db_path = get_db_path()?;
+        Self::open(&get_db_path()?)
+    }
+
+    /// Open a tracker on a specific database path.
+    fn open(db_path: &Path) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
             crate::core::utils::create_private_dir(parent)?;
         }
@@ -256,7 +264,7 @@ impl Tracker {
         // an already-private DB instead of the umask.
         crate::core::utils::open_private(
             std::fs::OpenOptions::new().write(true).create(true),
-            &db_path,
+            db_path,
         )
         .with_context(|| {
             format!(
@@ -265,11 +273,21 @@ impl Tracker {
             )
         })?;
 
-        let conn = Connection::open(&db_path)?;
+        let conn = Connection::open(db_path)?;
+        // A database that already holds pages but was created without
+        // auto_vacuum predates incremental reclaim. Read this before the PRAGMA
+        // below, which reports INCREMENTAL as soon as it is set even though the
+        // file is only converted by a VACUUM.
+        let needs_full_vacuum = Cell::new(is_legacy_non_auto_vacuum(&conn));
+        // auto_vacuum goes first: switching to WAL writes the header, and after
+        // that a new database can no longer change its vacuum mode. Setting it
+        // here makes a new database incremental from birth; on an existing one it
+        // only takes effect once a VACUUM converts the file.
         // WAL mode + busy_timeout for concurrent access (multiple Claude Code instances).
         // Non-fatal: NFS/read-only filesystems may not support WAL.
         let _ = conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
+            "PRAGMA auto_vacuum=INCREMENTAL;
+             PRAGMA journal_mode=WAL;
              PRAGMA busy_timeout=5000;",
         );
         conn.execute(
@@ -336,16 +354,22 @@ impl Tracker {
             [],
         )?;
 
-        restrict_db_files(&db_path);
+        restrict_db_files(db_path);
 
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            needs_full_vacuum,
+        })
     }
 
     /// Create an isolated in-memory tracker for tests.
     #[cfg(test)]
     pub fn new_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("Failed to open in-memory DB")?;
-        let tracker = Self { conn };
+        let tracker = Self {
+            conn,
+            needs_full_vacuum: Cell::new(false),
+        };
         tracker.init_schema()?;
         Ok(tracker)
     }
@@ -453,15 +477,44 @@ impl Tracker {
 
     fn cleanup_old(&self) -> Result<()> {
         let cutoff = Utc::now() - chrono::Duration::days(DEFAULT_HISTORY_DAYS);
-        self.conn.execute(
+        let mut deleted = self.conn.execute(
             "DELETE FROM commands WHERE timestamp < ?1",
             params![cutoff.to_rfc3339()],
         )?;
-        self.conn.execute(
+        deleted += self.conn.execute(
             "DELETE FROM parse_failures WHERE timestamp < ?1",
             params![cutoff.to_rfc3339()],
         )?;
+        if deleted > 0 {
+            self.reclaim_free_pages();
+        }
         Ok(())
+    }
+
+    /// Hand the pages freed by a delete back to the filesystem.
+    ///
+    /// Deleting rows only moves their pages to the freelist, so without this the
+    /// database keeps its high-water mark for good. Best-effort by design: a
+    /// database that cannot be shrunk right now must never fail the command that
+    /// was being recorded.
+    fn reclaim_free_pages(&self) {
+        if self.needs_full_vacuum.get() {
+            // The database predates auto_vacuum. `open` already requested
+            // INCREMENTAL, so this VACUUM both reclaims the accumulated pages and
+            // converts the file, which is why it only ever runs once.
+            if self.conn.execute_batch("VACUUM;").is_ok() {
+                self.needs_full_vacuum.set(false);
+            }
+            return;
+        }
+        // incremental_vacuum frees pages one step at a time and reports success
+        // either way, so it has to be driven to completion rather than run as a
+        // batch, which would return Ok having reclaimed nothing.
+        if let Ok(mut stmt) = self.conn.prepare("PRAGMA incremental_vacuum") {
+            if let Ok(mut rows) = stmt.query([]) {
+                while matches!(rows.next(), Ok(Some(_))) {}
+            }
+        }
     }
 
     /// Delete all tracked data (commands + parse_failures), resetting all stats to zero.
@@ -474,6 +527,7 @@ impl Tracker {
                  COMMIT;",
             )
             .context("Failed to reset tracking database")?;
+        self.reclaim_free_pages();
         Ok(())
     }
 
@@ -1233,6 +1287,23 @@ fn categorize_command(rtk_cmd: &str) -> String {
     .to_string()
 }
 
+/// Whether the file behind this connection was created before incremental
+/// auto_vacuum was enabled.
+///
+/// A brand-new database has no pages yet and reports `auto_vacuum = 0` too, so
+/// the page count is what separates the two. Both pragmas are read before
+/// `open` sets `auto_vacuum`, which starts reporting INCREMENTAL immediately
+/// even though the file itself is only converted by a VACUUM.
+fn is_legacy_non_auto_vacuum(conn: &Connection) -> bool {
+    let pages: i64 = conn
+        .query_row("PRAGMA page_count", [], |row| row.get(0))
+        .unwrap_or(0);
+    let auto_vacuum: i64 = conn
+        .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+        .unwrap_or(0);
+    pages > 0 && auto_vacuum == 0
+}
+
 /// SQLite appends `-wal`/`-shm` to the whole filename, so these are siblings
 /// rather than extension swaps. Concatenate on `OsString`, not `PathBuf::push`,
 /// which would append a component and silently target `history.db/-wal`.
@@ -1757,5 +1828,117 @@ mod tests {
             let mode = std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "expected 0600 on {}", p.display());
         }
+    }
+
+    // Space reclaim after retention cleanup.
+
+    fn pragma(conn: &Connection, name: &str) -> i64 {
+        conn.query_row(&format!("PRAGMA {}", name), [], |row| row.get(0))
+            .unwrap_or_else(|e| panic!("PRAGMA {} failed: {}", name, e))
+    }
+
+    /// Insert rows dated past the retention window, so the next cleanup deletes
+    /// them. The payload is what gives the database enough pages for the freed
+    /// space to be visible.
+    fn insert_expired_rows(conn: &Connection, count: usize) {
+        let stale = (Utc::now() - chrono::Duration::days(DEFAULT_HISTORY_DAYS + 1)).to_rfc3339();
+        let payload = "x".repeat(4096);
+        let tx = conn.unchecked_transaction().expect("transaction");
+        for _ in 0..count {
+            tx.execute(
+                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+                 VALUES (?1, ?2, ?2, '', 100, 20, 80, 80.0, 1)",
+                params![stale, payload],
+            )
+            .expect("insert expired row");
+        }
+        tx.commit().expect("commit");
+    }
+
+    #[test]
+    fn test_new_database_uses_incremental_auto_vacuum() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tracker = Tracker::open(&tmp.path().join("history.db")).expect("open tracker");
+
+        assert_eq!(
+            pragma(&tracker.conn, "auto_vacuum"),
+            2,
+            "a new database should be created with auto_vacuum=INCREMENTAL"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_reclaims_free_pages() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tracker = Tracker::open(&tmp.path().join("history.db")).expect("open tracker");
+
+        insert_expired_rows(&tracker.conn, 200);
+        let pages_before = pragma(&tracker.conn, "page_count");
+
+        tracker.cleanup_old().expect("cleanup");
+
+        assert_eq!(
+            pragma(&tracker.conn, "freelist_count"),
+            0,
+            "cleanup should hand the pages it freed back, not park them on the freelist"
+        );
+        assert!(
+            pragma(&tracker.conn, "page_count") < pages_before,
+            "page count should drop once expired rows are removed"
+        );
+    }
+
+    #[test]
+    fn test_legacy_database_is_converted_on_cleanup() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("history.db");
+
+        // A database as it looked before this change: rows past the retention
+        // window and no auto_vacuum.
+        {
+            let legacy = Tracker::open(&db_path).expect("open tracker");
+            legacy
+                .conn
+                .execute_batch("PRAGMA auto_vacuum=NONE; VACUUM;")
+                .expect("drop auto_vacuum");
+            insert_expired_rows(&legacy.conn, 200);
+            assert_eq!(pragma(&legacy.conn, "auto_vacuum"), 0);
+        }
+
+        let tracker = Tracker::open(&db_path).expect("reopen tracker");
+        let pages_before = pragma(&tracker.conn, "page_count");
+
+        tracker.cleanup_old().expect("cleanup");
+
+        assert_eq!(
+            pragma(&tracker.conn, "auto_vacuum"),
+            2,
+            "the one-time vacuum should also convert the file to incremental"
+        );
+        assert!(
+            pragma(&tracker.conn, "page_count") < pages_before,
+            "an existing database should give back its accumulated pages"
+        );
+        assert!(
+            !tracker.needs_full_vacuum.get(),
+            "the conversion should not be repeated on later cleanups"
+        );
+    }
+
+    #[test]
+    fn test_reset_all_reclaims_free_pages() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tracker = Tracker::open(&tmp.path().join("history.db")).expect("open tracker");
+
+        insert_expired_rows(&tracker.conn, 200);
+        let pages_before = pragma(&tracker.conn, "page_count");
+
+        tracker.reset_all().expect("reset");
+
+        assert_eq!(pragma(&tracker.conn, "freelist_count"), 0);
+        assert!(
+            pragma(&tracker.conn, "page_count") < pages_before,
+            "resetting stats to zero should also return the space"
+        );
     }
 }
