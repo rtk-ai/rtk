@@ -20,6 +20,9 @@ static LS_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    let args = strip_unsupported_depth_flag(args);
+    let args = args.as_slice();
+
     let show_all = args
         .iter()
         .any(|a| (a.starts_with('-') && !a.starts_with("--") && a.contains('a')) || a == "--all");
@@ -124,6 +127,43 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             .early_exit_on_failure()
             .no_trailing_newline(),
     )
+}
+
+/// `rtk ls` always lists a single directory level (it shells out to plain
+/// `ls -la`, with no recursion); `--depth` is not implemented. Native `ls`
+/// doesn't understand `--depth` either and errors on it (`unknown option --
+/// depth`), so strip the flag — and its value, in either `--depth N` or
+/// `--depth=N` form — before it reaches native `ls` or gets mistaken for a
+/// path argument. See #2365.
+fn strip_unsupported_depth_flag(args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut iter = args.iter().peekable();
+    let mut stripped = false;
+
+    while let Some(arg) = iter.next() {
+        if arg == "--depth" {
+            stripped = true;
+            // Only consume the next token if it looks like the depth value
+            // (all digits); otherwise leave it alone — it's likely a path.
+            if iter.peek().is_some_and(|next| {
+                !next.is_empty() && next.chars().all(|c| c.is_ascii_digit())
+            }) {
+                iter.next();
+            }
+            continue;
+        }
+        if arg.starts_with("--depth=") {
+            stripped = true;
+            continue;
+        }
+        out.push(arg.clone());
+    }
+
+    if stripped {
+        eprintln!("rtk: --depth is not supported by `rtk ls` (no recursion); ignoring");
+    }
+
+    out
 }
 
 /// Format bytes into human-readable size
@@ -352,6 +392,50 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- strip_unsupported_depth_flag (issue #2365) ---
+
+    #[test]
+    fn test_strip_depth_separate_value() {
+        let args = vec!["--depth".to_string(), "3".to_string()];
+        let out = strip_unsupported_depth_flag(&args);
+        assert!(out.is_empty(), "got: {out:?}");
+    }
+
+    #[test]
+    fn test_strip_depth_equals_value() {
+        let args = vec!["--depth=3".to_string()];
+        let out = strip_unsupported_depth_flag(&args);
+        assert!(out.is_empty(), "got: {out:?}");
+    }
+
+    #[test]
+    fn test_strip_depth_preserves_surrounding_args() {
+        let args = vec![
+            "-la".to_string(),
+            "--depth".to_string(),
+            "2".to_string(),
+            "src".to_string(),
+        ];
+        let out = strip_unsupported_depth_flag(&args);
+        assert_eq!(out, vec!["-la".to_string(), "src".to_string()]);
+    }
+
+    #[test]
+    fn test_strip_depth_without_numeric_value_keeps_next_arg() {
+        // Malformed usage (no number after --depth): don't eat the next
+        // token, since it's more likely a path than a depth value.
+        let args = vec!["--depth".to_string(), "src".to_string()];
+        let out = strip_unsupported_depth_flag(&args);
+        assert_eq!(out, vec!["src".to_string()]);
+    }
+
+    #[test]
+    fn test_strip_depth_absent_is_noop() {
+        let args = vec!["-la".to_string(), "src".to_string()];
+        let out = strip_unsupported_depth_flag(&args);
+        assert_eq!(out, args);
+    }
 
     #[test]
     fn test_compact_basic() {
