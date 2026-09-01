@@ -96,6 +96,8 @@ impl AgentIntegrationStatus {
 #[derive(Debug, Serialize)]
 pub struct DiscoverReport {
     pub sessions_scanned: usize,
+    #[serde(skip)]
+    pub all_projects: bool,
     pub total_commands: usize,
     pub already_rtk: usize,
     pub since_days: u64,
@@ -140,6 +142,18 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
             0.0
         }
     ));
+
+    if report.sessions_scanned == 0 {
+        if report.all_projects {
+            out.push_str("\nNo sessions found in the selected time range.\n");
+        } else {
+            out.push_str(
+                "\nNo sessions found for the current project. Try `rtk discover --all` to scan every project.\n",
+            );
+        }
+        append_agent_notes(&mut out, report.agent_status);
+        return out;
+    }
 
     if report.supported.is_empty() && report.unsupported.is_empty() {
         out.push_str("\nNo missed savings found. RTK usage looks good!\n");
@@ -277,6 +291,7 @@ mod tests {
     fn make_report(total_commands: usize, already_rtk: usize) -> DiscoverReport {
         DiscoverReport {
             sessions_scanned: 1,
+            all_projects: false,
             total_commands,
             already_rtk,
             since_days: 30,
@@ -314,6 +329,31 @@ mod tests {
         let report = make_report(0, 0);
         let output = format_text(&report, 10, false);
         assert!(output.contains("0 commands (0.0%)"));
+    }
+
+    #[test]
+    fn test_zero_sessions_does_not_report_success() {
+        let mut report = make_report(0, 0);
+        report.sessions_scanned = 0;
+
+        let output = format_text(&report, 10, false);
+
+        assert!(output.contains("No sessions found for the current project"));
+        assert!(output.contains("rtk discover --all"));
+        assert!(!output.contains("RTK usage looks good"));
+    }
+
+    #[test]
+    fn test_zero_sessions_all_projects_does_not_suggest_all() {
+        let mut report = make_report(0, 0);
+        report.sessions_scanned = 0;
+        report.all_projects = true;
+
+        let output = format_text(&report, 10, false);
+
+        assert!(output.contains("No sessions found in the selected time range"));
+        assert!(!output.contains("rtk discover --all"));
+        assert!(!output.contains("RTK usage looks good"));
     }
 
     // Full percent: 1000/1000 = 100.0%

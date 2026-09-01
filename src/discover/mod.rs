@@ -255,6 +255,7 @@ pub fn run(
 
     let report = DiscoverReport {
         sessions_scanned: sessions.len(),
+        all_projects: all,
         total_commands,
         already_rtk,
         since_days,
