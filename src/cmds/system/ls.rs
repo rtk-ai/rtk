@@ -89,12 +89,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         |raw| {
             let (entries, summary, parsed_count) = compact_ls(raw, show_all, show_long);
 
-            // If no lines were parsed (e.g., unrecognized locale), fall back to raw output.
+            // If no lines were parsed and the compact formatter could not produce
+            // any output (e.g., unrecognized locale), fall back to raw output.
             // This is safer than returning "(empty)" for a non-empty directory.
             let has_real_content = raw
                 .lines()
                 .any(|l| !l.starts_with("total ") && !l.is_empty() && !is_dotdir(l));
-            if parsed_count == 0 && has_real_content {
+            if parsed_count == 0 && entries.is_empty() && has_real_content {
                 return raw.to_string();
             }
 
@@ -241,18 +242,42 @@ fn perms_to_octal(perms: &str) -> Option<String> {
 fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, usize) {
     use std::collections::HashMap;
 
-    let mut dirs: Vec<(String, Option<String>)> = Vec::new(); // (name, octal_perms)
-    let mut files: Vec<(String, String, Option<String>)> = Vec::new(); // (name, size, octal_perms)
+    #[derive(Default)]
+    struct ListingGroup {
+        header: Option<String>,
+        dirs: Vec<(String, Option<String>)>, // (name, octal_perms)
+        files: Vec<(String, String, Option<String>)>, // (name, size, octal_perms)
+    }
+
+    let mut groups = vec![ListingGroup::default()];
     let mut by_ext: HashMap<String, usize> = HashMap::new();
     let mut lines_seen: usize = 0;
     let mut parsed_count: usize = 0;
     let mut dotdirs: usize = 0;
+    let mut header_count: usize = 0;
+    let mut total_dirs: usize = 0;
+    let mut total_files: usize = 0;
 
     for line in raw.lines() {
         if line.starts_with("total ") || line.is_empty() {
             continue;
         }
         lines_seen += 1;
+
+        let trimmed = line.trim();
+        if trimmed.ends_with(':') && LS_DATE_RE.find(trimmed).is_none() {
+            let current = groups.last_mut().expect("groups is never empty");
+            if current.header.is_none() && current.dirs.is_empty() && current.files.is_empty() {
+                current.header = Some(trimmed.to_string());
+            } else {
+                groups.push(ListingGroup {
+                    header: Some(trimmed.to_string()),
+                    ..ListingGroup::default()
+                });
+            }
+            header_count += 1;
+            continue;
+        }
 
         let Some((file_type, perms, size, name)) = parse_ls_line(line) else {
             if is_dotdir(line) {
@@ -275,8 +300,10 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
             None
         };
 
+        let current = groups.last_mut().expect("groups is never empty");
         if file_type == 'd' {
-            dirs.push((name, octal));
+            current.dirs.push((name, octal));
+            total_dirs += 1;
         } else {
             // Regular files, symlinks, character/block devices, pipes, sockets
             let ext = if let Some(pos) = name.rfind('.') {
@@ -285,48 +312,82 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
                 "no ext".to_string()
             };
             *by_ext.entry(ext).or_insert(0) += 1;
-            files.push((name, human_size(size), octal));
+            current.files.push((name, human_size(size), octal));
+            total_files += 1;
         }
     }
 
-    if dirs.is_empty() && files.is_empty() {
+    let has_headers = groups.iter().any(|group| group.header.is_some());
+    let render_empty_header_groups = |groups: &[ListingGroup]| {
+        let mut entries = String::new();
+        for group in groups.iter().filter(|group| group.header.is_some()) {
+            if !entries.is_empty() {
+                entries.push('\n');
+            }
+            if let Some(header) = &group.header {
+                entries.push_str(header);
+                entries.push_str("\n(empty)\n");
+            }
+        }
+        entries
+    };
+
+    if total_dirs == 0 && total_files == 0 {
         if lines_seen > 0 && parsed_count == 0 {
-            if dotdirs == lines_seen {
-                // Only . and .. entries (empty directory)
+            if dotdirs + header_count == lines_seen {
+                // Only directory headers plus . and .. entries (empty directory)
+                if has_headers {
+                    return (render_empty_header_groups(&groups), String::new(), 0);
+                }
                 return ("(empty)\n".to_string(), String::new(), 0);
             }
             // Real content that couldn't be parsed (e.g., non-English locale)
             return (String::new(), String::new(), 0);
+        }
+        if has_headers {
+            return (render_empty_header_groups(&groups), String::new(), parsed_count);
         }
         return ("(empty)\n".to_string(), String::new(), 0);
     }
 
     let mut entries = String::new();
 
-    // Dirs first, compact
-    for (name, octal) in &dirs {
-        if let Some(octal) = octal {
-            entries.push_str(octal);
-            entries.push_str("  ");
+    for group in &groups {
+        if has_headers {
+            if !entries.is_empty() {
+                entries.push('\n');
+            }
+            if let Some(header) = &group.header {
+                entries.push_str(header);
+                entries.push('\n');
+            }
         }
-        entries.push_str(name);
-        entries.push_str("/\n");
-    }
 
-    // Files with size
-    for (name, size, octal) in &files {
-        if let Some(octal) = octal {
-            entries.push_str(octal);
-            entries.push_str("  ");
+        // Dirs first, compact
+        for (name, octal) in &group.dirs {
+            if let Some(octal) = octal {
+                entries.push_str(octal);
+                entries.push_str("  ");
+            }
+            entries.push_str(name);
+            entries.push_str("/\n");
         }
-        entries.push_str(name);
-        entries.push_str("  ");
-        entries.push_str(size);
-        entries.push('\n');
+
+        // Files with size
+        for (name, size, octal) in &group.files {
+            if let Some(octal) = octal {
+                entries.push_str(octal);
+                entries.push_str("  ");
+            }
+            entries.push_str(name);
+            entries.push_str("  ");
+            entries.push_str(size);
+            entries.push('\n');
+        }
     }
 
     // Summary line (separate so caller can suppress when piped)
-    let mut summary = format!("\nSummary: {} files, {} dirs", files.len(), dirs.len());
+    let mut summary = format!("\nSummary: {} files, {} dirs", total_files, total_dirs);
     if !by_ext.is_empty() {
         // inline single-line summary — fewer entries to avoid wrapping.
         const MAX_EXT_SUMMARY: usize = reduced(CAP_WARNINGS, 5);
@@ -372,6 +433,50 @@ mod tests {
         assert!(!entries.contains("total")); // no total
         assert!(!entries.contains("\n.\n")); // no . entry
         assert!(!entries.contains("\n..\n")); // no .. entry
+    }
+
+    #[test]
+    fn test_compact_preserves_multiple_directory_headers() {
+        let input = "dir_a:\n\
+                     total 8\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 .\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 ..\n\
+                     -rw-r--r--  1 user  staff  1234 Jan  1 12:00 a.txt\n\
+                     \n\
+                     dir_b:\n\
+                     total 8\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 .\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 ..\n\
+                     -rw-r--r--  1 user  staff  5678 Jan  1 12:00 b.txt\n";
+        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        assert!(entries.contains("dir_a:"), "missing first directory header: {entries}");
+        assert!(entries.contains("a.txt"), "missing first directory entry: {entries}");
+        assert!(entries.contains("dir_b:"), "missing second directory header: {entries}");
+        assert!(entries.contains("b.txt"), "missing second directory entry: {entries}");
+        assert!(
+            entries.find("dir_a:").unwrap() < entries.find("a.txt").unwrap(),
+            "first header should precede its entries: {entries}"
+        );
+        assert!(
+            entries.find("dir_b:").unwrap() < entries.find("b.txt").unwrap(),
+            "second header should precede its entries: {entries}"
+        );
+    }
+
+    #[test]
+    fn test_compact_preserves_empty_multiple_directory_headers() {
+        let input = "dir_a:\n\
+                     total 0\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 .\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 ..\n\
+                     \n\
+                     dir_b:\n\
+                     total 0\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 .\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 ..\n";
+        let (entries, summary, _parsed) = compact_ls(input, false, false);
+        assert_eq!(entries, "dir_a:\n(empty)\n\ndir_b:\n(empty)\n");
+        assert!(summary.is_empty());
     }
 
     #[test]
