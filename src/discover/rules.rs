@@ -344,6 +344,14 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^ctest(?:\s|$)",
+        rtk_cmd: "rtk ctest",
+        rewrite_prefixes: &["ctest"],
+        category: "Tests",
+        savings_pct: 80.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?playwright",
         rtk_cmd: "rtk playwright",
         rewrite_prefixes: &[
@@ -571,6 +579,14 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^php\s+run-tests\.php(?:\s|$)",
+        rtk_cmd: "rtk phpt",
+        rewrite_prefixes: &["php run-tests.php"],
+        category: "Tests",
+        savings_pct: 99.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^(?:php\s+)?(?:\./)?(?:(?:vendor/)?bin/)?phpunit(?:\s|$)",
         rtk_cmd: "rtk phpunit",
         // rewrite_segment_inner normalizes the php wrapper, `./`, vendor/bin and
@@ -776,6 +792,21 @@ pub const RULES: &[RtkRule] = &[
         pattern: r"^(?:\./mvnw|mvnw\.cmd|mvnw|mvn)\b(?:\s+\S+)*?\s+(compile|test|integration-test|package|install|verify|deploy)\b",
         rtk_cmd: "rtk mvn",
         rewrite_prefixes: &["./mvnw", "mvnw.cmd", "mvnw", "mvn"],
+        category: "Build",
+        savings_pct: 82.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        // `mvnd` is a separate binary, not a `mvn` wrapper — it must keep its
+        // own rtk_cmd so the daemon is what actually runs. mvnd ships
+        // `mvnd.cmd` on Windows; listed explicitly (longer prefix first) on
+        // both the pattern and rewrite_prefixes, mirroring the mvn rule's
+        // `mvnw.cmd` handling — `^mvnd\b` alone matches the `.` boundary in
+        // `mvnd.cmd` but can't then reach `\s+(compile|...)`, so it silently
+        // fails to classify the command at all.
+        pattern: r"^(?:mvnd\.cmd|mvnd)\b(?:\s+\S+)*?\s+(compile|test|integration-test|package|install|verify|deploy)\b",
+        rtk_cmd: "rtk mvnd",
+        rewrite_prefixes: &["mvnd.cmd", "mvnd"],
         category: "Build",
         savings_pct: 82.0,
         ..RtkRule::DEFAULT

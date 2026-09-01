@@ -15,6 +15,7 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
         "pytest" => Some(crate::cmds::python::pytest_cmd::filter_pytest_output),
         "go-test" => Some(go_test_wrapper),
         "go-build" => Some(crate::cmds::go::go_cmd::filter_go_build),
+        "ctest" => Some(crate::cmds::system::ctest_cmd::filter_ctest_output),
         "tsc" => Some(crate::cmds::js::tsc_cmd::filter_tsc_output),
         "vitest" => Some(vitest_wrapper),
         "grep" | "rg" => Some(grep_wrapper),
@@ -179,6 +180,10 @@ pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
         return crate::cmds::python::pytest_cmd::filter_pytest_output;
     }
 
+    if crate::cmds::system::ctest_cmd::looks_like_ctest_output(first_1k) {
+        return crate::cmds::system::ctest_cmd::filter_ctest_output;
+    }
+
     let first_trimmed = first_1k.trim_start();
 
     // phpunit banner: "PHPUnit X.Y.Z by Sebastian Bergmann and contributors."
@@ -263,7 +268,7 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
         Some(name) => resolve_filter(name).ok_or_else(|| {
             anyhow::anyhow!(
                 "Unknown filter '{}'. Available: cargo-test, pytest, go-test, go-build, \
-                 tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
+                 ctest, tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
                  log, mypy, ruff-check, ruff-format, prettier, phpunit, pest, \
                  paratest, php-test, ecs, phpstan, pint",
                 name
@@ -347,6 +352,11 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_filter_ctest() {
+        assert!(resolve_filter("ctest").is_some());
+    }
+
+    #[test]
     fn test_resolve_filter_tsc() {
         assert!(resolve_filter("tsc").is_some());
     }
@@ -413,6 +423,50 @@ mod tests {
         let f = auto_detect_filter(input);
         let out = f(input);
         assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn test_auto_detect_ctest() {
+        let input = "Internal ctest changing into directory: /tmp/build\n\
+Test project /tmp/build\n\
+1/1 Test #1: smoke ...........................   Passed    0.01 sec\n\
+100% tests passed, 0 tests failed out of 1\n\
+Total Test time (real) =   0.01 sec\n";
+        let f = auto_detect_filter(input);
+        let out = f(input);
+        assert!(out.contains("ctest: 1/1 passed"), "out={}", out);
+    }
+
+    #[test]
+    fn test_auto_detect_ctest_without_tests() {
+        let input = "Test project /tmp/build\nNo tests were found!!!\n";
+        let f = auto_detect_filter(input);
+
+        assert_eq!(f(input), "ctest: no tests found");
+    }
+
+    #[test]
+    fn test_auto_detect_ctest_before_summary_enters_first_kilobyte() {
+        let mut input = String::from("Test project /tmp/build\n");
+        for index in 1..=40 {
+            input.push_str(&format!(
+                "{index}/40 Test #{index}: case_{index} ...........................   Passed    0.01 sec\n"
+            ));
+        }
+        input.push_str("100% tests passed, 0 tests failed out of 40\n");
+
+        let f = auto_detect_filter(&input);
+        let out = f(&input);
+
+        assert!(out.contains("ctest: 40/40 passed"), "out={out}");
+    }
+
+    #[test]
+    fn test_auto_detect_ctest_rejects_keyword_only_output() {
+        let input = "Test project migration status\nTest # notes\n100% tests passed\n";
+        let f = auto_detect_filter(input);
+
+        assert_eq!(f(input), input);
     }
 
     #[test]

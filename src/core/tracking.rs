@@ -1225,6 +1225,7 @@ fn categorize_command(rtk_cmd: &str) -> String {
         "docker" | "kubectl" => "cloud",
         "rspec" | "rubocop" | "rake" => "ruby",
         "dotnet" => "dotnet",
+        "ctest" => "cpp",
         "ls" | "tree" | "grep" | "find" | "wc" | "read" | "env" | "json" | "log" | "smart"
         | "diff" | "deps" | "summary" | "format" => "system",
         _ => "other",

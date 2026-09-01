@@ -9,7 +9,7 @@ use super::lexer::{
     shell_split, split_on_operators, tokenize, tokenize_with_newlines, ParsedToken, PipeKind,
     TokenKind,
 };
-use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
+use super::rules::{RtkRule, IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
 
@@ -1382,7 +1382,10 @@ fn rewrite_segment_inner(
         Classification::Supported { rtk_equivalent, .. } => {
             let stripped = ENV_PREFIX.replace(cmd_part, "");
             let cmd_clean = stripped.trim();
-            if is_excluded(cmd_clean, excluded) {
+            if !excluded.is_empty()
+                && (is_excluded(cmd_clean, excluded)
+                    || is_excluded(&tool_form(cmd_clean, rtk_equivalent), excluded))
+            {
                 return None;
             }
             rtk_equivalent
@@ -1448,20 +1451,12 @@ fn rewrite_segment_inner(
     // classify_command does, so a small canonical prefix list matches every
     // invocation form instead of enumerating each literal spelling.
     let php_normalized;
-    let strip_target: &str = if rule
-        .rtk_cmd
-        .strip_prefix("rtk ")
-        .is_some_and(|t| PHP_TOOL_NAMES.contains(&t))
-    {
-        // Peel `php ` then a leading `./` (normalize_php_tool_command only
-        // strips `./` for paths that resolve to a Composer tool, so a plain
-        // `./bin/<tool>` would otherwise survive and miss the prefix match).
-        let unwrapped = strip_php_wrapper(cmd_part);
-        let unwrapped = unwrapped.strip_prefix("./").unwrap_or(unwrapped);
-        php_normalized = normalize_php_tool_command(unwrapped);
-        &php_normalized
-    } else {
-        cmd_part
+    let strip_target: &str = match php_tool_form(cmd_part, rule.rtk_cmd) {
+        Some(normalized) => {
+            php_normalized = normalized;
+            &php_normalized
+        }
+        None => cmd_part,
     };
 
     // Try each rewrite prefix (longest first) with word-boundary check
@@ -1477,6 +1472,70 @@ fn rewrite_segment_inner(
     }
 
     None
+}
+
+/// The tool-name portion of a matched rewrite prefix: the shortest token-suffix of
+/// `prefix` that is itself a rewrite prefix of the same rule. That peels the wrapper
+/// (`npx`, `pnpm exec`, `python3 -m`, `bundle exec`) while keeping a subcommand the
+/// rule treats as part of the tool, so `golangci-lint run` and `next build` survive
+/// intact instead of collapsing to `run` and `build`.
+fn tool_portion(prefix: &'static str, rule: &RtkRule) -> &'static str {
+    let mut best = prefix;
+    let mut rest = prefix;
+    while let Some(pos) = rest.find(' ') {
+        rest = &rest[pos + 1..];
+        if rule.rewrite_prefixes.contains(&rest) {
+            best = rest;
+        }
+    }
+    best
+}
+
+/// Rewrite a command into the spelling `exclude_commands` is written against.
+///
+/// An entry names a tool, but the command may spell it with a wrapper
+/// (`npx playwright test`), an interpreter (`python3 -m pytest tests/`) or a path
+/// (`vendor/bin/phpunit tests/`). Peeling that spelling down to the tool lets one entry
+/// cover every form. The arguments are kept, so an anchored pattern still means what it
+/// says: `"^ls$"` excludes a bare `ls` without swallowing `ls -la`.
+/// Canonical `<tool> <args>` form of a Composer-resolved PHP tool invocation, peeling
+/// the `php` wrapper and its ini flags, a leading `./`, and a vendor/composer bin dir.
+/// `None` when `rtk_cmd` is not one of those tools.
+///
+/// `normalize_php_tool_command` only strips `./` for paths that resolve to a Composer
+/// tool, so a plain `./bin/<tool>` would otherwise survive and miss the prefix match.
+fn php_tool_form(cmd: &str, rtk_cmd: &str) -> Option<String> {
+    rtk_cmd
+        .strip_prefix("rtk ")
+        .filter(|t| PHP_TOOL_NAMES.contains(t))?;
+    let unwrapped = strip_php_wrapper(cmd);
+    let unwrapped = unwrapped.strip_prefix("./").unwrap_or(unwrapped);
+    Some(normalize_php_tool_command(unwrapped))
+}
+
+fn tool_form(cmd_clean: &str, rtk_equivalent: &str) -> String {
+    // Same normalization the rewrite path applies, so the exclusion sees the tool
+    // whichever way it was spelled — including `php vendor/bin/phpunit`.
+    let normalized = strip_absolute_path(
+        &php_tool_form(cmd_clean, rtk_equivalent).unwrap_or_else(|| cmd_clean.to_string()),
+    );
+    RULES
+        .iter()
+        .find(|r| r.rtk_cmd == rtk_equivalent)
+        .and_then(|rule| {
+            rule.rewrite_prefixes.iter().find_map(|&prefix| {
+                let rest = strip_word_prefix(&normalized, prefix)?;
+                // No rewrite prefix carries a path outside its first token, and that
+                // token is already a basename here, so `tool_portion` needs no strip.
+                let tool = tool_portion(prefix, rule);
+                Some(if rest.is_empty() {
+                    tool.to_string()
+                } else {
+                    format!("{} {}", tool, rest)
+                })
+            })
+        })
+        .unwrap_or(normalized)
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -2312,6 +2371,27 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("cargo test", &[]),
             Some("rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_ctest() {
+        assert_eq!(
+            classify_command("ctest -R smoke --output-on-failure"),
+            Classification::Supported {
+                rtk_equivalent: "rtk ctest",
+                category: "Tests",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_ctest() {
+        assert_eq!(
+            rewrite_command_no_prefixes("ctest -R smoke --output-on-failure", &[]),
+            Some("rtk ctest -R smoke --output-on-failure".into())
         );
     }
 
@@ -4527,6 +4607,51 @@ mod tests {
         );
     }
 
+    /// rtk-ai/rtk#3184 — `mvnd` must route to `rtk mvnd`, never `rtk mvn`,
+    /// so the daemon binary is the one that actually runs.
+    #[test]
+    fn test_rewrite_mvnd_clean_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("mvnd clean install", &[]),
+            Some("rtk mvnd clean install".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_mvnd_test() {
+        assert!(matches!(
+            classify_command("mvnd test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvnd",
+                ..
+            }
+        ));
+    }
+
+    /// Upstream PR #3199 review, finding 5 — `mvnd.cmd` (mvnd's Windows
+    /// wrapper) must classify and rewrite to `rtk mvnd`, mirroring how the
+    /// mvn rule handles `mvnw.cmd`. `^mvnd\b` alone matches the `.` boundary
+    /// but can't then reach `\s+(compile|...)`, so it silently classified
+    /// as unsupported before `mvnd.cmd` was added to the pattern.
+    #[test]
+    fn test_classify_mvnd_cmd_wrapper() {
+        assert!(matches!(
+            classify_command("mvnd.cmd package"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvnd",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_mvnd_cmd_clean_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("mvnd.cmd clean install", &[]),
+            Some("rtk mvnd clean install".into())
+        );
+    }
+
     // --- Compound operator edge cases ---
 
     #[test]
@@ -4709,6 +4834,147 @@ mod tests {
     fn test_exclude_invalid_regex_fallback() {
         let excluded = vec!["curl[".to_string()];
         assert!(rewrite_command_no_prefixes("curl http://example.com", &excluded).is_some());
+    }
+
+    #[test]
+    fn test_exclude_covers_php_wrapper_forms() {
+        // The rewrite path normalizes `php` + ini flags, `./`, and vendor/composer
+        // bin dirs; the exclusion must see the same canonical form.
+        for (pattern, cmd) in [
+            ("phpunit", "vendor/bin/phpunit tests/"),
+            ("phpunit", "php vendor/bin/phpunit tests/"),
+            ("phpunit", "php bin/phpunit"),
+            ("phpstan", "php vendor/bin/phpstan analyse src"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[pattern.to_string()]),
+                None,
+                "expected `{}` to be excluded by `{}`",
+                cmd,
+                pattern
+            );
+        }
+        // A different PHP tool is untouched.
+        assert!(rewrite_command_no_prefixes(
+            "php vendor/bin/phpstan analyse src",
+            &["phpunit".to_string()]
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn test_exclude_matches_wrapper_invoked_form() {
+        // #243: the README example, across every form that reaches `rtk playwright`.
+        let excluded = vec!["playwright".to_string()];
+        for cmd in [
+            "playwright test",
+            "npx playwright test",
+            "pnpm exec playwright test",
+            "pnpm dlx playwright test",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &excluded),
+                None,
+                "expected `{}` to be excluded",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_exclude_covers_interpreter_and_path_forms() {
+        // #3035: the interpreter form, and the path forms noted in #1053.
+        for (pattern, cmd) in [
+            ("pytest", "python3 -m pytest tests/ -q"),
+            ("pytest", "python -m pytest tests/"),
+            ("mypy", "python -m mypy ."),
+            ("gradlew", "./gradlew assembleDebug"),
+            ("phpunit", "vendor/bin/phpunit tests/"),
+            ("rspec", "bundle exec rspec"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[pattern.to_string()]),
+                None,
+                "expected `{}` to be excluded by `{}`",
+                cmd,
+                pattern
+            );
+        }
+    }
+
+    #[test]
+    fn test_exclude_covers_wrapper_when_tool_name_differs_from_target() {
+        // `eslint` and `biome` both resolve to `rtk lint`, so matching the resolved
+        // target instead of the peeled command would miss the wrapper form entirely.
+        let excluded = vec!["eslint".to_string()];
+        assert_eq!(rewrite_command_no_prefixes("eslint .", &excluded), None);
+        assert_eq!(rewrite_command_no_prefixes("npx eslint .", &excluded), None);
+        // ...and does not reach the other tool sharing that target.
+        assert!(rewrite_command_no_prefixes("npx biome check .", &excluded).is_some());
+    }
+
+    #[test]
+    fn test_exclude_keeps_arguments_so_anchored_regex_still_narrows() {
+        // An end-anchored entry exists to exclude the bare invocation only. Peeling
+        // must not drop the arguments, or `^ls$` would swallow every `ls`.
+        let excluded = vec!["^ls$".to_string()];
+        assert_eq!(rewrite_command_no_prefixes("ls", &excluded), None);
+        assert!(rewrite_command_no_prefixes("ls -la", &excluded).is_some());
+
+        // The same anchoring works through a wrapper.
+        let excluded = vec!["^pytest ".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("python3 -m pytest tests/", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_exclude_does_not_widen_across_tools_sharing_a_target() {
+        // Entries name the tool the user types, not rtk's internal command, so an
+        // entry must not leak to every tool routed to the same filter.
+        for (pattern, cmd) in [
+            ("read", "cat foo.txt"),
+            ("lint", "eslint ."),
+            ("lint", "biome check ."),
+            ("git", "yadm status"),
+        ] {
+            assert!(
+                rewrite_command_no_prefixes(cmd, &[pattern.to_string()]).is_some(),
+                "`{}` must not be excluded by `{}`",
+                cmd,
+                pattern
+            );
+        }
+    }
+
+    #[test]
+    fn test_exclude_peeled_form_is_exact_token() {
+        let excluded = vec!["go".to_string()];
+        assert!(rewrite_command_no_prefixes("golangci-lint run ./...", &excluded).is_some());
+        assert_eq!(
+            rewrite_command_no_prefixes("go build ./...", &excluded),
+            None
+        );
+        // A rule whose prefix carries a subcommand keeps it, so `golangci-lint run`
+        // does not collapse to `run`.
+        assert_eq!(
+            rewrite_command_no_prefixes("golangci-lint run ./...", &["golangci-lint".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_exclude_subcommand_pattern_stays_narrow() {
+        let excluded = vec!["git push".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("git push origin main", &excluded),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("git status", &excluded),
+            Some("rtk git status".into())
+        );
     }
 
     #[test]
@@ -5638,6 +5904,29 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn test_classify_phpt_run_tests() {
+        assert!(matches!(
+            classify_command("php run-tests.php Zend/tests/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpt",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_phpt_run_tests() {
+        assert_eq!(
+            rewrite_command_no_prefixes("php run-tests.php Zend/tests/67468.phpt", &[]),
+            Some("rtk phpt Zend/tests/67468.phpt".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("php run-tests.php", &[]),
+            Some("rtk phpt".into())
+        );
     }
 
     #[test]

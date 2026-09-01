@@ -2,6 +2,7 @@ use super::constants::{
     CLAUDE_DIR, CURSOR_DIR, DROID_DIR, DROID_HOME_ENV, DROID_SETTINGS_FILE, GEMINI_DIR,
     SETTINGS_JSON, SETTINGS_LOCAL_JSON,
 };
+use super::init::resolve_claude_dir;
 use crate::core::stream::exec_capture;
 use crate::discover::lexer::split_for_permissions;
 use serde_json::Value;
@@ -139,7 +140,7 @@ fn load_permission_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let Ok(json) = serde_json::from_str::<Value>(&content) else {
+        let Ok(json) = crate::core::utils::from_json_str::<Value>(&content) else {
             eprintln!(
                 "[rtk] warning: failed to parse permissions from {}",
                 path.display()
@@ -176,15 +177,25 @@ fn append_bash_rules(rules_value: Option<&Value>, target: &mut Vec<String>) {
 
 /// Return the ordered list of Claude Code settings file paths to check.
 fn get_settings_paths() -> Vec<PathBuf> {
+    get_settings_paths_from(find_project_root(), resolve_claude_dir().ok())
+}
+
+/// Assemble the settings paths for a project root and a resolved Claude config dir.
+///
+/// `claude_dir` is already resolved, so it honors `CLAUDE_CONFIG_DIR` when set.
+fn get_settings_paths_from(
+    project_root: Option<PathBuf>,
+    claude_dir: Option<PathBuf>,
+) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    if let Some(root) = find_project_root() {
+    if let Some(root) = project_root {
         paths.push(root.join(CLAUDE_DIR).join(SETTINGS_JSON));
         paths.push(root.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON));
     }
-    if let Some(home) = dirs::home_dir() {
-        paths.push(home.join(CLAUDE_DIR).join(SETTINGS_JSON));
-        paths.push(home.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON));
+    if let Some(claude_dir) = claude_dir {
+        paths.push(claude_dir.join(SETTINGS_JSON));
+        paths.push(claude_dir.join(SETTINGS_LOCAL_JSON));
     }
 
     paths
@@ -192,7 +203,7 @@ fn get_settings_paths() -> Vec<PathBuf> {
 
 fn read_json(path: &std::path::Path) -> Option<Value> {
     let content = std::fs::read_to_string(path).ok()?;
-    match serde_json::from_str::<Value>(&content) {
+    match crate::core::utils::from_json_str::<Value>(&content) {
         Ok(v) => Some(v),
         Err(_) => {
             eprintln!(
@@ -477,6 +488,39 @@ fn split_compound_command(cmd: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_get_settings_paths_uses_the_resolved_claude_dir() {
+        let project = PathBuf::from("/workspace/project");
+        let profile = PathBuf::from("/profiles/work/.claude");
+
+        let paths = get_settings_paths_from(Some(project.clone()), Some(profile.clone()));
+
+        assert_eq!(
+            paths,
+            vec![
+                project.join(CLAUDE_DIR).join(SETTINGS_JSON),
+                project.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON),
+                profile.join(SETTINGS_JSON),
+                profile.join(SETTINGS_LOCAL_JSON),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_get_settings_paths_without_a_claude_dir() {
+        let project = PathBuf::from("/workspace/project");
+
+        let paths = get_settings_paths_from(Some(project.clone()), None);
+
+        assert_eq!(
+            paths,
+            vec![
+                project.join(CLAUDE_DIR).join(SETTINGS_JSON),
+                project.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON),
+            ]
+        );
+    }
 
     #[test]
     fn test_parse_bash_pattern() {

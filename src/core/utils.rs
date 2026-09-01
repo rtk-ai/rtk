@@ -56,6 +56,25 @@ pub fn strip_ansi(text: &str) -> String {
     ANSI_RE.replace_all(text, "").to_string()
 }
 
+/// Strip one or more leading UTF-8 BOMs (`EF BB BF`, sometimes doubled),
+/// which serde_json refuses to parse. Windows editors (Notepad, PowerShell
+/// 5.1 `Out-File -Encoding utf8`) prepend one to hand-edited config files,
+/// and Cursor on Windows ships hook payloads with them. Strip defensively
+/// wherever RTK parses JSON a human or another tool may have written.
+pub fn strip_leading_bom(input: &str) -> &str {
+    let mut s = input;
+    while let Some(rest) = s.strip_prefix('\u{feff}') {
+        s = rest;
+    }
+    s
+}
+
+/// BOM-tolerant `serde_json::from_str`. Prefer this over `serde_json::from_str`
+/// anywhere the JSON may have been written by a human, an editor, or another tool.
+pub fn from_json_str<'a, T: serde::Deserialize<'a>>(s: &'a str) -> serde_json::Result<T> {
+    serde_json::from_str(strip_leading_bom(s))
+}
+
 /// Executes a command and returns cleaned stdout/stderr.
 ///
 /// # Arguments
@@ -444,7 +463,7 @@ fn composer_bin_dirs_from(env_bin_dir: Option<&str>, composer_json: Option<&str>
 }
 
 fn read_composer_bin_dir(composer_json: &str) -> Option<PathBuf> {
-    let parsed: Value = serde_json::from_str(composer_json).ok()?;
+    let parsed: Value = from_json_str(composer_json).ok()?;
     let bin_dir = parsed.get("config")?.get("bin-dir")?.as_str()?.trim();
     if bin_dir.is_empty() {
         None
@@ -624,6 +643,43 @@ fn output_codepage() -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_strip_leading_bom_helper() {
+        // Direct unit test on the helper so future refactors can't
+        // regress the loop semantics without a clear failure signal.
+        assert_eq!(strip_leading_bom(""), "");
+        assert_eq!(strip_leading_bom("hello"), "hello");
+        assert_eq!(strip_leading_bom("\u{feff}hello"), "hello");
+        assert_eq!(strip_leading_bom("\u{feff}\u{feff}hello"), "hello");
+        assert_eq!(strip_leading_bom("\u{feff}\u{feff}\u{feff}hello"), "hello");
+        // BOM in the middle is preserved (not "leading").
+        assert_eq!(strip_leading_bom("a\u{feff}b"), "a\u{feff}b");
+    }
+
+    #[test]
+    fn test_from_json_str_strips_bom() {
+        let v: Value = from_json_str("\u{feff}{\"foo\": 1}").unwrap();
+        assert_eq!(v["foo"], 1);
+    }
+
+    #[test]
+    fn test_from_json_str_no_bom() {
+        let v: Value = from_json_str("{\"foo\": 1}").unwrap();
+        assert_eq!(v["foo"], 1);
+    }
+
+    #[test]
+    fn test_from_json_str_borrowed_type() {
+        // Deserialize<'a> (not DeserializeOwned) must keep zero-copy
+        // borrowing working through the wrapper.
+        #[derive(serde::Deserialize)]
+        struct Borrowed<'a> {
+            name: &'a str,
+        }
+        let b: Borrowed = from_json_str("\u{feff}{\"name\": \"rtk\"}").unwrap();
+        assert_eq!(b.name, "rtk");
+    }
 
     #[test]
     fn test_truncate_short_string() {

@@ -215,17 +215,19 @@ rtk grep <pattern> [chemin] [options]
 
 | Option | Court | Defaut | Description |
 |--------|-------|--------|-------------|
-| `--max-len` | `-l` | 80 | Longueur maximale de ligne |
-| `--max` | `-m` | 50 | Nombre maximum de resultats |
-| `--context-only` |  | non | Afficher uniquement le contexte du match (pas de raccourci, `-c` est reserve a `grep --count`) |
-| `--file-type` | `-t` | tous | Filtrer par type (ts, py, rust, etc.) |
-| `--line-numbers` | `-n` | oui | Numeros de ligne (toujours actif) |
+| `--max-len` |  | 80 | Longueur maximale de ligne |
+| `--max` |  | 200 | Nombre maximum de resultats |
+| `--context-only` |  | non | Afficher uniquement le contexte du match |
 
-Les arguments supplementaires sont transmis a `rg` (ripgrep). Les flags qui changent le format de sortie (`-c`, `-l`, `-L`, `-o`, `-Z`) passent directement a `rg`/`grep` sans filtrage RTK.
+Aucune de ces options n'a de raccourci : `-l`, `-m` et `-c` sont reserves aux flags natifs de meme lettre (`--files-with-matches`, `--max-count`, `--count`) et sont transmis au moteur.
+
+Les arguments supplementaires sont transmis au moteur reellement invoque -- `grep` pour `rtk grep`, `rg` pour `rtk rg`, RTK ne substituant jamais l'un a l'autre. Un flag propre a ripgrep (`--glob`, `-t`) n'est donc valide que sous `rtk rg`. Les flags qui changent le format de sortie (`-c`, `-l`, `-L`, `-o`, `-Z`) passent directement au moteur sans filtrage RTK.
+
+Il n'y a pas d'option `--file-type` : `rtk rg -t rust` filtre par type, `rtk grep -t rust` remonte l'erreur de grep (`invalid option -- 't'`).
 
 **Avant / Apres :**
 ```
-# rg "fn run" (20 lignes)                   # rtk grep "fn run" (10 lignes)
+# grep -rn "fn run" (20 lignes)             # rtk grep -rn "fn run" (10 lignes)
 src/git.rs:45:pub fn run(...)                src/git.rs
 src/git.rs:120:fn run_status(...)              45: pub fn run(...)
 src/ls.rs:12:pub fn run(...)                   120: fn run_status(...)
@@ -1229,6 +1231,12 @@ Pour empecher certaines commandes d'etre reecrites, ajoutez-les dans `config.tom
 [hooks]
 exclude_commands = ["curl", "playwright"]
 ```
+
+Le motif est ancre en debut de commande : `"curl"` exclut `curl https://...` mais pas `curl-config`.
+Avant la comparaison, RTK retire le wrapper, l'interpreteur ou le chemin, donc `"playwright"` couvre
+`playwright test` comme `npx playwright test` ou `pnpm exec playwright test`, et `"pytest"` couvre
+aussi `python3 -m pytest tests/`. Les arguments sont conserves : `"^ls$"` exclut `ls` seul sans
+englober `ls -la`.
 
 ---
 

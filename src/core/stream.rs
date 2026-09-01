@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::borrow::Cow;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -47,6 +48,12 @@ pub trait StreamFilter {
 }
 
 pub trait BlockHandler {
+    /// Rewrite a raw line before it is matched or emitted — the place to
+    /// strip ANSI escapes for tools that colour by default. Identity unless
+    /// a handler opts in, so the rest of the pipeline sees raw bytes.
+    fn normalize_line<'a>(&self, line: &'a str) -> Cow<'a, str> {
+        Cow::Borrowed(line)
+    }
     fn should_skip(&mut self, line: &str) -> bool;
     fn is_block_start(&mut self, line: &str) -> bool;
     fn is_block_continuation(&mut self, line: &str, block: &[String]) -> bool;
@@ -83,6 +90,8 @@ impl<H: BlockHandler> BlockStreamFilter<H> {
 
 impl<H: BlockHandler> StreamFilter for BlockStreamFilter<H> {
     fn feed_line(&mut self, line: &str) -> Option<String> {
+        let line = self.handler.normalize_line(line);
+        let line = line.as_ref();
         if self.handler.should_skip(line) {
             return None;
         }
@@ -992,6 +1001,34 @@ pub(crate) mod tests {
             output.push_str(&post);
         }
         output
+    }
+
+    struct UpperHandler;
+
+    impl BlockHandler for UpperHandler {
+        fn normalize_line<'a>(&self, line: &'a str) -> Cow<'a, str> {
+            Cow::Owned(line.to_uppercase())
+        }
+        fn should_skip(&mut self, _line: &str) -> bool {
+            false
+        }
+        fn is_block_start(&mut self, line: &str) -> bool {
+            line.starts_with("ERR")
+        }
+        fn is_block_continuation(&mut self, line: &str, _block: &[String]) -> bool {
+            line.starts_with("  ")
+        }
+        fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+            None
+        }
+    }
+
+    #[test]
+    fn block_handler_normalize_line_feeds_matching_and_emission() {
+        // Both the match and the emitted block see the normalized line.
+        let mut f = BlockStreamFilter::new(UpperHandler);
+        let out = run_block_filter(&mut f, "err: one\n  detail\nnoise\n", 0);
+        assert_eq!(out, "ERR: ONE\n  DETAIL\n");
     }
 
     struct TestHandler;

@@ -4,6 +4,7 @@ use super::constants::{HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTIN
 use super::init::resolve_claude_dir;
 use super::is_claude_hook_command;
 use crate::core::constants::RTK_DATA_DIR;
+use crate::core::utils::from_json_str;
 use std::path::PathBuf;
 
 const CURRENT_HOOK_VERSION: u8 = 3;
@@ -64,7 +65,7 @@ fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
         Ok(c) if !c.trim().is_empty() => c,
         _ => return false,
     };
-    let root: serde_json::Value = match serde_json::from_str(&content) {
+    let root: serde_json::Value = match from_json_str(&content) {
         Ok(v) => v,
         Err(_) => return false,
     };
