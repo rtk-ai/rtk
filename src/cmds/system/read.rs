@@ -7,11 +7,44 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 
+/// Which slice of the file to keep after filtering.
+///
+/// The variants are mutually exclusive by construction, mirroring the
+/// `conflicts_with_all` groups on the CLI flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineWindow {
+    /// Keep everything the filter produced.
+    #[default]
+    All,
+    /// Structure-aware window: keeps signatures and imports from the whole
+    /// file, dropping less important lines. Not a verbatim prefix.
+    Max(usize),
+    /// First N lines, verbatim — the semantics of `head -n N`.
+    Head(usize),
+    /// Last N lines, verbatim — the semantics of `tail -n N`.
+    Tail(usize),
+}
+
+impl LineWindow {
+    /// Build from the mutually exclusive CLI flags.
+    pub fn from_flags(
+        max_lines: Option<usize>,
+        head_lines: Option<usize>,
+        tail_lines: Option<usize>,
+    ) -> Self {
+        match (max_lines, head_lines, tail_lines) {
+            (Some(n), _, _) => LineWindow::Max(n),
+            (_, Some(n), _) => LineWindow::Head(n),
+            (_, _, Some(n)) => LineWindow::Tail(n),
+            _ => LineWindow::All,
+        }
+    }
+}
+
 pub fn run(
     file: &Path,
     level: FilterLevel,
-    max_lines: Option<usize>,
-    tail_lines: Option<usize>,
+    window: LineWindow,
     line_numbers: bool,
     verbose: u8,
 ) -> Result<()> {
@@ -64,7 +97,7 @@ pub fn run(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
+    filtered = apply_line_window(&filtered, window, &lang);
 
     let (raw, rtk_output) = if line_numbers {
         (
@@ -87,8 +120,7 @@ pub fn run(
 
 pub fn run_stdin(
     level: FilterLevel,
-    max_lines: Option<usize>,
-    tail_lines: Option<usize>,
+    window: LineWindow,
     line_numbers: bool,
     verbose: u8,
 ) -> Result<()> {
@@ -132,7 +164,7 @@ pub fn run_stdin(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
+    filtered = apply_line_window(&filtered, window, &lang);
 
     let (raw, rtk_output) = if line_numbers {
         (
@@ -159,30 +191,37 @@ fn format_with_line_numbers(content: &str) -> String {
     out
 }
 
-fn apply_line_window(
-    content: &str,
-    max_lines: Option<usize>,
-    tail_lines: Option<usize>,
-    lang: &Language,
-) -> String {
-    if let Some(tail) = tail_lines {
-        if tail == 0 {
-            return String::new();
-        }
-        let lines: Vec<&str> = content.lines().collect();
-        let start = lines.len().saturating_sub(tail);
-        let mut result = lines[start..].join("\n");
-        if content.ends_with('\n') {
-            result.push('\n');
-        }
-        return result;
-    }
+fn apply_line_window(content: &str, window: LineWindow, lang: &Language) -> String {
+    match window {
+        LineWindow::All => content.to_string(),
 
-    if let Some(max) = max_lines {
-        return filter::smart_truncate(content, max, lang);
-    }
+        LineWindow::Tail(0) | LineWindow::Head(0) => String::new(),
 
-    content.to_string()
+        LineWindow::Tail(n) => {
+            let lines: Vec<&str> = content.lines().collect();
+            let start = lines.len().saturating_sub(n);
+            let mut result = lines[start..].join("\n");
+            if content.ends_with('\n') {
+                result.push('\n');
+            }
+            result
+        }
+
+        // Verbatim prefix — `head -n N` promises the first N lines and nothing
+        // else. Reordering or skipping lines here would hand the agent a
+        // discontiguous collage that reads as contiguous source.
+        LineWindow::Head(n) => {
+            let lines: Vec<&str> = content.lines().collect();
+            let end = n.min(lines.len());
+            let mut result = lines[..end].join("\n");
+            if end < lines.len() || content.ends_with('\n') {
+                result.push('\n');
+            }
+            result
+        }
+
+        LineWindow::Max(n) => filter::smart_truncate(content, n, lang),
+    }
 }
 
 #[cfg(test)]
@@ -203,7 +242,7 @@ fn main() {{
         )?;
 
         // Just verify it doesn't panic
-        run(file.path(), FilterLevel::Minimal, None, None, false, 0)?;
+        run(file.path(), FilterLevel::Minimal, LineWindow::All, false, 0)?;
         Ok(())
     }
 
@@ -217,23 +256,100 @@ fn main() {{
     #[test]
     fn test_apply_line_window_tail_lines() {
         let input = "a\nb\nc\nd\n";
-        let output = apply_line_window(input, None, Some(2), &Language::Unknown);
+        let output = apply_line_window(input, LineWindow::Tail(2), &Language::Unknown);
         assert_eq!(output, "c\nd\n");
     }
 
     #[test]
     fn test_apply_line_window_tail_lines_no_trailing_newline() {
         let input = "a\nb\nc\nd";
-        let output = apply_line_window(input, None, Some(2), &Language::Unknown);
+        let output = apply_line_window(input, LineWindow::Tail(2), &Language::Unknown);
         assert_eq!(output, "c\nd");
     }
 
     #[test]
     fn test_apply_line_window_max_lines_still_works() {
         let input = "a\nb\nc\nd\n";
-        let output = apply_line_window(input, Some(2), None, &Language::Unknown);
+        let output = apply_line_window(input, LineWindow::Max(2), &Language::Unknown);
         assert!(output.starts_with("a\n"));
         assert!(output.contains("more lines"));
+    }
+
+    #[test]
+    fn test_head_lines_is_a_verbatim_prefix() {
+        let input = "a\nb\nc\nd\n";
+        let output = apply_line_window(input, LineWindow::Head(2), &Language::Unknown);
+        assert_eq!(output, "a\nb\n");
+    }
+
+    #[test]
+    fn test_head_lines_no_trailing_newline_when_file_has_none() {
+        let input = "a\nb\nc";
+        let output = apply_line_window(input, LineWindow::Head(3), &Language::Unknown);
+        assert_eq!(output, "a\nb\nc");
+    }
+
+    #[test]
+    fn test_head_lines_beyond_eof_returns_whole_file() {
+        let input = "a\nb\n";
+        let output = apply_line_window(input, LineWindow::Head(99), &Language::Unknown);
+        assert_eq!(output, "a\nb\n");
+    }
+
+    #[test]
+    fn test_head_lines_zero_is_empty() {
+        let input = "a\nb\n";
+        let output = apply_line_window(input, LineWindow::Head(0), &Language::Unknown);
+        assert_eq!(output, "");
+    }
+
+    /// Regression: `head -n N` must never reorder or skip lines. The structure
+    /// aware `Max` window keeps signatures from the whole file, which reads as
+    /// contiguous source to an agent but is not — that is correct for an
+    /// explicit `--max-lines` but wrong for `head`.
+    #[test]
+    fn test_head_lines_does_not_cherry_pick_like_max_lines() {
+        let src = "\
+import x
+export function a() {
+  const secret = 1;
+  return secret;
+}
+export function b() {
+  return 2;
+}
+";
+        let literal_prefix: String = src
+            .lines()
+            .take(4)
+            .map(|l| format!("{}\n", l))
+            .collect();
+
+        let head = apply_line_window(src, LineWindow::Head(4), &Language::JavaScript);
+        assert_eq!(
+            head, literal_prefix,
+            "head must be byte-for-byte the first N lines"
+        );
+        assert!(
+            !head.contains("export function b"),
+            "head must not pull lines from further down the file"
+        );
+
+        // The structure-aware window is deliberately *not* a literal prefix —
+        // that is fine for an explicit --max-lines, and wrong for `head`.
+        let max = apply_line_window(src, LineWindow::Max(4), &Language::JavaScript);
+        assert_ne!(
+            max, literal_prefix,
+            "max-lines keeps its structure-aware behaviour"
+        );
+    }
+
+    #[test]
+    fn test_line_window_from_flags_precedence() {
+        assert_eq!(LineWindow::from_flags(None, None, None), LineWindow::All);
+        assert_eq!(LineWindow::from_flags(Some(3), None, None), LineWindow::Max(3));
+        assert_eq!(LineWindow::from_flags(None, Some(3), None), LineWindow::Head(3));
+        assert_eq!(LineWindow::from_flags(None, None, Some(3)), LineWindow::Tail(3));
     }
 
     fn rtk_bin() -> std::path::PathBuf {

@@ -109,12 +109,15 @@ enum Commands {
         /// Filter: none (default, full content), minimal, aggressive
         #[arg(short, long, default_value = "none")]
         level: core::filter::FilterLevel,
-        /// Max lines
-        #[arg(short, long, conflicts_with = "tail_lines")]
+        /// Max lines (structure-aware window: keeps signatures from the whole file)
+        #[arg(short, long, conflicts_with_all = ["tail_lines", "head_lines"])]
         max_lines: Option<usize>,
         /// Keep only last N lines
-        #[arg(long, conflicts_with = "max_lines")]
+        #[arg(long, conflicts_with_all = ["max_lines", "head_lines"])]
         tail_lines: Option<usize>,
+        /// Keep only first N lines, verbatim (same semantics as `head -n N`)
+        #[arg(long, conflicts_with_all = ["max_lines", "tail_lines"])]
+        head_lines: Option<usize>,
         /// Show line numbers
         #[arg(short = 'n', long)]
         line_numbers: bool,
@@ -1656,8 +1659,10 @@ fn run_cli() -> Result<i32> {
             level,
             max_lines,
             tail_lines,
+            head_lines,
             line_numbers,
         } => {
+            let window = read::LineWindow::from_flags(max_lines, head_lines, tail_lines);
             let mut had_error = false;
             let mut stdin_seen = false;
             for file in &files {
@@ -1667,16 +1672,9 @@ fn run_cli() -> Result<i32> {
                         continue;
                     }
                     stdin_seen = true;
-                    read::run_stdin(level, max_lines, tail_lines, line_numbers, cli.verbose)
+                    read::run_stdin(level, window, line_numbers, cli.verbose)
                 } else {
-                    read::run(
-                        file,
-                        level,
-                        max_lines,
-                        tail_lines,
-                        line_numbers,
-                        cli.verbose,
-                    )
+                    read::run(file, level, window, line_numbers, cli.verbose)
                 };
                 if let Err(e) = result {
                     eprintln!("cat: {}: {}", file.display(), e.root_cause());
