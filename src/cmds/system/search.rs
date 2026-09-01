@@ -10,7 +10,7 @@ use crate::core::stream::{
     self, exec_capture, exec_capture_stdin, CaptureResult, FilterMode, StdinMode, StreamFilter,
 };
 use crate::core::tracking;
-use crate::core::utils::{resolved_command, strip_ansi};
+use crate::core::utils::{resolved_command, strip_ansi, ChildArgExt};
 use crate::core::{args_utils, config};
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -314,19 +314,19 @@ fn engine_command<T: AsRef<str>>(
     line_buffered: bool,
 ) -> Command {
     let mut cmd = resolved_command(engine.bin());
-    cmd.args(engine.parse_flags());
+    cmd.child_args(engine.parse_flags());
     for a in extra_args {
-        cmd.arg(a.as_ref());
+        cmd.child_arg(a.as_ref());
     }
     if line_buffered {
         // The engine writes through a pipe, so flush each match immediately.
-        cmd.arg("--line-buffered");
+        cmd.child_arg("--line-buffered");
     }
     for p in patterns {
-        cmd.args(["-e", p]);
+        cmd.child_args(["-e", p]);
     }
-    cmd.arg("--");
-    cmd.args(paths);
+    cmd.child_arg("--");
+    cmd.child_args(paths);
     cmd
 }
 
@@ -449,10 +449,10 @@ fn passthrough<T: AsRef<str>>(
     let mut cmd = resolved_command(engine.bin());
     if stream_stdin && !std::io::stdout().is_terminal() {
         // Keep passthrough output live when stdout is piped.
-        cmd.arg("--line-buffered");
+        cmd.child_arg("--line-buffered");
     }
     for a in args {
-        cmd.arg(a.as_ref());
+        cmd.child_arg(a.as_ref());
     }
 
     let exit_code = if stream_stdin {
@@ -510,7 +510,7 @@ pub fn run(
         .any(|a| a == "--version" || a == "--help" || a == "-h")
     {
         let mut cmd = resolved_command(engine.bin());
-        cmd.args(args);
+        cmd.child_args(args);
         let result = exec_capture(&mut cmd).context("search failed")?;
         print!("{}", result.stdout);
         if !result.stderr.is_empty() {

@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde_json::Value;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -365,6 +366,107 @@ pub fn package_manager_exec(tool: &str) -> Command {
             }
         }
     }
+}
+
+/// Encode one argument for a child's raw command line the way libuv's
+/// `quote_cmd_arg` does: wrap it in `"`, escape an inner `"` as `\"`, and double
+/// every backslash run that ends up in front of a quote so it stays literal.
+///
+/// std's encoder emits the same bytes but wraps only for a space or a tab, which
+/// is what leaves MSYS children with a mangled command line (#3727).
+// Windows-only in production; the rules stay unit-tested on every platform.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn quote_arg_for_child(arg: &str) -> String {
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    let mut backslashes = 0usize;
+    for ch in arg.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                for _ in 0..backslashes * 2 + 1 {
+                    out.push('\\');
+                }
+                backslashes = 0;
+                out.push('"');
+            }
+            _ => {
+                for _ in 0..backslashes {
+                    out.push('\\');
+                }
+                backslashes = 0;
+                out.push(ch);
+            }
+        }
+    }
+    // The closing quote is a quote too, so a trailing run is doubled as well.
+    for _ in 0..backslashes * 2 {
+        out.push('\\');
+    }
+    out.push('"');
+    out
+}
+
+/// Pass caller-supplied arguments to a child so that MSYS/Cygwin children on
+/// Windows receive them intact.
+///
+/// Use instead of `Command::arg`/`args` for anything that arrived on rtk's own
+/// command line — a pattern, a path, a flag value.
+pub trait ChildArgExt {
+    fn child_arg<S: AsRef<OsStr>>(&mut self, arg: S) -> &mut Command;
+
+    fn child_args<I, S>(&mut self, args: I) -> &mut Command
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>;
+}
+
+impl ChildArgExt for Command {
+    fn child_arg<S: AsRef<OsStr>>(&mut self, arg: S) -> &mut Command {
+        push_child_arg(self, arg.as_ref());
+        self
+    }
+
+    fn child_args<I, S>(&mut self, args: I) -> &mut Command
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        for arg in args {
+            push_child_arg(self, arg.as_ref());
+        }
+        self
+    }
+}
+
+/// Windows: `"` is the only character std encodes differently from libuv, so
+/// re-encode just those arguments and leave the rest on std's path. `.bat`/`.cmd`
+/// shims stay on it too — cmd.exe parses by its own rules and `raw_arg` would
+/// bypass the escaping std applies for them.
+#[cfg(windows)]
+fn push_child_arg(cmd: &mut Command, arg: &OsStr) {
+    match arg.to_str() {
+        Some(s) if s.contains('"') && !is_batch_program(cmd) => {
+            std::os::windows::process::CommandExt::raw_arg(cmd, quote_arg_for_child(s));
+        }
+        _ => {
+            cmd.arg(arg);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn is_batch_program(cmd: &Command) -> bool {
+    std::path::Path::new(cmd.get_program())
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("bat") || ext.eq_ignore_ascii_case("cmd"))
+}
+
+/// Unix: the argument vector reaches `execvp` verbatim, so there is nothing to
+/// encode.
+#[cfg(not(windows))]
+fn push_child_arg(cmd: &mut Command, arg: &OsStr) {
+    cmd.arg(arg);
 }
 
 /// Resolve a binary name to its full path, honoring PATHEXT on Windows.
@@ -952,6 +1054,64 @@ mod tests {
     #[test]
     fn test_tool_exists_finds_git() {
         assert!(tool_exists("git"), "tool_exists('git') should return true");
+    }
+
+    // ===== Child-process argument quoting (issue #3727) =====
+
+    #[test]
+    fn test_quote_arg_wraps_a_quote_with_no_space_around_it() {
+        assert_eq!(quote_arg_for_child(r#"a"b"#), r#""a\"b""#);
+    }
+
+    #[test]
+    fn test_quote_arg_wraps_the_reported_json_key_pattern() {
+        // `rtk grep -c '"type"' file`, the shape reported in #3727.
+        assert_eq!(quote_arg_for_child(r#""type""#), r#""\"type\"""#);
+    }
+
+    #[test]
+    fn test_quote_arg_wraps_repeated_quotes() {
+        assert_eq!(quote_arg_for_child(r#"a""b"#), r#""a\"\"b""#);
+    }
+
+    #[test]
+    fn test_quote_arg_doubles_backslash_runs_before_a_quote() {
+        assert_eq!(quote_arg_for_child(r#"a\"b"#), r#""a\\\"b""#);
+        assert_eq!(quote_arg_for_child(r#"a\\"b"#), r#""a\\\\\"b""#);
+    }
+
+    #[test]
+    fn test_quote_arg_doubles_a_trailing_backslash_run() {
+        assert_eq!(quote_arg_for_child(r#"a"b\"#), r#""a\"b\\""#);
+    }
+
+    #[test]
+    fn test_quote_arg_keeps_backslashes_that_precede_ordinary_text() {
+        assert_eq!(quote_arg_for_child(r#"C:\a\b "x""#), r#""C:\a\b \"x\"""#);
+    }
+
+    #[test]
+    fn test_quote_arg_keeps_a_space_inside_the_wrapping() {
+        assert_eq!(quote_arg_for_child(r#"a b "c""#), r#""a b \"c\"""#);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_child_arg_re_encodes_only_arguments_holding_a_quote() {
+        let mut cmd = Command::new("grep");
+        cmd.child_args(["-c", r#""type""#, "q.jsonl"]);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["-c", r#""\"type\"""#, "q.jsonl"]);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_child_arg_leaves_batch_shims_on_stds_encoding() {
+        // cmd.exe parses by its own rules, so `raw_arg` must not be used there.
+        let mut cmd = Command::new("gradlew.bat");
+        cmd.child_arg(r#""type""#);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, [r#""type""#]);
     }
 
     // ===== Windows-specific PATHEXT resolution tests (issue #212) =====
