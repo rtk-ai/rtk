@@ -62,7 +62,40 @@ For full details on what is collected, opt-out options, and GDPR rights, see [Te
 | `RTK_TEE_DIR` | Override the tee directory |
 | `RTK_TELEMETRY_DISABLED=1` | Disable telemetry |
 | `RTK_HOOK_AUDIT=1` | Enable hook audit logging |
+| `RTK_TIMINGS=1` | Print a per-stage timing breakdown to stderr after each command |
 | `SKIP_ENV_VALIDATION=1` | Skip env validation (useful with Next.js) |
+
+## Timing breakdown
+
+`rtk gain` records one duration per command, but it cannot say how much of a
+run was the wrapped command versus RTK itself. `RTK_TIMINGS=1` prints that
+split to stderr after each tracked command:
+
+```
+$ RTK_TIMINGS=1 rtk git status
+...
+rtk timings: total=41.2ms startup=2.9ms handler=37.8ms child=30.1ms spawns=2 filter=7.7ms track=0.5ms
+```
+
+- `total` — the whole process, start to this line
+- `startup` — CLI parsing, config, hook checks, before the command handler runs
+- `handler` — the span recorded in `rtk gain` analytics
+- `child` — wall time spent on spawned processes (`spawns` counts them). For
+  streaming commands this runs from spawn until output is drained, so it
+  includes RTK's concurrent reading and printing.
+- `filter` — derived as `handler - child`: RTK's own parsing, filtering, and
+  printing. Treat it as a floor — on streaming commands the overlapped work
+  sits in `child`.
+- `track` — the history-DB write, which runs after `handler` is measured
+
+The line goes to stderr only, so filtered stdout is unchanged. Commands that
+don't record analytics (`rtk gain`, `rtk --version`, `rtk run`, hook mode)
+print nothing.
+
+Note: coding agents capture stderr. With the RTK hook active, prefer setting
+`RTK_TIMINGS=1` per command in your own terminal over exporting it in your
+shell profile — otherwise the timing line lands in the agent's context on
+every rewritten command.
 
 ## Tee system
 

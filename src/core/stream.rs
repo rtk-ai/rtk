@@ -301,7 +301,9 @@ pub fn run_streaming(
         };
         cmd.stdout(Stdio::inherit());
         cmd.stderr(Stdio::inherit());
+        let child_timer = super::timings::child_start();
         let status = cmd.status().context("Failed to spawn process")?;
+        super::timings::child_end(child_timer);
         return Ok(StreamResult {
             exit_code: status_to_exit_code(status),
             raw: String::new(),
@@ -331,6 +333,7 @@ pub fn run_streaming(
 
     let is_streaming = matches!(stdout_mode, FilterMode::Streaming(_));
 
+    let child_timer = super::timings::child_start();
     let mut child = ChildGuard(cmd.spawn().context("Failed to spawn process")?);
 
     let stdin_thread: Option<std::thread::JoinHandle<()>> = match stdin_mode {
@@ -525,6 +528,7 @@ pub fn run_streaming(
     }
 
     let status = child.0.wait().context("Failed to wait for child")?;
+    super::timings::child_end(child_timer);
     let exit_code = status_to_exit_code(status);
     let raw = format!("{}{}", raw_stdout, raw_stderr);
 
@@ -589,7 +593,9 @@ pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
 /// used as the label so no call site has to pass one.
 fn capture(cmd: &mut Command) -> Result<CaptureResult> {
     let program = cmd.get_program().to_string_lossy().into_owned();
+    let child_timer = super::timings::child_start();
     let output = cmd.output().context("Failed to execute command")?;
+    super::timings::child_end(child_timer);
     let exit_code = super::utils::exit_code_from_output(&output, &program);
     Ok(CaptureResult {
         stdout: super::utils::decode_process_output(&output.stdout),

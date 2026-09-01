@@ -267,7 +267,8 @@ fn run_compress(
         cmd.arg("-type").arg(t);
     }
     cmd.arg("-print0").stdin(std::process::Stdio::inherit());
-    let output = cmd.output().context("Failed to execute find")?;
+    let output = crate::core::timings::time_child(|| cmd.output())
+        .context("Failed to execute find")?;
     let exit_code = crate::core::utils::exit_code_from_output(&output, "find");
     {
         let mut stderr = std::io::stderr().lock();

@@ -6,7 +6,7 @@
 
 Domain-agnostic building blocks with **no knowledge of any specific command, hook, or agent**. If a module references "git", "cargo", "claude", or any external tool by name, it does not belong here. Core is a leaf in the dependency graph — it is consumed by all other components but imports from none of them.
 
-Owns: configuration loading, token tracking persistence, TOML filter engine, tee output recovery, display formatting, telemetry, and shared utilities.
+Owns: configuration loading, token tracking persistence, TOML filter engine, tee output recovery, display formatting, telemetry, wall-clock stage timings (`RTK_TIMINGS`), and shared utilities.
 
 Does **not** own: command-specific filtering logic (that's `cmds/`), hook lifecycle management (that's `src/hooks/`), or analytics dashboards (that's `analytics/`).
 
@@ -114,6 +114,8 @@ Core provides infrastructure that `cmds/` and other components consume. These co
 ### Tracking (`TimedExecution`)
 
 Consumers must call `timer.track()` on **all** code paths — success, failure, and fallback. Calling `std::process::exit()` before `track()` loses metrics. The raw string passed to `track()` should include both stdout and stderr to produce accurate savings percentages.
+
+`track()`/`track_passthrough()` also emit the opt-in `RTK_TIMINGS=1` stderr breakdown (`timings::report`). Child time is attributed via the spawn helpers in `stream.rs`; a handler that spawns a process without going through them must wrap the spawn in `timings::time_child()` (or a `child_start`/`child_end` pair), or that child's runtime is misreported as `filter`.
 
 ### Tee (`tee_and_hint`)
 

@@ -2636,10 +2636,9 @@ pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -
     if verbose > 0 {
         eprintln!("git passthrough: {:?}", args);
     }
-    let status = git_cmd(global_args)
-        .args(args)
-        .status()
-        .context("Failed to run git")?;
+    let status =
+        crate::core::timings::time_child(|| git_cmd(global_args).args(args).status())
+            .context("Failed to run git")?;
 
     let args_str = tracking::args_display(args);
     timer.track_passthrough(

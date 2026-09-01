@@ -61,7 +61,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     }
 
     if args.first().map(String::as_str) != Some("run") {
-        let status = cmd.status().context("Failed to run uv")?;
+        let status =
+            crate::core::timings::time_child(|| cmd.status()).context("Failed to run uv")?;
         timer.track_passthrough(&original_cmd, &format!("{rtk_cmd} (passthrough)"));
         return Ok(exit_code_from_status(&status, "uv"));
     }

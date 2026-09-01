@@ -11,6 +11,7 @@ pub mod stream;
 pub mod tee;
 pub mod telemetry;
 pub mod telemetry_cmd;
+pub mod timings;
 pub mod toml_filter;
 pub mod tracking;
 pub mod truncate;

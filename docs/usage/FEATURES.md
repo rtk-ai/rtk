@@ -1357,6 +1357,7 @@ exclude_commands = []       # Commandes a exclure de la recriture automatique
 | `RTK_TEE_DIR` | Surcharge le repertoire tee |
 | `RTK_TELEMETRY_DISABLED=1` | Desactiver la telemetrie |
 | `RTK_HOOK_AUDIT=1` | Activer l'audit du hook |
+| `RTK_TIMINGS=1` | Afficher sur stderr la repartition du temps par etape apres chaque commande |
 | `SKIP_ENV_VALIDATION=1` | Desactiver la validation d'env (Next.js, etc.) |
 
 ---

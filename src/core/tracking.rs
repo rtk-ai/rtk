@@ -1391,10 +1391,12 @@ impl TimedExecution {
     /// timer.track("ls -la", "rtk ls", input, output);
     /// ```
     pub fn track(&self, original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
-        let elapsed_ms = self.start.elapsed().as_millis() as u64;
+        let handler = self.start.elapsed();
+        let elapsed_ms = handler.as_millis() as u64;
         let input_tokens = estimate_tokens(input);
         let output_tokens = estimate_tokens(output);
 
+        let track_timer = super::timings::enabled().then(Instant::now);
         if let Ok(tracker) = Tracker::new() {
             let _ = tracker.record(
                 original_cmd,
@@ -1404,6 +1406,11 @@ impl TimedExecution {
                 elapsed_ms,
             );
         }
+        super::timings::report(
+            self.start,
+            handler,
+            track_timer.map(|t| t.elapsed()).unwrap_or_default(),
+        );
     }
 
     /// Track passthrough commands (timing-only, no token counting).
@@ -1427,11 +1434,18 @@ impl TimedExecution {
     /// timer.track_passthrough("git tag", "rtk git tag");
     /// ```
     pub fn track_passthrough(&self, original_cmd: &str, rtk_cmd: &str) {
-        let elapsed_ms = self.start.elapsed().as_millis() as u64;
+        let handler = self.start.elapsed();
+        let elapsed_ms = handler.as_millis() as u64;
         // input_tokens=0, output_tokens=0 won't dilute savings statistics
+        let track_timer = super::timings::enabled().then(Instant::now);
         if let Ok(tracker) = Tracker::new() {
             let _ = tracker.record(original_cmd, rtk_cmd, 0, 0, elapsed_ms);
         }
+        super::timings::report(
+            self.start,
+            handler,
+            track_timer.map(|t| t.elapsed()).unwrap_or_default(),
+        );
     }
 }
 
