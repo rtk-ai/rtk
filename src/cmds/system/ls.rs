@@ -225,42 +225,57 @@ fn perms_to_octal(perms: &str) -> Option<String> {
     }
 }
 
-/// Parse ls -la output into compact format.
+/// Returns the directory path from a `path:` section header (e.g. `src/cmds:`
+/// -> `src/cmds`), or `None` if the line is not a section header.
 ///
-/// Without `show_long`:
-///   name/        (dirs)
-///   name  size   (files)
-///
-/// With `show_long` (user passed `-l`):
-///   755  name/        (dirs)
-///   644  name  size   (files)
-///
-/// Returns (entries, summary, parsed_count) so caller can suppress summary when piped.
-/// parsed_count tracks how many non-header lines were successfully parsed.
-/// If parsed_count == 0 but raw had content, caller should fall back to raw output.
-fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, usize) {
-    use std::collections::HashMap;
+/// Native ls prints a `path:` line before each directory's listing whenever
+/// more than one directory operand is given, and before every directory in a
+/// recursive (`-R`) listing. A header is a non-empty line ending in ':' that
+/// is neither a `total` line nor a parseable `ls -la` entry, so a file
+/// literally named `foo:` is never mistaken for one.
+fn section_header(line: &str) -> Option<&str> {
+    let trimmed = line.trim_end();
+    if trimmed.starts_with("total ") || parse_ls_line(line).is_some() {
+        return None;
+    }
+    match trimmed.strip_suffix(':') {
+        Some(path) if !path.is_empty() => Some(path),
+        _ => None,
+    }
+}
 
-    let mut dirs: Vec<(String, Option<String>)> = Vec::new(); // (name, octal_perms)
-    let mut files: Vec<(String, String, Option<String>)> = Vec::new(); // (name, size, octal_perms)
-    let mut by_ext: HashMap<String, usize> = HashMap::new();
-    let mut lines_seen: usize = 0;
-    let mut parsed_count: usize = 0;
-    let mut dotdirs: usize = 0;
+/// One directory's worth of parsed entries: dirs first, then files.
+#[derive(Default)]
+struct SectionEntries {
+    dirs: Vec<(String, Option<String>)>, // (name, octal_perms)
+    files: Vec<(String, String, Option<String>)>, // (name, size, octal_perms)
+}
 
-    for line in raw.lines() {
+/// Parse a single section's `ls -la` lines, updating the shared extension
+/// histogram and counters.
+fn parse_section(
+    lines: &[&str],
+    show_all: bool,
+    show_long: bool,
+    by_ext: &mut std::collections::HashMap<String, usize>,
+    lines_seen: &mut usize,
+    parsed_count: &mut usize,
+    dotdirs: &mut usize,
+) -> SectionEntries {
+    let mut out = SectionEntries::default();
+    for line in lines {
         if line.starts_with("total ") || line.is_empty() {
             continue;
         }
-        lines_seen += 1;
+        *lines_seen += 1;
 
         let Some((file_type, perms, size, name)) = parse_ls_line(line) else {
             if is_dotdir(line) {
-                dotdirs += 1;
+                *dotdirs += 1;
             }
             continue;
         };
-        parsed_count += 1;
+        *parsed_count += 1;
 
         // Filter noise dirs unless -a
         if !show_all && NOISE_DIRS.iter().any(|noise| name == *noise) {
@@ -276,7 +291,7 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
         };
 
         if file_type == 'd' {
-            dirs.push((name, octal));
+            out.dirs.push((name, octal));
         } else {
             // Regular files, symlinks, character/block devices, pipes, sockets
             let ext = if let Some(pos) = name.rfind('.') {
@@ -285,11 +300,110 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
                 "no ext".to_string()
             };
             *by_ext.entry(ext).or_insert(0) += 1;
-            files.push((name, human_size(size), octal));
+            out.files.push((name, human_size(size), octal));
         }
     }
+    out
+}
 
-    if dirs.is_empty() && files.is_empty() {
+/// Append a section's dirs (first) then files to the compact output.
+fn render_section(sect: &SectionEntries, entries: &mut String) {
+    for (name, octal) in &sect.dirs {
+        if let Some(octal) = octal {
+            entries.push_str(octal);
+            entries.push_str("  ");
+        }
+        entries.push_str(name);
+        entries.push_str("/\n");
+    }
+    for (name, size, octal) in &sect.files {
+        if let Some(octal) = octal {
+            entries.push_str(octal);
+            entries.push_str("  ");
+        }
+        entries.push_str(name);
+        entries.push_str("  ");
+        entries.push_str(size);
+        entries.push('\n');
+    }
+}
+
+/// Parse ls -la output into compact format.
+///
+/// Without `show_long`:
+///   name/        (dirs)
+///   name  size   (files)
+///
+/// With `show_long` (user passed `-l`):
+///   755  name/        (dirs)
+///   644  name  size   (files)
+///
+/// When native ls prints `path:` headers (multiple directory operands, or
+/// `-R`), each directory's entries stay grouped under their header so files
+/// remain attributed to the directory they came from instead of being
+/// flattened into one list. Header-less output (single directory operand) is
+/// a single unnamed section and renders exactly as before.
+///
+/// Returns (entries, summary, parsed_count) so caller can suppress summary when piped.
+/// parsed_count tracks how many non-header lines were successfully parsed.
+/// If parsed_count == 0 but raw had content, caller should fall back to raw output.
+fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, usize) {
+    use std::collections::HashMap;
+
+    // Split output into `path:` sections. The leading unnamed section holds
+    // file operands (`ls file.txt dirA`) or the whole listing when ls printed
+    // no headers.
+    let mut sections: Vec<(Option<&str>, Vec<&str>)> = vec![(None, Vec::new())];
+    for line in raw.lines() {
+        if let Some(header) = section_header(line) {
+            sections.push((Some(header), Vec::new()));
+        } else {
+            sections
+                .last_mut()
+                .expect("sections always has at least one element")
+                .1
+                .push(line);
+        }
+    }
+    let has_headers = sections.iter().any(|(h, _)| h.is_some());
+
+    let mut by_ext: HashMap<String, usize> = HashMap::new();
+    let mut lines_seen: usize = 0;
+    let mut parsed_count: usize = 0;
+    let mut dotdirs: usize = 0;
+    let mut total_files: usize = 0;
+    let mut total_dirs: usize = 0;
+    let mut entries = String::new();
+
+    for (header, lines) in &sections {
+        let sect = parse_section(
+            lines,
+            show_all,
+            show_long,
+            &mut by_ext,
+            &mut lines_seen,
+            &mut parsed_count,
+            &mut dotdirs,
+        );
+
+        // Emit the `path:` header (only when ls itself printed headers) so
+        // every file stays anchored to its directory.
+        if has_headers {
+            if let Some(h) = header {
+                if !entries.is_empty() {
+                    entries.push('\n');
+                }
+                entries.push_str(h);
+                entries.push_str(":\n");
+            }
+        }
+
+        total_dirs += sect.dirs.len();
+        total_files += sect.files.len();
+        render_section(&sect, &mut entries);
+    }
+
+    if total_dirs == 0 && total_files == 0 {
         if lines_seen > 0 && parsed_count == 0 {
             if dotdirs == lines_seen {
                 // Only . and .. entries (empty directory)
@@ -301,32 +415,8 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
         return ("(empty)\n".to_string(), String::new(), 0);
     }
 
-    let mut entries = String::new();
-
-    // Dirs first, compact
-    for (name, octal) in &dirs {
-        if let Some(octal) = octal {
-            entries.push_str(octal);
-            entries.push_str("  ");
-        }
-        entries.push_str(name);
-        entries.push_str("/\n");
-    }
-
-    // Files with size
-    for (name, size, octal) in &files {
-        if let Some(octal) = octal {
-            entries.push_str(octal);
-            entries.push_str("  ");
-        }
-        entries.push_str(name);
-        entries.push_str("  ");
-        entries.push_str(size);
-        entries.push('\n');
-    }
-
     // Summary line (separate so caller can suppress when piped)
-    let mut summary = format!("\nSummary: {} files, {} dirs", files.len(), dirs.len());
+    let mut summary = format!("\nSummary: {} files, {} dirs", total_files, total_dirs);
     if !by_ext.is_empty() {
         // inline single-line summary — fewer entries to avoid wrapping.
         const MAX_EXT_SUMMARY: usize = reduced(CAP_WARNINGS, 5);
@@ -352,6 +442,91 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression test for #2857: `ls dirA dirB` emits one `path:` header per
+    // directory operand. The compactor must keep each file under its
+    // directory header instead of pooling everything into one flat list.
+    #[test]
+    fn test_compact_multi_dir_preserves_headers() {
+        let input = "dirA:\n\
+                     total 4\n\
+                     drwxr-xr-x  2 user staff  64 Jan  1 12:00 .\n\
+                     drwxr-xr-x  4 user staff 128 Jan  1 12:00 ..\n\
+                     -rw-r--r--  1 user staff   3 Jan  1 12:00 file_a.txt\n\
+                     \n\
+                     dirB:\n\
+                     total 4\n\
+                     drwxr-xr-x  2 user staff  64 Jan  1 12:00 .\n\
+                     drwxr-xr-x  4 user staff 128 Jan  1 12:00 ..\n\
+                     -rw-r--r--  1 user staff   3 Jan  1 12:00 file_b.txt\n";
+        let (entries, summary, parsed) = compact_ls(input, false, false);
+        assert_eq!(
+            parsed, 2,
+            "expected 2 parsed entries, got {parsed}: {entries}"
+        );
+        assert!(
+            entries.contains("dirA:\n"),
+            "missing dirA header: {entries}"
+        );
+        assert!(
+            entries.contains("dirB:\n"),
+            "missing dirB header: {entries}"
+        );
+        let b_pos = entries.find("dirB:").expect("dirB header present");
+        assert!(
+            entries[b_pos..].contains("file_b.txt"),
+            "file_b.txt not under dirB: {entries}"
+        );
+        assert!(
+            entries.find("file_a.txt").expect("file_a.txt present") < b_pos,
+            "file_a.txt should appear under dirA: before dirB: {entries}"
+        );
+        // Blank line separates directory groups, matching native ls.
+        assert!(
+            entries.contains("\n\ndirB:\n"),
+            "expected blank line before dirB header: {entries}"
+        );
+        assert!(
+            summary.contains("Summary: 2 files, 0 dirs"),
+            "summary should aggregate across sections: {summary}"
+        );
+    }
+
+    // `ls file.txt dirA` lists file operands first (header-less), then each
+    // directory under its `path:` header. The compact output must keep that
+    // shape so operands are not merged into the first directory.
+    #[test]
+    fn test_compact_file_operands_stay_before_dir_sections() {
+        let input = "-rw-r--r--  1 user staff  10 Jan  1 12:00 loose.txt\n\
+                     \n\
+                     dirA:\n\
+                     total 4\n\
+                     -rw-r--r--  1 user staff   3 Jan  1 12:00 file_a.txt\n";
+        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        assert!(
+            entries.starts_with("loose.txt"),
+            "file operand should come first without a header: {entries}"
+        );
+        let a_pos = entries.find("dirA:").expect("dirA header present");
+        assert!(
+            entries[a_pos..].contains("file_a.txt"),
+            "file_a.txt not under dirA: {entries}"
+        );
+    }
+
+    // A single directory operand produces header-less ls output and must not
+    // gain a header (native ls prints none in that case).
+    #[test]
+    fn test_compact_single_dir_stays_headerless() {
+        let input = "total 8\n\
+                     drwxr-xr-x  2 user staff  64 Jan  1 12:00 src\n\
+                     -rw-r--r--  1 user staff 100 Jan  1 12:00 Cargo.toml\n";
+        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        assert_eq!(
+            entries, "src/\nCargo.toml  100B\n",
+            "single-directory output must be unchanged"
+        );
+    }
 
     #[test]
     fn test_compact_basic() {
