@@ -18,6 +18,8 @@ use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
 use crate::discover::registry::prefix_contains_rtk_disabled;
 
+const MIN_DISCOVER_FALLBACK_OUTPUT_TOKENS: usize = 100;
+
 /// Aggregation bucket for supported commands.
 struct SupportedBucket {
     rtk_equivalent: &'static str,
@@ -121,6 +123,12 @@ pub fn run(
                         estimated_savings_pct,
                         status,
                     } => {
+                        let output_tokens =
+                            match discover_output_tokens(ext_cmd.output_len, category, part) {
+                                Some(tokens) => tokens,
+                                None => continue,
+                            };
+
                         let bucket = supported_map.entry(rtk_equivalent).or_insert_with(|| {
                             SupportedBucket {
                                 rtk_equivalent,
@@ -133,16 +141,6 @@ pub fn run(
                         });
 
                         bucket.count += 1;
-
-                        // Estimate tokens for this command
-                        let output_tokens = if let Some(len) = ext_cmd.output_len {
-                            // Real: from tool_result content length
-                            len / 4
-                        } else {
-                            // Fallback: category average
-                            let subcmd = extract_subcmd(part);
-                            category_avg_tokens(category, subcmd)
-                        };
 
                         let savings =
                             (output_tokens as f64 * estimated_savings_pct / 100.0) as usize;
@@ -274,6 +272,19 @@ pub fn run(
     Ok(())
 }
 
+fn discover_output_tokens(output_len: Option<usize>, category: &str, cmd: &str) -> Option<usize> {
+    match output_len {
+        Some(len) => {
+            let tokens = len.div_ceil(4);
+            (tokens >= MIN_DISCOVER_FALLBACK_OUTPUT_TOKENS).then_some(tokens)
+        }
+        None => {
+            let subcmd = extract_subcmd(cmd);
+            Some(category_avg_tokens(category, subcmd))
+        }
+    }
+}
+
 /// Extract the subcommand from a command string (second word).
 fn extract_subcmd(cmd: &str) -> &str {
     let parts: Vec<&str> = cmd.trim().splitn(3, char::is_whitespace).collect();
@@ -293,5 +304,35 @@ fn truncate_command(cmd: &str) -> String {
         0 => String::new(),
         1 => parts[0].to_string(),
         _ => format!("{} {}", parts[0], parts[1]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_real_outputs_are_not_reported_as_missed_savings() {
+        let len = (MIN_DISCOVER_FALLBACK_OUTPUT_TOKENS - 1) * 4;
+
+        assert_eq!(discover_output_tokens(Some(len), "Git", "git push"), None);
+    }
+
+    #[test]
+    fn large_real_outputs_are_reported_as_missed_savings() {
+        let len = MIN_DISCOVER_FALLBACK_OUTPUT_TOKENS * 4;
+
+        assert_eq!(
+            discover_output_tokens(Some(len), "Git", "git diff"),
+            Some(MIN_DISCOVER_FALLBACK_OUTPUT_TOKENS)
+        );
+    }
+
+    #[test]
+    fn missing_output_size_keeps_category_average_estimate() {
+        assert_eq!(
+            discover_output_tokens(None, "Git", "git diff"),
+            Some(category_avg_tokens("Git", "diff"))
+        );
     }
 }
