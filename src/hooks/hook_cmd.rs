@@ -469,6 +469,75 @@ fn run_gemini_inner_impl(
     })
 }
 
+// ── Antigravity CLI (agy) hook ────────────────────────────────
+
+/// Run the Antigravity CLI (agy) PreToolUse hook.
+///
+/// agy PreToolUse hook contract:
+/// - stdin: JSON with `toolCall: { name: "run_command", args: { CommandLine: "..." } }`
+/// - Passthrough: emit `{"decision": "allow"}`
+/// - Rewrite: emit `{"decision": "allow", "reason": "...", "overwrite": { "CommandLine": "..." }}`
+/// - Deny: emit `{"decision": "deny", "reason": "..."}`
+///
+/// Fail-open design: invalid JSON, non-command tools, or unparseable payloads
+/// emit `{"decision": "allow"}` so RTK never blocks agent operations.
+pub fn run_agy() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let output = run_agy_inner(&input);
+    let _ = writeln!(io::stdout(), "{output}");
+    Ok(())
+}
+
+fn run_agy_inner(input: &str) -> Value {
+    let input = strip_leading_bom(input).trim();
+    if input.is_empty() {
+        return json!({ "decision": "allow" });
+    }
+
+    let parsed: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(_) => return json!({ "decision": "allow" }),
+    };
+
+    let tool_name = parsed
+        .pointer("/toolCall/name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if tool_name != "run_command" {
+        return json!({ "decision": "allow" });
+    }
+
+    let cmd = parsed
+        .pointer("/toolCall/args/CommandLine")
+        .or_else(|| parsed.pointer("/toolCall/args/command"))
+        .or_else(|| parsed.pointer("/toolCall/args/cmd"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if cmd.is_empty() {
+        return json!({ "decision": "allow" });
+    }
+
+    match decide_hook_action(cmd, permissions::Host::Agy) {
+        HookDecision::Deny => json!({
+            "decision": "deny",
+            "reason": "Blocked by RTK permission rule"
+        }),
+        HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten) => {
+            audit_log("rewrite", cmd, rewritten);
+            json!({
+                "decision": "allow",
+                "reason": "Rewritten by rtk for token optimization.",
+                "overwrite": {
+                    "CommandLine": rewritten
+                }
+            })
+        }
+        HookDecision::Defer => json!({ "decision": "allow" }),
+    }
+}
+
 // ── Vibe hook ─────────────────────────────────────────────────
 
 /// Run the Mistral Vibe CLI pre_tool hook.
@@ -1799,6 +1868,86 @@ mod tests {
             get_rewritten("cargo test").is_some(),
             "cargo test should be rewritable when not denied"
         );
+    }
+
+    // --- Antigravity CLI (agy) handler ---
+
+    fn agy_input(cmd: &str) -> String {
+        json!({
+            "toolCall": {
+                "name": "run_command",
+                "args": { "CommandLine": cmd }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_agy_rewrite_git_status() {
+        let v = run_agy_inner(&agy_input("git status"));
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["overwrite"]["CommandLine"], "rtk git status");
+    }
+
+    #[test]
+    fn test_agy_passthrough_non_rewritable() {
+        let v = run_agy_inner(&agy_input("htop"));
+        assert_eq!(v["decision"], "allow");
+        assert!(v.get("overwrite").is_none());
+    }
+
+    #[test]
+    fn test_agy_non_command_tool_passthrough() {
+        let input = json!({
+            "toolCall": {
+                "name": "view_file",
+                "args": { "AbsolutePath": "/tmp/test.rs" }
+            }
+        })
+        .to_string();
+        let v = run_agy_inner(&input);
+        assert_eq!(v["decision"], "allow");
+        assert!(v.get("overwrite").is_none());
+    }
+
+    #[test]
+    fn test_agy_empty_and_corrupt_input_passthrough() {
+        assert_eq!(run_agy_inner("")["decision"], "allow");
+        assert_eq!(run_agy_inner("   ")["decision"], "allow");
+        assert_eq!(run_agy_inner("{not-json}")["decision"], "allow");
+    }
+
+    #[test]
+    fn test_agy_leading_bom_and_whitespace_trimmed() {
+        let raw = format!("\u{FEFF}   {}   ", agy_input("git status"));
+        let v = run_agy_inner(&raw);
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["overwrite"]["CommandLine"], "rtk git status");
+    }
+
+    #[test]
+    fn test_agy_complex_quoted_command_preserved() {
+        let cmd = "git log --format='%h %s' --all --decorate";
+        let v = run_agy_inner(&agy_input(cmd));
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(
+            v["overwrite"]["CommandLine"],
+            "rtk git log --format='%h %s' --all --decorate"
+        );
+    }
+
+    #[test]
+    fn test_agy_fallback_command_args_keys() {
+        let input = json!({
+            "toolCall": {
+                "name": "run_command",
+                "args": { "command": "git status" }
+            }
+        })
+        .to_string();
+        let v = run_agy_inner(&input);
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["overwrite"]["CommandLine"], "rtk git status");
     }
 
     // --- Shared decision flow (all hosts route through this) ---

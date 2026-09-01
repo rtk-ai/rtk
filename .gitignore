@@ -51,3 +51,4 @@ claudedocs
 
 # icm 
 .fastembed_cache/
+.cache/

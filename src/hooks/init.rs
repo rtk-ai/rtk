@@ -1840,6 +1840,134 @@ fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
+// ─── Antigravity CLI (agy) support ────────────────────────────
+
+const AGY_PLUGIN_JSON: &str = r#"{
+  "name": "rtk-agy",
+  "version": "1.0.0",
+  "description": "Antigravity CLI (agy) plugin for transparent command rewriting and token optimization using rtk"
+}
+"#;
+
+const AGY_HOOKS_JSON: &str = r#"{
+  "rtk-rewrite": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "rtk hook agy",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
+"#;
+
+pub fn run_agy_mode(global: bool, ctx: InitContext) -> Result<()> {
+    if global {
+        // AGY CLI discovers machine-global plugins from ~/.gemini/config/plugins/
+        let home = dirs::home_dir().context("Could not determine user home directory")?;
+        let base_dir = home.join(".gemini/config");
+        run_agy_mode_at(&base_dir, true, ctx)
+    } else {
+        run_agy_mode_at(&std::env::current_dir()?, false, ctx)
+    }
+}
+
+pub fn run_agy_mode_at(base_dir: &Path, global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+    let plugin_dir = if global {
+        base_dir.join("plugins/rtk-agy")
+    } else {
+        base_dir.join(".agents/plugins/rtk-agy")
+    };
+
+    let plugin_json_path = plugin_dir.join("plugin.json");
+    let hooks_json_path = plugin_dir.join("hooks.json");
+
+    if dry_run {
+        println!(
+            "[dry-run] would create plugin directory: {}",
+            plugin_dir.display()
+        );
+        println!("[dry-run] would write {}", plugin_json_path.display());
+        println!("[dry-run] would write {}", hooks_json_path.display());
+        if verbose > 0 {
+            println!("[dry-run] plugin.json content:\n{}", AGY_PLUGIN_JSON);
+            println!("[dry-run] hooks.json content:\n{}", AGY_HOOKS_JSON);
+        }
+        print_dry_run_footer();
+    } else {
+        fs::create_dir_all(&plugin_dir).context("Failed to create agy plugin directory")?;
+        fs::write(&plugin_json_path, AGY_PLUGIN_JSON).context("Failed to write agy plugin.json")?;
+        fs::write(&hooks_json_path, AGY_HOOKS_JSON).context("Failed to write agy hooks.json")?;
+
+        if verbose > 0 {
+            eprintln!("Wrote {}", plugin_json_path.display());
+            eprintln!("Wrote {}", hooks_json_path.display());
+        }
+
+        println!("\nRTK plugin configured for Antigravity CLI (agy).\n");
+        println!("  Plugin: {} (installed)", plugin_dir.display());
+        println!("  Hooks:  PreToolUse -> rtk hook agy");
+        println!("  Antigravity CLI will now transparently rewrite commands to rtk.\n");
+    }
+
+    Ok(())
+}
+
+pub fn uninstall_agy_mode(global: bool, ctx: InitContext) -> Result<Vec<String>> {
+    if global {
+        let home = dirs::home_dir().context("Could not determine user home directory")?;
+        let base_dir = home.join(".gemini/config");
+        uninstall_agy_mode_at(&base_dir, true, ctx)
+    } else {
+        uninstall_agy_mode_at(&std::env::current_dir()?, false, ctx)
+    }
+}
+
+pub fn uninstall_agy_mode_at(
+    base_dir: &Path,
+    global: bool,
+    ctx: InitContext,
+) -> Result<Vec<String>> {
+    let InitContext { verbose, dry_run } = ctx;
+    let mut removed = Vec::new();
+    let plugin_dir = if global {
+        base_dir.join("plugins/rtk-agy")
+    } else {
+        base_dir.join(".agents/plugins/rtk-agy")
+    };
+
+    if plugin_dir.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove agy plugin directory: {}",
+                plugin_dir.display()
+            );
+        } else {
+            // nosemgrep: filesystem-deletion -- uninstall intentionally removes only RTK's agy plugin directory.
+            fs::remove_dir_all(&plugin_dir).with_context(|| {
+                format!(
+                    "Failed to remove agy plugin directory: {}",
+                    plugin_dir.display()
+                )
+            })?;
+            if verbose > 0 {
+                eprintln!("Removed agy plugin directory: {}", plugin_dir.display());
+            }
+        }
+        removed.push(format!("Antigravity CLI plugin: {}", plugin_dir.display()));
+    }
+
+    Ok(removed)
+}
+
 // ─── Hermes support ────────────────────────────────────────────
 
 const HERMES_PLUGIN_INIT: &str = include_str!("../../hooks/hermes/rtk-rewrite/__init__.py");
@@ -5496,6 +5624,83 @@ mod tests {
         let content = fs::read_to_string(&agents_md).unwrap();
         assert!(!content.contains("old"));
         assert_eq!(content.matches("@RTK.md").count(), 1);
+    }
+
+    #[test]
+    fn test_agy_mode_creates_plugin_files_local() {
+        let temp = TempDir::new().unwrap();
+        run_agy_mode_at(temp.path(), false, InitContext::default()).unwrap();
+
+        let plugin_dir = temp.path().join(".agents/plugins/rtk-agy");
+        let manifest_path = plugin_dir.join("plugin.json");
+        let hooks_path = plugin_dir.join("hooks.json");
+
+        assert!(manifest_path.exists(), "plugin.json should exist");
+        assert!(hooks_path.exists(), "hooks.json should exist");
+
+        let manifest = fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest.contains(r#""name": "rtk-agy""#));
+
+        let hooks = fs::read_to_string(&hooks_path).unwrap();
+        assert!(hooks.contains(r#""rtk-rewrite""#));
+        assert!(hooks.contains(r#""command": "rtk hook agy""#));
+    }
+
+    #[test]
+    fn test_agy_mode_creates_plugin_files_global() {
+        let temp = TempDir::new().unwrap();
+        run_agy_mode_at(temp.path(), true, InitContext::default()).unwrap();
+
+        let plugin_dir = temp.path().join("plugins/rtk-agy");
+        let manifest_path = plugin_dir.join("plugin.json");
+        let hooks_path = plugin_dir.join("hooks.json");
+
+        assert!(manifest_path.exists(), "global plugin.json should exist");
+        assert!(hooks_path.exists(), "global hooks.json should exist");
+    }
+
+    #[test]
+    fn test_agy_mode_dry_run_writes_nothing() {
+        let temp = TempDir::new().unwrap();
+        run_agy_mode_at(
+            temp.path(),
+            false,
+            InitContext {
+                dry_run: true,
+                ..InitContext::default()
+            },
+        )
+        .unwrap();
+
+        let plugin_dir = temp.path().join(".agents/plugins/rtk-agy");
+        assert!(
+            !plugin_dir.exists(),
+            "Plugin dir must not exist after dry run"
+        );
+    }
+
+    #[test]
+    fn test_agy_mode_reinstall_idempotent() {
+        let temp = TempDir::new().unwrap();
+        run_agy_mode_at(temp.path(), false, InitContext::default()).unwrap();
+        // Second install should succeed without errors
+        run_agy_mode_at(temp.path(), false, InitContext::default()).unwrap();
+
+        let plugin_dir = temp.path().join(".agents/plugins/rtk-agy");
+        assert!(plugin_dir.join("plugin.json").exists());
+        assert!(plugin_dir.join("hooks.json").exists());
+    }
+
+    #[test]
+    fn test_agy_mode_uninstall_removes_plugin() {
+        let temp = TempDir::new().unwrap();
+        run_agy_mode_at(temp.path(), false, InitContext::default()).unwrap();
+
+        let removed = uninstall_agy_mode_at(temp.path(), false, InitContext::default()).unwrap();
+        assert_eq!(removed.len(), 1);
+
+        let plugin_dir = temp.path().join(".agents/plugins/rtk-agy");
+        assert!(!plugin_dir.exists(), "Plugin dir should be removed");
     }
 
     #[test]
