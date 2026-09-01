@@ -6,8 +6,8 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use super::lexer::{
-    shell_split, split_on_operators, tokenize, tokenize_with_newlines, ParsedToken, PipeKind,
-    TokenKind,
+    shell_split, split_for_permissions, split_on_operators, tokenize, tokenize_with_newlines,
+    ParsedToken, PipeKind, TokenKind,
 };
 use super::rules::{RtkRule, IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
@@ -547,6 +547,128 @@ fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> {
     LINE_CONTINUATION_RE.replace_all(s, " ")
 }
 
+/// Commands whose destructive effect can be pointed at the wrong target if a
+/// sibling compound stage was rewritten (and its output reformatted) first.
+const DESTRUCTIVE_COMMANDS: &[&str] = &[
+    "rm", "rmdir", "unlink", "shred", "dd", "truncate", "mv", "xargs",
+];
+/// Git subcommands that are destructive; other `git` subcommands are fine.
+const DESTRUCTIVE_GIT_SUBCOMMANDS: &[&str] = &["clean", "reset", "rm"];
+/// Two-token git subcommand forms that are destructive (e.g. `git stash list`
+/// is safe, `git stash drop` is not).
+const DESTRUCTIVE_GIT_SUBCOMMAND_PAIRS: &[(&str, &str)] =
+    &[("stash", "drop"), ("worktree", "remove")];
+
+/// Strip a single layer of matching quotes and any backslash escapes from a
+/// word, so `'rm'` and `\rm` are recognized as the same command as bare `rm`.
+fn unquote_unescape_word(word: &str) -> String {
+    let unescaped: String = word.chars().filter(|&c| c != '\\').collect();
+    if unescaped.len() >= 2 {
+        let bytes = unescaped.as_bytes();
+        let (first, last) = (bytes[0], bytes[unescaped.len() - 1]);
+        if (first == b'\'' && last == b'\'') || (first == b'"' && last == b'"') {
+            return unescaped[1..unescaped.len() - 1].to_string();
+        }
+    }
+    unescaped
+}
+
+/// If `seg`'s leading command (after any env-var prefix) is destructive,
+/// returns a short label for it (e.g. `"rm"`, `"git reset"`); else `None`.
+fn destructive_label(seg: &str) -> Option<String> {
+    let trimmed = seg.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (_, rest) = strip_disabled_prefix(trimmed);
+    let mut rest = rest.trim().to_string();
+    if rest.is_empty() {
+        return None;
+    }
+
+    // Same normalization the rewrite path applies before matching: strip
+    // shell prefix builtins (`command rm`, `builtin rm`, ...) and absolute
+    // binary paths (`/bin/rm`) so neither can hide a destructive command
+    // from this check while it still reaches the real binary at runtime.
+    while let Some(after) = SHELL_KEYWORD_PREFIXES
+        .iter()
+        .find_map(|&prefix| strip_word_prefix(&rest, prefix))
+    {
+        if after.is_empty() {
+            return None;
+        }
+        rest = after.to_string();
+    }
+    let rest = strip_absolute_path(&rest);
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let first_word = rest.split_whitespace().next()?;
+    let first_word = unquote_unescape_word(first_word);
+    if DESTRUCTIVE_COMMANDS.contains(&first_word.as_str()) {
+        return Some(first_word);
+    }
+    if first_word == "git" {
+        // Unquote/unescape every token here too, or `'git' clean -fd` and
+        // `\git reset --hard` bypass this check the same way a raw `'rm'`
+        // or `\rm` would without the check above.
+        let normalized_rest: String = rest
+            .split_whitespace()
+            .map(unquote_unescape_word)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let after_globals = strip_git_global_opts(&normalized_rest);
+        let after_git = after_globals.strip_prefix("git ").unwrap_or("");
+        let mut git_tokens = after_git.split_whitespace();
+        let subcmd = git_tokens.next().unwrap_or("");
+        let next_tok = git_tokens.next().unwrap_or("");
+        if DESTRUCTIVE_GIT_SUBCOMMANDS.contains(&subcmd) {
+            return Some(format!("git {}", subcmd));
+        }
+        if DESTRUCTIVE_GIT_SUBCOMMAND_PAIRS.contains(&(subcmd, next_tok)) {
+            return Some(format!("git {} {}", subcmd, next_tok));
+        }
+        if subcmd == "branch" && (next_tok == "-D" || next_tok == "-d") {
+            return Some(format!("git branch {}", next_tok));
+        }
+    }
+    None
+}
+
+/// Decides whether `trimmed`'s destructive-compound guard (see
+/// `rewrite_command`) should block the rewrite. `None` means the guard
+/// doesn't apply. `Some(note)` means it does; `note` is `Some(message)` only
+/// when at least one segment would otherwise have been rewritten — staying
+/// silent otherwise avoids a stderr line for compounds where nothing was
+/// going to change anyway (e.g. `mkdir -p d && mv a d`).
+fn destructive_compound_guard(
+    trimmed: &str,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+) -> Option<Option<String>> {
+    let permission_segments = split_for_permissions(trimmed);
+    if permission_segments.len() <= 1 {
+        return None;
+    }
+    let label = permission_segments
+        .iter()
+        .find_map(|&seg| destructive_label(seg))?;
+
+    let compiled = compile_exclude_patterns(excluded);
+    let normalized_prefixes = normalize_transparent_prefixes(transparent_prefixes);
+    let would_rewrite = permission_segments
+        .iter()
+        .any(|&seg| rewrite_single(seg, &compiled, &normalized_prefixes).is_some());
+
+    Some(would_rewrite.then(|| {
+        format!(
+            "[rtk] destructive command '{}' in compound; rewrite skipped",
+            label
+        )
+    }))
+}
+
 /// Returns `None` if the command is unsupported or ignored (hook should pass through).
 ///
 /// Handles compound commands (`&&`, `||`, `;`) by rewriting each segment independently.
@@ -591,6 +713,21 @@ pub fn rewrite_command(
     }
 
     if has_heredoc(trimmed) || trimmed.contains("$((") {
+        return None;
+    }
+
+    // A rewritten stage's output can be reformatted relative to the raw
+    // command; a destructive stage later in the same compound may then act
+    // on that reformatted output instead of the real one. Leave the whole
+    // compound unrewritten rather than risk it. Scan the same segment
+    // boundaries permission-checking uses (&&, ||, ;, |, single `&`,
+    // newline, subshells) so a separator the rewrite side still splits on
+    // can't sneak a destructive stage past this check. A single-segment
+    // command has no sibling stage to endanger and is unaffected.
+    if let Some(note) = destructive_compound_guard(trimmed, excluded, transparent_prefixes) {
+        if let Some(msg) = note {
+            eprintln!("{}", msg);
+        }
         return None;
     }
 
@@ -2706,6 +2843,17 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_find_pipe_non_destructive_consumer_still_skipped() {
+        // Same unsupported-final-stage mechanism as test_rewrite_find_pipe_skipped,
+        // with a non-destructive consumer (`xargs` also trips the destructive-
+        // compound guard, which would otherwise mask this coverage).
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -name '*.rs' | wc -l", &[]),
+            None
+        );
+    }
+
+    #[test]
     fn test_rewrite_find_pipe_wc_stays_raw() {
         assert_eq!(
             rewrite_command_no_prefixes("find src -type f | wc -l", &[]),
@@ -2729,6 +2877,13 @@ mod tests {
         );
         assert_eq!(
             rewrite_command_no_prefixes("find . | xargs grep TODO", &[]),
+            None
+        );
+        assert_eq!(
+            // Non-destructive stand-in for the `xargs` case above (same
+            // unsupported-final-stage mechanism, isolated from the
+            // destructive-compound guard).
+            rewrite_command_no_prefixes("find . | awk '{print $1}'", &[]),
             None
         );
         assert_eq!(
@@ -2786,6 +2941,207 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("rtk git add . && cargo test", &[]),
             Some("rtk git add . && rtk cargo test".into())
+        );
+    }
+
+    // --- destructive-command-in-compound guard ---
+    // A rewritten stage's output can be reformatted; a destructive stage
+    // elsewhere in the same compound must not act on that reformatted output.
+    // The whole compound is left unrewritten (None) rather than partially rewritten.
+
+    #[test]
+    fn test_rewrite_destructive_rm_in_and_compound_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status && rm -rf /tmp/x", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_destructive_sudo_rm_in_compound_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status && sudo rm x", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_destructive_rm_behind_command_builtin_unchanged() {
+        // `command` strips to the real binary at runtime — must not bypass the guard.
+        assert_eq!(
+            rewrite_command_no_prefixes("git status && command rm x", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_destructive_rm_single_ampersand_unchanged() {
+        assert_eq!(rewrite_command_no_prefixes("git status & rm x", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_destructive_rm_newline_separated_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status\nrm -rf foo", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_git_log_still_rewritten_non_regression() {
+        // Neither stage is destructive — existing rewrite behavior preserved.
+        assert_eq!(
+            rewrite_command_no_prefixes("git status && git log", &[]),
+            Some("rtk git status && rtk git log".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rm_alone_unaffected() {
+        // Single non-compound command — guard doesn't apply; unchanged from today.
+        assert_eq!(rewrite_command_no_prefixes("rm x", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_destructive_git_stash_drop_in_compound_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status && git stash drop", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_destructive_git_reset_hard_in_compound_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status && git reset --hard", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_destructive_git_rm_in_compound_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status && git rm -r x", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_destructive_git_worktree_remove_in_compound_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status && git worktree remove foo", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_destructive_git_branch_dash_d_in_compound_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status && git branch -D x", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_destructive_rm_absolute_path_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status && /bin/rm x", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_destructive_backslash_rm_in_compound_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status && \\rm x", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_stash_list_still_rewritten_non_regression() {
+        // "list" isn't destructive — normal rewrite applies (false-positive check).
+        assert_eq!(
+            rewrite_command_no_prefixes("git status && git stash list", &[]),
+            Some("rtk git status && rtk git stash list".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_quoted_rm_argument_not_command_still_rewritten() {
+        // "rm" appears only as a quoted argument to `echo`, not as a leading
+        // command — false-positive check.
+        assert_eq!(
+            rewrite_command_no_prefixes("echo \"rm -rf\" && git status", &[]),
+            Some("echo \"rm -rf\" && rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_destructive_backslash_git_reset_in_compound_unchanged() {
+        // `\git` must route through the same git-subcommand check as bare
+        // `git`, or the destructive subcommand goes undetected.
+        assert_eq!(
+            rewrite_command_no_prefixes("git status && \\git reset --hard", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_destructive_quoted_git_clean_in_compound_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status && 'git' clean -fd", &[]),
+            None
+        );
+    }
+
+    // --- destructive-compound guard: note only when a stage would rewrite ---
+
+    #[test]
+    fn test_destructive_compound_guard_silent_when_no_stage_rewritable() {
+        assert_eq!(
+            destructive_compound_guard("mkdir -p d && mv a d", &[], &[]),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn test_destructive_compound_guard_notes_when_stage_rewritable() {
+        assert_eq!(
+            destructive_compound_guard("git status && rm x", &[], &[]),
+            Some(Some(
+                "[rtk] destructive command 'rm' in compound; rewrite skipped".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_destructive_compound_guard_notes_for_mv_when_earlier_stage_rewritable() {
+        // `mv` documents the savings tradeoff: the compound stays unrewritten,
+        // but `cargo build` alone would have been, so the note still fires.
+        assert_eq!(
+            destructive_compound_guard(
+                "cargo build && mv target/release/rtk /usr/local/bin/",
+                &[],
+                &[]
+            ),
+            Some(Some(
+                "[rtk] destructive command 'mv' in compound; rewrite skipped".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_rewrite_destructive_xargs_after_unrewritable_stage_unchanged_silent() {
+        // Neither `echo hi` nor `xargs rm` is rewritable, so the guard fires
+        // silently — nothing in this compound would have changed anyway.
+        assert_eq!(
+            rewrite_command_no_prefixes("echo hi && xargs rm", &[]),
+            None
+        );
+        assert_eq!(
+            destructive_compound_guard("echo hi && xargs rm", &[], &[]),
+            Some(None)
         );
     }
 
