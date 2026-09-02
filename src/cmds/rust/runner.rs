@@ -178,15 +178,57 @@ fn filter_errors(output: &str) -> String {
     result.join("\n")
 }
 
+fn node_test_summary_key(line: &str) -> Option<&str> {
+    let summary = line.trim_start().strip_prefix('ℹ')?.trim_start();
+    let mut fields = summary.split_whitespace();
+    let key = fields.next()?;
+    let value = fields.next()?;
+
+    if fields.next().is_some() {
+        return None;
+    }
+
+    let is_valid_value = if key == "duration_ms" {
+        value.parse::<f64>().is_ok()
+    } else {
+        value.parse::<u64>().is_ok()
+    };
+
+    if is_valid_value
+        && matches!(
+            key,
+            "tests"
+                | "suites"
+                | "pass"
+                | "fail"
+                | "cancelled"
+                | "skipped"
+                | "todo"
+                | "duration_ms"
+        )
+    {
+        Some(key)
+    } else {
+        None
+    }
+}
+
 fn extract_test_summary(output: &str, command: &str) -> String {
     let mut result = Vec::new();
     let lines: Vec<&str> = output.lines().collect();
 
     let is_cargo = command.contains("cargo test");
     let is_pytest = command.contains("pytest");
-    let is_jest =
-        command.contains("jest") || command.contains("npm test") || command.contains("yarn test");
+    let is_jest = command.contains("jest")
+        || command.contains("npm test")
+        || command.contains("yarn test")
+        || command.contains("node --test");
     let is_go = command.contains("go test");
+    let has_node_test_summary = ["tests", "pass", "fail"].iter().all(|expected| {
+        lines
+            .iter()
+            .any(|line| node_test_summary_key(line) == Some(expected))
+    });
 
     let mut failures = Vec::new();
     let mut in_failure = false;
@@ -218,10 +260,14 @@ fn extract_test_summary(output: &str, command: &str) -> String {
         }
 
         if is_jest {
-            if line.contains("Tests:") || line.contains("Test Suites:") {
+            let trimmed = line.trim_start();
+            let is_node_summary =
+                has_node_test_summary && node_test_summary_key(line).is_some();
+            if line.contains("Tests:") || line.contains("Test Suites:") || is_node_summary {
                 result.push(line.to_string());
             }
-            if line.contains("✕") || line.contains("FAIL") {
+            let is_node_failure = trimmed.starts_with('✕') || trimmed.starts_with('✖');
+            if is_node_failure || (!has_node_test_summary && line.contains("FAIL")) {
                 failures.push(line.to_string());
             }
         }
@@ -289,5 +335,53 @@ mod tests {
         let filtered = filter_errors(output);
         assert!(filtered.contains("error"));
         assert!(!filtered.contains("info"));
+    }
+
+    #[test]
+    fn node_test_name_containing_fail_is_not_a_failure() {
+        let output = "✔ contains uppercase word FAIL in the name (0.45ms)\n\
+ℹ tests 1\n\
+ℹ suites 0\n\
+ℹ pass 1\n\
+ℹ fail 0\n\
+ℹ cancelled 0\n\
+ℹ skipped 0\n\
+ℹ todo 0\n\
+ℹ duration_ms 57.6223\n";
+
+        let filtered = extract_test_summary(output, "npm test");
+
+        assert!(!filtered.contains("[FAIL]"), "got: {filtered}");
+        assert!(filtered.contains("ℹ fail 0"), "got: {filtered}");
+    }
+
+    #[test]
+    fn node_test_failure_uses_status_glyph_with_structured_summary() {
+        let output = "✖ rejects a FAIL response (0.45ms)\n\
+ℹ tests 1\n\
+ℹ suites 0\n\
+ℹ pass 0\n\
+ℹ fail 1\n\
+ℹ duration_ms 57.6223\n";
+
+        let filtered = extract_test_summary(output, "node --test repro.test.js");
+
+        assert!(filtered.contains("[FAIL]"), "got: {filtered}");
+        assert!(filtered.contains("✖ rejects a FAIL response"), "got: {filtered}");
+        assert!(filtered.contains("ℹ fail 1"), "got: {filtered}");
+    }
+
+    #[test]
+    fn partial_node_summary_log_does_not_hide_jest_failure() {
+        let output = "console.log
+  ℹ fail 0
+FAIL src/example.test.js
+Tests: 1 failed, 1 total
+";
+
+        let filtered = extract_test_summary(output, "npm test");
+
+        assert!(filtered.contains("[FAIL]"), "got: {filtered}");
+        assert!(filtered.contains("FAIL src/example.test.js"), "got: {filtered}");
     }
 }
