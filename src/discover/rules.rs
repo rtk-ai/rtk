@@ -102,6 +102,19 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 70.0,
         ..RtkRule::DEFAULT
     },
+    // Match `node --test`, `node --check`, and `node -c …`. Other node
+    // invocations (`node script.js`, `node -e …`) are deliberately not
+    // routed: their output is the user's code's output, which we don't
+    // want to filter.
+    RtkRule {
+        pattern: r"^node\s+(--test(=|\s|$)|--check\s|-c\s)",
+        rtk_cmd: "rtk node",
+        rewrite_prefixes: &["node"],
+        category: "Tests",
+        savings_pct: 80.0,
+        subcmd_savings: &[("--test", 85.0), ("--check", 60.0)],
+        subcmd_status: &[],
+    },
     RtkRule {
         pattern: r"^(cat|head|tail)\s+",
         rtk_cmd: "rtk read",

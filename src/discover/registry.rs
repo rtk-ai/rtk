@@ -2074,6 +2074,58 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_node_test() {
+        for cmd in &[
+            "node --test",
+            "node --test tests/foo.js",
+            "node --test=concurrency=1",
+        ] {
+            match classify_command(cmd) {
+                Classification::Supported {
+                    rtk_equivalent: "rtk node",
+                    category: "Tests",
+                    ..
+                } => {}
+                other => panic!(
+                    "'{}' should classify as Supported(rtk node, Tests), got {:?}",
+                    cmd, other
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn test_classify_node_check() {
+        for cmd in &["node --check src/main.js", "node -c src/main.js"] {
+            match classify_command(cmd) {
+                Classification::Supported {
+                    rtk_equivalent: "rtk node",
+                    ..
+                } => {}
+                other => panic!(
+                    "'{}' should classify as Supported(rtk node), got {:?}",
+                    cmd, other
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn test_classify_node_run_is_not_routed() {
+        // `node script.js` and `node -e '…'` should NOT be routed —
+        // their output is the user's code's output, which we don't filter.
+        for cmd in &["node script.js", "node -e 'console.log(1)'", "node"] {
+            if let Classification::Supported {
+                rtk_equivalent: "rtk node",
+                ..
+            } = classify_command(cmd)
+            {
+                panic!("'{}' should NOT route through rtk node", cmd);
+            }
+        }
+    }
+
+    #[test]
     fn test_classify_cat_file() {
         assert_eq!(
             classify_command("cat src/main.rs"),

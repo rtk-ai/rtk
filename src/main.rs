@@ -12,8 +12,8 @@ use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
-    lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
-    vitest_cmd,
+    lint_cmd, next_cmd, node_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd,
+    tsc_cmd, vitest_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{
@@ -582,6 +582,13 @@ enum Commands {
     /// npm run with filtered output (strip boilerplate)
     Npm {
         /// npm run arguments (script name + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// node with filtered output: --test summary (TAP), --check silent on ok
+    Node {
+        /// node arguments (--test, --check, or script + args)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2306,6 +2313,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Npm { args } => npm_cmd::run(&args, cli.verbose, cli.skip_env)?,
 
+        Commands::Node { args } => node_cmd::run(&args, cli.verbose, cli.skip_env)?,
+
         Commands::Curl { args } => curl_cmd::run(&args, cli.verbose)?,
 
         Commands::Discover {
@@ -2809,6 +2818,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Playwright { .. }
             | Commands::Cargo { .. }
             | Commands::Npm { .. }
+            | Commands::Node { .. }
             | Commands::Npx { .. }
             | Commands::Curl { .. }
             | Commands::Ruff { .. }
