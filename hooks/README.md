@@ -187,11 +187,18 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 
 ### OpenCode (TypeScript Plugin)
 
-Mutates `args.command` in-place via the zx library:
+Mutates `args.command` in-place via Node's cross-platform `execFile` API:
 
 ```typescript
-const result = await $`rtk rewrite ${command}`.quiet().nothrow()
-const rewritten = String(result.stdout).trim()
+function runRtk(args: string[]): Promise<string> {
+  return new Promise((resolve) => {
+    execFile("rtk", args, { windowsHide: true }, (_error, stdout) => {
+      resolve(String(stdout ?? "").trim())
+    })
+  })
+}
+
+const rewritten = await runRtk(["rewrite", command])
 if (rewritten && rewritten !== command) {
   (args as Record<string, unknown>).command = rewritten
 }
