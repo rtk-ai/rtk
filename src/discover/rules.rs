@@ -103,6 +103,21 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^(?:(?:npx|pnpx)\s+|pnpm(?:\s+(?:dlx|exec))?\s+)?netlify\s+(?:logs\b|api\s+listSiteDeploys\b)",
+        rtk_cmd: "rtk netlify",
+        rewrite_prefixes: &[
+            "pnpm dlx netlify",
+            "pnpm exec netlify",
+            "pnpm netlify",
+            "pnpx netlify",
+            "npx netlify",
+            "netlify",
+        ],
+        category: "Cloud",
+        savings_pct: 60.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^(cat|head|tail)\s+",
         rtk_cmd: "rtk read",
         rewrite_prefixes: &["cat", "head", "tail"],

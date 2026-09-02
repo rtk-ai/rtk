@@ -7,7 +7,7 @@ mod learn;
 mod parser;
 
 // Re-export command modules for routing
-use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use cmds::cloud::{aws_cmd, container, curl_cmd, netlify_cmd, psql_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
@@ -207,6 +207,14 @@ enum Commands {
     #[command(disable_help_flag = true)]
     Psql {
         /// psql arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Netlify CLI with safe deploy inspection filtering
+    #[command(disable_help_flag = true)]
+    Netlify {
+        /// Netlify CLI arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1856,6 +1864,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Psql { args } => psql_cmd::run(&args, cli.verbose)?,
 
+        Commands::Netlify { args } => netlify_cmd::run(&args, cli.verbose)?,
+
         Commands::Pnpm { filter, command } => {
             // Warns user if filters are used with unsupported subcommands like typecheck
             if let Some(warning) = validate_pnpm_filters(&filter, &command) {
@@ -2782,6 +2792,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Git { .. }
             | Commands::Gh { .. }
             | Commands::Glab { .. }
+            | Commands::Netlify { .. }
             | Commands::Pnpm { .. }
             | Commands::Err { .. }
             | Commands::Test { .. }
@@ -3185,6 +3196,7 @@ mod tests {
             "glab",
             "aws",
             "psql",
+            "netlify",
             "pnpm",
             "err",
             "test",

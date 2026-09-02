@@ -6028,4 +6028,66 @@ mod tests {
             "pest"
         );
     }
+
+    #[test]
+    fn test_classify_netlify_read_only_commands() {
+        for command in [
+            "netlify logs --source deploy",
+            "npx netlify api listSiteDeploys --data '{}'",
+            "pnpm dlx netlify logs --source=deploy",
+            "pnpm exec netlify api listSiteDeploys",
+            "pnpx netlify logs --source deploy",
+        ] {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk netlify",
+                        ..
+                    }
+                ),
+                "command: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_netlify_invocation_forms() {
+        for (command, expected) in [
+            (
+                "netlify logs --source deploy",
+                "rtk netlify logs --source deploy",
+            ),
+            (
+                "npx netlify api listSiteDeploys",
+                "rtk netlify api listSiteDeploys",
+            ),
+            (
+                "pnpm dlx netlify logs --source=deploy",
+                "rtk netlify logs --source=deploy",
+            ),
+            (
+                "pnpm exec netlify api listSiteDeploys",
+                "rtk netlify api listSiteDeploys",
+            ),
+            (
+                "pnpm netlify logs --source deploy",
+                "rtk netlify logs --source deploy",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.into()),
+                "command: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unrelated_netlify_commands_are_not_discovered() {
+        assert!(matches!(
+            classify_command("netlify deploy --prod"),
+            Classification::Unsupported { .. }
+        ));
+    }
 }
