@@ -344,6 +344,22 @@ pub fn run(
 
     if !dry_run {
         prompt_telemetry_consent()?;
+        // Best-effort: unconditionally re-run tracking-DB schema migrations during
+        // install/upgrade (bypassing the `user_version` gate `Tracker::new()` uses
+        // on its hot path). This both pre-warms the schema so the first PreToolUse
+        // hook invocation (or `rtk <cmd>`) after this doesn't pay the one-time
+        // migration cost itself, and self-heals a table dropped/corrupted
+        // out-of-band (see `tracking::warn_if_missing_table`) — `rtk init` is
+        // already the natural "something's wrong, reinstall" move, so no separate
+        // repair flag is needed. `CREATE TABLE IF NOT EXISTS`/`ALTER TABLE` are
+        // additive, so existing history is left untouched. Never fail `rtk init`
+        // over a tracking-DB hiccup — but still tell the user something's wrong,
+        // consistent with every other best-effort warning in this function
+        // (rust-patterns.md's anti-pattern rule: a silent `Err(_) => {}` leaves
+        // the user with zero indication anything went wrong).
+        if let Err(e) = crate::core::tracking::ensure_schema_fresh() {
+            eprintln!("  [warn] Failed to prepare tracking database: {e}");
+        }
     }
 
     if dry_run {

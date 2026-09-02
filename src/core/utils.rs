@@ -6,6 +6,7 @@
 //! - Command execution with error context
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde_json::Value;
 use std::fs;
@@ -13,6 +14,25 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::LazyLock;
 use std::sync::OnceLock;
+
+/// Compute `days` ago from now, clamped instead of panicking on overflow.
+///
+/// `days` is typically user-supplied (`--since <days>`) and unbounded. Naively
+/// building `chrono::Duration::days(days as i64)` and subtracting it from
+/// `Utc::now()` panics for a large enough value ("DateTime - TimeDelta
+/// overflowed") — this happened identically in `rtk discover --since` and `rtk
+/// hook audit --since` before both were routed through this helper. `days` is
+/// capped to `i64::MAX` before the `as i64` cast (a `u64` past `i64::MAX` would
+/// otherwise reinterpret as negative, turning "look back" into "look forward"),
+/// and any remaining overflow building or applying the `Duration` falls back to
+/// `DateTime::<Utc>::MIN_UTC` — an arbitrarily distant cutoff means "no lower
+/// bound", which is exactly what an absurdly large `--since` should behave like.
+pub fn days_ago_cutoff(days: u64) -> DateTime<Utc> {
+    let days = days.min(i64::MAX as u64) as i64;
+    chrono::Duration::try_days(days)
+        .and_then(|d| Utc::now().checked_sub_signed(d))
+        .unwrap_or(DateTime::<Utc>::MIN_UTC)
+}
 
 /// Truncates a string to `max_len` characters, appending `...` if needed.
 ///
@@ -292,9 +312,41 @@ pub fn open_private(
     Ok(file)
 }
 
+/// Pure core of `set_owner_only`'s "is a chmod even needed" check, taking the raw
+/// `st_mode` reading directly so it's deterministically testable without touching
+/// the filesystem (an unprivileged `chmod` setting setuid/setgid isn't reliably
+/// honored across every environment — e.g. some sandboxed/containerized
+/// filesystems silently drop it — so a test that round-trips through a real file
+/// would be flaky rather than actually exercising this logic).
+///
+/// Masks with `0o7777`, NOT `0o777`: setuid/setgid/sticky live in the `0o7000`
+/// range, above the rwx bits but below the file-type bits `st_mode` also carries.
+/// A `0o777` mask would strip those dangerous bits out of the comparison too, so
+/// a file with e.g. setuid set (`0o4600`) would read as "already correct" against
+/// a `target` of `0o600` and permanently skip the chmod that would clear it —
+/// defeating the self-heal `set_owner_only` exists to provide, for exactly the
+/// files (external tampering, restored backups) it's meant to catch.
+#[cfg(unix)]
+fn mode_already_correct(actual: u32, target: u32) -> bool {
+    actual & 0o7777 == target
+}
+
 #[cfg(unix)]
 fn set_owner_only(path: &std::path::Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
+    // Skip the chmod syscall once permissions already match. This runs on every
+    // `Tracker::new()` call, which is now on the PreToolUse hook's hot path for
+    // *every* Bash tool call (not just RTK-covered ones — see rtk-ai/rtk#3206's
+    // hook_decisions ground-truth logging), under the project's <10ms latency
+    // budget, so a redundant chmod on the already-correct common case adds up.
+    // Falls through to chmod on any metadata-read failure, erring toward
+    // enforcing the permission rather than silently skipping it.
+    //
+    if let Ok(meta) = fs::metadata(path) {
+        if mode_already_correct(meta.permissions().mode(), mode) {
+            return;
+        }
+    }
     let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
 }
 
@@ -684,6 +736,25 @@ mod tests {
     #[test]
     fn test_truncate_short_string() {
         assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_days_ago_cutoff_normal_value_is_in_the_past() {
+        let cutoff = days_ago_cutoff(30);
+        assert!(cutoff < Utc::now());
+    }
+
+    #[test]
+    fn test_days_ago_cutoff_does_not_panic_on_huge_since_days() {
+        // rtk-ai/rtk#3206 review: `rtk discover --since 100000000` and `rtk hook
+        // audit --since 100000000` both panicked with "DateTime - TimeDelta
+        // overflowed". Must clamp instead of crashing.
+        assert_eq!(days_ago_cutoff(100_000_000), DateTime::<Utc>::MIN_UTC);
+    }
+
+    #[test]
+    fn test_days_ago_cutoff_does_not_panic_on_u64_max() {
+        assert_eq!(days_ago_cutoff(u64::MAX), DateTime::<Utc>::MIN_UTC);
     }
 
     #[test]
@@ -1386,5 +1457,81 @@ mod tests {
                 bytes
             );
         }
+    }
+
+    // rtk-ai/rtk#3206 review: set_owner_only now skips the chmod syscall once
+    // permissions already match, since Tracker::new() (which calls this via
+    // create_private_dir/open_private/restrict_db_files) is on the PreToolUse
+    // hook's hot path for every Bash tool call. These don't observe the skipped
+    // syscall directly, but confirm the already-correct case stays correct
+    // (idempotent) across repeated calls, on both a directory and a file.
+
+    #[test]
+    #[cfg(unix)]
+    fn test_set_owner_only_idempotent_when_already_correct_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("already-private");
+        create_private_dir(&dir).unwrap();
+        assert_eq!(mode_of(&dir), 0o700);
+
+        // Second call hits the already-correct fast path — must stay 0o700.
+        create_private_dir(&dir).unwrap();
+        assert_eq!(mode_of(&dir), 0o700);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_restrict_file_idempotent_when_already_correct() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("history.db");
+        fs::write(&file, b"x").unwrap();
+        restrict_file(&file);
+        assert_eq!(mode_of(&file), 0o600);
+
+        // Second call hits the already-correct fast path — must stay 0o600.
+        restrict_file(&file);
+        assert_eq!(mode_of(&file), 0o600);
+    }
+
+    // Regression: the fast-path comparison must mask with 0o7777 (including
+    // setuid/setgid/sticky), not 0o777 — a 0o777 mask would make a file with e.g.
+    // setuid set (0o4600) read as "already 0o600" and permanently skip the chmod
+    // that clears the dangerous bit. Tested against the pure mask logic directly
+    // (not round-tripped through a real chmod) since an unprivileged chmod setting
+    // setuid isn't reliably honored across every environment — some sandboxed/
+    // containerized filesystems silently drop it, which would make a
+    // filesystem-based version of this test flaky rather than exercise the logic.
+    #[test]
+    #[cfg(unix)]
+    fn test_mode_already_correct_rejects_setuid_bit() {
+        assert!(
+            !mode_already_correct(0o4600, 0o600),
+            "setuid set (0o4600) must not read as already-correct against target 0o600"
+        );
+        assert!(
+            !mode_already_correct(0o2600, 0o600),
+            "setgid set (0o2600) must not read as already-correct against target 0o600"
+        );
+        assert!(
+            !mode_already_correct(0o1600, 0o600),
+            "sticky bit set (0o1600) must not read as already-correct against target 0o600"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_mode_already_correct_accepts_exact_match() {
+        assert!(mode_already_correct(0o600, 0o600));
+        assert!(mode_already_correct(0o700, 0o700));
+        assert!(!mode_already_correct(0o644, 0o600));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_mode_already_correct_ignores_file_type_bits() {
+        // `st_mode` carries file-type bits (e.g. S_IFREG = 0o100000) above the
+        // 0o7777 permission range this function masks to — those must not affect
+        // the comparison either way.
+        assert!(mode_already_correct(0o100600, 0o600));
     }
 }

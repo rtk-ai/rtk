@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::{self, Read, Write};
 
+use crate::core::tracking::HookOutcome;
 use crate::core::utils::strip_leading_bom;
 use crate::discover::registry::{has_heredoc, rewrite_command};
 
@@ -237,9 +238,7 @@ fn get_rewritten(cmd: &str) -> Option<String> {
         return None;
     }
 
-    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
-        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
-        .unwrap_or_default();
+    let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
 
     let rewritten = rewrite_command(cmd, &excluded, &transparent_prefixes)?;
 
@@ -582,14 +581,16 @@ fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> 
 
 // ── Claude Code native hook ────────────────────────────────────
 
+#[derive(Debug)]
 enum PayloadAction {
     Rewrite {
         cmd: String,
         rewritten: String,
+        decision: HookOutcome,
         output: Value,
     },
     Skip {
-        reason: &'static str,
+        decision: HookOutcome,
         cmd: String,
     },
     Ignore,
@@ -605,16 +606,28 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         None => return PayloadAction::Ignore,
     };
 
-    let (rewritten, allow) = match decide_hook_action(cmd, permissions::Host::Claude) {
+    process_claude_payload_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::Claude))
+}
+
+/// Pure core of `process_claude_payload`, taking the hook decision directly so the
+/// full Allow/Ask/Deny/Defer matrix is unit-testable without depending on real
+/// permission config files — mirrors the `copilot_cli_response_from_decision`/
+/// `droid_response_from_decision` split already used elsewhere in this file.
+fn process_claude_payload_from_decision(
+    v: &Value,
+    cmd: &str,
+    decision: HookDecision,
+) -> PayloadAction {
+    let (rewritten, allow) = match decision {
         HookDecision::Deny => {
             return PayloadAction::Skip {
-                reason: "skip:deny_rule",
+                decision: HookOutcome::Deny,
                 cmd: cmd.to_string(),
             }
         }
         HookDecision::Defer => {
             return PayloadAction::Skip {
-                reason: "skip:defer",
+                decision: HookOutcome::Defer,
                 cmd: cmd.to_string(),
             }
         }
@@ -646,7 +659,55 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
     PayloadAction::Rewrite {
         cmd: cmd.to_string(),
         rewritten,
+        decision: if allow {
+            HookOutcome::Allow
+        } else {
+            HookOutcome::Ask
+        },
         output: json!({ "hookSpecificOutput": hook_output }),
+    }
+}
+
+/// Pull the fields `log_hook_decision` needs out of the raw PreToolUse payload.
+/// `None` when `session_id`/`tool_use_id` are absent — both are required to join
+/// back to the transcript later, so there's nothing useful to log without them.
+/// Split out from `log_hook_decision` so this extraction is unit-testable without
+/// touching the tracking DB.
+fn hook_log_fields(v: &Value) -> Option<(&str, &str, &str)> {
+    let session_id = v.get("session_id").and_then(|s| s.as_str())?;
+    let tool_use_id = v.get("tool_use_id").and_then(|s| s.as_str())?;
+    let project_path = v.get("cwd").and_then(|c| c.as_str()).unwrap_or("");
+    Some((session_id, tool_use_id, project_path))
+}
+
+/// Log the real hook decision to the tracking DB, keyed by the transcript's
+/// `tool_use_id`, so `rtk discover` can later read ground truth about historical
+/// hook coverage instead of re-deriving a guess from today's hook-install state.
+///
+/// Best-effort only — a tracking failure must never affect the hook's real output
+/// (fallback pattern from `rust-patterns.md`): this is a side channel, not the
+/// hook's actual job.
+fn log_hook_decision(v: &Value, cmd: &str, decision: HookOutcome, rewritten: Option<&str>) {
+    let Some((session_id, tool_use_id, project_path)) = hook_log_fields(v) else {
+        return;
+    };
+
+    let Ok(tracker) = crate::core::tracking::Tracker::new() else {
+        return;
+    };
+    if let Err(e) = tracker.record_hook_decision(
+        session_id,
+        tool_use_id,
+        project_path,
+        cmd,
+        decision,
+        rewritten,
+        env!("CARGO_PKG_VERSION"),
+    ) {
+        let _ = writeln!(
+            io::stderr(),
+            "[rtk hook] hook_decisions logging failed: {e}"
+        );
     }
 }
 
@@ -671,13 +732,39 @@ pub fn run_claude() -> Result<()> {
         PayloadAction::Rewrite {
             cmd,
             rewritten,
+            decision,
             output,
         } => {
-            audit_log("rewrite", &cmd, &rewritten);
+            // Write the response Claude Code is synchronously blocked on FIRST.
+            // `log_hook_decision` is a best-effort side channel (see its own doc
+            // comment: "a tracking failure must never affect the hook's real
+            // output") that opens a SQLite connection with a 5s busy_timeout — on
+            // lock contention (concurrent hook invocations sharing the default
+            // history.db) that write can block for real seconds. Since this fires
+            // on every single Bash tool call now (not just RTK-covered ones), that
+            // latency must never sit in front of the response, or it directly
+            // stalls the tool call it's supposedly just logging.
             let _ = writeln!(io::stdout(), "{output}");
+            audit_log("rewrite", &cmd, &rewritten);
+            log_hook_decision(&v, &cmd, decision, Some(&rewritten));
         }
-        PayloadAction::Skip { reason, cmd } => {
-            audit_log(reason, &cmd, "");
+        PayloadAction::Skip { decision, cmd } => {
+            // `rtk hook audit`'s skip-breakdown groups by a "skip:<reason>" prefix
+            // (see hook_audit_cmd.rs) — Skip is only ever reached via Deny/Defer,
+            // so map those to the reasons it expects rather than the bare
+            // HookOutcome::Display used for the Rewrite/tracking-DB paths.
+            //
+            // Skip has no stdout response to write (Claude Code falls through to
+            // its own native handling), but log_hook_decision is still deferred to
+            // last for the same reason as the Rewrite arm above: it must never be
+            // what a Bash tool call is waiting on.
+            let audit_action = match decision {
+                HookOutcome::Deny => "skip:deny_rule",
+                HookOutcome::Defer => "skip:defer",
+                HookOutcome::Allow | HookOutcome::Ask => "skip",
+            };
+            audit_log(audit_action, &cmd, "");
+            log_hook_decision(&v, &cmd, decision, None);
         }
         PayloadAction::Ignore => {}
     }
@@ -1423,6 +1510,139 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    /// Matches the real PreToolUse payload shape captured from a live Claude Code
+    /// session (verified fields: session_id, transcript_path, cwd, tool_use_id).
+    fn claude_payload_with_ids(cmd: &str, session_id: &str, tool_use_id: &str, cwd: &str) -> Value {
+        json!({
+            "session_id": session_id,
+            "transcript_path": "/home/user/.claude/projects/-home-user-project/session.jsonl",
+            "cwd": cwd,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": { "command": cmd },
+            "tool_use_id": tool_use_id
+        })
+    }
+
+    #[test]
+    fn test_hook_log_fields_extracts_real_payload_shape() {
+        let v =
+            claude_payload_with_ids("git status", "sess-1", "toolu_01ABC", "/home/user/project");
+        let (session_id, tool_use_id, project_path) = hook_log_fields(&v).unwrap();
+        assert_eq!(session_id, "sess-1");
+        assert_eq!(tool_use_id, "toolu_01ABC");
+        assert_eq!(project_path, "/home/user/project");
+    }
+
+    #[test]
+    fn test_hook_log_fields_none_without_tool_use_id() {
+        // Older/foreign payload shapes without a tool_use_id must not be logged —
+        // there's no join key to match it back to a transcript entry. Uses the
+        // real claude_input() fixture, which also lacks session_id — see the
+        // isolated variant below for a payload that has session_id present but
+        // tool_use_id specifically absent.
+        let v: Value = serde_json::from_str(&claude_input("git status")).unwrap();
+        assert!(hook_log_fields(&v).is_none());
+    }
+
+    #[test]
+    fn test_hook_log_fields_none_with_session_id_but_no_tool_use_id() {
+        // hook_log_fields checks session_id first and short-circuits via `?`, so
+        // the fixture above (missing both fields) can't tell us whether
+        // tool_use_id extraction specifically works — it passes even if that
+        // check were completely broken. This isolates tool_use_id: session_id
+        // present, tool_use_id absent.
+        let v = json!({
+            "session_id": "sess-1",
+            "tool_name": "Bash",
+            "tool_input": { "command": "git status" }
+        });
+        assert!(hook_log_fields(&v).is_none());
+    }
+
+    #[test]
+    fn test_hook_log_fields_defaults_missing_cwd_to_empty() {
+        let v = json!({
+            "session_id": "sess-1",
+            "tool_use_id": "toolu_01ABC",
+            "tool_name": "Bash",
+            "tool_input": { "command": "git status" }
+        });
+        let (_, _, project_path) = hook_log_fields(&v).unwrap();
+        assert_eq!(project_path, "");
+    }
+
+    // The decision field on PayloadAction feeds directly into hook_decisions —
+    // exercise the full Allow/Ask/Deny/Defer matrix against the pure
+    // process_claude_payload_from_decision (no real permission config needed).
+
+    #[test]
+    fn test_process_claude_payload_decision_allow() {
+        let v = claude_input_value("git status");
+        match process_claude_payload_from_decision(
+            &v,
+            "git status",
+            HookDecision::AllowRewrite("rtk git status".to_string()),
+        ) {
+            PayloadAction::Rewrite {
+                decision,
+                rewritten,
+                ..
+            } => {
+                assert_eq!(decision, HookOutcome::Allow);
+                assert_eq!(rewritten, "rtk git status");
+            }
+            other => {
+                panic!("expected Rewrite, got a different PayloadAction variant instead: {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_process_claude_payload_decision_ask() {
+        let v = claude_input_value("git status");
+        match process_claude_payload_from_decision(
+            &v,
+            "git status",
+            HookDecision::AskRewrite("rtk git status".to_string()),
+        ) {
+            PayloadAction::Rewrite { decision, .. } => assert_eq!(decision, HookOutcome::Ask),
+            other => {
+                panic!("expected Rewrite, got a different PayloadAction variant instead: {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_process_claude_payload_decision_deny() {
+        let v = claude_input_value("rm -rf /");
+        match process_claude_payload_from_decision(&v, "rm -rf /", HookDecision::Deny) {
+            PayloadAction::Skip { decision, .. } => assert_eq!(decision, HookOutcome::Deny),
+            other => {
+                panic!("expected Skip, got a different PayloadAction variant instead: {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_process_claude_payload_decision_defer() {
+        let v = claude_input_value("git status $(rm -rf /tmp/x)");
+        match process_claude_payload_from_decision(
+            &v,
+            "git status $(rm -rf /tmp/x)",
+            HookDecision::Defer,
+        ) {
+            PayloadAction::Skip { decision, .. } => assert_eq!(decision, HookOutcome::Defer),
+            other => {
+                panic!("expected Skip, got a different PayloadAction variant instead: {other:?}")
+            }
+        }
+    }
+
+    fn claude_input_value(cmd: &str) -> Value {
+        serde_json::from_str(&claude_input(cmd)).unwrap()
     }
 
     #[test]

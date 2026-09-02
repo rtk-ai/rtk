@@ -12,6 +12,9 @@ credentials.json
 secrets.json
 *.secret
 
+# Local Claude Code config (may contain machine-local settings/tokens)
+.claude/settings.local.json
+
 # IDE
 .idea/
 .vscode/

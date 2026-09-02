@@ -196,8 +196,66 @@ bench "read -n" "cat -n src/main.rs" "$RTK read src/main.rs -n"
 section "find"
 bench "find *" "find . -type f" "$RTK find '*'"
 bench "find *.rs" "find . -name '*.rs' -type f" "$RTK find '*.rs'"
-bench "find --max 10" "find . -not -path './target/*' -not -path './.git/*' -type f | head -10" "$RTK find '*' --max 10"
-bench "find --max 100" "find . -not -path './target/*' -not -path './.git/*' -type f | head -100" "$RTK find '*' --max 100"
+# `rtk find --max N` caps how many names are DISPLAYED but still scans and
+# summarizes the whole tree, so the honest baseline is the full `find` a user
+# would otherwise read, not a `head -N`-truncated slice — that measures a
+# different, early-terminated operation.
+# A single row carries the savings: the baseline is identical for every N, so a
+# second row would only add the same token count to the totals twice.
+bench "find --max 100" "find . -not -path './target/*' -not -path './.git/*' -type f" "$RTK find '*' --max 100"
+
+# That baseline no longer scales with N, so it cannot detect a --max that stops
+# limiting. Assert the cap directly instead: `rtk find --max N` displays exactly
+# min(N, total) names, so a --max that is ignored (falling back to the default
+# cap) fails whether N sits below or above that default.
+count_find_names() {
+  awk '
+    /^[0-9]+F [0-9]+D:$/ { next }   # "356F 63D:" summary header
+    /^\+[0-9]+ more$/    { next }   # "+256 more" truncation marker
+    /^ext: /             { next }   # extension histogram footer
+    NF == 0              { next }
+    { n += NF - ($1 ~ /\/$/ ? 1 : 0) }   # grouped lines lead with "dir/"
+    END { print n + 0 }
+  '
+}
+
+# Total tree size as rtk itself reports it: the "NNNF" header when it groups,
+# otherwise the displayed names plus whatever "+N more" hides.
+count_find_total() {
+  awk '
+    /^[0-9]+F [0-9]+D:$/ { total = $1 + 0; next }
+    /^\+[0-9]+ more$/    { more = substr($1, 2) + 0; next }
+    /^ext: /             { next }
+    NF == 0              { next }
+    { shown += NF - ($1 ~ /\/$/ ? 1 : 0) }
+    END { print (total ? total : shown + more) + 0 }
+  '
+}
+
+bench_find_max() {
+  local max="$1"
+  local out displayed total expected
+
+  out=$(eval "$RTK find '*' --max $max" 2>/dev/null || true)
+  displayed=$(printf '%s\n' "$out" | count_find_names)
+  total=$(printf '%s\n' "$out" | count_find_total)
+  expected=$([ "$max" -lt "$total" ] && echo "$max" || echo "$total")
+
+  TOTAL_TESTS=$((TOTAL_TESTS + 1))
+
+  if [ "$displayed" -eq "$expected" ] && [ "$expected" -gt 0 ]; then
+    printf "✅ %-24s │ %-40s │ %s/%s names displayed\n" \
+      "find --max $max cap" "rtk find '*' --max $max" "$displayed" "$total"
+    GOOD_TESTS=$((GOOD_TESTS + 1))
+  else
+    printf "❌ %-24s │ %-40s │ %s names displayed (expected %s of %s)\n" \
+      "find --max $max cap" "rtk find '*' --max $max" "$displayed" "$expected" "$total"
+    FAIL_TESTS=$((FAIL_TESTS + 1))
+  fi
+}
+
+bench_find_max 10
+bench_find_max 100
 
 # ===================
 # git
@@ -215,7 +273,7 @@ bench "git show" "git show HEAD --stat 2>/dev/null || true" "$RTK git show HEAD 
 section "grep"
 bench "grep fn" "grep -rn 'fn ' src/ || true" "$RTK grep -rn 'fn ' src/"
 bench "grep struct" "grep -rn 'struct ' src/ || true" "$RTK grep -rn 'struct ' src/"
-bench "grep -l 40" "grep -rn 'fn ' src/ || true" "$RTK grep -rn 'fn ' src/ -l 40"
+bench "grep --max-len 40" "grep -rn 'fn ' src/ || true" "$RTK grep --max-len 40 -rn 'fn ' src/"
 bench "grep -c" "grep -ron 'fn ' src/ || true" "$RTK grep -rc 'fn ' src/"
 
 # ===================

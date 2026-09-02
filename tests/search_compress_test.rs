@@ -17,6 +17,17 @@ fn rg_available() -> bool {
         .unwrap_or(false)
 }
 
+/// `rtk grep` shells out to `grep`, never `rg` (`search.rs`: `Engine::Grep => "grep"`).
+/// Guarding a grep-engine test on `rg_available()` makes it silently skip -- and
+/// report success -- on a box without ripgrep, which is a false green.
+fn grep_available() -> bool {
+    Command::new("grep")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 fn write_temp(content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("test.txt");
@@ -28,7 +39,7 @@ fn write_temp(content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
 
 #[test]
 fn single_file_context_shown_without_header() {
-    if !rg_available() {
+    if !grep_available() {
         return;
     }
     let long = "x".repeat(120);
@@ -53,7 +64,7 @@ fn single_file_context_shown_without_header() {
 
 #[test]
 fn after_context_uses_dash_separator_for_context_lines() {
-    if !rg_available() {
+    if !grep_available() {
         return;
     }
     let (_dir, path) = write_temp("MATCH\nafter1\n");
@@ -72,7 +83,7 @@ fn after_context_uses_dash_separator_for_context_lines() {
 
 #[test]
 fn capped_single_file_shows_header() {
-    if !rg_available() {
+    if !grep_available() {
         return;
     }
     let filler: String = (0..40).map(|i| format!("w{i} ")).collect();
@@ -92,7 +103,7 @@ fn capped_single_file_shows_header() {
 
 #[test]
 fn true_no_match_exits_1() {
-    if !rg_available() {
+    if !grep_available() {
         return;
     }
     let (_dir, path) = write_temp("hello world\n");
@@ -134,7 +145,7 @@ fn no_line_number_flag_produces_output_not_zero_matches() {
 
 #[test]
 fn no_filename_flag_produces_output_not_zero_matches() {
-    if !rg_available() {
+    if !grep_available() {
         return;
     }
     let (_dir, path) = write_temp("hello world\n");
@@ -231,7 +242,7 @@ fn count_tokens(s: &str) -> usize {
 // Covers #545: grep savings are measured against the real grep output.
 #[test]
 fn bulky_grep_yields_token_savings() {
-    if !rg_available() {
+    if !rg_available() || !grep_available() {
         return;
     }
     let filler: String = (0..50).map(|i| format!("word{i} ")).collect();
@@ -264,7 +275,7 @@ fn bulky_grep_yields_token_savings() {
 
 #[test]
 fn grep_only_flags_fall_back_to_system_grep() {
-    if !rg_available() {
+    if !grep_available() {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
@@ -296,7 +307,7 @@ fn grep_only_flags_fall_back_to_system_grep() {
 
 #[test]
 fn small_grep_not_worse_than_plain() {
-    if !rg_available() {
+    if !grep_available() {
         return;
     }
     let (_dir, path) = write_temp("foo\n");
@@ -316,11 +327,108 @@ fn small_grep_not_worse_than_plain() {
     );
 }
 
+// --- a numeric pattern must not bind to rtk's removed `-l` short ---
+
+#[test]
+fn numeric_pattern_with_files_with_matches_flag() {
+    if !grep_available() {
+        return;
+    }
+    // The pattern MUST parse as a usize for this test to gate anything. With
+    // `-l` bound to `--max-len: usize`, a non-numeric pattern makes clap fail,
+    // and run_fallback then re-runs raw grep and prints the right answer -- so
+    // a word pattern passes with or without the fix. A numeric pattern instead
+    // binds silently: `-l 8080` sets max_len=8080, leaving the first filename
+    // as the pattern and the second as the only path. No error, no fallback,
+    // wrong answer.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("hit.txt"), "listen on port 8080 today\n").expect("write");
+    std::fs::write(dir.path().join("miss.txt"), "nothing numeric here\n").expect("write");
+    let hit = dir.path().join("hit.txt");
+    let miss = dir.path().join("miss.txt");
+
+    let out = rtk()
+        .args([
+            "grep",
+            "-l",
+            "8080",
+            hit.to_str().unwrap(),
+            miss.to_str().unwrap(),
+        ])
+        .output()
+        .expect("rtk grep");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "`grep -l <number>` must find the match (#2628); status={:?} stderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("hit.txt"),
+        "-l must report the file containing 8080:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("miss.txt"),
+        "-l must not report the non-matching file:\n{stdout}"
+    );
+}
+
+// --- #2628: rtk's own long options still bind after the short forms were removed ---
+
+#[test]
+fn max_len_long_option_still_binds_to_rtk() {
+    if !grep_available() {
+        return;
+    }
+    // The other half of #2628: dropping the `-l` short must not stop the long
+    // form from reaching rtk's truncation. Needs a bulky match set -- a small
+    // result passes through uncompressed under the never-worse-than-plain
+    // guard, so a one-line file would prove nothing either way.
+    let body: String = (0..60)
+        .map(|i| format!("MATCH {i} {}\n", "x".repeat(400)))
+        .collect();
+    let (_dir, path) = write_temp(&body);
+    let file = path.to_str().unwrap();
+
+    // Measure matched lines only. rtk's own trailer ("+N more ... [see
+    // remaining: tail ...]") is fixed-width chrome that --max-len does not
+    // govern, and it is the longest line in either run.
+    let widest_match = |args: &[&str]| -> usize {
+        let out = rtk().args(args).output().expect("rtk grep");
+        assert!(
+            out.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| l.starts_with("MATCH "))
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+
+    let narrow = widest_match(&["grep", "--max-len", "40", "MATCH", file]);
+    let default = widest_match(&["grep", "MATCH", file]);
+
+    assert!(
+        narrow > 0 && default > 0,
+        "expected matched lines in both runs"
+    );
+    assert!(
+        narrow < default,
+        "--max-len must still bind after the short form was removed \
+         (narrow={narrow}, default={default})"
+    );
+}
+
 // --- #2543: bundled files-with-matches cluster (-rln / -ln) lists files, not "0 matches" ---
 
 #[test]
 fn bundled_files_with_matches_cluster_lists_files() {
-    if !rg_available() {
+    if !grep_available() {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
