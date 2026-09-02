@@ -346,12 +346,18 @@ fn docker_logs(args: &[String], _verbose: u8) -> Result<i32> {
 }
 
 pub fn k8s_pods(tool: &str, args: &[String], _verbose: u8) -> Result<i32> {
+    let (force, rest) = crate::core::k8s_cache::extract_force_flag(args);
+    let key = crate::core::k8s_cache::cache_key("pods", tool, &rest);
+
     let mut cmd = resolved_command(tool);
     cmd.args(["get", "pods", "-o", "json"]);
-    for arg in args {
+    for arg in &rest {
         cmd.arg(arg);
     }
-    run_k8s_json(cmd, tool, "get pods", format_kubectl_pods)
+    run_k8s_json(cmd, tool, "get pods", move |json| {
+        let full = format_kubectl_pods(json);
+        crate::core::k8s_cache::check_and_update(&key, &full, force).unwrap_or(full)
+    })
 }
 
 fn format_kubectl_pods(json: &Value) -> String {
@@ -432,12 +438,18 @@ fn format_kubectl_pods(json: &Value) -> String {
 }
 
 pub fn k8s_services(tool: &str, args: &[String], _verbose: u8) -> Result<i32> {
+    let (force, rest) = crate::core::k8s_cache::extract_force_flag(args);
+    let key = crate::core::k8s_cache::cache_key("services", tool, &rest);
+
     let mut cmd = resolved_command(tool);
     cmd.args(["get", "services", "-o", "json"]);
-    for arg in args {
+    for arg in &rest {
         cmd.arg(arg);
     }
-    run_k8s_json(cmd, tool, "get services", format_kubectl_services)
+    run_k8s_json(cmd, tool, "get services", move |json| {
+        let full = format_kubectl_services(json);
+        crate::core::k8s_cache::check_and_update(&key, &full, force).unwrap_or(full)
+    })
 }
 
 fn format_kubectl_services(json: &Value) -> String {
