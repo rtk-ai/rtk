@@ -1214,7 +1214,14 @@ fn pipeline_final_command_is_safe(rtk_cmd: &str, cmd: &str) -> bool {
 }
 
 enum ExcludePattern {
+    /// Anchored regex (entry started with `^`). Matched with `Regex::is_match`.
     Regex(Regex),
+    /// Literal command prefix. The entry can be one or more whitespace-separated
+    /// tokens (e.g. `"diff"`, `"git diff"`, `"docker compose up"`); a command
+    /// matches when it either equals the entry exactly or begins with the entry
+    /// followed by a whitespace character. This is what allows `"git diff"` to
+    /// exclude `"git diff HEAD"` without also excluding `"git diffstat"`
+    /// (#1919).
     Prefix(String),
 }
 
@@ -1230,21 +1237,36 @@ fn compile_exclude_patterns(patterns: &[String]) -> Vec<ExcludePattern> {
                 );
                 return None;
             }
-            let anchored = if trimmed.starts_with('^') {
-                trimmed.to_string()
-            } else {
-                format!(r"^{}($|\s)", regex::escape(trimmed))
-            };
-            Some(match Regex::new(&anchored) {
-                Ok(re) => ExcludePattern::Regex(re),
-                Err(e) => {
+            // Anchored entries (starting with `^`) are treated as regex so power
+            // users can write patterns like `^docker (compose|exec)`. Everything
+            // else is a literal command prefix — see `ExcludePattern::Prefix`
+            // for the matching contract.
+            if let Some(stripped) = trimmed.strip_prefix('^') {
+                if stripped.is_empty() {
                     eprintln!(
-                        "rtk: warning: invalid exclude_commands pattern '{}': {}",
-                        pattern, e
+                        "rtk: warning: ignoring trivial exclude_commands pattern '{}'",
+                        pattern
                     );
-                    ExcludePattern::Prefix(trimmed.to_string())
+                    return None;
                 }
-            })
+                return match Regex::new(trimmed) {
+                    Ok(re) => Some(ExcludePattern::Regex(re)),
+                    Err(e) => {
+                        eprintln!(
+                            "rtk: warning: invalid exclude_commands pattern '{}': {}",
+                            pattern, e
+                        );
+                        // Fall back to literal prefix on the un-anchored body so
+                        // a malformed regex still gives the user *some*
+                        // coverage instead of silently doing nothing.
+                        Some(ExcludePattern::Prefix(stripped.to_string()))
+                    }
+                };
+            }
+            // Normalise interior whitespace so `"git  diff"` (two spaces) still
+            // matches the same commands as `"git diff"`.
+            let canonical = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+            Some(ExcludePattern::Prefix(canonical))
         })
         .collect()
 }
@@ -1280,7 +1302,17 @@ fn rewrite_segment(
 fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
     excluded.iter().any(|pat| match pat {
         ExcludePattern::Regex(re) => re.is_match(cmd),
-        ExcludePattern::Prefix(prefix) => cmd.starts_with(prefix.as_str()),
+        // The entry matches when the command starts with the literal prefix
+        // *followed by whitespace* — or equals it exactly. This is the key
+        // contract for #1919 so that `"git diff"` covers `git diff HEAD` but
+        // does not bleed into `git diffstat` or `git-difftool`.
+        ExcludePattern::Prefix(prefix) => {
+            let cmd = cmd.trim_start();
+            cmd == prefix
+                || cmd
+                    .strip_prefix(prefix.as_str())
+                    .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+        }
     })
 }
 
@@ -4887,6 +4919,92 @@ mod tests {
         let excluded = vec!["git push".to_string()];
         assert_eq!(
             rewrite_command_no_prefixes("git push origin main", &excluded),
+            None
+        );
+    }
+
+    // --- #1919: multi-token exclude_commands entries cover subcommands ---
+    //
+    // The user-facing contract: an entry like `"git diff"` must exclude any
+    // command whose first two whitespace-separated tokens are `git diff`,
+    // independent of how many trailing tokens follow. Single-token entries
+    // such as `"diff"` keep their pre-existing behaviour. Below we exercise
+    // every shape `compile_exclude_patterns` is expected to handle.
+
+    #[test]
+    fn test_exclude_single_token_still_matches() {
+        // Regression sentinel for the original `["curl"]`-style use case.
+        let excluded = vec!["diff".to_string()];
+        assert_eq!(rewrite_command_no_prefixes("diff a b", &excluded), None);
+    }
+
+    #[test]
+    fn test_exclude_two_token_subcommand_git_diff() {
+        // The headline case from #1919: `"git diff"` must cover `git diff HEAD`.
+        let excluded = vec!["git diff".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("git diff HEAD", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_exclude_two_token_with_many_trailing_args() {
+        let excluded = vec!["git diff".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("git diff --staged path/to/file", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_exclude_three_token_subcommand() {
+        // Three-token entry: extends to wrapper tools such as `docker compose up`.
+        let excluded = vec!["docker compose up".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("docker compose up -d", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_exclude_exact_match_with_no_trailing_args() {
+        // `"git diff"` typed alone must also be excluded — equality is part of
+        // the contract, not just prefix-with-whitespace.
+        let excluded = vec!["git diff".to_string()];
+        assert_eq!(rewrite_command_no_prefixes("git diff", &excluded), None);
+    }
+
+    #[test]
+    fn test_exclude_two_token_does_not_match_sibling_subcommand() {
+        // `"git diff"` must not bleed into `git status` (different subcommand).
+        let excluded = vec!["git diff".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("git status", &excluded),
+            Some("rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_exclude_two_token_does_not_match_subcommand_prefix() {
+        // `"git diff"` must not match commands whose second token merely
+        // *starts* with `diff` (e.g. `git diffstat`) — the end of the entry
+        // must align with a whitespace boundary, not a substring boundary.
+        // Driving `is_excluded` directly lets us prove the boundary rule
+        // without depending on which subcommands happen to have an `rtk`
+        // equivalent today.
+        let excluded = compile_exclude_patterns(&["git diff".to_string()]);
+        assert!(!is_excluded("git diffstat HEAD", &excluded));
+        assert!(!is_excluded("git-difftool", &excluded));
+        assert!(is_excluded("git diff HEAD", &excluded));
+    }
+
+    #[test]
+    fn test_exclude_extra_whitespace_in_entry_is_normalised() {
+        // A typo like `"git  diff"` (two spaces) still excludes `git diff HEAD`.
+        let excluded = vec!["git  diff".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("git diff HEAD", &excluded),
             None
         );
     }
