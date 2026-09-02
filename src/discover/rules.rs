@@ -69,6 +69,20 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^tea\s+(pr|pull|pulls|issue|issues|i|release|releases|r|api)",
+        rtk_cmd: "rtk tea",
+        rewrite_prefixes: &["tea"],
+        category: "Gitea",
+        savings_pct: 82.0,
+        subcmd_savings: &[
+            ("pr", 87.0),
+            ("pull", 87.0),
+            ("pulls", 87.0),
+            ("issue", 80.0),
+        ],
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^cargo\s+(build|test|clippy|check|fmt|install)",
         rtk_cmd: "rtk cargo",
         rewrite_prefixes: &["cargo"],
