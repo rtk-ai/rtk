@@ -61,7 +61,7 @@ fn project_filter_params(project_path: Option<&str>) -> (Option<String>, Option<
     }
 }
 
-use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB, RTK_DATA_DIR};
+use super::constants::{CLEANUP_INTERVAL_HOURS, DEFAULT_HISTORY_DAYS, HISTORY_DB, RTK_DATA_DIR};
 
 /// Main tracking interface for recording and querying command history.
 ///
@@ -336,6 +336,14 @@ impl Tracker {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )",
+            [],
+        )?;
+
         restrict_db_files(&db_path);
 
         Ok(Self { conn })
@@ -389,13 +397,20 @@ impl Tracker {
             "CREATE INDEX IF NOT EXISTS idx_pf_timestamp ON parse_failures(timestamp)",
             [],
         )?;
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )",
+            [],
+        )?;
         Ok(())
     }
 
     /// Record a command execution with token counts and timing.
     ///
     /// Calculates savings metrics and stores the record in the database.
-    /// Automatically cleans up records older than 90 days after insertion.
+    /// Periodically cleans up records older than 90 days (at most once per 24h).
     ///
     /// # Arguments
     ///
@@ -447,12 +462,36 @@ impl Tracker {
             ],
         )?;
 
-        self.cleanup_old()?;
+        let _ = self.maybe_cleanup();
         Ok(())
     }
 
-    fn cleanup_old(&self) -> Result<()> {
-        let cutoff = Utc::now() - chrono::Duration::days(DEFAULT_HISTORY_DAYS);
+    fn maybe_cleanup(&self) -> Result<()> {
+        let last: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'last_cleanup'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let now = Utc::now();
+        let needs_cleanup = match last {
+            Some(ts) => {
+                let parsed = DateTime::parse_from_rfc3339(&ts)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| now - chrono::Duration::hours(CLEANUP_INTERVAL_HOURS + 1));
+                now.signed_duration_since(parsed).num_hours() >= CLEANUP_INTERVAL_HOURS
+            }
+            None => true,
+        };
+
+        if !needs_cleanup {
+            return Ok(());
+        }
+
+        let cutoff = now - chrono::Duration::days(DEFAULT_HISTORY_DAYS);
         self.conn.execute(
             "DELETE FROM commands WHERE timestamp < ?1",
             params![cutoff.to_rfc3339()],
@@ -460,6 +499,10 @@ impl Tracker {
         self.conn.execute(
             "DELETE FROM parse_failures WHERE timestamp < ?1",
             params![cutoff.to_rfc3339()],
+        )?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_cleanup', ?1)",
+            params![now.to_rfc3339()],
         )?;
         Ok(())
     }
@@ -494,7 +537,7 @@ impl Tracker {
                 fallback_succeeded as i32,
             ],
         )?;
-        self.cleanup_old()?;
+        let _ = self.maybe_cleanup();
         Ok(())
     }
 
@@ -1738,6 +1781,57 @@ mod tests {
     }
 
     #[test]
+    fn test_maybe_cleanup_skips_when_recent() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+
+        // First record triggers cleanup (no last_cleanup row yet)
+        tracker
+            .record("cmd1", "rtk cmd1", 100, 50, 10)
+            .expect("Failed to record");
+
+        // Verify last_cleanup was set
+        let last: String = tracker
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'last_cleanup'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("last_cleanup should exist after first record");
+        assert!(!last.is_empty());
+
+        // Insert an "old" record directly (91 days ago)
+        let old_ts = (Utc::now() - chrono::Duration::days(91)).to_rfc3339();
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+                 VALUES (?1, 'old', 'rtk old', '', 10, 5, 5, 50.0, 1)",
+                params![old_ts],
+            )
+            .expect("Failed to insert old record");
+
+        // Second record should NOT trigger cleanup (last_cleanup was just set)
+        tracker
+            .record("cmd2", "rtk cmd2", 100, 50, 10)
+            .expect("Failed to record");
+
+        // The old record should still exist (cleanup was skipped)
+        let count: i64 = tracker
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM commands WHERE original_cmd = 'old'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("Failed to count");
+        assert_eq!(
+            count, 1,
+            "Old record should survive because cleanup was skipped"
+        );
+    }
+
+    #[test]
     #[cfg(unix)]
     fn test_restrict_db_files_covers_wal_sidecars() {
         use std::os::unix::fs::PermissionsExt;
@@ -1757,5 +1851,50 @@ mod tests {
             let mode = std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "expected 0600 on {}", p.display());
         }
+    }
+
+    #[test]
+    fn test_maybe_cleanup_runs_when_stale() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+
+        // Manually set last_cleanup to 25 hours ago
+        let stale = (Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
+        tracker
+            .conn
+            .execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_cleanup', ?1)",
+                params![stale],
+            )
+            .expect("Failed to set stale last_cleanup");
+
+        // Insert an old record (91 days ago)
+        let old_ts = (Utc::now() - chrono::Duration::days(91)).to_rfc3339();
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+                 VALUES (?1, 'ancient', 'rtk ancient', '', 10, 5, 5, 50.0, 1)",
+                params![old_ts],
+            )
+            .expect("Failed to insert old record");
+
+        // This record() should trigger cleanup because last_cleanup is stale
+        tracker
+            .record("cmd", "rtk cmd", 100, 50, 10)
+            .expect("Failed to record");
+
+        // The old record should be gone
+        let count: i64 = tracker
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM commands WHERE original_cmd = 'ancient'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("Failed to count");
+        assert_eq!(
+            count, 0,
+            "Old record should be cleaned up because last_cleanup was stale"
+        );
     }
 }
