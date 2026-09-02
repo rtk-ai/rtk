@@ -647,6 +647,47 @@ pub enum Decoded {
     Binary,
 }
 
+/// Walk `bytes` as UTF-8, counting well-formed multibyte (≥2-byte) sequences and
+/// bytes that fail to decode. Lets [`decode_output`] tell a UTF-8 file with sparse
+/// corruption (many valid sequences, few invalid bytes) from genuine Latin-1,
+/// where every high byte is a lone char that fails as a UTF-8 lead — no valid
+/// multibyte sequence, all counted invalid. ASCII bytes are ignored; only the
+/// non-ASCII bytes are weighed.
+fn utf8_multibyte_scan(bytes: &[u8]) -> (usize, usize) {
+    let mut i = 0;
+    let mut valid_mb = 0usize;
+    let mut invalid = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b < 0x80 {
+            i += 1;
+            continue;
+        }
+        let len = match b {
+            0xC2..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF4 => 4,
+            // 0x80–0xBF stray continuation, 0xC0/0xC1 overlong, 0xF5–0xFF out of range.
+            _ => {
+                invalid += 1;
+                i += 1;
+                continue;
+            }
+        };
+        if bytes
+            .get(i..i + len)
+            .is_some_and(|seq| std::str::from_utf8(seq).is_ok())
+        {
+            valid_mb += 1;
+            i += len;
+        } else {
+            invalid += 1;
+            i += 1;
+        }
+    }
+    (valid_mb, invalid)
+}
+
 /// Decode captured stdout bytes, preferring fidelity over guessing:
 /// - Valid UTF-8 → [`Decoded::Utf8`].
 /// - Invalid UTF-8 that looks binary (NUL / dense control bytes) or uses the
@@ -693,6 +734,20 @@ pub fn decode_output(bytes: &[u8]) -> Decoded {
     match std::str::from_utf8(bytes) {
         Ok(s) => Decoded::Utf8(s.to_string()),
         Err(_) => {
+            // A buffer that is predominantly well-formed UTF-8 with only sparse
+            // invalid bytes is a UTF-8 file with local corruption, NOT Latin-1.
+            // Transcoding the whole buffer as Latin-1 would turn every multibyte
+            // char (`é` = C3 A9) into mojibake (`Ã©`) — strictly worse than
+            // develop's `from_utf8_lossy`, which keeps the valid text and replaces
+            // only the bad bytes. Genuine Latin-1 has ~no well-formed UTF-8
+            // multibyte runs (each accent is a lone high byte that fails as a
+            // UTF-8 lead), so `valid_mb` stays ~0 there and this never steals the
+            // Latin-1 path this change adds. Runs before the C1 guard because a
+            // valid UTF-8 continuation byte can fall in 0x80–0x9F (`ć` = C4 87).
+            let (valid_mb, invalid) = utf8_multibyte_scan(bytes);
+            if valid_mb > invalid {
+                return Decoded::Utf8(String::from_utf8_lossy(bytes).into_owned());
+            }
             // C1 control bytes are where ISO-8859-1 and Windows-1252 disagree.
             if bytes.iter().any(|&b| (0x80..=0x9F).contains(&b)) {
                 return Decoded::Binary;
@@ -923,6 +978,46 @@ pub(crate) mod tests {
         // Latin-1, not CJK — the threshold must not flip it to Binary.
         let bytes = b"caf\xE9\xE9 and plenty of ascii text to keep the density low";
         assert!(matches!(decode_output(bytes), Decoded::Latin1(_)));
+    }
+
+    #[test]
+    fn test_decode_output_mostly_utf8_with_bad_byte_stays_utf8() {
+        // Predominantly valid UTF-8 (é = C3 A9, à = C3 A0) with ONE stray invalid
+        // byte (0xFF). This must decode as UTF-8 (bad byte -> U+FFFD, develop's
+        // behavior), NOT Latin-1-transcode the whole buffer, which would mangle
+        // every `é` into `Ã©`. Regression guard for the blocking review finding.
+        let bytes = b"caf\xC3\xA9 r\xC3\xA9sum\xC3\xA9 d\xC3\xA9j\xC3\xA0\xFF";
+        let Decoded::Utf8(s) = decode_output(bytes) else {
+            panic!("expected Utf8 (lossy), got Latin1/Binary");
+        };
+        assert!(s.contains("café résumé déjà"), "kept the UTF-8 text: {s:?}");
+        assert!(
+            !s.contains("Ã©"),
+            "must not Latin-1-mangle valid UTF-8: {s:?}"
+        );
+    }
+
+    #[test]
+    fn test_decode_output_utf8_with_c1_continuation_and_bad_byte_stays_utf8() {
+        // `ć` = C4 87, whose continuation byte 0x87 falls in 0x80–0x9F. A mostly
+        // UTF-8 buffer like this with a stray bad byte must not be caught by the
+        // C1 guard and dumped as Binary — the predominance check runs first.
+        let bytes = b"\xC4\x87\xC4\x87\xC4\x87 mostly ascii source line\xFF";
+        assert!(matches!(decode_output(bytes), Decoded::Utf8(_)));
+    }
+
+    #[test]
+    fn test_decode_output_large_dense_euc_jp_blob_is_binary() {
+        // The predominance scan runs BEFORE the CJK density guard, so a *large*,
+        // realistically dense EUC-JP blob (not just 3 kanji) must still route to
+        // Binary: across the whole buffer `valid_mb` stays far below `invalid`, so
+        // it never steals the passthrough. Guards the new arm's ordering at scale.
+        let mut bytes = Vec::new();
+        for _ in 0..1000 {
+            bytes.extend_from_slice(b"\xC6\xFC\xCB\xDC\xB8\xEC"); // 日本語 (EUC-JP)
+        }
+        assert!(bytes.len() > 5_000);
+        assert!(matches!(decode_output(&bytes), Decoded::Binary));
     }
 
     #[test]

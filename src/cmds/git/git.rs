@@ -413,8 +413,18 @@ fn is_blob_show_arg(arg: &str) -> bool {
     // Detect `rev:path` style arguments while ignoring flags like `--pretty=format:...`.
     // `:/text` is a commit-message search, not a blob, so it is excluded. `:path` and
     // `:N:path` (index / merge-stage blobs) start with `:` but ARE blobs, so only the
-    // literal `:/` prefix is filtered out.
-    !arg.starts_with('-') && !arg.starts_with(":/") && arg.contains(':')
+    // `:/` prefix is filtered out there.
+    //
+    // Magic pathspecs (`:(exclude)…`, `:(top)…`, `:!…`) also start with `:` but are
+    // NOT blobs — they only ever appear as pathspecs, so exclude them too. A colon
+    // buried in a preceding option value (`git show -S 'a:b' HEAD`) still trips this
+    // heuristic; disambiguating that needs git's per-flag argument grammar, so it is
+    // left as a known (pre-existing) false positive rather than guessed at here.
+    !arg.starts_with('-')
+        && !arg.starts_with(":/")
+        && !arg.starts_with(":(")
+        && !arg.starts_with(":!")
+        && arg.contains(':')
 }
 
 /// The `<rev>:<path>` blob arguments of a `git show`. Args after a `--` are
@@ -3629,6 +3639,10 @@ mod tests {
         assert!(!is_blob_show_arg("HEAD"));
         // `:/text` is a commit-message search, not a blob.
         assert!(!is_blob_show_arg(":/fix the bug"));
+        // Magic pathspecs are pathspecs, never blobs.
+        assert!(!is_blob_show_arg(":(exclude)b.txt"));
+        assert!(!is_blob_show_arg(":(top,glob)*.rs"));
+        assert!(!is_blob_show_arg(":!b.txt"));
     }
 
     /// Helper: build an args slice from string literals.
@@ -3696,23 +3710,21 @@ mod tests {
     #[test]
     fn test_blob_windowing_token_savings() {
         // Per `.claude/rules/cli-testing.md`, a filter must verify its 60–90% savings
-        // claim with a real fixture. A ~40 KB text blob (well over the 8 KiB budget,
-        // under the 1 MB recovery cap) windows to the head; the recovery hint is a
-        // handful of tokens, so head-vs-raw is the savings floor.
+        // claim with a real fixture. The shipped 10.7 KB `blob_large.txt` only reaches
+        // ~25% (an 8 KiB head is a big fraction of it), so use a real, larger committed
+        // blob — the repo's own `src/main.rs` (~120 KB), the exact `git show HEAD:<src>`
+        // case this feature targets and stably far above the 24 KiB the assert needs —
+        // where windowing to the 8 KiB head genuinely clears the floor. The recovery
+        // hint is a handful of tokens, so head-vs-raw is the savings floor.
         fn count_tokens(text: &str) -> usize {
             text.split_whitespace().count()
         }
-        let mut raw = String::new();
-        for i in 0..600 {
-            raw.push_str(&format!(
-                "line {i}: some representative source content with a few tokens here\n"
-            ));
-        }
+        let raw = include_str!("../../main.rs");
         assert!(raw.len() > 3 * MAX_BLOB_BYTES.0);
         let (head, _remaining, _offset) =
-            blob_truncation(&raw, MAX_BLOB_BYTES, MaxRecoverable(1_000_000))
+            blob_truncation(raw, MAX_BLOB_BYTES, MaxRecoverable(1_000_000))
                 .expect("large blob should window");
-        let savings = 100.0 - (count_tokens(head) as f64 / count_tokens(&raw) as f64 * 100.0);
+        let savings = 100.0 - (count_tokens(head) as f64 / count_tokens(raw) as f64 * 100.0);
         assert!(
             savings >= 60.0,
             "expected ≥60% token savings, got {:.1}%",
