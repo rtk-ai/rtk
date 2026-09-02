@@ -4,6 +4,7 @@ mod core;
 mod discover;
 mod hooks;
 mod learn;
+mod mcp;
 mod parser;
 
 // Re-export command modules for routing
@@ -888,6 +889,19 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Start MCP (Model Context Protocol) server for Claude Desktop integration.
+    ///
+    /// Reads JSON-RPC 2.0 requests from stdin and writes responses to stdout.
+    /// Exposes a `bash` tool that routes commands through RTK's filter pipeline.
+    ///
+    /// Add to Claude Desktop via: rtk mcp-install
+    #[command(name = "mcp-serve")]
+    McpServe,
+
+    /// Install RTK as an MCP server in Claude Desktop's configuration.
+    #[command(name = "mcp-install")]
+    McpInstall,
+
     /// Hook processors for LLM CLI tools (Gemini CLI, Copilot, etc.)
     Hook {
         #[command(subcommand)]
@@ -1298,6 +1312,28 @@ enum GoCommands {
     Other(Vec<OsString>),
 }
 
+/// RTK-only subcommands that should never fall back to raw execution.
+/// If Clap fails to parse these, show the Clap error directly.
+const RTK_META_COMMANDS: &[&str] = &[
+    "gain",
+    "discover",
+    "learn",
+    "init",
+    "config",
+    "proxy",
+    "run",
+    "hook",
+    "hook-audit",
+    "pipe",
+    "cc-economics",
+    "verify",
+    "trust",
+    "untrust",
+    "session",
+    "rewrite",
+    "mcp-serve",
+    "mcp-install",
+];
 #[derive(Debug, Subcommand)]
 enum SbtCommands {
     /// Run tests with compact output (90% token reduction via ScalaTest filtering)
@@ -2473,6 +2509,16 @@ fn run_cli() -> Result<i32> {
 
         Commands::HookAudit { since } => {
             hooks::hook_audit_cmd::run(since, cli.verbose)?;
+            0
+        }
+
+        Commands::McpServe => {
+            mcp::serve()?;
+            0
+        }
+
+        Commands::McpInstall => {
+            mcp::install::run()?;
             0
         }
 

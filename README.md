@@ -17,6 +17,7 @@
 <p align="center">
   <a href="https://www.rtk-ai.app">Website</a> &bull;
   <a href="#installation">Install</a> &bull;
+  <a href="#claude-desktop-mcp">Claude Desktop</a> &bull;
   <a href="https://www.rtk-ai.app/guide/troubleshooting">Troubleshooting</a> &bull;
   <a href="docs/contributing/ARCHITECTURE.md">Architecture</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
@@ -345,6 +346,49 @@ rtk init --show             # Verify installation
 
 After install, **restart Claude Code**.
 
+## Claude Desktop (MCP)
+
+RTK works with **Claude Desktop** via the [Model Context Protocol](https://modelcontextprotocol.io). It exposes a `bash` tool that routes commands through the same filter pipeline used by Claude Code hooks — the same 60-90% token savings, no configuration needed per-project.
+
+```bash
+rtk mcp-install   # Register RTK in Claude Desktop's config, then restart the app
+```
+
+That's it. After restarting Claude Desktop, RTK's `bash` tool appears in the tool picker and all shell commands it runs go through RTK's filters automatically.
+
+**How it works:**
+
+```
+Claude Desktop → bash tool call {command: "git log -10"}
+                      ↓
+              rtk mcp-serve (stdio JSON-RPC 2.0, <10ms startup)
+                      ↓
+              spawns: rtk git log -10  (applies git log filter)
+                      ↓
+              returns compact output to Claude Desktop (~80% fewer tokens)
+```
+
+**Manual install** (if `rtk mcp-install` doesn't detect your config path):
+
+| Platform | Config file |
+|----------|-------------|
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Linux | `~/.config/Claude/claude_desktop_config.json` |
+
+```json
+{
+  "mcpServers": {
+    "rtk": {
+      "command": "/full/path/to/rtk",
+      "args": ["mcp-serve"]
+    }
+  }
+}
+```
+
+MCP-sourced savings appear in `rtk gain --history` under `source=mcp`. See [docs/MCP.md](docs/MCP.md) for full setup, verification, and troubleshooting.
+
 ## Windows
 
 RTK works fully on native Windows. Since **v0.37.2** the auto-rewrite hook runs as a **native binary command** (`rtk hook claude`) — no Unix shell, bash, or jq required — so commands are rewritten transparently on Command Prompt, PowerShell, and Windows Terminal, just like on Linux and macOS.
@@ -388,6 +432,7 @@ RTK supports 16 AI coding tools. Each integration rewrites shell commands to `rt
 | Tool | Install | Method |
 |------|---------|--------|
 | **Claude Code** | `rtk init -g` | PreToolUse hook (native binary) |
+| **Claude Desktop** | `rtk mcp-install` | MCP server (`bash` tool) |
 | **GitHub Copilot (VS Code)** | `rtk init -g --copilot` | PreToolUse hook — transparent rewrite |
 | **GitHub Copilot CLI** | `rtk init -g --copilot` | PreToolUse deny-with-suggestion (CLI limitation) |
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
@@ -440,6 +485,7 @@ brew uninstall rtk           # If installed via Homebrew
 ## Documentation
 
 - **[rtk-ai.app/guide](https://www.rtk-ai.app/guide)** — full user guide (installation, supported agents, what gets optimized, analytics, configuration, troubleshooting)
+- **[docs/MCP.md](docs/MCP.md)** — Claude Desktop MCP server setup, verification, troubleshooting
 - **[INSTALL.md](INSTALL.md)** — detailed installation reference
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** — system design and technical decisions
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — contribution guide
