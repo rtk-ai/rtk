@@ -5,8 +5,9 @@
  */
 
 import { vmEnsureReady, vmBuildRtk } from "./lib/vm";
+import { fileURLToPath } from "node:url";
 
-const PROJECT_ROOT = new URL("../../", import.meta.url).pathname.replace(/\/$/, "");
+const PROJECT_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
 await vmEnsureReady();
 const info = await vmBuildRtk(PROJECT_ROOT);
