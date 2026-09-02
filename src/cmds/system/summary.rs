@@ -4,39 +4,34 @@ use crate::core::guard::never_worse;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::CAP_WARNINGS;
-use crate::core::utils::truncate;
+use crate::core::utils::{truncate, user_command};
 use anyhow::{Context, Result};
 use regex::Regex;
-use std::process::Command;
 
 const MAX_SUMMARY_LIST: usize = CAP_WARNINGS;
 const MAX_SUMMARY_KEYS: usize = CAP_WARNINGS;
 
 /// Run a command and provide a heuristic summary
-pub fn run(command: &str, verbose: u8) -> Result<i32> {
+///
+/// `parts` are clap trailing varargs; they are joined only for display and
+/// tracking labels, never to build the child process (see [`user_command`]).
+pub fn run(parts: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let command = parts.join(" ");
 
     if verbose > 0 {
         eprintln!("Running and summarizing: {}", command);
     }
 
-    let mut cmd = if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd");
-        c.args(["/C", command]);
-        c
-    } else {
-        let mut c = Command::new("sh");
-        c.args(["-c", command]);
-        c
-    };
+    let mut cmd = user_command(parts);
     let result = exec_capture(&mut cmd).context("Failed to execute command")?;
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    let summary = summarize_output(&raw, command, result.success());
+    let summary = summarize_output(&raw, &command, result.success());
     let shown = never_worse(&raw, &summary);
     println!("{}", shown);
-    timer.track(command, "rtk summary", &raw, shown);
+    timer.track(&command, "rtk summary", &raw, shown);
     Ok(result.exit_code)
 }
 

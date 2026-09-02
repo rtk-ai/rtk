@@ -1885,15 +1885,9 @@ fn run_cli() -> Result<i32> {
             }
         }
 
-        Commands::Err { command } => {
-            let cmd = command.join(" ");
-            runner::run_err(&cmd, cli.verbose)?
-        }
+        Commands::Err { command } => runner::run_err(&command, cli.verbose)?,
 
-        Commands::Test { command } => {
-            let cmd = command.join(" ");
-            runner::run_test(&cmd, cli.verbose)?
-        }
+        Commands::Test { command } => runner::run_test(&command, cli.verbose)?,
 
         Commands::Json {
             file,
@@ -2013,10 +2007,7 @@ fn run_cli() -> Result<i32> {
             OcCommands::Other(args) => container::run_oc_passthrough(&args, cli.verbose)?,
         },
 
-        Commands::Summary { command } => {
-            let cmd = command.join(" ");
-            summary::run(&cmd, cli.verbose)?
-        }
+        Commands::Summary { command } => summary::run(&command, cli.verbose)?,
 
         Commands::Grep {
             max_len,
@@ -2533,22 +2524,23 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Run { command, args } => {
-            let raw = match command {
-                Some(c) => c,
-                None if !args.is_empty() => args.join(" "),
-                None => String::new(),
+            // `-c` is documented as the shell-like invocation, so its string is
+            // shell syntax by contract. Positional args arrive pre-split by the
+            // invoking shell and must not be re-parsed by a second one (#3185).
+            let label = match &command {
+                Some(c) => c.clone(),
+                None => args.join(" "),
             };
-            if raw.trim().is_empty() {
+            if label.trim().is_empty() {
                 0
             } else {
-                use std::process::Command as ProcCommand;
-                let shell = if cfg!(windows) { "cmd" } else { "sh" };
-                let flag = if cfg!(windows) { "/C" } else { "-c" };
-                let status = ProcCommand::new(shell)
-                    .arg(flag)
-                    .arg(&raw)
+                let mut proc = match &command {
+                    Some(c) => core::utils::shell_command(c),
+                    None => core::utils::user_command(&args),
+                };
+                let status = proc
                     .status()
-                    .with_context(|| format!("Failed to execute: {}", raw))?;
+                    .with_context(|| format!("Failed to execute: {}", label))?;
                 core::utils::exit_code_from_status(&status, "run")
             }
         }

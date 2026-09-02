@@ -2,9 +2,9 @@
 
 use crate::core::stream::StreamFilter;
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
+use crate::core::utils::user_command;
 use anyhow::Result;
 use regex::Regex;
-use std::process::Command;
 use std::sync::LazyLock;
 
 const MAX_RUNNER_FAILURES: usize = CAP_WARNINGS;
@@ -102,44 +102,39 @@ impl StreamFilter for ErrorStreamFilter {
     }
 }
 
-fn build_shell_command(command: &str) -> Command {
-    if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd");
-        c.args(["/C", command]);
-        c
-    } else {
-        let mut c = Command::new("sh");
-        c.args(["-c", command]);
-        c
-    }
-}
-
 /// Run a command and filter output to show only errors/warnings
-pub fn run_err(command: &str, verbose: u8) -> Result<i32> {
+///
+/// `parts` are clap trailing varargs; they are joined only for display and
+/// tracking labels, never to build the child process (see [`user_command`]).
+pub fn run_err(parts: &[String], verbose: u8) -> Result<i32> {
+    let label = parts.join(" ");
     if verbose > 0 {
-        eprintln!("Running: {}", command);
+        eprintln!("Running: {}", label);
     }
-    let cmd = build_shell_command(command);
+    let cmd = user_command(parts);
     crate::core::runner::run_streamed(
         cmd,
         "err",
-        command,
+        &label,
         Box::new(ErrorStreamFilter::new()),
         crate::core::runner::RunOptions::with_tee("err"),
     )
 }
 
 /// Run tests and show only failures
-pub fn run_test(command: &str, verbose: u8) -> Result<i32> {
+///
+/// `parts` are clap trailing varargs; see [`run_err`] for the join caveat.
+pub fn run_test(parts: &[String], verbose: u8) -> Result<i32> {
+    let label = parts.join(" ");
     if verbose > 0 {
-        eprintln!("Running tests: {}", command);
+        eprintln!("Running tests: {}", label);
     }
-    let cmd = build_shell_command(command);
-    let command_owned = command.to_string();
+    let cmd = user_command(parts);
+    let command_owned = label.clone();
     crate::core::runner::run_filtered(
         cmd,
         "test",
-        command,
+        &label,
         move |raw| extract_test_summary(raw, &command_owned),
         crate::core::runner::RunOptions::with_tee("test"),
     )

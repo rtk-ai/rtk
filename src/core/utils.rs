@@ -468,6 +468,49 @@ pub fn resolved_command(name: &str) -> Command {
     }
 }
 
+/// Build a `Command` that runs `line` through the platform shell.
+///
+/// Single chokepoint for the "interpret this string as shell syntax" path, so
+/// the cmd.exe/sh split lives in exactly one place.
+pub fn shell_command(line: &str) -> Command {
+    if cfg!(target_os = "windows") {
+        let mut c = Command::new("cmd");
+        c.args(["/C", line]);
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.args(["-c", line]);
+        c
+    }
+}
+
+/// Build the child process for a user-supplied command captured by clap's
+/// `trailing_var_arg`.
+///
+/// Those varargs arrive already split by the shell that invoked rtk. Rejoining
+/// them with spaces and handing the result to a *second* shell makes that shell
+/// re-interpret metacharacters the first one already consumed (#3185):
+/// `rtk run echo "a > b"` becomes `echo a > b`, which silently creates an empty
+/// file named `b` instead of printing `a > b`.
+///
+/// The part count is the discriminator:
+/// - one part: the user quoted a whole command line (`rtk err 'cargo b && cargo t'`),
+///   so shell syntax inside it is intentional — run it through a shell.
+/// - several parts: the invoking shell already did the parsing, and any operator
+///   it recognized was consumed before rtk was reached — spawn argv directly so
+///   every argument reaches the child verbatim.
+pub fn user_command(parts: &[String]) -> Command {
+    match parts {
+        [] => shell_command(""),
+        [single] => shell_command(single),
+        [program, args @ ..] => {
+            let mut c = resolved_command(program);
+            c.args(args);
+            c
+        }
+    }
+}
+
 /// Return Composer bin directories in precedence order.
 ///
 /// Composer allows overriding the default `vendor/bin` via `COMPOSER_BIN_DIR`
@@ -736,6 +779,73 @@ mod tests {
     #[test]
     fn test_truncate_short_string() {
         assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    fn program_of(cmd: &Command) -> String {
+        cmd.get_program().to_string_lossy().into_owned()
+    }
+
+    fn args_of(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// #3185: a multi-part command is argv the invoking shell already parsed.
+    /// Re-joining it into a shell string turns `a > b` into a redirection that
+    /// silently creates an empty file named `b`.
+    #[test]
+    fn user_command_multi_part_keeps_metacharacters_as_data() {
+        let parts = vec!["echo".to_string(), "a > b".to_string()];
+        let cmd = user_command(&parts);
+
+        assert!(program_of(&cmd).contains("echo"));
+        assert_eq!(args_of(&cmd), vec!["a > b"]);
+    }
+
+    #[test]
+    fn user_command_multi_part_keeps_backticks_and_pipes_as_data() {
+        let parts = vec!["echo".to_string(), "x `y`".to_string(), "p | q".to_string()];
+        let cmd = user_command(&parts);
+
+        assert_eq!(args_of(&cmd), vec!["x `y`", "p | q"]);
+    }
+
+    /// A single part is a whole command line the user quoted deliberately, so
+    /// operators inside it are intentional and still need a shell.
+    #[test]
+    fn user_command_single_part_goes_through_the_shell() {
+        let parts = vec!["cargo build && cargo test".to_string()];
+        let cmd = user_command(&parts);
+
+        if cfg!(target_os = "windows") {
+            assert_eq!(program_of(&cmd), "cmd");
+            assert_eq!(args_of(&cmd), vec!["/C", "cargo build && cargo test"]);
+        } else {
+            assert_eq!(program_of(&cmd), "sh");
+            assert_eq!(args_of(&cmd), vec!["-c", "cargo build && cargo test"]);
+        }
+    }
+
+    #[test]
+    fn user_command_empty_is_an_inert_shell() {
+        let cmd = user_command(&[]);
+
+        assert_eq!(args_of(&cmd).len(), 2);
+        assert_eq!(args_of(&cmd)[1], "");
+    }
+
+    #[test]
+    fn shell_command_uses_the_platform_shell() {
+        let cmd = shell_command("ls -la");
+
+        if cfg!(target_os = "windows") {
+            assert_eq!(program_of(&cmd), "cmd");
+            assert_eq!(args_of(&cmd), vec!["/C", "ls -la"]);
+        } else {
+            assert_eq!(program_of(&cmd), "sh");
+            assert_eq!(args_of(&cmd), vec!["-c", "ls -la"]);
+        }
     }
 
     #[test]
