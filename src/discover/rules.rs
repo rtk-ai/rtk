@@ -672,6 +672,20 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^snow\s+",
+        rtk_cmd: "rtk snow",
+        rewrite_prefixes: &["snow"],
+        category: "Infra",
+        savings_pct: 80.0,
+        subcmd_savings: &[
+            ("sql", 85.0),
+            ("object", 80.0),
+            ("connection", 70.0),
+            ("logs", 75.0),
+        ],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^ansible-playbook\b",
         rtk_cmd: "rtk ansible-playbook",
         rewrite_prefixes: &["ansible-playbook"],
