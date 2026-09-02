@@ -177,6 +177,16 @@ rtk git push                    # -> "ok main"
 rtk git pull                    # -> "ok 3 files +10 -2"
 ```
 
+### Jujutsu (jj)
+```bash
+rtk jj status                   # Compact working-copy status
+rtk jj log                      # Oneline template + limit (vs default graph)
+rtk jj diff                     # Summary by default; --git for unified diff
+rtk jj show -r <rev>            # Summary (-s) when not already set
+rtk jj op log                   # Trimmed operation log
+rtk jj log --no-compact         # Native graph log (still hint-stripped)
+```
+
 ### GitHub CLI
 ```bash
 rtk gh pr list                  # Compact PR listing

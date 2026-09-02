@@ -1,0 +1,5 @@
+Working copy changes:
+A .harness/expected.json
+A README.md
+Working copy  (@) : yysyrlnx bb43acfc docs: readme
+Parent commit (@-): nkkryzvo 0d61dcb4 feature-banana | introduce banana

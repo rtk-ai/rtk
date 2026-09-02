@@ -178,6 +178,16 @@ rtk git worktree        # Compact worktree
 
 Note: Git passthrough works for ALL subcommands, even those not explicitly listed.
 
+### Jujutsu / jj (15-30% typical; graph log higher)
+```bash
+rtk jj status          # Compact WC status (~25% on typical output)
+rtk jj log             # Oneline template + limit (largest savings vs default graph)
+rtk jj diff            # Summary by default; --git for compact unified diff
+rtk jj show            # Summary by default (-s)
+rtk jj op log          # Trimmed operation log
+```
+Use `rtk jj log --no-compact` for native graph. User `-n` is respected (no extra RTK line cap). Other jj subcommands passthrough via `rtk jj <cmd>`.
+
 ### GitHub (26-87% savings)
 ```bash
 rtk gh pr view <num>    # Compact PR view (87%)

@@ -11,6 +11,7 @@ use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
+use cmds::jj::jj_cmd;
 use cmds::js::{
     lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
     vitest_cmd,
@@ -834,6 +835,12 @@ enum Commands {
         command: GtCommands,
     },
 
+    /// Jujutsu (jj) VCS commands with compact, agent-friendly output
+    Jj {
+        #[command(subcommand)]
+        command: JjCommands,
+    },
+
     /// golangci-lint wrapper with compact `run` support and passthrough for other invocations
     #[command(name = "golangci-lint")]
     GolangciLint {
@@ -1499,6 +1506,38 @@ enum GtCommands {
         args: Vec<String>,
     },
     /// Passthrough: git-passthrough detection or direct gt execution
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Debug, Subcommand)]
+enum JjCommands {
+    /// Compact revision history (injects oneline template by default)
+    Log {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compact working-copy status
+    Status {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compact diff (--summary by default; --git uses compact unified diff)
+    Diff {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compact revision details (-s by default)
+    Show {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Operation log and subcommands
+    Op {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough for other jj subcommands
     #[command(external_subcommand)]
     Other(Vec<OsString>),
 }
@@ -2463,6 +2502,15 @@ fn run_cli() -> Result<i32> {
             GtCommands::Other(args) => gt_cmd::run_other(&args, cli.verbose)?,
         },
 
+        Commands::Jj { command } => match command {
+            JjCommands::Log { args } => jj_cmd::run_log(&args, cli.verbose)?,
+            JjCommands::Status { args } => jj_cmd::run_status(&args, cli.verbose)?,
+            JjCommands::Diff { args } => jj_cmd::run_diff(&args, cli.verbose)?,
+            JjCommands::Show { args } => jj_cmd::run_show(&args, cli.verbose)?,
+            JjCommands::Op { args } => jj_cmd::run_op(&args, cli.verbose)?,
+            JjCommands::Other(args) => jj_cmd::run_other(&args, cli.verbose)?,
+        },
+
         Commands::GolangciLint { args } => golangci_cmd::run(&args, cli.verbose)?,
 
         Commands::Gradlew { args } => gradlew_cmd::run(&args, cli.verbose)?,
@@ -2830,6 +2878,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Sbt { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
+            | Commands::Jj { .. }
     )
 }
 

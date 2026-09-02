@@ -1,6 +1,7 @@
 [filters.jj]
 description = "Compact Jujutsu (jj) output — strip blank lines, truncate"
-match_command = "^jj\\b"
+# Narrow fallback: only when `rtk jj <unknown>` misses Clap routing (config, util, …)
+match_command = "^jj\\s+(config|util|fix|help|version|abandon|rebase|new|describe|squash|git)\\b"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

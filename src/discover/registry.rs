@@ -2352,6 +2352,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_rewrite_jj_log() {
+        assert_eq!(
+            rewrite_command_no_prefixes("jj log -n 12", &[]),
+            Some("rtk jj log -n 12".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("jj status", &[]),
+            Some("rtk jj status".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("jj git fetch", &[]),
+            Some("rtk jj git fetch".into())
+        );
+    }
+
     // --- git -C <path> support (#555) ---
 
     #[test]
