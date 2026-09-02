@@ -1120,9 +1120,15 @@ impl Tracker {
             };
         match oldest {
             Some(ts) => {
-                let first = chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%dT%H:%M:%S")
-                    .or_else(|_| chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%d %H:%M:%S"))
-                    .map(|dt| dt.and_utc())
+                let first = chrono::DateTime::parse_from_rfc3339(&ts)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .or_else(|_| {
+                        chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%dT%H:%M:%S")
+                            .or_else(|_| {
+                                chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%d %H:%M:%S")
+                            })
+                            .map(|dt| dt.and_utc())
+                    })
                     .unwrap_or_else(|_| chrono::Utc::now());
                 let days = (chrono::Utc::now() - first).num_days();
                 Ok(days.max(0))
@@ -1757,5 +1763,22 @@ mod tests {
             let mode = std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "expected 0600 on {}", p.display());
         }
+    }
+
+    #[test]
+    fn test_first_seen_days_parses_rfc3339() {
+        let tracker = Tracker::new().expect("Failed to create tracker");
+        let test_cmd = format!("rtk first_seen_test_{}", std::process::id());
+        tracker
+            .record("first_seen_cmd", &test_cmd, 100, 20, 10)
+            .expect("Failed to record");
+
+        let days = tracker
+            .first_seen_days()
+            .expect("first_seen_days should not error");
+        assert!(
+            days >= 0,
+            "first_seen_days must be non-negative, got {days}"
+        );
     }
 }
