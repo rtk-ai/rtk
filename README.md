@@ -433,9 +433,12 @@ For the full config reference (all sections, env vars, per-project filters), see
 
 ```bash
 rtk init -g --uninstall     # Remove hook, RTK.md, settings.json entry
+rtk init --agent kimi --uninstall  # Remove RTK instructions from this project's AGENTS.md
 cargo uninstall rtk          # Remove binary
 brew uninstall rtk           # If installed via Homebrew
 ```
+
+Project-scoped Codex and Kimi installations share the same RTK-managed block in the project-root `AGENTS.md`. Uninstalling either integration removes that shared block.
 
 ## Documentation
 

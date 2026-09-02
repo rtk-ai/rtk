@@ -656,18 +656,27 @@ fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
     Ok(removed)
 }
 
-/// Full uninstall for Claude, Gemini, Codex, Cursor, or Pi artifacts.
+/// Full uninstall for Claude, Gemini, Codex, Cursor, Pi, or Kimi artifacts.
 pub fn uninstall(
     global: bool,
     gemini: bool,
     codex: bool,
     cursor: bool,
     pi: bool,
+    kimi: bool,
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
     if codex {
         uninstall_codex(global, ctx)?;
+        if dry_run {
+            print_dry_run_footer();
+        }
+        return Ok(());
+    }
+
+    if kimi {
+        uninstall_kimi(global, ctx)?;
         if dry_run {
             print_dry_run_footer();
         }
@@ -1976,6 +1985,62 @@ fn run_kimi_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn uninstall_kimi(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    if global {
+        anyhow::bail!(
+            "Kimi AI is project-scoped. Run `rtk init --agent kimi --uninstall` from the project root"
+        );
+    }
+
+    let removed = uninstall_kimi_at(&std::env::current_dir()?, ctx)?;
+    if removed.is_empty() {
+        println!("RTK was not installed for Kimi AI (nothing to remove)");
+    } else {
+        let header = if dry_run {
+            "[dry-run] would uninstall RTK for Kimi AI:"
+        } else {
+            "RTK uninstalled for Kimi AI:"
+        };
+        println!("{}", header);
+        for item in removed {
+            println!("  - {}", item);
+        }
+    }
+
+    Ok(())
+}
+
+fn uninstall_kimi_at(base_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    let InitContext { verbose, dry_run } = ctx;
+    let agents_md_path = base_dir.join(AGENTS_MD);
+    if !agents_md_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = fs::read_to_string(&agents_md_path)
+        .with_context(|| format!("Failed to read AGENTS.md: {}", agents_md_path.display()))?;
+    let (cleaned, removed) = remove_rtk_block(&content);
+    if !removed {
+        return Ok(Vec::new());
+    }
+
+    if dry_run {
+        println!(
+            "[dry-run] would update AGENTS.md: {}",
+            agents_md_path.display()
+        );
+        if verbose > 0 {
+            println!("[dry-run] content:\n{}", cleaned);
+        }
+    } else {
+        atomic_write(&agents_md_path, &cleaned)
+            .with_context(|| format!("Failed to write AGENTS.md: {}", agents_md_path.display()))?;
+    }
+
+    Ok(vec!["AGENTS.md: removed rtk-instructions block".to_string()])
 }
 
 fn uninstall_hermes_at(hermes_home: &Path, ctx: InitContext) -> Result<Vec<String>> {
@@ -5482,6 +5547,62 @@ mod tests {
     }
 
     #[test]
+    fn test_uninstall_kimi_at_removes_rtk_instructions_block() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join(AGENTS_MD);
+        fs::write(&agents_md, "# Project rules\n\nKeep this content.\n").unwrap();
+        run_kimi_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let removed = uninstall_kimi_at(temp.path(), InitContext::default()).unwrap();
+
+        let content = fs::read_to_string(&agents_md).unwrap();
+        assert!(!content.contains(RTK_BLOCK_START));
+        assert!(content.contains("# Project rules"));
+        assert!(content.contains("Keep this content."));
+        assert_eq!(removed, vec!["AGENTS.md: removed rtk-instructions block"]);
+    }
+
+    #[test]
+    fn test_uninstall_kimi_at_dry_run_preserves_agents_md() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join(AGENTS_MD);
+        fs::write(&agents_md, "# Project rules\n").unwrap();
+        run_kimi_mode_at(temp.path(), InitContext::default()).unwrap();
+        let before = fs::read_to_string(&agents_md).unwrap();
+
+        let removed = uninstall_kimi_at(
+            temp.path(),
+            InitContext {
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(&agents_md).unwrap(), before);
+        assert_eq!(removed, vec!["AGENTS.md: removed rtk-instructions block"]);
+    }
+
+    #[test]
+    fn test_uninstall_kimi_at_is_noop_without_rtk_block() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join(AGENTS_MD);
+        fs::write(&agents_md, "# Project rules\n").unwrap();
+
+        let removed = uninstall_kimi_at(temp.path(), InitContext::default()).unwrap();
+
+        assert!(removed.is_empty());
+        assert_eq!(fs::read_to_string(&agents_md).unwrap(), "# Project rules\n");
+    }
+
+    #[test]
+    fn test_uninstall_kimi_rejects_global_scope() {
+        let error = uninstall_kimi(true, InitContext::default()).unwrap_err();
+
+        assert!(error.to_string().contains("Kimi AI is project-scoped"));
+    }
+
+    #[test]
     fn test_patch_agents_md_creates_missing_file() {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");
@@ -7397,7 +7518,16 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
-            uninstall(true, false, false, false, false, InitContext::default()).unwrap();
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                InitContext::default(),
+            )
+            .unwrap();
 
             assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
             let settings_content =
@@ -7525,7 +7655,7 @@ mod tests {
                 dry_run: true,
                 ..Default::default()
             };
-            uninstall(true, false, false, false, false, dry).unwrap();
+            uninstall(true, false, false, false, false, false, dry).unwrap();
 
             // Files must still exist with identical content
             assert!(
@@ -7758,7 +7888,16 @@ mod tests {
             let plugin = pi_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
             assert!(plugin.exists());
 
-            uninstall(true, false, false, false, true, InitContext::default()).unwrap();
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                true,
+                false,
+                InitContext::default(),
+            )
+            .unwrap();
 
             assert!(!plugin.exists(), "plugin must be removed");
         });
@@ -7772,7 +7911,15 @@ mod tests {
         std::env::set_current_dir(tmp.path()).unwrap();
 
         run_pi_mode(false, InitContext::default()).unwrap();
-        let result = uninstall(false, false, false, false, true, InitContext::default());
+        let result = uninstall(
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            InitContext::default(),
+        );
         std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
@@ -7871,6 +8018,7 @@ mod tests {
                 false,
                 false,
                 true,
+                false,
                 InitContext {
                     verbose: 0,
                     dry_run: true,
@@ -7909,6 +8057,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             InitContext {
                 verbose: 0,
                 dry_run: true,
