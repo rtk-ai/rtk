@@ -150,6 +150,54 @@ fn find_no_results_emits_empty() {
 }
 
 #[test]
+fn find_existing_roots_and_native_visibility_are_faithful() {
+    let dir = init_git_repo();
+    std::fs::create_dir_all(dir.path().join("sub")).expect("create ignored directory");
+    std::fs::create_dir_all(dir.path().join(".hidden")).expect("create hidden directory");
+    std::fs::write(dir.path().join("journal.md"), "hello\n").expect("write root file");
+    std::fs::write(dir.path().join("sub/note.md"), "world\n").expect("write ignored file");
+    std::fs::write(dir.path().join(".hidden/secret.md"), "secret\n").expect("write hidden file");
+    std::fs::write(dir.path().join(".gitignore"), "sub/\n").expect("write gitignore");
+
+    for args in [
+        &["find", "./journal.md", "-type", "f"][..],
+        &["find", "./journal.md"][..],
+    ] {
+        let (out, code) = rtk_in_dir(dir.path(), args);
+        assert_eq!(out.trim_end(), "journal.md");
+        assert_eq!(code, Some(0));
+    }
+
+    let (out, code) = rtk_in_dir(dir.path(), &["find", "./sub", "-type", "d"]);
+    assert_eq!(
+        out.trim_end(),
+        "sub",
+        "native find must include its directory root"
+    );
+    assert_eq!(code, Some(0));
+
+    let (out, code) = rtk_in_dir(dir.path(), &["find", ".", "-iname", "*.md"]);
+    assert!(out.contains("journal.md"), "missing visible match: {out:?}");
+    assert!(
+        out.contains(".hidden/") && out.contains("secret.md"),
+        "missing hidden match: {out:?}"
+    );
+    assert!(
+        out.contains("sub/") && out.contains("note.md"),
+        "missing gitignored match: {out:?}"
+    );
+    assert_eq!(code, Some(0));
+
+    let (out, code) = rtk_in_dir(dir.path(), &["find", "*.md", "."]);
+    assert_eq!(
+        out.trim_end(),
+        "journal.md",
+        "compact syntax keeps ignore pruning"
+    );
+    assert_eq!(code, Some(0));
+}
+
+#[test]
 fn git_stash_list_no_stashes_emits_empty() {
     let dir = init_git_repo();
     let (out, code) = rtk_in_dir(dir.path(), &["git", "stash", "list"]);

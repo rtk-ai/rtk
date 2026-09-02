@@ -37,6 +37,7 @@ struct FindArgs {
     max_depth: Option<usize>,
     file_type: String,
     case_insensitive: bool,
+    prune_ignored: bool,
 }
 
 impl Default for FindArgs {
@@ -49,6 +50,7 @@ impl Default for FindArgs {
             max_depth: None,
             file_type: "f".to_string(),
             case_insensitive: false,
+            prune_ignored: false,
         }
     }
 }
@@ -76,6 +78,11 @@ fn is_expression_token(token: &str) -> bool {
 
 fn has_glob_meta(token: &str) -> bool {
     token.contains('*') || token.contains('?')
+}
+
+fn is_existing_search_root(token: &str) -> bool {
+    let path = Path::new(token);
+    path.is_dir() || (path.exists() && path.components().count() > 1)
 }
 
 /// Leading find options: `-H`, `-L`, `-P`, `-D debugopts`, `-Olevel`.
@@ -138,12 +145,12 @@ fn parse_subset(paths: &[String], expr: &[String]) -> Option<FindArgs> {
 /// find syntax: `find [options] [paths...] [expression]` — paths end at the first
 /// token starting with `-`, `!` or a parenthesis, exactly like find.
 /// RTK syntax: `find <pattern> [path] [-m max] [-t type]` — used when the first
-/// token contains `*` or `?`, or is not an existing directory.
+/// token contains `*` or `?`, or is not an explicit existing path.
 fn dispatch(original: &[String]) -> Result<Dispatch> {
     let (args, max, file_type) = peel_trailing_rtk_flags(original);
     let legacy = !args.is_empty()
         && !is_expression_token(&args[0])
-        && (has_glob_meta(&args[0]) || !Path::new(&args[0]).is_dir());
+        && (has_glob_meta(&args[0]) || !is_existing_search_root(&args[0]));
     let args = if legacy {
         legacy_to_find_syntax(&args)
     } else {
@@ -169,6 +176,7 @@ fn dispatch(original: &[String]) -> Result<Dispatch> {
     }
     if options.is_empty() {
         if let Some(mut parsed) = parse_subset(&paths, &expr) {
+            parsed.prune_ignored = legacy;
             let repeated_max = max.is_some() && parsed.max_explicit;
             let repeated_type =
                 file_type.is_some() && parsed.file_type != FindArgs::default().file_type;
@@ -329,6 +337,7 @@ pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
             parsed.max_depth,
             &parsed.file_type,
             parsed.case_insensitive,
+            parsed.prune_ignored,
             verbose,
         ),
         Dispatch::Compress {
@@ -400,6 +409,7 @@ pub fn run(
     max_depth: Option<usize>,
     file_type: &str,
     case_insensitive: bool,
+    prune_ignored: bool,
     verbose: u8,
 ) -> Result<()> {
     let timer = tracking::TimedExecution::start();
@@ -418,16 +428,17 @@ pub fn run(
         std::process::exit(1);
     }
 
-    // When the pattern targets dotfiles (e.g. -name ".claude.json"), we must walk hidden
-    // entries; otherwise skip them to keep results tidy (#1101).
-    let search_hidden = effective_pattern.starts_with('.');
+    // Native find syntax must retain native visibility. Compact RTK pattern syntax keeps
+    // ignore-aware pruning unless its pattern explicitly targets dotfiles (#1101, #2995).
+    let search_hidden = !prune_ignored || effective_pattern.starts_with('.');
 
     let mut builder = WalkBuilder::new(path);
     builder
         .hidden(!search_hidden) // skip hidden files/dirs unless pattern targets dotfiles
-        .git_ignore(true) // respect .gitignore
-        .git_global(true)
-        .git_exclude(true);
+        .ignore(prune_ignored)
+        .git_ignore(prune_ignored)
+        .git_global(prune_ignored)
+        .git_exclude(prune_ignored);
     if let Some(depth) = max_depth {
         builder.max_depth(Some(depth));
     }
@@ -477,7 +488,7 @@ pub fn run(
 
         if !display_path.is_empty() {
             files.push(display_path);
-        } else if !is_dir {
+        } else {
             files.push(path.to_string());
         }
     }
@@ -667,11 +678,26 @@ mod tests {
         let p = parse_find_args(&args(&["Cargo.toml"])).unwrap();
         assert_eq!(p.pattern, "Cargo.toml");
         assert_eq!(p.path, ".");
+        assert!(p.prune_ignored);
         let p = parse_find_args(&args(&["no_such_dir_xyz"])).unwrap();
         assert_eq!(p.pattern, "no_such_dir_xyz");
         let p = parse_find_args(&args(&["README.md", "src"])).unwrap();
         assert_eq!(p.pattern, "README.md");
         assert_eq!(p.path, "src");
+    }
+
+    #[test]
+    fn explicit_existing_file_path_is_a_search_root() {
+        let root = tempfile::TempDir::new().unwrap();
+        let file = root.path().join("journal.md");
+        std::fs::write(&file, "hello\n").unwrap();
+        let file = file.to_string_lossy().into_owned();
+
+        let parsed = parse_find_args(&args(&[&file])).unwrap();
+
+        assert_eq!(parsed.pattern, "*");
+        assert_eq!(parsed.path, file);
+        assert!(!parsed.prune_ignored);
     }
 
     #[test]
@@ -681,6 +707,7 @@ mod tests {
         assert_eq!(p.path, "src");
         assert_eq!(p.max_results, 5);
         assert!(p.max_explicit);
+        assert!(p.prune_ignored);
     }
 
     #[test]
@@ -737,6 +764,8 @@ mod tests {
         assert_eq!(class(&["src", "-iname", "README*"]), "native");
         assert_eq!(class(&[".", "-type", "d"]), "native");
         assert_eq!(class(&[".", "-name", "*.rs", "-m", "10"]), "native");
+        let parsed = parse_find_args(&args(&[".", "-name", "*.rs"])).unwrap();
+        assert!(!parsed.prune_ignored);
     }
 
     #[test]
@@ -864,6 +893,7 @@ mod tests {
             None,
             "f",
             false,
+            true,
             0,
         );
         assert!(result.is_ok());
@@ -1047,14 +1077,24 @@ mod tests {
     #[test]
     fn find_dotfile_pattern_includes_hidden() {
         // .gitignore exists at the repo root — must be found when using a dotfile pattern
-        let result = run(".gitignore", ".", 50, true, Some(1), "f", false, 0);
+        let result = run(
+            ".gitignore",
+            ".",
+            50,
+            true,
+            Some(1),
+            "f",
+            false,
+            true,
+            0,
+        );
         assert!(result.is_ok(), "run with dotfile pattern should not error");
     }
 
     #[test]
     fn find_regular_pattern_skips_hidden() {
         // Non-dot pattern should not error (hidden dirs remain skipped)
-        let result = run("*.rs", "src", 5, true, None, "f", false, 0);
+        let result = run("*.rs", "src", 5, true, None, "f", false, true, 0);
         assert!(result.is_ok());
     }
 
@@ -1063,27 +1103,37 @@ mod tests {
     #[test]
     fn find_rs_files_in_src() {
         // Should find .rs files without error
-        let result = run("*.rs", "src", 100, true, None, "f", false, 0);
+        let result = run("*.rs", "src", 100, true, None, "f", false, true, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_dot_pattern_works() {
         // "." pattern should not error (was broken before)
-        let result = run(".", "src", 10, true, None, "f", false, 0);
+        let result = run(".", "src", 10, true, None, "f", false, true, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_no_matches() {
-        let result = run("*.xyz_nonexistent", "src", 50, true, None, "f", false, 0);
+        let result = run(
+            "*.xyz_nonexistent",
+            "src",
+            50,
+            true,
+            None,
+            "f",
+            false,
+            true,
+            0,
+        );
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_respects_max() {
         // With max=2, should not error
-        let result = run("*.rs", "src", 2, true, None, "f", false, 0);
+        let result = run("*.rs", "src", 2, true, None, "f", false, true, 0);
         assert!(result.is_ok());
     }
 
@@ -1169,7 +1219,7 @@ mod tests {
     #[test]
     fn find_gitignored_excluded() {
         // target/ is in .gitignore — files inside should not appear
-        let result = run("*", ".", 1000, true, None, "f", false, 0);
+        let result = run("*", ".", 1000, true, None, "f", false, true, 0);
         assert!(result.is_ok());
         // We can't easily capture stdout in unit tests, but at least
         // verify it runs without error. The smoke tests verify content.
