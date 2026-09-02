@@ -4,9 +4,12 @@
 //! dual-metric economic impact reporting with blended and active cost-per-token.
 
 use anyhow::{Context, Result};
-use chrono::NaiveDate;
-use serde::Serialize;
+use chrono::{DateTime, NaiveDate, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::Path;
 
 use super::ccusage::{self, CcusagePeriod, Granularity};
 use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
@@ -186,13 +189,14 @@ pub fn run(
     all: bool,
     format: &str,
     verbose: u8,
+    audit: bool,
 ) -> Result<()> {
     let tracker = Tracker::new().context("Failed to initialize tracking database")?;
 
     match format {
         "json" => export_json(&tracker, daily, weekly, monthly, all),
         "csv" => export_csv(&tracker, daily, weekly, monthly, all),
-        _ => display_text(&tracker, daily, weekly, monthly, all, verbose),
+        _ => display_text(&tracker, daily, weekly, monthly, all, verbose, audit),
     }
 }
 
@@ -404,10 +408,11 @@ fn display_text(
     monthly: bool,
     all: bool,
     verbose: u8,
+    audit: bool,
 ) -> Result<()> {
     // Default: summary view
     if !daily && !weekly && !monthly && !all {
-        display_summary(tracker, verbose)?;
+        display_summary(tracker, verbose, audit)?;
         return Ok(());
     }
 
@@ -424,7 +429,7 @@ fn display_text(
     Ok(())
 }
 
-fn display_summary(tracker: &Tracker, verbose: u8) -> Result<()> {
+fn display_summary(tracker: &Tracker, verbose: u8, audit: bool) -> Result<()> {
     let cc_monthly =
         ccusage::fetch(Granularity::Monthly).context("Failed to fetch ccusage monthly data")?;
     let rtk_monthly = tracker
@@ -473,10 +478,90 @@ fn display_summary(tracker: &Tracker, verbose: u8) -> Result<()> {
     );
     println!();
 
-    println!("  Estimated Savings:");
+    let audit_s = if audit {
+        let projects_dir = dirs::home_dir().map(|h| h.join(".claude").join("projects"));
+        match projects_dir {
+            Some(dir) => match audit_precise_savings(tracker, &dir) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    eprintln!("rtk: --audit failed, showing weighted estimate: {e:#}");
+                    None
+                }
+            },
+            None => {
+                eprintln!("rtk: --audit failed: could not resolve home directory");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let parsed_audited = audit_s.is_some() && totals.weighted_input_cpt.is_some();
+
+    if parsed_audited {
+        println!("  Audited Savings (Prompt Caching):");
+    } else {
+        println!("  Estimated Savings (Weighted):");
+    }
     println!("  ┌─────────────────────────────────────────────────┐");
 
-    if let Some(weighted_savings) = totals.savings_weighted {
+    if let (Some(s), Some(input_cpt)) = (audit_s, totals.weighted_input_cpt) {
+        let p_write = input_cpt * WEIGHT_CACHE_CREATE;
+        let p_read = input_cpt * WEIGHT_CACHE_READ;
+        let pct = |x: f64| {
+            if totals.cc_cost > 0.0 {
+                x / totals.cc_cost * 100.0
+            } else {
+                0.0
+            }
+        };
+
+        let write_savings = s.write_tokens as f64 * p_write;
+        let read_savings = s.read_tokens as f64 * p_read;
+        let recovery_cost = s.recovery_write as f64 * p_write + s.recovery_read as f64 * p_read;
+        let total_savings = write_savings + read_savings - recovery_cost;
+
+        let print_row = |content: &str| {
+            println!("  │ {:<47} │", content);
+        };
+        print_row(&format!(
+            "Cache write savings:   {}  ({:.1}%)",
+            format_usd(write_savings).trim(),
+            pct(write_savings)
+        ));
+        print_row(&format!(
+            "Cache read savings:    {}  ({:.1}%)",
+            format_usd(read_savings).trim(),
+            pct(read_savings)
+        ));
+        if recovery_cost > 0.0 {
+            print_row(&format!(
+                "Recovery (re-read):   -{}  ({:.1}%)",
+                format_usd(recovery_cost).trim(),
+                pct(recovery_cost)
+            ));
+        }
+        print_row("───────────────────────────────────────────────");
+        print_row(&format!(
+            "Total savings:         {}  ({:.1}%)",
+            format_usd(total_savings).trim(),
+            pct(total_savings)
+        ));
+        print_row(&format!(
+            "Claude rtk calls:      {}/{} matched{}",
+            s.matched,
+            s.claude_invocations,
+            if s.recoveries > 0 {
+                format!(" \u{00b7} {} tee recoveries", s.recoveries)
+            } else {
+                String::new()
+            }
+        ));
+        print_row(&format!(
+            "Derived input CPT:     {}",
+            format_cpt(input_cpt).trim()
+        ));
+    } else if let Some(weighted_savings) = totals.savings_weighted {
         let weighted_pct = if totals.cc_cost > 0.0 {
             (weighted_savings / totals.cc_cost) * 100.0
         } else {
@@ -498,6 +583,11 @@ fn display_summary(tracker: &Tracker, verbose: u8) -> Result<()> {
     }
 
     println!("  └─────────────────────────────────────────────────┘");
+    if !audit {
+        println!(
+            "  💡 Tip: Run with --audit to perform a precise session-log audit of prompt caching."
+        );
+    }
     println!();
 
     println!("  How it works:");
@@ -822,6 +912,342 @@ fn print_csv_row(p: &PeriodEconomics) {
         blended_savings,
         cmds
     );
+}
+
+struct SessionEvent {
+    dt: DateTime<Utc>,
+    /// True only for Bash tool_use events whose command invokes `rtk` - the
+    /// authoritative signal that Claude drove an rtk-wrapped command.
+    is_rtk: bool,
+    /// True when the Bash command reads a tee file, re-introducing truncated output.
+    is_recovery: bool,
+    cwd: Option<String>,
+    cache_write: u64,
+    cache_read: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct LogEntry {
+    timestamp: String,
+    #[serde(rename = "requestId")]
+    request_id: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    message: Option<LogMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LogMessage {
+    content: Option<Vec<LogContent>>,
+    usage: Option<LogUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LogContent {
+    #[serde(rename = "type")]
+    content_type: String,
+    name: Option<String>,
+    input: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LogUsage {
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: u64,
+}
+
+/// Per-bucket token savings attributed to rtk compression across audited sessions.
+struct AuditSavings {
+    /// Cache-write-rate billing (1.25x): tool-result appearance + eviction rebuilds.
+    write_tokens: usize,
+    /// Cache-read-rate billing (0.1x): steady cached turns.
+    read_tokens: usize,
+    /// Tokens re-introduced by the agent reading a truncated tee file back into
+    /// context -- a debit against the savings the producing command claimed.
+    /// Split by the same write/read turn buckets as the credit.
+    recovery_write: usize,
+    recovery_read: usize,
+    /// rtk DB commands matched to a Claude session Bash call.
+    matched: usize,
+    /// Distinct `rtk ...` Bash events seen in Claude session logs (the authoritative
+    /// cap; `matched` should be ~= this).
+    claude_invocations: usize,
+    /// Bash turns that read a tee file (rtk read or raw cat/tail/head), recovering
+    /// output a producer command had truncated.
+    recoveries: usize,
+}
+
+/// Substrings whose presence in a Bash command mark it as a *recovery read* -- the
+/// agent reading a truncated tee file back into context. Covers the default tee dir
+/// (`<data_local>/rtk/tee/`) on POSIX and Windows plus an `RTK_TEE_DIR` override.
+/// Detection is loose by design: a non-read command (e.g. `rm`) touching the path
+/// is filtered downstream because its result turn carries ~no cache_write debit.
+fn tee_path_signals() -> Vec<String> {
+    let mut sigs: Vec<String> = vec!["/rtk/tee/".into(), "\\rtk\\tee\\".into()];
+    if let Ok(d) = std::env::var("RTK_TEE_DIR") {
+        sigs.push(d);
+    }
+    sigs
+}
+
+fn is_tee_recovery(cmd: &str, signals: &[String]) -> bool {
+    signals.iter().any(|s| cmd.contains(s))
+}
+
+struct RtkCommandAudit {
+    dt: DateTime<Utc>,
+    project: String,
+    saved_tokens: usize,
+    matched: bool,
+}
+
+fn audit_precise_savings(tracker: &Tracker, projects_dir: &Path) -> Result<AuditSavings> {
+    let raw_cmds = tracker
+        .get_raw_commands()
+        .context("Failed to query raw commands")?;
+    if raw_cmds.is_empty() {
+        return Ok(AuditSavings {
+            write_tokens: 0,
+            read_tokens: 0,
+            recovery_write: 0,
+            recovery_read: 0,
+            matched: 0,
+            claude_invocations: 0,
+            recoveries: 0,
+        });
+    }
+
+    let mut rtk_cmds: Vec<RtkCommandAudit> = raw_cmds
+        .into_iter()
+        .map(|(dt, project, saved)| RtkCommandAudit {
+            dt,
+            project,
+            saved_tokens: saved,
+            matched: false,
+        })
+        .collect();
+
+    // Earliest command timestamp minus 1 hour (mtime prune window). try_hours(1) is
+    // infallible for a 1-hour delta; fall back to no offset rather than panic.
+    let min_dt =
+        rtk_cmds[0].dt - chrono::TimeDelta::try_hours(1).unwrap_or_else(chrono::TimeDelta::zero);
+
+    let mut write_tokens = 0usize;
+    let mut read_tokens = 0usize;
+    let mut recovery_write = 0usize;
+    let mut recovery_read = 0usize;
+    let mut claude_invocations = 0usize;
+    let mut recoveries = 0usize;
+    // Built once: substrings that mark a Bash command as a tee-file recovery read.
+    let tee_signals = tee_path_signals();
+
+    if projects_dir.exists() {
+        for entry in walkdir::WalkDir::new(projects_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "jsonl") {
+                continue;
+            }
+            if let Ok(metadata) = entry.metadata() {
+                if let Ok(mtime) = metadata.modified() {
+                    let mtime_dt: DateTime<Utc> = mtime.into();
+                    if mtime_dt < min_dt {
+                        continue;
+                    }
+                }
+            }
+
+            // Parse + dedup by requestId. Assistant turns echo across streamed chunks,
+            // so the same requestId/usage repeats; keep one turn per requestId.
+            let mut by_req: HashMap<String, SessionEvent> = HashMap::new();
+            if let Ok(file) = File::open(path) {
+                for line in BufReader::new(file).lines().map_while(Result::ok) {
+                    if !line.contains("\"requestId\"") {
+                        continue;
+                    }
+                    let entry: LogEntry = match serde_json::from_str(&line) {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    let Some(req_id) = entry.request_id else {
+                        continue;
+                    };
+                    let cwd = entry.cwd;
+                    let Ok(dt) = DateTime::parse_from_rfc3339(&entry.timestamp) else {
+                        continue;
+                    };
+                    let dt_utc = dt.with_timezone(&Utc);
+                    let mut is_rtk = false;
+                    let mut is_recovery = false;
+                    let mut cache_write = 0u64;
+                    let mut cache_read = 0u64;
+                    if let Some(msg) = entry.message {
+                        if let Some(content_list) = msg.content {
+                            for item in content_list {
+                                if item.content_type == "tool_use" {
+                                    let name = item.name.as_deref();
+                                    // Field holding the target path/command: Bash ->
+                                    // "command" (may be an rtk invocation), Read ->
+                                    // "file_path"/"path" (never rtk). Both can recover a
+                                    // tee file, so detection is tool-agnostic.
+                                    let probe = match name {
+                                        Some("Bash") => {
+                                            item.input.as_ref().and_then(|i| i.get("command"))
+                                        }
+                                        Some("Read") => item.input.as_ref().and_then(|i| {
+                                            i.get("file_path").or_else(|| i.get("path"))
+                                        }),
+                                        _ => None,
+                                    };
+                                    if let Some(v) = probe.and_then(|c| c.as_str()) {
+                                        if name == Some("Bash") {
+                                            let first = v.split_whitespace().next().unwrap_or("");
+                                            is_rtk = first == "rtk" || first.ends_with("/rtk");
+                                        }
+                                        is_recovery = is_tee_recovery(v, &tee_signals);
+                                    }
+                                    if probe.is_some() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(u) = msg.usage {
+                            cache_write = u.cache_creation_input_tokens;
+                            cache_read = u.cache_read_input_tokens;
+                        }
+                    }
+                    match by_req.get_mut(&req_id) {
+                        // Usage is identical across echoes; OR the rtk flag, fill cwd.
+                        Some(ev) => {
+                            ev.is_rtk |= is_rtk;
+                            ev.is_recovery |= is_recovery;
+                            if ev.cwd.is_none() {
+                                ev.cwd = cwd;
+                            }
+                        }
+                        None => {
+                            by_req.insert(
+                                req_id,
+                                SessionEvent {
+                                    dt: dt_utc,
+                                    is_rtk,
+                                    is_recovery,
+                                    cwd,
+                                    cache_write,
+                                    cache_read,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+
+            claude_invocations += by_req.values().filter(|e| e.is_rtk).count();
+            recoveries += by_req.values().filter(|e| e.is_recovery).count();
+            let mut turns: Vec<SessionEvent> = by_req.into_values().collect();
+            turns.sort_by_key(|e| e.dt);
+
+            // Match each Bash turn to the nearest unmatched rtk command (<=5s), then
+            // credit its saved tokens across every subsequent turn by that turn's bucket.
+            for (i, ev) in turns.iter().enumerate() {
+                // Only Bash events Claude invoked as `rtk ...` can match an rtk
+                // command record - this is the authoritative cap on Claude-driven use.
+                // Recovery reads are skipped here: crediting a tee-read would
+                // double-count the producing command's truncation savings.
+                if !ev.is_rtk || ev.is_recovery {
+                    continue;
+                }
+                let mut best_idx: Option<usize> = None;
+                // rtk stamps its record AFTER the command finishes, so the DB timestamp
+                // lags the Claude Bash event by the command runtime. 60s recovers
+                // ~99.9% of invocations while keeping the window tight enough to avoid
+                // cross-session record stealing; the rtk-invocation + project filters
+                // pin each match, and the rtk-invocation cap means we can never exceed
+                // the number of events Claude actually drove.
+                let mut best_diff = 60.0f64;
+                for (j, cmd) in rtk_cmds.iter().enumerate() {
+                    if cmd.matched {
+                        continue;
+                    }
+                    // Scope to the same project: a Bash event may only claim an rtk
+                    // command that ran in this session's cwd. Stops cross-project
+                    // false matches (e.g. codex/terminal cmds near a Claude turn).
+                    if ev.cwd.as_deref() != Some(cmd.project.as_str()) {
+                        continue;
+                    }
+                    let diff = (cmd.dt - ev.dt).num_milliseconds().abs() as f64 / 1000.0;
+                    if diff < best_diff {
+                        best_diff = diff;
+                        best_idx = Some(j);
+                    }
+                }
+                let Some(j) = best_idx else { continue };
+                rtk_cmds[j].matched = true;
+                let m = rtk_cmds[j].saved_tokens;
+
+                // Appearance turn (i+1): the tool result enters the cached prefix,
+                // billed as a cache write. Validated via `claude -p`: the result's
+                // turn always shows cache_creation > 0, even for tiny outputs.
+                write_tokens += m;
+
+                // Every later turn: the prefix (incl. the compressed region) is either
+                // re-written (eviction rebuild: cache_write > cache_read) or re-read.
+                for t in turns.iter().skip(i + 2) {
+                    if t.cache_write > t.cache_read {
+                        write_tokens += m;
+                    } else {
+                        read_tokens += m;
+                    }
+                }
+            }
+
+            // Recovery debit: a tee-read re-introduces tokens the producing command's
+            // truncation had "saved", so net them back out. Mirrors the credit pass --
+            // the result turn (i+1) enters the cached prefix as a write, then each
+            // later turn re-reads or re-writes it. `r` is the result turn's cache_write
+            // (tokens re-introduced); the r==0 gate drops non-read commands.
+            for (i, ev) in turns.iter().enumerate() {
+                if !ev.is_recovery {
+                    continue;
+                }
+                let Some(result) = turns.get(i + 1) else {
+                    continue;
+                };
+                let r = result.cache_write as usize;
+                if r == 0 {
+                    continue;
+                }
+                recovery_write += r;
+                for t in turns.iter().skip(i + 2) {
+                    if t.cache_write > t.cache_read {
+                        recovery_write += r;
+                    } else {
+                        recovery_read += r;
+                    }
+                }
+            }
+        }
+    }
+
+    let matched = rtk_cmds.iter().filter(|c| c.matched).count();
+
+    // Unmatched commands ran outside any Claude session (terminal/codex) and never
+    // entered an LLM context, so they earn no savings under the authoritative-cap model.
+
+    Ok(AuditSavings {
+        write_tokens,
+        read_tokens,
+        recovery_write,
+        recovery_read,
+        matched,
+        claude_invocations,
+        recoveries,
+    })
 }
 
 #[cfg(test)]
@@ -1151,5 +1577,263 @@ mod tests {
         assert!(totals.savings_weighted.is_some());
         assert!(totals.blended_cpt.is_some());
         assert!(totals.active_cpt.is_some());
+    }
+
+    /// Build one Claude session log line for tests.
+    fn ev_read(
+        ts: &str,
+        req: &str,
+        cwd: Option<&str>,
+        file_path: &str,
+        cw: u64,
+        cr: u64,
+    ) -> String {
+        let cwd_field = match cwd {
+            Some(c) => format!(",\"cwd\":\"{}\"", c),
+            None => String::new(),
+        };
+        format!(
+            "{{\"timestamp\":\"{}\",\"requestId\":\"{}\"{},\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"name\":\"Read\",\"input\":{{\"file_path\":\"{}\"}}}}],\"usage\":{{\"cache_creation_input_tokens\":{},\"cache_read_input_tokens\":{}}}}}}}",
+            ts, req, cwd_field, file_path, cw, cr
+        )
+    }
+
+    fn ev(ts: &str, req: &str, cwd: Option<&str>, bash: Option<&str>, cw: u64, cr: u64) -> String {
+        let content = match bash {
+            Some(c) => format!(
+                "[{{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{{\"command\":\"{}\"}}}}]",
+                c
+            ),
+            None => "[]".to_string(),
+        };
+        let cwd_field = match cwd {
+            Some(c) => format!(",\"cwd\":\"{}\"", c),
+            None => String::new(),
+        };
+        format!(
+            "{{\"timestamp\":\"{}\",\"requestId\":\"{}\"{},\"message\":{{\"content\":{},\"usage\":{{\"cache_creation_input_tokens\":{},\"cache_read_input_tokens\":{}}}}}}}",
+            ts, req, cwd_field, content, cw, cr
+        )
+    }
+
+    #[test]
+    fn test_audit_precise_savings() {
+        let tracker = Tracker::new_in_memory().unwrap();
+        tracker
+            .record("cargo check", "rtk cargo check", 1000, 100, 50)
+            .unwrap();
+        let rows = tracker.get_raw_commands().unwrap();
+        let cmd_time = rows[0].0;
+        let project = rows[0].1.clone();
+        let t0 = cmd_time.to_rfc3339();
+        let t1 = (cmd_time + chrono::TimeDelta::try_seconds(1).unwrap()).to_rfc3339();
+        let t2 = (cmd_time + chrono::TimeDelta::try_seconds(2).unwrap()).to_rfc3339();
+        let t3 = (cmd_time + chrono::TimeDelta::try_seconds(3).unwrap()).to_rfc3339();
+
+        let dir = tempfile::tempdir().unwrap();
+        let projects_dir = dir.path().join("proj");
+        std::fs::create_dir_all(&projects_dir).unwrap();
+        // t0: rtk Bash call (match anchor). t1: appearance, cache_write>0 -> WRITE.
+        // t2: read-dominant -> READ. t3: rebuild, cache_write>cache_read -> WRITE.
+        std::fs::write(
+            projects_dir.join("s.jsonl"),
+            format!(
+                "{}\n{}\n{}\n{}\n",
+                ev(
+                    &t0,
+                    "req0",
+                    Some(&project),
+                    Some("rtk cargo check"),
+                    0,
+                    5000
+                ),
+                ev(&t1, "req1", None, None, 200, 6000),
+                ev(&t2, "req2", None, None, 50, 7000),
+                ev(&t3, "req3", None, None, 90000, 1000),
+            ),
+        )
+        .unwrap();
+
+        let s = audit_precise_savings(&tracker, &projects_dir).unwrap();
+        assert_eq!(s.matched, 1);
+        assert_eq!(s.claude_invocations, 1);
+        assert_eq!(s.write_tokens, 1800); // appearance + rebuild
+        assert_eq!(s.read_tokens, 900); // one read turn
+    }
+
+    #[test]
+    fn test_audit_rtk_call_is_last_turn() {
+        // The rtk Bash call is the last logged turn: no appearance/read turns follow,
+        // so the saved tokens are credited once at the appearance (write) rate.
+        let tracker = Tracker::new_in_memory().unwrap();
+        tracker.record("c", "rtk c", 1000, 100, 1).unwrap();
+        let rows = tracker.get_raw_commands().unwrap();
+        let cmd_time = rows[0].0;
+        let project = rows[0].1.clone();
+        let t0 = cmd_time.to_rfc3339();
+        let dir = tempfile::tempdir().unwrap();
+        let projects_dir = dir.path().join("proj");
+        std::fs::create_dir_all(&projects_dir).unwrap();
+        std::fs::write(
+            projects_dir.join("s.jsonl"),
+            ev(&t0, "req0", Some(&project), Some("rtk c"), 0, 5000),
+        )
+        .unwrap();
+        let s = audit_precise_savings(&tracker, &projects_dir).unwrap();
+        assert_eq!(s.matched, 1);
+        assert_eq!(s.write_tokens, 1000 - 100); // appearance only, no later turns
+        assert_eq!(s.read_tokens, 0);
+    }
+
+    #[test]
+    fn test_audit_recovery_debit_raw_cat() {
+        // grep truncates output (credited), then the agent raw-cats the tee file
+        // back into context. The re-read tokens debit the savings; the cat itself
+        // earns no credit (it is not rtk and its tokens were "saved" by the grep).
+        let tracker = Tracker::new_in_memory().unwrap();
+        tracker
+            .record("grep foo src/", "rtk grep foo src/", 1000, 200, 50)
+            .unwrap();
+        let rows = tracker.get_raw_commands().unwrap();
+        let cmd_time = rows[0].0;
+        let project = rows[0].1.clone();
+        let t0 = cmd_time.to_rfc3339();
+        let t1 = (cmd_time + chrono::TimeDelta::try_seconds(1).unwrap()).to_rfc3339();
+        let t2 = (cmd_time + chrono::TimeDelta::try_seconds(2).unwrap()).to_rfc3339();
+        let t3 = (cmd_time + chrono::TimeDelta::try_seconds(3).unwrap()).to_rfc3339();
+        let tee = "/home/u/.local/share/rtk/tee/grep_0_src.log";
+
+        let dir = tempfile::tempdir().unwrap();
+        let projects_dir = dir.path().join("proj");
+        std::fs::create_dir_all(&projects_dir).unwrap();
+        std::fs::write(
+            projects_dir.join("s.jsonl"),
+            format!(
+                "{}\n{}\n{}\n{}\n",
+                ev(
+                    &t0,
+                    "req0",
+                    Some(&project),
+                    Some("rtk grep foo src/"),
+                    0,
+                    5000
+                ),
+                ev(&t1, "req1", None, None, 200, 6000),
+                ev(
+                    &t2,
+                    "req2",
+                    Some(&project),
+                    Some(&format!("cat {}", tee)),
+                    0,
+                    7000
+                ),
+                ev(&t3, "req3", None, None, 600, 8000),
+            ),
+        )
+        .unwrap();
+
+        let s = audit_precise_savings(&tracker, &projects_dir).unwrap();
+        assert_eq!(s.matched, 1);
+        assert_eq!(s.recoveries, 1);
+        assert_eq!(s.write_tokens, 800); // grep credited at the appearance turn (t1)
+        assert_eq!(s.read_tokens, 1600); // t2, t3 read-bucket the saved prefix
+        assert_eq!(s.recovery_write, 600); // cat result (t3) cache_write re-entered
+        assert_eq!(s.recovery_read, 0);
+    }
+
+    #[test]
+    fn test_audit_recovery_rtk_read_not_credited() {
+        // An rtk-read of a tee file is rtk-driven BUT a recovery: crediting it would
+        // double-count the grep's truncation, so it must be skipped and debited.
+        let tracker = Tracker::new_in_memory().unwrap();
+        tracker
+            .record(
+                "cat /home/u/.local/share/rtk/tee/x.log",
+                "rtk read /home/u/.local/share/rtk/tee/x.log",
+                800,
+                600,
+                50,
+            )
+            .unwrap();
+        let rows = tracker.get_raw_commands().unwrap();
+        let cmd_time = rows[0].0;
+        let project = rows[0].1.clone();
+        let t0 = cmd_time.to_rfc3339();
+        let t1 = (cmd_time + chrono::TimeDelta::try_seconds(1).unwrap()).to_rfc3339();
+
+        let dir = tempfile::tempdir().unwrap();
+        let projects_dir = dir.path().join("proj");
+        std::fs::create_dir_all(&projects_dir).unwrap();
+        std::fs::write(
+            projects_dir.join("s.jsonl"),
+            format!(
+                "{}\n{}\n",
+                ev(
+                    &t0,
+                    "req0",
+                    Some(&project),
+                    Some("rtk read /home/u/.local/share/rtk/tee/x.log"),
+                    0,
+                    5000
+                ),
+                ev(&t1, "req1", None, None, 600, 6000),
+            ),
+        )
+        .unwrap();
+
+        let s = audit_precise_savings(&tracker, &projects_dir).unwrap();
+        assert_eq!(s.matched, 0, "recovery read must not be credited");
+        assert_eq!(s.recoveries, 1);
+        assert_eq!(s.write_tokens, 0);
+        assert_eq!(s.recovery_write, 600);
+    }
+
+    #[test]
+    fn test_audit_recovery_read_tool() {
+        // Same scenario as the raw-cat case, but the agent follows the breadcrumb via
+        // Claude's Read tool instead of Bash. Recovery detection must be tool-agnostic.
+        let tracker = Tracker::new_in_memory().unwrap();
+        tracker
+            .record("grep foo src/", "rtk grep foo src/", 1000, 200, 50)
+            .unwrap();
+        let rows = tracker.get_raw_commands().unwrap();
+        let cmd_time = rows[0].0;
+        let project = rows[0].1.clone();
+        let t0 = cmd_time.to_rfc3339();
+        let t1 = (cmd_time + chrono::TimeDelta::try_seconds(1).unwrap()).to_rfc3339();
+        let t2 = (cmd_time + chrono::TimeDelta::try_seconds(2).unwrap()).to_rfc3339();
+        let t3 = (cmd_time + chrono::TimeDelta::try_seconds(3).unwrap()).to_rfc3339();
+        let tee = "/home/u/.local/share/rtk/tee/grep_0_src.log";
+
+        let dir = tempfile::tempdir().unwrap();
+        let projects_dir = dir.path().join("proj");
+        std::fs::create_dir_all(&projects_dir).unwrap();
+        std::fs::write(
+            projects_dir.join("s.jsonl"),
+            format!(
+                "{}\n{}\n{}\n{}\n",
+                ev(
+                    &t0,
+                    "req0",
+                    Some(&project),
+                    Some("rtk grep foo src/"),
+                    0,
+                    5000
+                ),
+                ev(&t1, "req1", None, None, 200, 6000),
+                ev_read(&t2, "req2", Some(&project), tee, 0, 7000),
+                ev(&t3, "req3", None, None, 600, 8000),
+            ),
+        )
+        .unwrap();
+
+        let s = audit_precise_savings(&tracker, &projects_dir).unwrap();
+        assert_eq!(s.matched, 1);
+        assert_eq!(
+            s.recoveries, 1,
+            "Read-tool tee read must count as a recovery"
+        );
+        assert_eq!(s.write_tokens, 800);
+        assert_eq!(s.recovery_write, 600);
     }
 }

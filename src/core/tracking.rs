@@ -341,6 +341,32 @@ impl Tracker {
         Ok(Self { conn })
     }
 
+    /// Get list of raw command records for precise economics auditing.
+    /// Returns `(timestamp, project_path, saved_tokens)` per command, oldest first.
+    pub fn get_raw_commands(&self) -> Result<Vec<(DateTime<Utc>, String, usize)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT timestamp, project_path, saved_tokens FROM commands ORDER BY timestamp ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let ts_str: String = row.get(0)?;
+            // Skip rows whose timestamp won't parse rather than coercing them to
+            // `now()` - a single corrupt oldest row would otherwise move `min_dt` to
+            // ~now and prune every session file out of the audit.
+            let dt = DateTime::parse_from_rfc3339(&ts_str)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc));
+            Ok((dt, row.get::<_, String>(1)?, row.get::<_, i64>(2)? as usize))
+        })?;
+        let mut res = Vec::new();
+        for r in rows {
+            let (dt, project, saved) = r?;
+            if let Some(dt) = dt {
+                res.push((dt, project, saved));
+            }
+        }
+        Ok(res)
+    }
+
     /// Create an isolated in-memory tracker for tests.
     #[cfg(test)]
     pub fn new_in_memory() -> Result<Self> {
@@ -1459,6 +1485,9 @@ pub fn args_display(args: &[OsString]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
@@ -1484,6 +1513,7 @@ mod tests {
     // 3. Tracker::record + get_recent — round-trip DB
     #[test]
     fn test_tracker_record_and_recent() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let tracker = Tracker::new().expect("Failed to create tracker");
 
         // Use unique test identifier to avoid conflicts with other tests
@@ -1508,6 +1538,7 @@ mod tests {
     // 4. track_passthrough doesn't dilute stats (input=0, output=0)
     #[test]
     fn test_track_passthrough_no_dilution() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let tracker = Tracker::new().expect("Failed to create tracker");
 
         // Use unique test identifiers
@@ -1552,6 +1583,7 @@ mod tests {
     // 5. TimedExecution::track records with exec_time > 0
     #[test]
     fn test_timed_execution_records_time() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let timer = TimedExecution::start();
         std::thread::sleep(std::time::Duration::from_millis(10));
         timer.track("test cmd", "rtk test", "raw input data", "filtered");
@@ -1565,6 +1597,7 @@ mod tests {
     // 6. TimedExecution::track_passthrough records with 0 tokens
     #[test]
     fn test_timed_execution_passthrough() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let timer = TimedExecution::start();
         timer.track_passthrough("git tag", "rtk git tag (passthrough)");
 
@@ -1587,8 +1620,6 @@ mod tests {
     #[test]
     fn test_db_path_env_and_default() {
         use std::env;
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap();
 
         let custom_path = env::temp_dir().join("rtk_test_custom.db");
@@ -1646,6 +1677,7 @@ mod tests {
     // 12. record_parse_failure + get_parse_failure_summary roundtrip
     #[test]
     fn test_parse_failure_roundtrip() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let tracker = Tracker::new().expect("Failed to create tracker");
         let test_cmd = format!("git -C /path status test_{}", std::process::id());
 
@@ -1664,6 +1696,7 @@ mod tests {
     // 13. recovery_rate calculation
     #[test]
     fn test_parse_failure_recovery_rate() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let tracker = Tracker::new().expect("Failed to create tracker");
         let pid = std::process::id();
 

@@ -1172,6 +1172,7 @@ rtk cc-economics --daily              # Ventilation quotidienne
 rtk cc-economics --weekly             # Ventilation hebdomadaire
 rtk cc-economics --monthly            # Ventilation mensuelle
 rtk cc-economics --all                # Toutes les ventilations
+rtk cc-economics --audit              # Audit precis de la mise en cache de prompt via les logs de session
 rtk cc-economics --format json        # Export JSON
 ```
 
