@@ -37,6 +37,18 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Instant;
 
+/// Upper bound on the per-call "saved tokens" attribution.
+///
+/// Rationale (issue #1973): when RTK filters a 50 MB log via `rtk read`, the
+/// raw stdout may estimate to millions of tokens, but Claude's tool-result
+/// surface is capped at ~25 000 tokens — anything beyond that wouldn't have
+/// reached Claude regardless of RTK. Recording 12 M "saved tokens" overstates
+/// RTK's contribution by orders of magnitude. Capping the per-call attribution
+/// to this realistic upper bound keeps the dashboard honest.
+///
+/// 25 000 mirrors Claude Code's default `MAX_OUTPUT_TOKENS` for tool results.
+pub const CLAUDE_TOOL_RESULT_CAP: usize = 25_000;
+
 // ── Project path helpers ── // added: project-scoped tracking support
 
 /// Get the canonical project path string for the current working directory.
@@ -321,6 +333,31 @@ impl Tracker {
             [],
         );
 
+        // Migration (#1973): cap historical inflated saved_tokens to the
+        // Claude tool-result ceiling. Older RTK versions recorded raw
+        // input-output differences which could reach millions of tokens for
+        // commands like `rtk read 50MB.log`; that magnitude never reaches
+        // Claude, so the dashboard headline was orders of magnitude wrong.
+        // This UPDATE is idempotent: re-running has no further effect once
+        // every row is at or below the cap.
+        let _ = conn.execute(
+            "UPDATE commands SET saved_tokens = ?1 WHERE saved_tokens > ?1",
+            params![CLAUDE_TOOL_RESULT_CAP as i64],
+        );
+        // The same cap applies to per-call savings_pct: if it was computed
+        // from a raw saved value, recompute it from the capped value using
+        // the capped input as denominator.
+        let _ = conn.execute(
+            "UPDATE commands
+             SET savings_pct = CASE
+                 WHEN MIN(input_tokens, ?1) > 0
+                 THEN (CAST(saved_tokens AS REAL) / MIN(input_tokens, ?1)) * 100.0
+                 ELSE 0
+             END
+             WHERE input_tokens > ?1 OR saved_tokens >= ?1",
+            params![CLAUDE_TOOL_RESULT_CAP as i64],
+        );
+
         conn.execute(
             "CREATE TABLE IF NOT EXISTS parse_failures (
                 id INTEGER PRIMARY KEY,
@@ -422,9 +459,15 @@ impl Tracker {
         output_tokens: usize,
         exec_time_ms: u64,
     ) -> Result<()> {
-        let saved = input_tokens.saturating_sub(output_tokens);
-        let pct = if input_tokens > 0 {
-            (saved as f64 / input_tokens as f64) * 100.0
+        // Issue #1973: cap per-call "saved" attribution at what would
+        // realistically have reached Claude under any scheme. The pct uses
+        // the same capped denominator so it doesn't get diluted to ~0% on
+        // very large local-only inputs (e.g. `rtk read 50MB.log`).
+        let raw_saved = input_tokens.saturating_sub(output_tokens);
+        let saved = raw_saved.min(CLAUDE_TOOL_RESULT_CAP);
+        let pct_denominator = input_tokens.min(CLAUDE_TOOL_RESULT_CAP);
+        let pct = if pct_denominator > 0 {
+            (saved as f64 / pct_denominator as f64) * 100.0
         } else {
             0.0
         };
@@ -1682,6 +1725,80 @@ mod tests {
         // We can't assert exact rate because other tests may have added records,
         // but we can verify recovery_rate is between 0 and 100
         assert!(summary.recovery_rate >= 0.0 && summary.recovery_rate <= 100.0);
+    }
+
+    #[test]
+    fn test_record_caps_saved_tokens_at_claude_tool_result_cap() {
+        // Issue #1973: a 50MB log filtered through `rtk read` would naively
+        // record millions of "saved tokens". The cap keeps the attribution
+        // honest because that volume never reaches Claude anyway.
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+        let huge_input = 12_000_000usize;
+        let small_output = 5_000usize;
+
+        tracker
+            .record(
+                "read 50MB.log",
+                "rtk read 50MB.log",
+                huge_input,
+                small_output,
+                12,
+            )
+            .expect("record");
+
+        let recent = tracker.get_recent(1).expect("recent");
+        let row = recent.first().expect("at least one row");
+        assert_eq!(
+            row.saved_tokens, CLAUDE_TOOL_RESULT_CAP,
+            "saved_tokens must be capped at CLAUDE_TOOL_RESULT_CAP, got {}",
+            row.saved_tokens
+        );
+    }
+
+    #[test]
+    fn test_record_pct_uses_capped_denominator() {
+        // Without the cap, pct = 25K / 12M ≈ 0.2% — gain would display a
+        // useless 0% for a record where RTK fully filtered a gigantic log.
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+        tracker
+            .record("read big.log", "rtk read big.log", 12_000_000, 5_000, 5)
+            .expect("record");
+
+        let recent = tracker.get_recent(1).expect("recent");
+        let row = recent.first().expect("row");
+        assert!(
+            row.savings_pct >= 75.0,
+            "expected pct ≥ 75% (capped denominator), got {:.2}",
+            row.savings_pct
+        );
+    }
+
+    #[test]
+    fn test_record_passthrough_unaffected_by_cap() {
+        // input_tokens == output_tokens (e.g. proxy mode) must yield 0 saved
+        // and 0% pct, regardless of the cap.
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+        tracker
+            .record("git push", "rtk proxy git push", 1234, 1234, 50)
+            .expect("record");
+
+        let row = tracker.get_recent(1).expect("recent").remove(0);
+        assert_eq!(row.saved_tokens, 0);
+        assert_eq!(row.savings_pct, 0.0);
+    }
+
+    #[test]
+    fn test_record_small_savings_unchanged() {
+        // Small savings (well under the cap) must pass through unchanged so
+        // the dashboard still reflects realistic per-call wins.
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+        tracker
+            .record("git log -10", "rtk git log -10", 1000, 200, 30)
+            .expect("record");
+
+        let row = tracker.get_recent(1).expect("recent").remove(0);
+        assert_eq!(row.saved_tokens, 800);
+        assert!((row.savings_pct - 80.0).abs() < 0.001);
     }
 
     #[test]
