@@ -72,8 +72,15 @@ pub fn run(
         }
     }
 
+    // Commands the Claude Code hook already rewrote to rtk at execution time.
+    // Transcripts record the model-authored command (pre-rewrite), so without
+    // this cross-reference every hook-captured command would be reported as
+    // a missed saving.
+    let hook_rewritten = crate::hooks::hook_audit_cmd::load_rewritten_originals(since_days);
+
     let mut total_commands: usize = 0;
     let mut already_rtk: usize = 0;
+    let mut hook_captured: usize = 0;
     let mut parse_errors: usize = 0;
     let mut rtk_disabled_count: usize = 0;
     let mut rtk_disabled_cmds: HashMap<String, usize> = HashMap::new();
@@ -94,6 +101,14 @@ pub fn run(
 
         for ext_cmd in &extracted {
             let parts = split_command_chain(&ext_cmd.command);
+
+            // Already captured by the hook at execution time — not a missed saving.
+            if !hook_rewritten.is_empty() && hook_rewritten.contains(ext_cmd.command.trim()) {
+                total_commands += parts.len();
+                hook_captured += parts.len();
+                continue;
+            }
+
             for part in parts {
                 total_commands += 1;
 
@@ -257,6 +272,7 @@ pub fn run(
         sessions_scanned: sessions.len(),
         total_commands,
         already_rtk,
+        hook_captured,
         since_days,
         supported,
         unsupported,

@@ -68,6 +68,78 @@ fn filter_since_days(entries: &[AuditEntry], days: u64) -> Vec<&AuditEntry> {
         .collect()
 }
 
+/// Reverse of `sanitize_log_field` in hook_cmd.rs: restore `\\`, `\|`, `\n`, `\r`.
+fn unescape_log_field(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('\\') => out.push('\\'),
+                Some('|') => out.push('|'),
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Load the set of original commands the hook rewrote within the last N days
+/// (0 = no time filter). Best-effort: any read/parse failure yields an empty
+/// set so callers (e.g. `rtk discover`) never fail because of the audit log.
+pub fn load_rewritten_originals(since_days: u64) -> std::collections::HashSet<String> {
+    load_rewritten_originals_from(&default_log_path(), since_days)
+}
+
+fn load_rewritten_originals_from(
+    path: &std::path::Path,
+    since_days: u64,
+) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return set;
+    };
+
+    // Log timestamps are local time without timezone suffix (see audit_log_inner).
+    let cutoff = if since_days > 0 {
+        Some(
+            (chrono::Local::now() - chrono::Duration::days(since_days as i64))
+                .format("%Y-%m-%dT%H:%M:%S")
+                .to_string(),
+        )
+    } else {
+        None
+    };
+
+    for line in content.lines() {
+        let Some(entry) = parse_line(line) else {
+            continue;
+        };
+        if entry.action != "rewrite" {
+            continue;
+        }
+        if let Some(ref cutoff) = cutoff {
+            if entry.timestamp.as_str() < cutoff.as_str() {
+                continue;
+            }
+        }
+        set.insert(
+            unescape_log_field(entry.original_cmd.trim())
+                .trim()
+                .to_string(),
+        );
+    }
+    set
+}
+
 pub fn run(since_days: u64, verbose: u8) -> Result<()> {
     let log_path = default_log_path();
 
@@ -177,6 +249,71 @@ pub fn run(since_days: u64, verbose: u8) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_unescape_log_field_roundtrip() {
+        // Mirrors sanitize_log_field in hook_cmd.rs
+        assert_eq!(unescape_log_field(r"git log \| head"), "git log | head");
+        assert_eq!(unescape_log_field(r"echo a\nb"), "echo a\nb");
+        assert_eq!(unescape_log_field(r"path\\to"), r"path\to");
+        assert_eq!(unescape_log_field("plain"), "plain");
+    }
+
+    #[test]
+    fn test_load_rewritten_originals_filters_action_and_unescapes() {
+        let tmp = std::env::temp_dir().join(format!("rtk-audit-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let log = tmp.join("hook-audit.log");
+        std::fs::write(
+            &log,
+            "2026-06-01T10:00:00 | rewrite | git add . | rtk git add .\n\
+             2026-06-01T10:00:01 | skip:no_match | htop | -\n\
+             2026-06-01T10:00:02 | rewrite | grep -n foo \\| head -5 | rtk grep -n foo \\| head -5\n\
+             malformed line\n\
+             2026-06-01T10:00:03 | skip:defer | cd /tmp | -\n",
+        )
+        .unwrap();
+
+        let set = load_rewritten_originals_from(&log, 0);
+        assert_eq!(set.len(), 2);
+        assert!(set.contains("git add ."));
+        assert!(set.contains("grep -n foo | head -5"));
+        assert!(!set.contains("htop"));
+        assert!(!set.contains("cd /tmp"));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_load_rewritten_originals_since_days_cutoff() {
+        let tmp = std::env::temp_dir().join(format!("rtk-audit-cutoff-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let log = tmp.join("hook-audit.log");
+        let recent = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S");
+        std::fs::write(
+            &log,
+            format!(
+                "2001-01-01T00:00:00 | rewrite | git old | rtk git old\n\
+                 {recent} | rewrite | git new | rtk git new\n"
+            ),
+        )
+        .unwrap();
+
+        let set = load_rewritten_originals_from(&log, 30);
+        assert!(set.contains("git new"));
+        assert!(!set.contains("git old"));
+
+        let all = load_rewritten_originals_from(&log, 0);
+        assert_eq!(all.len(), 2);
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_load_rewritten_originals_missing_file_is_empty() {
+        let set = load_rewritten_originals_from(std::path::Path::new("/nonexistent/audit.log"), 30);
+        assert!(set.is_empty());
+    }
 
     #[test]
     fn test_parse_line_rewrite() {

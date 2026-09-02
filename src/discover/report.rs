@@ -98,6 +98,9 @@ pub struct DiscoverReport {
     pub sessions_scanned: usize,
     pub total_commands: usize,
     pub already_rtk: usize,
+    /// Commands already rewritten to rtk by the agent hook at execution time
+    /// (cross-referenced from the hook audit log; 0 when auditing is disabled).
+    pub hook_captured: usize,
     pub since_days: u64,
     pub supported: Vec<SupportedEntry>,
     pub unsupported: Vec<UnsupportedEntry>,
@@ -140,6 +143,17 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
             0.0
         }
     ));
+    if report.hook_captured > 0 {
+        out.push_str(&format!(
+            "Captured by hook rewrite: {} commands ({:.1}%)\n",
+            report.hook_captured,
+            if report.total_commands > 0 {
+                report.hook_captured as f64 * 100.0 / report.total_commands as f64
+            } else {
+                0.0
+            }
+        ));
+    }
 
     if report.supported.is_empty() && report.unsupported.is_empty() {
         out.push_str("\nNo missed savings found. RTK usage looks good!\n");
@@ -279,6 +293,7 @@ mod tests {
             sessions_scanned: 1,
             total_commands,
             already_rtk,
+            hook_captured: 0,
             since_days: 30,
             supported: vec![],
             unsupported: vec![],
@@ -291,6 +306,21 @@ mod tests {
 
     // B6 regression: integer division truncated small percentages to 0%.
     // Example: 3/1000 = 0% (old bug), should be "0.3%".
+    #[test]
+    fn test_hook_captured_line_rendered_when_nonzero() {
+        let mut report = make_report(1000, 3);
+        report.hook_captured = 500;
+        let output = format_text(&report, 10, false);
+        assert!(output.contains("Captured by hook rewrite: 500 commands (50.0%)"));
+    }
+
+    #[test]
+    fn test_hook_captured_line_hidden_when_zero() {
+        let report = make_report(1000, 3);
+        let output = format_text(&report, 10, false);
+        assert!(!output.contains("Captured by hook rewrite"));
+    }
+
     #[test]
     fn test_already_rtk_percent_shows_decimal() {
         let report = make_report(1000, 3);
