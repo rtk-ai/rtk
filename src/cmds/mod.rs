@@ -2,6 +2,7 @@
 
 pub mod cloud;
 pub mod dotnet;
+pub mod gcc;
 pub mod git;
 pub mod go;
 pub mod js;

@@ -562,6 +562,43 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 65.0,
         ..RtkRule::DEFAULT
     },
+    // C/C++ compilers
+    RtkRule {
+        pattern: r"^gcc\s+",
+        rtk_cmd: "rtk gcc",
+        rewrite_prefixes: &["gcc"],
+        category: "Build",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^g\+\+\s+",
+        rtk_cmd: "rtk g++",
+        rewrite_prefixes: &["g++"],
+        category: "Build",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^clang\s+",
+        rtk_cmd: "rtk clang",
+        rewrite_prefixes: &["clang"],
+        category: "Build",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^clang\+\+\s+",
+        rtk_cmd: "rtk clang++",
+        rewrite_prefixes: &["clang++"],
+        category: "Build",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
     // PHP tooling
     RtkRule {
         pattern: r"^php\s+artisan(?:\s|$)",

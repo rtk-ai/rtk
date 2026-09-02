@@ -1,0 +1,43 @@
+In file included from src/main.c:3:
+src/utils.h:12:5: warning: implicit declaration of function 'strlcpy' [-Wimplicit-function-declaration]
+   12 |     strlcpy(dst, src, size);
+      |     ^~~~~~~
+src/utils.h:12:5: note: include '<string.h>' or provide a declaration of 'strlcpy'
+src/main.c: In function 'main':
+src/main.c:25:9: error: 'x' undeclared (first use in this function)
+   25 |         x = 42;
+      |         ^
+src/main.c:25:9: note: each undeclared identifier is reported only once for each function it appears in
+src/main.c:31:12: error: expected ';' before '}' token
+   31 |     return 0
+      |            ^
+      |            ;
+   31 | }
+      | ~
+src/main.c:45:22: warning: unused variable 'buf' [-Wunused-variable]
+   45 |     char buf[256];
+      |                  ^~~~
+src/parser.c: In function 'parse_line':
+src/parser.c:88:5: error: implicit declaration of function 'my_strdup' [-Wimplicit-function-declaration]
+   88 |     return my_strdup(line);
+      |     ^~~~~~
+src/parser.c:88:12: warning: returning 'int' from a function with return type 'char *' makes pointer from integer without a cast [-Wint-conversion]
+   88 |     return my_strdup(line);
+      |            ^~~~~~~~~
+src/parser.c:102:20: error: incompatible types when assigning to type 'int' from type 'char *'
+  102 |     token->value = strdup(buf);
+      |                    ^~~~~
+src/lexer.c: In function 'tokenize':
+src/lexer.c:55:18: error: passing argument 1 of 'strlen' from incompatible pointer type [-Wincompatible-pointer-types]
+   55 |     size_t len = strlen(count);
+      |                  ^~~~~  ~~~~~
+      |                         |
+      |                         int *
+src/lexer.c:55:18: note: expected 'const char *' but argument is of type 'int *'
+src/lexer.c:72:12: warning: format '%s' expects argument of type 'char *', but argument 2 has type 'int' [-Wformat=]
+   72 |     printf("%s\n", value);
+      |            ~^      ~~~~~
+      |             |      |
+      |             char * int
+      |            %d
+make: *** [Makefile:10: build] Error 1
