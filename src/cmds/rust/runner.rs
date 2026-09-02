@@ -17,6 +17,7 @@ static ERROR_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         Regex::new(r"(?i)^.*\berr\b.*$").unwrap(),
         Regex::new(r"(?i)^.*warning[\s:\[].*$").unwrap(),
         Regex::new(r"(?i)^.*\bwarn\b.*$").unwrap(),
+        Regex::new(r"(?i)^.*\bfail\b.*$").unwrap(),
         Regex::new(r"(?i)^.*failed.*$").unwrap(),
         Regex::new(r"(?i)^.*failure.*$").unwrap(),
         Regex::new(r"(?i)^.*exception.*$").unwrap(),
@@ -136,11 +137,11 @@ pub fn run_test(command: &str, verbose: u8) -> Result<i32> {
     }
     let cmd = build_shell_command(command);
     let command_owned = command.to_string();
-    crate::core::runner::run_filtered(
+    crate::core::runner::run_filtered_with_exit(
         cmd,
         "test",
         command,
-        move |raw| extract_test_summary(raw, &command_owned),
+        move |raw, exit_code| extract_test_summary(raw, &command_owned, exit_code),
         crate::core::runner::RunOptions::with_tee("test"),
     )
 }
@@ -178,7 +179,7 @@ fn filter_errors(output: &str) -> String {
     result.join("\n")
 }
 
-fn extract_test_summary(output: &str, command: &str) -> String {
+fn extract_test_summary(output: &str, command: &str, exit_code: i32) -> String {
     let mut result = Vec::new();
     let lines: Vec<&str> = output.lines().collect();
 
@@ -267,11 +268,35 @@ fn extract_test_summary(output: &str, command: &str) -> String {
             output.push_str(&format!("  {}\n", r));
         }
     } else {
-        output.push_str("OUTPUT (last 5 lines):\n");
-        let start = lines.len().saturating_sub(5);
-        for line in &lines[start..] {
-            if !line.trim().is_empty() {
+        let is_generic = !is_cargo && !is_pytest && !is_jest && !is_go;
+        let error_lines: Vec<&str> = if is_generic && exit_code != 0 {
+            lines
+                .iter()
+                .copied()
+                .filter(|line| ERROR_PATTERNS.iter().any(|p| p.is_match(line)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        if !error_lines.is_empty() {
+            output.push_str("[FAIL] ERRORS:\n");
+            for line in error_lines.iter().take(MAX_RUNNER_LINES) {
                 output.push_str(&format!("  {}\n", line));
+            }
+            if error_lines.len() > MAX_RUNNER_LINES {
+                output.push_str(&format!(
+                    "  ... +{} more\n",
+                    error_lines.len() - MAX_RUNNER_LINES
+                ));
+            }
+        } else {
+            output.push_str("OUTPUT (last 5 lines):\n");
+            let start = lines.len().saturating_sub(5);
+            for line in &lines[start..] {
+                if !line.trim().is_empty() {
+                    output.push_str(&format!("  {}\n", line));
+                }
             }
         }
     }
@@ -289,5 +314,72 @@ mod tests {
         let filtered = filter_errors(output);
         assert!(filtered.contains("error"));
         assert!(!filtered.contains("info"));
+    }
+
+    #[test]
+    fn test_extract_generic_runner_shows_error_lines_before_tail() {
+        let output = "\
+error: setup failed before tests ran
+line 1
+line 2
+line 3
+line 4
+line 5
+line 6";
+
+        let summary = extract_test_summary(output, "custom-test-runner", 1);
+
+        assert!(summary.contains("[FAIL] ERRORS:"));
+        assert!(summary.contains("error: setup failed before tests ran"));
+        assert!(!summary.contains("OUTPUT (last 5 lines):"));
+        assert!(!summary.contains("line 6"));
+    }
+
+    #[test]
+    fn test_extract_generic_runner_without_errors_keeps_last_five_lines() {
+        let output = "\
+line 1
+line 2
+line 3
+line 4
+line 5
+line 6";
+
+        let summary = extract_test_summary(output, "custom-test-runner", 0);
+
+        assert!(summary.contains("OUTPUT (last 5 lines):"));
+        assert!(!summary.contains("line 1"));
+        assert!(summary.contains("line 2"));
+        assert!(summary.contains("line 6"));
+    }
+
+    #[test]
+    fn test_extract_generic_runner_passing_with_failed_keyword_shows_tail() {
+        let output = "\
+setup complete
+Summary: 0 failed, 10 passed";
+
+        let summary = extract_test_summary(output, "custom-test-runner", 0);
+
+        assert!(summary.contains("OUTPUT (last 5 lines):"));
+        assert!(!summary.contains("[FAIL] ERRORS:"));
+        assert!(summary.contains("Summary: 0 failed, 10 passed"));
+    }
+
+    #[test]
+    fn test_extract_generic_runner_catches_fail_keyword() {
+        let output = "\
+setup complete
+fail: something went wrong
+line 3
+line 4
+line 5
+line 6";
+
+        let summary = extract_test_summary(output, "custom-test-runner", 1);
+
+        assert!(summary.contains("[FAIL] ERRORS:"));
+        assert!(summary.contains("fail: something went wrong"));
+        assert!(!summary.contains("OUTPUT (last 5 lines):"));
     }
 }
