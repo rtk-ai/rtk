@@ -11,8 +11,8 @@ use std::collections::HashMap;
 
 use provider::{ClaudeProvider, SessionProvider};
 use registry::{
-    category_avg_tokens, classify_command, split_command_chain, strip_disabled_prefix,
-    Classification,
+    category_avg_tokens, classify_command, split_command_chain,
+    strip_disabled_prefix_for_analytics, Classification,
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
@@ -98,7 +98,7 @@ pub fn run(
                 total_commands += 1;
 
                 // Detect RTK_DISABLED= bypass before classification
-                let (env_prefix, actual_cmd) = strip_disabled_prefix(part);
+                let (env_prefix, actual_cmd) = strip_disabled_prefix_for_analytics(part);
                 if prefix_contains_rtk_disabled(env_prefix) {
                     // Only count if the underlying command is one RTK supports
                     match classify_command(actual_cmd) {
