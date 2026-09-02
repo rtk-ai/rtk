@@ -247,7 +247,7 @@ impl Tracker {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn new() -> Result<Self> {
-        let db_path = get_db_path()?;
+        let db_path = tracker_db_path()?;
         if let Some(parent) = db_path.parent() {
             crate::core::utils::create_private_dir(parent)?;
         }
@@ -1270,6 +1270,39 @@ pub(crate) fn get_db_path() -> Result<PathBuf> {
     // Priority 3: Default platform-specific location
     let data_dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
     Ok(data_dir.join(RTK_DATA_DIR).join(HISTORY_DB))
+}
+
+/// Resolve the path the tracker actually opens.
+///
+/// Identical to [`get_db_path`] in a release build. Under `cfg(test)` it diverts
+/// to a per-process temp file unless `RTK_DB_PATH` is set explicitly.
+///
+/// This exists because `cargo test` — which CONTRIBUTING tells contributors to
+/// run — used to insert rows straight into the developer's real
+/// `<data-dir>/rtk/history.db`. Every write path funnels through
+/// `Tracker::new()`, so it is not only the handful of tests in this module that
+/// leak: any command test exercising the real code path via [`TimedExecution`]
+/// leaks too (`find`/`git`/`read` tests accounted for the majority of the rows
+/// observed in the wild). Fixing it here rather than per-test makes the whole
+/// class impossible instead of patching the instances.
+///
+/// Guarding at the *open* site keeps `get_db_path` a pure configuration
+/// resolver, so `test_db_path_env_and_default` still asserts real precedence
+/// rules rather than the test shim.
+fn tracker_db_path() -> Result<PathBuf> {
+    #[cfg(test)]
+    {
+        // An explicit RTK_DB_PATH still wins, so a test can point at a fixture
+        // on purpose (test_db_path_env_and_default relies on that precedence).
+        if std::env::var_os("RTK_DB_PATH").is_none() {
+            // Stable within the process: Tracker::new() is called many times per
+            // test binary and every call must land on the same database.
+            return Ok(
+                std::env::temp_dir().join(format!("rtk-test-history-{}.db", std::process::id()))
+            );
+        }
+    }
+    get_db_path()
 }
 
 /// Individual parse failure record.
