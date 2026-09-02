@@ -1509,6 +1509,28 @@ fn shell_split(input: &str) -> Vec<String> {
     discover::lexer::shell_split(input)
 }
 
+fn shell_join_args(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| shell_quote_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote_arg(arg: &str) -> String {
+    if arg.is_empty() {
+        return "''".to_string();
+    }
+
+    if arg
+        .bytes()
+        .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' | b'.' | b'/' | b':' | b'=' | b',' | b'+' | b'%'))
+    {
+        return arg.to_string();
+    }
+
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
 fn build_k8s_namespace_args(namespace: Option<String>, all: bool) -> Vec<String> {
     let mut args = Vec::new();
     if all {
@@ -2503,7 +2525,11 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Check { agent: _, command } => {
                 use crate::discover::registry::rewrite_command;
-                let raw = command.join(" ");
+                let raw = if command.len() == 1 {
+                    command[0].clone()
+                } else {
+                    shell_join_args(&command)
+                };
                 let (excluded, transparent_prefixes) = crate::core::config::Config::load()
                     .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
                     .unwrap_or_default();
@@ -2521,7 +2547,11 @@ fn run_cli() -> Result<i32> {
         },
 
         Commands::Rewrite { args } => {
-            let cmd = args.join(" ");
+            let cmd = if args.len() == 1 {
+                args[0].clone()
+            } else {
+                shell_join_args(&args)
+            };
             hooks::rewrite_cmd::run(&cmd)?;
             0
         }
