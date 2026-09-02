@@ -104,9 +104,21 @@ impl StreamFilter for ErrorStreamFilter {
 
 fn build_shell_command(command: &str) -> Command {
     if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd");
-        c.args(["/C", command]);
-        c
+        // std::process::Command's default arg-escaping on Windows would
+        // re-escape our already-quoted `command` string a second time when
+        // building the command line for cmd.exe itself, corrupting it.
+        // raw_arg passes it through untouched, so only our own
+        // quote_shell_arg escaping (targeting cmd.exe's /C parsing) and the
+        // child program's own argv parsing are in play -- not a third layer.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let mut c = Command::new("cmd");
+            c.raw_arg("/C").raw_arg(command);
+            c
+        }
+        #[cfg(not(windows))]
+        unreachable!()
     } else {
         let mut c = Command::new("sh");
         c.args(["-c", command]);
@@ -114,32 +126,75 @@ fn build_shell_command(command: &str) -> Command {
     }
 }
 
-/// Run a command and filter output to show only errors/warnings
-pub fn run_err(command: &str, verbose: u8) -> Result<i32> {
-    if verbose > 0 {
-        eprintln!("Running: {}", command);
+/// Quote a single argument so a shell re-parsing the joined command string
+/// reconstructs this exact argument, not a re-split version of it.
+fn quote_shell_arg(arg: &str) -> String {
+    let is_safe = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | '@'));
+    if is_safe {
+        return arg.to_string();
     }
-    let cmd = build_shell_command(command);
+    if cfg!(target_os = "windows") {
+        // Backslash-escape embedded quotes (the CommandLineToArgvW
+        // convention most Windows programs, including node.exe, parse
+        // their own argv with) rather than cmd.exe's own doubled-quote
+        // convention, which is a separate, outer parsing layer.
+        format!("\"{}\"", arg.replace('"', "\\\""))
+    } else {
+        // POSIX single-quoting: close the quote, insert an escaped literal
+        // quote, reopen — the standard technique for embedding a ' inside ''.
+        format!("'{}'", arg.replace('\'', r"'\''"))
+    }
+}
+
+/// Re-join argv into a shell command string, preserving argument boundaries.
+///
+/// The OS already split the original command into correct argv elements by
+/// the time this process sees them — `argv.join(" ")` alone throws that away
+/// (issue #2985): an argument containing spaces or shell metacharacters
+/// (e.g. `node -e 'console.log("a")'`) gets flattened into the join, then
+/// `sh -c`/`cmd /C` re-splits it on those same characters, silently running
+/// something different from what the user typed.
+fn shell_quote_join(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|a| quote_shell_arg(a))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Run a command and filter output to show only errors/warnings
+pub fn run_err(command: &[String], verbose: u8) -> Result<i32> {
+    let display = command.join(" ");
+    if verbose > 0 {
+        eprintln!("Running: {}", display);
+    }
+    let quoted = shell_quote_join(command);
+    let cmd = build_shell_command(&quoted);
     crate::core::runner::run_streamed(
         cmd,
         "err",
-        command,
+        &display,
         Box::new(ErrorStreamFilter::new()),
         crate::core::runner::RunOptions::with_tee("err"),
     )
 }
 
 /// Run tests and show only failures
-pub fn run_test(command: &str, verbose: u8) -> Result<i32> {
+pub fn run_test(command: &[String], verbose: u8) -> Result<i32> {
+    let display = command.join(" ");
     if verbose > 0 {
-        eprintln!("Running tests: {}", command);
+        eprintln!("Running tests: {}", display);
     }
-    let cmd = build_shell_command(command);
-    let command_owned = command.to_string();
+    let quoted = shell_quote_join(command);
+    let cmd = build_shell_command(&quoted);
+    let command_owned = display.clone();
     crate::core::runner::run_filtered(
         cmd,
         "test",
-        command,
+        &display,
         move |raw| extract_test_summary(raw, &command_owned),
         crate::core::runner::RunOptions::with_tee("test"),
     )
@@ -289,5 +344,54 @@ mod tests {
         let filtered = filter_errors(output);
         assert!(filtered.contains("error"));
         assert!(!filtered.contains("info"));
+    }
+
+    #[test]
+    fn test_quote_shell_arg_leaves_safe_args_unquoted() {
+        assert_eq!(quote_shell_arg("node"), "node");
+        assert_eq!(quote_shell_arg("-e"), "-e");
+        assert_eq!(quote_shell_arg("src/main.rs"), "src/main.rs");
+    }
+
+    #[test]
+    fn test_quote_shell_arg_quotes_args_with_metacharacters() {
+        let quoted = quote_shell_arg(r#"console.log("a")"#);
+        // Round-trips through the platform's own shell-quoting rules --
+        // exact escaped form differs per platform, but it must be quoted
+        // and must not equal the raw unsafe string.
+        assert_ne!(quoted, r#"console.log("a")"#);
+        assert!(quoted.starts_with('\'') || quoted.starts_with('"'));
+    }
+
+    #[test]
+    fn test_quote_shell_arg_quotes_args_with_spaces() {
+        let quoted = quote_shell_arg("hello world");
+        assert_ne!(quoted, "hello world");
+    }
+
+    #[test]
+    fn test_shell_quote_join_preserves_argument_boundaries() {
+        // Regression test for #2985: a naive `argv.join(" ")` flattens an
+        // argument containing spaces/quotes into the join, and the shell
+        // re-splits it on those same characters when the string is
+        // re-parsed. The quoted join must survive a shell round-trip.
+        let argv = vec![
+            "node".to_string(),
+            "-e".to_string(),
+            r#"console.log("a")"#.to_string(),
+        ];
+        let joined = shell_quote_join(&argv);
+        // The full original third argument must appear intact somewhere in
+        // the joined string (inside its quoting), not just the words of it
+        // scattered by an unquoted join.
+        assert!(joined.contains("console.log"));
+        assert!(joined.contains('a'));
+        // It must differ from the naive, bug-reproducing join.
+        assert_ne!(joined, argv.join(" "));
+    }
+
+    #[test]
+    fn test_shell_quote_join_empty_argv() {
+        assert_eq!(shell_quote_join(&[]), "");
     }
 }
