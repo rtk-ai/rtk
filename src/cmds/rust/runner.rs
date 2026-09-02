@@ -136,11 +136,11 @@ pub fn run_test(command: &str, verbose: u8) -> Result<i32> {
     }
     let cmd = build_shell_command(command);
     let command_owned = command.to_string();
-    crate::core::runner::run_filtered(
+    crate::core::runner::run_filtered_with_exit(
         cmd,
         "test",
         command,
-        move |raw| extract_test_summary(raw, &command_owned),
+        move |raw, exit_code| extract_test_summary(raw, &command_owned, exit_code),
         crate::core::runner::RunOptions::with_tee("test"),
     )
 }
@@ -178,7 +178,7 @@ fn filter_errors(output: &str) -> String {
     result.join("\n")
 }
 
-fn extract_test_summary(output: &str, command: &str) -> String {
+fn extract_test_summary(output: &str, command: &str, exit_code: i32) -> String {
     let mut result = Vec::new();
     let lines: Vec<&str> = output.lines().collect();
 
@@ -267,12 +267,56 @@ fn extract_test_summary(output: &str, command: &str) -> String {
             output.push_str(&format!("  {}\n", r));
         }
     } else {
-        output.push_str("OUTPUT (last 5 lines):\n");
-        let start = lines.len().saturating_sub(5);
-        for line in &lines[start..] {
-            if !line.trim().is_empty() {
+        let mut error_lines = Vec::new();
+        let mut in_error_block = false;
+        let mut blank_count: usize = 0;
+        for line in lines.iter() {
+            let is_error = ERROR_PATTERNS.iter().any(|p| p.is_match(line));
+            if is_error {
+                in_error_block = true;
+                blank_count = 0;
+                error_lines.push(*line);
+            } else if in_error_block {
+                if line.trim().is_empty() {
+                    blank_count += 1;
+                    if blank_count >= 2 {
+                        in_error_block = false;
+                    } else {
+                        error_lines.push(*line);
+                    }
+                } else if line.starts_with(' ') || line.starts_with('\t') {
+                    blank_count = 0;
+                    error_lines.push(*line);
+                } else {
+                    in_error_block = false;
+                }
+            }
+        }
+
+        if !error_lines.is_empty() {
+            output.push_str("[FAIL] DETECTED FAILURES:\n");
+            for line in error_lines.iter().take(MAX_RUNNER_LINES) {
                 output.push_str(&format!("  {}\n", line));
             }
+            if error_lines.len() > MAX_RUNNER_LINES {
+                output.push_str(&format!(
+                    "  ... +{} more\n",
+                    error_lines.len() - MAX_RUNNER_LINES
+                ));
+            }
+        } else if exit_code != 0 {
+            output.push_str(&format!(
+                "[FAIL] Command failed (exit code: {})\n",
+                exit_code
+            ));
+            let start = lines.len().saturating_sub(10);
+            for line in &lines[start..] {
+                if !line.trim().is_empty() {
+                    output.push_str(&format!("  {}\n", line));
+                }
+            }
+        } else {
+            output.push_str("[ok] All tests passed (no recognized test runner)\n");
         }
     }
 
@@ -289,5 +333,48 @@ mod tests {
         let filtered = filter_errors(output);
         assert!(filtered.contains("error"));
         assert!(!filtered.contains("info"));
+    }
+
+    #[test]
+    fn test_generic_runner_surfaces_failure_lines() {
+        let output = "running tests\nsetup complete\nerror: assertion failed at test_foo\n  expected: 42\n  got: 0\ncleanup done";
+        let result = extract_test_summary(output, "make test", 1);
+        assert!(
+            result.contains("[FAIL] DETECTED FAILURES:"),
+            "should detect error patterns: {}",
+            result
+        );
+        assert!(result.contains("error: assertion failed"));
+    }
+
+    #[test]
+    fn test_generic_runner_nonzero_no_patterns() {
+        let output = "running tests\ntest 1 ok\ntest 2 ok\ntest 3 ok\nsome info\nmore info\nfinal line";
+        let result = extract_test_summary(output, "make test", 2);
+        assert!(
+            result.contains("[FAIL] Command failed (exit code: 2)"),
+            "should show exit code: {}",
+            result
+        );
+        assert!(result.contains("final line"));
+    }
+
+    #[test]
+    fn test_generic_runner_success() {
+        let output = "running tests\ntest 1 ok\ntest 2 ok\nall good";
+        let result = extract_test_summary(output, "make test", 0);
+        assert!(
+            result.contains("[ok] All tests passed (no recognized test runner)"),
+            "should show success: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_recognized_runners_unchanged() {
+        let output = "test result: ok. 5 passed; 0 failed\n";
+        let result = extract_test_summary(output, "cargo test", 0);
+        assert!(result.contains("SUMMARY:"));
+        assert!(result.contains("test result:"));
     }
 }
