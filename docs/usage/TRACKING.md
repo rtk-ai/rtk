@@ -545,7 +545,8 @@ let _ = conn.execute(
 ## Security & Privacy
 
 - **Local storage only**: Tracking database never leaves the machine
-- **Telemetry requires consent**: RTK can send a daily anonymous usage ping (version, OS, command counts, token savings). Disabled by default, requires explicit consent via `rtk init` or `rtk telemetry enable`. Manage with `rtk telemetry status/disable/forget`. Override: `RTK_TELEMETRY_DISABLED=1`
+- **Telemetry requires consent**: RTK can send a daily anonymous usage ping (version, OS, command counts, token savings). Disabled by default, requires explicit consent via `rtk init` or `rtk telemetry enable`. Manage with `rtk telemetry status/disable/forget`. Override: `RTK_TELEMETRY_DISABLED=1` or `rtk --no-telemetry`
+- **Tracking can be disabled**: Disable the local tracking database via `RTK_DISABLE_TRACKING=1`, `rtk --no-tracking`, or `[tracking] enabled = false` in `config.toml`. Use `rtk --secure` to disable both tracking and telemetry at once.
 - **User control**: Users can delete `~/.local/share/rtk/tracking.db` anytime
 - **90-day retention**: Old data automatically purged
 

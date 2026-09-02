@@ -476,9 +476,17 @@ rtk telemetry disable    # Withdraw consent — stops all collection immediately
 rtk telemetry forget     # Withdraw consent + delete all local data + request server-side erasure
 ```
 
+**Override via CLI flag (per-invocation):**
+```bash
+rtk --no-telemetry git log -5       # Skip telemetry for this command
+rtk --no-tracking cargo build       # Skip local history.db for this command
+rtk --secure git log -5             # Disable both (overrides config.toml)
+```
+
 **Override via environment:**
 ```bash
-export RTK_TELEMETRY_DISABLED=1   # Blocks telemetry regardless of consent
+export RTK_TELEMETRY_DISABLED=1    # Blocks telemetry regardless of consent
+export RTK_DISABLE_TRACKING=1      # Blocks local tracking regardless of consent
 ```
 
 ## Star History

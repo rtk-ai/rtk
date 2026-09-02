@@ -22,6 +22,9 @@ rtk config --create   # create config file with defaults
 ## Full config structure
 
 ```toml
+secure = false              # master switch: disables BOTH telemetry AND tracking
+                            # overrides [tracking] and [telemetry] below
+
 [tracking]
 enabled = true              # enable/disable token tracking
 history_days = 90           # retention in days (auto-cleanup)
@@ -60,7 +63,8 @@ For full details on what is collected, opt-out options, and GDPR rights, see [Te
 |----------|-------------|
 | `RTK_DISABLED=1` | Disable RTK for a single command (`RTK_DISABLED=1 git status`) |
 | `RTK_TEE_DIR` | Override the tee directory |
-| `RTK_TELEMETRY_DISABLED=1` | Disable telemetry |
+| `RTK_TELEMETRY_DISABLED=1` | Disable telemetry (overrides config) |
+| `RTK_DISABLE_TRACKING=1` | Disable local tracking database (overrides config) |
 | `RTK_HOOK_AUDIT=1` | Enable hook audit logging |
 | `SKIP_ENV_VALIDATION=1` | Skip env validation (useful with Next.js) |
 
@@ -144,10 +148,13 @@ Data sent: device hash, version, OS, architecture, command count/24h, top comman
 To opt out:
 
 ```bash
-# Via environment variable
+# Via CLI flag (per-invocation)
+rtk --no-telemetry git log -5
+
+# Via environment variable (session or CI)
 export RTK_TELEMETRY_DISABLED=1
 
-# Via config.toml
+# Via config.toml (MDM-deployable)
 [telemetry]
 enabled = false
 ```

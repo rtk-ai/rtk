@@ -83,6 +83,18 @@ struct Cli {
     /// Set SKIP_ENV_VALIDATION=1 for child processes (Next.js, tsc, lint, prisma)
     #[arg(long = "skip-env", global = true)]
     skip_env: bool,
+
+    /// Disable telemetry AND tracking, overriding config.toml and env vars
+    #[arg(long = "secure", global = true)]
+    secure: bool,
+
+    /// Disable telemetry pings, overriding config.toml (alias: env RTK_TELEMETRY_DISABLED=1)
+    #[arg(long = "no-telemetry", global = true)]
+    no_telemetry: bool,
+
+    /// Disable local tracking database, overriding config.toml (alias: env RTK_DISABLE_TRACKING=1)
+    #[arg(long = "no-tracking", global = true)]
+    no_tracking: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1619,9 +1631,6 @@ where
 }
 
 fn run_cli() -> Result<i32> {
-    // Fire-and-forget telemetry ping (1/day, non-blocking)
-    core::telemetry::maybe_ping();
-
     let cli = match Cli::try_parse_from(std::env::args_os()) {
         Ok(cli) => cli,
         Err(e) => {
@@ -1631,6 +1640,23 @@ fn run_cli() -> Result<i32> {
             return run_fallback(e);
         }
     };
+
+    // Set secure state from parsed CLI (raw-arg init() already caught fallback path)
+    if cli.secure {
+        core::secure::set_secure();
+    } else {
+        if cli.no_telemetry {
+            core::secure::set_no_telemetry();
+        }
+        if cli.no_tracking {
+            core::secure::set_no_tracking();
+        }
+    }
+
+    // Fire-and-forget telemetry ping (1/day, non-blocking), gated by secure
+    if !core::secure::is_telemetry_forced_off() {
+        core::telemetry::maybe_ping();
+    }
 
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
     // Skip for Gain — it shows its own inline hook warning.

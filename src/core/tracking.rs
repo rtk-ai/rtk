@@ -247,6 +247,22 @@ impl Tracker {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn new() -> Result<Self> {
+        // Priority: --secure / --no-tracking > RTK_DISABLE_TRACKING=1 > config.toml
+        crate::core::secure::is_tracking_forced_off();
+        if crate::core::secure::is_tracking_forced_off() {
+            anyhow::bail!("tracking disabled by --secure or --no-tracking");
+        }
+        if std::env::var("RTK_DISABLE_TRACKING").as_deref() == Ok("1") {
+            anyhow::bail!("tracking disabled by RTK_DISABLE_TRACKING=1");
+        }
+        if let Ok(cfg) = crate::core::config::Config::load() {
+            if cfg.secure {
+                anyhow::bail!("tracking disabled by secure=true in config.toml");
+            }
+            if !cfg.tracking.enabled {
+                anyhow::bail!("tracking disabled in config.toml");
+            }
+        }
         let db_path = get_db_path()?;
         if let Some(parent) = db_path.parent() {
             crate::core::utils::create_private_dir(parent)?;

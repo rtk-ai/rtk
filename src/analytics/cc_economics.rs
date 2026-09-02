@@ -187,7 +187,31 @@ pub fn run(
     format: &str,
     verbose: u8,
 ) -> Result<()> {
-    let tracker = Tracker::new().context("Failed to initialize tracking database")?;
+    if crate::core::secure::is_tracking_forced_off()
+        || std::env::var("RTK_DISABLE_TRACKING").as_deref() == Ok("1")
+    {
+        match format {
+            "json" => println!("{}", serde_json::json!({"tracking": "disabled"})),
+            _ => println!(
+                "Tracking is disabled by --secure, --no-tracking, or config.toml. No data to show."
+            ),
+        }
+        return Ok(());
+    }
+    let tracker = match Tracker::new() {
+        Ok(t) => t,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("tracking disabled") {
+                match format {
+                    "json" => println!("{}", serde_json::json!({"tracking": "disabled"})),
+                    _ => println!("{}", msg),
+                }
+                return Ok(());
+            }
+            anyhow::bail!("Failed to initialize tracking database: {}", msg);
+        }
+    };
 
     match format {
         "json" => export_json(&tracker, daily, weekly, monthly, all),

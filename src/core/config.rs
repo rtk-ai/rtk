@@ -7,6 +7,11 @@ use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Config {
+    /// Secure mode: disables both telemetry and tracking.
+    /// Overrides [tracking] and [telemetry] individual settings.
+    /// CLI --secure and env vars take precedence over this.
+    #[serde(default)]
+    pub secure: bool,
     #[serde(default)]
     pub tracking: TrackingConfig,
     #[serde(default)]
