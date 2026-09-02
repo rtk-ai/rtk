@@ -47,6 +47,8 @@ Agent runs "cargo test"
 
 ## Installation by agent
 
+`rtk init` installs Claude by default when no explicit target is selected. If you pass `--opencode`, RTK installs only the OpenCode plugin and skips Claude. If you pass a specific agent target (for example `--cursor`, `--windsurf`, `--cline`), RTK installs only that target.
+
 ### Claude Code
 
 ```bash

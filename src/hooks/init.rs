@@ -414,6 +414,9 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
         )
     })?;
 
+    fs::create_dir_all(parent)
+        .with_context(|| format!("Failed to create parent directory {}", parent.display()))?;
+
     // Create temp file in same directory (ensures same filesystem for atomic rename)
     let mut temp_file = NamedTempFile::new_in(parent)
         .with_context(|| format!("Failed to create temp file in {}", parent.display()))?;

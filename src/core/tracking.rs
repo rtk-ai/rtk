@@ -1552,33 +1552,54 @@ mod tests {
     // 5. TimedExecution::track records with exec_time > 0
     #[test]
     fn test_timed_execution_records_time() {
+        let rtk_cmd = format!(
+            "rtk test timed {}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
         let timer = TimedExecution::start();
         std::thread::sleep(std::time::Duration::from_millis(10));
-        timer.track("test cmd", "rtk test", "raw input data", "filtered");
+        timer.track("test cmd", &rtk_cmd, "raw input data", "filtered");
 
-        // Verify via DB that record exists
+        // Verify via DB that record exists (query exact command to avoid race with parallel tests)
         let tracker = Tracker::new().expect("Failed to create tracker");
-        let recent = tracker.get_recent(5).expect("Failed to get recent");
-        assert!(recent.iter().any(|r| r.rtk_cmd == "rtk test"));
+        let count: i64 = tracker
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM commands WHERE rtk_cmd = ?1",
+                params![rtk_cmd],
+                |row| row.get(0),
+            )
+            .expect("Failed to query inserted record");
+        assert!(count >= 1, "TimedExecution record not found");
     }
 
     // 6. TimedExecution::track_passthrough records with 0 tokens
     #[test]
     fn test_timed_execution_passthrough() {
+        let rtk_cmd = format!(
+            "rtk git tag passthrough {}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
         let timer = TimedExecution::start();
-        timer.track_passthrough("git tag", "rtk git tag (passthrough)");
+        timer.track_passthrough("git tag", &rtk_cmd);
 
         let tracker = Tracker::new().expect("Failed to create tracker");
-        let recent = tracker.get_recent(5).expect("Failed to get recent");
-
-        let pt = recent
-            .iter()
-            .find(|r| r.rtk_cmd.contains("passthrough"))
+        let (saved_tokens, savings_pct): (i64, f64) = tracker
+            .conn
+            .query_row(
+                "SELECT saved_tokens, savings_pct
+                 FROM commands
+                 WHERE rtk_cmd = ?1
+                 ORDER BY id DESC
+                 LIMIT 1",
+                params![rtk_cmd],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .expect("Passthrough record not found");
 
         // savings_pct should be 0 for passthrough
-        assert_eq!(pt.savings_pct, 0.0);
-        assert_eq!(pt.saved_tokens, 0);
+        assert_eq!(savings_pct, 0.0);
+        assert_eq!(saved_tokens, 0);
     }
 
     // 7. get_db_path respects environment variable RTK_DB_PATH

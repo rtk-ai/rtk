@@ -61,6 +61,36 @@ pub enum AgentTarget {
     Vibe,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InitTargets {
+    install_claude: bool,
+    install_opencode: bool,
+    install_cursor: bool,
+    install_windsurf: bool,
+    install_cline: bool,
+}
+
+fn derive_init_targets(opencode: bool, agent: Option<AgentTarget>) -> InitTargets {
+    let install_opencode = opencode;
+    let install_cursor = agent == Some(AgentTarget::Cursor);
+    let install_windsurf = agent == Some(AgentTarget::Windsurf);
+    let install_cline = agent == Some(AgentTarget::Cline);
+
+    let install_claude = if opencode {
+        false
+    } else {
+        matches!(agent, None | Some(AgentTarget::Claude))
+    };
+
+    InitTargets {
+        install_claude,
+        install_opencode,
+        install_cursor,
+        install_windsurf,
+        install_cline,
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "rtk",
@@ -2122,11 +2152,7 @@ fn run_cli() -> Result<i32> {
                 };
                 hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
             } else {
-                let install_opencode = opencode;
-                let install_claude = !opencode;
-                let install_cursor = agent == Some(AgentTarget::Cursor);
-                let install_windsurf = agent == Some(AgentTarget::Windsurf);
-                let install_cline = agent == Some(AgentTarget::Cline);
+                let targets = derive_init_targets(opencode, agent);
 
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -2137,11 +2163,11 @@ fn run_cli() -> Result<i32> {
                 };
                 hooks::init::run(
                     global,
-                    install_claude,
-                    install_opencode,
-                    install_cursor,
-                    install_windsurf,
-                    install_cline,
+                    targets.install_claude,
+                    targets.install_opencode,
+                    targets.install_cursor,
+                    targets.install_windsurf,
+                    targets.install_cline,
                     claude_md,
                     hook_only,
                     codex,
@@ -3380,6 +3406,38 @@ mod tests {
                 args
             );
         }
+    }
+
+    #[test]
+    fn test_init_targets_default_agent_is_claude() {
+        let targets = derive_init_targets(false, None);
+        assert!(targets.install_claude);
+        assert!(!targets.install_opencode);
+        assert!(!targets.install_cursor);
+        assert!(!targets.install_windsurf);
+        assert!(!targets.install_cline);
+    }
+
+    #[test]
+    fn test_init_targets_cursor_agent_disables_claude() {
+        let targets = derive_init_targets(false, Some(AgentTarget::Cursor));
+        assert!(!targets.install_claude);
+        assert!(!targets.install_opencode);
+        assert!(targets.install_cursor);
+    }
+
+    #[test]
+    fn test_init_targets_explicit_claude_keeps_claude() {
+        let targets = derive_init_targets(false, Some(AgentTarget::Claude));
+        assert!(targets.install_claude);
+        assert!(!targets.install_opencode);
+    }
+
+    #[test]
+    fn test_init_targets_opencode_disables_claude() {
+        let targets = derive_init_targets(true, None);
+        assert!(!targets.install_claude);
+        assert!(targets.install_opencode);
     }
 
     #[test]
