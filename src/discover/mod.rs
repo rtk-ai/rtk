@@ -40,6 +40,30 @@ struct UnsupportedBucket {
     example: String,
 }
 
+/// Resolve the `-p`/`--project` value (or the default cwd) into the filter
+/// string matched against Claude's sanitized project directory names.
+///
+/// A `-p` value containing a path separator is a filesystem path (e.g.
+/// `/home/user/projects/my-app`), so it must go through the same
+/// `encode_project_path` sanitization as the default cwd case -- Claude
+/// stores transcripts under directory names with `/` (and other
+/// non-alphanumeric characters) replaced by `-`, so an un-sanitized path
+/// value can never substring-match the real directory name. A `-p` value
+/// with no separator is treated as a plain name substring (e.g. `my-app`)
+/// and passed through unchanged, since it already matches correctly today.
+fn resolve_project_filter(project: Option<&str>, all: bool, cwd: &str) -> Option<String> {
+    if all {
+        return None;
+    }
+    match project {
+        Some(p) if p.contains('/') || p.contains('\\') => {
+            Some(ClaudeProvider::encode_project_path(p))
+        }
+        Some(p) => Some(p.to_string()),
+        None => Some(ClaudeProvider::encode_project_path(cwd)),
+    }
+}
+
 pub fn run(
     project: Option<&str>,
     all: bool,
@@ -50,18 +74,9 @@ pub fn run(
 ) -> Result<()> {
     let provider = ClaudeProvider;
 
-    // Determine project filter
-    let project_filter = if all {
-        None
-    } else if let Some(p) = project {
-        Some(p.to_string())
-    } else {
-        // Default: current working directory
-        let cwd = std::env::current_dir()?;
-        let cwd_str = cwd.to_string_lossy().to_string();
-        let encoded = ClaudeProvider::encode_project_path(&cwd_str);
-        Some(encoded)
-    };
+    let cwd = std::env::current_dir()?;
+    let cwd_str = cwd.to_string_lossy().to_string();
+    let project_filter = resolve_project_filter(project, all, &cwd_str);
 
     let sessions = provider.discover_sessions(project_filter.as_deref(), Some(since_days))?;
 
@@ -293,5 +308,57 @@ fn truncate_command(cmd: &str) -> String {
         0 => String::new(),
         1 => parts[0].to_string(),
         _ => format!("{} {}", parts[0], parts[1]),
+    }
+}
+
+#[cfg(test)]
+mod resolve_project_filter_tests {
+    use super::resolve_project_filter;
+
+    #[test]
+    fn all_flag_disables_filtering_regardless_of_project() {
+        assert_eq!(
+            resolve_project_filter(Some("my-app"), true, "/home/user/my-app"),
+            None
+        );
+        assert_eq!(
+            resolve_project_filter(None, true, "/home/user/my-app"),
+            None
+        );
+    }
+
+    #[test]
+    fn absolute_unix_path_is_sanitized_like_the_cwd_default() {
+        // Exact repro from the report: an absolute -p path must match the
+        // same encoded form the default (cwd) branch already produces.
+        let via_project_flag =
+            resolve_project_filter(Some("/home/user/projects/my-app"), false, "/irrelevant");
+        let via_cwd_default = resolve_project_filter(None, false, "/home/user/projects/my-app");
+        assert_eq!(via_project_flag, via_cwd_default);
+        assert_eq!(via_project_flag.unwrap(), "-home-user-projects-my-app");
+    }
+
+    #[test]
+    fn windows_path_with_backslashes_is_sanitized() {
+        let filter = resolve_project_filter(Some(r"C:\Users\foo\bar"), false, "/irrelevant");
+        assert_eq!(filter.unwrap(), "C:-Users-foo-bar");
+    }
+
+    #[test]
+    fn plain_name_substring_is_passed_through_unchanged() {
+        // No path separator -> treated as a substring filter, unchanged,
+        // matching the already-working "name substring" mode from the report.
+        assert_eq!(
+            resolve_project_filter(Some("my-app"), false, "/irrelevant"),
+            Some("my-app".to_string())
+        );
+    }
+
+    #[test]
+    fn no_project_falls_back_to_encoded_cwd() {
+        assert_eq!(
+            resolve_project_filter(None, false, "/home/user/my-app"),
+            Some("-home-user-my-app".to_string())
+        );
     }
 }
