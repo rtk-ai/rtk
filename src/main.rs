@@ -1890,10 +1890,7 @@ fn run_cli() -> Result<i32> {
             runner::run_err(&cmd, cli.verbose)?
         }
 
-        Commands::Test { command } => {
-            let cmd = command.join(" ");
-            runner::run_test(&cmd, cli.verbose)?
-        }
+        Commands::Test { command } => runner::run_test(&command, cli.verbose)?,
 
         Commands::Json {
             file,
