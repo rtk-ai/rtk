@@ -11,11 +11,12 @@ use std::collections::HashMap;
 
 use provider::{ClaudeProvider, SessionProvider};
 use registry::{
-    category_avg_tokens, classify_command, split_command_chain, strip_disabled_prefix,
-    Classification,
+    category_avg_tokens, classify_command, rewrite_command, split_command_chain,
+    strip_disabled_prefix, Classification,
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
+use crate::discover::lexer::contains_unattestable_construct;
 use crate::discover::registry::prefix_contains_rtk_disabled;
 
 /// Aggregation bucket for supported commands.
@@ -65,6 +66,10 @@ pub fn run(
 
     let sessions = provider.discover_sessions(project_filter.as_deref(), Some(since_days))?;
 
+    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
+        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
+        .unwrap_or_default();
+
     if verbose > 0 {
         eprintln!("Scanning {} session files...", sessions.len());
         for s in &sessions {
@@ -111,6 +116,11 @@ pub fn run(
                             // RTK_DISABLED on unsupported/ignored command — not interesting
                         }
                     }
+                    continue;
+                }
+
+                if is_already_using_rtk(part, &excluded, &transparent_prefixes) {
+                    already_rtk += 1;
                     continue;
                 }
 
@@ -168,13 +178,7 @@ pub fn run(
                         });
                         bucket.count += 1;
                     }
-                    Classification::Ignored => {
-                        // Check if it starts with "rtk "
-                        if part.trim().starts_with("rtk ") {
-                            already_rtk += 1;
-                        }
-                        // Otherwise just skip
-                    }
+                    Classification::Ignored => {}
                 }
             }
         }
@@ -274,6 +278,23 @@ pub fn run(
     Ok(())
 }
 
+/// Returns true when a command is already routed through RTK: either it
+/// starts with `rtk`, or the hook would rewrite it (transcript logs the
+/// pre-rewrite form even though execution used RTK).
+fn is_already_using_rtk(cmd: &str, excluded: &[String], transparent_prefixes: &[String]) -> bool {
+    let trimmed = cmd.trim();
+    if trimmed.starts_with("rtk ") || trimmed == "rtk" {
+        return true;
+    }
+    if contains_unattestable_construct(trimmed) {
+        return false;
+    }
+    match rewrite_command(trimmed, excluded, transparent_prefixes) {
+        Some(rewritten) => rewritten != trimmed,
+        None => false,
+    }
+}
+
 /// Extract the subcommand from a command string (second word).
 fn extract_subcmd(cmd: &str) -> &str {
     let parts: Vec<&str> = cmd.trim().splitn(3, char::is_whitespace).collect();
@@ -293,5 +314,58 @@ fn truncate_command(cmd: &str) -> String {
         0 => String::new(),
         1 => parts[0].to_string(),
         _ => format!("{} {}", parts[0], parts[1]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn no_config() -> (Vec<String>, Vec<String>) {
+        (vec![], vec![])
+    }
+
+    #[test]
+    fn test_hook_rewritten_command_counts_as_already_rtk() {
+        let (excluded, prefixes) = no_config();
+        // JSONL logs "grep -n foo" but the hook executes "rtk grep -n foo".
+        assert!(is_already_using_rtk(
+            "grep -n foo",
+            &excluded,
+            &prefixes
+        ));
+    }
+
+    #[test]
+    fn test_explicit_rtk_command_counts_as_already_rtk() {
+        let (excluded, prefixes) = no_config();
+        assert!(is_already_using_rtk(
+            "rtk git status",
+            &excluded,
+            &prefixes
+        ));
+    }
+
+    #[test]
+    fn test_unsupported_command_not_counted_as_already_rtk() {
+        let (excluded, prefixes) = no_config();
+        assert!(!is_already_using_rtk("echo hello", &excluded, &prefixes));
+    }
+
+    #[test]
+    fn test_unattestable_command_not_counted_as_already_rtk() {
+        let (excluded, prefixes) = no_config();
+        assert!(!is_already_using_rtk(
+            "git log > /tmp/out.txt",
+            &excluded,
+            &prefixes
+        ));
+    }
+
+    #[test]
+    fn test_excluded_command_not_counted_as_already_rtk() {
+        let excluded = vec!["git status".to_string()];
+        let prefixes = vec![];
+        assert!(!is_already_using_rtk("git status", &excluded, &prefixes));
     }
 }
