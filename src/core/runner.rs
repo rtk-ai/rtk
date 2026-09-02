@@ -1,6 +1,7 @@
 //! Shared command execution skeleton for filter modules.
 
 use anyhow::{Context, Result};
+use std::borrow::Cow;
 use std::process::Command;
 
 use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
@@ -135,6 +136,8 @@ where
         raw
     };
 
+    // stderr is forwarded unchanged below, so it costs the same whether or not rtk is
+    // in the way. What the guard must not inflate is the stdout it replaces.
     let shown = if let Some(label) = opts.tee_label {
         print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
     } else {
@@ -147,12 +150,21 @@ where
         guarded
     };
 
-    timer.track(
-        cmd_label,
-        &format!("rtk {}", cmd_label),
-        raw_for_tracking,
-        &shown,
-    );
+    // Stdout-only filters parse structured stdout; stderr still carries diagnostics
+    // (config errors, missing linters) that the user needs.
+    let forwarded_stderr = opts.filter_stdout_only && !result.raw_stderr.trim().is_empty();
+    if forwarded_stderr {
+        eprint!("{}", result.raw_stderr);
+    }
+
+    // Forwarded stderr reaches the user just as much as stdout does, so counting only
+    // stdout would book a passed-through stream as if the filter had removed it.
+    let emitted = if forwarded_stderr {
+        Cow::Owned(format!("{}{}", shown, result.raw_stderr))
+    } else {
+        Cow::Borrowed(shown.as_str())
+    };
+    timer.track(cmd_label, &format!("rtk {}", cmd_label), raw, &emitted);
     Ok(exit_code)
 }
 
