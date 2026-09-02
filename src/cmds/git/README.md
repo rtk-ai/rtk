@@ -5,6 +5,7 @@
 ## Specifics
 
 - **git.rs** uses `trailing_var_arg = true` + `allow_hyphen_values = true` so native git flags (`--oneline`, `--cached`, etc.) pass through correctly
+- **but_cmd.rs** requests GitButler's `--format=json` for read-only supported commands (`status`, `diff`, `show`, `branch list`, `push`, `pull`) and renders it compactly; explicit output-format flags and unsupported or mutating commands pass through unchanged
 - Default `git status` uses `--porcelain -b` so the compact output never exceeds raw `git status` (an untracked directory collapses to a single line, matching git's default); branch/short-only flags reuse the compact path, other explicit args still pass through unchanged
 - Global git options (`-C`, `--git-dir`, `--work-tree`, `--no-pager`) are prepended before the subcommand
 - Exit code propagation is critical for CI/CD pipelines

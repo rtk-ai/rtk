@@ -177,6 +177,13 @@ rtk git push                    # -> "ok main"
 rtk git pull                    # -> "ok 3 files +10 -2"
 ```
 
+### GitButler CLI
+```bash
+rtk but status                  # Compact structured workspace status
+rtk but diff                    # Compact structured diff
+rtk but branch list             # Compact branch list
+```
+
 ### GitHub CLI
 ```bash
 rtk gh pr list                  # Compact PR listing

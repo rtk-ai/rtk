@@ -9,7 +9,7 @@ mod parser;
 // Re-export command modules for routing
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
-use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
+use cmds::git::{but_cmd, diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
     lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
@@ -832,6 +832,15 @@ enum Commands {
     Gt {
         #[command(subcommand)]
         command: GtCommands,
+    },
+
+    /// GitButler (but) commands with compact JSON-first output
+    But {
+        /// GitButler subcommand (e.g. status, diff, branch, push, pull)
+        subcommand: String,
+        /// Additional arguments passed to GitButler
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     /// golangci-lint wrapper with compact `run` support and passthrough for other invocations
@@ -2463,6 +2472,8 @@ fn run_cli() -> Result<i32> {
             GtCommands::Other(args) => gt_cmd::run_other(&args, cli.verbose)?,
         },
 
+        Commands::But { subcommand, args } => but_cmd::run(&subcommand, &args, cli.verbose)?,
+
         Commands::GolangciLint { args } => golangci_cmd::run(&args, cli.verbose)?,
 
         Commands::Gradlew { args } => gradlew_cmd::run(&args, cli.verbose)?,
@@ -2830,6 +2841,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Sbt { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
+            | Commands::But { .. }
     )
 }
 
@@ -2850,6 +2862,19 @@ mod tests {
                 assert_eq!(args, vec!["-m", "fix: typo"]);
             }
             _ => panic!("Expected Git Commit command"),
+        }
+    }
+
+    #[test]
+    fn test_but_status_parses_native_arguments() {
+        let cli = Cli::try_parse_from(["rtk", "but", "status", "--files"]).unwrap();
+
+        match cli.command {
+            Commands::But { subcommand, args } => {
+                assert_eq!(subcommand, "status");
+                assert_eq!(args, vec!["--files"]);
+            }
+            _ => panic!("Expected But command"),
         }
     }
 
@@ -3223,6 +3248,7 @@ mod tests {
             "pip",
             "go",
             "gt",
+            "but",
             "golangci-lint",
             "gradlew",
             "mvn",
