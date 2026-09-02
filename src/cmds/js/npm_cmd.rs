@@ -5,77 +5,114 @@ use crate::core::utils::resolved_command;
 use anyhow::Result;
 
 /// Known npm subcommands that should NOT get "run" injected.
-/// Shared between production code and tests to avoid drift.
+/// Source: union of `npm help` across npm 10 and 11, plus short aliases.
+/// Entries removed from `npm help` in later versions are kept because the
+/// commands still work and dropping them would cause false `run` injection.
 const NPM_SUBCOMMANDS: &[&str] = &[
-    "install",
-    "i",
-    "ci",
-    "uninstall",
-    "remove",
-    "rm",
-    "update",
-    "up",
-    "list",
-    "ls",
-    "outdated",
-    "init",
-    "create",
-    "publish",
-    "pack",
-    "link",
+    // --- npm 10 + 11 `npm help` primary commands ---
+    "access",
+    "adduser",
+    "approve-scripts",
     "audit",
-    "fund",
+    "bugs",
+    "cache",
+    "ci",
+    "completion",
+    "config",
+    "dedupe",
+    "deny-scripts",
+    "deprecate",
+    "diff",
+    "dist-tag",
+    "docs",
+    "doctor",
+    "edit",
     "exec",
     "explain",
-    "why",
-    "search",
-    "view",
-    "info",
-    "show",
-    "config",
-    "set",
+    "explore",
+    "find-dupes",
+    "fund",
     "get",
-    "cache",
-    "prune",
-    "dedupe",
-    "doctor",
     "help",
-    "version",
-    "prefix",
-    "root",
-    "bin",
-    "bugs",
-    "docs",
-    "home",
-    "repo",
-    "ping",
-    "whoami",
-    "token",
-    "profile",
-    "team",
-    "access",
-    "owner",
-    "deprecate",
-    "dist-tag",
-    "star",
-    "stars",
+    "help-search",
+    "init",
+    "install",
+    "install-ci-test",
+    "install-test",
+    "link",
+    "ll",
     "login",
     "logout",
-    "adduser",
-    "unpublish",
+    "ls",
+    "org",
+    "outdated",
+    "owner",
+    "pack",
+    "ping",
     "pkg",
-    "diff",
+    "prefix",
+    "profile",
+    "prune",
+    "publish",
+    "query",
     "rebuild",
-    "test",
-    "t",
+    "repo",
+    "restart",
+    "root",
+    "run",
+    "run-script",
+    "sbom",
+    "search",
+    "set",
+    "shrinkwrap",
+    "stage",
+    "star",
+    "stars",
     "start",
     "stop",
-    "restart",
+    "team",
+    "test",
+    "token",
+    "trust",
+    "undeprecate",
+    "uninstall",
+    "unpublish",
+    "unstar",
+    "update",
+    "version",
+    "view",
+    "whoami",
+    // --- kept from npm 10 (demoted to aliases in npm 11, still work) ---
+    "bin",
+    "create",
+    "home",
+    "hook",
+    "info",
+    "list",
+    "remove",
+    "rm",
+    "show",
+    "up",
+    "why",
+    // --- short aliases (npm help <alias> confirms these) ---
+    "add",
+    "cit",
+    "ddp",
+    "i",
+    "it",
+    "ln",
+    "r",
+    "rb",
+    "s",
+    "se",
+    "t",
+    "un",
+    "x",
 ];
 
-pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
-    // Determine if this is "npm run <script>" or another npm subcommand (install, list, etc.)
-    // Only inject "run" when args look like a script name, not a known npm subcommand.
+/// Build the effective npm args, injecting "run" when the first arg looks
+/// like a script name rather than a known npm subcommand or flag.
+fn build_effective_npm_args(args: &[String]) -> Vec<String> {
     let first_arg = args.first().map(|s| s.as_str());
     let is_run_explicit = first_arg == Some("run");
     let is_npm_subcommand = first_arg
@@ -83,14 +120,15 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
         .unwrap_or(false);
 
     let mut effective_args: Vec<String> = Vec::with_capacity(args.len() + 1);
-    if is_run_explicit || is_npm_subcommand {
-        effective_args.extend_from_slice(args);
-    } else {
-        // "rtk npm build" → "npm run build" (assume script name)
+    if !(is_run_explicit || is_npm_subcommand) {
         effective_args.push("run".to_string());
-        effective_args.extend_from_slice(args);
     }
+    effective_args.extend_from_slice(args);
+    effective_args
+}
 
+pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
+    let effective_args = build_effective_npm_args(args);
     run_filtered("npm", &effective_args, verbose, skip_env)
 }
 
@@ -190,42 +228,69 @@ npm notice
         assert!(result.contains("Build completed"));
     }
 
+    fn args(strs: &[&str]) -> Vec<String> {
+        strs.iter().copied().map(String::from).collect()
+    }
+
     #[test]
     fn test_npm_subcommand_routing() {
-        // Uses the shared NPM_SUBCOMMANDS constant — no drift between prod and test
-        fn needs_run_injection(args: &[&str]) -> bool {
-            let first = args.first().copied();
-            let is_run_explicit = first == Some("run");
-            let is_subcommand = first
-                .map(|a| NPM_SUBCOMMANDS.contains(&a) || a.starts_with('-'))
-                .unwrap_or(false);
-            !is_run_explicit && !is_subcommand
-        }
-
-        // Known subcommands should NOT get "run" injected
         for subcmd in NPM_SUBCOMMANDS {
-            assert!(
-                !needs_run_injection(&[subcmd]),
-                "'npm {}' should NOT inject 'run'",
-                subcmd
+            let result = build_effective_npm_args(&args(&[subcmd]));
+            assert_eq!(
+                result[0], *subcmd,
+                "'npm {subcmd}' should NOT inject 'run'"
             );
         }
 
-        // Script names SHOULD get "run" injected
         for script in &["build", "dev", "lint", "typecheck", "deploy"] {
-            assert!(
-                needs_run_injection(&[script]),
-                "'npm {}' SHOULD inject 'run'",
-                script
+            let result = build_effective_npm_args(&args(&[script]));
+            assert_eq!(
+                result[0], "run",
+                "'npm {script}' SHOULD inject 'run'"
             );
+            assert_eq!(result[1], *script);
         }
 
         // Flags should NOT get "run" injected
-        assert!(!needs_run_injection(&["--version"]));
-        assert!(!needs_run_injection(&["-h"]));
+        assert_eq!(build_effective_npm_args(&args(&["--version"]))[0], "--version");
+        assert_eq!(build_effective_npm_args(&args(&["-h"]))[0], "-h");
+    }
 
-        // Explicit "run" should NOT inject another "run"
-        assert!(!needs_run_injection(&["run", "build"]));
+    #[test]
+    fn test_npm_run_no_double_injection() {
+        let result = build_effective_npm_args(&args(&["run", "build"]));
+        assert_eq!(result, vec!["run", "build"]);
+
+        let result = build_effective_npm_args(&args(&["run"]));
+        assert_eq!(result, vec!["run"]);
+    }
+
+    #[test]
+    fn test_npm_aliases_no_run_injection() {
+        for alias in &["add", "x", "ln", "un", "r", "s", "se", "rb", "ddp", "it", "cit"] {
+            let result = build_effective_npm_args(&args(&[alias]));
+            assert_eq!(
+                result[0], *alias,
+                "'npm {alias}' incorrectly got 'run' injected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_npm11_commands_no_run_injection() {
+        for cmd in &[
+            "approve-scripts",
+            "deny-scripts",
+            "stage",
+            "trust",
+            "undeprecate",
+        ] {
+            let result = build_effective_npm_args(&args(&[cmd]));
+            assert_eq!(
+                result[0], *cmd,
+                "'npm {cmd}' incorrectly got 'run' injected"
+            );
+        }
     }
 
     #[test]
