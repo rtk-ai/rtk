@@ -48,6 +48,11 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 3. Classifies each command against the same rules used for live rewriting
 4. Aggregates results: which commands could have been rewritten, estimated token savings, adoption rate
 
+Claude Code transcripts store the model's original command, not the command returned by a
+`PreToolUse` hook. When `discover` detects an active Claude RTK hook, it therefore suppresses
+missed-savings and adoption estimates instead of presenting pre-hook commands as missed. The
+unsupported-command list remains available because those commands are not rewritten by RTK.
+
 The classification logic is shared between discover and rewrite — same patterns, same rules, different consumers.
 
 ## Env Prefix Handling
