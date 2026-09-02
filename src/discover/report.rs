@@ -96,6 +96,7 @@ impl AgentIntegrationStatus {
 #[derive(Debug, Serialize)]
 pub struct DiscoverReport {
     pub sessions_scanned: usize,
+    pub sessions_with_bash: usize,
     pub total_commands: usize,
     pub already_rtk: usize,
     pub since_days: u64,
@@ -128,8 +129,11 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
     out.push_str(&"=".repeat(52));
     out.push('\n');
     out.push_str(&format!(
-        "Scanned: {} sessions (last {} days), {} Bash commands\n",
-        report.sessions_scanned, report.since_days, report.total_commands
+        "Scanned: {} sessions ({} with Bash commands, last {} days), {} Bash commands\n",
+        report.sessions_scanned,
+        report.sessions_with_bash,
+        report.since_days,
+        report.total_commands
     ));
     out.push_str(&format!(
         "Already using RTK: {} commands ({:.1}%)\n",
@@ -277,6 +281,7 @@ mod tests {
     fn make_report(total_commands: usize, already_rtk: usize) -> DiscoverReport {
         DiscoverReport {
             sessions_scanned: 1,
+            sessions_with_bash: 1,
             total_commands,
             already_rtk,
             since_days: 30,
@@ -287,6 +292,17 @@ mod tests {
             rtk_disabled_examples: vec![],
             agent_status: AgentIntegrationStatus::default(),
         }
+    }
+
+    #[test]
+    fn test_session_summary_distinguishes_bash_sessions() {
+        let mut report = make_report(3, 0);
+        report.sessions_scanned = 4;
+        report.sessions_with_bash = 1;
+
+        let output = format_text(&report, 10, false);
+
+        assert!(output.contains("Scanned: 4 sessions (1 with Bash commands"));
     }
 
     // B6 regression: integer division truncated small percentages to 0%.
