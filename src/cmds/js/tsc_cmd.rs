@@ -76,6 +76,22 @@ fn clean_line(line: &str) -> Cow<'_, str> {
     }
 }
 
+const INFORMATIONAL_FLAGS: &[&str] = &[
+    "--showConfig",
+    "--listFiles",
+    "--listFilesOnly",
+    "--init",
+    "--help",
+    "-h",
+    "--version",
+    "-v",
+];
+
+fn is_informational_invocation(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| INFORMATIONAL_FLAGS.contains(&arg.as_str()))
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let tsc_exists = tool_exists("tsc");
 
@@ -96,10 +112,21 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: {} {}", tool, args.join(" "));
     }
 
+    let args_display = args.join(" ");
+    if is_informational_invocation(args) {
+        return runner::run(
+            cmd,
+            "tsc",
+            &args_display,
+            runner::RunMode::Passthrough,
+            runner::RunOptions::default(),
+        );
+    }
+
     runner::run_streamed(
         cmd,
         "tsc",
-        &args.join(" "),
+        &args_display,
         Box::new(BlockStreamFilter::new(TscHandler::new())),
         runner::RunOptions::with_tee("tsc"),
     )
@@ -487,6 +514,26 @@ src/app.tsx(20,5): error TS2345: Argument of type 'number' is not assignable to 
         let output = "\x1b[32mFound 0 errors.\x1b[0m Watching for file changes.";
         let result = filter_tsc_output(output);
         assert!(result.contains("No errors found"));
+    }
+
+    #[test]
+    fn informational_flags_bypass_diagnostic_filtering() {
+        for flag in INFORMATIONAL_FLAGS {
+            assert!(
+                is_informational_invocation(&[flag.to_string()]),
+                "{flag} should preserve native tsc output"
+            );
+        }
+    }
+
+    #[test]
+    fn typecheck_invocations_stay_filtered() {
+        assert!(!is_informational_invocation(&[]));
+        assert!(!is_informational_invocation(&["--noEmit".to_string()]));
+        assert!(!is_informational_invocation(&[
+            "-p".to_string(),
+            "tsconfig.json".to_string()
+        ]));
     }
 
     // --- Streaming handler tests ---
