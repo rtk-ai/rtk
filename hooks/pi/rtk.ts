@@ -10,11 +10,24 @@
 //   1           No RTK equivalent → pass through unchanged
 //   3 + stdout  Rewrite (advisory) → mutate command
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
-import { isToolCallEventType } from "@earendil-works/pi-coding-agent"
+import type {
+  BashToolCallEvent,
+  ExtensionAPI,
+  ToolCallEvent,
+} from "@earendil-works/pi-coding-agent"
 
 const REWRITE_TIMEOUT_MS = 2_000
 const MIN_SUPPORTED_RTK_MINOR = 23
+
+// Local reimplementation of the package's `isToolCallEventType("bash", event)` type
+// guard. That helper is a value export, so importing it pulls in the whole
+// `@earendil-works/pi-coding-agent` barrel at extension load — profiled at ~250ms
+// warmed, vs ~10ms for a type-only import. `BashToolCallEvent`/`ToolCallEvent`
+// below are type-only imports and are erased at compile time, so they carry none
+// of that cost. See #2753.
+function isBashToolCallEvent(event: ToolCallEvent): event is BashToolCallEvent {
+  return event.toolName === "bash"
+}
 
 // Parse "X.Y.Z" semver, return [major, minor, patch] or null.
 function parseSemver(raw: string): [number, number, number] | null {
@@ -58,7 +71,7 @@ export default async function (pi: ExtensionAPI) {
 
   pi.on("tool_call", async (event, ctx) => {
     try {
-      if (!isToolCallEventType("bash", event)) return
+      if (!isBashToolCallEvent(event)) return
 
       const cmd = event.input.command
       if (typeof cmd !== "string" || cmd.trim() === "") return

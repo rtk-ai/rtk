@@ -8,20 +8,19 @@ use crate::core::truncate::CAP_LIST;
 use crate::core::utils::{ok_confirmation, resolved_command, truncate};
 use crate::git;
 use anyhow::Result;
-use lazy_static::lazy_static;
 use regex::Regex;
 use serde_json::Value;
 use std::process::Command;
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref HTML_COMMENT_RE: Regex = Regex::new(r"(?s)<!--.*?-->").unwrap();
-    static ref BADGE_LINE_RE: Regex =
-        Regex::new(r"(?m)^\s*\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)\s*$").unwrap();
-    static ref IMAGE_ONLY_LINE_RE: Regex = Regex::new(r"(?m)^\s*!\[[^\]]*\]\([^)]*\)\s*$").unwrap();
-    static ref HORIZONTAL_RULE_RE: Regex =
-        Regex::new(r"(?m)^\s*(?:---+|\*\*\*+|___+)\s*$").unwrap();
-    static ref MULTI_BLANK_RE: Regex = Regex::new(r"\n{3,}").unwrap();
-}
+static HTML_COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->").unwrap());
+static BADGE_LINE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)\s*$").unwrap());
+static IMAGE_ONLY_LINE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*!\[[^\]]*\]\([^)]*\)\s*$").unwrap());
+static HORIZONTAL_RULE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*(?:---+|\*\*\*+|___+)\s*$").unwrap());
+static MULTI_BLANK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
 
 /// Filter markdown body to remove noise while preserving meaningful content.
 /// Removes HTML comments, badge lines, image-only lines, horizontal rules,
@@ -917,6 +916,11 @@ fn pr_merge(args: &[String], _verbose: u8) -> Result<i32> {
 
 /// Flags that change `gh pr diff` output from unified diff to a different format.
 /// When present, compact_diff would produce empty output since it expects diff headers.
+///
+/// `--patch` is here because GitHub's `.patch` is an mbox of `format-patch`
+/// output, not a unified diff: each patch carries a commit message, a bare
+/// `---` before the diffstat, and a `-- ` signature. Someone asking for a patch
+/// wants one that applies, so it passes through whole.
 fn has_non_diff_format_flag(args: &[String]) -> bool {
     args.iter().any(|a| {
         a == "--name-only"
@@ -924,6 +928,7 @@ fn has_non_diff_format_flag(args: &[String]) -> bool {
             || a == "--stat"
             || a == "--numstat"
             || a == "--shortstat"
+            || a == "--patch"
     })
 }
 
@@ -1386,6 +1391,12 @@ mod tests {
     #[test]
     fn test_non_diff_format_flag_shortstat() {
         assert!(has_non_diff_format_flag(&["--shortstat".into()]));
+    }
+
+    #[test]
+    fn test_has_non_diff_format_flag_patch() {
+        // `--patch` yields an mbox, which compact_diff has no business parsing.
+        assert!(has_non_diff_format_flag(&["--patch".into()]));
     }
 
     #[test]

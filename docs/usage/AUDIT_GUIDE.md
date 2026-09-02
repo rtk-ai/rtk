@@ -261,9 +261,7 @@ EOF
 
 ### Token Estimation
 
-rtk estimates tokens using `text.len() / 4` (4 characters per token average).
-
-**Accuracy**: ±10% compared to actual LLM tokenization (sufficient for trends).
+`rtk gain` estimates tokens as `bytes / 4` (`src/core/tracking.rs:1284`). RTK ships no real tokenizer by design: embedding one would cost startup time and would require a tokenizer per model, or a per-session model lookup, which RTK does not implement. The same estimator is applied to raw and filtered output, so the percentage is reliable; the absolute token counts are approximate and will not match your provider's billing.
 
 ### Savings Calculation
 
@@ -274,10 +272,12 @@ Saved Tokens    = Input - Output
 Savings %       = (Saved / Input) × 100
 ```
 
+`Savings %` is a bash output byte ratio. Those bytes are one contributor to input tokens, and input tokens are only part of a bill that also counts output tokens.
+
 ### Typical Savings by Command
 
-| Command | Typical Savings | Mechanism |
-|---------|----------------|-----------|
+| Command | Bash output reduction | Mechanism |
+|---------|----------------------|-----------|
 | `rtk git status` | 77-93% | Compact stat format |
 | `rtk eslint` | 84% | Group by rule |
 | `rtk jest` | 94-99% | Show failures only |

@@ -6,7 +6,7 @@
 
 1. ✅ **Rust Token Killer** (this project) - LLM token optimizer
    - Repos: `rtk-ai/rtk`
-   - Has `rtk gain` command for token savings stats
+   - Has `rtk gain` command showing the savings dashboard
 
 2. ❌ **Rust Type Kit** (reachingforthejack/rtk) - DIFFERENT PROJECT
    - Rust codebase query tool and type generator
@@ -21,7 +21,7 @@
 rtk --version
 
 # CRITICAL: Verify it's the Token Killer (not Type Kit)
-rtk gain    # Should show token savings stats, NOT "command not found"
+rtk gain    # Should show the savings dashboard, NOT "command not found"
 
 # Check installation path
 which rtk
@@ -49,7 +49,7 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
 
 After installation, **verify you have the correct rtk**:
 ```bash
-rtk gain  # Must show token savings stats (not "command not found")
+rtk gain  # Must show the savings dashboard (not "command not found")
 ```
 
 ### Alternative: Manual Installation
@@ -62,7 +62,7 @@ cargo install --git https://github.com/rtk-ai/rtk
 cargo install rtk
 
 # ALWAYS VERIFY after installation
-rtk gain  # MUST show token savings, not "command not found"
+rtk gain  # MUST show the savings dashboard, not "command not found"
 ```
 
 ⚠️ **WARNING**: `cargo install rtk` from crates.io might install the wrong package. Always verify with `rtk gain`.
@@ -107,7 +107,7 @@ rtk init -g --no-patch      # Print manual instructions instead
 rtk init --show  # Check hook is installed and executable
 ```
 
-**Token savings**: ~99.5% reduction (2000 tokens → 10 tokens in context)
+**Context cost**: the hook adds a 10-line `RTK.md` to your context instead of a full command reference, and rewrites commands transparently at no per-command context cost.
 
 **What is settings.json?**
 Claude Code's hook registry. RTK adds a PreToolUse hook that rewrites commands transparently. Without this, Claude won't invoke the hook automatically.
@@ -146,7 +146,7 @@ cd /path/to/your/project
 rtk init  # Creates ./CLAUDE.md with full RTK instructions (137 lines)
 ```
 
-**Token savings**: Instructions loaded only for this project
+**Context cost**: instructions loaded only for this project
 
 ### Upgrading from Previous Version
 
@@ -180,7 +180,7 @@ rtk init --show
 ```bash
 # 1. Install RTK
 cargo install --git https://github.com/rtk-ai/rtk
-rtk gain  # Verify (must show token stats)
+rtk gain  # Verify (must show the savings dashboard)
 
 # 2. Setup with prompts
 rtk init -g
@@ -294,9 +294,11 @@ rtk git commit -m "msg"  # → "ok ✓ abc1234"
 rtk git push          # → "ok ✓ main"
 ```
 
+> Percentages below are **reductions in bash output**, not reductions in your bill.
+
 ### Pnpm (fork only)
 ```bash
-rtk pnpm list     # Dependency tree (-70% tokens)
+rtk pnpm list     # Dependency tree (-70%)
 rtk pnpm outdated # Available updates (-80-90%)
 rtk pnpm install  # Silent installation
 ```
@@ -316,25 +318,26 @@ rtk test <cmd>      # Generic test wrapper - failures only (-90%)
 
 ### Statistics
 ```bash
-rtk gain              # Token savings
+rtk gain              # Savings dashboard
 rtk gain --graph      # With ASCII graph
 rtk gain --history    # With command history
 ```
 
-## Validated Token Savings
+## What RTK Filters
 
-### Production T3 Stack Project
-| Operation | Standard | RTK | Reduction |
-|-----------|----------|-----|-----------|
-| `vitest` | 102,199 chars | 377 chars | **-99.6%** |
-| `git status` | 529 chars | 217 chars | **-59%** |
-| `pnpm list` | ~8,000 tokens | ~2,400 | **-70%** |
-| `pnpm outdated` | ~12,000 tokens | ~1,200-2,400 | **-80-90%** |
+RTK compresses the output of a shell command before your agent reads it. What that looks like in practice:
 
-### Typical Claude Code Session (30 min)
-- **Without RTK**: ~150,000 tokens
-- **With RTK**: ~45,000 tokens
-- **Savings**: **70% reduction**
+| Operation | What RTK does to the output |
+|-----------|-----------------------------|
+| `vitest` / `jest` | Failures only; passing suites collapse to a count |
+| `git status` | Compact stat format, grouped by state |
+| `pnpm list` | Compact dependency tree |
+| `pnpm outdated` | Package, current and target version only |
+| `cargo test` | Failures only, with the assertion and location |
+
+The percentages shown next to commands above are **reductions in bash output bytes**. That is the part RTK controls — it is not the same as reducing your bill by the same amount, because bash output is only one contributor to input tokens, and input tokens are only part of a bill that also counts output tokens.
+
+See [How RTK Savings Work](docs/guide/resources/savings-explained.md) for the full explanation, including why the token counts RTK reports are estimates.
 
 ## Troubleshooting
 

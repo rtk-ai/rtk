@@ -5,7 +5,7 @@
 ## Design Intent
 
 RTK's Pi extension is a **rewrite-only token optimizer**. It mutates bash commands to their
-`rtk`-prefixed equivalents, saving 60–90% context tokens.
+`rtk`-prefixed equivalents, cutting up to 90% of the bash output that reaches the context.
 
 **Permission gating is intentionally out of scope.** RTK does not block, confirm, or audit
 commands — that concern belongs to a dedicated permission extension (e.g. one that gates
@@ -15,7 +15,7 @@ with other Pi extensions.
 ## Specifics
 
 - TypeScript extension using Pi's `ExtensionAPI` (not a shell hook, no `zx` dependency)
-- Subscribes to `tool_call` event, narrows to `bash` tool via `isToolCallEventType`
+- Subscribes to `tool_call` event, narrows to `bash` tool via a local `isBashToolCallEvent` guard (avoids importing the package's value-exported `isToolCallEventType`, which pulls in its whole barrel at extension load)
 - Calls `rtk rewrite` via `pi.exec`; mutates `event.input.command` in-place if rewrite differs
 - All error paths return `undefined` (pass through); RTK never blocks execution
 - Version guard at load time: checks `rtk >= 0.23.0`; warns and registers no-op if too old or missing

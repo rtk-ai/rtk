@@ -249,8 +249,21 @@ impl Tracker {
     pub fn new() -> Result<Self> {
         let db_path = get_db_path()?;
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::core::utils::create_private_dir(parent)?;
         }
+
+        // Create the file ourselves so SQLite derives the -wal/-shm modes from
+        // an already-private DB instead of the umask.
+        crate::core::utils::open_private(
+            std::fs::OpenOptions::new().write(true).create(true),
+            &db_path,
+        )
+        .with_context(|| {
+            format!(
+                "Failed to pre-create private DB file: {}",
+                db_path.display()
+            )
+        })?;
 
         let conn = Connection::open(&db_path)?;
         // WAL mode + busy_timeout for concurrent access (multiple Claude Code instances).
@@ -322,6 +335,8 @@ impl Tracker {
             "CREATE INDEX IF NOT EXISTS idx_pf_timestamp ON parse_failures(timestamp)",
             [],
         )?;
+
+        restrict_db_files(&db_path);
 
         Ok(Self { conn })
     }
@@ -1210,6 +1225,7 @@ fn categorize_command(rtk_cmd: &str) -> String {
         "docker" | "kubectl" => "cloud",
         "rspec" | "rubocop" | "rake" => "ruby",
         "dotnet" => "dotnet",
+        "ctest" => "cpp",
         "ls" | "tree" | "grep" | "find" | "wc" | "read" | "env" | "json" | "log" | "smart"
         | "diff" | "deps" | "summary" | "format" => "system",
         _ => "other",
@@ -1217,7 +1233,28 @@ fn categorize_command(rtk_cmd: &str) -> String {
     .to_string()
 }
 
-fn get_db_path() -> Result<PathBuf> {
+/// SQLite appends `-wal`/`-shm` to the whole filename, so these are siblings
+/// rather than extension swaps. Concatenate on `OsString`, not `PathBuf::push`,
+/// which would append a component and silently target `history.db/-wal`.
+fn restrict_db_files(db_path: &std::path::Path) {
+    crate::core::utils::restrict_file(db_path);
+    for sidecar in db_sidecars(db_path) {
+        crate::core::utils::restrict_file(&sidecar);
+    }
+}
+
+fn db_sidecars(db_path: &std::path::Path) -> Vec<PathBuf> {
+    ["-wal", "-shm"]
+        .iter()
+        .map(|suffix| {
+            let mut name = db_path.as_os_str().to_os_string();
+            name.push(suffix);
+            PathBuf::from(name)
+        })
+        .collect()
+}
+
+pub(crate) fn get_db_path() -> Result<PathBuf> {
     // Priority 1: Environment variable RTK_DB_PATH
     if let Ok(custom_path) = std::env::var("RTK_DB_PATH") {
         return Ok(PathBuf::from(custom_path));
@@ -1685,5 +1722,40 @@ mod tests {
             failures.total, 0,
             "parse_failures table should be empty after reset"
         );
+    }
+
+    #[test]
+    fn test_db_sidecars_are_siblings_not_children() {
+        let got = db_sidecars(std::path::Path::new("/data/rtk/history.db"));
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from("/data/rtk/history.db-wal"),
+                PathBuf::from("/data/rtk/history.db-shm"),
+            ],
+            "PathBuf::push would yield history.db/-wal and silently harden nothing"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_restrict_db_files_covers_wal_sidecars() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = tmp.path().join("history.db");
+        let wal = tmp.path().join("history.db-wal");
+        let shm = tmp.path().join("history.db-shm");
+        for p in [&db, &wal, &shm] {
+            std::fs::write(p, b"x").expect("write");
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        }
+
+        restrict_db_files(&db);
+
+        for p in [&db, &wal, &shm] {
+            let mode = std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "expected 0600 on {}", p.display());
+        }
     }
 }
