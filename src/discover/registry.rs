@@ -73,6 +73,13 @@ static ENV_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
 static GIT_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:(?:-C\s+\S+|-c\s+\S+|--git-dir(?:=\S+|\s+\S+)|--work-tree(?:=\S+|\s+\S+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\s+)+").unwrap()
 });
+// Strip pnpm global options that precede the subcommand so `pnpm -r install`,
+// `pnpm --filter @app install`, `pnpm -w list` route to the same rules as their
+// bare forms. Only a fixed, known set is stripped — never an unknown `-x`, so a
+// non-install flag-first command can't be mis-rewritten into a filter with savings.
+static PNPM_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:(?:-r|--recursive|-w|--workspace-root|--filter(?:=\S+|\s+\S+)|-F(?:=\S+|\s+\S+))\s+)+").unwrap()
+});
 // Issue #1362: each capture expects a SINGLE file argument (`\S+$`). Multi-file
 // invocations like `head -3 a b c` fail to match so the segment is passed through
 // to the native `head`/`tail` binary — which already handles multi-file with
@@ -139,6 +146,9 @@ pub fn classify_command(cmd: &str) -> Classification {
     // Strip golangci-lint global options before `run` so classify/rewrite stays
     // aligned with the runtime wrapper behavior.
     let cmd_normalized = strip_golangci_global_opts(&cmd_normalized);
+    // Strip pnpm global options (-r, --filter, -w) before the subcommand so
+    // `pnpm -r install` classifies like `pnpm install`.
+    let cmd_normalized = strip_pnpm_global_opts(&cmd_normalized);
     let cmd_clean = cmd_normalized.as_str();
 
     // Exclude cat/head/tail with redirect operators — these are writes, not reads (#315)
@@ -346,6 +356,20 @@ fn strip_git_global_opts(cmd: &str) -> String {
     let after_git = &cmd[4..]; // skip "git "
     let stripped = GIT_GLOBAL_OPT.replace(after_git, "");
     format!("git {}", stripped.trim())
+}
+
+/// Strip pnpm global options before the subcommand (mirror of `strip_git_global_opts`).
+/// `pnpm -r install` → `pnpm install`; `pnpm --filter @app list` → `pnpm list`.
+/// Classification only — the rewrite re-emits the ORIGINAL command, so the stripped
+/// flags are preserved (e.g. `pnpm -r install` → `rtk pnpm -r install`).
+/// Returns the original string unchanged if not a pnpm command.
+fn strip_pnpm_global_opts(cmd: &str) -> String {
+    if !cmd.starts_with("pnpm ") {
+        return cmd.to_string();
+    }
+    let after_pnpm = &cmd[5..]; // skip "pnpm "
+    let stripped = PNPM_GLOBAL_OPT.replace(after_pnpm, "");
+    format!("pnpm {}", stripped.trim())
 }
 
 /// Strip golangci-lint global options before the `run` subcommand.
@@ -2392,6 +2416,101 @@ mod tests {
             "git -C should be classified as supported, got: {:?}",
             result
         );
+    }
+
+    // --- pnpm global option stripping (-r / --filter / -w) ---
+
+    #[test]
+    fn test_rewrite_pnpm_recursive_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -r install", &[]),
+            Some("rtk pnpm -r install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_filter_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter @app install", &[]),
+            Some("rtk pnpm --filter @app install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_filter_short_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -F @app install", &[]),
+            Some("rtk pnpm -F @app install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_filter_eq_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter=@app install", &[]),
+            Some("rtk pnpm --filter=@app install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_workspace_root_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -w install", &[]),
+            Some("rtk pnpm -w install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_recursive_filter_combo() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -r --filter @app list", &[]),
+            Some("rtk pnpm -r --filter @app list".into())
+        );
+    }
+
+    // No-regression: bare forms behave exactly as before.
+    #[test]
+    fn test_rewrite_pnpm_bare_install_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm install", &[]),
+            Some("rtk pnpm install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_run_build_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm run build", &[]),
+            Some("rtk pnpm run build".into())
+        );
+    }
+
+    // Bare `pnpm build` is still NOT rewritten: it would only hit the passthrough
+    // (no output parser), so rewriting it would add false-positive surface for zero
+    // savings. Stripping global opts must not change this.
+    #[test]
+    fn test_rewrite_pnpm_bare_build_none() {
+        assert_eq!(rewrite_command_no_prefixes("pnpm build", &[]), None);
+    }
+
+    // False-positive guards.
+    #[test]
+    fn test_rewrite_pnpm_filter_no_subcommand_none() {
+        // A filter with no subcommand must not be rewritten.
+        assert_eq!(rewrite_command_no_prefixes("pnpm --filter @app", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_unknown_flag_not_stripped() {
+        // `-x` is not a known global opt → not stripped → no subcommand → None.
+        assert_eq!(rewrite_command_no_prefixes("pnpm -x build", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_recursive_lint_safe_noop() {
+        // `pnpm lint` classifies as Supported, but the ORIGINAL `pnpm -r lint`
+        // matches no lint rewrite-prefix → safe no-op (never a malformed rewrite).
+        assert_eq!(rewrite_command_no_prefixes("pnpm -r lint", &[]), None);
     }
 
     #[test]

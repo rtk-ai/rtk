@@ -217,6 +217,14 @@ enum Commands {
         #[arg(long, short = 'F')]
         filter: Vec<String>,
 
+        /// Recursive across workspace packages (pnpm -r)
+        #[arg(long, short = 'r')]
+        recursive: bool,
+
+        /// Run in the workspace root (pnpm -w)
+        #[arg(long = "workspace-root", short = 'w')]
+        workspace_root: bool,
+
         #[command(subcommand)]
         command: PnpmCommands,
     },
@@ -1529,20 +1537,58 @@ fn build_k8s_logs_args(pod: String, container: Option<String>) -> Vec<String> {
     args
 }
 
-/// Merge pnpm global filters args with other ones for standard String-based commands
-fn merge_pnpm_args(filters: &[String], args: &[String]) -> Vec<String> {
-    filters
-        .iter()
-        .map(|filter| format!("--filter={}", filter))
+/// Leading pnpm global flags (recursive / workspace-root), forwarded to pnpm.
+///
+/// These are appended *after* the subcommand by the callers (e.g. `run_install`
+/// builds `pnpm install <flags>`), i.e. `pnpm -r install` typed by the user runs
+/// as `pnpm install -r`. This is behavior-preserving: `-r`/`-w`/`--filter` are
+/// root-level pnpm options accepted in either position (same established pattern
+/// already used for `--filter`). Verified against pnpm 9.15.4: `pnpm install
+/// --help` lists `-r, --recursive`, `-w, --workspace-root` and `--filter` as
+/// options of `install` itself, and `pnpm <flag> <sub>` vs `pnpm <sub> <flag>`
+/// produce byte-identical output on `ls` and `outdated` for all three flags. If a
+/// future pnpm makes position significant, emit these before the subcommand
+/// instead (as the passthrough path already does via merge order).
+fn pnpm_global_flags(recursive: bool, workspace_root: bool) -> Vec<String> {
+    let mut flags = Vec::new();
+    if recursive {
+        flags.push("-r".to_string());
+    }
+    if workspace_root {
+        flags.push("-w".to_string());
+    }
+    flags
+}
+
+/// Merge pnpm global flags + filters with the subcommand args (String-based commands).
+fn merge_pnpm_args(
+    filters: &[String],
+    recursive: bool,
+    workspace_root: bool,
+    args: &[String],
+) -> Vec<String> {
+    pnpm_global_flags(recursive, workspace_root)
+        .into_iter()
+        .chain(filters.iter().map(|filter| format!("--filter={}", filter)))
         .chain(args.iter().cloned())
         .collect()
 }
 
-/// Merge pnpm global filters args with other ones, using OsString for passthrough compatibility
-fn merge_pnpm_args_os(filters: &[String], args: &[OsString]) -> Vec<OsString> {
-    filters
-        .iter()
-        .map(|filter| OsString::from(format!("--filter={}", filter)))
+/// Same as `merge_pnpm_args` but OsString-based, for passthrough compatibility.
+fn merge_pnpm_args_os(
+    filters: &[String],
+    recursive: bool,
+    workspace_root: bool,
+    args: &[OsString],
+) -> Vec<OsString> {
+    pnpm_global_flags(recursive, workspace_root)
+        .into_iter()
+        .map(OsString::from)
+        .chain(
+            filters
+                .iter()
+                .map(|filter| OsString::from(format!("--filter={}", filter))),
+        )
         .chain(args.iter().cloned())
         .collect()
 }
@@ -1565,6 +1611,33 @@ fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<S
                 return Some(msg);
             }
             None
+        }
+        _ => None,
+    }
+}
+
+/// Warn when pnpm global flags (`-r`/`-w`) are dropped for subcommands that don't
+/// forward them (Typecheck delegates to `tsc` and ignores them), mirroring the
+/// `--filter` warning in `validate_pnpm_filters`. Not reachable via the hook
+/// rewriter (`typecheck` isn't a rewritten pnpm subcommand) but possible manually.
+fn validate_pnpm_globals(
+    recursive: bool,
+    workspace_root: bool,
+    command: &PnpmCommands,
+) -> Option<String> {
+    match command {
+        PnpmCommands::Typecheck { .. } if recursive || workspace_root => {
+            let mut flags = Vec::new();
+            if recursive {
+                flags.push("-r");
+            }
+            if workspace_root {
+                flags.push("-w");
+            }
+            Some(format!(
+                "[rtk] warning: pnpm tsc does not support {} — ignored",
+                flags.join(", ")
+            ))
         }
         _ => None,
     }
@@ -1856,32 +1929,41 @@ fn run_cli() -> Result<i32> {
 
         Commands::Psql { args } => psql_cmd::run(&args, cli.verbose)?,
 
-        Commands::Pnpm { filter, command } => {
+        Commands::Pnpm {
+            filter,
+            recursive,
+            workspace_root,
+            command,
+        } => {
             // Warns user if filters are used with unsupported subcommands like typecheck
             if let Some(warning) = validate_pnpm_filters(&filter, &command) {
+                eprintln!("{}", warning);
+            }
+            if let Some(warning) = validate_pnpm_globals(recursive, workspace_root, &command) {
                 eprintln!("{}", warning);
             }
 
             match command {
                 PnpmCommands::List { depth, args } => pnpm_cmd::run(
                     pnpm_cmd::PnpmCommand::List { depth },
-                    &merge_pnpm_args(&filter, &args),
+                    &merge_pnpm_args(&filter, recursive, workspace_root, &args),
                     cli.verbose,
                 )?,
                 PnpmCommands::Outdated { args } => pnpm_cmd::run(
                     pnpm_cmd::PnpmCommand::Outdated,
-                    &merge_pnpm_args(&filter, &args),
+                    &merge_pnpm_args(&filter, recursive, workspace_root, &args),
                     cli.verbose,
                 )?,
                 PnpmCommands::Install { args } => pnpm_cmd::run(
                     pnpm_cmd::PnpmCommand::Install,
-                    &merge_pnpm_args(&filter, &args),
+                    &merge_pnpm_args(&filter, recursive, workspace_root, &args),
                     cli.verbose,
                 )?,
                 PnpmCommands::Typecheck { args } => tsc_cmd::run(&args, cli.verbose)?,
-                PnpmCommands::Other(args) => {
-                    pnpm_cmd::run_passthrough(&merge_pnpm_args_os(&filter, &args), cli.verbose)?
-                }
+                PnpmCommands::Other(args) => pnpm_cmd::run_passthrough(
+                    &merge_pnpm_args_os(&filter, recursive, workspace_root, &args),
+                    cli.verbose,
+                )?,
             }
         }
 
@@ -2932,6 +3014,46 @@ mod tests {
     }
 
     #[test]
+    fn test_pnpm_recursive_install_parsing() {
+        // The rewriter emits `rtk pnpm -r install` for `pnpm -r install`; it must parse
+        // to Install with recursive=true (not error, not Other) so `-r` is forwarded.
+        let cli = Cli::try_parse_from(["rtk", "pnpm", "-r", "install"]).unwrap();
+        match cli.command {
+            Commands::Pnpm {
+                recursive,
+                workspace_root,
+                command,
+                ..
+            } => {
+                assert!(recursive);
+                assert!(!workspace_root);
+                assert!(matches!(command, PnpmCommands::Install { .. }));
+            }
+            _ => panic!("Expected Pnpm command"),
+        }
+    }
+
+    #[test]
+    fn test_pnpm_workspace_root_filter_install_parsing() {
+        let cli =
+            Cli::try_parse_from(["rtk", "pnpm", "-w", "--filter", "@app", "install"]).unwrap();
+        match cli.command {
+            Commands::Pnpm {
+                filter,
+                recursive,
+                workspace_root,
+                command,
+            } => {
+                assert!(!recursive);
+                assert!(workspace_root);
+                assert_eq!(filter, vec!["@app".to_string()]);
+                assert!(matches!(command, PnpmCommands::Install { .. }));
+            }
+            _ => panic!("Expected Pnpm command"),
+        }
+    }
+
+    #[test]
     fn test_git_commit_long_flag_multiple() {
         let cli = Cli::try_parse_from([
             "rtk",
@@ -3467,7 +3589,10 @@ mod tests {
         let filters = vec![];
         let args = vec!["--depth=0".to_string(), "--no-verbose".to_string()];
         let expected_args = vec!["--depth=0", "--no-verbose"];
-        assert_eq!(merge_pnpm_args(&filters, &args), expected_args);
+        assert_eq!(
+            merge_pnpm_args(&filters, false, false, &args),
+            expected_args
+        );
     }
 
     #[test]
@@ -3485,7 +3610,10 @@ mod tests {
             "--depth=0",
             "--no-verbose",
         ];
-        assert_eq!(merge_pnpm_args(&filters, &args), expected_args);
+        assert_eq!(
+            merge_pnpm_args(&filters, false, false, &args),
+            expected_args
+        );
     }
 
     #[test]
@@ -3493,7 +3621,10 @@ mod tests {
         let filters = vec![];
         let args = vec![OsString::from("--depth=0")];
         let expected_args = vec![OsString::from("--depth=0")];
-        assert_eq!(merge_pnpm_args_os(&filters, &args), expected_args);
+        assert_eq!(
+            merge_pnpm_args_os(&filters, false, false, &args),
+            expected_args
+        );
     }
 
     #[test]
@@ -3504,7 +3635,39 @@ mod tests {
             OsString::from("--filter=@app1"),
             OsString::from("--depth=0"),
         ];
-        assert_eq!(merge_pnpm_args_os(&filters, &args), expected_args);
+        assert_eq!(
+            merge_pnpm_args_os(&filters, false, false, &args),
+            expected_args
+        );
+    }
+
+    #[test]
+    fn test_merge_recursive_workspace_root_ordering() {
+        // Global flags come first, then filters, then the subcommand args —
+        // executed as `pnpm <sub> -r -w --filter=@app <args>` (position-independent,
+        // verified empirically; see pnpm_global_flags docs).
+        let filters = vec!["@app".to_string()];
+        let args = vec!["--depth=0".to_string()];
+        assert_eq!(
+            merge_pnpm_args(&filters, true, true, &args),
+            vec!["-r", "-w", "--filter=@app", "--depth=0"]
+        );
+        // No flags → unchanged from the filters-only behavior.
+        assert_eq!(merge_pnpm_args(&[], false, false, &args), vec!["--depth=0"]);
+    }
+
+    #[test]
+    fn test_validate_pnpm_globals_warns_on_typecheck() {
+        let cmd = PnpmCommands::Typecheck { args: vec![] };
+        assert!(validate_pnpm_globals(true, false, &cmd).is_some());
+        assert!(validate_pnpm_globals(false, true, &cmd).is_some());
+        // Both flags at once: single warning naming both.
+        let both = validate_pnpm_globals(true, true, &cmd).unwrap();
+        assert!(both.contains("-r") && both.contains("-w"));
+        assert!(validate_pnpm_globals(false, false, &cmd).is_none());
+        // Non-typecheck subcommands forward the flags → no warning.
+        let install = PnpmCommands::Install { args: vec![] };
+        assert!(validate_pnpm_globals(true, true, &install).is_none());
     }
 
     #[test]
@@ -3518,6 +3681,7 @@ mod tests {
             Commands::Pnpm {
                 filter,
                 command: PnpmCommands::List { depth, args },
+                ..
             } => {
                 assert_eq!(depth, 0);
                 assert_eq!(filter, vec!["@app1", "@app2"]);
@@ -3578,7 +3742,9 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Commands::Pnpm { filter, command } => {
+            Commands::Pnpm {
+                filter, command, ..
+            } => {
                 let warning = validate_pnpm_filters(&filter, &command);
 
                 assert!(filter.is_empty());
@@ -3605,7 +3771,9 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Commands::Pnpm { filter, command } => {
+            Commands::Pnpm {
+                filter, command, ..
+            } => {
                 let warning = validate_pnpm_filters(&filter, &command).unwrap();
 
                 assert_eq!(filter, vec!["@app1", "@app2"]);
