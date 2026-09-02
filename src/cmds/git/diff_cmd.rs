@@ -6,6 +6,10 @@ use anyhow::Result;
 use std::fs;
 use std::path::Path;
 
+const IDENTICAL_FILES_MESSAGE: &str = "[ok] Files are identical\n";
+const WHITESPACE_ONLY_DIFF_DETAIL: &str =
+    "   files differ only in whitespace or line endings (no line-content change)\n";
+
 /// Ultra-condensed diff - only changed lines, no context.
 /// Returns the diff-convention exit code: 0 if identical, 1 if files differ.
 pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
@@ -23,7 +27,7 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
     let fallback = format_classic_diff(&diff);
     let both_files = format!("{}\n---\n{}", content1, content2);
 
-    let (rtk, exit_code) = render_diff(file1, file2, &diff);
+    let (rtk, exit_code) = render_diff(file1, file2, &diff, content1 == content2);
 
     let shown = select_file_diff_output(&diff, &fallback, &rtk);
     print!("{}", shown);
@@ -36,13 +40,29 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
     Ok(exit_code)
 }
 
-fn render_diff(file1: &Path, file2: &Path, diff: &DiffResult) -> (String, i32) {
+fn render_file_header(file1: &Path, file2: &Path) -> String {
+    format!("{} → {}\n", file1.display(), file2.display())
+}
+
+fn render_diff(file1: &Path, file2: &Path, diff: &DiffResult, bytes_equal: bool) -> (String, i32) {
     if diff.changes.is_empty() {
-        return ("[ok] Files are identical\n".to_string(), 0);
+        if bytes_equal {
+            return (IDENTICAL_FILES_MESSAGE.to_string(), 0);
+        }
+        // `str::lines()` strips `\r` and drops a trailing newline, so these
+        // byte-level differences can leave no line changes to render.
+        return (
+            format!(
+                "{}{}",
+                render_file_header(file1, file2),
+                WHITESPACE_ONLY_DIFF_DETAIL
+            ),
+            1,
+        );
     }
 
     let mut rtk = String::new();
-    rtk.push_str(&format!("{} → {}\n", file1.display(), file2.display()));
+    rtk.push_str(&render_file_header(file1, file2));
     rtk.push_str(&format!(
         "   +{} added, -{} removed, ~{} modified\n\n",
         diff.added, diff.removed, diff.modified
@@ -367,6 +387,18 @@ fn condense_unified_diff(diff: &str) -> String {
 mod tests {
     use super::*;
 
+    fn render_test_diff(file1: &str, file2: &str, content1: &str, content2: &str) -> (String, i32) {
+        let lines1: Vec<&str> = content1.lines().collect();
+        let lines2: Vec<&str> = content2.lines().collect();
+        let diff = compute_diff(&lines1, &lines2);
+        render_diff(
+            Path::new(file1),
+            Path::new(file2),
+            &diff,
+            content1 == content2,
+        )
+    }
+
     // --- similarity ---
 
     #[test]
@@ -465,8 +497,7 @@ mod tests {
     fn test_render_modified_only_yaml_not_identical() {
         // "a: 1" vs "a: 2" is classified as modified (similarity > 0.5);
         // the identical check must not ignore modified-only diffs.
-        let diff = compute_diff(&["a: 1"], &["a: 2"]);
-        let (out, code) = render_diff(Path::new("one.yaml"), Path::new("two.yaml"), &diff);
+        let (out, code) = render_test_diff("one.yaml", "two.yaml", "a: 1\n", "a: 2\n");
         assert!(
             !out.contains("identical"),
             "modified-only diff reported as identical:\n{}",
@@ -480,8 +511,7 @@ mod tests {
 
     #[test]
     fn test_render_modified_only_json_not_identical() {
-        let diff = compute_diff(&["{\"a\": 1}"], &["{\"a\": 2}"]);
-        let (out, code) = render_diff(Path::new("j1.json"), Path::new("j2.json"), &diff);
+        let (out, code) = render_test_diff("j1.json", "j2.json", "{\"a\": 1}\n", "{\"a\": 2}\n");
         assert!(
             !out.contains("identical"),
             "modified-only diff reported as identical:\n{}",
@@ -492,25 +522,66 @@ mod tests {
 
     #[test]
     fn test_render_identical_files_exit_zero() {
-        let diff = compute_diff(&["a: 1", "b: 2"], &["a: 1", "b: 2"]);
-        let (out, code) = render_diff(Path::new("a.yaml"), Path::new("b.yaml"), &diff);
+        let (out, code) =
+            render_test_diff("a.yaml", "b.yaml", "a: 1\nb: 2\n", "a: 1\nb: 2\n");
         assert!(out.contains("[ok] Files are identical"));
         assert_eq!(code, 0);
     }
 
     #[test]
     fn test_render_added_removed_exit_one() {
-        let diff = compute_diff(&["x"], &["y"]);
-        let (out, code) = render_diff(Path::new("t1.txt"), Path::new("t2.txt"), &diff);
+        let (out, code) = render_test_diff("t1.txt", "t2.txt", "x\n", "y\n");
         assert!(out.contains("+1 added, -1 removed"));
         assert_eq!(code, 1);
+    }
+
+    // --- byte-different but line-equal files must not be "identical" (issue #3469) ---
+
+    #[test]
+    fn test_render_crlf_vs_lf_not_identical() {
+        let (out, code) = render_test_diff(
+            "a.txt",
+            "b.txt",
+            "alpha\nbeta\n",
+            "alpha\r\nbeta\r\n",
+        );
+        assert!(
+            !out.contains("identical"),
+            "CRLF-vs-LF difference reported as identical:\n{}",
+            out
+        );
+        assert!(
+            out.contains("whitespace or line endings"),
+            "expected the whitespace/line-ending message, got:\n{}",
+            out
+        );
+        assert_eq!(code, 1, "byte-different files must exit 1 (diff convention)");
+    }
+
+    #[test]
+    fn test_render_trailing_newline_not_identical() {
+        let (out, code) = render_test_diff("a.txt", "b.txt", "abc", "abc\n");
+        assert!(
+            !out.contains("identical"),
+            "trailing-newline difference reported as identical:\n{}",
+            out
+        );
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn test_render_byte_identical_exit_zero_with_crlf() {
+        let (out, code) = render_test_diff("a.txt", "b.txt", "a\r\nb\r\n", "a\r\nb\r\n");
+        assert!(out.contains("[ok] Files are identical"));
+        assert_eq!(code, 0);
     }
 
     #[test]
     fn test_never_worse_fallback_is_a_classic_diff() {
         let diff = compute_diff(&["alpha beta"], &["alpha zzzz"]);
         let fallback = format_classic_diff(&diff);
-        let (rendered, code) = render_diff(Path::new("before"), Path::new("after"), &diff);
+        let (rendered, code) =
+            render_diff(Path::new("before"), Path::new("after"), &diff, false);
         let shown = select_file_diff_output(&diff, &fallback, &rendered);
 
         assert_eq!(code, 1);
@@ -532,8 +603,15 @@ mod tests {
 
         let diff = compute_diff(&r1, &r2);
         let fallback = format_classic_diff(&diff);
-        let both_files = format!("{}\n---\n{}", old.join("\n"), new.join("\n"));
-        let (rendered, _) = render_diff(Path::new("a"), Path::new("b"), &diff);
+        let old_content = old.join("\n");
+        let new_content = new.join("\n");
+        let both_files = format!("{}\n---\n{}", old_content, new_content);
+        let (rendered, _) = render_diff(
+            Path::new("a"),
+            Path::new("b"),
+            &diff,
+            old_content == new_content,
+        );
         let shown = select_file_diff_output(&diff, &fallback, &rendered);
         let baseline = tracking_baseline(&diff, &fallback, &both_files, shown);
 
