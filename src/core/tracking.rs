@@ -223,6 +223,21 @@ pub struct MonthStats {
 /// Type alias for command statistics tuple: (command, count, saved_tokens, avg_savings_pct, avg_time_ms)
 type CommandStats = (String, usize, usize, f64, u64);
 
+/// Tell users how to repair a tracking database whose schema is incomplete.
+fn missing_table_hint(context: &str, err: &rusqlite::Error) -> Option<String> {
+    err.to_string().contains("no such table").then(|| {
+        format!(
+            "rtk: tracking database looks corrupted ({context}: {err}). Run `rtk init` to recreate it."
+        )
+    })
+}
+
+fn warn_if_missing_table(context: &str, err: &rusqlite::Error) {
+    if let Some(hint) = missing_table_hint(context, err) {
+        eprintln!("{hint}");
+    }
+}
+
 impl Tracker {
     /// Create a new tracker instance.
     ///
@@ -502,13 +517,17 @@ impl Tracker {
     pub fn get_parse_failure_summary(&self) -> Result<ParseFailureSummary> {
         let total: i64 = self
             .conn
-            .query_row("SELECT COUNT(*) FROM parse_failures", [], |row| row.get(0))?;
+            .query_row("SELECT COUNT(*) FROM parse_failures", [], |row| row.get(0))
+            .inspect_err(|e| warn_if_missing_table("get_parse_failure_summary", e))?;
 
-        let succeeded: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM parse_failures WHERE fallback_succeeded = 1",
-            [],
-            |row| row.get(0),
-        )?;
+        let succeeded: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM parse_failures WHERE fallback_succeeded = 1",
+                [],
+                |row| row.get(0),
+            )
+            .inspect_err(|e| warn_if_missing_table("get_parse_failure_summary", e))?;
 
         let recovery_rate = if total > 0 {
             (succeeded as f64 / total as f64) * 100.0
@@ -517,13 +536,16 @@ impl Tracker {
         };
 
         // Top commands by frequency
-        let mut stmt = self.conn.prepare(
-            "SELECT raw_command, COUNT(*) as cnt
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT raw_command, COUNT(*) as cnt
              FROM parse_failures
              GROUP BY raw_command
              ORDER BY cnt DESC
              LIMIT 10",
-        )?;
+            )
+            .inspect_err(|e| warn_if_missing_table("get_parse_failure_summary", e))?;
         let top_commands = stmt
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
@@ -531,12 +553,15 @@ impl Tracker {
             .collect::<Result<Vec<_>, _>>()?;
 
         // Recent 10
-        let mut stmt = self.conn.prepare(
-            "SELECT timestamp, raw_command, error_message, fallback_succeeded
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT timestamp, raw_command, error_message, fallback_succeeded
              FROM parse_failures
              ORDER BY timestamp DESC
              LIMIT 10",
-        )?;
+            )
+            .inspect_err(|e| warn_if_missing_table("get_parse_failure_summary", e))?;
         let recent = stmt
             .query_map([], |row| {
                 Ok(ParseFailureRecord {
@@ -592,11 +617,14 @@ impl Tracker {
         let mut total_saved = 0usize;
         let mut total_time_ms = 0u64;
 
-        let mut stmt = self.conn.prepare(
-            "SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)", // added: project filter
-        )?;
+            )
+            .inspect_err(|e| warn_if_missing_table("get_summary", e))?;
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
@@ -650,14 +678,17 @@ impl Tracker {
         project_path: Option<&str>, // added
     ) -> Result<Vec<CommandStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
-        let mut stmt = self.conn.prepare(
-            "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY rtk_cmd
              ORDER BY SUM(saved_tokens) DESC
              LIMIT 10", // added: project filter in WHERE
-        )?;
+            )
+            .inspect_err(|e| warn_if_missing_table("get_by_command", e))?;
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
@@ -678,14 +709,17 @@ impl Tracker {
         project_path: Option<&str>, // added
     ) -> Result<Vec<(String, usize)>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
-        let mut stmt = self.conn.prepare(
-            "SELECT DATE(timestamp), SUM(saved_tokens)
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT DATE(timestamp), SUM(saved_tokens)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY DATE(timestamp)
              ORDER BY DATE(timestamp) DESC
              LIMIT 30", // added: project filter in WHERE
-        )?;
+            )
+            .inspect_err(|e| warn_if_missing_table("get_by_day", e))?;
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
@@ -722,8 +756,10 @@ impl Tracker {
     /// Get daily statistics filtered by project path. // added
     pub fn get_all_days_filtered(&self, project_path: Option<&str>) -> Result<Vec<DayStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
-        let mut stmt = self.conn.prepare(
-            "SELECT
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT
                 DATE(timestamp) as date,
                 COUNT(*) as commands,
                 SUM(input_tokens) as input,
@@ -734,7 +770,8 @@ impl Tracker {
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY DATE(timestamp)
              ORDER BY DATE(timestamp) DESC", // added: project filter
-        )?;
+            )
+            .inspect_err(|e| warn_if_missing_table("get_all_days", e))?;
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
@@ -795,8 +832,10 @@ impl Tracker {
     /// Get weekly statistics filtered by project path. // added
     pub fn get_by_week_filtered(&self, project_path: Option<&str>) -> Result<Vec<WeekStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
-        let mut stmt = self.conn.prepare(
-            "SELECT
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT
                 DATE(timestamp, 'weekday 0', '-6 days') as week_start,
                 DATE(timestamp, 'weekday 0') as week_end,
                 COUNT(*) as commands,
@@ -808,7 +847,8 @@ impl Tracker {
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY week_start
              ORDER BY week_start DESC", // added: project filter
-        )?;
+            )
+            .inspect_err(|e| warn_if_missing_table("get_by_week", e))?;
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
@@ -870,8 +910,10 @@ impl Tracker {
     /// Get monthly statistics filtered by project path. // added
     pub fn get_by_month_filtered(&self, project_path: Option<&str>) -> Result<Vec<MonthStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
-        let mut stmt = self.conn.prepare(
-            "SELECT
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT
                 strftime('%Y-%m', timestamp) as month,
                 COUNT(*) as commands,
                 SUM(input_tokens) as input,
@@ -882,7 +924,8 @@ impl Tracker {
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY month
              ORDER BY month DESC", // added: project filter
-        )?;
+            )
+            .inspect_err(|e| warn_if_missing_table("get_by_month", e))?;
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
@@ -951,13 +994,16 @@ impl Tracker {
         project_path: Option<&str>,
     ) -> Result<Vec<CommandRecord>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
-        let mut stmt = self.conn.prepare(
-            "SELECT timestamp, rtk_cmd, saved_tokens, savings_pct
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT timestamp, rtk_cmd, saved_tokens, savings_pct
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              ORDER BY timestamp DESC
              LIMIT ?3", // added: project filter
-        )?;
+            )
+            .inspect_err(|e| warn_if_missing_table("get_recent", e))?;
 
         let rows = stmt.query_map(
             params![project_exact, project_glob, limit as i64], // added: project params
@@ -1757,5 +1803,22 @@ mod tests {
             let mode = std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "expected 0600 on {}", p.display());
         }
+    }
+
+    #[test]
+    fn test_missing_table_hint_only_targets_schema_errors() {
+        let tracker = Tracker::new_in_memory().expect("create tracker");
+        tracker
+            .conn
+            .execute("DROP TABLE commands", [])
+            .expect("drop commands table");
+
+        let err = tracker
+            .get_recent(1)
+            .expect_err("missing table should fail");
+        assert!(err.to_string().contains("no such table"));
+
+        let other = rusqlite::Error::InvalidQuery;
+        assert!(missing_table_hint("get_recent", &other).is_none());
     }
 }
