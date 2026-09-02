@@ -1,0 +1,81 @@
+[filters.graphify-explain]
+description = "Preserve graphify's native connection and grouped-file summary"
+match_command = "^graphify\\s+explain(?:\\s|$)"
+
+[[tests.graphify-explain]]
+name = "preserves a small explanation"
+input = """
+Node: .previewRetailer()
+  ID:        app_http_controllers_api_v1_principal_retailercontroller_retailercontroller_previewretailer
+  Source:    app/Http/Controllers/Api/V1/Principal/RetailerController.php L2419
+  Type:      code
+  Community: 87
+  Degree:    2
+
+Connections (2):
+  --> Illuminate\\Http\\Request [references] [EXTRACTED] app/Http/Controllers/Api/V1/Principal/RetailerController.php:L2419
+  <-- RetailerController [method] [EXTRACTED] app/Http/Controllers/Api/V1/Principal/RetailerController.php:L2419
+"""
+expected = """
+Node: .previewRetailer()
+  ID:        app_http_controllers_api_v1_principal_retailercontroller_retailercontroller_previewretailer
+  Source:    app/Http/Controllers/Api/V1/Principal/RetailerController.php L2419
+  Type:      code
+  Community: 87
+  Degree:    2
+
+Connections (2):
+  --> Illuminate\\Http\\Request [references] [EXTRACTED] app/Http/Controllers/Api/V1/Principal/RetailerController.php:L2419
+  <-- RetailerController [method] [EXTRACTED] app/Http/Controllers/Api/V1/Principal/RetailerController.php:L2419
+"""
+
+[[tests.graphify-explain]]
+name = "keeps identity and grouped tail for a high-degree node"
+input = """
+Node: Illuminate\\Database\\Eloquent\\Model
+  ID:        illuminate_database_eloquent_model
+  Source:
+  Type:      code
+  Community: 1
+  Degree:    524
+
+Connections (524):
+  <-- Voucher [inherits] [EXTRACTED] app/Models/B2c/Voucher.php:L26
+  <-- Business [inherits] [EXTRACTED] app/Models/Business.php:L33
+  <-- Member [inherits] [EXTRACTED] app/Models/Member.php:L16
+  <-- PaylaterContract [inherits] [EXTRACTED] app/Models/PaylaterContract.php:L8
+  ... and 504 more
+  Grouped by file:
+    <-- app/Models/AnalyticsFactsSla.php: 2 connections
+    <-- app/Models/AnalyticsFactsTips.php: 2 connections
+    <-- app/Models/Area.php: 2 connections
+    <-- app/Models/Areas.php: 2 connections
+    <-- app/Models/B2c/BusinessAreas.php: 2 connections
+    <-- app/Models/B2c/BusinessWarehouse.php: 2 connections
+    <-- app/Models/B2c/VoucherLimit.php: 2 connections
+    ... and 240 more files
+"""
+expected = """
+Node: Illuminate\\Database\\Eloquent\\Model
+  ID:        illuminate_database_eloquent_model
+  Source:
+  Type:      code
+  Community: 1
+  Degree:    524
+
+Connections (524):
+  <-- Voucher [inherits] [EXTRACTED] app/Models/B2c/Voucher.php:L26
+  <-- Business [inherits] [EXTRACTED] app/Models/Business.php:L33
+  <-- Member [inherits] [EXTRACTED] app/Models/Member.php:L16
+  <-- PaylaterContract [inherits] [EXTRACTED] app/Models/PaylaterContract.php:L8
+  ... and 504 more
+  Grouped by file:
+    <-- app/Models/AnalyticsFactsSla.php: 2 connections
+    <-- app/Models/AnalyticsFactsTips.php: 2 connections
+    <-- app/Models/Area.php: 2 connections
+    <-- app/Models/Areas.php: 2 connections
+    <-- app/Models/B2c/BusinessAreas.php: 2 connections
+    <-- app/Models/B2c/BusinessWarehouse.php: 2 connections
+    <-- app/Models/B2c/VoucherLimit.php: 2 connections
+    ... and 240 more files
+"""

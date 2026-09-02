@@ -1,0 +1,39 @@
+[filters.graphify-update]
+description = "Strip graphify update progress while preserving warnings and outcomes"
+match_command = "^graphify\\s+update(?:\\s|$)"
+strip_lines_matching = [
+  "^\\s*$",
+  "^Re-extracting code files in .+ \\(no LLM needed\\)\\.\\.\\.$",
+  "^  AST extraction: \\d+/\\d+ uncached files \\(\\d+%\\)$",
+  "^Code graph updated\\. For doc/paper/image changes run /graphify --update in your AI assistant\\.$",
+  "^Tip: set GEMINI_API_KEY or GOOGLE_API_KEY to use Gemini for semantic extraction\\.$",
+]
+
+[[tests.graphify-update]]
+name = "preserves warnings and the final update outcome"
+input = """
+Re-extracting code files in /workspace/app (no LLM needed)...
+  AST extraction: 14/14 uncached files (100%)
+  warning: 1 source file(s) produced zero nodes and are absent from the graph: .githooks-config.json.
+  warning: 9 .sql file(s) contributed nothing to the graph because tree_sitter_sql is not installed.
+[graphify watch] No code-graph topology changes detected; outputs left untouched.
+Code graph updated. For doc/paper/image changes run /graphify --update in your AI assistant.
+Tip: set GEMINI_API_KEY or GOOGLE_API_KEY to use Gemini for semantic extraction.
+"""
+expected = """
+  warning: 1 source file(s) produced zero nodes and are absent from the graph: .githooks-config.json.
+  warning: 9 .sql file(s) contributed nothing to the graph because tree_sitter_sql is not installed.
+[graphify watch] No code-graph topology changes detected; outputs left untouched.
+"""
+
+[[tests.graphify-update]]
+name = "preserves failed rebuild output"
+input = """
+Re-extracting code files in /workspace/app (no LLM needed)...
+[graphify watch] Rebuild failed: graph is empty
+Nothing to update or rebuild failed — check output above.
+"""
+expected = """
+[graphify watch] Rebuild failed: graph is empty
+Nothing to update or rebuild failed — check output above.
+"""

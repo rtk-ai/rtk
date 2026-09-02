@@ -1,0 +1,110 @@
+[filters.graphify-query]
+description = "Keep graphify query nodes and high-signal relationships"
+match_command = "^graphify\\s+query(?:\\s|$)"
+replace = [
+  { pattern = " community=\\d+", replacement = "" },
+]
+priority_lines_matching = [
+  "^Traversal:",
+  "^\\[!\\] TRUNCATED:",
+  "^NODE ",
+  "^EDGE .*--(?:calls|references)\\b",
+  "^EDGE .*\\[INFERRED(?:\\s|\\])",
+  "^EDGE .*--(?:contains|method|inherits)\\b",
+  "^EDGE ",
+]
+priority_skip_if_output_matches = ["^\\[!\\] TRUNCATED:"]
+max_lines = 60
+
+[[tests.graphify-query]]
+name = "preserves a small query"
+input = """
+Traversal: BFS depth=2 | Start: ['.retailer()'] | 2 nodes found
+
+NODE .retailer() [src=app/Models/Member.php loc=L102 community=29]
+NODE Member [src=app/Models/Member.php loc=L16 community=29]
+EDGE Member --method [EXTRACTED]--> .retailer() at=app/Models/Member.php:L102
+"""
+expected = """
+Traversal: BFS depth=2 | Start: ['.retailer()'] | 2 nodes found
+
+NODE .retailer() [src=app/Models/Member.php loc=L102]
+NODE Member [src=app/Models/Member.php loc=L16]
+EDGE Member --method [EXTRACTED]--> .retailer() at=app/Models/Member.php:L102
+"""
+
+[[tests.graphify-query]]
+name = "keeps leading nodes and trailing edges"
+input = """
+Traversal: BFS depth=2 | Start: ['RetailerController'] | 14 nodes found
+
+NODE RetailerController [src=app/Http/Controllers/Api/V1/Integration/RetailerController.php loc=L17 community=235]
+NODE Controller [src=app/Http/Controllers/Controller.php loc=L17 community=2]
+NODE LogIntegration.php [src=app/Traits/Integration/LogIntegration.php loc=L1 community=235]
+NODE V1/Integration/RetailerController.php [src=app/Http/Controllers/Api/V1/Integration/RetailerController.php loc=L1 community=235]
+NODE .integration() [src=app/Http/Controllers/Api/V1/Integration/RetailerController.php loc=L27 community=0]
+NODE Illuminate\\Http\\Request [src= loc= community=0]
+NODE Exception [src= loc= community=8]
+NODE V1/Integration/WholesalerController.php [src=app/Http/Controllers/Api/V1/Integration/WholesalerController.php loc=L1 community=235]
+NODE V2/Integration/RetailerController.php [src=app/Http/Controllers/Api/V2/Integration/RetailerController.php loc=L1 community=235]
+NODE V2/Integration/WholesalerController.php [src=app/Http/Controllers/Api/V2/Integration/WholesalerController.php loc=L1 community=235]
+EDGE RetailerController --method [EXTRACTED]--> .integration() at=app/Http/Controllers/Api/V1/Integration/RetailerController.php:L27
+EDGE RetailerController --inherits [EXTRACTED]--> Controller at=app/Http/Controllers/Api/V1/Integration/RetailerController.php:L17
+EDGE RetailerController --mixes_in [EXTRACTED]--> LogIntegration.php at=app/Http/Controllers/Api/V1/Integration/RetailerController.php:L19
+EDGE .integration() --references [EXTRACTED context=parameter_type]--> Illuminate\\Http\\Request at=app/Http/Controllers/Api/V1/Integration/RetailerController.php:L27
+EDGE V1/Integration/WholesalerController.php --imports [EXTRACTED context=import]--> LogIntegration.php at=app/Http/Controllers/Api/V1/Integration/WholesalerController.php:L10
+EDGE WholesalerController --mixes_in [EXTRACTED]--> LogIntegration.php at=app/Http/Controllers/Api/V1/Integration/WholesalerController.php:L18
+EDGE V2/Integration/RetailerController.php --imports [EXTRACTED context=import]--> LogIntegration.php at=app/Http/Controllers/Api/V2/Integration/RetailerController.php:L10
+EDGE RetailerController --mixes_in [EXTRACTED]--> LogIntegration.php at=app/Http/Controllers/Api/V2/Integration/RetailerController.php:L19
+EDGE V2/Integration/WholesalerController.php --imports [EXTRACTED context=import]--> LogIntegration.php at=app/Http/Controllers/Api/V2/Integration/WholesalerController.php:L10
+EDGE WholesalerController --mixes_in [EXTRACTED]--> LogIntegration.php at=app/Http/Controllers/Api/V2/Integration/WholesalerController.php:L18
+"""
+expected = """
+Traversal: BFS depth=2 | Start: ['RetailerController'] | 14 nodes found
+
+NODE RetailerController [src=app/Http/Controllers/Api/V1/Integration/RetailerController.php loc=L17]
+NODE Controller [src=app/Http/Controllers/Controller.php loc=L17]
+NODE LogIntegration.php [src=app/Traits/Integration/LogIntegration.php loc=L1]
+NODE V1/Integration/RetailerController.php [src=app/Http/Controllers/Api/V1/Integration/RetailerController.php loc=L1]
+NODE .integration() [src=app/Http/Controllers/Api/V1/Integration/RetailerController.php loc=L27]
+NODE Illuminate\\Http\\Request [src= loc=]
+NODE Exception [src= loc=]
+NODE V1/Integration/WholesalerController.php [src=app/Http/Controllers/Api/V1/Integration/WholesalerController.php loc=L1]
+NODE V2/Integration/RetailerController.php [src=app/Http/Controllers/Api/V2/Integration/RetailerController.php loc=L1]
+NODE V2/Integration/WholesalerController.php [src=app/Http/Controllers/Api/V2/Integration/WholesalerController.php loc=L1]
+EDGE RetailerController --method [EXTRACTED]--> .integration() at=app/Http/Controllers/Api/V1/Integration/RetailerController.php:L27
+EDGE RetailerController --inherits [EXTRACTED]--> Controller at=app/Http/Controllers/Api/V1/Integration/RetailerController.php:L17
+EDGE RetailerController --mixes_in [EXTRACTED]--> LogIntegration.php at=app/Http/Controllers/Api/V1/Integration/RetailerController.php:L19
+EDGE .integration() --references [EXTRACTED context=parameter_type]--> Illuminate\\Http\\Request at=app/Http/Controllers/Api/V1/Integration/RetailerController.php:L27
+EDGE V1/Integration/WholesalerController.php --imports [EXTRACTED context=import]--> LogIntegration.php at=app/Http/Controllers/Api/V1/Integration/WholesalerController.php:L10
+EDGE WholesalerController --mixes_in [EXTRACTED]--> LogIntegration.php at=app/Http/Controllers/Api/V1/Integration/WholesalerController.php:L18
+EDGE V2/Integration/RetailerController.php --imports [EXTRACTED context=import]--> LogIntegration.php at=app/Http/Controllers/Api/V2/Integration/RetailerController.php:L10
+EDGE RetailerController --mixes_in [EXTRACTED]--> LogIntegration.php at=app/Http/Controllers/Api/V2/Integration/RetailerController.php:L19
+EDGE V2/Integration/WholesalerController.php --imports [EXTRACTED context=import]--> LogIntegration.php at=app/Http/Controllers/Api/V2/Integration/WholesalerController.php:L10
+EDGE WholesalerController --mixes_in [EXTRACTED]--> LogIntegration.php at=app/Http/Controllers/Api/V2/Integration/WholesalerController.php:L18
+"""
+
+[[tests.graphify-query]]
+name = "keeps BusinessController calls and references before imports"
+input = """
+Traversal: BFS depth=2 | Start: ['BusinessController'] | 3 nodes found
+
+NODE BusinessController [src=app/Http/Controllers/Api/V1/Customer/BusinessController.php loc=L30 community=56]
+NODE .getNearby() [src=app/Http/Controllers/Api/V1/Customer/BusinessController.php loc=L48 community=56]
+NODE ayoencrypt() [src=app/Helpers/SecurityHelpers.php loc=L4 community=16]
+EDGE BusinessController --mixes_in [EXTRACTED]--> BusinessTrait.php at=app/Http/Controllers/Api/V1/Customer/BusinessController.php:L32
+EDGE V1/Customer/BusinessController.php --imports [EXTRACTED context=import]--> Exception at=app/Http/Controllers/Api/V1/Customer/BusinessController.php:L22
+EDGE .getNearby() --calls [INFERRED context=call]--> ayoencrypt() at=app/Http/Controllers/Api/V1/Customer/BusinessController.php:L58
+EDGE .getNearby() --references [EXTRACTED context=parameter_type]--> Illuminate\\Http\\Request at=app/Http/Controllers/Api/V1/Customer/BusinessController.php:L48
+"""
+expected = """
+Traversal: BFS depth=2 | Start: ['BusinessController'] | 3 nodes found
+
+NODE BusinessController [src=app/Http/Controllers/Api/V1/Customer/BusinessController.php loc=L30]
+NODE .getNearby() [src=app/Http/Controllers/Api/V1/Customer/BusinessController.php loc=L48]
+NODE ayoencrypt() [src=app/Helpers/SecurityHelpers.php loc=L4]
+EDGE BusinessController --mixes_in [EXTRACTED]--> BusinessTrait.php at=app/Http/Controllers/Api/V1/Customer/BusinessController.php:L32
+EDGE V1/Customer/BusinessController.php --imports [EXTRACTED context=import]--> Exception at=app/Http/Controllers/Api/V1/Customer/BusinessController.php:L22
+EDGE .getNearby() --calls [INFERRED context=call]--> ayoencrypt() at=app/Http/Controllers/Api/V1/Customer/BusinessController.php:L58
+EDGE .getNearby() --references [EXTRACTED context=parameter_type]--> Illuminate\\Http\\Request at=app/Http/Controllers/Api/V1/Customer/BusinessController.php:L48
+"""
