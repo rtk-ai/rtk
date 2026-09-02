@@ -5,6 +5,7 @@ use super::constants::{
 use super::init::resolve_claude_dir;
 use crate::core::stream::exec_capture;
 use crate::discover::lexer::split_for_permissions;
+use crate::discover::shell_wrapper::{is_shell_wrapper_candidate, parse_shell_wrapper};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -70,6 +71,10 @@ pub(crate) fn check_command_with_rules(
         }
     }
 
+    if let Some(verdict) = check_shell_wrapper_permissions(&segments, deny_rules) {
+        return verdict;
+    }
+
     // Can't decompose substitution / file-target redirects — never auto-allow.
     if crate::discover::lexer::contains_unattestable_construct(cmd) {
         return PermissionVerdict::Ask;
@@ -120,6 +125,36 @@ pub(crate) fn check_command_with_rules(
     } else {
         PermissionVerdict::Default
     }
+}
+
+fn check_shell_wrapper_permissions(
+    segments: &[&str],
+    deny_rules: &[String],
+) -> Option<PermissionVerdict> {
+    let mut contains_shell_wrapper = false;
+    for segment in segments {
+        let segment = segment.trim();
+        let Some(wrapper) = parse_shell_wrapper(segment) else {
+            contains_shell_wrapper |= is_shell_wrapper_candidate(segment);
+            continue;
+        };
+        let Some(script) = wrapper.script(segment) else {
+            return Some(PermissionVerdict::Ask);
+        };
+        contains_shell_wrapper = true;
+        let inner_denied = split_for_permissions(script).iter().any(|inner_segment| {
+            deny_rules
+                .iter()
+                .any(|pattern| command_matches_pattern(inner_segment.trim(), pattern))
+        });
+        if inner_denied {
+            return Some(PermissionVerdict::Deny);
+        }
+    }
+
+    // A quoted shell script hides a second parsing boundary from the host rule.
+    // Rewriting it is useful, but RTK must never turn that into auto-approval.
+    contains_shell_wrapper.then_some(PermissionVerdict::Ask)
 }
 
 /// Load deny, ask, and allow Bash rules from all Claude Code settings files.
@@ -1225,6 +1260,56 @@ mod tests {
         assert_eq!(
             check_command_with_rules("rm -rf /", &[], &[], &allow),
             PermissionVerdict::Default
+        );
+    }
+    #[test]
+    fn test_shell_wrapper_never_auto_allowed() {
+        let allow = vec!["*".to_string()];
+        assert_eq!(
+            check_command_with_rules(r#"bash -c "head foo && grep -R bar .""#, &[], &[], &allow),
+            PermissionVerdict::Ask
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_inner_deny_wins() {
+        let deny = vec!["rm:*".to_string()];
+        let allow = vec!["*".to_string()];
+        assert_eq!(
+            check_command_with_rules(
+                "bash -c 'git status; rm -rf /tmp/example'",
+                &deny,
+                &[],
+                &allow
+            ),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
+    fn test_unsupported_shell_wrapper_candidate_never_auto_allowed() {
+        let allow = vec!["*".to_string()];
+        for command in ["bash -lc 'git status'", "bash -e -c 'git status'"] {
+            assert_eq!(
+                check_command_with_rules(command, &[], &[], &allow),
+                PermissionVerdict::Ask,
+                "unsupported command-string wrapper must ask: {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_shell_wrapper_inner_deny_wins_inside_outer_compound() {
+        let deny = vec!["rm:*".to_string()];
+        let allow = vec!["*".to_string()];
+        assert_eq!(
+            check_command_with_rules(
+                "bash -c 'git status; rm -rf /tmp/example' && cargo test",
+                &deny,
+                &[],
+                &allow
+            ),
+            PermissionVerdict::Deny
         );
     }
 }

@@ -23,6 +23,8 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 
 **Compound splitting** — The rewrite engine walks the tokens, splitting on `Operator` (`&&`, `||`, `;`) and typed `Pipe` tokens (`|`, `|&`). For normal pipelines, producers and intermediate stages stay raw, and only an argument-safe final stage marked `pipeline_final_safe` is rewritten. The initial safe set is ordinary `grep` and `rg` invocations; search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. Stderr pipelines (`|&`) and pipelines containing opaque shell groups remain raw.
 
+**Quoted shell wrappers** — An exact `sh -c`, `bash -c`, or `zsh -c` segment whose script is one balanced quoted argument has that script rewritten in place, leaving the shell path, quote delimiters, spacing, suffix arguments and redirects byte-identical (`shell_wrapper.rs`). Recursion is capped at one level, so a wrapper inside a wrapper stays raw. A script carrying a newline, heredoc, `$((`, or any construct the lexer cannot attest defers unchanged, as does a `fish` script — fish control keywords (`and`, `or`, `if`) at a command boundary need a fish-aware lexer the shared one does not model.
+
 **Per-segment rewriting** — Each segment goes through:
 
 1. Strip trailing redirects (`2>&1`, `>/dev/null`) — matched via lexer tokens, set aside, re-appended after rewriting

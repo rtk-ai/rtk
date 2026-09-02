@@ -5,6 +5,7 @@ pub mod provider;
 pub mod registry;
 mod report;
 pub mod rules;
+pub(crate) mod shell_wrapper;
 
 use anyhow::Result;
 use std::collections::HashMap;
