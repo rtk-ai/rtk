@@ -26,6 +26,7 @@ rtk config --create   # create config file with defaults
 enabled = true              # enable/disable token tracking
 history_days = 90           # retention in days (auto-cleanup)
 database_path = "/custom/path/history.db"   # optional override
+estimate_cap_chars = 30000  # cap per-command token estimates (0 = uncapped)
 
 [display]
 colors = true               # colored output
@@ -61,6 +62,7 @@ For full details on what is collected, opt-out options, and GDPR rights, see [Te
 | `RTK_DISABLED=1` | Disable RTK for a single command (`RTK_DISABLED=1 git status`) |
 | `RTK_TEE_DIR` | Override the tee directory |
 | `RTK_TELEMETRY_DISABLED=1` | Disable telemetry |
+| `RTK_TRACK_CAP_CHARS` | Override `tracking.estimate_cap_chars` (0 = uncapped) |
 | `RTK_HOOK_AUDIT=1` | Enable hook audit logging |
 | `SKIP_ENV_VALIDATION=1` | Skip env validation (useful with Next.js) |
 

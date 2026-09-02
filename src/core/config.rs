@@ -1,6 +1,8 @@
 //! Reads user settings from config.toml.
 
-use super::constants::{CONFIG_TOML, DEFAULT_HISTORY_DAYS, RTK_DATA_DIR};
+use super::constants::{
+    CONFIG_TOML, DEFAULT_ESTIMATE_CAP_CHARS, DEFAULT_HISTORY_DAYS, RTK_DATA_DIR,
+};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -59,6 +61,14 @@ pub struct TrackingConfig {
     pub history_days: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub database_path: Option<PathBuf>,
+    /// Char ceiling for token estimates recorded per command (0 disables the
+    /// cap). `RTK_TRACK_CAP_CHARS` overrides this at runtime.
+    #[serde(default = "default_estimate_cap_chars")]
+    pub estimate_cap_chars: usize,
+}
+
+fn default_estimate_cap_chars() -> usize {
+    DEFAULT_ESTIMATE_CAP_CHARS
 }
 
 impl Default for TrackingConfig {
@@ -67,6 +77,7 @@ impl Default for TrackingConfig {
             enabled: true,
             history_days: DEFAULT_HISTORY_DAYS as u32,
             database_path: None,
+            estimate_cap_chars: DEFAULT_ESTIMATE_CAP_CHARS,
         }
     }
 }
@@ -272,6 +283,23 @@ enabled = true
         assert!(config.telemetry.enabled);
         assert!(config.telemetry.consent_given.is_none());
         assert!(config.telemetry.consent_date.is_none());
+    }
+
+    #[test]
+    fn test_tracking_config_estimate_cap_chars_default_30000() {
+        assert_eq!(Config::default().tracking.estimate_cap_chars, 30_000);
+    }
+
+    #[test]
+    fn test_tracking_config_missing_estimate_cap_chars_defaults_to_30000() {
+        // Older configs that predate this field must still parse.
+        let toml = r#"
+[tracking]
+enabled = true
+history_days = 90
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.tracking.estimate_cap_chars, 30_000);
     }
 
     #[test]
