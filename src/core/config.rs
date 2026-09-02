@@ -131,6 +131,19 @@ pub struct LimitsConfig {
     pub status_max_untracked: usize,
     /// Max chars for parser passthrough fallback (default: 2000)
     pub passthrough_max_chars: usize,
+    /// Skip filtering when output has ≤ this many lines (default: 5, 0 = disabled)
+    #[serde(default = "default_short_line_threshold")]
+    pub short_line_threshold: usize,
+    /// Skip filtering when output has ≤ this many bytes (default: 500, 0 = disabled)
+    #[serde(default = "default_short_byte_threshold")]
+    pub short_byte_threshold: usize,
+}
+
+fn default_short_line_threshold() -> usize {
+    5
+}
+fn default_short_byte_threshold() -> usize {
+    500
 }
 
 impl Default for LimitsConfig {
@@ -141,6 +154,8 @@ impl Default for LimitsConfig {
             status_max_files: 15,
             status_max_untracked: 10,
             passthrough_max_chars: 2000,
+            short_line_threshold: default_short_line_threshold(),
+            short_byte_threshold: default_short_byte_threshold(),
         }
     }
 }
@@ -329,5 +344,44 @@ consent_date = "2026-04-10T12:00:00Z"
             config.telemetry.consent_date.as_deref(),
             Some("2026-04-10T12:00:00Z")
         );
+    }
+
+    #[test]
+    fn test_config_short_thresholds_defaults() {
+        let config = Config::default();
+        assert_eq!(config.limits.short_line_threshold, 5);
+        assert_eq!(config.limits.short_byte_threshold, 500);
+    }
+
+    #[test]
+    fn test_config_short_thresholds_deserialize() {
+        let toml = r#"
+[limits]
+grep_max_results = 200
+grep_max_per_file = 25
+status_max_files = 15
+status_max_untracked = 10
+passthrough_max_chars = 2000
+short_line_threshold = 10
+short_byte_threshold = 1000
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.limits.short_line_threshold, 10);
+        assert_eq!(config.limits.short_byte_threshold, 1000);
+    }
+
+    #[test]
+    fn test_config_short_thresholds_missing_uses_defaults() {
+        let toml = r#"
+[limits]
+grep_max_results = 100
+grep_max_per_file = 25
+status_max_files = 15
+status_max_untracked = 10
+passthrough_max_chars = 2000
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.limits.short_line_threshold, 5);
+        assert_eq!(config.limits.short_byte_threshold, 500);
     }
 }

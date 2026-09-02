@@ -88,6 +88,16 @@ pub enum RunMode<'a> {
     Passthrough,
 }
 
+fn should_auto_passthrough(text: &str) -> bool {
+    let limits = crate::core::config::limits();
+    let line_threshold = limits.short_line_threshold;
+    let byte_threshold = limits.short_byte_threshold;
+    if line_threshold == 0 || byte_threshold == 0 {
+        return false;
+    }
+    text.len() <= byte_threshold && text.lines().count() <= line_threshold
+}
+
 fn run_captured_filter<F>(
     mut cmd: Command,
     tool_name: &str,
@@ -118,6 +128,15 @@ where
         if !result.raw_stderr.trim().is_empty() {
             eprint!("{}", result.raw_stderr);
         }
+        timer.track(cmd_label, &format!("rtk {}", cmd_label), raw, raw);
+        return Ok(exit_code);
+    }
+
+    if should_auto_passthrough(raw) {
+        if let Some(label) = opts.tee_label {
+            crate::core::tee::tee_raw(raw, label, exit_code);
+        }
+        print!("{}", raw);
         timer.track(cmd_label, &format!("rtk {}", cmd_label), raw, raw);
         return Ok(exit_code);
     }
@@ -283,4 +302,39 @@ pub fn run_streamed(
         RunMode::Streamed(filter),
         opts,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_auto_passthrough_short() {
+        assert!(should_auto_passthrough("line one\nline two\n"));
+    }
+
+    #[test]
+    fn test_should_auto_passthrough_long() {
+        let long = "a]n".repeat(200);
+        assert!(!should_auto_passthrough(&long));
+    }
+
+    #[test]
+    fn test_should_auto_passthrough_many_lines() {
+        let lines = "line\n".repeat(10);
+        assert!(!should_auto_passthrough(&lines));
+    }
+
+    #[test]
+    fn test_should_auto_passthrough_empty() {
+        assert!(should_auto_passthrough(""));
+    }
+
+    #[test]
+    fn test_should_auto_passthrough_at_boundary() {
+        let exactly_5_lines = "a\nb\nc\nd\ne";
+        assert!(should_auto_passthrough(exactly_5_lines));
+        let six_lines = "a\nb\nc\nd\ne\nf";
+        assert!(!should_auto_passthrough(six_lines));
+    }
 }
