@@ -119,6 +119,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "mypy" => {
             // mypy uses default text output (no special flags)
         }
+        "biome" => {
+            // Biome uses its own subcommands (check, lint, format) and
+            // native diagnostics — no format flags needed.
+        }
         _ => {
             // Other linters: no special formatting
         }
@@ -135,6 +139,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             1
         }
     } else {
+        // For biome and other explicit linters: skip the linter name (index 0),
+        // but preserve subcommands (check, lint, format, etc.)
         1
     };
 
@@ -196,6 +202,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         }
         "pylint" => filter_pylint_json(&result.stdout),
         "mypy" => mypy_cmd::filter_mypy_output(&raw),
+        "biome" => filter_biome_output(&raw),
         _ => filter_generic_lint(&raw),
     };
 
@@ -436,6 +443,110 @@ fn filter_pylint_json(output: &str) -> String {
             crate::core::tee::force_tee_tail_hint(&all_file_lines, "pylint-files", MAX_FILES + 1)
         {
             result.push_str(&format!("  {}\n", hint));
+        }
+    }
+
+    result.trim().to_string()
+}
+
+/// Filter Biome diagnostic output — groups violations by file and rule.
+///
+/// Biome outputs diagnostics in a structured text format with file paths,
+/// rule names, and suggestions. This filter extracts diagnostics and groups
+/// them by rule for a compact summary.
+fn filter_biome_output(output: &str) -> String {
+    use lazy_static::lazy_static;
+    use regex::Regex;
+
+    lazy_static! {
+        // Matches diagnostic headers like: "path/to/file.ts:10:5 lint/suspicious/noDoubleEquals"
+        // or "path/to/file.ts lint/style/useConst"
+        static ref DIAG_RE: Regex =
+            Regex::new(r"(?m)^[^\s].*?\s+(lint/\S+|a11y/\S+|nursery/\S+|style/\S+|suspicious/\S+|correctness/\S+|complexity/\S+|performance/\S+|security/\S+)")
+                .expect("biome diagnostic regex");
+
+        // Matches "Found N errors" / "Found N warnings" summary lines
+        static ref SUMMARY_RE: Regex =
+            Regex::new(r"(?i)Found\s+(\d+)\s+(error|warning|diagnostic)")
+                .expect("biome summary regex");
+
+        // Matches file paths at the start of diagnostic blocks
+        static ref FILE_RE: Regex =
+            Regex::new(r"(?m)^(\S+\.\w{1,6})(?::\d+(?::\d+)?)?")
+                .expect("biome file regex");
+    }
+
+    // Extract rule names
+    let mut by_rule: HashMap<String, usize> = HashMap::new();
+    for cap in DIAG_RE.captures_iter(output) {
+        let rule = cap[1].to_string();
+        *by_rule.entry(rule).or_insert(0) += 1;
+    }
+
+    // Extract unique file paths
+    let mut files: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for cap in FILE_RE.captures_iter(output) {
+        let path = cap[1].to_string();
+        if path.contains('/') || path.contains('.') {
+            files.insert(path);
+        }
+    }
+
+    // Try to parse summary counts from biome's own summary
+    let mut total_errors = 0usize;
+    let mut total_warnings = 0usize;
+    for cap in SUMMARY_RE.captures_iter(output) {
+        let count: usize = cap[1].parse().unwrap_or(0);
+        let kind = cap[2].to_lowercase();
+        if kind.starts_with("error") {
+            total_errors += count;
+        } else {
+            total_warnings += count;
+        }
+    }
+
+    // If we couldn't parse structured data, fall back to generic filter
+    if by_rule.is_empty() {
+        return filter_generic_lint(output);
+    }
+
+    // If biome didn't emit summary counts, use rule match count
+    if total_errors == 0 && total_warnings == 0 {
+        total_errors = by_rule.values().sum();
+    }
+
+    let mut result = String::new();
+    result.push_str(&format!(
+        "Biome: {} issues in {} files\n",
+        total_errors + total_warnings,
+        files.len()
+    ));
+
+    // Show top rules
+    let mut rule_counts: Vec<_> = by_rule.iter().collect();
+    rule_counts.sort_by(|a, b| b.1.cmp(a.1));
+
+    result.push_str("Rules:\n");
+    for (rule, count) in rule_counts.iter().take(10) {
+        result.push_str(&format!("  {} ({}x)\n", rule, count));
+    }
+
+    if rule_counts.len() > 10 {
+        result.push_str(&format!("  … +{} more rules\n", rule_counts.len() - 10));
+    }
+
+    // Show top files
+    if !files.is_empty() {
+        result.push('\n');
+        result.push_str("Files:\n");
+        let mut file_list: Vec<_> = files.iter().collect();
+        file_list.sort();
+        const MAX_FILES: usize = CAP_WARNINGS;
+        for f in file_list.iter().take(MAX_FILES) {
+            result.push_str(&format!("  {}\n", compact_path(f)));
+        }
+        if file_list.len() > MAX_FILES {
+            result.push_str(&format!("  … +{} more files\n", file_list.len() - MAX_FILES));
         }
     }
 
@@ -704,5 +815,132 @@ mod tests {
         assert!(!is_python_linter("eslint"));
         assert!(!is_python_linter("biome"));
         assert!(!is_python_linter("unknown"));
+    }
+
+    #[test]
+    fn test_detect_linter_biome() {
+        let args: Vec<String> = vec!["biome".into(), "check".into(), "src/".into()];
+        let (linter, explicit) = detect_linter(&args);
+        assert_eq!(linter, "biome");
+        assert!(explicit);
+    }
+
+    #[test]
+    fn test_detect_linter_biome_lint_subcommand() {
+        let args: Vec<String> = vec!["biome".into(), "lint".into(), ".".into()];
+        let (linter, explicit) = detect_linter(&args);
+        assert_eq!(linter, "biome");
+        assert!(explicit);
+    }
+
+    #[test]
+    fn test_filter_biome_output_with_diagnostics() {
+        let biome_output = r#"src/App.tsx:15:3 lint/suspicious/noDoubleEquals ━━━━━━━━━━━━━━━━━━━
+  ✖ Use === instead of ==.
+
+src/App.tsx:22:5 lint/style/useConst ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✖ This variable is never reassigned. Use const instead.
+
+src/utils/helpers.ts:10:1 lint/suspicious/noDoubleEquals ━━━━━━━━━
+  ✖ Use === instead of ==.
+
+src/utils/helpers.ts:45:8 lint/correctness/noUnusedVariables ━━━━━
+  ✖ This variable is unused.
+
+Found 4 errors."#;
+
+        let result = filter_biome_output(biome_output);
+        assert!(result.contains("Biome:"), "should have Biome header: {}", result);
+        assert!(result.contains("4 issues"), "should report 4 issues: {}", result);
+        assert!(
+            result.contains("lint/suspicious/noDoubleEquals"),
+            "should list noDoubleEquals rule: {}",
+            result
+        );
+        assert!(
+            result.contains("lint/style/useConst"),
+            "should list useConst rule: {}",
+            result
+        );
+        assert!(
+            result.contains("2x"),
+            "noDoubleEquals should appear 2 times: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_biome_output_no_issues() {
+        let biome_output = "Checked 42 files in 120ms. No fixes applied.";
+        let result = filter_biome_output(biome_output);
+        assert!(
+            result.contains("No issues found"),
+            "should fall back to generic filter with no-issues message: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_biome_output_token_savings() {
+        let biome_output = r#"src/App.tsx:15:3 lint/suspicious/noDoubleEquals ━━━━━━━━━━━━━━━━━━━
+  ✖ Use === instead of ==.
+    14 │ function check(a, b) {
+  > 15 │   if (a == b) {
+       │       ^^^^
+    16 │     return true;
+    17 │   }
+  ℹ Suggested fix: Use ===
+
+src/App.tsx:22:5 lint/style/useConst ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✖ This variable is never reassigned. Use const instead.
+    21 │
+  > 22 │     let count = 0;
+       │     ^^^
+    23 │     console.log(count);
+  ℹ Suggested fix: Use const instead of let
+
+src/utils/helpers.ts:10:1 lint/suspicious/noDoubleEquals ━━━━━━━━━
+  ✖ Use === instead of ==.
+    9  │ export function isEqual(a, b) {
+  > 10 │   return a == b;
+       │          ^^^^
+    11 │ }
+  ℹ Suggested fix: Use ===
+
+src/utils/helpers.ts:45:8 lint/correctness/noUnusedVariables ━━━━━
+  ✖ This variable is unused.
+    44 │ function processData() {
+  > 45 │   const unused = 42;
+       │         ^^^^^^
+    46 │   return getData();
+    47 │ }
+
+src/api/client.ts:88:12 lint/suspicious/noDoubleEquals ━━━━━━━━━━━
+  ✖ Use === instead of ==.
+    87 │ function handleResponse(status) {
+  > 88 │   if (status == 200) {
+       │              ^^^^
+    89 │     return true;
+    90 │   }
+  ℹ Suggested fix: Use ===
+
+Found 5 errors."#;
+
+        fn count_tokens(s: &str) -> usize {
+            s.split_whitespace().count()
+        }
+
+        let result = filter_biome_output(biome_output);
+        let input_tokens = count_tokens(biome_output);
+        let output_tokens = count_tokens(&result);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+
+        assert!(
+            savings >= 60.0,
+            "Biome filter: expected ≥60% savings, got {:.1}% (in={}, out={})",
+            savings,
+            input_tokens,
+            output_tokens
+        );
     }
 }
