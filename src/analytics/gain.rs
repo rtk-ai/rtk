@@ -1,7 +1,7 @@
 //! Shows users how many tokens RTK has saved them over time.
 
 use crate::core::display_helpers::{format_duration, print_period_table};
-use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
+use crate::core::tracking::{DayStats, MonthStats, SessionStats, Tracker, WeekStats};
 use crate::core::utils::{format_tokens, truncate};
 use crate::hooks::hook_check;
 use anyhow::{Context, Result};
@@ -22,6 +22,8 @@ pub fn run(
     weekly: bool,
     monthly: bool,
     all: bool,
+    session: bool,               // added: grouped by-session view
+    session_scope: Option<&str>, // added: scope all output to one session
     format: &str,
     failures: bool,
     reset: bool,
@@ -56,7 +58,9 @@ pub fn run(
                 weekly,
                 monthly,
                 all,
+                session,                  // added: pass session view flag
                 project_scope.as_deref(), // added: pass project scope
+                session_scope,            // added: pass session scope
             );
         }
         "csv" => {
@@ -66,14 +70,16 @@ pub fn run(
                 weekly,
                 monthly,
                 all,
+                session,                  // added: pass session view flag
                 project_scope.as_deref(), // added: pass project scope
+                session_scope,            // added: pass session scope
             );
         }
         _ => {} // Continue with text format
     }
 
     let summary = tracker
-        .get_summary_filtered(project_scope.as_deref()) // changed: use filtered variant
+        .get_summary_filtered(project_scope.as_deref(), session_scope) // changed: project + session scope
         .context("Failed to load token savings summary from database")?;
 
     if summary.total_commands == 0 {
@@ -83,18 +89,22 @@ pub fn run(
     }
 
     // Default view (summary)
-    if !daily && !weekly && !monthly && !all {
+    if !daily && !weekly && !monthly && !all && !session {
         // added: scope-aware styled header // changed: merged upstream styled + project scope
-        let title = if project_scope.is_some() {
-            "RTK Token Savings (Project Scope)"
-        } else {
-            "RTK Token Savings (Global Scope)"
+        let title = match (project_scope.is_some(), session_scope.is_some()) {
+            (_, true) => "RTK Token Savings (Session Scope)",
+            (true, false) => "RTK Token Savings (Project Scope)",
+            (false, false) => "RTK Token Savings (Global Scope)",
         };
         println!("{}", styled(title, true));
         println!("{}", "═".repeat(60));
         // added: show project path when scoped
         if let Some(ref scope) = project_scope {
             println!("Scope: {}", shorten_path(scope));
+        }
+        // added: show session id when scoped
+        if let Some(sid) = session_scope {
+            println!("Session: {}", sid);
         }
         println!();
 
@@ -252,7 +262,8 @@ pub fn run(
         }
 
         if history {
-            let recent = tracker.get_recent_filtered(10, project_scope.as_deref())?; // changed: filtered
+            let recent =
+                tracker.get_recent_filtered(10, project_scope.as_deref(), session_scope)?; // changed: project + session scope
             if !recent.is_empty() {
                 println!("{}", styled("Recent Commands", true)); // added: styled header
                 println!("──────────────────────────────────────────────────────────");
@@ -311,15 +322,20 @@ pub fn run(
 
     // Time breakdown views
     if all || daily {
-        print_daily_full(&tracker, project_scope.as_deref())?; // changed: pass project scope
+        print_daily_full(&tracker, project_scope.as_deref(), session_scope)?; // changed: project + session scope
     }
 
     if all || weekly {
-        print_weekly(&tracker, project_scope.as_deref())?; // changed: pass project scope
+        print_weekly(&tracker, project_scope.as_deref(), session_scope)?; // changed: project + session scope
     }
 
     if all || monthly {
-        print_monthly(&tracker, project_scope.as_deref())?; // changed: pass project scope
+        print_monthly(&tracker, project_scope.as_deref(), session_scope)?; // changed: project + session scope
+    }
+
+    // Grouped by-session view (scoped to project when --project is set)
+    if all || session {
+        print_by_session(&tracker, project_scope.as_deref())?; // added: session grouping
     }
 
     Ok(())
@@ -482,24 +498,96 @@ fn print_ascii_graph(data: &[(String, usize)]) {
     }
 }
 
-fn print_daily_full(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
-    // changed: add project scope
-    let days = tracker.get_all_days_filtered(project_scope)?; // changed: use filtered variant
+fn print_daily_full(
+    tracker: &Tracker,
+    project_scope: Option<&str>,
+    session_scope: Option<&str>, // added
+) -> Result<()> {
+    let days = tracker.get_all_days_filtered(project_scope, session_scope)?; // changed: project + session scope
     print_period_table(&days);
     Ok(())
 }
 
-fn print_weekly(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
-    // changed: add project scope
-    let weeks = tracker.get_by_week_filtered(project_scope)?; // changed: use filtered variant
+fn print_weekly(
+    tracker: &Tracker,
+    project_scope: Option<&str>,
+    session_scope: Option<&str>, // added
+) -> Result<()> {
+    let weeks = tracker.get_by_week_filtered(project_scope, session_scope)?; // changed: project + session scope
     print_period_table(&weeks);
     Ok(())
 }
 
-fn print_monthly(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
-    // changed: add project scope
-    let months = tracker.get_by_month_filtered(project_scope)?; // changed: use filtered variant
+fn print_monthly(
+    tracker: &Tracker,
+    project_scope: Option<&str>,
+    session_scope: Option<&str>, // added
+) -> Result<()> {
+    let months = tracker.get_by_month_filtered(project_scope, session_scope)?; // changed: project + session scope
     print_period_table(&months);
+    Ok(())
+}
+
+/// Print the "By Session" aggregate table. // added
+fn print_by_session(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
+    let sessions = tracker.get_by_session_filtered(project_scope)?;
+
+    println!("{}", styled("By Session", true));
+    if sessions.is_empty() {
+        println!("{}", "─".repeat(60));
+        println!("No session-attributed commands yet.");
+        println!("Pass --session-id <id> (or use the Claude Code hook) to attribute commands.");
+        println!();
+        return Ok(());
+    }
+
+    let sid_width = 24usize;
+    let count_width = sessions
+        .iter()
+        .map(|s| s.commands.to_string().len())
+        .max()
+        .unwrap_or(5)
+        .max(5);
+    let saved_width = sessions
+        .iter()
+        .map(|s| format_tokens(s.saved_tokens).len())
+        .max()
+        .unwrap_or(5)
+        .max(5);
+
+    let table_width = 3 + 2 + sid_width + 2 + count_width + 2 + saved_width + 2 + 6;
+    println!("{}", "─".repeat(table_width));
+    println!(
+        "{:>3}  {:<sid_width$}  {:>count_width$}  {:>saved_width$}  {:>6}",
+        "#",
+        "Session",
+        "Count",
+        "Saved",
+        "Avg%",
+        sid_width = sid_width,
+        count_width = count_width,
+        saved_width = saved_width
+    );
+    println!("{}", "─".repeat(table_width));
+
+    for (idx, s) in sessions.iter().enumerate() {
+        let row_idx = format!("{:>2}.", idx + 1);
+        let sid_cell = style_command_cell(&truncate_for_column(&s.session_id, sid_width));
+        let count_cell = format!("{:>count_width$}", s.commands, count_width = count_width);
+        let saved_cell = format!(
+            "{:>saved_width$}",
+            format_tokens(s.saved_tokens),
+            saved_width = saved_width
+        );
+        let pct_plain = format!("{:>6}", format!("{:.1}%", s.savings_pct));
+        let pct_cell = colorize_pct_cell(s.savings_pct, &pct_plain);
+        println!(
+            "{}  {}  {}  {}  {}",
+            row_idx, sid_cell, count_cell, saved_cell, pct_cell
+        );
+    }
+    println!("{}", "─".repeat(table_width));
+    println!();
     Ok(())
 }
 
@@ -512,6 +600,8 @@ struct ExportData {
     weekly: Option<Vec<WeekStats>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     monthly: Option<Vec<MonthStats>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sessions: Option<Vec<SessionStats>>, // added: session grouping
 }
 
 #[derive(Serialize)]
@@ -525,16 +615,19 @@ struct ExportSummary {
     avg_time_ms: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn export_json(
     tracker: &Tracker,
     daily: bool,
     weekly: bool,
     monthly: bool,
     all: bool,
+    session: bool,               // added: session view flag
     project_scope: Option<&str>, // added: project scope
+    session_scope: Option<&str>, // added: session scope
 ) -> Result<()> {
     let summary = tracker
-        .get_summary_filtered(project_scope) // changed: use filtered variant
+        .get_summary_filtered(project_scope, session_scope) // changed: project + session scope
         .context("Failed to load token savings summary from database")?;
 
     let export = ExportData {
@@ -548,17 +641,22 @@ fn export_json(
             avg_time_ms: summary.avg_time_ms,
         },
         daily: if all || daily {
-            Some(tracker.get_all_days_filtered(project_scope)?) // changed: use filtered
+            Some(tracker.get_all_days_filtered(project_scope, session_scope)?) // changed: project + session scope
         } else {
             None
         },
         weekly: if all || weekly {
-            Some(tracker.get_by_week_filtered(project_scope)?) // changed: use filtered
+            Some(tracker.get_by_week_filtered(project_scope, session_scope)?) // changed: project + session scope
         } else {
             None
         },
         monthly: if all || monthly {
-            Some(tracker.get_by_month_filtered(project_scope)?) // changed: use filtered
+            Some(tracker.get_by_month_filtered(project_scope, session_scope)?) // changed: project + session scope
+        } else {
+            None
+        },
+        sessions: if all || session {
+            Some(tracker.get_by_session_filtered(project_scope)?) // added: session grouping
         } else {
             None
         },
@@ -570,16 +668,19 @@ fn export_json(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn export_csv(
     tracker: &Tracker,
     daily: bool,
     weekly: bool,
     monthly: bool,
     all: bool,
+    session: bool,               // added: session view flag
     project_scope: Option<&str>, // added: project scope
+    session_scope: Option<&str>, // added: session scope
 ) -> Result<()> {
     if all || daily {
-        let days = tracker.get_all_days_filtered(project_scope)?; // changed: use filtered
+        let days = tracker.get_all_days_filtered(project_scope, session_scope)?; // changed: project + session scope
         println!("# Daily Data");
         println!("date,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms");
         for day in days {
@@ -599,7 +700,7 @@ fn export_csv(
     }
 
     if all || weekly {
-        let weeks = tracker.get_by_week_filtered(project_scope)?; // changed: use filtered
+        let weeks = tracker.get_by_week_filtered(project_scope, session_scope)?; // changed: project + session scope
         println!("# Weekly Data");
         println!(
             "week_start,week_end,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms"
@@ -622,7 +723,7 @@ fn export_csv(
     }
 
     if all || monthly {
-        let months = tracker.get_by_month_filtered(project_scope)?; // changed: use filtered
+        let months = tracker.get_by_month_filtered(project_scope, session_scope)?; // changed: project + session scope
         println!("# Monthly Data");
         println!("month,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms");
         for month in months {
@@ -636,6 +737,26 @@ fn export_csv(
                 month.savings_pct,
                 month.total_time_ms,
                 month.avg_time_ms
+            );
+        }
+        println!();
+    }
+
+    if all || session {
+        let sessions = tracker.get_by_session_filtered(project_scope)?; // added: session grouping
+        println!("# Session Data");
+        println!("session_id,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms");
+        for s in sessions {
+            println!(
+                "{},{},{},{},{},{:.2},{},{}",
+                s.session_id,
+                s.commands,
+                s.input_tokens,
+                s.output_tokens,
+                s.saved_tokens,
+                s.savings_pct,
+                s.total_time_ms,
+                s.avg_time_ms
             );
         }
     }

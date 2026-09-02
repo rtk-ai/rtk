@@ -61,6 +61,21 @@ fn project_filter_params(project_path: Option<&str>) -> (Option<String>, Option<
     }
 }
 
+/// Get the session id for the current process from the `RTK_SESSION_ID` env var.
+///
+/// Set ambiently by the global `--session-id` flag in `run_cli` (or the Claude Code
+/// hook injecting it). Empty string when unset — mirrors `current_project_path_string`.
+fn current_session_id() -> String {
+    std::env::var("RTK_SESSION_ID").unwrap_or_default()
+}
+
+/// Build the SQL filter param for session-scoped queries.
+/// Returns the exact-match id (or `None` for no session scoping).
+/// Used with a `(?N IS NULL OR session_id = ?N)` WHERE clause.
+fn session_filter_param(session_id: Option<&str>) -> Option<String> {
+    session_id.map(|s| s.to_string())
+}
+
 use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB, RTK_DATA_DIR};
 
 /// Main tracking interface for recording and querying command history.
@@ -220,6 +235,30 @@ pub struct MonthStats {
     pub avg_time_ms: u64,
 }
 
+/// Per-session statistics for token savings and execution metrics.
+///
+/// Serializable to JSON for export via `rtk gain --session --format json`.
+/// One row per distinct `session_id` (blank ids are excluded).
+#[derive(Debug, Serialize)]
+pub struct SessionStats {
+    /// Session identifier (e.g. Claude Code session id)
+    pub session_id: String,
+    /// Number of commands executed in this session
+    pub commands: usize,
+    /// Total input tokens for this session
+    pub input_tokens: usize,
+    /// Total output tokens for this session
+    pub output_tokens: usize,
+    /// Total tokens saved this session
+    pub saved_tokens: usize,
+    /// Savings percentage for this session
+    pub savings_pct: f64,
+    /// Total execution time for this session (milliseconds)
+    pub total_time_ms: u64,
+    /// Average execution time per command (milliseconds)
+    pub avg_time_ms: u64,
+}
+
 /// Type alias for command statistics tuple: (command, count, saved_tokens, avg_savings_pct, avg_time_ms)
 type CommandStats = (String, usize, usize, f64, u64);
 
@@ -320,6 +359,16 @@ impl Tracker {
             "CREATE INDEX IF NOT EXISTS idx_project_path_timestamp ON commands(project_path, timestamp)",
             [],
         );
+        // Migration: add session_id column with DEFAULT '' for new rows // added: session tracking
+        let _ = conn.execute(
+            "ALTER TABLE commands ADD COLUMN session_id TEXT DEFAULT ''",
+            [],
+        );
+        // Index for fast session-scoped gain queries // added
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_timestamp ON commands(session_id, timestamp)",
+            [],
+        );
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS parse_failures (
@@ -363,7 +412,8 @@ impl Tracker {
                 saved_tokens INTEGER NOT NULL,
                 savings_pct REAL NOT NULL,
                 exec_time_ms INTEGER DEFAULT 0,
-                project_path TEXT DEFAULT ''
+                project_path TEXT DEFAULT '',
+                session_id TEXT DEFAULT ''
             )",
             [],
         )?;
@@ -373,6 +423,10 @@ impl Tracker {
         )?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_project_path_timestamp ON commands(project_path, timestamp)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_timestamp ON commands(session_id, timestamp)",
             [],
         )?;
         self.conn.execute(
@@ -430,15 +484,17 @@ impl Tracker {
         };
 
         let project_path = current_project_path_string(); // added: record cwd
+        let session_id = current_session_id(); // added: record session
 
         self.conn.execute(
-            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", // added: project_path
+            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, session_id, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)", // added: session_id
             params![
                 Utc::now().to_rfc3339(),
                 original_cmd,
                 rtk_cmd,
                 project_path, // added
+                session_id,   // added
                 input_tokens as i64,
                 output_tokens as i64,
                 saved as i64,
@@ -577,15 +633,21 @@ impl Tracker {
     /// ```
     #[allow(dead_code)]
     pub fn get_summary(&self) -> Result<GainSummary> {
-        self.get_summary_filtered(None) // delegate to filtered variant
+        self.get_summary_filtered(None, None) // delegate to filtered variant
     }
 
-    /// Get summary statistics filtered by project path. // added
+    /// Get summary statistics filtered by project path and/or session id. // added
     ///
     /// When `project_path` is `Some`, matches the exact working directory
     /// or any subdirectory (prefix match with path separator).
-    pub fn get_summary_filtered(&self, project_path: Option<&str>) -> Result<GainSummary> {
+    /// When `session_id` is `Some`, matches only that session's commands.
+    pub fn get_summary_filtered(
+        &self,
+        project_path: Option<&str>,
+        session_id: Option<&str>, // added: session scope
+    ) -> Result<GainSummary> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
+        let session = session_filter_param(session_id); // added
         let mut total_commands = 0usize;
         let mut total_input = 0usize;
         let mut total_output = 0usize;
@@ -595,10 +657,11 @@ impl Tracker {
         let mut stmt = self.conn.prepare(
             "SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms
              FROM commands
-             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)", // added: project filter
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND (?3 IS NULL OR session_id = ?3)", // added: project + session filter
         )?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+        let rows = stmt.query_map(params![project_exact, project_glob, session], |row| {
             // added: params
             Ok((
                 row.get::<_, i64>(0)? as usize,
@@ -629,8 +692,8 @@ impl Tracker {
             0
         };
 
-        let by_command = self.get_by_command(project_path)?; // added: pass project filter
-        let by_day = self.get_by_day(project_path)?; // added: pass project filter
+        let by_command = self.get_by_command(project_path, session_id)?; // added: pass project + session filter
+        let by_day = self.get_by_day(project_path, session_id)?; // added: pass project + session filter
 
         Ok(GainSummary {
             total_commands,
@@ -648,18 +711,21 @@ impl Tracker {
     fn get_by_command(
         &self,
         project_path: Option<&str>, // added
+        session_id: Option<&str>,   // added: session scope
     ) -> Result<Vec<CommandStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
+        let session = session_filter_param(session_id); // added
         let mut stmt = self.conn.prepare(
             "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND (?3 IS NULL OR session_id = ?3)
              GROUP BY rtk_cmd
              ORDER BY SUM(saved_tokens) DESC
-             LIMIT 10", // added: project filter in WHERE
+             LIMIT 10", // added: project + session filter in WHERE
         )?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+        let rows = stmt.query_map(params![project_exact, project_glob, session], |row| {
             // added: params
             Ok((
                 row.get::<_, String>(0)?,
@@ -676,18 +742,21 @@ impl Tracker {
     fn get_by_day(
         &self,
         project_path: Option<&str>, // added
+        session_id: Option<&str>,   // added: session scope
     ) -> Result<Vec<(String, usize)>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
+        let session = session_filter_param(session_id); // added
         let mut stmt = self.conn.prepare(
             "SELECT DATE(timestamp), SUM(saved_tokens)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND (?3 IS NULL OR session_id = ?3)
              GROUP BY DATE(timestamp)
              ORDER BY DATE(timestamp) DESC
-             LIMIT 30", // added: project filter in WHERE
+             LIMIT 30", // added: project + session filter in WHERE
         )?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+        let rows = stmt.query_map(params![project_exact, project_glob, session], |row| {
             // added: params
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
         })?;
@@ -716,12 +785,17 @@ impl Tracker {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn get_all_days(&self) -> Result<Vec<DayStats>> {
-        self.get_all_days_filtered(None) // delegate to filtered variant
+        self.get_all_days_filtered(None, None) // delegate to filtered variant
     }
 
-    /// Get daily statistics filtered by project path. // added
-    pub fn get_all_days_filtered(&self, project_path: Option<&str>) -> Result<Vec<DayStats>> {
+    /// Get daily statistics filtered by project path and/or session id. // added
+    pub fn get_all_days_filtered(
+        &self,
+        project_path: Option<&str>,
+        session_id: Option<&str>, // added: session scope
+    ) -> Result<Vec<DayStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
+        let session = session_filter_param(session_id); // added
         let mut stmt = self.conn.prepare(
             "SELECT
                 DATE(timestamp) as date,
@@ -732,11 +806,12 @@ impl Tracker {
                 SUM(exec_time_ms) as total_time
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND (?3 IS NULL OR session_id = ?3)
              GROUP BY DATE(timestamp)
-             ORDER BY DATE(timestamp) DESC", // added: project filter
+             ORDER BY DATE(timestamp) DESC", // added: project + session filter
         )?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+        let rows = stmt.query_map(params![project_exact, project_glob, session], |row| {
             // added: params
             let input = row.get::<_, i64>(2)? as usize;
             let saved = row.get::<_, i64>(4)? as usize;
@@ -789,12 +864,17 @@ impl Tracker {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn get_by_week(&self) -> Result<Vec<WeekStats>> {
-        self.get_by_week_filtered(None) // delegate to filtered variant
+        self.get_by_week_filtered(None, None) // delegate to filtered variant
     }
 
-    /// Get weekly statistics filtered by project path. // added
-    pub fn get_by_week_filtered(&self, project_path: Option<&str>) -> Result<Vec<WeekStats>> {
+    /// Get weekly statistics filtered by project path and/or session id. // added
+    pub fn get_by_week_filtered(
+        &self,
+        project_path: Option<&str>,
+        session_id: Option<&str>, // added: session scope
+    ) -> Result<Vec<WeekStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
+        let session = session_filter_param(session_id); // added
         let mut stmt = self.conn.prepare(
             "SELECT
                 DATE(timestamp, 'weekday 0', '-6 days') as week_start,
@@ -806,11 +886,12 @@ impl Tracker {
                 SUM(exec_time_ms) as total_time
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND (?3 IS NULL OR session_id = ?3)
              GROUP BY week_start
-             ORDER BY week_start DESC", // added: project filter
+             ORDER BY week_start DESC", // added: project + session filter
         )?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+        let rows = stmt.query_map(params![project_exact, project_glob, session], |row| {
             // added: params
             let input = row.get::<_, i64>(3)? as usize;
             let saved = row.get::<_, i64>(5)? as usize;
@@ -864,12 +945,17 @@ impl Tracker {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn get_by_month(&self) -> Result<Vec<MonthStats>> {
-        self.get_by_month_filtered(None) // delegate to filtered variant
+        self.get_by_month_filtered(None, None) // delegate to filtered variant
     }
 
-    /// Get monthly statistics filtered by project path. // added
-    pub fn get_by_month_filtered(&self, project_path: Option<&str>) -> Result<Vec<MonthStats>> {
+    /// Get monthly statistics filtered by project path and/or session id. // added
+    pub fn get_by_month_filtered(
+        &self,
+        project_path: Option<&str>,
+        session_id: Option<&str>, // added: session scope
+    ) -> Result<Vec<MonthStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
+        let session = session_filter_param(session_id); // added
         let mut stmt = self.conn.prepare(
             "SELECT
                 strftime('%Y-%m', timestamp) as month,
@@ -880,11 +966,12 @@ impl Tracker {
                 SUM(exec_time_ms) as total_time
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND (?3 IS NULL OR session_id = ?3)
              GROUP BY month
-             ORDER BY month DESC", // added: project filter
+             ORDER BY month DESC", // added: project + session filter
         )?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+        let rows = stmt.query_map(params![project_exact, project_glob, session], |row| {
             // added: params
             let input = row.get::<_, i64>(2)? as usize;
             let saved = row.get::<_, i64>(4)? as usize;
@@ -918,6 +1005,59 @@ impl Tracker {
         Ok(result)
     }
 
+    /// Get statistics grouped by session id. // added: session grouping
+    ///
+    /// Returns one [`SessionStats`] per distinct session, ordered by tokens saved
+    /// (descending). Rows with a blank `session_id` (commands run without a session)
+    /// are excluded. Optionally scoped to a project path.
+    pub fn get_by_session_filtered(&self, project_path: Option<&str>) -> Result<Vec<SessionStats>> {
+        let (project_exact, project_glob) = project_filter_params(project_path);
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                session_id,
+                COUNT(*) as commands,
+                SUM(input_tokens) as input,
+                SUM(output_tokens) as output,
+                SUM(saved_tokens) as saved,
+                SUM(exec_time_ms) as total_time
+             FROM commands
+             WHERE session_id != ''
+               AND (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+             GROUP BY session_id
+             ORDER BY SUM(saved_tokens) DESC",
+        )?;
+
+        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+            let input = row.get::<_, i64>(2)? as usize;
+            let saved = row.get::<_, i64>(4)? as usize;
+            let commands = row.get::<_, i64>(1)? as usize;
+            let total_time = row.get::<_, i64>(5)? as u64;
+            let savings_pct = if input > 0 {
+                (saved as f64 / input as f64) * 100.0
+            } else {
+                0.0
+            };
+            let avg_time_ms = if commands > 0 {
+                total_time / commands as u64
+            } else {
+                0
+            };
+
+            Ok(SessionStats {
+                session_id: row.get(0)?,
+                commands,
+                input_tokens: input,
+                output_tokens: row.get::<_, i64>(3)? as usize,
+                saved_tokens: saved,
+                savings_pct,
+                total_time_ms: total_time,
+                avg_time_ms,
+            })
+        })?;
+
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Get recent command history.
     ///
     /// Returns up to `limit` most recent command records, ordered by timestamp (newest first).
@@ -941,26 +1081,29 @@ impl Tracker {
     /// ```
     #[allow(dead_code)]
     pub fn get_recent(&self, limit: usize) -> Result<Vec<CommandRecord>> {
-        self.get_recent_filtered(limit, None) // delegate to filtered variant
+        self.get_recent_filtered(limit, None, None) // delegate to filtered variant
     }
 
-    /// Get recent command history filtered by project path. // added
+    /// Get recent command history filtered by project path and/or session id. // added
     pub fn get_recent_filtered(
         &self,
         limit: usize,
         project_path: Option<&str>,
+        session_id: Option<&str>, // added: session scope
     ) -> Result<Vec<CommandRecord>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
+        let session = session_filter_param(session_id); // added
         let mut stmt = self.conn.prepare(
             "SELECT timestamp, rtk_cmd, saved_tokens, savings_pct
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND (?3 IS NULL OR session_id = ?3)
              ORDER BY timestamp DESC
-             LIMIT ?3", // added: project filter
+             LIMIT ?4", // added: project + session filter
         )?;
 
         let rows = stmt.query_map(
-            params![project_exact, project_glob, limit as i64], // added: project params
+            params![project_exact, project_glob, session, limit as i64], // added: session param
             |row| {
                 Ok(CommandRecord {
                     timestamp: DateTime::parse_from_rfc3339(&row.get::<_, String>(0)?)
@@ -1459,6 +1602,11 @@ pub fn args_display(args: &[OsString]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes tests that mutate process-global env vars (RTK_DB_PATH,
+    /// RTK_SESSION_ID) so parallel runs don't observe each other's state.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
@@ -1587,8 +1735,6 @@ mod tests {
     #[test]
     fn test_db_path_env_and_default() {
         use std::env;
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap();
 
         let custom_path = env::temp_dir().join("rtk_test_custom.db");
@@ -1757,5 +1903,140 @@ mod tests {
             let mode = std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "expected 0600 on {}", p.display());
         }
+    }
+
+    // Insert a row directly with an explicit session_id, bypassing the ambient
+    // RTK_SESSION_ID env var so tests don't race on process-global state.
+    #[cfg(test)]
+    fn record_with_session(tracker: &Tracker, rtk_cmd: &str, input: usize, session_id: &str) {
+        let saved = input.saturating_sub(input / 5); // arbitrary 80% savings
+        let pct = if input > 0 {
+            (saved as f64 / input as f64) * 100.0
+        } else {
+            0.0
+        };
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, session_id, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+                 VALUES (?1, ?2, ?3, '', ?4, ?5, ?6, ?7, ?8, 0)",
+                params![
+                    Utc::now().to_rfc3339(),
+                    "orig",
+                    rtk_cmd,
+                    session_id,
+                    input as i64,
+                    (input / 5) as i64,
+                    saved as i64,
+                    pct
+                ],
+            )
+            .expect("insert with session");
+    }
+
+    #[test]
+    fn test_get_by_session_groups_and_excludes_blank() {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+        record_with_session(&tracker, "rtk git status", 100, "sess-a");
+        record_with_session(&tracker, "rtk cargo build", 200, "sess-a");
+        record_with_session(&tracker, "rtk go test", 500, "sess-b");
+        record_with_session(&tracker, "rtk ls", 300, ""); // blank → excluded
+
+        let sessions = tracker
+            .get_by_session_filtered(None)
+            .expect("by session query");
+
+        assert_eq!(sessions.len(), 2, "blank session must be excluded");
+        // Ordered by saved_tokens DESC: sess-a (100+200=300 in → 240 saved) vs
+        // sess-b (500 in → 400 saved) → sess-b first.
+        assert_eq!(sessions[0].session_id, "sess-b");
+        assert_eq!(sessions[0].commands, 1);
+        assert_eq!(sessions[1].session_id, "sess-a");
+        assert_eq!(sessions[1].commands, 2);
+        assert_eq!(sessions[1].input_tokens, 300);
+    }
+
+    #[test]
+    fn test_summary_scoped_by_session() {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+        record_with_session(&tracker, "rtk a", 100, "sess-a");
+        record_with_session(&tracker, "rtk b", 400, "sess-b");
+
+        let only_a = tracker
+            .get_summary_filtered(None, Some("sess-a"))
+            .expect("summary scoped to sess-a");
+        assert_eq!(only_a.total_commands, 1);
+        assert_eq!(only_a.total_input, 100);
+
+        let all = tracker
+            .get_summary_filtered(None, None)
+            .expect("unscoped summary");
+        assert_eq!(all.total_commands, 2);
+        assert_eq!(all.total_input, 500);
+    }
+
+    #[test]
+    fn test_record_reads_ambient_session_env() {
+        // Exercises the ambient current_session_id() path end-to-end. Uses a
+        // unique id so a concurrent test picking up the env var can't collide.
+        use std::env;
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+        let sid = format!("env-sess-{}", std::process::id());
+        env::set_var("RTK_SESSION_ID", &sid);
+        tracker
+            .record("git status", "rtk git status", 100, 20, 5)
+            .expect("record");
+        env::remove_var("RTK_SESSION_ID");
+
+        let sessions = tracker
+            .get_by_session_filtered(None)
+            .expect("by session query");
+        assert!(
+            sessions.iter().any(|s| s.session_id == sid),
+            "record() should attribute to the ambient RTK_SESSION_ID"
+        );
+    }
+
+    #[test]
+    fn test_session_id_migration_idempotent() {
+        // Simulate an old DB (pre-session_id schema), then run the ADD COLUMN
+        // migration twice: the first adds it, the second is expected to error
+        // ("duplicate column") and must be swallowed, matching Tracker::new's
+        // `let _ =` pattern. Uses a bare in-memory connection so it never
+        // touches the process-global RTK_DB_PATH.
+        let conn = Connection::open_in_memory().expect("in-memory conn");
+        conn.execute(
+            "CREATE TABLE commands (
+                id INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                rtk_cmd TEXT NOT NULL
+            )",
+            [],
+        )
+        .expect("create legacy table");
+
+        let add = || {
+            conn.execute(
+                "ALTER TABLE commands ADD COLUMN session_id TEXT DEFAULT ''",
+                [],
+            )
+        };
+        assert!(add().is_ok(), "first ADD COLUMN should succeed");
+        assert!(
+            add().is_err(),
+            "second ADD COLUMN should error (duplicate) and be swallowed by `let _ =`"
+        );
+
+        // Column exists and defaults to '' for legacy rows.
+        conn.execute(
+            "INSERT INTO commands (timestamp, rtk_cmd) VALUES ('t', 'rtk ls')",
+            [],
+        )
+        .expect("insert legacy row");
+        let sid: String = conn
+            .query_row("SELECT session_id FROM commands LIMIT 1", [], |r| r.get(0))
+            .expect("read session_id");
+        assert_eq!(sid, "");
     }
 }

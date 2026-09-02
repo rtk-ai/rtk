@@ -6,13 +6,48 @@
 use super::constants::PRE_TOOL_USE_KEY;
 use super::permissions::{self, PermissionVerdict};
 use anyhow::{Context, Result};
+use regex::Regex;
 use serde_json::{json, Value};
 use std::io::{self, Read, Write};
+use std::sync::LazyLock;
 
 use crate::core::utils::strip_leading_bom;
 use crate::discover::registry::{has_heredoc, rewrite_command};
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
+
+/// Matches an `rtk` invocation at a command position (start of string or after a
+/// shell separator) so `--session-id` can be injected into every segment of a
+/// compound rewrite (e.g. `rtk git ... && rtk cargo ...`).
+static RTK_TOKEN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?P<pre>(?:^|[\n;&|]\s*))rtk(?P<post>\s)").unwrap());
+
+/// Reject session ids that contain anything but safe id characters, since the id
+/// is embedded into a command string executed by a shell. UUID/slug-style ids
+/// (alphanumeric, `-`, `_`) pass; anything else is refused to avoid injection.
+fn is_safe_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Inject `--session-id <id>` into each `rtk` invocation of a rewritten command
+/// so the executed command attributes its savings to the session. Returns the
+/// command unchanged if the id is missing/unsafe or no `rtk` token is present.
+fn inject_session_id(rewritten: &str, session_id: Option<&str>) -> String {
+    let id = match session_id {
+        Some(id) if is_safe_session_id(id) => id,
+        _ => return rewritten.to_string(),
+    };
+    RTK_TOKEN_RE
+        .replace_all(
+            rewritten,
+            format!("${{pre}}rtk --session-id {id}${{post}}").as_str(),
+        )
+        .into_owned()
+}
 
 fn read_stdin_limited() -> Result<String> {
     let mut input = String::new();
@@ -622,6 +657,11 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         HookDecision::AskRewrite(r) => (r, false),
     };
 
+    // Attribute savings to the Claude Code session by threading its id into the
+    // executed command (the hook can't set env vars for the child process).
+    let session_id = v.get("session_id").and_then(|s| s.as_str());
+    let rewritten = inject_session_id(&rewritten, session_id);
+
     let updated_input = {
         let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
         if let Some(obj) = ti.as_object_mut() {
@@ -845,6 +885,10 @@ fn droid_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) ->
     };
 
     audit_log("rewrite", cmd, &rewritten);
+
+    // Attribute savings to the session (Droid payloads carry a top-level session_id).
+    let session_id = v.get("session_id").and_then(|s| s.as_str());
+    let rewritten = inject_session_id(&rewritten, session_id);
 
     let updated_input = {
         let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
@@ -2153,6 +2197,8 @@ mod tests {
     #[test]
     fn test_droid_allow_decision_emits_no_permission_decision() {
         // Defensive: even an AllowRewrite decision carries the rewrite only.
+        // droid_input carries session_id "abc123", so the executed command is
+        // attributed to that session via --session-id injection.
         let v: Value = serde_json::from_str(&droid_input("Execute", "git status")).unwrap();
         let out = droid_response_from_decision(
             &v,
@@ -2168,7 +2214,7 @@ mod tests {
         assert_eq!(
             out.pointer("/hookSpecificOutput/updatedInput/command")
                 .and_then(|c| c.as_str()),
-            Some("rtk git status")
+            Some("rtk --session-id abc123 git status")
         );
     }
 
@@ -2282,5 +2328,80 @@ mod tests {
     fn test_vibe_substitution_defers() {
         let input = vibe_input("bash", "echo $(rm -rf /)");
         assert!(run_vibe_inner(&input).is_none());
+    }
+
+    // ── Session id injection ───────────────────────────────────
+
+    #[test]
+    fn test_inject_session_id_basic() {
+        let out = inject_session_id("rtk git status", Some("sess-1"));
+        assert_eq!(out, "rtk --session-id sess-1 git status");
+    }
+
+    #[test]
+    fn test_inject_session_id_compound_command() {
+        let out = inject_session_id("rtk git status && rtk cargo build", Some("s_2"));
+        assert_eq!(
+            out,
+            "rtk --session-id s_2 git status && rtk --session-id s_2 cargo build"
+        );
+    }
+
+    #[test]
+    fn test_inject_session_id_none_or_unsafe_is_noop() {
+        assert_eq!(inject_session_id("rtk git status", None), "rtk git status");
+        // Shell metacharacters must never be embedded into the command string.
+        assert_eq!(
+            inject_session_id("rtk git status", Some("a; rm -rf /")),
+            "rtk git status"
+        );
+        assert_eq!(
+            inject_session_id("rtk git status", Some("$(evil)")),
+            "rtk git status"
+        );
+    }
+
+    #[test]
+    fn test_inject_session_id_no_rtk_token_unchanged() {
+        assert_eq!(inject_session_id("htop", Some("sess-1")), "htop");
+    }
+
+    #[test]
+    fn test_is_safe_session_id() {
+        assert!(is_safe_session_id("abc123"));
+        assert!(is_safe_session_id("a-b_c-123"));
+        assert!(!is_safe_session_id(""));
+        assert!(!is_safe_session_id("has space"));
+        assert!(!is_safe_session_id("semi;colon"));
+        assert!(!is_safe_session_id(&"x".repeat(129)));
+    }
+
+    #[test]
+    fn test_claude_payload_injects_session_id() {
+        let input = json!({
+            "session_id": "abc123",
+            "tool_name": "Bash",
+            "tool_input": { "command": "git status" }
+        })
+        .to_string();
+        let result = run_claude_inner(&input).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk --session-id abc123 git status");
+    }
+
+    #[test]
+    fn test_claude_payload_without_session_id_unchanged() {
+        // Existing payloads with no session_id keep the plain rtk rewrite.
+        let result = run_claude_inner(&claude_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk git status");
     }
 }
