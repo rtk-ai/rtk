@@ -166,6 +166,39 @@ struct FilterResult<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static CURL_TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_tee_hint_enabled<R>(test: impl FnOnce() -> R) -> R {
+        let _guard = CURL_TEST_ENV_LOCK.lock().unwrap();
+
+        let old_tee = std::env::var_os("RTK_TEE");
+        let old_tee_dir = std::env::var_os("RTK_TEE_DIR");
+        let old_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
+        let temp_root = tempfile::tempdir().expect("temp dir for curl tests");
+
+        std::env::set_var("RTK_TEE", "1");
+        std::env::set_var("RTK_TEE_DIR", temp_root.path().join("tee"));
+        std::env::set_var("XDG_CONFIG_HOME", temp_root.path().join("config"));
+
+        let result = test();
+
+        match old_tee {
+            Some(v) => std::env::set_var("RTK_TEE", v),
+            None => std::env::remove_var("RTK_TEE"),
+        }
+        match old_tee_dir {
+            Some(v) => std::env::set_var("RTK_TEE_DIR", v),
+            None => std::env::remove_var("RTK_TEE_DIR"),
+        }
+        match old_xdg_config {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+
+        result
+    }
 
     #[test]
     fn test_filter_curl_json_small_no_tee_hint() {
@@ -185,7 +218,7 @@ mod tests {
     #[test]
     fn test_filter_curl_long_output_truncated() {
         let long: String = "x".repeat(1000);
-        let result = filter_curl_output(&long, true);
+        let result = with_tee_hint_enabled(|| filter_curl_output(&long, true));
         assert!(result.content.starts_with('x'));
         assert!(result.content.contains("bytes total"));
         assert!(result.content.contains("1000"));
@@ -196,7 +229,7 @@ mod tests {
     #[test]
     fn test_filter_curl_multibyte_boundary() {
         let content = "a".repeat(499) + "é";
-        let result = filter_curl_output(&content, true);
+        let result = with_tee_hint_enabled(|| filter_curl_output(&content, true));
         assert!(result.content.contains("bytes total"));
         assert!(result.content.len() < 600);
     }
@@ -204,7 +237,7 @@ mod tests {
     #[test]
     fn test_filter_curl_exact_500_bytes() {
         let content = "a".repeat(500);
-        let result = filter_curl_output(&content, true);
+        let result = with_tee_hint_enabled(|| filter_curl_output(&content, true));
         assert!(result.content.contains("bytes total"));
     }
 

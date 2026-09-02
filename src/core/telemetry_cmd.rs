@@ -34,42 +34,95 @@ pub fn telemetry_disabled_by_env() -> bool {
 
 fn run_status() -> Result<()> {
     let config = crate::core::config::Config::load().unwrap_or_default();
+    let lang = crate::core::i18n::ui_language(&config);
 
     let consent_str = match config.telemetry.consent_given {
-        Some(true) => "yes",
-        Some(false) => "no",
-        None => "never asked",
+        Some(true) => crate::core::i18n::bool_text(true, lang),
+        Some(false) => crate::core::i18n::bool_text(false, lang),
+        None => crate::core::i18n::t(crate::core::i18n::Message::ConsentUnknown, lang),
     };
 
     let enabled_str = if config.telemetry.enabled {
-        "yes"
+        crate::core::i18n::bool_text(true, lang)
     } else {
-        "no"
+        crate::core::i18n::bool_text(false, lang)
     };
 
     let env_override = telemetry_disabled_by_env();
 
-    println!("Telemetry status:");
-    println!("  consent:       {}", consent_str);
+    println!(
+        "{}",
+        crate::core::i18n::t(crate::core::i18n::Message::TelemetryStatusHeader, lang)
+    );
+    println!(
+        "{} {}",
+        crate::core::i18n::t(crate::core::i18n::Message::TelemetryStatusConsentLabel, lang),
+        consent_str
+    );
     if let Some(date) = &config.telemetry.consent_date {
-        println!("  consent date:  {}", date);
+        println!(
+            "{} {}",
+            crate::core::i18n::t(
+                crate::core::i18n::Message::TelemetryStatusConsentDateLabel,
+                lang
+            ),
+            date
+        );
     }
-    println!("  enabled:       {}", enabled_str);
+    println!(
+        "{} {}",
+        crate::core::i18n::t(crate::core::i18n::Message::TelemetryStatusEnabledLabel, lang),
+        enabled_str
+    );
     if env_override {
-        println!("  env override:  RTK_TELEMETRY_DISABLED=1 (blocked)");
+        println!(
+            "{} RTK_TELEMETRY_DISABLED=1 {}",
+            crate::core::i18n::t(
+                crate::core::i18n::Message::TelemetryStatusEnvOverrideLabel,
+                lang
+            ),
+            crate::core::i18n::t(crate::core::i18n::Message::TelemetryStatusBlocked, lang)
+        );
     }
 
     let salt_path = super::telemetry::salt_file_path();
     if salt_path.exists() {
         let hash = super::telemetry::generate_device_hash();
-        println!("  device hash:   {}...{}", &hash[..8], &hash[56..]);
+        println!(
+            "{} {}...{}",
+            crate::core::i18n::t(
+                crate::core::i18n::Message::TelemetryStatusDeviceHashLabel,
+                lang
+            ),
+            &hash[..8],
+            &hash[56..]
+        );
     } else {
-        println!("  device hash:   (no salt file)");
+        println!(
+            "{} {}",
+            crate::core::i18n::t(
+                crate::core::i18n::Message::TelemetryStatusDeviceHashLabel,
+                lang
+            ),
+            crate::core::i18n::t(
+                crate::core::i18n::Message::TelemetryStatusMissingSalt,
+                lang
+            )
+        );
     }
 
     println!();
-    println!("Data controller: RTK AI Labs, contact@rtk-ai.app");
-    println!("Details: https://github.com/rtk-ai/rtk/blob/master/docs/TELEMETRY.md");
+    println!(
+        "{}",
+        crate::core::i18n::t(
+            crate::core::i18n::Message::TelemetryStatusDataController,
+            lang
+        )
+    );
+    println!(
+        "{}",
+        crate::core::i18n::t(crate::core::i18n::Message::TelemetryStatusDetails, lang)
+    );
 
     Ok(())
 }
@@ -77,19 +130,52 @@ fn run_status() -> Result<()> {
 fn run_enable() -> Result<()> {
     use std::io::{self, BufRead, IsTerminal};
 
+    let config = crate::core::config::Config::load().unwrap_or_default();
+    let lang = crate::core::i18n::ui_language(&config);
+
     if !io::stdin().is_terminal() {
         anyhow::bail!(
-            "consent requires interactive terminal — cannot enable telemetry in piped mode"
+            crate::core::i18n::t(crate::core::i18n::Message::TelemetryEnableNeedsTerminal, lang)
         );
     }
 
-    eprintln!("RTK collects anonymous usage metrics once per day to improve filters.");
+    eprintln!(
+        "{}",
+        crate::core::i18n::t(crate::core::i18n::Message::TelemetryEnableIntro, lang)
+    );
     eprintln!();
-    eprintln!("  What:    command names (not arguments), token savings, OS, version");
-    eprintln!("  Who:     RTK AI Labs, contact@rtk-ai.app");
-    eprintln!("  Details: https://github.com/rtk-ai/rtk/blob/master/docs/TELEMETRY.md");
+    eprintln!(
+        "{}",
+        crate::core::i18n::t(crate::core::i18n::Message::TelemetryEnableWhat, lang)
+    );
+    eprintln!(
+        "{}",
+        crate::core::i18n::t(crate::core::i18n::Message::TelemetryEnableWhy, lang)
+    );
+    eprintln!(
+        "{}",
+        crate::core::i18n::t(crate::core::i18n::Message::TelemetryEnableWho, lang)
+    );
+    eprintln!(
+        "{}",
+        crate::core::i18n::t(crate::core::i18n::Message::TelemetryEnableRights, lang)
+    );
+    eprintln!(
+        "{}",
+        crate::core::i18n::t(
+            crate::core::i18n::Message::TelemetryEnableRightsErasure,
+            lang
+        )
+    );
+    eprintln!(
+        "{}",
+        crate::core::i18n::t(crate::core::i18n::Message::TelemetryEnableDetails, lang)
+    );
     eprintln!();
-    eprint!("Enable anonymous telemetry? [y/N] ");
+    eprint!(
+        "{}",
+        crate::core::i18n::t(crate::core::i18n::Message::TelemetryEnableQuestion, lang)
+    );
 
     let stdin = io::stdin();
     let mut line = String::new();
@@ -106,9 +192,15 @@ fn run_enable() -> Result<()> {
     crate::hooks::init::save_telemetry_consent(accepted)?;
 
     if accepted {
-        println!("Telemetry enabled. Disable anytime: rtk telemetry disable");
+        println!(
+            "{}",
+            crate::core::i18n::t(crate::core::i18n::Message::TelemetryEnableEnabled, lang)
+        );
     } else {
-        println!("Telemetry not enabled.");
+        println!(
+            "{}",
+            crate::core::i18n::t(crate::core::i18n::Message::TelemetryEnableDisabled, lang)
+        );
     }
 
     Ok(())

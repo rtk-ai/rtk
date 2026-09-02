@@ -473,6 +473,7 @@ fn prompt_telemetry_consent() -> Result<()> {
     use std::io::{self, BufRead, IsTerminal};
 
     let config = crate::core::config::Config::load().unwrap_or_default();
+    let lang = crate::core::i18n::ui_language(&config);
     match config.telemetry.consent_given {
         Some(true) => return Ok(()),
         Some(false) => return Ok(()),
@@ -494,17 +495,47 @@ fn prompt_telemetry_consent() -> Result<()> {
     }
 
     eprintln!();
-    eprintln!("--- Telemetry ---");
-    eprintln!("RTK collects anonymous usage metrics once per day to improve filters.");
+    eprintln!(
+        "{}",
+        crate::core::i18n::t(crate::core::i18n::Message::TelemetryPromptHeader, lang)
+    );
+    eprintln!(
+        "{}",
+        crate::core::i18n::t(crate::core::i18n::Message::TelemetryEnableIntro, lang)
+    );
     eprintln!();
-    eprintln!("  What:    command names (not arguments), token savings, OS, version");
-    eprintln!("  Why:     prioritize filter development for the most-used commands");
-    eprintln!("  Who:     RTK AI Labs, contact@rtk-ai.app");
-    eprintln!("  Rights:  disable anytime with `rtk telemetry disable`,");
-    eprintln!("           request erasure with `rtk telemetry forget`");
-    eprintln!("  Details: https://github.com/rtk-ai/rtk/blob/master/docs/TELEMETRY.md");
+    eprintln!(
+        "{}",
+        crate::core::i18n::t(crate::core::i18n::Message::TelemetryEnableWhat, lang)
+    );
+    eprintln!(
+        "{}",
+        crate::core::i18n::t(crate::core::i18n::Message::TelemetryEnableWhy, lang)
+    );
+    eprintln!(
+        "{}",
+        crate::core::i18n::t(crate::core::i18n::Message::TelemetryEnableWho, lang)
+    );
+    eprintln!(
+        "{}",
+        crate::core::i18n::t(crate::core::i18n::Message::TelemetryEnableRights, lang)
+    );
+    eprintln!(
+        "{}",
+        crate::core::i18n::t(
+            crate::core::i18n::Message::TelemetryEnableRightsErasure,
+            lang
+        )
+    );
+    eprintln!(
+        "{}",
+        crate::core::i18n::t(crate::core::i18n::Message::TelemetryEnableDetails, lang)
+    );
     eprintln!();
-    eprint!("Enable anonymous telemetry? [y/N] ");
+    eprint!(
+        "{}",
+        crate::core::i18n::t(crate::core::i18n::Message::TelemetryEnableQuestion, lang)
+    );
 
     let stdin = io::stdin();
     let mut line = String::new();
@@ -521,9 +552,15 @@ fn prompt_telemetry_consent() -> Result<()> {
     save_telemetry_consent(accepted)?;
 
     if accepted {
-        eprintln!("  Telemetry enabled. Disable anytime: rtk telemetry disable");
+        eprintln!(
+            "{}",
+            crate::core::i18n::t(crate::core::i18n::Message::TelemetryEnableEnabled, lang)
+        );
     } else {
-        eprintln!("  Telemetry disabled.");
+        eprintln!(
+            "{}",
+            crate::core::i18n::t(crate::core::i18n::Message::TelemetryEnableDisabled, lang)
+        );
     }
 
     Ok(())

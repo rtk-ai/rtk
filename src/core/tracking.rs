@@ -1459,6 +1459,27 @@ pub fn args_display(args: &[OsString]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static TRACKING_TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_temporary_tracking_db<R>(test: impl FnOnce() -> R) -> R {
+        let _guard = TRACKING_TEST_ENV_LOCK.lock().unwrap();
+
+        let old_path = std::env::var_os("RTK_DB_PATH");
+        let temp_dir = tempfile::tempdir().expect("temporary tracking db dir");
+        let db_path = temp_dir.path().join("history.db");
+        std::env::set_var("RTK_DB_PATH", &db_path);
+
+        let result = test();
+
+        match old_path {
+            Some(path) => std::env::set_var("RTK_DB_PATH", path),
+            None => std::env::remove_var("RTK_DB_PATH"),
+        }
+
+        result
+    }
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
@@ -1484,7 +1505,7 @@ mod tests {
     // 3. Tracker::record + get_recent — round-trip DB
     #[test]
     fn test_tracker_record_and_recent() {
-        let tracker = Tracker::new().expect("Failed to create tracker");
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
 
         // Use unique test identifier to avoid conflicts with other tests
         let test_cmd = format!("rtk git status test_{}", std::process::id());
@@ -1508,7 +1529,7 @@ mod tests {
     // 4. track_passthrough doesn't dilute stats (input=0, output=0)
     #[test]
     fn test_track_passthrough_no_dilution() {
-        let tracker = Tracker::new().expect("Failed to create tracker");
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
 
         // Use unique test identifiers
         let pid = std::process::id();
@@ -1552,33 +1573,37 @@ mod tests {
     // 5. TimedExecution::track records with exec_time > 0
     #[test]
     fn test_timed_execution_records_time() {
-        let timer = TimedExecution::start();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        timer.track("test cmd", "rtk test", "raw input data", "filtered");
+        with_temporary_tracking_db(|| {
+            let timer = TimedExecution::start();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            timer.track("test cmd", "rtk test", "raw input data", "filtered");
 
-        // Verify via DB that record exists
-        let tracker = Tracker::new().expect("Failed to create tracker");
-        let recent = tracker.get_recent(5).expect("Failed to get recent");
-        assert!(recent.iter().any(|r| r.rtk_cmd == "rtk test"));
+            // Verify via DB that record exists
+            let tracker = Tracker::new().expect("Failed to create tracker");
+            let recent = tracker.get_recent(5).expect("Failed to get recent");
+            assert!(recent.iter().any(|r| r.rtk_cmd == "rtk test"));
+        });
     }
 
     // 6. TimedExecution::track_passthrough records with 0 tokens
     #[test]
     fn test_timed_execution_passthrough() {
-        let timer = TimedExecution::start();
-        timer.track_passthrough("git tag", "rtk git tag (passthrough)");
+        with_temporary_tracking_db(|| {
+            let timer = TimedExecution::start();
+            timer.track_passthrough("git tag", "rtk git tag (passthrough)");
 
-        let tracker = Tracker::new().expect("Failed to create tracker");
-        let recent = tracker.get_recent(5).expect("Failed to get recent");
+            let tracker = Tracker::new().expect("Failed to create tracker");
+            let recent = tracker.get_recent(5).expect("Failed to get recent");
 
-        let pt = recent
-            .iter()
-            .find(|r| r.rtk_cmd.contains("passthrough"))
-            .expect("Passthrough record not found");
+            let pt = recent
+                .iter()
+                .find(|r| r.rtk_cmd.contains("passthrough"))
+                .expect("Passthrough record not found");
 
-        // savings_pct should be 0 for passthrough
-        assert_eq!(pt.savings_pct, 0.0);
-        assert_eq!(pt.saved_tokens, 0);
+            // savings_pct should be 0 for passthrough
+            assert_eq!(pt.savings_pct, 0.0);
+            assert_eq!(pt.saved_tokens, 0);
+        });
     }
 
     // 7. get_db_path respects environment variable RTK_DB_PATH
@@ -1646,7 +1671,7 @@ mod tests {
     // 12. record_parse_failure + get_parse_failure_summary roundtrip
     #[test]
     fn test_parse_failure_roundtrip() {
-        let tracker = Tracker::new().expect("Failed to create tracker");
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
         let test_cmd = format!("git -C /path status test_{}", std::process::id());
 
         tracker
@@ -1664,7 +1689,7 @@ mod tests {
     // 13. recovery_rate calculation
     #[test]
     fn test_parse_failure_recovery_rate() {
-        let tracker = Tracker::new().expect("Failed to create tracker");
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
         let pid = std::process::id();
 
         // 2 successes, 1 failure

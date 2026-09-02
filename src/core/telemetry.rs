@@ -1,7 +1,7 @@
 //! Optional usage ping so we know which commands people run most.
 
 use super::constants::RTK_DATA_DIR;
-use crate::core::config;
+use crate::core::{config, i18n};
 use crate::core::tracking;
 use crate::hooks::constants::CLAUDE_DIR;
 use crate::hooks::init::resolve_claude_dir;
@@ -63,18 +63,19 @@ pub fn maybe_ping() {
     touch_marker(&marker);
 
     // Spawn thread so we never block the CLI
-    std::thread::spawn(|| {
-        let _ = send_ping();
+    std::thread::spawn(move || {
+        let _ = send_ping(cfg);
     });
 }
 
-fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
+fn send_ping(cfg: config::Config) -> Result<(), Box<dyn std::error::Error>> {
     let url = TELEMETRY_URL.ok_or("no telemetry URL")?;
     let device_hash = generate_device_hash();
     let version = env!("CARGO_PKG_VERSION").to_string();
     let os = std::env::consts::OS.to_string();
     let arch = std::env::consts::ARCH.to_string();
     let install_method = detect_install_method();
+    let language_hint = i18n::language_hint(&cfg);
 
     // Get stats from tracking DB (single connection for both basic + enriched)
     let tracker = tracking::Tracker::new().ok();
@@ -128,6 +129,7 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
         "first_seen_days": enriched.first_seen_days,
         "active_days_30d": enriched.active_days_30d,
         "commands_total": enriched.commands_total,
+        "language_hint": language_hint,
         // Ecosystem: where to invest filters
         "ecosystem_mix": enriched.ecosystem_mix,
         // Economics: value delivered

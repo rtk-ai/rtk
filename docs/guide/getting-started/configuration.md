@@ -31,6 +31,7 @@ database_path = "/custom/path/history.db"   # optional override
 colors = true               # colored output
 emoji = true                # use emojis in output
 max_width = 120             # maximum output width
+language = "en"             # interface language: en | id (optional auto-detect fallback)
 
 [filters]
 # These apply to file-reading commands (ls, find, grep, cat/rtk read).
@@ -61,6 +62,7 @@ For full details on what is collected, opt-out options, and GDPR rights, see [Te
 | `RTK_DISABLED=1` | Disable RTK for a single command (`RTK_DISABLED=1 git status`) |
 | `RTK_TEE_DIR` | Override the tee directory |
 | `RTK_TELEMETRY_DISABLED=1` | Disable telemetry |
+| `RTK_DISPLAY_LANGUAGE=id` | Override language used in UI strings and language telemetry hint |
 | `RTK_HOOK_AUDIT=1` | Enable hook audit logging |
 | `SKIP_ENV_VALIDATION=1` | Skip env validation (useful with Next.js) |
 
@@ -139,7 +141,7 @@ RTK_DISABLED=1 git rebase main
 
 RTK sends one anonymous ping per day (23h interval). No personal data, no file paths, no command content.
 
-Data sent: device hash, version, OS, architecture, command count/24h, top commands, savings %.
+Data sent: device hash, version, OS, architecture, language hint, command count/24h, top commands, savings %.
 
 To opt out:
 
