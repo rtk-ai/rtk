@@ -455,6 +455,33 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^dart\s+analyze\b",
+        rtk_cmd: "rtk dart analyze",
+        rewrite_prefixes: &["dart analyze"],
+        category: "Build",
+        savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^dart\s+pub\s+(get|add|upgrade|downgrade|outdated)\b",
+        rtk_cmd: "rtk dart pub",
+        rewrite_prefixes: &["dart pub"],
+        category: "PackageManager",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^dart\s+test\b",
+        rtk_cmd: "rtk dart test",
+        rewrite_prefixes: &["dart test"],
+        category: "Build",
+        savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^(python3?\s+-m\s+)?mypy(\s|$)",
         rtk_cmd: "rtk mypy",
         rewrite_prefixes: &["python3 -m mypy", "python -m mypy", "mypy"],
@@ -725,6 +752,33 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^flutter\s+pub\s+(get|add|upgrade|downgrade|outdated)\b",
+        rtk_cmd: "rtk flutter pub",
+        rewrite_prefixes: &["flutter pub"],
+        category: "PackageManager",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^flutter\s+test\b",
+        rtk_cmd: "rtk flutter test",
+        rewrite_prefixes: &["flutter test"],
+        category: "Build",
+        savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^flutter\s+analyze\b",
+        rtk_cmd: "rtk flutter analyze",
+        rewrite_prefixes: &["flutter analyze"],
+        category: "Build",
+        savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^gcloud\b",
         rtk_cmd: "rtk gcloud",
         rewrite_prefixes: &["gcloud"],
@@ -982,6 +1036,24 @@ pub const RULES: &[RtkRule] = &[
         category: "Infra",
         savings_pct: 65.0,
         ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^dart\s+run\s+build_runner\b",
+        rtk_cmd: "rtk dart build_runner",
+        rewrite_prefixes: &["dart run build_runner"],
+        category: "Build",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^flutter\s+build\b",
+        rtk_cmd: "rtk flutter build",
+        rewrite_prefixes: &["flutter build"],
+        category: "Build",
+        savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
     },
 ];
 

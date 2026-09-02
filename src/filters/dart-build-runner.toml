@@ -1,0 +1,67 @@
+[filters.dart-build-runner]
+description = "Compact dart run build_runner — strip AOT compile progress, per-file intermediate lines; keep builder summaries, warnings, and final result"
+match_command = "^dart\\s+run\\s+build_runner\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*\\d+s compiling builders",
+  "^W These options have been removed",
+  ".*;\\s*\\S+\\.dart$",
+]
+max_lines = 60
+
+[[tests.dart-build-runner]]
+name = "full build with changes — strips progress, keeps builder summaries and final"
+input = """
+  1s compiling builders/aot
+  2s compiling builders/aot
+  3s compiling builders/aot
+W These options have been removed and were ignored: --delete-conflicting-outputs
+  0s freezed on 180 inputs; integration_test/app_test.dart
+  2s freezed on 180 inputs: 15 no-op; spent 2s analyzing; lib/core/error/exceptions.dart
+  5s freezed on 180 inputs: 3 output, 78 no-op; spent 5s analyzing, 1s resolving; lib/features/onboarding/onboarding.dart
+  7s freezed on 180 inputs: 12 output, 168 no-op; spent 5s analyzing, 1s resolving
+  0s json_serializable on 360 inputs; integration_test/app_test.dart
+W json_serializable on lib/features/practice/domain/entities/evaluation.dart:
+  The language version (3.5.0) does not match the required range `^3.8.0`.
+  Edit pubspec.yaml to include an SDK constraint of at least ^3.8.0.
+  2s json_serializable on 360 inputs: 168 skipped, 4 output, 188 no-op; spent 2s analyzing
+  0s source_gen:combining_builder on 360 inputs; integration_test/app_test.dart
+  0s source_gen:combining_builder on 360 inputs: 168 skipped, 4 output, 188 no-op
+  0s injectable_generator:injectable_builder on 720 inputs; integration_test/app_test.dart
+  0s injectable_generator:injectable_builder on 720 inputs: 524 skipped, 26 output, 170 no-op
+  0s injectable_generator:injectable_config_builder on 720 inputs; integration_test/app_test.dart
+  0s injectable_generator:injectable_config_builder on 720 inputs: 524 skipped, 1 output, 195 no-op
+  Built with build_runner/aot in 26s; wrote 47 outputs.
+"""
+expected = """  7s freezed on 180 inputs: 12 output, 168 no-op; spent 5s analyzing, 1s resolving
+W json_serializable on lib/features/practice/domain/entities/evaluation.dart:
+  The language version (3.5.0) does not match the required range `^3.8.0`.
+  Edit pubspec.yaml to include an SDK constraint of at least ^3.8.0.
+  2s json_serializable on 360 inputs: 168 skipped, 4 output, 188 no-op; spent 2s analyzing
+  0s source_gen:combining_builder on 360 inputs: 168 skipped, 4 output, 188 no-op
+  0s injectable_generator:injectable_builder on 720 inputs: 524 skipped, 26 output, 170 no-op
+  0s injectable_generator:injectable_config_builder on 720 inputs: 524 skipped, 1 output, 195 no-op
+  Built with build_runner/aot in 26s; wrote 47 outputs."""
+
+[[tests.dart-build-runner]]
+name = "clean build — all skipped"
+input = """
+  0s freezed on 180 inputs; integration_test/app_test.dart
+  0s freezed on 180 inputs: 180 skipped
+  0s json_serializable on 360 inputs; integration_test/app_test.dart
+  0s json_serializable on 360 inputs: 360 skipped
+  0s source_gen:combining_builder on 360 inputs; integration_test/app_test.dart
+  0s source_gen:combining_builder on 360 inputs: 360 skipped
+  0s injectable_generator:injectable_builder on 720 inputs; integration_test/app_test.dart
+  0s injectable_generator:injectable_builder on 720 inputs: 720 skipped
+  0s injectable_generator:injectable_config_builder on 720 inputs; integration_test/app_test.dart
+  0s injectable_generator:injectable_config_builder on 720 inputs: 720 skipped
+  Built with build_runner/aot in 1s; wrote 0 outputs.
+"""
+expected = """  0s freezed on 180 inputs: 180 skipped
+  0s json_serializable on 360 inputs: 360 skipped
+  0s source_gen:combining_builder on 360 inputs: 360 skipped
+  0s injectable_generator:injectable_builder on 720 inputs: 720 skipped
+  0s injectable_generator:injectable_config_builder on 720 inputs: 720 skipped
+  Built with build_runner/aot in 1s; wrote 0 outputs."""

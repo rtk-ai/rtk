@@ -1,0 +1,89 @@
+[filters.flutter-test]
+description = "Compact flutter test output — strip pub preamble, loading lines, and blank lines; keep test results only"
+match_command = "^flutter\\s+test\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\d\\d:\\d\\d\\s+\\+\\d+\\s*:\\s*loading",
+  "^Resolving dependencies",
+  "^Downloading packages",
+  "^Got dependencies!",
+  "^  [a-zA-Z_][a-zA-Z0-9_-]* \\d",
+  "^\\d+ packages have newer",
+  "^Try `flutter pub outdated`",
+  "^The following plugins do not support",
+  "^  - ",
+  "^This will become an error",
+  "^Running",
+  "^\\[\\+\\d+ ms\\] ",
+]
+match_output = [
+  { pattern = "All tests passed!", message = "ok flutter test: all passed" },
+]
+max_lines = 80
+
+[[tests.flutter-test]]
+name = "all passing with pub preamble — short-circuits"
+input = """
+Resolving dependencies...
+Downloading packages...
+  _fe_analyzer_shared 96.0.0 (103.0.0 available)
+  meta 1.18.0 (1.18.3 available)
+Got dependencies!
+
+00:00 +0: loading test/widget_test.dart
+00:00 +0: test/widget_test.dart: counter increments
+00:00 +1: test/widget_test.dart: smoke test
+00:00 +2: All tests passed!
+"""
+expected = "ok flutter test: all passed"
+
+[[tests.flutter-test]]
+name = "failures — strips pub noise and plugin warnings, keeps all test results"
+input = """
+Resolving dependencies...
+Downloading packages...
+  _fe_analyzer_shared 96.0.0 (103.0.0 available)
+Got dependencies!
+59 packages have newer versions incompatible with dependency constraints.
+Try `flutter pub outdated` for more information.
+The following plugins do not support Swift Package Manager for ios:
+  - patrol
+  - flutter_secure_storage
+This will become an error in a future version of Flutter.
+The following plugins do not support Swift Package Manager for macos:
+  - patrol
+  - flutter_secure_storage_macos
+This will become an error in a future version of Flutter.
+
+00:00 +0: loading test/widget_test.dart
+00:00 +0: test/widget_test.dart: passing widget test
+00:00 +1: test/auth_test.dart: login fails
+00:00 +1 -1: test/auth_test.dart: login fails [E]
+  Expected: true
+    Actual: false
+  
+  package:test_api            expect
+  test/auth_test.dart 12:5    main.<fn>
+  
+00:00 +1 -1: test/widget_test.dart: another pass
+00:00 +2 -1: Some tests failed.
+Failing tests:
+  test/auth_test.dart: login fails
+"""
+expected = """00:00 +0: test/widget_test.dart: passing widget test
+00:00 +1: test/auth_test.dart: login fails
+00:00 +1 -1: test/auth_test.dart: login fails [E]
+  Expected: true
+    Actual: false
+  package:test_api            expect
+  test/auth_test.dart 12:5    main.<fn>
+00:00 +1 -1: test/widget_test.dart: another pass
+00:00 +2 -1: Some tests failed.
+Failing tests:
+  test/auth_test.dart: login fails"""
+
+[[tests.flutter-test]]
+name = "empty input"
+input = ""
+expected = ""

@@ -1,0 +1,40 @@
+[filters.dart-pub-get]
+description = "Compact dart pub get — strip download noise; keep summary, warnings, and hints"
+match_command = "^dart\\s+pub\\s+(get|add|upgrade|downgrade|outdated)\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Resolving dependencies",
+  "^Downloading packages",
+  "^  [a-zA-Z_][a-zA-Z0-9_-]* \\d",
+]
+max_lines = 60
+
+[[tests.dart-pub-get]]
+name = "strips package lines, keeps summary and warnings"
+input = """
+Resolving dependencies...
+Downloading packages...
+  _fe_analyzer_shared 96.0.0 (103.0.0 available)
+  analyzer 10.2.0 (13.3.0 available)
+  dart_style 3.1.7 (3.1.9 available)
+  meta 1.18.0 (1.18.3 available)
+Got dependencies!
+59 packages have newer versions incompatible with dependency constraints.
+Try `dart pub outdated` for more information.
+"""
+expected = "Got dependencies!\n59 packages have newer versions incompatible with dependency constraints.\nTry `dart pub outdated` for more information."
+
+[[tests.dart-pub-get]]
+name = "pub outdated — strips package lines, keeps table"
+input = """
+Showing outdated packages.
+[*] indicates versions that are not the latest available.
+
+Resolving dependencies...
+Downloading packages...
+  package_config 2.2.0 (3.0.0 available)
+  meta 1.18.0 (1.18.3 available)
+all dependencies are up-to-date.
+"""
+expected = "Showing outdated packages.\n[*] indicates versions that are not the latest available.\nall dependencies are up-to-date."
