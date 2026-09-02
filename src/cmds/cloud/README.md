@@ -9,3 +9,4 @@
 - `curl_cmd.rs` truncates long responses, saves full output to file for recovery
 - `wget_cmd.rs` wraps wget with output filtering
 - `psql_cmd.rs` filters PostgreSQL query output
+- `supabase_cmd.rs` filters safe database lint, non-interactive push, file-backed diff, local reset, and migration-list output. Interactive or remote operations remain passthrough, sensitive arguments are redacted from tracking, and truncated lists provide tee recovery
