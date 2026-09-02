@@ -35,6 +35,10 @@ pub struct RunOptions<'a> {
     pub tee_label: Option<&'a str>,
     pub filter_stdout_only: bool,
     pub skip_filter_on_failure: bool,
+    /// On nonzero exit, emit the exit-aware filter result even when it is
+    /// longer than the raw output. Use only when the filter adds essential
+    /// failure state that the raw output may contradict or omit.
+    pub authoritative_failure_output: bool,
     pub no_trailing_newline: bool,
     /// Forward rtk's own stdin to the child process. Needed for commands that
     /// can read from a pipe (e.g. `cat file | rtk wc`); without it the child
@@ -64,6 +68,11 @@ impl<'a> RunOptions<'a> {
 
     pub fn early_exit_on_failure(mut self) -> Self {
         self.skip_filter_on_failure = true;
+        self
+    }
+
+    pub fn authoritative_failure_output(mut self) -> Self {
+        self.authoritative_failure_output = true;
         self
     }
 
@@ -135,7 +144,21 @@ where
         raw
     };
 
-    let shown = if let Some(label) = opts.tee_label {
+    let shown = if opts.authoritative_failure_output && exit_code != 0 {
+        let hint = opts
+            .tee_label
+            .and_then(|label| crate::core::tee::tee_and_hint(raw, label, exit_code));
+        let body = match hint {
+            Some(hint) => format!("{}\n{}", filtered, hint),
+            None => filtered,
+        };
+        if opts.no_trailing_newline {
+            print!("{}", body);
+        } else {
+            println!("{}", body);
+        }
+        body
+    } else if let Some(label) = opts.tee_label {
         print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
     } else {
         let guarded = crate::core::guard::never_worse(raw_for_tracking, &filtered).to_string();

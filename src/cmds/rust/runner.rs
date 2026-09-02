@@ -34,6 +34,15 @@ static ERROR_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     ]
 });
 
+static TEST_FAIL_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^.*\bfail\b.*$").unwrap());
+static ZERO_OUTCOME_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(?:0\s+(?:test\s+)?(?:failed|failures?|errors?|warnings?)|(?:failures?|errors?|warnings?)\s*:\s*0)\b",
+    )
+    .unwrap()
+});
+
 struct ErrorStreamFilter {
     in_error_block: bool,
     blank_count: usize,
@@ -136,23 +145,29 @@ pub fn run_test(command: &str, verbose: u8) -> Result<i32> {
     }
     let cmd = build_shell_command(command);
     let command_owned = command.to_string();
-    crate::core::runner::run_filtered(
+    crate::core::runner::run_filtered_with_exit(
         cmd,
         "test",
         command,
-        move |raw| extract_test_summary(raw, &command_owned),
-        crate::core::runner::RunOptions::with_tee("test"),
+        move |raw, exit_code| extract_test_summary(raw, &command_owned, exit_code),
+        crate::core::runner::RunOptions::with_tee("test").authoritative_failure_output(),
     )
 }
 
-#[cfg(test)]
 fn filter_errors(output: &str) -> String {
     let mut result = Vec::new();
     let mut in_error_block = false;
     let mut blank_count = 0;
 
     for line in output.lines() {
-        let is_error_line = ERROR_PATTERNS.iter().any(|p| p.is_match(line));
+        // Ignore zero-valued outcome counters such as "12 passed, 0 failed";
+        // otherwise they can hide the actual unclassified diagnostic by
+        // suppressing the safer first/last excerpt fallback.
+        let without_zero_outcomes = ZERO_OUTCOME_PATTERN.replace_all(line, "");
+        let is_error_line = TEST_FAIL_PATTERN.is_match(&without_zero_outcomes)
+            || ERROR_PATTERNS
+                .iter()
+                .any(|pattern| pattern.is_match(&without_zero_outcomes));
 
         if is_error_line {
             in_error_block = true;
@@ -178,9 +193,60 @@ fn filter_errors(output: &str) -> String {
     result.join("\n")
 }
 
-fn extract_test_summary(output: &str, command: &str) -> String {
+fn append_failure_excerpt(output: &mut String, lines: &[&str], anchors: &[&str]) {
+    let nonempty_indices: Vec<_> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| (!line.trim().is_empty()).then_some(index))
+        .collect();
+    let mut selected = std::collections::BTreeSet::new();
+
+    for index in nonempty_indices.iter().take(5) {
+        selected.insert(*index);
+    }
+    for index in nonempty_indices.iter().rev().take(5) {
+        selected.insert(*index);
+    }
+
+    let mut anchor_search_start = 0;
+    for anchor in anchors.iter().take(MAX_RUNNER_LINES) {
+        let Some(offset) = lines[anchor_search_start..]
+            .iter()
+            .position(|line| line == anchor)
+        else {
+            continue;
+        };
+        let index = anchor_search_start + offset;
+        anchor_search_start = index + 1;
+
+        let Ok(nonempty_position) = nonempty_indices.binary_search(&index) else {
+            continue;
+        };
+        let start = nonempty_position.saturating_sub(2);
+        let end = (nonempty_position + 2).min(nonempty_indices.len().saturating_sub(1));
+        for context_index in nonempty_indices.iter().take(end + 1).skip(start) {
+            selected.insert(*context_index);
+        }
+    }
+
+    let mut previous = None;
+    for index in selected {
+        if let Some(previous_index) = previous {
+            if index > previous_index + 1 {
+                output.push_str(&format!(
+                    "  ... {} lines omitted ...\n",
+                    index - previous_index - 1
+                ));
+            }
+        }
+        output.push_str(&format!("  {}\n", lines[index]));
+        previous = Some(index);
+    }
+}
+
+fn extract_test_summary(raw_output: &str, command: &str, exit_code: i32) -> String {
     let mut result = Vec::new();
-    let lines: Vec<&str> = output.lines().collect();
+    let lines: Vec<&str> = raw_output.lines().collect();
 
     let is_cargo = command.contains("cargo test");
     let is_pytest = command.contains("pytest");
@@ -238,10 +304,25 @@ fn extract_test_summary(output: &str, command: &str) -> String {
 
     let mut output = String::new();
 
+    // The child status is authoritative. A successful runner may legitimately
+    // mention recovered or expected failures, while a failing runner must never
+    // be reduced to a success-looking summary.
+    if exit_code == 0 {
+        if !result.is_empty() {
+            output.push_str("SUMMARY:\n");
+            for line in &result {
+                output.push_str(&format!("  {}\n", line));
+            }
+        } else {
+            output.push_str("[ok] All tests passed (unrecognized test runner)\n");
+        }
+        return output;
+    }
+
     if !failures.is_empty() {
         output.push_str("[FAIL] FAILURES:\n");
-        for f in failures.iter().take(MAX_RUNNER_FAILURES) {
-            output.push_str(&format!("  {}\n", f));
+        for failure in failures.iter().take(MAX_RUNNER_FAILURES) {
+            output.push_str(&format!("  {}\n", failure));
         }
         if failures.len() > MAX_RUNNER_FAILURES {
             output.push_str(&format!(
@@ -249,8 +330,8 @@ fn extract_test_summary(output: &str, command: &str) -> String {
                 failures.len() - MAX_RUNNER_FAILURES
             ));
         }
-        for f in failure_lines.iter().take(MAX_RUNNER_LINES) {
-            output.push_str(&format!("  {}\n", f.trim()));
+        for line in failure_lines.iter().take(MAX_RUNNER_LINES) {
+            output.push_str(&format!("  {}\n", line.trim()));
         }
         if failure_lines.len() > MAX_RUNNER_LINES {
             output.push_str(&format!(
@@ -259,20 +340,44 @@ fn extract_test_summary(output: &str, command: &str) -> String {
             ));
         }
         output.push('\n');
+        output.push_str("CONTEXT:\n");
+        let failure_anchors: Vec<_> = failures
+            .iter()
+            .take(MAX_RUNNER_FAILURES)
+            .map(String::as_str)
+            .collect();
+        append_failure_excerpt(&mut output, &lines, &failure_anchors);
+    } else {
+        let detected_errors = filter_errors(raw_output);
+        if !detected_errors.is_empty() {
+            output.push_str("[FAIL] DETECTED FAILURES:\n");
+            let error_lines: Vec<_> = detected_errors.lines().collect();
+            for line in error_lines.iter().take(MAX_RUNNER_LINES) {
+                output.push_str(&format!("  {}\n", line));
+            }
+            if error_lines.len() > MAX_RUNNER_LINES {
+                output.push_str(&format!(
+                    "  ... +{} more\n",
+                    error_lines.len() - MAX_RUNNER_LINES
+                ));
+            }
+            output.push('\n');
+            output.push_str("CONTEXT:\n");
+            append_failure_excerpt(&mut output, &lines, &error_lines);
+        } else {
+            output.push_str(&format!(
+                "[FAIL] Command failed (exit code: {})\n",
+                exit_code
+            ));
+
+            append_failure_excerpt(&mut output, &lines, &[]);
+        }
     }
 
     if !result.is_empty() {
         output.push_str("SUMMARY:\n");
-        for r in &result {
-            output.push_str(&format!("  {}\n", r));
-        }
-    } else {
-        output.push_str("OUTPUT (last 5 lines):\n");
-        let start = lines.len().saturating_sub(5);
-        for line in &lines[start..] {
-            if !line.trim().is_empty() {
-                output.push_str(&format!("  {}\n", line));
-            }
+        for line in &result {
+            output.push_str(&format!("  {}\n", line));
         }
     }
 
@@ -289,5 +394,62 @@ mod tests {
         let filtered = filter_errors(output);
         assert!(filtered.contains("error"));
         assert!(!filtered.contains("info"));
+    }
+
+    #[test]
+    fn test_filter_errors_ignores_zero_failure_counters() {
+        assert!(filter_errors("12 passed, 0 failed").is_empty());
+        assert!(filter_errors("12 passed, 0 test failures").is_empty());
+        assert!(filter_errors("Failures: 0").is_empty());
+        assert!(filter_errors("12 passed, 1 failed").contains("1 failed"));
+        assert!(filter_errors("Failures: 1").contains("Failures: 1"));
+    }
+
+    #[test]
+    fn test_standalone_fail_is_scoped_to_test_filter() {
+        let mut stream = ErrorStreamFilter::new();
+        assert_eq!(stream.feed_line("FAIL: expected assertion"), None);
+        assert!(filter_errors("FAIL: expected assertion").contains("FAIL:"));
+    }
+
+    #[test]
+    fn test_nonzero_classified_runner_keeps_unrecognized_diagnostic() {
+        let mut raw = String::from("12 passed, 0 failed\nprocess terminated by sentinel 417\n");
+        for index in 1..=20 {
+            raw.push_str(&format!("cleanup step {index}\n"));
+        }
+        let filtered = extract_test_summary(&raw, "pytest-wrapper", 9);
+        assert!(filtered.contains("process terminated by sentinel 417"));
+        assert!(filtered.contains("cleanup step 20"));
+        assert!(filtered.contains("SUMMARY:"));
+    }
+
+    #[test]
+    fn test_anchor_context_keeps_middle_adjacent_diagnostic() {
+        let lines = [
+            "setup 1",
+            "setup 2",
+            "setup 3",
+            "setup 4",
+            "setup 5",
+            "setup 6",
+            "FAILED test_middle",
+            "diagnostic sentinel MIDDLE-417",
+            "cleanup 1",
+            "cleanup 2",
+            "cleanup 3",
+            "cleanup 4",
+            "cleanup 5",
+            "cleanup 6",
+        ];
+        let mut output = String::new();
+        append_failure_excerpt(&mut output, &lines, &["FAILED test_middle"]);
+        assert!(output.contains("diagnostic sentinel MIDDLE-417"));
+    }
+
+    #[test]
+    fn test_zero_exit_never_emits_failure_banner() {
+        let filtered = extract_test_summary("FAILED but recovered\n", "pytest-wrapper", 0);
+        assert!(!filtered.contains("[FAIL]"));
     }
 }
