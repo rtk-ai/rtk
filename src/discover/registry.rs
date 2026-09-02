@@ -547,6 +547,45 @@ fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> {
     LINE_CONTINUATION_RE.replace_all(s, " ")
 }
 
+/// Quick shape check to reject commands that `rtk` cannot safely rewrite.
+///
+/// Returns `true` for commands that should pass through unmodified instead of
+/// being rewritten. Saves the cost of tokenization and regex matching that
+/// `rewrite_command` would otherwise perform before eventually reaching the
+/// same conclusion.
+///
+/// Current unsupported shapes:
+/// - `find` / `fd` — `rtk find` and `rtk fd` only accept a limited flag set
+///   (`-name`, `-iname`, `-type`, `-maxdepth`). Any predicate outside that set
+///   (`-not`, `-exec`, `-newermt`, `-path`, …) causes a silent wrong result
+///   or runtime rejection. Excluding these entirely is simpler and safer than
+///   parsing every predicate combination.
+/// - `rtk find` / `rtk fd` — already-routed to a subcommand that rtk itself
+///   cannot rewrite further; returning `None` leaves the existing command as-is.
+/// - Unattestable constructs (backticks, `$((`, `<(`) — shell syntax that rtk
+///   cannot evaluate or predict the output shape of.
+fn is_unsupported_shape(cmd: &str) -> bool {
+    // 1. find/fd entirely — rtk's own find/fd subcommands reject complex predicates
+    if cmd.starts_with("find ") || cmd == "find" || cmd.starts_with("fd ") || cmd == "fd" {
+        return true;
+    }
+
+    // 2. Already-RTK with a find/fd subcommand — no further rewrite to attempt
+    if cmd.starts_with("rtk ") {
+        let subcmd = cmd.split_whitespace().nth(1).unwrap_or("");
+        if subcmd == "find" || subcmd == "fd" {
+            return true;
+        }
+    }
+
+    // 3. Unattestable shell constructs — output shape is unpredictable
+    if cmd.contains('`') || cmd.contains("$((") || cmd.contains("<(") {
+        return true;
+    }
+
+    false
+}
+
 /// Returns `None` if the command is unsupported or ignored (hook should pass through).
 ///
 /// Handles compound commands (`&&`, `||`, `;`) by rewriting each segment independently.
@@ -591,6 +630,12 @@ pub fn rewrite_command(
     }
 
     if has_heredoc(trimmed) || trimmed.contains("$((") {
+        return None;
+    }
+
+    // Reject unsupported command shapes before expensive tokenization/regex work.
+    // find/fd, rtk find/fd, and unattestable constructs skip rewrite entirely.
+    if is_unsupported_shape(trimmed) {
         return None;
     }
 
@@ -2223,6 +2268,55 @@ mod tests {
         }
     }
 
+    // --- is_unsupported_shape tests ---
+
+    #[test]
+    fn test_unsupported_find_not_predicate() {
+        // find with -not should passthrough (unsupported shape)
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -type f -not -name '*.log'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_unsupported_find_exec_predicate() {
+        // find with -exec should passthrough
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -name '*.log' -exec rm {} \\;", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_unsupported_fd_extensions() {
+        // fd with flags should passthrough
+        assert_eq!(rewrite_command_no_prefixes("fd -t f -e rs", &[]), None);
+    }
+
+    #[test]
+    fn test_unsupported_rtk_find() {
+        // rtk find should not be re-rewritten
+        assert_eq!(rewrite_command_no_prefixes("rtk find . -type f", &[]), None);
+    }
+
+    #[test]
+    fn test_unsupported_rtk_fd() {
+        // rtk fd should not be re-rewritten
+        assert_eq!(rewrite_command_no_prefixes("rtk fd . -type f", &[]), None);
+    }
+
+    #[test]
+    fn test_rtk_git_still_supported() {
+        // rtk git should still go through (not blocked by unsupported shape check)
+        assert_eq!(
+            rewrite_command_no_prefixes("rtk git status", &[]),
+            Some("rtk git status".to_string())
+        );
+    }
+
+    // --- existing tests ---
+
     #[test]
     fn test_classify_find_not_blocked_by_fi() {
         // Regression: "fi" in IGNORED_PREFIXES used to shadow "find" commands
@@ -2759,10 +2853,10 @@ mod tests {
 
     #[test]
     fn test_rewrite_find_no_pipe_still_rewritten() {
-        // find WITHOUT a pipe should still be rewritten
+        // find passes through — rtk find cannot safely handle all find predicates
         assert_eq!(
             rewrite_command_no_prefixes("find . -name '*.rs'", &[]),
-            Some("rtk find . -name '*.rs'".into())
+            None
         );
     }
 
@@ -4809,9 +4903,10 @@ mod tests {
 
     #[test]
     fn test_rewrite_find_with_flags() {
+        // find passes through — rtk find cannot safely handle all find predicates
         assert_eq!(
             rewrite_command_no_prefixes("find . -name '*.rs' -type f", &[]),
-            Some("rtk find . -name '*.rs' -type f".into())
+            None
         );
     }
 
