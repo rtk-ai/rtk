@@ -1659,6 +1659,29 @@ pub fn estimate_tokens(text: &str) -> usize {
     (text.len() as f64 / 4.0).ceil() as usize
 }
 
+/// Baseline cap in tokens for savings accounting.
+///
+/// Raw tool output is truncated by agent harnesses before reaching the model,
+/// so tokens beyond that limit were never real input and must not count as
+/// "saved". Resolution order: `RTK_BASELINE_CAP_CHARS` env (0 = no cap),
+/// `BASH_MAX_OUTPUT_LENGTH` env (Claude Code's own truncation limit),
+/// then the Claude Code default of 30000 chars.
+fn baseline_cap_tokens() -> usize {
+    let cap_chars = std::env::var("RTK_BASELINE_CAP_CHARS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .or_else(|| {
+            std::env::var("BASH_MAX_OUTPUT_LENGTH")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+        })
+        .unwrap_or(30_000);
+    if cap_chars == 0 {
+        return usize::MAX;
+    }
+    (cap_chars as f64 / 4.0).ceil() as usize
+}
+
 /// Helper struct for timing command execution
 /// Helper for timing command execution and tracking results.
 ///
@@ -1728,8 +1751,14 @@ impl TimedExecution {
     /// ```
     pub fn track(&self, original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
-        let input_tokens = estimate_tokens(input);
-        let output_tokens = estimate_tokens(output);
+        // Agent harnesses truncate raw tool output before the model sees it
+        // (Claude Code: BASH_MAX_OUTPUT_LENGTH, default 30000 chars), so an
+        // unfiltered `cat huge.log` would never reach the model in full.
+        // Cap both sides at that limit so savings reflect tokens the model
+        // would actually have ingested. RTK_BASELINE_CAP_CHARS=0 disables.
+        let cap_tokens = baseline_cap_tokens();
+        let input_tokens = estimate_tokens(input).min(cap_tokens);
+        let output_tokens = estimate_tokens(output).min(cap_tokens);
 
         if let Ok(tracker) = Tracker::new() {
             let _ = tracker.record(
@@ -1812,6 +1841,27 @@ mod tests {
         assert_eq!(estimate_tokens("abcde"), 2); // 5 chars = ceil(1.25) = 2
         assert_eq!(estimate_tokens("a"), 1); // 1 char = ceil(0.25) = 1
         assert_eq!(estimate_tokens("12345678"), 2); // 8 chars = 2 tokens
+    }
+
+    // 1b. baseline_cap_tokens — env resolution and disable via 0
+    #[test]
+    fn test_baseline_cap_tokens() {
+        // Env-dependent: serialize by testing each branch in one test body.
+        std::env::remove_var("RTK_BASELINE_CAP_CHARS");
+        std::env::remove_var("BASH_MAX_OUTPUT_LENGTH");
+        assert_eq!(baseline_cap_tokens(), 7500); // 30000 / 4
+
+        std::env::set_var("BASH_MAX_OUTPUT_LENGTH", "15000");
+        assert_eq!(baseline_cap_tokens(), 3750);
+
+        std::env::set_var("RTK_BASELINE_CAP_CHARS", "8000"); // takes precedence
+        assert_eq!(baseline_cap_tokens(), 2000);
+
+        std::env::set_var("RTK_BASELINE_CAP_CHARS", "0"); // 0 = disabled
+        assert_eq!(baseline_cap_tokens(), usize::MAX);
+
+        std::env::remove_var("RTK_BASELINE_CAP_CHARS");
+        std::env::remove_var("BASH_MAX_OUTPUT_LENGTH");
     }
 
     // 2. args_display — format OsString vec
