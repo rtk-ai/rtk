@@ -52,11 +52,22 @@ CREATE TABLE parse_failures (
   timestamp TEXT,
   raw_command TEXT,
   error_message TEXT,
-  fallback_succeeded INTEGER   -- 1=yes, 0=no
+  fallback_succeeded INTEGER,  -- 1=yes, 0=no
+  project_path TEXT            -- cwd; '' for rows written before this column existed
 );
 ```
 
+Both tables are stamped with the cwd, so a failure can be attributed to the project
+it happened in rather than matched to other rows by bare timestamp — which is
+ambiguous on a machine running concurrent sessions. `rtk gain --failures --project`
+scopes the failure log the same way `rtk gain --project` scopes savings.
+
 Project-scoped queries use GLOB patterns (not LIKE) to avoid `_`/`%` wildcard issues in paths.
+
+Schema changes are additive and applied by `migrate_schema()` in `tracking.rs`, shared
+by the production and in-memory-test schema paths so the two cannot drift. Existing
+rows take the column `DEFAULT`, so readers never have to distinguish "old row" from
+"unknown project".
 
 ## Config Sections
 

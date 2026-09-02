@@ -44,7 +44,7 @@ pub fn run(
     }
 
     if failures {
-        return show_failures(&tracker);
+        return show_failures(&tracker, project_scope.as_deref()); // changed: pass project scope
     }
 
     // Handle export formats
@@ -429,6 +429,17 @@ fn resolve_project_scope(project: bool) -> Result<Option<String>> {
     Ok(Some(canonical.to_string_lossy().to_string()))
 }
 
+/// Final path component of a project path, for compact per-row labelling. // added
+/// Returns `None` for rows recorded before `project_path` existed (empty string).
+fn project_dir_name(project_path: &str) -> Option<&str> {
+    if project_path.is_empty() {
+        return None;
+    }
+    project_path
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+}
+
 /// Shorten long absolute paths for display. // added
 fn shorten_path(path: &str) -> String {
     let path_buf = PathBuf::from(path);
@@ -692,19 +703,34 @@ fn check_rtk_disabled_bypass() -> Option<String> {
     }
 }
 
-fn show_failures(tracker: &Tracker) -> Result<()> {
+fn show_failures(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
+    // changed: add project scope
     let summary = tracker
-        .get_parse_failure_summary()
+        .get_parse_failure_summary_filtered(project_scope) // changed: use filtered variant
         .context("Failed to load parse failure data")?;
 
     if summary.total == 0 {
-        println!("No parse failures recorded.");
+        if project_scope.is_some() {
+            println!("No parse failures recorded for this project.");
+        } else {
+            println!("No parse failures recorded.");
+        }
         println!("This means all commands parsed successfully (or fallback hasn't triggered yet).");
         return Ok(());
     }
 
-    println!("{}", styled("RTK Parse Failures", true));
+    // added: scope-aware header, matching the default gain view
+    let title = if project_scope.is_some() {
+        "RTK Parse Failures (Project Scope)"
+    } else {
+        "RTK Parse Failures"
+    };
+    println!("{}", styled(title, true));
     println!("{}", "═".repeat(60));
+    // added: show project path when scoped
+    if let Some(scope) = project_scope {
+        println!("Scope: {}", shorten_path(scope));
+    }
     println!();
 
     print_kpi("Total failures", summary.total.to_string());
@@ -730,7 +756,16 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
             let ts_short = &rec.timestamp[..rec.timestamp.floor_char_boundary(16)];
             let status = if rec.fallback_succeeded { "ok" } else { "FAIL" };
             let cmd_display = truncate(&rec.raw_command, 40);
-            println!("  {} [{}] {}", ts_short, status, cmd_display);
+            // added: name the project when the view spans several of them —
+            // already-scoped output would just repeat the header
+            let where_display = match project_dir_name(&rec.project_path) {
+                Some(name) if project_scope.is_none() => format!("  ({})", name),
+                _ => String::new(),
+            };
+            println!(
+                "  {} [{}] {}{}",
+                ts_short, status, cmd_display, where_display
+            );
         }
         println!();
     }
@@ -759,4 +794,20 @@ fn confirm_reset() -> Result<bool> {
         .context("Failed to read confirmation")?;
 
     Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // project_dir_name labels a failure row with its project directory // added
+    #[test]
+    fn test_project_dir_name() {
+        assert_eq!(project_dir_name("/home/user/myproj"), Some("myproj"));
+        assert_eq!(project_dir_name("C:\\github\\rtk"), Some("rtk"));
+        // A trailing separator must not yield an empty label
+        assert_eq!(project_dir_name("/home/user/myproj/"), Some("myproj"));
+        // Pre-migration rows carry '' and get no label at all
+        assert_eq!(project_dir_name(""), None);
+    }
 }
