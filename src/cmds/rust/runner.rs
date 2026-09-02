@@ -102,44 +102,54 @@ impl StreamFilter for ErrorStreamFilter {
     }
 }
 
-fn build_shell_command(command: &str) -> Command {
-    if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd");
-        c.args(["/C", command]);
-        c
+/// Build the child command with argv passed through verbatim, matching
+/// `rtk proxy` semantics: a single argument is split shell-style respecting
+/// quotes (#388), so `rtk err 'cargo build --release'` still works, while
+/// multi-argument invocations keep each argument intact. Joining argv into a
+/// `sh -c` string re-split quoted arguments and masked child exit codes
+/// (#2389).
+fn build_argv_command(argv: &[String], usage: &str) -> Result<(Command, String)> {
+    let parts: Vec<String> = if argv.len() == 1 {
+        let split = crate::discover::lexer::shell_split(&argv[0]);
+        if split.len() > 1 { split } else { argv.to_vec() }
     } else {
-        let mut c = Command::new("sh");
-        c.args(["-c", command]);
-        c
-    }
+        argv.to_vec()
+    };
+    let Some((program, args)) = parts.split_first() else {
+        anyhow::bail!("missing command\nUsage: rtk {usage} <command> [args...]");
+    };
+    let display = parts.join(" ");
+    let mut cmd = crate::core::utils::resolved_command(program);
+    cmd.args(args);
+    Ok((cmd, display))
 }
 
 /// Run a command and filter output to show only errors/warnings
-pub fn run_err(command: &str, verbose: u8) -> Result<i32> {
+pub fn run_err(command: &[String], verbose: u8) -> Result<i32> {
+    let (cmd, display) = build_argv_command(command, "err")?;
     if verbose > 0 {
-        eprintln!("Running: {}", command);
+        eprintln!("Running: {}", display);
     }
-    let cmd = build_shell_command(command);
     crate::core::runner::run_streamed(
         cmd,
         "err",
-        command,
+        &display,
         Box::new(ErrorStreamFilter::new()),
         crate::core::runner::RunOptions::with_tee("err"),
     )
 }
 
 /// Run tests and show only failures
-pub fn run_test(command: &str, verbose: u8) -> Result<i32> {
+pub fn run_test(command: &[String], verbose: u8) -> Result<i32> {
+    let (cmd, display) = build_argv_command(command, "test")?;
     if verbose > 0 {
-        eprintln!("Running tests: {}", command);
+        eprintln!("Running tests: {}", display);
     }
-    let cmd = build_shell_command(command);
-    let command_owned = command.to_string();
+    let command_owned = display.clone();
     crate::core::runner::run_filtered(
         cmd,
         "test",
-        command,
+        &display,
         move |raw| extract_test_summary(raw, &command_owned),
         crate::core::runner::RunOptions::with_tee("test"),
     )
@@ -289,5 +299,53 @@ mod tests {
         let filtered = filter_errors(output);
         assert!(filtered.contains("error"));
         assert!(!filtered.contains("info"));
+    }
+
+    fn argv_of(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn quoted_argument_with_spaces_is_preserved_verbatim() {
+        // Regression for #2389: `rtk err sh -c 'exit 7'` must reach the child
+        // as ["-c", "exit 7"], not ["-c", "exit", "7"].
+        let argv = vec!["sh".to_string(), "-c".to_string(), "exit 7".to_string()];
+        let (cmd, display) = build_argv_command(&argv, "err").unwrap();
+        assert_eq!(argv_of(&cmd), vec!["-c", "exit 7"]);
+        assert_eq!(display, "sh -c exit 7");
+    }
+
+    #[test]
+    fn single_argument_is_shell_split_like_proxy() {
+        // Parity with `rtk proxy` single-string handling (#388).
+        let argv = vec!["cargo build --release".to_string()];
+        let (cmd, _) = build_argv_command(&argv, "err").unwrap();
+        assert!(cmd.get_program().to_string_lossy().contains("cargo"));
+        assert_eq!(argv_of(&cmd), vec!["build", "--release"]);
+    }
+
+    #[test]
+    fn single_argument_quotes_are_respected_when_splitting() {
+        let argv = vec!["git log --format=\"%H %s\"".to_string()];
+        let (cmd, _) = build_argv_command(&argv, "err").unwrap();
+        assert_eq!(argv_of(&cmd), vec!["log", "--format=%H %s"]);
+    }
+
+    #[test]
+    fn empty_command_is_an_error() {
+        assert!(build_argv_command(&[], "err").is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn child_exit_code_is_propagated() {
+        // `sh -c 'exit 7'` corrupted to `sh -c exit 7` exits 0; the verbatim
+        // argv must surface the real exit code.
+        let argv = vec!["sh".to_string(), "-c".to_string(), "exit 7".to_string()];
+        let (mut cmd, _) = build_argv_command(&argv, "err").unwrap();
+        let status = cmd.status().unwrap();
+        assert_eq!(status.code(), Some(7));
     }
 }
