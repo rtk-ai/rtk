@@ -4412,6 +4412,19 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_pm2_commands() {
+        for command in ["list", "ls", "status", "logs api", "restart api"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("pm2 {command}"), &[]),
+                Some(format!("rtk pm2 {command}")),
+                "Failed for command: pm2 {command}"
+            );
+        }
+
+        assert_eq!(rewrite_command_no_prefixes("pm2 delete api", &[]), None);
+    }
+
+    #[test]
     fn test_rewrite_npm_bare_subcommand() {
         let commands = vec!["exec", "run", "run-script", "x"];
         for command in commands {

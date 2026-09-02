@@ -12,8 +12,8 @@ use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
-    lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
-    vitest_cmd,
+    lint_cmd, next_cmd, npm_cmd, playwright_cmd, pm2_cmd, pnpm_cmd, prettier_cmd, prisma_cmd,
+    tsc_cmd, vitest_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{
@@ -569,6 +569,13 @@ enum Commands {
     /// Playwright E2E tests with compact output
     Playwright {
         /// Playwright arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// PM2 process management with compact list and log output
+    Pm2 {
+        /// PM2 arguments (list, logs, restart, and other native commands)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2282,6 +2289,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Playwright { args } => playwright_cmd::run(&args, cli.verbose)?,
 
+        Commands::Pm2 { args } => pm2_cmd::run(&args, cli.verbose)?,
+
         Commands::Cargo { command } => match command {
             CargoCommands::Build { args } => {
                 cargo_cmd::run(cargo_cmd::CargoCommand::Build, &args, cli.verbose)?
@@ -2807,6 +2816,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Lint { .. }
             | Commands::Prettier { .. }
             | Commands::Playwright { .. }
+            | Commands::Pm2 { .. }
             | Commands::Cargo { .. }
             | Commands::Npm { .. }
             | Commands::Npx { .. }
@@ -3210,6 +3220,7 @@ mod tests {
             "prettier",
             "format",
             "playwright",
+            "pm2",
             "cargo",
             "npm",
             "npx",
@@ -3527,6 +3538,17 @@ mod tests {
                 );
             }
             _ => panic!("Expected Pnpm List command"),
+        }
+    }
+
+    #[test]
+    fn test_pm2_trailing_arguments() {
+        let cli = Cli::try_parse_from(["rtk", "pm2", "logs", "api", "--lines", "50"]).unwrap();
+        match cli.command {
+            Commands::Pm2 { args } => {
+                assert_eq!(args, vec!["logs", "api", "--lines", "50"]);
+            }
+            _ => panic!("Expected Pm2 command"),
         }
     }
 

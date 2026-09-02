@@ -1,0 +1,103 @@
+[
+  {
+    "pid": 42123,
+    "name": "rtk-fixture",
+    "pm2_env": {
+      "name": "rtk-fixture",
+      "namespace": "default",
+      "args": ["300"],
+      "env": {
+        "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/node/bin:/home/example/.local/bin",
+        "HOME": "/home/example",
+        "SHELL": "/bin/zsh",
+        "PWD": "/srv/rtk-fixture",
+        "NODE_ENV": "production",
+        "SECRET_TOKEN": "redacted-real-environment-value",
+        "DATABASE_URL": "postgres://redacted@db.example.invalid/app",
+        "REDIS_URL": "redis://cache.example.invalid:6379/0",
+        "API_BASE_URL": "https://api.example.invalid",
+        "LOG_LEVEL": "info",
+        "LANG": "C.UTF-8",
+        "TERM": "xterm-256color",
+        "PM2_HOME": "/home/example/.pm2"
+      },
+      "merge_logs": true,
+      "vizion": true,
+      "autostart": true,
+      "autorestart": true,
+      "watch": false,
+      "instance_var": "NODE_APP_INSTANCE",
+      "treekill": true,
+      "username": "example",
+      "kill_retry_time": 100,
+      "node_args": [],
+      "pm_exec_path": "/bin/sleep",
+      "pm_cwd": "/srv/rtk-fixture",
+      "exec_interpreter": "none",
+      "exec_mode": "fork_mode",
+      "instances": 1,
+      "pm_out_log_path": "/home/example/.pm2/logs/rtk-fixture-out.log",
+      "pm_err_log_path": "/home/example/.pm2/logs/rtk-fixture-error.log",
+      "pm_pid_path": "/home/example/.pm2/pids/rtk-fixture-0.pid",
+      "status": "online",
+      "pm_uptime": 1784497324154,
+      "created_at": 1784497324154,
+      "pm_id": 0,
+      "restart_time": 0,
+      "unstable_restarts": 0,
+      "version": "N/A"
+    },
+    "pm_id": 0,
+    "monit": {
+      "memory": 1196032,
+      "cpu": 0
+    }
+  },
+  {
+    "pid": 0,
+    "name": "api-worker",
+    "pm2_env": {
+      "name": "api-worker",
+      "namespace": "workers",
+      "args": ["dist/worker.js"],
+      "env": {
+        "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/node/bin:/home/example/.local/bin",
+        "HOME": "/home/example",
+        "SHELL": "/bin/bash",
+        "PWD": "/srv/api-worker",
+        "NODE_ENV": "production",
+        "SECRET_TOKEN": "another-redacted-real-environment-value",
+        "QUEUE_NAME": "mailers",
+        "QUEUE_CONCURRENCY": "8",
+        "DATABASE_URL": "postgres://redacted@db.example.invalid/app",
+        "REDIS_URL": "redis://cache.example.invalid:6379/1",
+        "LOG_LEVEL": "warn",
+        "LANG": "C.UTF-8",
+        "PM2_HOME": "/home/example/.pm2"
+      },
+      "merge_logs": true,
+      "autorestart": true,
+      "watch": false,
+      "instances": 1,
+      "pm_exec_path": "/srv/api-worker/dist/worker.js",
+      "pm_cwd": "/srv/api-worker",
+      "exec_interpreter": "node",
+      "exec_mode": "fork_mode",
+      "pm_out_log_path": "/home/example/.pm2/logs/api-worker-out.log",
+      "pm_err_log_path": "/home/example/.pm2/logs/api-worker-error.log",
+      "pm_pid_path": "/home/example/.pm2/pids/api-worker-1.pid",
+      "status": "stopped",
+      "pm_uptime": 1784497300000,
+      "created_at": 1784497200000,
+      "pm_id": 1,
+      "restart_time": 4,
+      "unstable_restarts": 0,
+      "version": "2.4.1"
+    },
+    "pm_id": 1,
+    "monit": {
+      "memory": 67108864,
+      "cpu": 2.5
+    }
+  }
+]
