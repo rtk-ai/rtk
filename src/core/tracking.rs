@@ -107,6 +107,21 @@ pub struct CommandRecord {
     pub savings_pct: f64,
 }
 
+/// Detailed tracked command row used by discover-like analytics.
+#[derive(Debug)]
+pub struct TrackedCommandRecord {
+    /// UTC timestamp when command was executed
+    pub timestamp: DateTime<Utc>,
+    /// Raw/original command before RTK routing
+    pub original_cmd: String,
+    /// RTK command that was actually executed
+    pub rtk_cmd: String,
+    /// Raw input token estimate captured by tracking
+    pub input_tokens: usize,
+    /// Filtered output token count captured by tracking
+    pub output_tokens: usize,
+}
+
 /// Aggregated statistics across all recorded commands.
 ///
 /// Provides overall metrics and breakdowns by command and by day.
@@ -976,6 +991,38 @@ impl Tracker {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Get tracked commands suitable for discover-style analysis.
+    pub fn get_discover_commands_filtered(
+        &self,
+        since_days: u64,
+        project_path: Option<&str>,
+    ) -> Result<Vec<TrackedCommandRecord>> {
+        let cutoff = Utc::now() - chrono::Duration::days(since_days as i64);
+        let cutoff_ts = cutoff.to_rfc3339();
+        let (project_exact, project_glob) = project_filter_params(project_path);
+        let mut stmt = self.conn.prepare(
+            "SELECT timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens
+             FROM commands
+             WHERE timestamp >= ?1
+               AND (?2 IS NULL OR project_path = ?2 OR project_path GLOB ?3)
+             ORDER BY timestamp DESC",
+        )?;
+
+        let rows = stmt.query_map(params![cutoff_ts, project_exact, project_glob], |row| {
+            Ok(TrackedCommandRecord {
+                timestamp: DateTime::parse_from_rfc3339(&row.get::<_, String>(0)?)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                original_cmd: row.get(1)?,
+                rtk_cmd: row.get(2)?,
+                input_tokens: row.get::<_, i64>(3)? as usize,
+                output_tokens: row.get::<_, i64>(4)? as usize,
+            })
+        })?;
+
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Count commands since a given timestamp (for telemetry).
     pub fn count_commands_since(&self, since: chrono::DateTime<chrono::Utc>) -> Result<i64> {
         let ts = since.format("%Y-%m-%dT%H:%M:%S").to_string();
@@ -1579,6 +1626,24 @@ mod tests {
         // savings_pct should be 0 for passthrough
         assert_eq!(pt.savings_pct, 0.0);
         assert_eq!(pt.saved_tokens, 0);
+    }
+
+    #[test]
+    fn test_get_discover_commands_filtered_returns_original_and_rtk_commands() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+        tracker
+            .record("git status", "rtk git status", 100, 20, 10)
+            .expect("Failed to record tracked command");
+
+        let rows = tracker
+            .get_discover_commands_filtered(30, None)
+            .expect("Failed to query discover commands");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].original_cmd, "git status");
+        assert_eq!(rows[0].rtk_cmd, "rtk git status");
+        assert_eq!(rows[0].input_tokens, 100);
+        assert_eq!(rows[0].output_tokens, 20);
     }
 
     // 7. get_db_path respects environment variable RTK_DB_PATH

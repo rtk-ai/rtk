@@ -1,5 +1,6 @@
 //! Reads Claude Code session logs from disk and streams their command history.
 
+use crate::core::tracking::Tracker;
 use crate::hooks::init::resolve_claude_dir;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -20,16 +21,14 @@ pub struct ExtractedCommand {
     pub output_content: Option<String>,
     /// Whether the tool_result indicated an error
     pub is_error: bool,
+    /// Whether RTK actually routed the command already.
+    pub was_rtk_routed: bool,
     /// Chronological sequence index within the session
     #[allow(dead_code)]
     pub sequence_index: usize,
 }
 
-/// Trait for session providers (Claude Code, OpenCode, etc.).
-///
-/// Note: Cursor Agent transcripts use a text-only format without structured
-/// tool_use/tool_result blocks, so command extraction is not possible.
-/// Use `rtk gain` to track savings for Cursor sessions instead.
+/// Trait for session providers (Claude Code, Cursor tracking, etc.).
 pub trait SessionProvider {
     fn discover_sessions(
         &self,
@@ -40,6 +39,20 @@ pub trait SessionProvider {
 }
 
 pub struct ClaudeProvider;
+
+pub struct CursorTrackerProvider {
+    since_days: u64,
+    project_scope: Option<String>,
+}
+
+impl CursorTrackerProvider {
+    pub fn new(since_days: u64, project_scope: Option<String>) -> Self {
+        Self {
+            since_days,
+            project_scope,
+        }
+    }
+}
 
 impl ClaudeProvider {
     /// Get the base directory for Claude Code projects.
@@ -263,11 +276,49 @@ impl SessionProvider for ClaudeProvider {
                 session_id: session_id.clone(),
                 output_content,
                 is_error,
+                was_rtk_routed: false,
                 sequence_index,
             });
         }
 
         Ok(commands)
+    }
+}
+
+impl SessionProvider for CursorTrackerProvider {
+    fn discover_sessions(
+        &self,
+        _project_filter: Option<&str>,
+        _since_days: Option<u64>,
+    ) -> Result<Vec<PathBuf>> {
+        let tracker = Tracker::new().context("failed to open RTK tracking database")?;
+        let count = tracker
+            .get_discover_commands_filtered(self.since_days, self.project_scope.as_deref())?
+            .len();
+        if count == 0 {
+            Ok(Vec::new())
+        } else {
+            Ok(vec![PathBuf::from("__cursor_tracking__")])
+        }
+    }
+
+    fn extract_commands(&self, _path: &Path) -> Result<Vec<ExtractedCommand>> {
+        let tracker = Tracker::new().context("failed to open RTK tracking database")?;
+        let rows =
+            tracker.get_discover_commands_filtered(self.since_days, self.project_scope.as_deref())?;
+        Ok(rows
+            .into_iter()
+            .enumerate()
+            .map(|(idx, row)| ExtractedCommand {
+                command: row.original_cmd,
+                output_len: Some(row.input_tokens.saturating_mul(4)),
+                session_id: row.timestamp.to_rfc3339(),
+                output_content: None,
+                is_error: false,
+                was_rtk_routed: row.rtk_cmd.starts_with("rtk "),
+                sequence_index: idx,
+            })
+            .collect())
     }
 }
 

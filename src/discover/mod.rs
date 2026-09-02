@@ -9,7 +9,7 @@ pub mod rules;
 use anyhow::Result;
 use std::collections::HashMap;
 
-use provider::{ClaudeProvider, SessionProvider};
+use provider::{ClaudeProvider, CursorTrackerProvider, SessionProvider};
 use registry::{
     category_avg_tokens, classify_command, split_command_chain, strip_disabled_prefix,
     Classification,
@@ -48,10 +48,8 @@ pub fn run(
     format: &str,
     verbose: u8,
 ) -> Result<()> {
-    let provider = ClaudeProvider;
-
     // Determine project filter
-    let project_filter = if all {
+    let claude_project_filter = if all {
         None
     } else if let Some(p) = project {
         Some(p.to_string())
@@ -62,13 +60,41 @@ pub fn run(
         let encoded = ClaudeProvider::encode_project_path(&cwd_str);
         Some(encoded)
     };
+    let cursor_project_scope = if all {
+        None
+    } else if let Some(project) = project {
+        std::path::Path::new(project)
+            .canonicalize()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string())
+    } else {
+        let cwd = std::env::current_dir()?;
+        Some(cwd.canonicalize().unwrap_or(cwd).to_string_lossy().to_string())
+    };
 
-    let sessions = provider.discover_sessions(project_filter.as_deref(), Some(since_days))?;
+    let claude_provider = ClaudeProvider;
+    let cursor_provider = CursorTrackerProvider::new(since_days, cursor_project_scope);
+
+    let mut sources: Vec<(&dyn SessionProvider, Vec<std::path::PathBuf>)> = Vec::new();
+    let claude_sessions =
+        claude_provider.discover_sessions(claude_project_filter.as_deref(), Some(since_days))?;
+    if !claude_sessions.is_empty() {
+        sources.push((&claude_provider, claude_sessions));
+    } else {
+        let cursor_sessions = cursor_provider.discover_sessions(None, None)?;
+        if !cursor_sessions.is_empty() {
+            sources.push((&cursor_provider, cursor_sessions));
+        }
+    }
+
+    let sessions_scanned: usize = sources.iter().map(|(_, sessions)| sessions.len()).sum();
 
     if verbose > 0 {
-        eprintln!("Scanning {} session files...", sessions.len());
-        for s in &sessions {
-            eprintln!("  {}", s.display());
+        eprintln!("Scanning {} session sources...", sessions_scanned);
+        for (_, sessions) in &sources {
+            for s in sessions {
+                eprintln!("  {}", s.display());
+            }
         }
     }
 
@@ -80,100 +106,99 @@ pub fn run(
     let mut supported_map: HashMap<&'static str, SupportedBucket> = HashMap::new();
     let mut unsupported_map: HashMap<String, UnsupportedBucket> = HashMap::new();
 
-    for session_path in &sessions {
-        let extracted = match provider.extract_commands(session_path) {
-            Ok(cmds) => cmds,
-            Err(e) => {
-                if verbose > 0 {
-                    eprintln!("Warning: skipping {}: {}", session_path.display(), e);
-                }
-                parse_errors += 1;
-                continue;
-            }
-        };
-
-        for ext_cmd in &extracted {
-            let parts = split_command_chain(&ext_cmd.command);
-            for part in parts {
-                total_commands += 1;
-
-                // Detect RTK_DISABLED= bypass before classification
-                let (env_prefix, actual_cmd) = strip_disabled_prefix(part);
-                if prefix_contains_rtk_disabled(env_prefix) {
-                    // Only count if the underlying command is one RTK supports
-                    match classify_command(actual_cmd) {
-                        Classification::Supported { .. } => {
-                            rtk_disabled_count += 1;
-                            let display = truncate_command(actual_cmd);
-                            *rtk_disabled_cmds.entry(display).or_insert(0) += 1;
-                        }
-                        _ => {
-                            // RTK_DISABLED on unsupported/ignored command — not interesting
-                        }
+    for (provider, sessions) in &sources {
+        for session_path in sessions {
+            let extracted = match provider.extract_commands(session_path) {
+                Ok(cmds) => cmds,
+                Err(e) => {
+                    if verbose > 0 {
+                        eprintln!("Warning: skipping {}: {}", session_path.display(), e);
                     }
+                    parse_errors += 1;
                     continue;
                 }
+            };
 
-                match classify_command(part) {
-                    Classification::Supported {
-                        rtk_equivalent,
-                        category,
-                        estimated_savings_pct,
-                        status,
-                    } => {
-                        let bucket = supported_map.entry(rtk_equivalent).or_insert_with(|| {
-                            SupportedBucket {
-                                rtk_equivalent,
-                                category,
-                                count: 0,
-                                total_output_tokens: 0,
-                                total_raw_output_tokens: 0,
-                                command_counts: HashMap::new(),
+            for ext_cmd in &extracted {
+                let parts = split_command_chain(&ext_cmd.command);
+                for part in parts {
+                    total_commands += 1;
+
+                    // Detect RTK_DISABLED= bypass before classification
+                    let (env_prefix, actual_cmd) = strip_disabled_prefix(part);
+                    if prefix_contains_rtk_disabled(env_prefix) {
+                        match classify_command(actual_cmd) {
+                            Classification::Supported { .. } => {
+                                rtk_disabled_count += 1;
+                                let display = truncate_command(actual_cmd);
+                                *rtk_disabled_cmds.entry(display).or_insert(0) += 1;
                             }
-                        });
-
-                        bucket.count += 1;
-
-                        // Estimate tokens for this command
-                        let output_tokens = if let Some(len) = ext_cmd.output_len {
-                            // Real: from tool_result content length
-                            len / 4
-                        } else {
-                            // Fallback: category average
-                            let subcmd = extract_subcmd(part);
-                            category_avg_tokens(category, subcmd)
-                        };
-
-                        let savings =
-                            (output_tokens as f64 * estimated_savings_pct / 100.0) as usize;
-                        bucket.total_output_tokens += savings;
-                        // Accumulate pre-savings tokens so we can compute a weighted effective
-                        // savings rate across all sub-commands in this bucket later.
-                        bucket.total_raw_output_tokens += output_tokens;
-
-                        // Track the display name with status
-                        let display_name = truncate_command(part);
-                        let entry = bucket
-                            .command_counts
-                            .entry(format!("{}:{:?}", display_name, status))
-                            .or_insert(0);
-                        *entry += 1;
-                    }
-                    Classification::Unsupported { base_command } => {
-                        let bucket = unsupported_map.entry(base_command).or_insert_with(|| {
-                            UnsupportedBucket {
-                                count: 0,
-                                example: part.to_string(),
-                            }
-                        });
-                        bucket.count += 1;
-                    }
-                    Classification::Ignored => {
-                        // Check if it starts with "rtk "
-                        if part.trim().starts_with("rtk ") {
-                            already_rtk += 1;
+                            _ => {}
                         }
-                        // Otherwise just skip
+                        continue;
+                    }
+
+                    match classify_command(part) {
+                        Classification::Supported {
+                            rtk_equivalent,
+                            category,
+                            estimated_savings_pct,
+                            status,
+                        } => {
+                            if ext_cmd.was_rtk_routed {
+                                already_rtk += 1;
+                                continue;
+                            }
+
+                            let bucket = supported_map.entry(rtk_equivalent).or_insert_with(|| {
+                                SupportedBucket {
+                                    rtk_equivalent,
+                                    category,
+                                    count: 0,
+                                    total_output_tokens: 0,
+                                    total_raw_output_tokens: 0,
+                                    command_counts: HashMap::new(),
+                                }
+                            });
+
+                            bucket.count += 1;
+
+                            let output_tokens = if let Some(len) = ext_cmd.output_len {
+                                len / 4
+                            } else {
+                                let subcmd = extract_subcmd(part);
+                                category_avg_tokens(category, subcmd)
+                            };
+
+                            let savings =
+                                (output_tokens as f64 * estimated_savings_pct / 100.0) as usize;
+                            bucket.total_output_tokens += savings;
+                            bucket.total_raw_output_tokens += output_tokens;
+
+                            let display_name = truncate_command(part);
+                            let entry = bucket
+                                .command_counts
+                                .entry(format!("{}:{:?}", display_name, status))
+                                .or_insert(0);
+                            *entry += 1;
+                        }
+                        Classification::Unsupported { base_command } => {
+                            let bucket = unsupported_map.entry(base_command).or_insert_with(|| {
+                                UnsupportedBucket {
+                                    count: 0,
+                                    example: part.to_string(),
+                                }
+                            });
+                            bucket.count += 1;
+                            if ext_cmd.was_rtk_routed {
+                                already_rtk += 1;
+                            }
+                        }
+                        Classification::Ignored => {
+                            if ext_cmd.was_rtk_routed || part.trim().starts_with("rtk ") {
+                                already_rtk += 1;
+                            }
+                        }
                     }
                 }
             }
@@ -254,7 +279,7 @@ pub fn run(
     };
 
     let report = DiscoverReport {
-        sessions_scanned: sessions.len(),
+        sessions_scanned,
         total_commands,
         already_rtk,
         since_days,

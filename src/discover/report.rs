@@ -229,7 +229,7 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
 
 fn append_agent_notes(out: &mut String, status: AgentIntegrationStatus) {
     if status.cursor_hook_installed {
-        out.push_str("\nNote: Cursor sessions are tracked via `rtk gain` (discover scans Claude Code only)\n");
+        out.push_str("\nNote: Cursor discover uses RTK tracking history when structured session logs are unavailable\n",);
     }
 
     if status.hermes_plugin_installed {

@@ -202,6 +202,7 @@ mod tests {
             session_id: "test".to_string(),
             output_content: None,
             is_error: false,
+            was_rtk_routed: false,
             sequence_index: 0,
         }
     }
