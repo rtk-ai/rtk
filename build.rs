@@ -9,7 +9,12 @@ fn main() {
         // main-thread stack during process startup. Reserve a larger stack for
         // the CLI binary so `rtk.exe --version`, `--help`, and hook entry
         // points start reliably without requiring ad-hoc RUSTFLAGS.
-        println!("cargo:rustc-link-arg=/STACK:8388608");
+        // MSVC's link.exe and GNU/mingw's ld use different flag syntax for this.
+        if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            println!("cargo:rustc-link-arg=/STACK:8388608");
+        } else {
+            println!("cargo:rustc-link-arg=-Wl,--stack,8388608");
+        }
     }
 
     let filters_dir = Path::new("src/filters");
