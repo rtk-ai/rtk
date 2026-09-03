@@ -887,6 +887,101 @@ fn run_cursor_inner_with_rules(
     }
 }
 
+// ── Crush native hook ─────────────────────────────────────────
+
+/// Run the Crush PreToolUse hook natively.
+///
+/// Crush hook contract (https://github.com/charmbracelet/crush/tree/main/docs/hooks):
+/// - stdin: JSON with `tool_name` and `tool_input`.
+/// - environment fallback: `CRUSH_TOOL_INPUT_COMMAND` for bash calls.
+/// - passthrough: exit 0 with empty stdout.
+/// - rewrite: emit an object-valued `updated_input` patch.
+pub fn run_crush() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let env_cmd = std::env::var("CRUSH_TOOL_INPUT_COMMAND").ok();
+
+    if let Some(output) = run_crush_inner(&input, env_cmd.as_deref()) {
+        let _ = writeln!(io::stdout(), "{output}");
+    }
+    Ok(())
+}
+
+fn run_crush_inner(input: &str, env_cmd: Option<&str>) -> Option<String> {
+    let cmd = crush_command_from_input(input, env_cmd)?;
+    crush_response_from_decision(decide_hook_action(&cmd, permissions::Host::Crush), &cmd)
+}
+
+fn crush_command_from_input(input: &str, env_cmd: Option<&str>) -> Option<String> {
+    let input = strip_leading_bom(input).trim();
+
+    if !input.is_empty() {
+        match serde_json::from_str::<Value>(input) {
+            Ok(json) => {
+                let tool_name = json
+                    .get("tool_name")
+                    .and_then(|tool| tool.as_str())
+                    .unwrap_or("");
+                if !matches!(tool_name, "bash" | "Bash") {
+                    return None;
+                }
+
+                if let Some(cmd) = json
+                    .pointer("/tool_input/command")
+                    .and_then(|command| command.as_str())
+                    .filter(|command| !command.is_empty())
+                {
+                    return Some(cmd.to_string());
+                }
+            }
+            Err(e) => {
+                let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            }
+        }
+    }
+
+    env_cmd.filter(|cmd| !cmd.is_empty()).map(str::to_string)
+}
+
+fn crush_response_from_decision(decision: HookDecision, cmd: &str) -> Option<String> {
+    match decision {
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            Some(
+                json!({
+                    "version": 1,
+                    "decision": "deny",
+                    "reason": "Blocked by RTK permission rule"
+                })
+                .to_string(),
+            )
+        }
+        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => {
+            audit_log("rewrite", cmd, &rewritten);
+            Some(
+                json!({
+                    "version": 1,
+                    "updated_input": { "command": rewritten }
+                })
+                .to_string(),
+            )
+        }
+        HookDecision::Defer => None,
+    }
+}
+
+#[cfg(test)]
+fn run_crush_inner_with_rules(
+    input: &str,
+    env_cmd: Option<&str>,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+) -> Option<String> {
+    let cmd = crush_command_from_input(input, env_cmd)?;
+    let verdict = permissions::check_command_with_rules(&cmd, deny_rules, ask_rules, allow_rules);
+    crush_response_from_decision(decide_from_verdict(&cmd, verdict), &cmd)
+}
+
 // ── Factory Droid PreToolUse hook ──────────────────────────────
 //
 // Payload is shaped like Claude Code's (docs.factory.ai/reference/hooks-reference);
@@ -2426,6 +2521,83 @@ mod tests {
         // so Droid runs them unchanged.
         let input = droid_input("Execute", "definitely-not-a-real-binary --foo");
         assert!(run_droid_inner(&input).is_none());
+    }
+
+    fn crush_input(tool: &str, cmd: &str) -> String {
+        json!({
+            "event": PRE_TOOL_USE_KEY,
+            "tool_name": tool,
+            "tool_input": { "command": cmd }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_crush_rewrites_bash_command_without_preapproving() {
+        let output =
+            run_crush_inner(&crush_input("bash", "git status"), None).expect("rewrite expected");
+        let json: Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(json["version"], 1);
+        assert_eq!(json["updated_input"]["command"], "rtk git status");
+        assert!(json["updated_input"].is_object());
+        assert!(json.get("decision").is_none());
+    }
+
+    #[test]
+    fn test_crush_uses_environment_fallback() {
+        let output = run_crush_inner("", Some("cargo test")).expect("rewrite expected");
+        let json: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(json["updated_input"]["command"], "rtk cargo test");
+    }
+
+    #[test]
+    fn test_crush_json_command_takes_precedence_over_environment() {
+        let output = run_crush_inner(&crush_input("bash", "git status"), Some("cargo test"))
+            .expect("rewrite expected");
+        let json: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(json["updated_input"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_crush_malformed_json_uses_environment_fallback() {
+        let output = run_crush_inner("{not json", Some("git status"))
+            .expect("environment fallback should rewrite");
+        let json: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(json["updated_input"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_crush_strips_utf8_bom() {
+        let input = format!("\u{feff}{}", crush_input("bash", "git status"));
+        let output = run_crush_inner(&input, None).expect("rewrite expected");
+        let json: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(json["updated_input"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_crush_non_bash_and_unknown_commands_pass_through() {
+        assert!(run_crush_inner(&crush_input("edit", "git status"), None).is_none());
+        assert!(run_crush_inner(
+            &crush_input("bash", "definitely-not-a-real-binary --foo"),
+            None,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn test_crush_deny_rule_emits_deny_without_rewrite() {
+        let output = run_crush_inner_with_rules(
+            &crush_input("bash", "git status"),
+            None,
+            &["git status".to_string()],
+            &[],
+            &[],
+        )
+        .expect("deny response expected");
+        let json: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(json["decision"], "deny");
+        assert!(json.get("updated_input").is_none());
     }
 
     fn vibe_input(tool: &str, cmd: &str) -> String {

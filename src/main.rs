@@ -920,6 +920,8 @@ enum HookCommands {
     Claude,
     /// Process Cursor Agent hook (reads JSON from stdin)
     Cursor,
+    /// Process Crush PreToolUse hook (reads JSON from stdin)
+    Crush,
     /// Process Gemini CLI BeforeTool hook (reads JSON from stdin)
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
@@ -2670,6 +2672,10 @@ fn run_cli() -> Result<i32> {
                 hooks::hook_cmd::run_cursor()?;
                 0
             }
+            HookCommands::Crush => {
+                hooks::hook_cmd::run_crush()?;
+                0
+            }
             HookCommands::Gemini => {
                 hooks::hook_cmd::run_gemini()?;
                 0
@@ -3489,6 +3495,17 @@ mod tests {
             cli.command,
             Commands::Hook {
                 command: HookCommands::Claude
+            }
+        ));
+    }
+
+    #[test]
+    fn test_hook_crush_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "crush"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::Crush
             }
         ));
     }
