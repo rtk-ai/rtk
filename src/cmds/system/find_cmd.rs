@@ -391,6 +391,18 @@ fn build_capped_listing(files: &[String], max_results: usize) -> String {
     listing
 }
 
+/// Dotfiles such as `.env` are commonly gitignored, and native `find` still returns them,
+/// so a dotfile-targeted search must not silently apply git exclusions.
+fn find_walk_builder(path: &Path, search_hidden: bool) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(path);
+    builder
+        .hidden(!search_hidden)
+        .git_ignore(!search_hidden)
+        .git_global(!search_hidden)
+        .git_exclude(!search_hidden);
+    builder
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     pattern: &str,
@@ -422,12 +434,7 @@ pub fn run(
     // entries; otherwise skip them to keep results tidy (#1101).
     let search_hidden = effective_pattern.starts_with('.');
 
-    let mut builder = WalkBuilder::new(path);
-    builder
-        .hidden(!search_hidden) // skip hidden files/dirs unless pattern targets dotfiles
-        .git_ignore(true) // respect .gitignore
-        .git_global(true)
-        .git_exclude(true);
+    let mut builder = find_walk_builder(Path::new(path), search_hidden);
     if let Some(depth) = max_depth {
         builder.max_depth(Some(depth));
     }
@@ -611,6 +618,8 @@ fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
     /// Convert string slices to Vec<String> for test convenience.
     fn args(values: &[&str]) -> Vec<String> {
@@ -1049,6 +1058,42 @@ mod tests {
         // .gitignore exists at the repo root — must be found when using a dotfile pattern
         let result = run(".gitignore", ".", 50, true, Some(1), "f", false, 0);
         assert!(result.is_ok(), "run with dotfile pattern should not error");
+    }
+
+    #[test]
+    fn find_dotfile_pattern_includes_gitignored_files() {
+        let temp = TempDir::new().unwrap();
+        // `ignore` only applies .gitignore inside a git repository.
+        fs::create_dir(temp.path().join(".git")).unwrap();
+        fs::write(temp.path().join(".gitignore"), ".env\nignored.txt\n").unwrap();
+        fs::write(temp.path().join(".env"), "SECRET=test-only\n").unwrap();
+        fs::write(temp.path().join("ignored.txt"), "x\n").unwrap();
+
+        let names = |search_hidden| -> Vec<String> {
+            find_walk_builder(temp.path(), search_hidden)
+                .build()
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    entry
+                        .path()
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(str::to_string)
+                })
+                .collect()
+        };
+
+        let dotfile_search = names(true);
+        assert!(
+            dotfile_search.iter().any(|n| n == ".env"),
+            "dotfile search must include files excluded by .gitignore, got {dotfile_search:?}"
+        );
+
+        let ordinary_search = names(false);
+        assert!(
+            !ordinary_search.iter().any(|n| n == "ignored.txt"),
+            "ordinary search must continue to respect .gitignore, got {ordinary_search:?}"
+        );
     }
 
     #[test]
