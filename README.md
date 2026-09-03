@@ -349,6 +349,7 @@ The most effective way to use rtk. The hook transparently intercepts Bash comman
 ```bash
 rtk init -g                 # Install hook + RTK.md (recommended)
 rtk init -g --opencode      # OpenCode plugin (instead of Claude Code)
+rtk init -g --mimocode      # MiniMax Code plugin
 rtk init -g --auto-patch    # Non-interactive (CI/CD)
 rtk init -g --hook-only     # Hook only, no RTK.md
 rtk init --show             # Verify installation
@@ -407,6 +408,7 @@ RTK supports 16 AI coding tools. Each integration rewrites shell commands to `rt
 | **Windsurf** | `rtk init -g --agent windsurf` | .windsurfrules (project-scoped) |
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
+| **MiniMax Code** | `rtk init -g --mimocode` or `rtk init --agent mimocode` | Plugin TS (tool.execute.before) |
 | **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |
 | **Pi** | `rtk init -g --agent pi` (global) | TypeScript extension (tool_call) |
 | **Hermes** | `rtk init --agent hermes` | Python plugin adapter (terminal command mutation via `rtk rewrite`) |

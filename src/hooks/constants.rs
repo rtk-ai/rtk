@@ -21,6 +21,9 @@ pub const CONFIG_DIR: &str = ".config";
 pub const OPENCODE_SUBDIR: &str = "opencode";
 pub const PLUGIN_SUBDIR: &str = "plugins";
 pub const OPENCODE_PLUGIN_FILE: &str = "rtk.ts";
+pub const MIMOCODE_SUBDIR: &str = "mimocode";
+pub const MIMOCODE_PLUGIN_FILE: &str = "rtk.ts";
+pub const MIMOCODE_HOME_ENV: &str = "MIMOCODE_HOME";
 
 pub const CURSOR_DIR: &str = ".cursor";
 pub const CODEX_DIR: &str = ".codex";

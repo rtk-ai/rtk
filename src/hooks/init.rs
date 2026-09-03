@@ -10,7 +10,8 @@ use tempfile::NamedTempFile;
 use crate::core::utils::{from_json_str, strip_leading_bom};
 use crate::hooks::constants::{
     CONFIG_DIR, COPILOT_HOME_ENV, COPILOT_HOOK_FILE, COPILOT_INSTRUCTIONS_FILE, COPILOT_USER_DIR,
-    CURSOR_DIR, GEMINI_DIR, GITHUB_DIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+    CURSOR_DIR, GEMINI_DIR, GITHUB_DIR, MIMOCODE_HOME_ENV, MIMOCODE_PLUGIN_FILE, MIMOCODE_SUBDIR,
+    OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
 };
 
 use super::constants::{
@@ -27,6 +28,7 @@ use super::is_claude_hook_command;
 
 // Embedded OpenCode plugin (auto-rewrite)
 const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
+const MIMOCODE_PLUGIN: &str = include_str!("../../hooks/mimocode/rtk.ts");
 
 // Embedded Pi extension (auto-rewrite)
 const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
@@ -3577,6 +3579,75 @@ fn remove_opencode_plugin(ctx: InitContext) -> Result<Vec<PathBuf>> {
     Ok(removed)
 }
 
+fn resolve_mimocode_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var(MIMOCODE_HOME_ENV) {
+        if !dir.is_empty() {
+            return Ok(PathBuf::from(dir));
+        }
+    }
+    resolve_home_subdir(CONFIG_DIR).map(|p| p.join(MIMOCODE_SUBDIR))
+}
+
+fn mimocode_plugin_path(dir: &Path) -> PathBuf {
+    dir.join(PLUGIN_SUBDIR).join(MIMOCODE_PLUGIN_FILE)
+}
+
+fn ensure_mimocode_plugin_installed(path: &Path, ctx: InitContext) -> Result<bool> {
+    let InitContext { dry_run, .. } = ctx;
+    if !dry_run {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create MiniMax Code plugin directory: {}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+    write_if_changed(path, MIMOCODE_PLUGIN, "MiniMax Code plugin", ctx)
+}
+
+pub fn run_mimocode_mode(_global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let path = mimocode_plugin_path(&resolve_mimocode_dir()?);
+    let installed = ensure_mimocode_plugin_installed(&path, ctx)?;
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        let status = if installed {
+            "installed"
+        } else {
+            "already up to date"
+        };
+        println!("RTK MiniMax Code plugin {}:", status);
+        println!("  Plugin: {}", path.display());
+        println!("\nRestart MiniMax Code to activate. Test with: git status");
+    }
+    Ok(())
+}
+
+pub fn uninstall_mimocode(_global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+    let path = mimocode_plugin_path(&resolve_mimocode_dir()?);
+    if !path.exists() {
+        println!("RTK MiniMax Code support was not installed (nothing to remove)");
+    } else if dry_run {
+        println!(
+            "[dry-run] would remove MiniMax Code plugin: {}",
+            path.display()
+        );
+        print_dry_run_footer();
+    } else {
+        fs::remove_file(&path)
+            .with_context(|| format!("Failed to remove MiniMax Code plugin: {}", path.display()))?;
+        if verbose > 0 {
+            eprintln!("Removed MiniMax Code plugin: {}", path.display());
+        }
+        println!("RTK uninstalled (MiniMax Code):\n  - {}", path.display());
+    }
+    Ok(())
+}
+
 // ─── Cursor Agent support ─────────────────────────────────────────────
 
 fn resolve_cursor_dir() -> Result<PathBuf> {
@@ -5250,6 +5321,19 @@ mod tests {
         assert!(plugin_path.exists());
         fs::remove_file(&plugin_path).unwrap();
         assert!(!plugin_path.exists());
+    }
+
+    #[test]
+    fn test_mimocode_plugin_install_and_update() {
+        let temp = TempDir::new().unwrap();
+        let plugin_path = mimocode_plugin_path(&temp.path().join("mimocode"));
+
+        assert!(ensure_mimocode_plugin_installed(&plugin_path, InitContext::default()).unwrap());
+        assert_eq!(fs::read_to_string(&plugin_path).unwrap(), MIMOCODE_PLUGIN);
+
+        fs::write(&plugin_path, "// stale plugin").unwrap();
+        assert!(ensure_mimocode_plugin_installed(&plugin_path, InitContext::default()).unwrap());
+        assert_eq!(fs::read_to_string(&plugin_path).unwrap(), MIMOCODE_PLUGIN);
     }
 
     #[test]
