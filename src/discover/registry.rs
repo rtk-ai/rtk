@@ -1061,6 +1061,72 @@ fn rewrite_pipeline_final_stage(
     })
 }
 
+/// A plain `cat` invocation (no flags, no files) is byte-transparent: it
+/// copies stdin to stdout unchanged. `producer | cat` and `producer` are
+/// therefore equivalent on stdout, so the producer can be rewritten exactly
+/// like a standalone command without risking a change to what the pipe's
+/// consumer sees. Any argument (`cat -n`, `cat -`, `cat file`) changes that
+/// contract, so only the bare word qualifies.
+fn is_transparent_cat_sink(stage: &str) -> bool {
+    stage.trim() == "cat"
+}
+
+/// Issue #3722: pipelines never rewrite their producer (see
+/// [`rewrite_compound`]'s doc comment) because a filter's reformatted output
+/// could change what a downstream consumer reads. That contract holds even
+/// for [`rewrite_pipeline_final_stage`]'s allowlisted final-stage rewrite —
+/// it only replaces the *sink*, never the producer feeding it.
+///
+/// `producer | cat` is the one shape where rewriting the producer is
+/// provably safe: a bare `cat` sink is byte-transparent (see
+/// [`is_transparent_cat_sink`]), so nothing downstream of the pipe can
+/// observe the difference between `producer` and `rtk producer`. The
+/// exception is scoped tightly — a single stdout pipe, no further pipe
+/// stages — so a pipeline with real intermediate processing (`a | b | cat`)
+/// keeps the general raw-producer contract.
+fn rewrite_producer_before_transparent_sink(
+    cmd: &str,
+    tokens: &[ParsedToken],
+    seg_start: usize,
+    first_pipe_offset: usize,
+    end_offset: usize,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+) -> Option<String> {
+    let pipe_tok = tokens
+        .iter()
+        .find(|t| t.offset == first_pipe_offset && matches!(t.kind, TokenKind::Pipe(_)))?;
+    if pipe_tok.kind != TokenKind::Pipe(PipeKind::Stdout) {
+        return None;
+    }
+    let has_further_pipe = tokens.iter().any(|t| {
+        t.offset > first_pipe_offset
+            && t.offset < end_offset
+            && matches!(t.kind, TokenKind::Pipe(_))
+    });
+    if has_further_pipe {
+        return None;
+    }
+
+    let sink_start = first_pipe_offset + pipe_tok.value.len();
+    if !is_transparent_cat_sink(&cmd[sink_start..end_offset]) {
+        return None;
+    }
+
+    let producer = cmd[seg_start..first_pipe_offset].trim();
+    let rewritten_producer = rewrite_segment_inner(
+        producer,
+        excluded,
+        transparent_prefixes,
+        RewriteContext::Normal,
+        0,
+    )?;
+    if rewritten_producer == producer {
+        return None;
+    }
+    Some(format!("{} | cat", rewritten_producer))
+}
+
 /// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each segment.
 fn rewrite_compound(
     cmd: &str,
@@ -1120,7 +1186,18 @@ fn rewrite_compound(
                     analysis,
                     excluded,
                     transparent_prefixes,
-                );
+                )
+                .or_else(|| {
+                    rewrite_producer_before_transparent_sink(
+                        cmd,
+                        &tokens,
+                        seg_start,
+                        tok.offset,
+                        analysis.end_offset,
+                        excluded,
+                        transparent_prefixes,
+                    )
+                });
 
                 if let Some(rewritten) = rewritten_pipeline {
                     any_changed = true;
@@ -5813,6 +5890,54 @@ mod tests {
             rewrite_command_no_prefixes("cargo test |& grep FAILED && git status", &[]),
             Some("cargo test |& grep FAILED && rtk git status".into())
         );
+    }
+
+    // --- transparent `| cat` sink (issue #3722): `cat` with no arguments is
+    // byte-transparent, so rewriting the producer changes nothing downstream.
+
+    #[test]
+    fn test_rewrite_producer_before_transparent_cat_sink() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status | cat", &[]),
+            Some("rtk git status | cat".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("git status --porcelain | cat", &[]),
+            Some("rtk git status --porcelain | cat".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_producer_before_cat_then_and() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status | cat && git log -3", &[]),
+            Some("rtk git status | cat && rtk git log -3".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_cat_with_args_stays_raw() {
+        // `cat -n` is not byte-transparent (adds line numbers), so the
+        // producer must not be rewritten.
+        assert_eq!(
+            rewrite_command_no_prefixes("git status | cat -n", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_multi_pipe_to_cat_stays_raw() {
+        // A second pipe stage still carries the raw-content contract, so the
+        // transparent-sink exception only applies to a single pipe.
+        assert_eq!(
+            rewrite_command_no_prefixes("git log | grep feat | cat", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_stderr_pipe_to_cat_stays_raw() {
+        assert_eq!(rewrite_command_no_prefixes("cargo test |& cat", &[]), None);
     }
 
     // --- line-continuation handling (issue #1564) ---
