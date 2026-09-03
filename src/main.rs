@@ -2358,7 +2358,7 @@ fn run_cli() -> Result<i32> {
             // Intelligent routing: delegate to specialized filters
             match args[0].as_str() {
                 "tsc" | "typescript" => tsc_cmd::run(&args[1..], cli.verbose)?,
-                "eslint" => lint_cmd::run(&args[1..], cli.verbose)?,
+                "eslint" => lint_cmd::run(&args, cli.verbose)?,
                 "prisma" => {
                     // Route to prisma_cmd based on subcommand
                     if args.len() > 1 {
