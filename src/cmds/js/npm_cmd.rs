@@ -1,6 +1,7 @@
 //! Filters npm output and auto-injects the "run" subcommand when appropriate.
 
 use crate::core::runner;
+use crate::core::stream::{LineHandler, LineStreamFilter};
 use crate::core::utils::resolved_command;
 use anyhow::Result;
 
@@ -106,8 +107,7 @@ pub fn exec(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
 /// Shared command-execution path for `run` (npm) and `exec` (npx).
 ///
 /// Builds the resolved command, appends args, applies `SKIP_ENV_VALIDATION`,
-/// emits the verbose log line, and routes through `runner::run_filtered` with
-/// the npm output filter.
+/// emits the verbose log line, and streams through the npm output filter.
 fn run_filtered(name: &str, args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
     let mut cmd = resolved_command(name);
     for arg in args {
@@ -123,48 +123,71 @@ fn run_filtered(name: &str, args: &[String], verbose: u8, skip_env: bool) -> Res
         eprintln!("Running: {} {}", name, args_display);
     }
 
-    runner::run_filtered(
+    runner::run_streamed(
         cmd,
         name,
         &args_display,
-        filter_npm_output,
+        Box::new(LineStreamFilter::new(NpmLineHandler::default())),
         runner::RunOptions::default(),
     )
 }
 
-/// Filter npm run output - strip boilerplate, progress bars, npm WARN
-fn filter_npm_output(output: &str) -> String {
-    let mut result = Vec::new();
+#[derive(Default)]
+struct NpmLineHandler {
+    emitted_line: bool,
+}
 
-    for line in output.lines() {
+impl LineHandler for NpmLineHandler {
+    fn should_skip(&mut self, line: &str) -> bool {
         // Skip npm boilerplate
         if line.starts_with('>') && line.contains('@') {
-            continue;
+            return true;
         }
         // Skip npm lifecycle scripts
         if line.trim_start().starts_with("npm WARN") {
-            continue;
+            return true;
         }
         if line.trim_start().starts_with("npm notice") {
-            continue;
+            return true;
         }
         // Skip progress indicators
         if line.contains("⸩") || line.contains("⸨") || line.contains("...") && line.len() < 10 {
-            continue;
+            return true;
         }
         // Skip empty lines
         if line.trim().is_empty() {
-            continue;
+            return true;
         }
 
-        result.push(line.to_string());
+        false
     }
 
-    if result.is_empty() {
-        "ok".to_string()
-    } else {
-        result.join("\n")
+    fn observe_line(&mut self, _line: &str) {
+        self.emitted_line = true;
     }
+
+    fn format_summary(&self, _exit_code: i32, raw: &str) -> Option<String> {
+        if self.emitted_line || raw.is_empty() {
+            return None;
+        }
+
+        Some(crate::core::guard::never_worse(raw, "ok\n").to_string())
+    }
+}
+
+#[cfg(test)]
+fn filter_npm_output(output: &str) -> String {
+    use crate::core::stream::StreamFilter;
+
+    let mut filter = LineStreamFilter::new(NpmLineHandler::default());
+    let mut filtered = output
+        .lines()
+        .filter_map(|line| filter.feed_line(line))
+        .collect::<String>();
+    if let Some(summary) = filter.on_exit(0, output) {
+        filtered.push_str(&summary);
+    }
+    filtered.trim_end_matches('\n').to_string()
 }
 
 #[cfg(test)]
@@ -188,6 +211,31 @@ npm notice
         assert!(!result.contains("npm notice"));
         assert!(!result.contains("> project@"));
         assert!(result.contains("Build completed"));
+    }
+
+    #[test]
+    fn test_filter_npm_output_preserves_line_filtering_semantics() {
+        let output = "> project@1.0.0 build\n\
+> next build\n\
+  npm WARN deprecated package\n\
+npm notice update available\n\
+⸩\n\
+...\n\
+\n\
+meaningful output\n";
+
+        assert_eq!(filter_npm_output(output), "> next build\nmeaningful output");
+    }
+
+    #[test]
+    fn test_filter_npm_output_all_filtered() {
+        let output = "> project@1.0.0 build\nnpm WARN hidden\nnpm notice hidden\n\n";
+        assert_eq!(filter_npm_output(output), "ok");
+    }
+
+    #[test]
+    fn test_filter_npm_output_truly_silent() {
+        assert_eq!(filter_npm_output(""), "");
     }
 
     #[test]
