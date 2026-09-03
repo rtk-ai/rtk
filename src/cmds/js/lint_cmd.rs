@@ -57,6 +57,39 @@ fn is_python_linter(linter: &str) -> bool {
     matches!(linter, "ruff" | "pylint" | "mypy" | "flake8")
 }
 
+/// Detect the JS/TS linter from common config files in the current directory.
+/// Only checks well-known filenames — no full directory scan.
+fn detect_js_linter_from_config() -> Option<&'static str> {
+    use std::path::Path;
+
+    let cwd = std::env::current_dir().ok()?;
+
+    for candidate in &[
+        ("eslint.config.js", "eslint"),
+        ("eslint.config.mjs", "eslint"),
+        ("eslint.config.cjs", "eslint"),
+        ("eslint.config.ts", "eslint"),
+        ("eslint.config.mts", "eslint"),
+        ("eslint.config.cts", "eslint"),
+        (".eslintrc.js", "eslint"),
+        (".eslintrc.cjs", "eslint"),
+        (".eslintrc.yaml", "eslint"),
+        (".eslintrc.yml", "eslint"),
+        (".eslintrc.json", "eslint"),
+        (".eslintrc", "eslint"),
+        (".oxlintrc.json", "oxlint"),
+        (".oxlintrc.jsonc", "oxlint"),
+        ("oxlint.config.ts", "oxlint"),
+        ("biome.json", "biome"),
+        ("biome.jsonc", "biome"),
+    ] {
+        if Path::new(&cwd).join(candidate.0).exists() {
+            return Some(candidate.1);
+        }
+    }
+    None
+}
+
 /// Strip package manager prefixes (npx, bunx, pnpm, pnpm exec, yarn) from args.
 /// Returns the number of args to skip.
 fn strip_pm_prefix(args: &[String]) -> usize {
@@ -83,7 +116,12 @@ fn detect_linter(args: &[String]) -> (&str, bool) {
     if is_path_or_flag {
         ("eslint", false)
     } else {
-        (&args[0], true)
+        let name = &args[0];
+        if name == "lint" || name == "oxlint" {
+            ("oxlint", true)
+        } else {
+            (name, true)
+        }
     }
 }
 
@@ -93,7 +131,15 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let skip = strip_pm_prefix(args);
     let effective_args = &args[skip..];
 
-    let (linter, explicit) = detect_linter(effective_args);
+    let (mut linter, mut explicit) = detect_linter(effective_args);
+
+    // When no explicit linter was given, try to detect from project config files
+    if !explicit {
+        if let Some(detected) = detect_js_linter_from_config() {
+            linter = detected;
+            explicit = true;
+        }
+    }
 
     // Python linters use resolved_command() directly (they're on PATH via pip/pipx)
     // JS linters use package_manager_exec (npx/pnpm exec)
@@ -107,6 +153,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     match linter {
         "eslint" => {
             cmd.arg("-f").arg("json");
+        }
+        "oxlint" => {
+            cmd.arg("--format").arg("json");
         }
         // Force JSON output for ruff check
         "ruff" if !effective_args.contains(&"--output-format".to_string()) => {
@@ -146,11 +195,14 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         if linter == "pylint" && arg.starts_with("--output-format") {
             continue;
         }
+        if linter == "oxlint" && arg.starts_with("--format") {
+            continue;
+        }
         cmd.arg(arg);
     }
 
-    // Default to current directory if no path specified (for ruff/pylint/mypy/eslint)
-    if matches!(linter, "ruff" | "pylint" | "mypy" | "eslint") {
+    // Default to current directory if no path specified
+    if matches!(linter, "ruff" | "pylint" | "mypy" | "eslint" | "oxlint") {
         let has_path = effective_args
             .iter()
             .skip(start_idx)
@@ -186,6 +238,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     // Dispatch to appropriate filter based on linter
     let filtered = match linter {
         "eslint" => filter_eslint_json(&result.stdout),
+        "oxlint" => filter_eslint_json(&result.stdout),
         "ruff" => {
             // Reuse ruff_cmd's JSON parser
             if !result.stdout.trim().is_empty() {
@@ -216,19 +269,15 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     Ok(0)
 }
 
-/// Filter ESLint JSON output - group by rule and file
+/// Filter ESLint/oxlint JSON output - group by rule and file
 fn filter_eslint_json(output: &str) -> String {
     let results: Result<Vec<EslintResult>, _> = serde_json::from_str(output);
 
     let results = match results {
         Ok(r) => r,
-        Err(e) => {
-            // Fallback if JSON parsing fails
-            return format!(
-                "ESLint output (JSON parse failed: {})\n{}",
-                e,
-                truncate(output, config::limits().passthrough_max_chars)
-            );
+        Err(_) => {
+            // Fallback if JSON parsing fails: try generic lint filter
+            return filter_generic_lint(output);
         }
     };
 
@@ -241,12 +290,16 @@ fn filter_eslint_json(output: &str) -> String {
         return "ESLint: No issues found".to_string();
     }
 
-    // Group messages by rule
-    let mut by_rule: HashMap<String, usize> = HashMap::new();
+    // Group messages by rule, capturing a sample message per rule
+    let mut by_rule: HashMap<String, (usize, String)> = HashMap::new();
     for result in &results {
         for msg in &result.messages {
             if let Some(rule) = &msg.rule_id {
-                *by_rule.entry(rule.clone()).or_insert(0) += 1;
+                let entry = by_rule.entry(rule.clone()).or_insert((0, String::new()));
+                entry.0 += 1;
+                if entry.1.is_empty() && !msg.message.is_empty() {
+                    entry.1 = msg.message.clone();
+                }
             }
         }
     }
@@ -266,14 +319,18 @@ fn filter_eslint_json(output: &str) -> String {
         total_errors, total_warnings, total_files
     ));
 
-    // Show top rules
+    // Show top rules with sample messages
     let mut rule_counts: Vec<_> = by_rule.iter().collect();
-    rule_counts.sort_by(|a, b| b.1.cmp(a.1));
+    rule_counts.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
 
     if !rule_counts.is_empty() {
         result.push_str("Top rules:\n");
-        for (rule, count) in rule_counts.iter().take(10) {
-            result.push_str(&format!("  {} ({}x)\n", rule, count));
+        for (rule, (count, msg)) in rule_counts.iter().take(10) {
+            result.push_str(&format!("  {} ({}x)", rule, count));
+            if !msg.is_empty() {
+                result.push_str(&format!(": {}", msg));
+            }
+            result.push('\n');
         }
         result.push('\n');
     }
@@ -285,16 +342,24 @@ fn filter_eslint_json(output: &str) -> String {
         let short_path = compact_path(&file_result.file_path);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
-        let mut file_rules: HashMap<String, usize> = HashMap::new();
+        let mut file_rules: HashMap<String, (usize, String)> = HashMap::new();
         for msg in &file_result.messages {
             if let Some(rule) = &msg.rule_id {
-                *file_rules.entry(rule.clone()).or_insert(0) += 1;
+                let entry = file_rules.entry(rule.clone()).or_insert((0, String::new()));
+                entry.0 += 1;
+                if entry.1.is_empty() && !msg.message.is_empty() {
+                    entry.1 = msg.message.clone();
+                }
             }
         }
         let mut file_rule_counts: Vec<_> = file_rules.iter().collect();
-        file_rule_counts.sort_by(|a, b| b.1.cmp(a.1));
-        for (rule, count) in file_rule_counts.iter().take(3) {
-            result.push_str(&format!("    {} ({})\n", rule, count));
+        file_rule_counts.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+        for (rule, (count, msg)) in file_rule_counts.iter().take(3) {
+            result.push_str(&format!("    {} ({})", rule, count));
+            if !msg.is_empty() {
+                result.push_str(&format!(": {}", msg));
+            }
+            result.push('\n');
         }
     }
 
@@ -321,13 +386,9 @@ fn filter_pylint_json(output: &str) -> String {
 
     let diagnostics = match diagnostics {
         Ok(d) => d,
-        Err(e) => {
-            // Fallback if JSON parsing fails
-            return format!(
-                "Pylint output (JSON parse failed: {})\n{}",
-                e,
-                truncate(output, config::limits().passthrough_max_chars)
-            );
+        Err(_) => {
+            // Fallback if JSON parsing fails: try generic lint filter
+            return filter_generic_lint(output);
         }
     };
 
@@ -460,8 +521,16 @@ fn filter_generic_lint(output: &str) -> String {
         }
     }
 
+    let trimmed = output.trim();
     if errors == 0 && warnings == 0 {
-        return "Lint: No issues found".to_string();
+        if trimmed.is_empty() {
+            return "Lint: No issues found".to_string();
+        }
+        // Output exists but doesn't match "warning"/"error" keywords — pass through raw
+        return format!(
+            "Lint output:\n{}",
+            truncate(trimmed, crate::core::config::limits().passthrough_max_chars)
+        );
     }
 
     let mut result = String::new();
@@ -704,5 +773,95 @@ mod tests {
         assert!(!is_python_linter("eslint"));
         assert!(!is_python_linter("biome"));
         assert!(!is_python_linter("unknown"));
+    }
+
+    #[test]
+    fn test_detect_linter_oxlint() {
+        let args: Vec<String> = vec!["oxlint".into(), "src/".into()];
+        let (linter, explicit) = detect_linter(&args);
+        assert_eq!(linter, "oxlint");
+        assert!(explicit);
+    }
+
+    #[test]
+    fn test_detect_linter_lint_script_detected_as_oxlint() {
+        // When the script name is "lint", assume oxlint so rtk handles it explicitly
+        let args: Vec<String> = vec!["lint".into(), "src/".into()];
+        let (linter, explicit) = detect_linter(&args);
+        assert_eq!(linter, "oxlint");
+        assert!(explicit);
+    }
+
+    #[test]
+    fn test_detect_js_linter_from_config_found() {
+        let dir = std::env::temp_dir().join("rtk-test-oxlint-config");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join(".oxlintrc.json"), "{}");
+        let orig_cwd = std::env::current_dir().ok();
+        std::env::set_current_dir(&dir).ok();
+        let result = detect_js_linter_from_config();
+        std::env::set_current_dir(orig_cwd.unwrap()).ok();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(result, Some("oxlint"));
+    }
+
+    #[test]
+    fn test_detect_js_linter_from_config_flat_config() {
+        // ESLint v9 flat config should be detected
+        let dir = std::env::temp_dir().join("rtk-test-eslint-flat-config");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("eslint.config.js"), "{}");
+        let orig_cwd = std::env::current_dir().ok();
+        std::env::set_current_dir(&dir).ok();
+        let result = detect_js_linter_from_config();
+        std::env::set_current_dir(orig_cwd.unwrap()).ok();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(result, Some("eslint"));
+    }
+
+    #[test]
+    fn test_detect_js_linter_from_config_not_found() {
+        // Should return None in the test environment (no linter config files)
+        let result = detect_js_linter_from_config();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_filter_eslint_json_includes_messages() {
+        let json = r#"[
+            {
+                "filePath": "/Users/test/project/src/utils.ts",
+                "messages": [
+                    {
+                        "ruleId": "prefer-const",
+                        "severity": 1,
+                        "message": "Use const instead of let",
+                        "line": 10,
+                        "column": 5
+                    }
+                ],
+                "errorCount": 0,
+                "warningCount": 1
+            }
+        ]"#;
+        let result = filter_eslint_json(json);
+        assert!(result.contains("prefer-const"));
+        assert!(result.contains("Use const instead of let"));
+    }
+
+    #[test]
+    fn test_filter_eslint_json_fallback_to_generic() {
+        // Non-JSON output should fall back gracefully, not show a JSON parse error
+        let output = "Some linter output with warning: unused variable";
+        let result = filter_eslint_json(output);
+        assert!(!result.contains("JSON parse failed"));
+        assert!(result.contains("warning"));
+    }
+
+    #[test]
+    fn test_filter_eslint_json_empty_output() {
+        // Empty/whitespace output should say no issues found
+        let result = filter_eslint_json("");
+        assert!(result.contains("No issues found"));
     }
 }
