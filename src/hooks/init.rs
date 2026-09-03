@@ -14,13 +14,15 @@ use crate::hooks::constants::{
 };
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, DROID_DIR,
-    DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR,
-    DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
-    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
-    HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
-    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR,
-    VIBE_HOOKS_FILE, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
+    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CRUSH_BASH_MATCHER, CRUSH_DIR,
+    CRUSH_GLOBAL_CONFIG_ENV, CRUSH_HOOK_COMMAND, CRUSH_HOOK_NAME, CRUSH_LOCAL_RC_FILE,
+    CRUSH_RC_FILE, CURSOR_HOOK_COMMAND, DROID_DIR, DROID_EXECUTE_MATCHER, DROID_HOME_ENV,
+    DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR, DROID_HOOK_COMMAND, DROID_SETTINGS_FILE,
+    GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
+    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
+    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOKS_FILE,
+    VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
 };
 use super::integrity;
 use super::is_claude_hook_command;
@@ -4509,6 +4511,306 @@ fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
     Ok(removed)
 }
 
+// ── Crush integration ───────────────────────────────────────
+
+fn resolve_crush_global_dir() -> Result<PathBuf> {
+    resolve_crush_global_dir_from(
+        std::env::var_os(CRUSH_GLOBAL_CONFIG_ENV),
+        std::env::var_os("XDG_CONFIG_HOME"),
+        dirs::home_dir(),
+    )
+}
+
+fn resolve_crush_global_dir_from(
+    crush_global_config: Option<OsString>,
+    xdg_config_home: Option<OsString>,
+    home_dir: Option<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(path) = crush_global_config.filter(|path| !path.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(path) = xdg_config_home.filter(|path| !path.is_empty()) {
+        return Ok(PathBuf::from(path).join("crush"));
+    }
+    home_dir.map(|h| h.join(CRUSH_DIR)).context(
+        "Cannot determine Crush config directory. Set $CRUSH_GLOBAL_CONFIG, $XDG_CONFIG_HOME, or $HOME.",
+    )
+}
+
+fn select_crush_project_rc(project_dir: &Path) -> PathBuf {
+    let dotfile = project_dir.join(CRUSH_LOCAL_RC_FILE);
+    if dotfile.exists() {
+        return dotfile;
+    }
+
+    let plain = project_dir.join(CRUSH_RC_FILE);
+    if plain.exists() {
+        return plain;
+    }
+
+    dotfile
+}
+
+fn crush_project_rc_candidates(project_dir: &Path) -> [PathBuf; 2] {
+    [
+        project_dir.join(CRUSH_LOCAL_RC_FILE),
+        project_dir.join(CRUSH_RC_FILE),
+    ]
+}
+
+/// Entry point for `rtk init --agent crush` and its global variant.
+pub fn run_crush_mode(global: bool, patch_mode: PatchMode, ctx: InitContext) -> Result<()> {
+    let crushrc_path = if global {
+        resolve_crush_global_dir()?.join(CRUSH_RC_FILE)
+    } else {
+        let project_dir = std::env::current_dir().context("Cannot determine current directory")?;
+        select_crush_project_rc(&project_dir)
+    };
+
+    run_crush_mode_at(&crushrc_path, global, patch_mode, ctx)
+}
+
+fn run_crush_mode_at(
+    crushrc_path: &Path,
+    global: bool,
+    patch_mode: PatchMode,
+    ctx: InitContext,
+) -> Result<()> {
+    let outcome = patch_crush_rc(crushrc_path, patch_mode, ctx)?;
+
+    if ctx.dry_run {
+        print_dry_run_footer();
+    } else if let Some(summary_verb) = outcome.summary_verb() {
+        let scope = if global { "global" } else { "project" };
+        println!("\nCrush hook {summary_verb} ({scope}).\n");
+        println!("  Config: {}", crushrc_path.display());
+        println!("  Command: {CRUSH_HOOK_COMMAND}");
+        println!("  Restart Crush. Test with: git status\n");
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CrushHookPatchOutcome {
+    Installed,
+    AlreadyPresent,
+    Skipped,
+}
+
+impl CrushHookPatchOutcome {
+    fn summary_verb(self) -> Option<&'static str> {
+        match self {
+            Self::Installed => Some("installed"),
+            Self::AlreadyPresent => Some("already present"),
+            Self::Skipped => None,
+        }
+    }
+}
+
+fn patch_crush_rc(
+    crushrc_path: &Path,
+    patch_mode: PatchMode,
+    ctx: InitContext,
+) -> Result<CrushHookPatchOutcome> {
+    let InitContext { verbose, dry_run } = ctx;
+    let existing = if crushrc_path.exists() {
+        fs::read_to_string(crushrc_path)
+            .with_context(|| format!("Failed to read {}", crushrc_path.display()))?
+    } else {
+        String::new()
+    };
+
+    if crushrc_has_rtk_hook(&existing) {
+        if verbose > 0 {
+            eprintln!("Crush config already has RTK hook");
+        }
+        return Ok(CrushHookPatchOutcome::AlreadyPresent);
+    }
+
+    if patch_mode == PatchMode::Skip {
+        println!(
+            "\nManual setup needed: add this line to {}:\n\n  {}",
+            crushrc_path.display(),
+            crush_hook_entry().trim_end()
+        );
+        return Ok(CrushHookPatchOutcome::Skipped);
+    }
+
+    if patch_mode == PatchMode::Ask {
+        if dry_run {
+            println!(
+                "[dry-run] would prompt before patching {}",
+                crushrc_path.display()
+            );
+        } else {
+            print!("Patch {} with RTK hook? [y/N] ", crushrc_path.display());
+            std::io::stdout().flush().ok();
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer).ok();
+            if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+                println!(
+                    "Skipped. Re-run with --auto-patch, or add the hook manually to {}",
+                    crushrc_path.display()
+                );
+                return Ok(CrushHookPatchOutcome::Skipped);
+            }
+        }
+    }
+
+    let entry = crush_hook_entry();
+    let new_content = if existing.is_empty() {
+        entry.clone()
+    } else if existing.ends_with("\n\n") {
+        format!("{existing}{entry}")
+    } else if existing.ends_with('\n') {
+        format!("{existing}\n{entry}")
+    } else {
+        format!("{existing}\n\n{entry}")
+    };
+
+    if dry_run {
+        println!(
+            "[dry-run] would patch Crush config: {}",
+            crushrc_path.display()
+        );
+        if verbose > 0 {
+            println!("[dry-run] appended entry:\n{entry}");
+        }
+    } else {
+        let parent = crushrc_path.parent().with_context(|| {
+            format!(
+                "Cannot write to {}: path has no parent directory",
+                crushrc_path.display()
+            )
+        })?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create Crush config dir: {}", parent.display()))?;
+        atomic_write(crushrc_path, &new_content)
+            .with_context(|| format!("Failed to write {}", crushrc_path.display()))?;
+    }
+
+    Ok(CrushHookPatchOutcome::Installed)
+}
+
+fn crush_hook_entry() -> String {
+    format!(
+        "hook add PreToolUse --name {CRUSH_HOOK_NAME} --matcher '{CRUSH_BASH_MATCHER}' --command '{CRUSH_HOOK_COMMAND}' --timeout 10\n"
+    )
+}
+
+fn crushrc_has_rtk_hook(content: &str) -> bool {
+    content.lines().any(crushrc_line_is_rtk_hook)
+}
+
+fn crushrc_line_is_rtk_hook(line: &str) -> bool {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return false;
+    }
+
+    let tokens = crate::discover::lexer::shell_split(line);
+    if tokens.first().map(String::as_str) != Some("hook")
+        || tokens.get(1).map(String::as_str) != Some("add")
+        || tokens.get(2).map(String::as_str) != Some("PreToolUse")
+    {
+        return false;
+    }
+
+    tokens.windows(2).any(|pair| {
+        pair[0] == "--command" && pair.get(1).is_some_and(|value| value == CRUSH_HOOK_COMMAND)
+    }) || tokens
+        .iter()
+        .any(|token| token.strip_prefix("--command=") == Some(CRUSH_HOOK_COMMAND))
+}
+
+/// Remove RTK's Crush hook from local or global `crushrc` files.
+pub fn uninstall_crush(global: bool, ctx: InitContext) -> Result<()> {
+    let paths = if global {
+        vec![resolve_crush_global_dir()?.join(CRUSH_RC_FILE)]
+    } else {
+        let project_dir = std::env::current_dir().context("Cannot determine current directory")?;
+        crush_project_rc_candidates(&project_dir).to_vec()
+    };
+    let removed = uninstall_crush_at(&paths, ctx)?;
+
+    if removed.is_empty() {
+        println!("RTK Crush support was not installed (nothing to remove)");
+    } else {
+        let header = if ctx.dry_run {
+            "[dry-run] would uninstall RTK for Crush:"
+        } else {
+            "RTK uninstalled for Crush:"
+        };
+        println!("{header}");
+        for item in removed {
+            println!("  - {item}");
+        }
+        if !ctx.dry_run {
+            println!("\nRestart Crush to apply changes.");
+        }
+    }
+
+    if ctx.dry_run {
+        print_dry_run_footer();
+    }
+    Ok(())
+}
+
+fn uninstall_crush_at(paths: &[PathBuf], ctx: InitContext) -> Result<Vec<String>> {
+    let mut removed = Vec::new();
+
+    for path in paths.iter().filter(|path| path.exists()) {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let Some(new_content) = strip_crush_rtk_entries(&content) else {
+            continue;
+        };
+
+        if ctx.dry_run {
+            println!(
+                "[dry-run] would remove RTK hook from Crush config: {}",
+                path.display()
+            );
+        } else if new_content.trim().is_empty() {
+            // nosemgrep: filesystem-deletion -- uninstall removes only a config file containing RTK's hook
+            fs::remove_file(path)
+                .with_context(|| format!("Failed to remove {}", path.display()))?;
+        } else {
+            atomic_write(path, &new_content)
+                .with_context(|| format!("Failed to write {}", path.display()))?;
+        }
+        removed.push(format!(
+            "Crush config: removed RTK hook ({})",
+            path.display()
+        ));
+    }
+
+    if ctx.verbose > 0 && !removed.is_empty() {
+        eprintln!("Crush artifacts removed");
+    }
+    Ok(removed)
+}
+
+fn strip_crush_rtk_entries(content: &str) -> Option<String> {
+    let mut removed = false;
+    let mut output = String::with_capacity(content.len());
+
+    for line in content.split_inclusive('\n') {
+        if crushrc_line_is_rtk_hook(line) {
+            removed = true;
+        } else {
+            output.push_str(line);
+        }
+    }
+
+    if removed {
+        Some(output)
+    } else {
+        None
+    }
+}
+
 // ── Vibe integration ────────────────────────────────────────
 
 fn resolve_vibe_dir() -> Result<PathBuf> {
@@ -8435,6 +8737,161 @@ mod tests {
             "Hook config must not be written when the upsert aborts: {}",
             hook_path.display()
         );
+    }
+
+    // ── Crush tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_crush_global_dir_resolution_precedence() {
+        let home = PathBuf::from("/home/tester");
+        assert_eq!(
+            resolve_crush_global_dir_from(
+                Some(OsString::from("/custom/crush")),
+                Some(OsString::from("/xdg")),
+                Some(home.clone()),
+            )
+            .unwrap(),
+            PathBuf::from("/custom/crush")
+        );
+        assert_eq!(
+            resolve_crush_global_dir_from(
+                Some(OsString::new()),
+                Some(OsString::from("/xdg")),
+                Some(home.clone()),
+            )
+            .unwrap(),
+            PathBuf::from("/xdg/crush")
+        );
+        assert_eq!(
+            resolve_crush_global_dir_from(None, None, Some(home)).unwrap(),
+            PathBuf::from("/home/tester/.config/crush")
+        );
+        assert!(resolve_crush_global_dir_from(None, None, None).is_err());
+    }
+
+    #[test]
+    fn test_crush_project_config_selection_uses_documented_priority() {
+        let temp = TempDir::new().unwrap();
+        let dotfile = temp.path().join(CRUSH_LOCAL_RC_FILE);
+        let plain = temp.path().join(CRUSH_RC_FILE);
+
+        assert_eq!(select_crush_project_rc(temp.path()), dotfile);
+        fs::write(&plain, "# plain\n").unwrap();
+        assert_eq!(select_crush_project_rc(temp.path()), plain);
+        fs::write(&dotfile, "# dotfile\n").unwrap();
+        assert_eq!(select_crush_project_rc(temp.path()), dotfile);
+    }
+
+    #[test]
+    fn test_crush_hook_entry_matches_builtin_syntax() {
+        assert_eq!(
+            crush_hook_entry(),
+            "hook add PreToolUse --name rtk-rewrite --matcher '^bash$' --command 'rtk hook crush' --timeout 10\n"
+        );
+    }
+
+    #[test]
+    fn test_crush_hook_detection_parses_command_flag() {
+        assert!(!crushrc_has_rtk_hook(""));
+        assert!(!crushrc_has_rtk_hook(
+            "# hook add PreToolUse --command 'rtk hook crush'\n"
+        ));
+        assert!(!crushrc_has_rtk_hook(
+            "hook add PostToolUse --command 'rtk hook crush'\n"
+        ));
+        assert!(crushrc_has_rtk_hook(
+            "hook add PreToolUse --command \"rtk hook crush\" --name custom\n"
+        ));
+        assert!(crushrc_has_rtk_hook(
+            "hook add PreToolUse --command='rtk hook crush'\n"
+        ));
+    }
+
+    #[test]
+    fn test_crush_install_creates_parent_and_hook() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("nested").join(CRUSH_RC_FILE);
+
+        run_crush_mode_at(&path, true, PatchMode::Auto, InitContext::default()).unwrap();
+
+        assert_eq!(fs::read_to_string(path).unwrap(), crush_hook_entry());
+    }
+
+    #[test]
+    fn test_crush_install_preserves_existing_config_and_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(CRUSH_LOCAL_RC_FILE);
+        let user_config = "# user config\npermissions allow view\n";
+        fs::write(&path, user_config).unwrap();
+
+        run_crush_mode_at(&path, false, PatchMode::Auto, InitContext::default()).unwrap();
+        let after_first = fs::read_to_string(&path).unwrap();
+        run_crush_mode_at(&path, false, PatchMode::Auto, InitContext::default()).unwrap();
+
+        assert!(after_first.starts_with(user_config));
+        assert_eq!(fs::read_to_string(&path).unwrap(), after_first);
+        assert_eq!(after_first.matches(CRUSH_HOOK_COMMAND).count(), 1);
+    }
+
+    #[test]
+    fn test_crush_install_skip_and_dry_run_write_nothing() {
+        let temp = TempDir::new().unwrap();
+        let skipped = temp.path().join("skipped").join(CRUSH_RC_FILE);
+        let dry_run = temp.path().join("dry-run").join(CRUSH_RC_FILE);
+
+        run_crush_mode_at(&skipped, true, PatchMode::Skip, InitContext::default()).unwrap();
+        run_crush_mode_at(
+            &dry_run,
+            true,
+            PatchMode::Auto,
+            InitContext {
+                verbose: 0,
+                dry_run: true,
+            },
+        )
+        .unwrap();
+
+        assert!(!skipped.exists());
+        assert!(!dry_run.exists());
+    }
+
+    #[test]
+    fn test_crush_uninstall_removes_only_rtk_hook() {
+        let temp = TempDir::new().unwrap();
+        let dotfile = temp.path().join(CRUSH_LOCAL_RC_FILE);
+        let plain = temp.path().join(CRUSH_RC_FILE);
+        fs::write(
+            &dotfile,
+            format!("permissions allow view\n\n{}", crush_hook_entry()),
+        )
+        .unwrap();
+        fs::write(
+            &plain,
+            "hook add PreToolUse --name audit --command './audit.sh'\n",
+        )
+        .unwrap();
+        let paths = crush_project_rc_candidates(temp.path()).to_vec();
+
+        let removed_first = uninstall_crush_at(&paths, InitContext::default()).unwrap();
+        let removed_second = uninstall_crush_at(&paths, InitContext::default()).unwrap();
+
+        assert_eq!(removed_first.len(), 1);
+        assert!(removed_second.is_empty());
+        let remaining = fs::read_to_string(dotfile).unwrap();
+        assert!(remaining.contains("permissions allow view"));
+        assert!(!remaining.contains(CRUSH_HOOK_COMMAND));
+        assert!(fs::read_to_string(plain).unwrap().contains("./audit.sh"));
+    }
+
+    #[test]
+    fn test_crush_uninstall_removes_config_when_only_rtk_hook() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(CRUSH_LOCAL_RC_FILE);
+        fs::write(&path, crush_hook_entry()).unwrap();
+
+        uninstall_crush_at(std::slice::from_ref(&path), InitContext::default()).unwrap();
+
+        assert!(!path.exists());
     }
 
     // ── Vibe tests ────────────────────────────────────────────
