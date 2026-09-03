@@ -6,7 +6,7 @@
 
 The **lifecycle management** layer for LLM agent hooks: install, uninstall, verify integrity, audit usage, and manage trust. This component creates and maintains the hook artifacts that live in `hooks/` (root), but does **not** execute rewrite logic itself — that lives in `discover/registry`.
 
-Owns: `rtk init` installation flows (4 agents via `AgentTarget` enum + 3 special modes: Gemini, Codex, OpenCode), SHA-256 integrity verification, hook version checking, audit log analysis, `rtk rewrite` CLI entry point, and TOML filter trust management.
+Owns: `rtk init` installation flows (6 agents via `AgentTarget` enum, now including Mistral Vibe + 3 special modes: Gemini, Codex, OpenCode), SHA-256 integrity verification, hook version checking, audit log analysis, `rtk rewrite` CLI entry point, and TOML filter trust management.
 
 Does **not** own: the deployed hook scripts themselves (that's `hooks/`), the rewrite pattern registry (that's `discover/`), or command filtering (that's `cmds/`).
 
@@ -22,7 +22,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 `rtk init` supports these installation flows:
 
 | Mode | Command | Creates | Patches |
-|------|---------|---------|---------|
+|------|---------|---------|----------|
 | Default (global) | `rtk init -g` | Hook, SHA-256 hash, RTK.md | settings.json, CLAUDE.md |
 | Hook only | `rtk init -g --hook-only` | Hook, SHA-256 hash | settings.json |
 | Claude-MD (legacy) | `rtk init --claude-md` | 134-line RTK block | CLAUDE.md |
@@ -30,6 +30,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Cline | `rtk init --agent cline` | `.clinerules` | -- |
 | Codex | `rtk init --codex` | RTK.md in `$CODEX_HOME` or `~/.codex` | AGENTS.md |
 | Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
+| Pi | `rtk init --agent pi` | `.pi/extensions/rtk.ts` | -- |
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |
 
 
@@ -85,9 +86,11 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 |------|------------|-------------------|
 | Claude Code (rtk-rewrite.sh) | Yes | `permissionDecision: "ask"` — user prompted |
 | Copilot VS Code (rtk hook copilot) | Yes | `permissionDecision: "ask"` — user prompted |
+| Cursor (rtk hook cursor) | Ready | `permission: "ask",` — users will be prompted when Cursor enforces the permission; in the meantime, allow |
 | Gemini CLI (rtk hook gemini) | No (allow/deny only) | allow (limitation — no ask mode in Gemini) |
 | Copilot CLI (rtk hook copilot) | No updatedInput | deny-with-suggestion (unchanged) |
 | Codex | ask parsed but no-op | allow (limitation — fails open) |
+| Mistral Vibe (rtk hook vibe) | No native ask surface | passthrough — Vibe's own approval prompt fires on the rewritten command |
 
 ### Implementation
 
@@ -100,4 +103,4 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 Hook processors in `hook_cmd.rs` must return `Ok(())` on every path — success, no-match, parse error, and unexpected input. Returning `Err` propagates to `main()` and exits non-zero, which blocks the agent's command from executing. This violates the non-blocking guarantee documented in `hooks/README.md`.
 
 ## Adding New Functionality
-To add support for a new AI coding agent: (1) add the hook installation logic to `init.rs` following the existing agent patterns, (2) if the agent requires a custom hook protocol (like Gemini's `BeforeTool`), add a processor function in `hook_cmd.rs`, (3) add the agent's hook file path to `hook_check.rs` for validation, and (4) update `integrity.rs` with the expected hash for the new hook file. Test by running `rtk init` in a fresh environment and verifying the hook rewrites commands correctly in the target agent.
+To add support for a new AI coding agent: (1) add the hook installation logic to `init.rs` following the existing agent patterns, (2) if the agent requires a custom hook protocol (like Gemini's `BeforeTool` or Vibe's `pre_tool`), add a processor function in `hook_cmd.rs` and a matching `HookCommands::<Agent>` variant + `AgentTarget::<Agent>` enum entry in `main.rs`, (3) if the agent has installable permission surfaces (denylist / allowlist), wire them into `permissions.rs::check_command_for` via a new `Host::<Agent>` variant, and (4) update `integrity.rs` with the expected hash for the new hook file. Note that `hook_check.rs::maybe_warn()` only checks the Claude Code hook — other agents don't have an outdated-hook warning path. Test by running `rtk init` in a fresh environment and verifying the hook rewrites commands correctly in the target agent.

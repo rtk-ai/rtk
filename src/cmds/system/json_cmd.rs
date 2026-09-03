@@ -1,8 +1,11 @@
 //! Inspects JSON structure without showing values, saving tokens on large payloads.
 
+use crate::core::guard::never_worse;
 use crate::core::tracking;
+use crate::core::utils::{from_json_str, strip_leading_bom};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
@@ -47,17 +50,13 @@ pub fn run(file: &Path, max_depth: usize, schema_only: bool, verbose: u8) -> Res
     let content = fs::read_to_string(file)
         .with_context(|| format!("Failed to read file: {}", file.display()))?;
 
-    let output = if schema_only {
-        filter_json_string(&content, max_depth)?
-    } else {
-        filter_json_compact(&content, max_depth)?
-    };
-    println!("{}", output);
+    let shown = render_json(&content, max_depth, schema_only)?;
+    println!("{}", shown);
     timer.track(
         &format!("cat {}", file.display()),
         "rtk json",
         &content,
-        &output,
+        &shown,
     );
     Ok(())
 }
@@ -76,20 +75,50 @@ pub fn run_stdin(max_depth: usize, schema_only: bool, verbose: u8) -> Result<()>
         .read_to_string(&mut content)
         .context("Failed to read from stdin")?;
 
-    let output = if schema_only {
-        filter_json_string(&content, max_depth)?
-    } else {
-        filter_json_compact(&content, max_depth)?
-    };
-    println!("{}", output);
-    timer.track("cat - (stdin)", "rtk json -", &content, &output);
+    let shown = render_json(&content, max_depth, schema_only)?;
+    println!("{}", shown);
+    timer.track("cat - (stdin)", "rtk json -", &content, &shown);
     Ok(())
+}
+
+/// Filter `content` and fall back to it verbatim if the filtered form isn't
+/// smaller. Strips a leading BOM once, up front, and compares/falls back
+/// against the *stripped* content — otherwise a raw fallback would still
+/// carry the BOM into piped output (`rtk json foo.json | jq .` failing to
+/// parse it) even though `filter_json_*` already tolerates a BOM on input.
+///
+/// Returns `Cow` rather than an owned `String`: the raw-fallback case can
+/// then stay a zero-copy borrow of `content` instead of paying for another
+/// full copy of the (potentially large) input on every fallback.
+fn render_json<'a>(
+    content: &'a str,
+    max_depth: usize,
+    schema_only: bool,
+) -> Result<Cow<'a, str>> {
+    let content = strip_leading_bom(content);
+    let output = if schema_only {
+        filter_json_string(content, max_depth)?
+    } else {
+        filter_json_compact(content, max_depth)?
+    };
+    let shown = never_worse(content, &output);
+    // never_worse hands back one of its two inputs (no allocation); compare
+    // the `&str` fat pointers to tell which, instead of re-deriving the
+    // decision. Comparing the whole slice, not just `as_ptr()`, so a future
+    // never_worse that returns a sub-slice of `content` is not mistaken for
+    // `content` itself -- that would silently re-expand the output.
+    Ok(if std::ptr::eq(shown, content) {
+        Cow::Borrowed(content)
+    } else {
+        Cow::Owned(output)
+    })
 }
 
 /// Parse a JSON string and return compact representation with values preserved.
 /// Long strings are truncated, arrays are summarized.
 pub fn filter_json_compact(json_str: &str, max_depth: usize) -> Result<String> {
-    let value: Value = serde_json::from_str(json_str).context("Failed to parse JSON")?;
+    let value: Value =
+        from_json_str(json_str).context("Failed to parse JSON")?;
     Ok(compact_json(&value, 0, max_depth))
 }
 
@@ -180,7 +209,8 @@ fn compact_json(value: &Value, depth: usize, max_depth: usize) -> String {
 /// Parse a JSON string and return its schema representation (types only, no values).
 /// Useful for piping JSON from other commands (e.g., `gh api`, `curl`).
 pub fn filter_json_string(json_str: &str, max_depth: usize) -> Result<String> {
-    let value: Value = serde_json::from_str(json_str).context("Failed to parse JSON")?;
+    let value: Value =
+        from_json_str(json_str).context("Failed to parse JSON")?;
     Ok(extract_schema(&value, 0, max_depth))
 }
 
@@ -350,6 +380,54 @@ mod tests {
             "truncated value is {} bytes: {value}",
             value.len()
         );
+    }
+
+    #[test]
+    fn test_compact_parses_bom_prefixed_json() {
+        let json = "\u{feff}{\"name\": \"test\", \"count\": 42}";
+        let output = filter_json_compact(json, 5).expect("BOM-prefixed JSON must parse");
+        assert!(output.contains("name"));
+        assert!(output.contains("42"));
+        // Same input without BOM produces identical output.
+        assert_eq!(output, filter_json_compact(&json[3..], 5).unwrap());
+    }
+
+    #[test]
+    fn test_schema_parses_bom_prefixed_json() {
+        let json = "\u{feff}{\"name\": \"test\", \"count\": 42}";
+        let output = filter_json_string(json, 5).expect("BOM-prefixed JSON must parse");
+        assert!(output.contains("string"));
+        assert!(output.contains("int"));
+        assert_eq!(output, filter_json_string(&json[3..], 5).unwrap());
+    }
+
+    #[test]
+    fn test_render_json_fallback_strips_bom_when_filtered_is_larger() {
+        // A minified BOM-prefixed package.json: compact_json pretty-prints
+        // with indentation, so `filtered` ends up larger than the minified
+        // raw and never_worse falls back to raw. If that comparison (and the
+        // returned string) still carries the BOM, `rtk json foo.json | jq .`
+        // fails to parse — the exact bug this fix closes.
+        let raw = "\u{feff}{\"a\":1,\"b\":2,\"c\":3,\"d\":4,\"e\":5}";
+        let stripped = strip_leading_bom(raw);
+
+        // render_json takes the raw, un-stripped content directly — the same
+        // shape run()/run_stdin() hand it after fs::read_to_string /
+        // reading stdin. It must strip internally, not rely on the caller.
+        let shown = render_json(raw, 5, false).expect("must render");
+
+        // Sanity: this exercises the raw-fallback path (a zero-copy borrow
+        // of the stripped content), not the filtered/owned one.
+        assert!(
+            matches!(shown, Cow::Borrowed(_)),
+            "raw fallback should borrow, not allocate: {shown:?}"
+        );
+        assert_eq!(shown, stripped, "expected the raw (BOM-stripped) fallback");
+        assert!(
+            !shown.starts_with('\u{feff}'),
+            "fallback output must not carry a BOM into piped output: {shown:?}"
+        );
+        let _: Value = serde_json::from_str(&shown).expect("fallback output must parse as JSON");
     }
 
     #[test]

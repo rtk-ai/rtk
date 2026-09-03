@@ -3,7 +3,8 @@
 use crate::core::config;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
-use crate::core::utils::{package_manager_exec, resolved_command, truncate};
+use crate::core::truncate::{CAP_ERRORS, CAP_WARNINGS};
+use crate::core::utils::{resolved_command, tool_exec, truncate, MissingTool};
 use crate::mypy_cmd;
 use crate::ruff_cmd;
 use anyhow::{Context, Result};
@@ -71,6 +72,12 @@ fn strip_pm_prefix(args: &[String]) -> usize {
     skip
 }
 
+/// The package runner named at the front of the args, if any. `bunx eslint`
+/// and `pnpm exec eslint` both name one; a bare `exec` does not.
+fn named_runner(args: &[String], skip: usize) -> Option<&str> {
+    args[..skip].iter().map(String::as_str).find(|a| *a != "exec")
+}
+
 /// Detect the linter name from args (after stripping PM prefixes).
 /// Returns the linter name and whether it was explicitly specified.
 fn detect_linter(args: &[String]) -> (&str, bool) {
@@ -86,11 +93,16 @@ fn detect_linter(args: &[String]) -> (&str, bool) {
     }
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+/// `runner` is the package runner the user named (`bunx eslint`), or None when
+/// nothing was named and lockfile detection applies.
+pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     let skip = strip_pm_prefix(args);
     let effective_args = &args[skip..];
+    // A runner stripped from the args was still named by the user, so it wins
+    // over lockfile detection just as an explicitly threaded one does.
+    let runner = runner.or_else(|| named_runner(args, skip));
 
     let (linter, explicit) = detect_linter(effective_args);
 
@@ -99,7 +111,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = if is_python_linter(linter) {
         resolved_command(linter)
     } else {
-        package_manager_exec(linter)
+        tool_exec(runner, linter, MissingTool::Fail)
     };
 
     // Add format flags based on linter
@@ -198,17 +210,18 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         _ => filter_generic_lint(&raw),
     };
 
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "lint", result.exit_code) {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
+    let hint = crate::core::tee::tee_and_hint(&raw, "lint", result.exit_code);
+    let shown = crate::core::runner::emit_guarded(&filtered, hint.as_deref(), &raw);
 
     timer.track(
-        &format!("{} {}", linter, args.join(" ")),
-        &format!("rtk lint {} {}", linter, args.join(" ")),
+        &format!("{} {}", linter, effective_args[start_idx..].join(" ")),
+        &format!(
+            "rtk lint {} {}",
+            linter,
+            effective_args[start_idx..].join(" ")
+        ),
         &raw,
-        &filtered,
+        &shown,
     );
 
     if !result.success() {
@@ -267,7 +280,6 @@ fn filter_eslint_json(output: &str) -> String {
         "ESLint: {} errors, {} warnings in {} files\n",
         total_errors, total_warnings, total_files
     ));
-    result.push_str("═══════════════════════════════════════\n");
 
     // Show top rules
     let mut rule_counts: Vec<_> = by_rule.iter().collect();
@@ -281,30 +293,38 @@ fn filter_eslint_json(output: &str) -> String {
         result.push('\n');
     }
 
-    // Show top files with most issues
+    // Show top files with most issues, plus the top rules in each
+    const MAX_FILES: usize = CAP_WARNINGS;
     result.push_str("Top files:\n");
-    for (file_result, count) in by_file.iter().take(10) {
+    for (file_result, count) in by_file.iter().take(MAX_FILES) {
         let short_path = compact_path(&file_result.file_path);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
-        // Show top 3 rules in this file
         let mut file_rules: HashMap<String, usize> = HashMap::new();
         for msg in &file_result.messages {
             if let Some(rule) = &msg.rule_id {
                 *file_rules.entry(rule.clone()).or_insert(0) += 1;
             }
         }
-
         let mut file_rule_counts: Vec<_> = file_rules.iter().collect();
         file_rule_counts.sort_by(|a, b| b.1.cmp(a.1));
-
         for (rule, count) in file_rule_counts.iter().take(3) {
             result.push_str(&format!("    {} ({})\n", rule, count));
         }
     }
 
-    if by_file.len() > 10 {
-        result.push_str(&format!("\n... +{} more files\n", by_file.len() - 10));
+    if by_file.len() > MAX_FILES {
+        result.push_str(&format!("\n… +{} more files\n", by_file.len() - MAX_FILES));
+        let all_file_lines = by_file
+            .iter()
+            .map(|(r, count)| format!("{} ({} issues)", compact_path(&r.file_path), count))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_file_lines, "eslint-files", MAX_FILES + 1)
+        {
+            result.push_str(&format!("  {}\n", hint));
+        }
     }
 
     result.trim().to_string()
@@ -385,7 +405,6 @@ fn filter_pylint_json(output: &str) -> String {
         result.push('\n');
     }
 
-    result.push_str("═══════════════════════════════════════\n");
 
     // Show top symbols (rules)
     let mut symbol_counts: Vec<_> = by_symbol.iter().collect();
@@ -400,8 +419,9 @@ fn filter_pylint_json(output: &str) -> String {
     }
 
     // Show top files
+    const MAX_FILES: usize = CAP_WARNINGS;
     result.push_str("Top files:\n");
-    for (file, count) in file_counts.iter().take(10) {
+    for (file, count) in file_counts.iter().take(MAX_FILES) {
         let short_path = compact_path(file);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
@@ -420,8 +440,18 @@ fn filter_pylint_json(output: &str) -> String {
         }
     }
 
-    if file_counts.len() > 10 {
-        result.push_str(&format!("\n... +{} more files\n", file_counts.len() - 10));
+    if file_counts.len() > MAX_FILES {
+        result.push_str(&format!("\n… +{} more files\n", file_counts.len() - MAX_FILES));
+        let all_file_lines = file_counts
+            .iter()
+            .map(|(file, count)| format!("{} ({} issues)", compact_path(file), count))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_file_lines, "pylint-files", MAX_FILES + 1)
+        {
+            result.push_str(&format!("  {}\n", hint));
+        }
     }
 
     result.trim().to_string()
@@ -451,14 +481,20 @@ fn filter_generic_lint(output: &str) -> String {
 
     let mut result = String::new();
     result.push_str(&format!("Lint: {} errors, {} warnings\n", errors, warnings));
-    result.push_str("═══════════════════════════════════════\n");
 
-    for issue in issues.iter().take(20) {
+    const MAX_ISSUES: usize = CAP_ERRORS;
+    for issue in issues.iter().take(MAX_ISSUES) {
         result.push_str(&format!("{}\n", truncate(issue, 100)));
     }
 
-    if issues.len() > 20 {
-        result.push_str(&format!("\n... +{} more issues\n", issues.len() - 20));
+    if issues.len() > MAX_ISSUES {
+        result.push_str(&format!("\n… +{} more issues\n", issues.len() - MAX_ISSUES));
+        let all_issues = issues.join("\n");
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_issues, "lint-issues", MAX_ISSUES + 1)
+        {
+            result.push_str(&format!("  {}\n", hint));
+        }
     }
 
     result.trim().to_string()
@@ -684,4 +720,20 @@ mod tests {
         assert!(!is_python_linter("biome"));
         assert!(!is_python_linter("unknown"));
     }
+
+    #[test]
+    fn test_named_runner_recovers_the_stripped_prefix() {
+        let args: Vec<String> = ["bunx", "eslint", "."].iter().map(|s| s.to_string()).collect();
+        let skip = strip_pm_prefix(&args);
+        assert_eq!(named_runner(&args, skip), Some("bunx"));
+
+        let args: Vec<String> = ["pnpm", "exec", "eslint"].iter().map(|s| s.to_string()).collect();
+        let skip = strip_pm_prefix(&args);
+        assert_eq!(named_runner(&args, skip), Some("pnpm"));
+
+        let args: Vec<String> = ["eslint", "src"].iter().map(|s| s.to_string()).collect();
+        let skip = strip_pm_prefix(&args);
+        assert_eq!(named_runner(&args, skip), None);
+    }
 }
+

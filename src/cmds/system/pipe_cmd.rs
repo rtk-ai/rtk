@@ -1,7 +1,13 @@
 use anyhow::Result;
 use std::io::Read;
 
+use crate::core::guard::never_worse;
 use crate::core::stream::RAW_CAP;
+use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
+
+const MAX_PIPE_MATCHES: usize = CAP_WARNINGS;
+const MAX_PIPE_FILES: usize = CAP_WARNINGS;
+const MAX_PIPE_DIRS: usize = CAP_LIST;
 
 pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
     match name {
@@ -9,17 +15,26 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
         "pytest" => Some(crate::cmds::python::pytest_cmd::filter_pytest_output),
         "go-test" => Some(go_test_wrapper),
         "go-build" => Some(crate::cmds::go::go_cmd::filter_go_build),
+        "ctest" => Some(crate::cmds::system::ctest_cmd::filter_ctest_output),
         "tsc" => Some(crate::cmds::js::tsc_cmd::filter_tsc_output),
         "vitest" => Some(vitest_wrapper),
         "grep" | "rg" => Some(grep_wrapper),
         "find" | "fd" => Some(find_wrapper),
         "git-log" => Some(git_log_wrapper),
         "git-diff" => Some(git_diff_wrapper),
-        "git-status" => Some(crate::cmds::git::git::format_status_output),
+        "git-status" => Some(git_status_wrapper),
+        "log" => Some(crate::cmds::system::log_cmd::run_stdin_str),
         "mypy" => Some(crate::cmds::python::mypy_cmd::filter_mypy_output),
         "ruff-check" => Some(crate::cmds::python::ruff_cmd::filter_ruff_check_json),
         "ruff-format" => Some(crate::cmds::python::ruff_cmd::filter_ruff_format),
         "prettier" => Some(crate::cmds::js::prettier_cmd::filter_prettier_output),
+        "phpunit" => Some(crate::cmds::php::phpunit_cmd::filter_phpunit_output),
+        "pest" | "paratest" | "php-test" => {
+            Some(crate::cmds::php::test_output::filter_test_runner_output)
+        }
+        "ecs" => Some(crate::cmds::php::ecs_cmd::filter_ecs_output),
+        "phpstan" => Some(phpstan_wrapper),
+        "pint" => Some(pint_wrapper),
         _ => None,
     }
 }
@@ -28,12 +43,34 @@ fn go_test_wrapper(input: &str) -> String {
     crate::cmds::go::go_cmd::filter_go_test_json(input)
 }
 
+fn git_status_wrapper(input: &str) -> String {
+    crate::cmds::git::git::format_status_output(input)
+}
+
 fn git_log_wrapper(input: &str) -> String {
     crate::cmds::git::git::filter_log_output(input, 50, false, false)
 }
 
 fn git_diff_wrapper(input: &str) -> String {
     crate::cmds::git::git::compact_diff(input, 200)
+}
+
+fn phpstan_wrapper(input: &str) -> String {
+    // Runner forces --format=json; piped output may be either JSON or the
+    // default human table. Pick by content.
+    if input.trim_start().starts_with('{') {
+        crate::cmds::php::phpstan_cmd::filter_phpstan_json(input)
+    } else {
+        crate::cmds::php::phpstan_cmd::filter_phpstan_text(input)
+    }
+}
+
+fn pint_wrapper(input: &str) -> String {
+    if input.trim_start().starts_with('{') {
+        crate::cmds::php::pint_cmd::filter_pint_json(input)
+    } else {
+        crate::core::utils::fallback_tail(input, "pint", 60)
+    }
 }
 
 fn vitest_wrapper(input: &str) -> String {
@@ -73,11 +110,11 @@ fn grep_wrapper(input: &str) -> String {
 
     for (file, matches) in files {
         out.push_str(&format!("[file] {} ({}):\n", file, matches.len()));
-        for (line_num, content) in matches.iter().take(10) {
+        for (line_num, content) in matches.iter().take(MAX_PIPE_MATCHES) {
             out.push_str(&format!("  {:>4}: {}\n", line_num, content.trim()));
         }
-        if matches.len() > 10 {
-            out.push_str(&format!("  +{}\n", matches.len() - 10));
+        if matches.len() > MAX_PIPE_MATCHES {
+            out.push_str(&format!("  +{}\n", matches.len() - MAX_PIPE_MATCHES));
         }
         out.push('\n');
     }
@@ -112,18 +149,18 @@ fn find_wrapper(input: &str) -> String {
     let mut dirs: Vec<_> = by_dir.iter().collect();
     dirs.sort_by_key(|(d, _)| *d);
 
-    for (dir, files) in dirs.iter().take(20) {
+    for (dir, files) in dirs.iter().take(MAX_PIPE_DIRS) {
         out.push_str(&format!("{}/  ({})\n", dir, files.len()));
-        for f in files.iter().take(10) {
+        for f in files.iter().take(MAX_PIPE_FILES) {
             out.push_str(&format!("  {}\n", f));
         }
-        if files.len() > 10 {
-            out.push_str(&format!("  +{}\n", files.len() - 10));
+        if files.len() > MAX_PIPE_FILES {
+            out.push_str(&format!("  +{}\n", files.len() - MAX_PIPE_FILES));
         }
     }
 
-    if dirs.len() > 20 {
-        out.push_str(&format!("\n+{} more dirs\n", dirs.len() - 20));
+    if dirs.len() > MAX_PIPE_DIRS {
+        out.push_str(&format!("\n+{} more dirs\n", dirs.len() - MAX_PIPE_DIRS));
     }
 
     out
@@ -143,7 +180,19 @@ pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
         return crate::cmds::python::pytest_cmd::filter_pytest_output;
     }
 
+    if crate::cmds::system::ctest_cmd::looks_like_ctest_output(first_1k) {
+        return crate::cmds::system::ctest_cmd::filter_ctest_output;
+    }
+
     let first_trimmed = first_1k.trim_start();
+
+    // phpunit banner: "PHPUnit X.Y.Z by Sebastian Bergmann and contributors."
+    // Anchor to the leading "PHPUnit " token so a LICENSE/composer/`git log`
+    // that merely mentions the author isn't misrouted here.
+    if first_trimmed.starts_with("PHPUnit ") && first_1k.contains("by Sebastian Bergmann") {
+        return crate::cmds::php::phpunit_cmd::filter_phpunit_output;
+    }
+
     if first_trimmed.starts_with('{') && first_1k.contains("\"Action\"") {
         return go_test_wrapper;
     }
@@ -219,8 +268,9 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
         Some(name) => resolve_filter(name).ok_or_else(|| {
             anyhow::anyhow!(
                 "Unknown filter '{}'. Available: cargo-test, pytest, go-test, go-build, \
-                 tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
-                 mypy, ruff-check, ruff-format, prettier",
+                 ctest, tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
+                 log, mypy, ruff-check, ruff-format, prettier, phpunit, pest, \
+                 paratest, php-test, ecs, phpstan, pint",
                 name
             )
         })?,
@@ -228,13 +278,39 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
     };
 
     let output = apply_filter(filter_fn, &buf);
-    print!("{}", output);
+    let shown = never_worse(&buf, &output);
+    print!("{}", shown);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_auto_detect_phpunit_banner() {
+        // The phpunit banner must route to the phpunit filter with no -f flag.
+        let input = "PHPUnit 11.0.0 by Sebastian Bergmann and contributors.\n\n\
+                     ...  3 / 3 (100%)\n\nOK (3 tests, 5 assertions)\n";
+        let f = auto_detect_filter(input);
+        let out = f(input);
+        assert!(out.starts_with("PHPUnit:"), "out={}", out);
+    }
+
+    #[test]
+    fn test_auto_detect_phpunit_not_misrouted_by_author_mention() {
+        // Text that merely mentions the author (LICENSE, git log, composer meta)
+        // must pass through untouched, not route to the phpunit filter.
+        let input = "commit abc123\nAuthor: written by Sebastian Bergmann and contributors\n\n    Update changelog\n";
+        let f = auto_detect_filter(input);
+        let out = f(input);
+        assert_eq!(out, input, "should pass through unchanged, got: {}", out);
+    }
+
+    #[test]
+    fn test_resolve_filter_phpunit() {
+        assert!(resolve_filter("phpunit").is_some());
+    }
 
     #[test]
     fn test_resolve_filter_cargo_test() {
@@ -276,6 +352,11 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_filter_ctest() {
+        assert!(resolve_filter("ctest").is_some());
+    }
+
+    #[test]
     fn test_resolve_filter_tsc() {
         assert!(resolve_filter("tsc").is_some());
     }
@@ -298,6 +379,11 @@ mod tests {
     #[test]
     fn test_resolve_filter_git_status() {
         assert!(resolve_filter("git-status").is_some());
+    }
+
+    #[test]
+    fn test_resolve_filter_log() {
+        assert!(resolve_filter("log").is_some());
     }
 
     #[test]
@@ -337,6 +423,50 @@ mod tests {
         let f = auto_detect_filter(input);
         let out = f(input);
         assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn test_auto_detect_ctest() {
+        let input = "Internal ctest changing into directory: /tmp/build\n\
+Test project /tmp/build\n\
+1/1 Test #1: smoke ...........................   Passed    0.01 sec\n\
+100% tests passed, 0 tests failed out of 1\n\
+Total Test time (real) =   0.01 sec\n";
+        let f = auto_detect_filter(input);
+        let out = f(input);
+        assert!(out.contains("ctest: 1/1 passed"), "out={}", out);
+    }
+
+    #[test]
+    fn test_auto_detect_ctest_without_tests() {
+        let input = "Test project /tmp/build\nNo tests were found!!!\n";
+        let f = auto_detect_filter(input);
+
+        assert_eq!(f(input), "ctest: no tests found");
+    }
+
+    #[test]
+    fn test_auto_detect_ctest_before_summary_enters_first_kilobyte() {
+        let mut input = String::from("Test project /tmp/build\n");
+        for index in 1..=40 {
+            input.push_str(&format!(
+                "{index}/40 Test #{index}: case_{index} ...........................   Passed    0.01 sec\n"
+            ));
+        }
+        input.push_str("100% tests passed, 0 tests failed out of 40\n");
+
+        let f = auto_detect_filter(&input);
+        let out = f(&input);
+
+        assert!(out.contains("ctest: 40/40 passed"), "out={out}");
+    }
+
+    #[test]
+    fn test_auto_detect_ctest_rejects_keyword_only_output() {
+        let input = "Test project migration status\nTest # notes\n100% tests passed\n";
+        let f = auto_detect_filter(input);
+
+        assert_eq!(f(input), input);
     }
 
     #[test]

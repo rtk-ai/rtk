@@ -1,14 +1,20 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
+use crate::core::args_utils;
+use crate::core::guard::never_worse;
+use crate::core::runner::{self, RunOptions};
 use crate::core::stream::{
-    self, exec_capture, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode,
+    self, exec_capture, exec_capture_stdin, CaptureResult, FilterMode, LineHandler,
+    LineStreamFilter, StdinMode,
 };
 use crate::core::tracking;
-use crate::core::utils::{exit_code_from_output, exit_code_from_status, resolved_command};
+use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
+use crate::core::utils::{
+    exit_code_from_status, join_with_overflow, resolved_command, strip_ansi,
+};
 use anyhow::{Context, Result};
 use std::ffi::OsString;
 use std::process::Command;
-use std::process::Stdio;
 
 #[derive(Debug, Clone)]
 pub enum GitCommand {
@@ -18,6 +24,7 @@ pub enum GitCommand {
     Show,
     Add,
     Commit,
+    Checkout,
     Push,
     Pull,
     Branch,
@@ -69,7 +76,7 @@ fn build_status_command(args: &[String], global_args: &[String]) -> Command {
     let mut cmd = git_cmd(global_args);
     cmd.arg("status");
     if uses_compact_status_path(args) {
-        cmd.args(["--porcelain", "-b", "-uall"]);
+        cmd.args(["--porcelain", "-b"]);
     } else {
         cmd.args(args);
     }
@@ -90,6 +97,7 @@ pub fn run(
         GitCommand::Show => run_show(args, max_lines, verbose, global_args),
         GitCommand::Add => run_add(args, verbose, global_args),
         GitCommand::Commit => run_commit(args, verbose, global_args),
+        GitCommand::Checkout => run_checkout(args, verbose, global_args),
         GitCommand::Push => run_push(args, verbose, global_args),
         GitCommand::Pull => run_pull(args, verbose, global_args),
         GitCommand::Branch => run_branch(args, verbose, global_args),
@@ -98,65 +106,6 @@ pub fn run(
             run_stash(subcommand.as_deref(), args, verbose, global_args)
         }
         GitCommand::Worktree => run_worktree(args, verbose, global_args),
-    }
-}
-
-/// Re-insert `--` before the first path-like argument when clap has consumed it.
-///
-/// clap's `trailing_var_arg = true` silently drops `--` when it appears as the
-/// first positional argument (before any other positional).  This means:
-///   `rtk git diff -- file` → args = ["file"]   (clap ate `--`)
-///   `rtk git diff HEAD -- file` → args = ["HEAD", "--", "file"]  (preserved)
-///
-/// Without the `--` separator git may treat an unambiguous path as a revision and
-/// emit "fatal: ambiguous argument".  We re-insert `--` before the first path-like
-/// argument; see `normalize_diff_args_impl` for the detection rules.
-fn normalize_diff_args(args: &[String]) -> Vec<String> {
-    normalize_diff_args_impl(args, |p| std::path::Path::new(p).exists())
-}
-
-/// Testable core of `normalize_diff_args` — accepts an injectable filesystem existence checker.
-///
-/// The path-detection logic is:
-/// 1. Explicit path prefixes (`.`, `~`) → always a path, no filesystem check needed.
-/// 2. Contains path separator (`/`, `\`) → use `path_exists` to distinguish branch names
-///    (e.g. `feature/auth`) from real paths (e.g. `src/main.rs`).
-/// 3. Bare word with no separator → never a path (avoids injecting `--` when a file
-///    happens to share a name with a branch or ref, e.g. a file named `main`).
-fn normalize_diff_args_impl<F>(args: &[String], path_exists: F) -> Vec<String>
-where
-    F: Fn(&str) -> bool,
-{
-    // Already has `--` — nothing to do
-    if args.iter().any(|a| a == "--") {
-        return args.to_vec();
-    }
-    let path_start = args.iter().position(|arg| {
-        if arg.starts_with('-') {
-            return false;
-        }
-        // Explicit path prefixes — always treat as path regardless of existence
-        if arg.starts_with('.') || arg.starts_with('~') {
-            return true;
-        }
-        // Contains path separator — use filesystem check to distinguish
-        // branch names (feature/auth) from real paths (src/main.rs)
-        if arg.contains('/') || arg.contains('\\') {
-            return path_exists(arg);
-        }
-        // Bare word (no separator, no special prefix) — never inject `--`
-        // This avoids misidentifying a ref/branch as a path even if a same-named
-        // file happens to exist on disk.
-        false
-    });
-    match path_start {
-        Some(idx) => {
-            let mut out = args[..idx].to_vec();
-            out.push("--".to_string());
-            out.extend_from_slice(&args[idx..]);
-            out
-        }
-        None => args.to_vec(),
     }
 }
 
@@ -169,7 +118,7 @@ fn run_diff(
     let timer = tracking::TimedExecution::start();
 
     // Re-insert `--` when clap's trailing_var_arg consumed it (issue #1215)
-    let args = &normalize_diff_args(args);
+    let args = &args_utils::restore_double_dash(args);
 
     // Check if user wants stat output
     let wants_stat = args
@@ -177,7 +126,7 @@ fn run_diff(
         .any(|arg| arg == "--stat" || arg == "--numstat" || arg == "--shortstat");
 
     // Check if user wants compact diff (default RTK behavior)
-    let wants_compact = !args.iter().any(|arg| arg == "--no-compact");
+    let wants_compact = !args.iter().any(|arg| arg == "--no-compact") && !emits_word_diff(args);
 
     if wants_stat || !wants_compact {
         // User wants stat or explicitly no compacting - pass through directly
@@ -236,9 +185,6 @@ fn run_diff(
         eprintln!("Git diff summary:");
     }
 
-    // Print stat summary first
-    println!("{}", result.stdout.trim());
-
     // Now get actual diff but compact it
     let mut diff_cmd = git_cmd(global_args);
     diff_cmd.arg("diff");
@@ -248,20 +194,22 @@ fn run_diff(
 
     let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git diff")?;
 
-    let mut final_output = result.stdout.clone();
-    if !diff_result.stdout.is_empty() {
-        println!("\n--- Changes ---");
+    let printed = if !diff_result.stdout.is_empty() {
         let compacted = compact_diff(&diff_result.stdout, max_lines.unwrap_or(500));
-        println!("{}", compacted);
-        final_output.push_str("\n--- Changes ---\n");
-        final_output.push_str(&compacted);
-    }
+        format!("{}\n\nChanges:\n{}", result.stdout.trim(), compacted)
+    } else {
+        result.stdout.trim().to_string()
+    };
+
+    let raw = format!("{}\n{}", result.stdout, diff_result.stdout);
+    let shown = never_worse(&raw, &printed);
+    println!("{}", shown);
 
     timer.track(
         &format!("git diff {}", args.join(" ")),
         &format!("rtk git diff {}", args.join(" ")),
-        &format!("{}\n{}", result.stdout, diff_result.stdout),
-        &final_output,
+        &raw,
+        shown,
     );
 
     Ok(0)
@@ -288,7 +236,7 @@ fn run_show(
     // pass through directly to avoid duplicated output from compact-show steps.
     let wants_blob_show = args.iter().any(|arg| is_blob_show_arg(arg));
 
-    if wants_stat_only || wants_format || wants_blob_show {
+    if wants_stat_only || wants_format || wants_blob_show || emits_word_diff(args) {
         let mut cmd = git_cmd(global_args);
         cmd.arg("show");
         for arg in args {
@@ -336,7 +284,7 @@ fn run_show(
         eprintln!("{}", summary_result.stderr);
         return Ok(summary_result.exit_code);
     }
-    println!("{}", summary_result.stdout.trim());
+    let mut printed = summary_result.stdout.trim().to_string();
 
     // Step 2: --stat summary
     let mut stat_cmd = git_cmd(global_args);
@@ -347,7 +295,8 @@ fn run_show(
     let stat_result = exec_capture(&mut stat_cmd).context("Failed to run git show --stat")?;
     let stat_text = stat_result.stdout.trim();
     if !stat_text.is_empty() {
-        println!("{}", stat_text);
+        printed.push('\n');
+        printed.push_str(stat_text);
     }
 
     // Step 3: compacted diff
@@ -359,24 +308,58 @@ fn run_show(
     let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git show (diff)")?;
     let diff_text = diff_result.stdout.trim();
 
-    let mut final_output = summary_result.stdout.clone();
     if !diff_text.is_empty() {
         if verbose > 0 {
-            println!("\n--- Changes ---");
+            printed.push_str("\n\nChanges:");
         }
         let compacted = compact_diff(diff_text, max_lines.unwrap_or(500));
-        println!("{}", compacted);
-        final_output.push_str(&format!("\n{}", compacted));
+        printed.push('\n');
+        printed.push_str(&compacted);
     }
+
+    let shown = never_worse(&raw_output, &printed);
+    println!("{}", shown);
 
     timer.track(
         &format!("git show {}", args.join(" ")),
         &format!("rtk git show {}", args.join(" ")),
         &raw_output,
-        &final_output,
+        shown,
     );
 
     Ok(0)
+}
+
+/// Whether these args make git emit a word diff rather than a line diff.
+///
+/// `compact_diff` reads a unified or combined diff: a body line's first column
+/// (or columns) is a marker and the rest is content. A word diff drops the
+/// marker entirely and puts `[-removed-]` / `{+added+}` inline, so its body
+/// lines are arbitrary content in the marker position. A line starting with `+`
+/// then counts as an addition, one starting with `\` is dropped as a
+/// no-newline annotation, and one whose content happens to start `diff --`
+/// opens a new file section. There is nothing to compact faithfully, so these
+/// modes pass through.
+///
+/// `--word-diff=none` is the mode that turns a word diff back off, leaving an
+/// ordinary unified diff to compact. Modes are last-one-wins, which is what
+/// that mode is for: overriding an alias or an earlier flag on the same line.
+fn emits_word_diff(args: &[String]) -> bool {
+    let mut word_diff = false;
+    for arg in args {
+        if let Some(mode) = arg.strip_prefix("--word-diff=") {
+            word_diff = mode != "none";
+        } else if arg == "--word-diff"
+            || arg.starts_with("--word-diff-regex")
+            || arg == "--color-words"
+            || arg.starts_with("--color-words=")
+        {
+            // `--color-words[=<regex>]` takes a regex rather than a mode, so
+            // there is no `none` to honour on that spelling.
+            word_diff = true;
+        }
+    }
+    word_diff
 }
 
 fn is_blob_show_arg(arg: &str) -> bool {
@@ -384,73 +367,430 @@ fn is_blob_show_arg(arg: &str) -> bool {
     !arg.starts_with('-') && arg.contains(':')
 }
 
+/// Path named by a diff section header.
+///
+/// `diff --git a/p b/p` carries the path twice; `diff --cc p` and
+/// `diff --combined p` carry it once, as the whole remainder of the line. Only
+/// the two-path form can be split at its midpoint, so the header kind decides
+/// which shape to read: `diff --cc dup dup` names one file called `dup dup`,
+/// not the file `dup` twice.
+///
+/// Under the default `core.quotepath`, git wraps a path in `"` and escapes any
+/// non-ASCII byte, control character, quote or backslash inside it — but not a
+/// space. The quoting is undone here, so the header carries the path as it is
+/// on disk and a `grep` over the output finds it by name.
+fn diff_header_path(line: &str) -> String {
+    let Some(rest) = line.splitn(3, ' ').nth(2) else {
+        return "unknown".to_string();
+    };
+    if !line.starts_with("diff --git ") {
+        return unquote_path(rest);
+    }
+    if let Some(path) = same_path_twice(rest) {
+        return path;
+    }
+    // A rename names two different paths, and the destination is the second.
+    if let Some(quoted) = rest
+        .split(" \"b/")
+        .nth(1)
+        .and_then(|dst| dst.strip_suffix('"'))
+    {
+        return unescape_path(quoted);
+    }
+    match rest.split(" b/").nth(1) {
+        Some(path) => path.to_string(),
+        None => unquote_path(rest),
+    }
+}
+
+/// The path a `diff --git` header names twice, split at the midpoint.
+///
+/// Anything but a rename names the same path on both sides, so the two halves
+/// are the same length and the separating space sits dead centre. Splitting
+/// there instead of on the first ` b/` keeps a path that contains that
+/// substring — a file under a directory named `x b`. Prefixes are then dropped
+/// by matching the halves against each other rather than by name, so
+/// `--no-prefix` and any custom `--src-prefix` / `--dst-prefix` read alike.
+///
+/// `None` for a rename, whose halves differ past their first component, and for
+/// anything else the two halves disagree on; both fall through to the ` b/`
+/// split. A `--no-prefix` rename between two directories is the one shape this
+/// cannot tell from a prefix pair — space-separated paths with no prefix are
+/// ambiguous by construction — and it reads as the shared trailing path.
+fn same_path_twice(rest: &str) -> Option<String> {
+    if rest.len().is_multiple_of(2) {
+        return None;
+    }
+    let mid = rest.len() / 2;
+    // A space at the midpoint is a char boundary, so both halves are valid.
+    if rest.as_bytes().get(mid) != Some(&b' ') {
+        return None;
+    }
+    let (left, right) = (unquote_path(&rest[..mid]), unquote_path(&rest[mid + 1..]));
+    if left == right {
+        return Some(left);
+    }
+    let (_, left_path) = left.split_once('/')?;
+    let (_, right_path) = right.split_once('/')?;
+    (left_path == right_path).then(|| right_path.to_string())
+}
+
+/// Undo git's `core.quotepath` quoting: `"a/\303\251.txt"` becomes `a/é.txt`.
+///
+/// A path git did not quote is returned as-is, so either form can be passed.
+fn unquote_path(raw: &str) -> String {
+    match raw.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+        Some(quoted) => unescape_path(quoted),
+        None => raw.to_string(),
+    }
+}
+
+/// Decode the C escapes inside a quoted path.
+///
+/// The octal escapes spell out the path's bytes one at a time, so a multi-byte
+/// character arrives as several of them; they are collected as bytes and
+/// decoded once at the end rather than per escape. A path whose bytes are not
+/// UTF-8 keeps replacement characters, which is as close as a `String` gets.
+fn unescape_path(quoted: &str) -> String {
+    let bytes = quoted.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' || i + 1 == bytes.len() {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        let escape = bytes[i + 1];
+        if escape.is_ascii_digit() {
+            let end = (i + 4).min(bytes.len());
+            let octal = std::str::from_utf8(&bytes[i + 1..end])
+                .ok()
+                .and_then(|digits| u8::from_str_radix(digits, 8).ok());
+            match octal {
+                Some(byte) => {
+                    out.push(byte);
+                    i = end;
+                }
+                // Not an octal escape after all: keep the backslash verbatim.
+                None => {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        out.push(match escape {
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b't' => b'\t',
+            b'n' => b'\n',
+            b'v' => 0x0b,
+            b'f' => 0x0c,
+            b'r' => b'\r',
+            // `\"` and `\\` stand for themselves.
+            other => other,
+        });
+        i += 2;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Line budget a hunk header declares, and how wide its body prefix is.
+struct HunkHeader {
+    /// Lines the hunk spans in each parent, in marker-column order. One entry
+    /// for a unified `@@`, one per parent for a combined `@@@`.
+    parents: Vec<usize>,
+    /// Lines the hunk spans in the result file.
+    new: usize,
+    /// Marker columns: 1 for `@@`, and one per parent for a combined `@@@`.
+    prefix_width: usize,
+}
+
+impl HunkHeader {
+    /// Whether every declared line has been accounted for, which is where the
+    /// hunk body ends. A combined hunk is not done until *every* parent's
+    /// budget is spent: a line removed from only the second parent spends that
+    /// parent's budget and neither the first's nor the result's.
+    fn exhausted(&self) -> bool {
+        self.new == 0 && self.parents.iter().all(|&remaining| remaining == 0)
+    }
+
+    /// Charge a body line against the budgets it occupies.
+    ///
+    /// Column `i` is the line's marker against parent `i + 1`. `-` there means
+    /// the line is in that parent and is being removed; a space on a line that
+    /// is not a removal means the line is in that parent unchanged. Both spend
+    /// one of that parent's lines. `+` there, or a space on a removal line,
+    /// means the line is not in that parent at all.
+    ///
+    /// Collapsing the columns into one add/delete pair, as an aggregate over
+    /// the whole prefix does, loses that distinction and leaves a combined
+    /// hunk's budget unable to converge.
+    fn consume(&mut self, markers: &[u8]) {
+        let is_add = markers.contains(&b'+');
+        let is_del = markers.contains(&b'-');
+        for (i, remaining) in self.parents.iter_mut().enumerate() {
+            let column = markers.get(i).copied();
+            let present = if is_del {
+                column == Some(b'-')
+            } else {
+                // A line shorter than the prefix reads as context, which is
+                // what a bare blank line in a unified diff body is.
+                column != Some(b'+')
+            };
+            if present {
+                *remaining = remaining.saturating_sub(1);
+            }
+        }
+        // In the result file unless the line is a pure deletion.
+        if is_add || !is_del {
+            self.new = self.new.saturating_sub(1);
+        }
+    }
+}
+
+/// Parse `@@ -a,b +c,d @@` and the combined `@@@ -a,b -c,d +e,f @@@`.
+///
+/// The counts bound the hunk body, which is what lets the body end where the
+/// hunk ends rather than running on until the next header. Anything after it —
+/// an mbox envelope, a `--` signature, trailing prose — is then outside every
+/// hunk and cannot be read as diff content. A count is 1 when the header omits
+/// it (`@@ -1 +1 @@`).
+fn parse_hunk_header(line: &str) -> Option<HunkHeader> {
+    let at_run = line.len() - line.trim_start_matches('@').len();
+    if at_run < 2 {
+        return None;
+    }
+    let body = line[at_run..].split('@').next()?;
+
+    let mut parents: Vec<usize> = Vec::new();
+    let mut new = None;
+    for group in body.split_whitespace() {
+        let Some(rest) = group.strip_prefix(['-', '+']) else {
+            continue;
+        };
+        let count = match rest.split_once(',') {
+            Some((_, c)) => c.parse::<usize>().ok()?,
+            None => 1,
+        };
+        if group.starts_with('-') {
+            // A combined header lists one range per parent, in the same order
+            // as the marker columns.
+            parents.push(count);
+        } else {
+            new = Some(count);
+        }
+    }
+
+    // `@@` has one marker column, `@@@` two, and so on for more parents.
+    let prefix_width = at_run - 1;
+    // A well-formed header lists exactly one range per marker column. When it
+    // does not, only the columns can be charged, so trust them: an untracked
+    // parent would otherwise sit at its declared count forever and the hunk
+    // would never close, while a parent with no column of its own would be
+    // charged against nothing. A missing range gets `usize::MAX`, which keeps
+    // the hunk open to the next header rather than dropping its body.
+    if parents.len() != prefix_width {
+        parents.resize(prefix_width, usize::MAX);
+    }
+
+    Some(HunkHeader {
+        parents,
+        new: new.unwrap_or(0),
+        prefix_width,
+    })
+}
+
+/// Render the note for change lines dropped past `max_hunk_lines`, split by
+/// sign so an anchored `^-` / `^+` audit can tell what it did not see.
+fn hunk_truncation_note(deletions: usize, additions: usize) -> Option<String> {
+    fn count(n: usize, noun: &str) -> String {
+        if n == 1 {
+            format!("{} {}", n, noun)
+        } else {
+            format!("{} {}s", n, noun)
+        }
+    }
+    match (deletions, additions) {
+        (0, 0) => None,
+        (0, a) => Some(format!("  ... ({} truncated)", count(a, "addition"))),
+        (d, 0) => Some(format!("  ... ({} truncated)", count(d, "deletion"))),
+        (d, a) => Some(format!(
+            "  ... ({}, {} truncated)",
+            count(d, "deletion"),
+            count(a, "addition")
+        )),
+    }
+}
+
+/// Emit the buffered leading context, charged against the diff-wide budget.
+///
+/// Keeps the lines closest to the change when the budget cannot take all of
+/// them. Called wherever a hunk closes as well as at its first change line:
+/// context buffered by a hunk that ends without one would otherwise be dropped,
+/// leaving a bare hunk header with nothing under it.
+fn flush_leading_context(
+    buffer: &mut Vec<String>,
+    result: &mut Vec<String>,
+    total: &mut usize,
+    cap: usize,
+) {
+    let room = cap.saturating_sub(*total);
+    let keep = buffer.len().min(room);
+    let skip = buffer.len() - keep;
+    for ctx in buffer.drain(..).skip(skip) {
+        result.push(ctx);
+    }
+    *total += keep;
+}
+
 pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     let mut result = Vec::new();
     let mut current_file = String::new();
     let mut added = 0;
     let mut removed = 0;
-    let mut in_hunk = false;
+    let mut hunk: Option<HunkHeader> = None;
     let mut hunk_shown = 0;
-    let mut hunk_skipped = 0usize;
+    let mut skipped_add = 0usize;
+    let mut skipped_del = 0usize;
+    let mut leading_context: Vec<String> = Vec::new();
+    let mut leading_context_total = 0usize;
     let max_hunk_lines = 100;
+    // Context before a hunk's first change, up to three lines per hunk and
+    // `max_lines / 10` across the diff. It does not count against `max_lines`,
+    // so it cannot displace change lines, and the diff-wide cap is what bounds
+    // the overrun that exemption would otherwise allow: a diff of many small
+    // hunks would otherwise spend three exempt lines on every one of them.
+    let max_leading_context = 3;
+    let leading_context_cap = max_lines / 10;
     let mut was_truncated = false;
 
     for line in diff.lines() {
-        if line.starts_with("diff --git") {
-            // Flush hunk truncation before starting a new file
-            if hunk_skipped > 0 {
-                result.push(format!("  ... ({} lines truncated)", hunk_skipped));
+        // Every diff section header (`--git`, `--cc`, `--combined`) opens a new
+        // file and closes any open hunk, so the `---` / `+++` headers that
+        // follow it are never read as hunk content.
+        if line.starts_with("diff --") {
+            flush_leading_context(
+                &mut leading_context,
+                &mut result,
+                &mut leading_context_total,
+                leading_context_cap,
+            );
+            if let Some(note) = hunk_truncation_note(skipped_del, skipped_add) {
+                result.push(note);
                 was_truncated = true;
-                hunk_skipped = 0;
+                skipped_del = 0;
+                skipped_add = 0;
             }
             if !current_file.is_empty() && (added > 0 || removed > 0) {
                 result.push(format!("  +{} -{}", added, removed));
             }
-            current_file = line.split(" b/").nth(1).unwrap_or("unknown").to_string();
+            current_file = diff_header_path(line);
             result.push(format!("\n{}", current_file));
             added = 0;
             removed = 0;
-            in_hunk = false;
+            hunk = None;
             hunk_shown = 0;
-        } else if line.starts_with("@@") {
-            // Flush hunk truncation before starting a new hunk
-            if hunk_skipped > 0 {
-                result.push(format!("  ... ({} lines truncated)", hunk_skipped));
+        } else if let Some(header) = parse_hunk_header(line) {
+            flush_leading_context(
+                &mut leading_context,
+                &mut result,
+                &mut leading_context_total,
+                leading_context_cap,
+            );
+            if let Some(note) = hunk_truncation_note(skipped_del, skipped_add) {
+                result.push(note);
                 was_truncated = true;
-                hunk_skipped = 0;
+                skipped_del = 0;
+                skipped_add = 0;
             }
-            in_hunk = true;
+            hunk = Some(header);
             hunk_shown = 0;
             // Preserve the full unified diff hunk header, including trailing
             // function / symbol context after the second @@ marker.
-            result.push(format!("  {}", line));
-        } else if in_hunk {
-            if line.starts_with('+') && !line.starts_with("+++") {
-                added += 1;
+            result.push(line.to_string());
+        } else if let Some(header) = hunk.as_mut() {
+            if header.exhausted() {
+                hunk = None;
+                continue;
+            }
+            if line.starts_with('\\') {
+                // "\ No newline at end of file" annotates the line above and
+                // occupies no line in either file.
+                continue;
+            }
+
+            // Slice the marker columns as bytes. `prefix_width` counts columns,
+            // and the markers are ASCII by construction, but the body content
+            // right after them is not: `--word-diff` emits body lines with no
+            // marker column at all, so a `char`-unaware `&line[..width]` splits
+            // a leading multi-byte character and panics.
+            let width = header.prefix_width.min(line.len());
+            let markers = &line.as_bytes()[..width];
+            let is_add = markers.contains(&b'+');
+            let is_del = markers.contains(&b'-');
+            header.consume(markers);
+
+            // Hunk bodies emit at column 0 in git's own unified shape, so
+            // `^+` / `^-` anchor. rtk's own annotations stay indented so those
+            // same anchors never match them. Inside a hunk every `+`/`-` line
+            // is content: the `---` / `+++` file headers only ever appear
+            // before the first hunk header.
+            if is_add || is_del {
+                if is_add {
+                    added += 1;
+                }
+                if is_del {
+                    removed += 1;
+                }
                 if hunk_shown < max_hunk_lines {
-                    result.push(format!("  {}", line));
+                    // The context immediately preceding the change, so the body
+                    // reads as contiguous with it. The diff-wide budget is
+                    // charged on emit rather than on buffering, so a line the
+                    // ring evicted never costs anything.
+                    flush_leading_context(
+                        &mut leading_context,
+                        &mut result,
+                        &mut leading_context_total,
+                        leading_context_cap,
+                    );
+                    result.push(line.to_string());
                     hunk_shown += 1;
+                } else if is_del {
+                    skipped_del += 1;
                 } else {
-                    hunk_skipped += 1;
+                    skipped_add += 1;
                 }
-            } else if line.starts_with('-') && !line.starts_with("---") {
-                removed += 1;
+                leading_context.clear();
+            } else if hunk_shown > 0 {
                 if hunk_shown < max_hunk_lines {
-                    result.push(format!("  {}", line));
-                    hunk_shown += 1;
-                } else {
-                    hunk_skipped += 1;
-                }
-            } else if hunk_shown < max_hunk_lines && !line.starts_with("\\") {
-                // Context line
-                if hunk_shown > 0 {
-                    result.push(format!("  {}", line));
+                    result.push(line.to_string());
                     hunk_shown += 1;
                 }
+            } else if leading_context_total < leading_context_cap {
+                // Keep the last `max_leading_context` lines rather than the
+                // first: with `-U10` or `--function-context` the first ones sit
+                // ten lines above the change and would imply an adjacency the
+                // file does not have.
+                if leading_context.len() == max_leading_context {
+                    leading_context.remove(0);
+                }
+                leading_context.push(line.to_string());
+            }
+
+            if header.exhausted() {
+                hunk = None;
+                flush_leading_context(
+                    &mut leading_context,
+                    &mut result,
+                    &mut leading_context_total,
+                    leading_context_cap,
+                );
             }
         }
 
-        if result.len() >= max_lines {
+        if result.len().saturating_sub(leading_context_total) >= max_lines {
             result.push("\n... (more changes truncated)".to_string());
             was_truncated = true;
             break;
@@ -458,8 +798,14 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     }
 
     // Flush last hunk
-    if hunk_skipped > 0 {
-        result.push(format!("  ... ({} lines truncated)", hunk_skipped));
+    flush_leading_context(
+        &mut leading_context,
+        &mut result,
+        &mut leading_context_total,
+        leading_context_cap,
+    );
+    if let Some(note) = hunk_truncation_note(skipped_del, skipped_add) {
+        result.push(note);
         was_truncated = true;
     }
 
@@ -480,20 +826,40 @@ fn run_log(
     verbose: u8,
     global_args: &[String],
 ) -> Result<i32> {
+    // Re-insert `--` when clap's trailing_var_arg consumed it (issue #1215):
+    // without this, `rtk git log -- -p` loses its literal "--" and
+    // `requests_raw_log_output`/`log_arg_tokens` can no longer tell that
+    // `-p` is a pathspec, not the real patch flag.
+    let args = &args_utils::restore_double_dash(args);
+
+    if requests_raw_log_output(args) {
+        let passthrough_args: Vec<OsString> = std::iter::once(OsString::from("log"))
+            .chain(args.iter().map(OsString::from))
+            .collect();
+        return run_passthrough(&passthrough_args, global_args, verbose);
+    }
+
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = git_cmd(global_args);
     cmd.arg("log");
 
+    // Tokenize once and share it: flag-vs-value classification is reused
+    // below by both the flag-presence checks and the limit parsing, and a
+    // value belonging to --grep/--author/etc. (e.g. `--grep --pretty`) must
+    // not be misread as one of the flags below.
+    let tokens = log_arg_tokens(args);
+    let flag_args = flag_args_from_tokens(&tokens);
+
     // Check if user provided format flags
-    let has_format_flag = args.iter().any(|arg| {
+    let has_format_flag = flag_args.iter().any(|arg| {
         arg.starts_with("--oneline") || arg.starts_with("--pretty") || arg.starts_with("--format")
     });
 
     // Check if user provided limit flag (-N, -n N, --max-count=N, --max-count N)
-    let has_limit_flag = args.iter().any(|arg| {
+    let has_limit_flag = flag_args.iter().any(|arg| {
         (arg.starts_with('-') && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit()))
-            || arg == "-n"
+            || *arg == "-n"
             || arg.starts_with("--max-count")
     });
 
@@ -507,7 +873,7 @@ fn run_log(
     // Determine limit: respect user's explicit -N flag, use sensible defaults otherwise
     let (limit, user_set_limit) = if has_limit_flag {
         // User explicitly passed -N / -n N / --max-count=N → respect their choice
-        let n = parse_user_limit(args).unwrap_or(10);
+        let n = parse_limit_from_tokens(&tokens).unwrap_or(10);
         (n, true)
     } else if has_format_flag {
         // --oneline / --pretty without -N: user wants compact output, allow more
@@ -520,10 +886,11 @@ fn run_log(
     };
 
     // Only add --no-merges if user didn't explicitly request merge commits
-    let wants_merges = args
+    let wants_merges = flag_args
         .iter()
-        .any(|arg| arg == "--merges" || arg == "--min-parents=2");
-    if !wants_merges {
+        .any(|arg| *arg == "--merges" || *arg == "--min-parents=2" || *arg == "--no-merges");
+    // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
+    if !wants_merges && !has_limit_flag {
         cmd.arg("--no-merges");
     }
 
@@ -545,6 +912,7 @@ fn run_log(
 
     // Post-process: truncate long messages, cap lines only if RTK set the default
     let filtered = filter_log_output(&result.stdout, limit, user_set_limit, has_format_flag);
+    let filtered = never_worse(&result.stdout, &filtered).to_string();
     println!("{}", filtered);
 
     timer.track(
@@ -557,42 +925,186 @@ fn run_log(
     Ok(0)
 }
 
-/// Filter git log output: truncate long messages, cap lines
+/// True for git log/diff options that take their value as a separate,
+/// space-delimited token (e.g. `--grep -p` searches messages for the
+/// literal string "-p"; it does not request patch output). Consuming
+/// that value token keeps flag-lookalike values from being misread as
+/// the corresponding boolean flag.
+fn consumes_next_token_as_value(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--after"
+            | "--anchored"
+            | "--author"
+            | "--before"
+            | "--color-moved-ws"
+            | "--committer"
+            | "--date"
+            | "--decorate-refs"
+            | "--decorate-refs-exclude"
+            | "--diff-algorithm"
+            | "--diff-filter"
+            | "--diff-merges"
+            | "--dst-prefix"
+            | "--encoding"
+            | "--exclude"
+            | "--find-object"
+            | "--glob"
+            | "--grep"
+            | "--grep-reflog"
+            | "--inter-hunk-context"
+            | "--line-prefix"
+            | "--max-depth"
+            | "--output"
+            | "--output-indicator-context"
+            | "--output-indicator-new"
+            | "--output-indicator-old"
+            | "--rotate-to"
+            | "--since"
+            | "--since-as-filter"
+            | "--skip"
+            | "--skip-to"
+            | "--src-prefix"
+            | "--stat-count"
+            | "--stat-name-width"
+            | "--stat-width"
+            | "--until"
+            | "--word-diff-regex"
+            | "--ws-error-highlight"
+            | "-G"
+            | "-I"
+            | "-L"
+            | "-O"
+            | "-S"
+            | "-l"
+            | "-n"
+    )
+}
+
+/// A git log argument, classified as either a flag or the value consumed
+/// by the preceding flag.
+enum LogArg<'a> {
+    Flag(&'a str),
+    Value { flag: &'a str, value: &'a str },
+}
+
+/// Tokenizes git log `args` into [`LogArg`]s, stopping at the `--` pathspec
+/// separator (tokens after it are paths, never flags or their values —
+/// e.g. `git log -- -5` means "history for the path literally named -5").
+/// `-n`/`--max-count`'s own count and every option in
+/// [`consumes_next_token_as_value`] are paired with the flag that consumes
+/// them. Shared by every git-log flag/value/limit check in [`run_log`] so
+/// `--`-handling and option-value handling live in one place instead of
+/// being reimplemented per check.
+fn log_arg_tokens(args: &[String]) -> Vec<LogArg<'_>> {
+    let mut tokens = Vec::with_capacity(args.len());
+    let mut iter = args.iter().take_while(|arg| *arg != "--");
+    while let Some(arg) = iter.next() {
+        let arg_str = arg.as_str();
+        if arg_str == "--max-count" || consumes_next_token_as_value(arg_str) {
+            if let Some(value) = iter.next() {
+                tokens.push(LogArg::Value {
+                    flag: arg_str,
+                    value: value.as_str(),
+                });
+                continue;
+            }
+        }
+        tokens.push(LogArg::Flag(arg_str));
+    }
+    tokens
+}
+
+/// Filters `tokens` down to the flags themselves, dropping every value
+/// consumed by the preceding option.
+fn flag_args_from_tokens<'a>(tokens: &[LogArg<'a>]) -> Vec<&'a str> {
+    tokens
+        .iter()
+        .map(|token| match token {
+            LogArg::Flag(flag) | LogArg::Value { flag, .. } => *flag,
+        })
+        .collect()
+}
+
+/// Filters `args` down to the tokens that are actual flags, dropping every
+/// token consumed as a value by the preceding option. `run_log` shares a
+/// single tokenization via [`flag_args_from_tokens`] instead; this
+/// convenience wrapper exists for tests that only care about the flags.
+#[cfg(test)]
+fn real_flag_args(args: &[String]) -> Vec<&str> {
+    flag_args_from_tokens(&log_arg_tokens(args))
+}
+
+/// True for git log/diff flags that change the *shape* of git's raw output
+/// (patch text, diffstat, name lists) in a way RTK's injected
+/// `--pretty=format` + `---END---` markers can't coexist with — matching
+/// this must request the untouched passthrough path instead of RTK's
+/// filtered one (see [`requests_raw_log_output`]).
+fn requests_raw_diff_shape(flag: &str) -> bool {
+    matches!(
+        flag,
+        "-p" | "-u"
+            | "--dirstat"
+            | "--name-only"
+            | "--name-status"
+            | "--numstat"
+            | "--patch"
+            | "--patch-with-raw"
+            | "--patch-with-stat"
+            | "--raw"
+            | "--shortstat"
+            | "--stat"
+            | "--summary"
+    ) || flag.starts_with("--stat=")
+        || flag.starts_with("--dirstat=")
+}
+
+fn requests_raw_log_output(args: &[String]) -> bool {
+    log_arg_tokens(args)
+        .iter()
+        .any(|token| matches!(token, LogArg::Flag(flag) if requests_raw_diff_shape(flag)))
+}
+
 /// Parse the user-specified limit from git log args.
 /// Handles: -20, -n 20, --max-count=20, --max-count 20
+/// `run_log` shares a single tokenization via [`parse_limit_from_tokens`]
+/// instead; this convenience wrapper exists for tests.
+#[cfg(test)]
 fn parse_user_limit(args: &[String]) -> Option<usize> {
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        // -20 (combined digit form)
-        if arg.starts_with('-')
-            && arg.len() > 1
-            && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
-        {
-            if let Ok(n) = arg[1..].parse::<usize>() {
-                return Some(n);
-            }
-        }
-        // -n 20 (two-token form)
-        if arg == "-n" {
-            if let Some(next) = iter.next() {
-                if let Ok(n) = next.parse::<usize>() {
+    parse_limit_from_tokens(&log_arg_tokens(args))
+}
+
+fn parse_limit_from_tokens(tokens: &[LogArg<'_>]) -> Option<usize> {
+    for token in tokens {
+        match token {
+            // -20 (combined digit form)
+            LogArg::Flag(flag)
+                if flag.starts_with('-')
+                    && flag.len() > 1
+                    && flag.chars().nth(1).is_some_and(|c| c.is_ascii_digit()) =>
+            {
+                if let Ok(n) = flag[1..].parse::<usize>() {
                     return Some(n);
                 }
             }
-        }
-        // --max-count=20
-        if let Some(rest) = arg.strip_prefix("--max-count=") {
-            if let Ok(n) = rest.parse::<usize>() {
-                return Some(n);
-            }
-        }
-        // --max-count 20 (two-token form)
-        if arg == "--max-count" {
-            if let Some(next) = iter.next() {
-                if let Ok(n) = next.parse::<usize>() {
+            // -n 20 / --max-count 20 (two-token form)
+            LogArg::Value {
+                flag: "-n" | "--max-count",
+                value,
+            } => {
+                if let Ok(n) = value.parse::<usize>() {
                     return Some(n);
                 }
             }
+            // --max-count=20
+            LogArg::Flag(flag) => {
+                if let Some(rest) = flag.strip_prefix("--max-count=") {
+                    if let Ok(n) = rest.parse::<usize>() {
+                        return Some(n);
+                    }
+                }
+            }
+            LogArg::Value { .. } => {}
         }
     }
     None
@@ -678,8 +1190,15 @@ fn truncate_line(line: &str, width: usize) -> String {
     }
 }
 
-/// Preserve RTK's branch/clean framing while keeping porcelain file lines intact.
 pub(crate) fn format_status_output(porcelain: &str) -> String {
+    format_status_inner(porcelain, None)
+}
+
+pub(crate) fn format_status_output_detached(porcelain: &str, detached_ref: &str) -> String {
+    format_status_inner(porcelain, Some(detached_ref))
+}
+
+fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
     let lines: Vec<&str> = porcelain
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -694,7 +1213,8 @@ pub(crate) fn format_status_output(porcelain: &str) -> String {
     if let Some(branch_line) = lines.first() {
         if branch_line.starts_with("##") {
             let branch = branch_line.trim_start_matches("## ");
-            output.push(format!("* {}", branch));
+            let display = detached.unwrap_or(branch);
+            output.push(format!("* {}", display));
         } else {
             output.push((*branch_line).to_string());
         }
@@ -809,6 +1329,20 @@ fn extract_state_header(raw: &str) -> Option<String> {
     None
 }
 
+/// Extract the explicit "HEAD detached at/from <ref>" line from plain
+/// `git status` output.
+///
+/// Porcelain `-b` collapses a detached HEAD to the opaque `## HEAD (no branch)`,
+/// which an agent (or a distracted human) can misread as a branch literally
+/// named `HEAD`. The plain-status output keeps the explicit SHA/ref, so we
+/// surface that instead. Returns `None` when HEAD is on a branch.
+fn extract_detached_head(raw: &str) -> Option<String> {
+    raw.lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("HEAD detached "))
+        .map(str::to_string)
+}
+
 /// Minimal filtering for git status with user-provided args
 fn filter_status_with_args(output: &str) -> String {
     let mut result = Vec::new();
@@ -874,6 +1408,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 
         // Apply minimal filtering: strip ANSI, remove hints, empty lines
         let filtered = filter_status_with_args(&result.stdout);
+        let filtered = never_worse(&result.stdout, &filtered).to_string();
         print!("{}", filtered);
 
         timer.track(
@@ -896,9 +1431,15 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     let mut cmd = build_status_command(args, global_args);
     let result = exec_capture(&mut cmd).context("Failed to run git status")?;
 
-    if !result.stderr.is_empty() && result.stderr.contains("not a git repository") {
-        let message = "Not a git repository".to_string();
-        eprintln!("{}", message);
+    if !result.success() {
+        let message = if result.stderr.contains("not a git repository") {
+            "Not a git repository".to_string()
+        } else {
+            result.stderr.trim().to_string()
+        };
+        if !message.is_empty() {
+            eprintln!("{}", message);
+        }
         let original_cmd = if args.is_empty() {
             "git status".to_string()
         } else {
@@ -909,11 +1450,15 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         } else {
             format!("rtk git status {}", args.join(" "))
         };
-        timer.track(&original_cmd, &rtk_cmd, &raw_output, &message);
+        let shown = never_worse(&raw_output, &message);
+        timer.track(&original_cmd, &rtk_cmd, &raw_output, shown);
         return Ok(result.exit_code);
     }
 
-    let formatted = format_status_output(&result.stdout);
+    let formatted = match extract_detached_head(&raw_output) {
+        Some(detached_ref) => format_status_output_detached(&result.stdout, &detached_ref),
+        None => format_status_output(&result.stdout),
+    };
 
     // Surface in-progress state (rebase/merge/cherry-pick/bisect/am) from the
     // plain-status output we already captured for tracking. Porcelain omits it
@@ -923,7 +1468,8 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         None => formatted,
     };
 
-    println!("{}", final_output);
+    let shown = never_worse(&raw_output, &final_output);
+    println!("{}", shown);
 
     let original_cmd = if args.is_empty() {
         "git status".to_string()
@@ -936,7 +1482,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         format!("rtk git status {}", args.join(" "))
     };
 
-    timer.track(&original_cmd, &rtk_cmd, &raw_output, &final_output);
+    timer.track(&original_cmd, &rtk_cmd, &raw_output, shown);
 
     Ok(0)
 }
@@ -970,8 +1516,11 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
         stat_cmd.args(["diff", "--cached", "--stat", "--shortstat"]);
         let stat_result = exec_capture(&mut stat_cmd).context("Failed to check staged files")?;
 
+        // Mirror git's own behaviour: a no-op `git add` is silent. Emitting a
+        // generic "ok" here is misleading — an agent can't tell "staged N files"
+        // from "staged nothing" when both print "ok".
         let compact = if stat_result.stdout.trim().is_empty() {
-            "ok (nothing to add)".to_string()
+            String::new()
         } else {
             // Parse "1 file changed, 5 insertions(+)" format
             let short = stat_result.stdout.lines().last().unwrap_or("").trim();
@@ -982,7 +1531,9 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
             }
         };
 
-        println!("{}", compact);
+        if !compact.is_empty() {
+            println!("{}", compact);
+        }
 
         timer.track(
             &format!("git add {}", args.join(" ")),
@@ -1013,6 +1564,33 @@ fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
     cmd
 }
 
+/// Parse the first line of `git commit` success output and return a compact token.
+/// Handles: `[main abc1234def] message`, `[main (root-commit) abc1234def] msg`,
+/// localized variants, and multibyte branch names.
+fn parse_commit_output(line: &str) -> String {
+    // Locate the summary's own brackets rather than assuming the line starts
+    // with '['. git prints hook output before its summary, so the first line
+    // is often something else entirely; slicing from byte 1 panics outright
+    // when that line opens with a multi-byte character ("✅ lint passed]"),
+    // and a line decoded from non-UTF-8 bytes starts with a multi-byte U+FFFD.
+    // Both indices come from `find`, so both land on character boundaries.
+    let (Some(open), Some(bracket_end)) = (line.find('['), line.find(']')) else {
+        return "ok".to_string();
+    };
+    if open >= bracket_end {
+        return "ok".to_string();
+    }
+
+    let bracket_content = &line[open + 1..bracket_end];
+    let hash = bracket_content.split_whitespace().next_back().unwrap_or("");
+    if hash.chars().count() >= 7 {
+        let short_hash: String = hash.chars().take(7).collect();
+        format!("ok {}", short_hash)
+    } else {
+        "ok".to_string()
+    }
+}
+
 fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -1022,56 +1600,241 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         eprintln!("{}", original_cmd);
     }
 
-    let output = build_commit_command(args, global_args)
-        .stdin(Stdio::inherit())
-        .output()
+    // stdin is inherited so an interactive editor, GPG passphrase prompt or
+    // credential helper still reaches the terminal.
+    let CaptureResult {
+        stdout,
+        stderr,
+        exit_code,
+    } = exec_capture_stdin(&mut build_commit_command(args, global_args))
         .context("Failed to run git commit")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let exit_code = exit_code_from_output(&output, "git commit");
     let raw_output = format!("{}\n{}", stdout, stderr);
 
-    if output.status.success() {
-        // Extract commit hash from output like "[main abc1234] message"
-        let compact = if let Some(line) = stdout.lines().next() {
-            if let Some(hash_start) = line.find(' ') {
-                let hash = line[1..hash_start].split(' ').next_back().unwrap_or("");
-                if !hash.is_empty() && hash.len() >= 7 {
-                    format!("ok {}", &hash[..7.min(hash.len())])
-                } else {
-                    "ok".to_string()
-                }
-            } else {
-                "ok".to_string()
+    match classify_commit_outcome(exit_code == 0, &stdout, exit_code) {
+        CommitOutcome::Ok(compact) => {
+            println!("{}", compact);
+            timer.track(&original_cmd, "rtk git commit", &raw_output, &compact);
+            Ok(0)
+        }
+        CommitOutcome::Failed(code) => {
+            if !stderr.trim().is_empty() {
+                eprint!("{}", stderr);
             }
-        } else {
-            "ok".to_string()
-        };
+            if !stdout.trim().is_empty() {
+                eprint!("{}", stdout);
+            }
+            timer.track(&original_cmd, "rtk git commit", &raw_output, &raw_output);
+            Ok(code)
+        }
+    }
+}
 
-        println!("{}", compact);
+/// Outcome of a `git commit`: a non-success status propagates the exit code
+/// rather than being reported as "ok" (#2494).
+enum CommitOutcome {
+    Ok(String),
+    Failed(i32),
+}
 
-        timer.track(&original_cmd, "rtk git commit", &raw_output, &compact);
-    } else if stderr.contains("nothing to commit") || stdout.contains("nothing to commit") {
-        println!("ok (nothing to commit)");
-        timer.track(
-            &original_cmd,
-            "rtk git commit",
-            &raw_output,
-            "ok (nothing to commit)",
-        );
+/// Classify a `git commit` result.
+fn classify_commit_outcome(success: bool, stdout: &str, exit_code: i32) -> CommitOutcome {
+    if success {
+        // Extract commit hash from output
+        let compact = stdout
+            .lines()
+            .next()
+            .map(parse_commit_output)
+            .unwrap_or_else(|| "ok".to_string());
+        CommitOutcome::Ok(compact)
     } else {
-        if !stderr.trim().is_empty() {
-            eprint!("{}", stderr);
-        }
-        if !stdout.trim().is_empty() {
-            eprint!("{}", stdout);
-        }
-        timer.track(&original_cmd, "rtk git commit", &raw_output, &raw_output);
-        return Ok(exit_code);
+        CommitOutcome::Failed(exit_code)
+    }
+}
+
+fn run_checkout(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let args = args_utils::restore_double_dash(args);
+
+    if verbose > 0 {
+        eprintln!("git checkout");
     }
 
-    Ok(0)
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("checkout");
+    for arg in &args {
+        cmd.arg(arg);
+    }
+
+    let args_display = args.join(" ");
+    let args_for_filter = args.clone();
+    runner::run_filtered_with_exit(
+        cmd,
+        "git checkout",
+        &args_display,
+        move |raw, exit_code| format_checkout_output(&args_for_filter, raw, exit_code),
+        RunOptions::with_tee("git_checkout"),
+    )
+}
+
+fn format_checkout_output(args: &[String], raw: &str, exit_code: i32) -> String {
+    if exit_code == 0 {
+        format_checkout_success(args, raw)
+    } else {
+        filter_checkout_failure(raw)
+    }
+}
+
+fn format_checkout_success(args: &[String], raw: &str) -> String {
+    if let Some(restored) = checkout_restored_count(args) {
+        return format!(
+            "ok {} {}",
+            restored,
+            pluralize(restored, "file restored", "files restored")
+        );
+    }
+    if let Some(branch) = checkout_reset_branch_arg(args) {
+        return format!("ok {}", branch);
+    }
+
+    for line in raw.lines().map(str::trim) {
+        if let Some(branch) = quoted_suffix(line, "Switched to a new branch ") {
+            return format!("ok {} (new)", branch);
+        }
+        if let Some(branch) = quoted_suffix(line, "Switched to branch ") {
+            return format!("ok {}", branch);
+        }
+        if let Some(branch) = quoted_suffix(line, "Already on ") {
+            return format!("ok {}", branch);
+        }
+        if let Some(rest) = line.strip_prefix("HEAD is now at ") {
+            let hash = rest.split_whitespace().next().unwrap_or("HEAD");
+            return format!("ok HEAD {}", hash);
+        }
+        if line.starts_with("Updated ") && line.contains(" path") {
+            return format!("ok {}", line.to_ascii_lowercase());
+        }
+    }
+
+    if let Some(branch) = checkout_new_branch_arg(args) {
+        return format!("ok {} (new)", branch);
+    }
+    if let Some(branch) = checkout_branch_arg(args) {
+        return format!("ok {}", branch);
+    }
+
+    "ok".to_string()
+}
+
+fn checkout_restored_count(args: &[String]) -> Option<usize> {
+    let separator = args.iter().position(|arg| arg == "--")?;
+    let count = args[separator + 1..]
+        .iter()
+        .filter(|arg| !arg.is_empty())
+        .count();
+    (count > 0).then_some(count)
+}
+
+fn checkout_new_branch_arg(args: &[String]) -> Option<&str> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-b" | "--orphan" => return iter.next().map(String::as_str),
+            "-B" => {
+                iter.next();
+            }
+            _ => {
+                if let Some(branch) = arg.strip_prefix("--orphan=") {
+                    return Some(branch);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn checkout_reset_branch_arg(args: &[String]) -> Option<&str> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "-B" {
+            return iter.next().map(String::as_str);
+        }
+    }
+    None
+}
+
+fn checkout_branch_arg(args: &[String]) -> Option<&str> {
+    if args.iter().any(|arg| arg == "--") {
+        return None;
+    }
+
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-b" | "-B" | "--orphan" => {
+                iter.next();
+            }
+            "-t" | "--track" | "--detach" => {}
+            _ if arg.starts_with('-') => {}
+            _ => return Some(arg),
+        }
+    }
+    None
+}
+
+fn quoted_suffix<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    line.strip_prefix(prefix)
+        .and_then(|rest| rest.strip_prefix('\''))
+        .and_then(|rest| rest.strip_suffix('\''))
+}
+
+fn pluralize<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
+    if count == 1 {
+        singular
+    } else {
+        plural
+    }
+}
+
+fn filter_checkout_failure(raw: &str) -> String {
+    let mut important = Vec::new();
+    let mut in_file_list = false;
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let is_header = trimmed.starts_with("error:")
+            || trimmed.starts_with("fatal:")
+            || trimmed.starts_with("CONFLICT");
+
+        if is_header {
+            in_file_list = trimmed.contains("following")
+                && trimmed.contains("files")
+                && trimmed.ends_with(':');
+            important.push(trimmed.to_string());
+            continue;
+        }
+
+        if in_file_list {
+            if trimmed.starts_with("Please ") || trimmed.starts_with("Aborting") {
+                in_file_list = false;
+            } else if line.starts_with(char::is_whitespace) {
+                important.push(line.to_string());
+                continue;
+            }
+        }
+
+        if trimmed.starts_with("Aborting") {
+            important.push(trimmed.to_string());
+        }
+    }
+
+    if important.is_empty() {
+        raw.trim().to_string()
+    } else {
+        important.join("\n")
+    }
 }
 
 // Git push progress prefixes (stderr) — dropped from the stream.
@@ -1385,6 +2148,7 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     }
 
     let filtered = filter_branch_output(&result.stdout);
+    let filtered = never_worse(&result.stdout, &filtered).to_string();
     println!("{}", filtered);
 
     timer.track(
@@ -1441,12 +2205,16 @@ fn filter_branch_output(output: &str) -> String {
             .filter(|r| *r != &current && !local.contains(r))
             .collect();
         if !remote_only.is_empty() {
+            const MAX_REMOTE_BRANCHES: usize = CAP_WARNINGS;
             result.push(format!("  remote-only ({}):", remote_only.len()));
-            for b in remote_only.iter().take(10) {
+            for b in remote_only.iter().take(MAX_REMOTE_BRANCHES) {
                 result.push(format!("    {}", b));
             }
-            if remote_only.len() > 10 {
-                result.push(format!("    ... +{} more", remote_only.len() - 10));
+            if remote_only.len() > MAX_REMOTE_BRANCHES {
+                result.push(format!(
+                    "    ... +{} more",
+                    remote_only.len() - MAX_REMOTE_BRANCHES
+                ));
             }
         }
     }
@@ -1503,9 +2271,12 @@ fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32
 fn format_stash_message(subcommand: Option<&str>, result: &CaptureResult) -> String {
     match subcommand {
         None | Some("push") | Some("save") => {
-            // Create operations check for "no local changes"
-            if result.stdout.contains("No local changes") {
-                "ok (nothing to stash)".to_string()
+            // A successful stash collapses to "ok stashed" (the WIP ref/sha git
+            // prints isn't needed to `git stash pop`). But a no-op must NOT look
+            // like success — pass git's "No local changes to save" through so the
+            // agent can tell nothing was stashed.
+            if result.combined().contains("No local changes") {
+                "No local changes to save".to_string()
             } else {
                 "ok stashed".to_string()
             }
@@ -1533,13 +2304,15 @@ fn run_stash(
             let result = exec_capture(&mut cmd).context("Failed to run git stash list")?;
 
             if result.stdout.trim().is_empty() {
-                let msg = "No stashes";
-                println!("{}", msg);
-                timer.track("git stash list", "rtk git stash list", &result.stdout, msg);
-                return Ok(0);
+                if !result.success() && !result.stderr.trim().is_empty() {
+                    eprintln!("{}", result.stderr.trim());
+                }
+                timer.track("git stash list", "rtk git stash list", &result.stdout, "");
+                return Ok(result.exit_code);
             }
 
             let filtered = filter_stash_list(&result.stdout);
+            let filtered = never_worse(&result.stdout, &filtered).to_string();
             println!("{}", filtered);
             timer.track(
                 "git stash list",
@@ -1549,28 +2322,36 @@ fn run_stash(
             );
         }
         Some("show") => {
+            let patch_mode = args.iter().any(|a| a == "-p" || a == "--patch");
+
             let mut cmd = git_cmd(global_args);
-            cmd.args(["stash", "show", "-p"]);
+            cmd.args(["stash", "show"]);
             for arg in args {
                 cmd.arg(arg);
             }
             let result = exec_capture(&mut cmd).context("Failed to run git stash show")?;
 
-            let filtered = if result.stdout.trim().is_empty() {
-                let msg = "Empty stash";
-                println!("{}", msg);
-                msg.to_string()
-            } else {
-                let compacted = compact_diff(&result.stdout, 100);
-                println!("{}", compacted);
-                compacted
-            };
+            if result.stdout.trim().is_empty() {
+                if !result.success() && !result.stderr.trim().is_empty() {
+                    eprintln!("{}", result.stderr.trim());
+                }
+                timer.track("git stash show", "rtk git stash show", &result.stdout, "");
+                return Ok(result.exit_code);
+            }
 
+            let filtered = if patch_mode && !emits_word_diff(args) {
+                compact_diff(&result.stdout, 100)
+            } else if patch_mode {
+                result.stdout.clone()
+            } else {
+                compact_stash_stat(&result.stdout)
+            };
+            let shown = crate::core::runner::emit_guarded(&filtered, None, &result.stdout);
             timer.track(
                 "git stash show",
                 "rtk git stash show",
                 &result.stdout,
-                &filtered,
+                &shown,
             );
         }
         Some("apply") | Some("branch") | Some("clear") | Some("create") | Some("drop")
@@ -1675,6 +2456,79 @@ fn filter_stash_list(output: &str) -> String {
     result.join("\n")
 }
 
+fn compact_stash_stat(raw: &str) -> String {
+    let (files, summary) = parse_stash_stat(raw);
+    if files.is_empty() {
+        return raw.trim_end().to_string();
+    }
+    let total = files.len();
+    let mut out = join_with_overflow(&files[..total.min(CAP_LIST)], total, CAP_LIST, "files");
+    if total > CAP_LIST {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&files.join("\n"), "git-stash-show", CAP_LIST + 1)
+        {
+            out.push(' ');
+            out.push_str(&hint);
+        }
+    }
+    if !summary.is_empty() {
+        out.push('\n');
+        out.push_str(&compress_stat_summary(&summary));
+    }
+    out
+}
+
+fn compress_stat_summary(summary: &str) -> String {
+    summary
+        .replace("insertions(+)", "+")
+        .replace("insertion(+)", "+")
+        .replace("deletions(-)", "-")
+        .replace("deletion(-)", "-")
+        .replace("files changed", "changed")
+        .replace("file changed", "changed")
+        .replace(",", "")
+}
+
+fn parse_stash_stat(stat: &str) -> (Vec<String>, String) {
+    let stat = strip_ansi(stat);
+    let mut files = Vec::new();
+    let mut summary = String::new();
+
+    for line in stat.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match diffstat_row(line) {
+            Some(row) => files.push(row),
+            None => summary = line.to_string(),
+        }
+    }
+
+    (files, summary)
+}
+
+fn diffstat_row(line: &str) -> Option<String> {
+    let bar = line.rfind('|')?;
+    let path = line[..bar].trim();
+    let rhs = line[bar + 1..].trim();
+    let is_diffstat_row = rhs.starts_with("Bin") || rhs.starts_with(|c: char| c.is_ascii_digit());
+    if path.is_empty() || !is_diffstat_row {
+        return None;
+    }
+    if rhs.starts_with("Bin") {
+        return Some(format!("{} (binary)", path));
+    }
+    let count = rhs.split_whitespace().next().unwrap_or("");
+    let sign = match (rhs.contains('+'), rhs.contains('-')) {
+        (true, true) => " +-",
+        (true, false) => " +",
+        (false, true) => " -",
+        (false, false) => "",
+    };
+    Some(format!("{} {}{}", path, count, sign))
+}
+
 fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -1722,7 +2576,21 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
     cmd.args(["worktree", "list"]);
     let result = exec_capture(&mut cmd).context("Failed to run git worktree list")?;
 
+    if !result.success() {
+        if !result.stderr.trim().is_empty() {
+            eprintln!("{}", result.stderr);
+        }
+        timer.track(
+            "git worktree list",
+            "rtk git worktree",
+            &result.stdout,
+            &result.stderr,
+        );
+        return Ok(result.exit_code);
+    }
+
     let filtered = filter_worktree_list(&result.stdout);
+    let filtered = never_worse(&result.stdout, &filtered).to_string();
     println!("{}", filtered);
     timer.track(
         "git worktree list",
@@ -1861,10 +2729,10 @@ mod tests {
     }
 
     #[test]
-    fn test_build_status_command_default_includes_uall() {
+    fn test_build_status_command_default_compact() {
         let cmd = build_status_command(&[], &[]);
         let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, vec!["status", "--porcelain", "-b", "-uall"]);
+        assert_eq!(args, vec!["status", "--porcelain", "-b"]);
     }
 
     #[test]
@@ -1872,8 +2740,14 @@ mod tests {
         assert!(uses_compact_status_path(&["-b".to_string()]));
         assert!(uses_compact_status_path(&["--branch".to_string()]));
         assert!(uses_compact_status_path(&["-sb".to_string()]));
-        assert!(uses_compact_status_path(&["-s".to_string(), "-b".to_string()]));
-        assert!(uses_compact_status_path(&["--short".to_string(), "--branch".to_string()]));
+        assert!(uses_compact_status_path(&[
+            "-s".to_string(),
+            "-b".to_string()
+        ]));
+        assert!(uses_compact_status_path(&[
+            "--short".to_string(),
+            "--branch".to_string()
+        ]));
         assert!(!uses_compact_status_path(&["-s".to_string()]));
         assert!(!uses_compact_status_path(&["--short".to_string()]));
         assert!(!uses_compact_status_path(&["--porcelain".to_string()]));
@@ -1885,7 +2759,7 @@ mod tests {
         let args = vec!["--short".to_string(), "--branch".to_string()];
         let cmd = build_status_command(&args, &[]);
         let cmd_args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(cmd_args, vec!["status", "--porcelain", "-b", "-uall"]);
+        assert_eq!(cmd_args, vec!["status", "--porcelain", "-b"]);
     }
 
     #[test]
@@ -1894,6 +2768,30 @@ mod tests {
         let cmd = build_status_command(&args, &[]);
         let cmd_args: Vec<_> = cmd.get_args().collect();
         assert_eq!(cmd_args, vec!["status", "--porcelain", "-uno"]);
+    }
+
+    #[test]
+    fn test_run_status_compact_propagates_non_repo_failure() {
+        // #2497: a `git status` failure other than "not a git repository"
+        // (here: a corrupt index) must propagate a non-zero exit, not be
+        // flattened into "Clean working tree" + exit 0.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().to_string_lossy().into_owned();
+        assert!(
+            Command::new("git")
+                .args(["-C", &p, "init", "-q"])
+                .status()
+                .expect("git init")
+                .success(),
+            "git init should succeed"
+        );
+        std::fs::write(dir.path().join(".git/index"), "corrupt-index").expect("corrupt index");
+        let global = vec!["-C".to_string(), p];
+        let code = run_status(&[], 0, &global).expect("run_status");
+        assert_ne!(
+            code, 0,
+            "corrupt-index git status must not be reported as success"
+        );
     }
 
     #[test]
@@ -1909,6 +2807,554 @@ mod tests {
         let result = compact_diff(diff, 100);
         assert!(result.contains("foo.rs"));
         assert!(result.contains("+"));
+    }
+
+    #[test]
+    fn test_compact_diff_hunk_lines_are_grep_anchorable() {
+        let diff = "diff --git a/f.txt b/f.txt\n\
+                    --- a/f.txt\n\
+                    +++ b/f.txt\n\
+                    @@ -1,5 +1,4 @@\n\
+                    \x20keep1\n\
+                    -DELETED_A\n\
+                    \x20keep2\n\
+                    -DELETED_B\n\
+                    +ADDED\n";
+        let result = compact_diff(diff, 100);
+
+        let removed: Vec<&str> = result.lines().filter(|l| l.starts_with('-')).collect();
+        let added: Vec<&str> = result.lines().filter(|l| l.starts_with('+')).collect();
+
+        assert_eq!(removed, vec!["-DELETED_A", "-DELETED_B"], "`^-` must anchor");
+        assert_eq!(added, vec!["+ADDED"], "`^+` must anchor");
+
+        // rtk's own tally stays indented so these same greps never count it as
+        // a diff line. Without this, `^+` would pick up the "+1 -2" summary.
+        assert!(result.contains("  +1 -2"), "tally must stay indented");
+
+        // Context lines keep git's leading space, so they are not `^-`/`^+`.
+        // Both are emitted: the one before the first change as well as the one
+        // between changes.
+        assert!(
+            result.lines().any(|l| l == " keep1"),
+            "leading context must survive, got:\n{}",
+            result
+        );
+        assert!(result.lines().any(|l| l == " keep2"));
+    }
+
+    #[test]
+    fn test_compact_diff_keeps_content_starting_with_plus_or_minus() {
+        // `---` / `+++` are file headers only before the first `@@`. Inside a
+        // hunk, `++i;` and `-- sql comment` are content and must be neither
+        // dropped from the body nor missing from the tally.
+        let diff = "diff --git a/f.sql b/f.sql\n\
+                    --- a/f.sql\n\
+                    +++ b/f.sql\n\
+                    @@ -1,2 +1,2 @@\n\
+                    --- sql comment\n\
+                    +++i;\n";
+        let result = compact_diff(diff, 100);
+
+        assert!(
+            result.lines().any(|l| l == "--- sql comment"),
+            "deleted SQL comment must survive, got:\n{}",
+            result
+        );
+        assert!(
+            result.lines().any(|l| l == "+++i;"),
+            "added `++i;` must survive, got:\n{}",
+            result
+        );
+        assert!(result.contains("  +1 -1"), "tally must count both, got:\n{}", result);
+    }
+
+    #[test]
+    fn test_compact_diff_leading_context_has_its_own_budget() {
+        // Leading context must not consume the 100-line change budget: a hunk
+        // opening with more context than the budget still shows every change.
+        let mut diff = String::from("diff --git a/f.rs b/f.rs\n@@ -1,120 +1,120 @@\n");
+        for i in 0..20 {
+            diff.push_str(&format!(" ctx{}\n", i));
+        }
+        for i in 0..100 {
+            diff.push_str(&format!("-del{}\n", i));
+        }
+        let result = compact_diff(&diff, 1000);
+
+        let ctx = result.lines().filter(|l| l.starts_with(" ctx")).count();
+        let dels = result.lines().filter(|l| l.starts_with("-del")).count();
+        assert_eq!(ctx, 3, "leading context is capped, got:\n{}", result);
+        assert_eq!(dels, 100, "every change must still be shown, got:\n{}", result);
+        assert!(
+            !result.contains("truncated"),
+            "no change was dropped, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_compact_diff_combined_diff_headers_are_not_hunk_content() {
+        // `diff --cc` sections do not match `diff --git`, so the reset fires on
+        // the `diff --` prefix and the `---` / `+++` headers of every section
+        // stay outside the hunk body.
+        let diff = "diff --cc a.txt\n\
+                    index ba2906d,e45c9c2..0000000\n\
+                    --- a/a.txt\n\
+                    +++ b/a.txt\n\
+                    @@@ -1,1 -1,1 +1,5 @@@\n\
+                    ++<<<<<<< HEAD\n\
+                    \x20+main\n\
+                    ++=======\n\
+                    + side\n\
+                    ++>>>>>>> side\n\
+                    diff --cc z.txt\n\
+                    index ba2906d,e45c9c2..0000000\n\
+                    --- a/z.txt\n\
+                    +++ b/z.txt\n\
+                    @@@ -1,1 -1,1 +1,5 @@@\n\
+                    ++<<<<<<< HEAD\n\
+                    \x20+main\n\
+                    ++=======\n\
+                    + side\n\
+                    ++>>>>>>> side\n";
+        let result = compact_diff(diff, 500);
+
+        assert!(
+            !result.lines().any(|l| l.starts_with("+++ b/")),
+            "file headers must not reach the hunk body, got:\n{}",
+            result
+        );
+        assert!(result.contains("z.txt"), "got:\n{}", result);
+        // A combined diff carries one marker column per parent, so ` +main` is
+        // an addition against the second parent. The tally counts all five
+        // added lines per file; an anchored `^+` sees only the four whose
+        // marker sits in column 1. That gap is documented in FEATURES.md.
+        assert_eq!(
+            result.matches("  +5 -0").count(),
+            2,
+            "column-2 markers must be counted, got:\n{}",
+            result
+        );
+        let anchored = result.lines().filter(|l| l.starts_with('+')).count();
+        assert_eq!(anchored, 8, "four per file anchor, got:\n{}", result);
+    }
+
+    #[test]
+    fn test_compact_diff_mbox_signature_is_not_a_deletion() {
+        // `gh pr diff --patch` yields an mbox: a bare `---` before the diffstat
+        // and a `-- ` signature after each patch, both at column 0. The hunk
+        // ends where its declared line counts run out, so neither is read as
+        // hunk content.
+        let diff = "From abc Mon Sep 17 00:00:00 2001\n\
+                    Subject: [PATCH 1/2] one\n\
+                    \n\
+                    ---\n\
+                    \x20f.txt | 2 +-\n\
+                    \n\
+                    diff --git a/f.txt b/f.txt\n\
+                    --- a/f.txt\n\
+                    +++ b/f.txt\n\
+                    @@ -1,2 +1,2 @@\n\
+                    -old1\n\
+                    +new1\n\
+                    \x20tail1\n\
+                    -- \n\
+                    2.40.0\n\
+                    \n\
+                    From def Mon Sep 17 00:00:00 2001\n\
+                    Subject: [PATCH 2/2] two\n\
+                    \n\
+                    ---\n\
+                    diff --git a/g.txt b/g.txt\n\
+                    --- a/g.txt\n\
+                    +++ b/g.txt\n\
+                    @@ -1,2 +1,2 @@\n\
+                    -old2\n\
+                    +new2\n\
+                    \x20tail2\n\
+                    -- \n\
+                    2.40.0\n";
+        let result = compact_diff(diff, 500);
+
+        let removed: Vec<&str> = result.lines().filter(|l| l.starts_with('-')).collect();
+        assert_eq!(
+            removed,
+            vec!["-old1", "-old2"],
+            "only real deletions anchor, got:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("Subject:"),
+            "mbox envelope must stay out of the body, got:\n{}",
+            result
+        );
+        assert!(result.contains("  +1 -1"), "tally counts real changes only, got:\n{}", result);
+    }
+
+    #[test]
+    fn test_compact_diff_leading_context_is_adjacent_to_the_change() {
+        // With `-U10` the first context lines sit ten lines above the change.
+        // Emitting those would tell the reader that ctx3 precedes the deletion
+        // when ctx10 does.
+        let mut diff = String::from("diff --git a/f.rs b/f.rs\n@@ -1,11 +1,11 @@\n");
+        for i in 1..=10 {
+            diff.push_str(&format!(" ctx{}\n", i));
+        }
+        diff.push_str("-old\n+new\n");
+        let result = compact_diff(&diff, 500);
+
+        let ctx: Vec<&str> = result.lines().filter(|l| l.starts_with(" ctx")).collect();
+        assert_eq!(
+            ctx,
+            vec![" ctx8", " ctx9", " ctx10"],
+            "the last context lines, not the first, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_diff_header_path_keeps_spaces() {
+        assert_eq!(
+            diff_header_path("diff --git a/my file.txt b/my file.txt"),
+            "my file.txt"
+        );
+        assert_eq!(diff_header_path("diff --cc my file.txt"), "my file.txt");
+        assert_eq!(
+            diff_header_path("diff --combined my file.txt"),
+            "my file.txt"
+        );
+    }
+
+    #[test]
+    fn test_diff_header_path_handles_gits_quoted_paths() {
+        // Under the default `core.quotepath`, git escapes a non-ASCII path and
+        // wraps it in quotes, which removes the ` b/` separator the plain form
+        // is split on. Without the quoted form handled, the fallback returned
+        // the whole remainder — both paths — as the section header.
+        assert_eq!(
+            diff_header_path(r#"diff --git "a/Ã©tÃ©.txt" "b/Ã©tÃ©.txt""#),
+            r"Ã©tÃ©.txt"
+        );
+        assert_eq!(
+            diff_header_path(r#"diff --cc "Ã©tÃ©.txt""#),
+            r"Ã©tÃ©.txt"
+        );
+        // A rename quotes each side on its own.
+        assert_eq!(
+            diff_header_path(r#"diff --git a/plain.txt "b/Ã©t.txt""#),
+            r"Ã©t.txt"
+        );
+        assert_eq!(
+            diff_header_path(r#"diff --git "a/Ã©t.txt" b/plain.txt"#),
+            "plain.txt"
+        );
+    }
+
+    #[test]
+    fn test_diff_header_path_unescapes_gits_default_quoting() {
+        // What git actually emits under the default `core.quotepath`: one octal
+        // escape per byte, so the header has to be decoded rather than merely
+        // unwrapped, or `rtk git diff | grep été` finds nothing.
+        assert_eq!(
+            diff_header_path(r#"diff --git "a/\303\251t\303\251.txt" "b/\303\251t\303\251.txt""#),
+            "été.txt"
+        );
+        assert_eq!(
+            diff_header_path(r#"diff --cc "\303\251t\303\251.txt""#),
+            "été.txt"
+        );
+        assert_eq!(
+            diff_header_path(r#"diff --git a/plain.txt "b/\303\251t.txt""#),
+            "ét.txt"
+        );
+        // The single-character escapes, and a backslash standing for itself.
+        assert_eq!(
+            diff_header_path(r#"diff --cc "tab\there.txt""#),
+            "tab\there.txt"
+        );
+        assert_eq!(
+            diff_header_path(r#"diff --cc "quote\"here.txt""#),
+            "quote\"here.txt"
+        );
+        assert_eq!(
+            diff_header_path(r#"diff --cc "back\\slash.txt""#),
+            r"back\slash.txt"
+        );
+    }
+
+    #[test]
+    fn test_emits_word_diff_detects_every_form() {
+        for flag in [
+            "--word-diff",
+            "--word-diff=plain",
+            "--word-diff=porcelain",
+            "--word-diff-regex=.",
+            "--color-words",
+            "--color-words=.",
+        ] {
+            assert!(
+                emits_word_diff(&[flag.to_string()]),
+                "{} must pass through",
+                flag
+            );
+        }
+        assert!(!emits_word_diff(&["--stat".to_string()]));
+        assert!(!emits_word_diff(&["-U10".to_string()]));
+        assert!(!emits_word_diff(&[]));
+    }
+
+    #[test]
+    fn test_emits_word_diff_honours_the_none_mode() {
+        // `--word-diff=none` leaves an ordinary unified diff, which compacts
+        // like any other. Treating it as a word diff passed the whole raw diff
+        // through, so a defensive `--word-diff=none` lost every saving.
+        assert!(!emits_word_diff(&["--word-diff=none".to_string()]));
+        // Modes are last-one-wins, which is what `none` exists to do.
+        assert!(!emits_word_diff(&[
+            "--word-diff".to_string(),
+            "--word-diff=none".to_string()
+        ]));
+        assert!(emits_word_diff(&[
+            "--word-diff=none".to_string(),
+            "--word-diff".to_string()
+        ]));
+        // `--color-words` takes a regex, so `none` there is a pattern.
+        assert!(emits_word_diff(&["--color-words=none".to_string()]));
+    }
+
+    #[test]
+    fn test_parse_hunk_header_reconciles_ranges_with_marker_columns() {
+        // A well-formed header lists one range per marker column. When it does
+        // not, only the columns can be charged. A missing range must not leave
+        // an untracked parent holding the hunk open forever, and an extra one
+        // must not sit at its declared count with no column to spend it.
+        let h = parse_hunk_header("@@@ -1 +1 @@@").expect("two columns, one range");
+        assert_eq!(h.prefix_width, 2);
+        assert_eq!(h.parents, vec![1, usize::MAX]);
+
+        let h = parse_hunk_header("@@@ -1 -1 -1 +0,0 @@@").expect("two columns, three ranges");
+        assert_eq!(h.prefix_width, 2);
+        assert_eq!(h.parents, vec![1, 1]);
+    }
+
+    #[test]
+    fn test_compact_diff_extra_range_does_not_strand_a_hunk() {
+        // With the third range untracked, `--x` left it at 1 forever, so the
+        // hunk never closed and the mbox signature became its content.
+        let out = compact_diff("diff --cc f\n@@@ -1 -1 -1 +0,0 @@@\n--x\n-- \n2.40.0\n", 100);
+        assert!(out.contains("--x"), "got:\n{}", out);
+        assert!(!out.contains("2.40.0"), "got:\n{}", out);
+        assert!(!out.contains("-- "), "got:\n{}", out);
+        // One line, removed from both parents, is one deletion.
+        assert!(out.contains("+0 -1"), "got:\n{}", out);
+    }
+
+    #[test]
+    fn test_compact_diff_missing_range_keeps_the_body() {
+        // One range for two columns: the untracked parent gets `usize::MAX`, so
+        // the hunk stays open to the next header rather than closing early and
+        // dropping ` -lost`.
+        let out = compact_diff("diff --cc f\n@@@ -1 +1 @@@\n +kept\n -lost\n", 100);
+        assert!(out.contains(" +kept"), "got:\n{}", out);
+        assert!(out.contains(" -lost"), "got:\n{}", out);
+        assert!(out.contains("+1 -1"), "got:\n{}", out);
+    }
+
+    #[test]
+    fn test_diff_header_path_splits_the_pair_at_its_midpoint() {
+        // A file under a directory named `x b` puts the ` b/` separator inside
+        // the path, so the first match is the wrong one.
+        assert_eq!(diff_header_path("diff --git a/x b/y b/x b/y"), "x b/y");
+        // `--no-prefix` and custom prefixes leave no ` b/` at all.
+        assert_eq!(diff_header_path("diff --git x x"), "x");
+        assert_eq!(
+            diff_header_path("diff --git src/main.rs src/main.rs"),
+            "src/main.rs"
+        );
+        // Prefixes are matched against each other, not by name, so a custom
+        // `--dst-prefix` reads like any other pair.
+        assert_eq!(diff_header_path("diff --git a/f.txt w/f.txt"), "f.txt");
+        assert_eq!(diff_header_path("diff --git i/f.txt w/f.txt"), "f.txt");
+        // A rename's halves disagree past their first component, so the ` b/`
+        // split still names the destination.
+        assert_eq!(diff_header_path("diff --git a/old.txt b/new.txt"), "new.txt");
+    }
+
+    #[test]
+    fn test_diff_header_path_does_not_split_single_path_headers() {
+        // `diff --cc` names one path. Splitting its remainder at the midpoint
+        // would read a file called `dup dup` as the file `dup` named twice.
+        assert_eq!(diff_header_path("diff --cc dup dup"), "dup dup");
+        assert_eq!(diff_header_path("diff --combined dup dup"), "dup dup");
+        assert_eq!(diff_header_path("diff --cc a/x b/x"), "a/x b/x");
+    }
+
+    #[test]
+    fn test_parse_hunk_header_counts() {
+        let h = parse_hunk_header("@@ -10,3 +10,4 @@ fn ctx() {").expect("unified header");
+        assert_eq!((h.parents.as_slice(), h.new, h.prefix_width), (&[3][..], 4, 1));
+
+        // Omitted counts mean one line.
+        let h = parse_hunk_header("@@ -1 +1 @@").expect("single-line header");
+        assert_eq!((h.parents.as_slice(), h.new), (&[1][..], 1));
+
+        // A combined header lists one range per parent, in marker-column order.
+        // Every one of them bounds the hunk body.
+        let h = parse_hunk_header("@@@ -1,1 -1,4 +1,5 @@@").expect("combined header");
+        assert_eq!(
+            (h.parents.as_slice(), h.new, h.prefix_width),
+            (&[1, 4][..], 5, 2)
+        );
+
+        assert!(parse_hunk_header("@ -1,1 +1,1 @").is_none());
+        assert!(parse_hunk_header("-- ").is_none());
+        assert!(parse_hunk_header("---").is_none());
+    }
+
+    #[test]
+    fn test_compact_diff_non_ascii_body_line_without_a_marker_does_not_panic() {
+        // `--word-diff` / `--color-words` emit body lines with no marker column,
+        // so content lands where the markers are sliced. Slicing by byte index
+        // split a leading multi-byte character and aborted the process.
+        let out = compact_diff(
+            "diff --git a/f.txt b/f.txt\n@@ -1,3 +1,3 @@\n-old\n+new\nécole ancienne ligne\n",
+            100,
+        );
+        assert!(out.contains("-old"), "got:\n{}", out);
+        assert!(out.contains("+new"), "got:\n{}", out);
+        assert!(out.contains("école ancienne ligne"), "got:\n{}", out);
+    }
+
+    #[test]
+    fn test_compact_diff_combined_hunk_ends_at_its_declared_length() {
+        // Every parent's declared range bounds the body. Charging only the
+        // first parent left `old` unable to converge on real conflict output,
+        // so the hunk never closed by count and the mbox / signature / prose
+        // guard did not apply to combined sections at all.
+        let conflict = "diff --cc f.txt\n@@@ -1,1 -1,1 +1,5 @@@\n++<<<<<<<\n +main\n++=======\n+ side\n++>>>>>>>\n-- \ntrailing signature\n";
+        let out = compact_diff(conflict, 100);
+        assert!(!out.contains("trailing signature"), "got:\n{}", out);
+        assert!(!out.contains("-- "), "got:\n{}", out);
+        assert!(out.contains("+5 -0"), "got:\n{}", out);
+    }
+
+    #[test]
+    fn test_compact_diff_combined_hunk_keeps_second_parent_removals() {
+        // `-1,2 -1,4 +1,2`: two removals spend only the second parent's budget.
+        // Closing on the first parent and the result alone dropped them with no
+        // tally and no truncation note — a silent loss.
+        let out = compact_diff(
+            "diff --cc f.txt\n@@@ -1,2 -1,4 +1,2 @@@\n  a\n  b\n -x\n -y\n",
+            100,
+        );
+        assert!(out.contains(" -x"), "got:\n{}", out);
+        assert!(out.contains(" -y"), "got:\n{}", out);
+        assert!(out.contains("+0 -2"), "got:\n{}", out);
+    }
+
+    #[test]
+    fn test_compact_diff_flushes_context_from_a_hunk_with_no_change_line() {
+        // The buffer drained only on the first change line, so a hunk that ends
+        // without one rendered as a bare header with nothing under it.
+        let out = compact_diff(
+            "diff --git a/g.txt b/g.txt\n@@ -1,3 +1,3 @@\n ctx1\n ctx2\n ctx3\n",
+            100,
+        );
+        assert!(out.contains(" ctx1"), "got:\n{}", out);
+        assert!(out.contains(" ctx3"), "got:\n{}", out);
+    }
+
+    #[test]
+    fn test_compact_diff_leading_context_does_not_displace_change_lines() {
+        // Leading context is exempt from `max_lines`, so the same number of
+        // change lines survives whether or not the hunks open with context.
+        let build = |with_context: bool| {
+            let mut diff = String::new();
+            for f in 0..30 {
+                diff.push_str(&format!("diff --git a/f{}.rs b/f{}.rs\n", f, f));
+                diff.push_str("@@ -1,20 +1,20 @@\n");
+                if with_context {
+                    for c in 0..3 {
+                        diff.push_str(&format!(" ctx{}_{}\n", f, c));
+                    }
+                }
+                for i in 0..12 {
+                    diff.push_str(&format!("-del{}_{}\n", f, i));
+                }
+            }
+            diff
+        };
+        let count_changes =
+            |out: &str| out.lines().filter(|l| l.starts_with("-del")).count();
+
+        let without = compact_diff(&build(false), 500);
+        let with = compact_diff(&build(true), 500);
+        assert_eq!(
+            count_changes(&with),
+            count_changes(&without),
+            "leading context displaced change lines:\n{}",
+            with
+        );
+    }
+
+    #[test]
+    fn test_compact_diff_leading_context_is_capped_across_the_diff() {
+        // The diff-wide cap is what bounds the exemption: without it, a diff of
+        // many small hunks would spend three exempt lines on each one.
+        let mut diff = String::new();
+        for f in 0..200 {
+            diff.push_str(&format!("diff --git a/f{}.rs b/f{}.rs\n", f, f));
+            diff.push_str("@@ -1,4 +1,4 @@\n");
+            for c in 0..3 {
+                diff.push_str(&format!(" ctx{}_{}\n", f, c));
+            }
+            diff.push_str(&format!("-del{}\n", f));
+        }
+        let result = compact_diff(&diff, 500);
+
+        let ctx = result.lines().filter(|l| l.starts_with(" ctx")).count();
+        assert!(
+            ctx <= 50,
+            "leading context must stay within max_lines / 10, got {} in:\n{}",
+            ctx,
+            result
+        );
+    }
+
+    #[test]
+    fn test_hunk_truncation_note_counts_one_as_singular() {
+        assert_eq!(
+            hunk_truncation_note(1, 0).as_deref(),
+            Some("  ... (1 deletion truncated)")
+        );
+        assert_eq!(
+            hunk_truncation_note(0, 1).as_deref(),
+            Some("  ... (1 addition truncated)")
+        );
+        assert_eq!(
+            hunk_truncation_note(1, 2).as_deref(),
+            Some("  ... (1 deletion, 2 additions truncated)")
+        );
+        assert_eq!(hunk_truncation_note(0, 0), None);
+    }
+
+    #[test]
+    fn test_compact_diff_truncation_note_splits_by_sign() {
+        // An anchored `^-` audit needs to know how many deletions it did not
+        // see, which a merged "N lines truncated" cannot tell it.
+        let mut diff = String::from("diff --git a/f.rs b/f.rs\n@@ -1,160 +1,160 @@\n");
+        for i in 0..80 {
+            diff.push_str(&format!("-del{}\n", i));
+            diff.push_str(&format!("+add{}\n", i));
+        }
+        let result = compact_diff(&diff, 1000);
+
+        assert!(
+            result.contains("  ... (30 deletions, 30 additions truncated)"),
+            "expected per-sign truncation note, got:\n{}",
+            result
+        );
     }
 
     #[test]
@@ -1960,134 +3406,6 @@ mod tests {
         assert!(
             !result.contains("more changes truncated"),
             "5 files × 20 lines should not exceed max_lines=500"
-        );
-    }
-
-    // ----- normalize_diff_args (issue #1215 + branch-name fix #1431) -----
-    //
-    // Tests use normalize_diff_args_impl with a mock path-existence checker so
-    // they don't depend on the real filesystem.
-
-    fn exists_mock<'a>(existing: &'a [&'a str]) -> impl Fn(&str) -> bool + 'a {
-        move |p| existing.contains(&p)
-    }
-
-    /// Baseline: `--` already present → no-op, args unchanged.
-    #[test]
-    fn test_normalize_diff_args_noop_when_separator_present() {
-        let args = vec![
-            "HEAD".to_string(),
-            "--".to_string(),
-            "src/main.rs".to_string(),
-        ];
-        assert_eq!(normalize_diff_args_impl(&args, exists_mock(&[])), args);
-    }
-
-    /// Core regression (issue #1215): clap ate `--` before a real file path.
-    /// When the path exists on disk, `--` must be re-inserted.
-    #[test]
-    fn test_normalize_diff_args_reinserts_separator_before_existing_path() {
-        let args = vec!["apps/client/frontend/src/MyComponent.tsx".to_string()];
-        let normalized = normalize_diff_args_impl(
-            &args,
-            exists_mock(&["apps/client/frontend/src/MyComponent.tsx"]),
-        );
-        assert_eq!(
-            normalized,
-            vec![
-                "--".to_string(),
-                "apps/client/frontend/src/MyComponent.tsx".to_string()
-            ],
-            "-- must be injected before an existing path"
-        );
-    }
-
-    /// Ref before path: ["HEAD", "src/foo.rs"] where src/foo.rs exists → inject after HEAD.
-    #[test]
-    fn test_normalize_diff_args_reinserts_separator_after_ref() {
-        let args = vec!["HEAD".to_string(), "src/foo.rs".to_string()];
-        let normalized = normalize_diff_args_impl(&args, exists_mock(&["src/foo.rs"]));
-        assert_eq!(
-            normalized,
-            vec![
-                "HEAD".to_string(),
-                "--".to_string(),
-                "src/foo.rs".to_string()
-            ]
-        );
-    }
-
-    /// Flags before path: ["--cached", "src/foo.rs"] where src/foo.rs exists.
-    #[test]
-    fn test_normalize_diff_args_reinserts_separator_after_flag() {
-        let args = vec!["--cached".to_string(), "src/foo.rs".to_string()];
-        let normalized = normalize_diff_args_impl(&args, exists_mock(&["src/foo.rs"]));
-        assert_eq!(
-            normalized,
-            vec![
-                "--cached".to_string(),
-                "--".to_string(),
-                "src/foo.rs".to_string()
-            ]
-        );
-    }
-
-    /// Pure flags (no paths) → no injection.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_pure_flags() {
-        let args = vec!["--stat".to_string(), "--cached".to_string()];
-        assert_eq!(normalize_diff_args_impl(&args, exists_mock(&[])), args);
-    }
-
-    /// Dotfile that exists on disk → inject `--`.
-    #[test]
-    fn test_normalize_diff_args_dotfile_is_path() {
-        let args = vec![".gitignore".to_string()];
-        let normalized = normalize_diff_args_impl(&args, exists_mock(&[".gitignore"]));
-        assert_eq!(normalized, vec!["--".to_string(), ".gitignore".to_string()]);
-    }
-
-    /// A bare ref (HEAD) that doesn't exist as a file → no injection.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_bare_ref() {
-        let args = vec!["HEAD".to_string()];
-        assert_eq!(normalize_diff_args_impl(&args, exists_mock(&[])), args);
-    }
-
-    /// Branch name with `/` that does NOT exist as a file → no injection.
-    /// Regression for issue #1431: `rtk git diff feature/user-auth` must not inject `--`.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_branch_with_slash() {
-        let args = vec!["feature/user-auth".to_string()];
-        assert_eq!(
-            normalize_diff_args_impl(&args, exists_mock(&[])),
-            args,
-            "branch names containing '/' must not trigger -- injection"
-        );
-    }
-
-    /// Range syntax with `/` → no injection.
-    /// Regression: `rtk git diff main...feature/user-auth` produced no output.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_range_with_slash() {
-        let args = vec!["main...feature/user-auth".to_string()];
-        assert_eq!(
-            normalize_diff_args_impl(&args, exists_mock(&[])),
-            args,
-            "revision ranges like main...feature/user-auth must not trigger -- injection"
-        );
-    }
-
-    /// Bare word that happens to exist as a file on disk → still no injection.
-    /// A file named "main" must not cause `--` to be injected when the user
-    /// intends `rtk git diff main` as a branch comparison.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_bare_word_even_if_file_exists() {
-        let args = vec!["main".to_string()];
-        assert_eq!(
-            normalize_diff_args_impl(&args, exists_mock(&["main"])),
-            args,
-            "bare words must never trigger -- injection even when a same-named file exists"
         );
     }
 
@@ -2166,6 +3484,132 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_stash_stat_strips_decorations() {
+        let raw = " del.md   |   2 --\n keep.md  |   5 ++++-\n logo.bin | Bin 0 -> 1024 bytes\n \
+                   new.rs   |  40 ++++++++\n 4 files changed, 44 insertions(+), 3 deletions(-)\n";
+        let (files, summary) = parse_stash_stat(raw);
+        assert_eq!(
+            files,
+            vec![
+                "del.md 2 -",
+                "keep.md 5 +-",
+                "logo.bin (binary)",
+                "new.rs 40 +"
+            ]
+        );
+        assert_eq!(summary, "4 files changed, 44 insertions(+), 3 deletions(-)");
+    }
+
+    #[test]
+    fn test_parse_stash_stat_collapsed_bar() {
+        let (files, _) = parse_stash_stat(" .claude/CLAUDE.md | 234 +-\n");
+        assert_eq!(files, vec![".claude/CLAUDE.md 234 +-"]);
+    }
+
+    #[test]
+    fn test_compact_stash_stat_passthrough_numstat() {
+        let raw = "0\t1\tdel.md\n3\t2\tkeep.md\n1\t0\tn1.rs\n";
+        assert_eq!(
+            compact_stash_stat(raw),
+            "0\t1\tdel.md\n3\t2\tkeep.md\n1\t0\tn1.rs"
+        );
+    }
+
+    #[test]
+    fn test_compact_stash_stat_passthrough_name_only() {
+        let raw = "del.md\nkeep.md\nn1.rs\n";
+        assert_eq!(compact_stash_stat(raw), "del.md\nkeep.md\nn1.rs");
+    }
+
+    #[test]
+    fn test_compress_stat_summary_variants() {
+        assert_eq!(
+            compress_stat_summary("4 files changed, 60 insertions(+), 313 deletions(-)"),
+            "4 changed 60 + 313 -"
+        );
+        assert_eq!(
+            compress_stat_summary("1 file changed, 1 insertion(+)"),
+            "1 changed 1 +"
+        );
+        assert_eq!(
+            compress_stat_summary("1 file changed, 1 deletion(-)"),
+            "1 changed 1 -"
+        );
+        assert_eq!(
+            compress_stat_summary("2 files changed, 4 insertions(+), 1 deletion(-)"),
+            "2 changed 4 + 1 -"
+        );
+    }
+
+    #[test]
+    fn test_compact_stash_stat_compresses_summary() {
+        let raw = " a.txt | 2 ++\n 1 file changed, 2 insertions(+)\n";
+        assert_eq!(compact_stash_stat(raw), "a.txt 2 +\n1 changed 2 +");
+    }
+
+    #[test]
+    fn test_parse_stash_stat_last_pipe_is_separator() {
+        let (files, _) = parse_stash_stat(" weird|name.txt | 3 +++\n");
+        assert_eq!(files, vec!["weird|name.txt 3 +"]);
+    }
+
+    #[test]
+    fn test_parse_stash_stat_strips_ansi() {
+        let (files, _) = parse_stash_stat(" a.txt | 2 \x1b[32m++\x1b[m\n");
+        assert_eq!(files, vec!["a.txt 2 +"]);
+    }
+
+    #[test]
+    fn test_parse_stash_stat_empty() {
+        let (files, summary) = parse_stash_stat("");
+        assert!(files.is_empty());
+        assert!(summary.is_empty());
+    }
+
+    #[test]
+    fn test_parse_stash_stat_unicode_and_malformed_never_panic() {
+        let _ = parse_stash_stat("not a diffstat at all");
+        let _ = parse_stash_stat("| | |");
+        let (files, _) = parse_stash_stat(" 日本語.md | 5 +++--\n");
+        assert_eq!(files, vec!["日本語.md 5 +-"]);
+    }
+
+    #[test]
+    fn test_parse_stash_stat_savings() {
+        use crate::core::tracking::estimate_tokens;
+        let raw = " CONTRIBUTING.md | 305 \
+                   ----------------------------------------------------------\n \
+                   README.md       |  28 ++++--\n logo.bin        | Bin 0 -> 2048 bytes\n \
+                   newfeature.rs   |  40 ++++++++\n \
+                   4 files changed, 60 insertions(+), 313 deletions(-)\n";
+        let (files, summary) = parse_stash_stat(raw);
+        let compact = format!("{}\n{}", files.join("\n"), summary);
+        let savings =
+            100.0 - (estimate_tokens(&compact) as f64 / estimate_tokens(raw) as f64 * 100.0);
+        assert!(
+            savings >= 40.0,
+            "expected >=40% savings, got {:.1}%",
+            savings
+        );
+    }
+
+    #[test]
+    fn test_run_stash_list_propagates_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global = vec!["-C".to_string(), dir.path().to_string_lossy().into_owned()];
+        let code = run_stash(Some("list"), &[], 0, &global).expect("run_stash list");
+        assert_ne!(code, 0, "git stash list failure must propagate");
+    }
+
+    #[test]
+    fn test_run_stash_show_propagates_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global = vec!["-C".to_string(), dir.path().to_string_lossy().into_owned()];
+        let code = run_stash(Some("show"), &[], 0, &global).expect("run_stash show");
+        assert_ne!(code, 0, "git stash show failure must propagate");
+    }
+
+    #[test]
     fn test_filter_worktree_list() {
         let output =
             "/home/user/project  abc1234 [main]\n/home/user/worktrees/feat  def5678 [feature]\n";
@@ -2173,6 +3617,16 @@ mod tests {
         assert!(result.contains("abc1234"));
         assert!(result.contains("[main]"));
         assert!(result.contains("[feature]"));
+    }
+
+    #[test]
+    fn test_run_worktree_list_propagates_failure() {
+        // #2497: `git worktree list` outside a repo exits non-zero; rtk must not
+        // report success (empty output + exit 0).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global = vec!["-C".to_string(), dir.path().to_string_lossy().into_owned()];
+        let code = run_worktree(&[], 0, &global).expect("run_worktree");
+        assert_ne!(code, 0, "git worktree list failure must propagate");
     }
 
     #[test]
@@ -2422,6 +3876,226 @@ A  added.rs
     }
 
     #[test]
+    fn test_patch_log_flags_request_raw_output() {
+        for flag in [
+            "-p",
+            "-u",
+            "--patch",
+            "--patch-with-raw",
+            "--patch-with-stat",
+        ] {
+            let args = vec![flag.to_string()];
+            assert!(requests_raw_log_output(&args), "{flag} should pass through");
+        }
+    }
+
+    #[test]
+    fn test_patch_flag_after_pathspec_separator_is_ignored() {
+        // `git log -- -p` means "show history for a path literally named -p",
+        // not "show patches" — the flag lookalike appears after `--`.
+        let args = vec!["--".to_string(), "-p".to_string()];
+        assert!(
+            !requests_raw_log_output(&args),
+            "-p after -- is a pathspec, not a patch flag, and should stay on the filtered path"
+        );
+    }
+
+    #[test]
+    fn test_non_patch_log_flags_remain_filtered() {
+        for flag in ["--no-patch", "--oneline", "--format=%H"] {
+            let args = vec![flag.to_string()];
+            assert!(
+                !requests_raw_log_output(&args),
+                "{flag} should remain on the filtered log path"
+            );
+        }
+    }
+
+    #[test]
+    fn test_diff_shape_flags_request_raw_output() {
+        // These change the shape of git's raw output (diffstat, name lists)
+        // the same way -p does — RTK's injected --pretty=format markers
+        // can't coexist with them, so they must stay on the raw path too.
+        for flag in [
+            "--dirstat",
+            "--dirstat=files",
+            "--name-only",
+            "--name-status",
+            "--numstat",
+            "--raw",
+            "--shortstat",
+            "--stat",
+            "--stat=80",
+            "--summary",
+        ] {
+            let args = vec![flag.to_string()];
+            assert!(
+                requests_raw_log_output(&args),
+                "{flag} changes output shape and should request raw output"
+            );
+        }
+    }
+
+    #[test]
+    fn test_diff_shape_flag_as_value_of_grep_is_not_misdetected() {
+        // `git log --grep --stat` searches for the literal string
+        // "--stat"; git consumes it as --grep's value, not the --stat flag.
+        let args = vec!["--grep".to_string(), "--stat".to_string()];
+        assert!(
+            !requests_raw_log_output(&args),
+            "--stat as the value of --grep should stay on the filtered path"
+        );
+    }
+
+    #[test]
+    fn test_patch_flag_as_value_of_grep_is_not_misdetected() {
+        // `git log --grep -p` searches commit messages for the literal
+        // string "-p"; git does not treat it as the patch flag.
+        for opt in [
+            "--author",
+            "--committer",
+            "--diff-algorithm",
+            "--diff-filter",
+            "--grep",
+            "-G",
+            "-S",
+        ] {
+            let args = vec![opt.to_string(), "-p".to_string()];
+            assert!(
+                !requests_raw_log_output(&args),
+                "-p as the value of {opt} should stay on the filtered path"
+            );
+        }
+    }
+
+    #[test]
+    fn test_patch_flag_still_detected_after_value_taking_option() {
+        // The value-taking option consumes only its own value token;
+        // a genuine -p later in the args still triggers the raw path.
+        let args = vec!["--grep".to_string(), "fix".to_string(), "-p".to_string()];
+        assert!(
+            requests_raw_log_output(&args),
+            "a real -p after --grep's value should still request raw output"
+        );
+    }
+
+    #[test]
+    fn test_optional_value_options_do_not_consume_next_token() {
+        // These options only take an attached value (-U3, --unified=3,
+        // --expand-tabs=4, --max-parents=2); a bare separate token after
+        // them is not their value, so it must not be swallowed. Confirmed
+        // against git 2.53.0: e.g. `git log --expand-tabs 4` fails with
+        // "fatal: ambiguous argument '4'" rather than treating 4 as the
+        // option's value.
+        for opt in [
+            "-U",
+            "--unified",
+            "--expand-tabs",
+            "--max-parents",
+            "--min-parents",
+        ] {
+            let args = vec![opt.to_string(), "-p".to_string()];
+            assert!(
+                requests_raw_log_output(&args),
+                "a real -p after {opt} should still request raw output"
+            );
+        }
+    }
+
+    #[test]
+    fn test_real_flag_args_drops_value_taking_option_values() {
+        // `--grep`'s value is not itself a flag and must not appear in the
+        // filtered set, even when it looks like -N, --pretty, or --merges.
+        let args = vec!["--grep".to_string(), "-5".to_string()];
+        assert_eq!(real_flag_args(&args), vec!["--grep"]);
+    }
+
+    #[test]
+    fn test_real_flag_args_keeps_limit_flag_drops_its_value() {
+        let args = vec!["-n".to_string(), "15".to_string()];
+        assert_eq!(real_flag_args(&args), vec!["-n"]);
+
+        let args = vec!["--max-count".to_string(), "25".to_string()];
+        assert_eq!(real_flag_args(&args), vec!["--max-count"]);
+    }
+
+    #[test]
+    fn test_real_flag_args_keeps_genuine_flags() {
+        let args = vec!["--grep".to_string(), "fix".to_string(), "--oneline".to_string()];
+        assert_eq!(real_flag_args(&args), vec!["--grep", "--oneline"]);
+    }
+
+    #[test]
+    fn test_grep_value_looking_like_limit_flag_is_not_misdetected() {
+        // `git log --grep -5` searches commit messages for the literal
+        // string "-5"; it is not a request to limit output to 5 commits.
+        let args = vec!["--grep".to_string(), "-5".to_string()];
+        assert!(
+            !real_flag_args(&args)
+                .iter()
+                .any(|arg| arg.starts_with('-') && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit())),
+            "-5 as the value of --grep should not be seen as a limit flag"
+        );
+        assert_eq!(
+            parse_user_limit(&args),
+            None,
+            "-5 as the value of --grep should not be parsed as a limit"
+        );
+    }
+
+    #[test]
+    fn test_grep_value_looking_like_format_flag_is_not_misdetected() {
+        // `git log --grep --pretty` searches for the literal string
+        // "--pretty"; git consumes it as --grep's value, not a format flag.
+        let args = vec!["--grep".to_string(), "--pretty".to_string()];
+        assert!(
+            !real_flag_args(&args)
+                .iter()
+                .any(|arg| arg.starts_with("--pretty")),
+            "--pretty as the value of --grep should not be seen as a format flag"
+        );
+    }
+
+    #[test]
+    fn test_grep_value_looking_like_merges_flag_is_not_misdetected() {
+        // `git log --grep --merges` searches for the literal string
+        // "--merges"; git consumes it as --grep's value, not --merges.
+        let args = vec!["--grep".to_string(), "--merges".to_string()];
+        assert!(
+            !real_flag_args(&args).contains(&"--merges"),
+            "--merges as the value of --grep should not be seen as the --merges flag"
+        );
+    }
+
+    #[test]
+    fn test_parse_user_limit_skips_foreign_option_values() {
+        // A real limit later in the args is still found after a
+        // value-taking option's value is skipped.
+        let args = vec![
+            "--grep".to_string(),
+            "-5".to_string(),
+            "-20".to_string(),
+        ];
+        assert_eq!(parse_user_limit(&args), Some(20));
+    }
+
+    #[test]
+    fn test_log_arg_tokens_stop_at_pathspec_separator() {
+        // `git log -- -5` means "history for the path literally named -5",
+        // not a limit flag — tokens after `--` must be ignored entirely.
+        let args = vec!["--".to_string(), "-5".to_string()];
+        assert!(
+            real_flag_args(&args).is_empty(),
+            "-5 after -- is a pathspec, not a flag"
+        );
+        assert_eq!(
+            parse_user_limit(&args),
+            None,
+            "-5 after -- should not be parsed as a limit"
+        );
+    }
+
+    #[test]
     fn test_filter_log_output_token_savings() {
         fn count_tokens(text: &str) -> usize {
             text.split_whitespace().count()
@@ -2511,6 +4185,121 @@ no changes added to commit (use "git add" and/or "git commit -a")
         let porcelain = "## main\nA  🎉-party.txt\n M 日本語ファイル.rs\n";
         let result = format_status_output(porcelain);
         assert!(result.contains("* main"));
+    }
+
+    // --- commit output parsing ---
+
+    #[test]
+    fn test_parse_commit_output_normal() {
+        let line = "[main abc1234def] add feature";
+        assert_eq!(parse_commit_output(line), "ok abc1234");
+    }
+
+    #[test]
+    fn test_parse_commit_output_root_commit() {
+        let line = "[main (root-commit) abc1234def] initial commit";
+        assert_eq!(parse_commit_output(line), "ok abc1234");
+    }
+
+    /// Regression test: multibyte branch name must not panic (was byte-slicing before fix)
+    #[test]
+    fn test_parse_commit_output_multibyte_branch() {
+        let line = "[分支名 abc1234def] 提交消息";
+        assert_eq!(parse_commit_output(line), "ok abc1234");
+    }
+
+    /// Regression test: Thai branch name (3 bytes per char)
+    #[test]
+    fn test_parse_commit_output_thai_branch() {
+        let line = "[สาขา abc1234def] commit message";
+        assert_eq!(parse_commit_output(line), "ok abc1234");
+    }
+
+    /// Regression: git prints hook output before its own summary. A first line
+    /// that opens with a multi-byte character and contains ']' used to panic on
+    /// `line[1..]` ("byte index 1 is not a char boundary").
+    #[test]
+    fn test_parse_commit_output_multibyte_prefix_does_not_panic() {
+        assert_eq!(parse_commit_output("✅ lint passed]"), "ok");
+        assert_eq!(parse_commit_output("→ hook] done"), "ok");
+    }
+
+    /// The same shape as above, but with a real summary after the hook text —
+    /// the hash must still be found via the bracket pair.
+    #[test]
+    fn test_parse_commit_output_after_multibyte_hook_prefix() {
+        assert_eq!(
+            parse_commit_output("✅ [main abc1234def] add feature"),
+            "ok abc1234"
+        );
+    }
+
+    /// A U+FFFD from lossily decoded output is itself multi-byte.
+    #[test]
+    fn test_parse_commit_output_replacement_char_prefix() {
+        assert_eq!(parse_commit_output("\u{FFFD}oops]"), "ok");
+    }
+
+    /// A closing bracket before any opening one must not slice backwards.
+    #[test]
+    fn test_parse_commit_output_close_before_open() {
+        assert_eq!(parse_commit_output("] stray [main abc1234def]"), "ok");
+    }
+
+    #[test]
+    fn test_parse_commit_output_no_bracket() {
+        let line = "some other output";
+        assert_eq!(parse_commit_output(line), "ok");
+    }
+
+    #[test]
+    fn test_parse_commit_output_short_hash() {
+        // Hash shorter than 7 chars — treat as "ok" (no hash shown)
+        let line = "[main abc12] message";
+        assert_eq!(parse_commit_output(line), "ok");
+    }
+
+    #[test]
+    fn test_parse_commit_output_empty() {
+        assert_eq!(parse_commit_output(""), "ok");
+    }
+
+    // --- commit outcome classification (issue #2494) ---
+
+    #[test]
+    fn test_classify_commit_success_extracts_hash() {
+        match classify_commit_outcome(true, "[main abc1234def] add feature", 0) {
+            CommitOutcome::Ok(s) => assert_eq!(s, "ok abc1234"),
+            CommitOutcome::Failed(_) => panic!("successful commit must be Ok"),
+        }
+    }
+
+    #[test]
+    fn test_classify_commit_success_empty_stdout() {
+        match classify_commit_outcome(true, "", 0) {
+            CommitOutcome::Ok(s) => assert_eq!(s, "ok"),
+            CommitOutcome::Failed(_) => panic!("successful commit must be Ok"),
+        }
+    }
+
+    #[test]
+    fn test_classify_commit_nothing_to_commit_is_failure() {
+        match classify_commit_outcome(
+            false,
+            "On branch main\nnothing to commit, working tree clean",
+            1,
+        ) {
+            CommitOutcome::Failed(code) => assert_eq!(code, 1),
+            CommitOutcome::Ok(s) => panic!("nothing-to-commit must not be ok: {}", s),
+        }
+    }
+
+    #[test]
+    fn test_classify_commit_hook_abort_propagates_exit_code() {
+        match classify_commit_outcome(false, "pre-commit hook failed", 2) {
+            CommitOutcome::Failed(code) => assert_eq!(code, 2),
+            CommitOutcome::Ok(_) => panic!("hook abort must be a failure"),
+        }
     }
 
     /// Regression test: --oneline and other user format flags must preserve all commits.
@@ -2756,9 +4545,38 @@ no changes added to commit (use "git add" and/or "git commit -a")
         }
         let result = compact_diff(&diff, 500);
         assert!(
-            result.contains("50 lines truncated"),
-            "Expected '50 lines truncated' (150 - 100 = 50), got:\n{}",
+            result.contains("50 additions truncated"),
+            "Expected '50 additions truncated' (150 - 100 = 50), got:\n{}",
             result
+        );
+    }
+
+    #[test]
+    fn test_extract_detached_head_returns_line() {
+        let raw = "HEAD detached at abc1234\nnothing to commit, working tree clean\n";
+        assert_eq!(
+            extract_detached_head(raw),
+            Some("HEAD detached at abc1234".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_detached_head_on_branch_is_none() {
+        let raw = "On branch main\nnothing to commit, working tree clean\n";
+        assert!(extract_detached_head(raw).is_none());
+    }
+
+    #[test]
+    fn test_format_status_output_detached_head() {
+        let porcelain = "## HEAD (no branch)\n M src/main.rs\n";
+        let result = format_status_output_detached(porcelain, "HEAD detached at abc1234");
+        assert!(
+            result.contains("HEAD detached at abc1234"),
+            "should use explicit detached ref, got: {result}"
+        );
+        assert!(
+            !result.contains("HEAD (no branch)"),
+            "should not show opaque porcelain string, got: {result}"
         );
     }
 

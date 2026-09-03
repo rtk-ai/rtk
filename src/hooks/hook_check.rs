@@ -1,10 +1,10 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
-use super::constants::{
-    CLAUDE_DIR, CLAUDE_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
-    SETTINGS_JSON,
-};
+use super::constants::{HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON};
+use super::init::resolve_claude_dir;
+use super::is_claude_hook_command;
 use crate::core::constants::RTK_DATA_DIR;
+use crate::core::utils::from_json_str;
 use std::path::PathBuf;
 
 const CURRENT_HOOK_VERSION: u8 = 3;
@@ -25,11 +25,10 @@ pub enum HookStatus {
 /// Returns `Ok` if no Claude Code is detected (not applicable).
 pub fn status() -> HookStatus {
     // Don't warn users who don't have Claude Code installed
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => return HookStatus::Ok,
+    let claude_dir = match resolve_claude_dir() {
+        Ok(d) => d,
+        Err(_) => return HookStatus::Ok,
     };
-    let claude_dir = home.join(CLAUDE_DIR);
     if !claude_dir.exists() {
         return HookStatus::Ok;
     }
@@ -66,7 +65,7 @@ fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
         Ok(c) if !c.trim().is_empty() => c,
         _ => return false,
     };
-    let root: serde_json::Value = match serde_json::from_str(&content) {
+    let root: serde_json::Value = match from_json_str(&content) {
         Ok(v) => v,
         Err(_) => return false,
     };
@@ -83,7 +82,7 @@ fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
         .filter_map(|entry| entry.get("hooks")?.as_array())
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
-        .any(|cmd| cmd == CLAUDE_HOOK_COMMAND)
+        .any(is_claude_hook_command)
 }
 
 /// Check if the installed hook is missing or outdated, warn once per day.
@@ -115,7 +114,7 @@ fn check_and_warn() -> Option<()> {
     eprintln!("{}", warning);
 
     // Touch marker after warning is printed
-    let _ = std::fs::create_dir_all(marker.parent()?);
+    let _ = crate::core::utils::create_private_dir(marker.parent()?);
     let _ = std::fs::write(&marker, b"");
 
     Some(())
@@ -134,11 +133,8 @@ pub fn parse_hook_version(content: &str) -> u8 {
 }
 
 fn hook_installed_path() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    let path = home
-        .join(CLAUDE_DIR)
-        .join(HOOKS_SUBDIR)
-        .join(REWRITE_HOOK_FILE);
+    let claude_dir = resolve_claude_dir().ok()?;
+    let path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
     if path.exists() {
         Some(path)
     } else {
@@ -213,6 +209,29 @@ mod tests {
         // Clone works
         let s = HookStatus::Missing;
         assert_eq!(s.clone(), HookStatus::Missing);
+    }
+
+    #[test]
+    fn test_binary_hook_registered_accepts_absolute_rtk_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join(SETTINGS_JSON),
+            r#"{
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/opt/homebrew/bin/rtk hook claude",
+                            "timeout": 5
+                        }]
+                    }]
+                }
+            }"#,
+        )
+        .expect("write settings");
+
+        assert!(binary_hook_registered(tmp.path()));
     }
 
     #[test]

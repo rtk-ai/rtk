@@ -90,17 +90,47 @@ install() {
     info "Version: $VERSION"
 
     DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY_NAME}-${TARGET}.tar.gz"
+    CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt"
     TEMP_DIR=$(mktemp -d)
     ARCHIVE="${TEMP_DIR}/${BINARY_NAME}.tar.gz"
+    CHECKSUMS="${TEMP_DIR}/checksums.txt"
+    ASSET_NAME="${BINARY_NAME}-${TARGET}.tar.gz"
 
     info "Downloading from: $DOWNLOAD_URL"
     if ! curl -fsSL "$DOWNLOAD_URL" -o "$ARCHIVE"; then
         error "Failed to download binary"
     fi
 
+    info "Downloading checksums..."
+    if ! curl -fsSL "$CHECKSUMS_URL" -o "$CHECKSUMS"; then
+        error "Failed to download checksums.txt — refusing to install unverified binary (set RTK_SKIP_CHECKSUM=1 to bypass at your own risk)"
+    fi
+
+    if [ "${RTK_SKIP_CHECKSUM:-0}" = "1" ]; then
+        warn "RTK_SKIP_CHECKSUM=1 set — SKIPPING checksum verification (NOT RECOMMENDED)"
+    else
+        info "Verifying SHA-256 checksum..."
+        EXPECTED=$(grep "[[:space:]]${ASSET_NAME}\$" "$CHECKSUMS" | awk '{print $1}')
+        if [ -z "$EXPECTED" ]; then
+            error "checksum for ${ASSET_NAME} not found in checksums.txt — refusing to install"
+        fi
+        # sha256sum (Linux GNU) vs shasum -a 256 (macOS) — prefer whichever is available.
+        if command -v sha256sum >/dev/null 2>&1; then
+            ACTUAL=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+        elif command -v shasum >/dev/null 2>&1; then
+            ACTUAL=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
+        else
+            error "Neither sha256sum nor shasum available — cannot verify checksum"
+        fi
+        if [ "$EXPECTED" != "$ACTUAL" ]; then
+            error "checksum mismatch! expected=${EXPECTED} actual=${ACTUAL} — refusing to install"
+        fi
+        info "Checksum verified."
+    fi
+
     # Verify archive contents before extraction (CWE-22 path traversal).
     # Reject any entry with an absolute path or a ".." component.
-    info "Verifying archive..."
+    info "Verifying archive contents..."
     if tar -tzf "$ARCHIVE" | grep -qE '^/|(^|/)\.\.(/|$)'; then
         error "Archive contains unsafe paths (absolute or directory traversal) — refusing to extract"
     fi
@@ -121,9 +151,13 @@ install() {
 
 # Verify installation
 verify() {
-    if command -v "$BINARY_NAME" >/dev/null 2>&1; then
-        info "Verification: $($BINARY_NAME --version)"
+    INSTALLED_BIN="${INSTALL_DIR}/${BINARY_NAME}"
+    if [ -x "$INSTALLED_BIN" ]; then
+        info "Verification: $("$INSTALLED_BIN" --version)"
     else
+        error "Binary not found at expected location: $INSTALLED_BIN"
+    fi
+    if ! command -v "$BINARY_NAME" >/dev/null 2>&1; then
         warn "Binary installed but not in PATH. Add to your shell profile:"
         warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
     fi

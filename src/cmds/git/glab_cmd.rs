@@ -12,28 +12,30 @@
 
 use super::git;
 use crate::core::runner::{self, RunOptions};
+use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{ok_confirmation, resolved_command, strip_ansi, truncate};
 use anyhow::Result;
-use lazy_static::lazy_static;
 use regex::Regex;
 use serde_json::Value;
 use std::process::Command;
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref HTML_COMMENT_RE: Regex = Regex::new(r"(?s)<!--.*?-->").unwrap();
-    static ref BADGE_LINE_RE: Regex =
-        Regex::new(r"(?m)^\s*\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)\s*$").unwrap();
-    static ref IMAGE_ONLY_LINE_RE: Regex = Regex::new(r"(?m)^\s*!\[[^\]]*\]\([^)]*\)\s*$").unwrap();
-    static ref HORIZONTAL_RULE_RE: Regex =
-        Regex::new(r"(?m)^\s*(?:---+|\*\*\*+|___+)\s*$").unwrap();
-    static ref MULTI_BLANK_RE: Regex = Regex::new(r"\n{3,}").unwrap();
-    static ref MR_URL_RE: Regex = Regex::new(r"/-/merge_requests/(\d+)").unwrap();
-    /// Match GitLab CI section markers: section_start/end:timestamp:name[0K
-    static ref SECTION_MARKER_RE: Regex =
-        Regex::new(r"section_(?:start|end):\d+:[a-z0-9_]+(?:\x1b\[0K|\[0K)*").unwrap();
-    /// Match bare bracket ANSI-like codes without ESC prefix: [0K, [0;m, [36;1m, etc.
-    static ref BARE_ANSI_RE: Regex = Regex::new(r"\[[\d;]+[A-Za-z]").unwrap();
-}
+static HTML_COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->").unwrap());
+static BADGE_LINE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)\s*$").unwrap());
+static IMAGE_ONLY_LINE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*!\[[^\]]*\]\([^)]*\)\s*$").unwrap());
+static HORIZONTAL_RULE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*(?:---+|\*\*\*+|___+)\s*$").unwrap());
+static MULTI_BLANK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
+static MR_URL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"/-/merge_requests/(\d+)").unwrap());
+/// Match GitLab CI section markers: section_start/end:timestamp:name[0K
+static SECTION_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"section_(?:start|end):\d+:[a-z0-9_]+(?:\x1b\[0K|\[0K)*").unwrap()
+});
+/// Match bare bracket ANSI-like codes without ESC prefix: [0K, [0;m, [36;1m, etc.
+static BARE_ANSI_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[[\d;]+[A-Za-z]").unwrap());
 
 /// Filter markdown body to remove noise while preserving meaningful content.
 /// Removes HTML comments, badge lines, image-only lines, horizontal rules,
@@ -211,6 +213,16 @@ fn extract_identifier_and_extra_args(args: &[String]) -> Option<(String, Vec<Str
     identifier.map(|id| (id, extra))
 }
 
+/// Like `extract_identifier_and_extra_args` but yields `(None, args.to_vec())` when no
+/// positional identifier is present, so callers can defer the "id required" decision
+/// to `glab` itself (e.g. `glab mr view` defaults to the current branch's MR).
+fn parse_optional_identifier(args: &[String]) -> (Option<String>, Vec<String>) {
+    match extract_identifier_and_extra_args(args) {
+        Some((id, extra)) => (Some(id), extra),
+        None => (None, args.to_vec()),
+    }
+}
+
 /// Check if user explicitly requested JSON/custom output format.
 /// When present, passthrough to avoid double JSON injection.
 fn has_output_flag(args: &[String]) -> bool {
@@ -304,27 +316,27 @@ fn format_mr_list(json: &Value, ultra_compact: bool) -> String {
         "Merge Requests\n"
     });
 
-    for mr in mrs.iter().take(20) {
-        let iid = mr["iid"].as_i64().unwrap_or(0);
-        let title = mr["title"].as_str().unwrap_or("???");
-        let state = mr["state"].as_str().unwrap_or("???");
-        let author = mr["author"]["username"].as_str().unwrap_or("???");
-
-        let icon = state_icon(state, ultra_compact);
-        filtered.push_str(&format!(
-            "  {} !{} {} ({})\n",
-            icon,
-            iid,
-            truncate(title, 60),
-            author
-        ));
+    let all_lines: Vec<String> = mrs
+        .iter()
+        .map(|mr| {
+            let iid = mr["iid"].as_i64().unwrap_or(0);
+            let title = mr["title"].as_str().unwrap_or("???");
+            let state = mr["state"].as_str().unwrap_or("???");
+            let author = mr["author"]["username"].as_str().unwrap_or("???");
+            let icon = state_icon(state, ultra_compact);
+            format!("  {} !{} {} ({})", icon, iid, truncate(title, 60), author)
+        })
+        .collect();
+    const MAX_LIST: usize = CAP_LIST;
+    for line in all_lines.iter().take(MAX_LIST) {
+        filtered.push_str(&format!("{}\n", line));
     }
-
-    if mrs.len() > 20 {
-        filtered.push_str(&format!(
-            "  ... {} more (use glab mr list for all)\n",
-            mrs.len() - 20
-        ));
+    if all_lines.len() > MAX_LIST {
+        filtered.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_LIST));
+        let all_text = all_lines.join("\n");
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "glab-mrs", MAX_LIST + 1) {
+            filtered.push_str(&format!("  {}\n", hint));
+        }
     }
 
     filtered
@@ -408,24 +420,32 @@ fn format_mr_view(json: &Value, ultra_compact: bool) -> String {
 }
 
 fn mr_view(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
-    let (mr_number, extra_args) = match extract_identifier_and_extra_args(args) {
-        Some(pair) => pair,
-        None => return Err(anyhow::anyhow!("MR number required")),
-    };
+    // `glab mr view` without an identifier defaults to the MR for the current branch.
+    let (mr_number_opt, extra_args) = parse_optional_identifier(args);
 
     // Passthrough for --web, --comments, or explicit output format
     if should_passthrough_view(&extra_args) {
-        return run_passthrough_with_extra("glab", &["mr", "view", &mr_number], &extra_args);
+        let mut base: Vec<&str> = vec!["mr", "view"];
+        if let Some(id) = mr_number_opt.as_deref() {
+            base.push(id);
+        }
+        return run_passthrough_with_extra("glab", &base, &extra_args);
     }
 
     let mut cmd = resolved_command("glab");
-    cmd.args(["mr", "view", &mr_number, "-F", "json"]);
+    cmd.args(["mr", "view"]);
+    if let Some(id) = mr_number_opt.as_deref() {
+        cmd.arg(id);
+    }
+    cmd.args(["-F", "json"]);
     for arg in &extra_args {
         cmd.arg(arg);
     }
-    run_glab_json(cmd, &format!("mr view {}", mr_number), |json| {
-        format_mr_view(json, ultra_compact)
-    })
+    let label = match mr_number_opt.as_deref() {
+        Some(id) => format!("mr view {}", id),
+        None => "mr view".to_string(),
+    };
+    run_glab_json(cmd, &label, |json| format_mr_view(json, ultra_compact))
 }
 
 fn mr_create(args: &[String], _verbose: u8) -> Result<i32> {
@@ -524,27 +544,32 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
     let mut filtered = String::new();
     filtered.push_str("Issues\n");
 
-    for issue in issues.iter().take(20) {
-        let iid = issue["iid"].as_i64().unwrap_or(0);
-        let title = issue["title"].as_str().unwrap_or("???");
-        let state = issue["state"].as_str().unwrap_or("???");
-
-        let icon = if ultra_compact {
-            if state == "opened" {
-                "O"
+    let all_lines: Vec<String> = issues
+        .iter()
+        .map(|issue| {
+            let iid = issue["iid"].as_i64().unwrap_or(0);
+            let title = issue["title"].as_str().unwrap_or("???");
+            let state = issue["state"].as_str().unwrap_or("???");
+            let icon = if ultra_compact {
+                if state == "opened" { "O" } else { "C" }
+            } else if state == "opened" {
+                "[open]"
             } else {
-                "C"
-            }
-        } else if state == "opened" {
-            "[open]"
-        } else {
-            "[closed]"
-        };
-        filtered.push_str(&format!("  {} #{} {}\n", icon, iid, truncate(title, 60)));
+                "[closed]"
+            };
+            format!("  {} #{} {}", icon, iid, truncate(title, 60))
+        })
+        .collect();
+    const MAX_LIST: usize = CAP_LIST;
+    for line in all_lines.iter().take(MAX_LIST) {
+        filtered.push_str(&format!("{}\n", line));
     }
-
-    if issues.len() > 20 {
-        filtered.push_str(&format!("  ... {} more\n", issues.len() - 20));
+    if all_lines.len() > MAX_LIST {
+        filtered.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_LIST));
+        let all_text = all_lines.join("\n");
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "glab-issues", MAX_LIST + 1) {
+            filtered.push_str(&format!("  {}\n", hint));
+        }
     }
 
     filtered
@@ -597,25 +622,31 @@ fn format_issue_view(json: &Value) -> String {
 }
 
 fn issue_view(args: &[String], _verbose: u8) -> Result<i32> {
-    let (issue_number, extra_args) = match extract_identifier_and_extra_args(args) {
-        Some(pair) => pair,
-        None => return Err(anyhow::anyhow!("Issue number required")),
-    };
+    // Let glab emit its own error message when the identifier is missing rather than pre-rejecting.
+    let (issue_number_opt, extra_args) = parse_optional_identifier(args);
 
     if should_passthrough_view(&extra_args) {
-        return run_passthrough_with_extra("glab", &["issue", "view", &issue_number], &extra_args);
+        let mut base: Vec<&str> = vec!["issue", "view"];
+        if let Some(id) = issue_number_opt.as_deref() {
+            base.push(id);
+        }
+        return run_passthrough_with_extra("glab", &base, &extra_args);
     }
 
     let mut cmd = resolved_command("glab");
-    cmd.args(["issue", "view", &issue_number, "-F", "json"]);
+    cmd.args(["issue", "view"]);
+    if let Some(id) = issue_number_opt.as_deref() {
+        cmd.arg(id);
+    }
+    cmd.args(["-F", "json"]);
     for arg in &extra_args {
         cmd.arg(arg);
     }
-    run_glab_json(
-        cmd,
-        &format!("issue view {}", issue_number),
-        format_issue_view,
-    )
+    let label = match issue_number_opt.as_deref() {
+        Some(id) => format!("issue view {}", id),
+        None => "issue view".to_string(),
+    };
+    run_glab_json(cmd, &label, format_issue_view)
 }
 
 // ── CI/Pipeline subcommands ─────────────────────────────────────────────
@@ -646,13 +677,28 @@ fn format_ci_list(json: &Value, ultra_compact: bool) -> String {
 
     let mut filtered = String::new();
     filtered.push_str("Pipelines\n");
-    for pipeline in pipelines.iter().take(10) {
-        let id = pipeline["id"].as_i64().unwrap_or(0);
-        let status = pipeline["status"].as_str().unwrap_or("???");
-        let ref_name = pipeline["ref"].as_str().unwrap_or("???");
-
-        let icon = pipeline_icon(status, ultra_compact);
-        filtered.push_str(&format!("  {} #{} {} ({})\n", icon, id, status, ref_name));
+    let all_lines: Vec<String> = pipelines
+        .iter()
+        .map(|pipeline| {
+            let id = pipeline["id"].as_i64().unwrap_or(0);
+            let status = pipeline["status"].as_str().unwrap_or("???");
+            let ref_name = pipeline["ref"].as_str().unwrap_or("???");
+            let icon = pipeline_icon(status, ultra_compact);
+            format!("  {} #{} {} ({})", icon, id, status, ref_name)
+        })
+        .collect();
+    const MAX_CI_LIST: usize = CAP_WARNINGS;
+    for line in all_lines.iter().take(MAX_CI_LIST) {
+        filtered.push_str(&format!("{}\n", line));
+    }
+    if all_lines.len() > MAX_CI_LIST {
+        filtered.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_CI_LIST));
+        let all_text = all_lines.join("\n");
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_text, "glab-pipelines", MAX_CI_LIST + 1)
+        {
+            filtered.push_str(&format!("  {}\n", hint));
+        }
     }
     filtered
 }
@@ -1212,6 +1258,35 @@ mod tests {
     fn test_extract_identifier_only_flags() {
         let args: Vec<String> = vec!["-R".into(), "group/project".into()];
         assert!(extract_identifier_and_extra_args(&args).is_none());
+    }
+
+    // ── parse_optional_identifier tests ─────────────────────────────────
+
+    #[test]
+    fn test_parse_optional_identifier_empty_yields_no_id() {
+        // `glab mr view` (no args) must surface as (None, []) so the caller
+        // hands the request to glab, which resolves the current branch's MR.
+        let (id, extra) = parse_optional_identifier(&[]);
+        assert!(id.is_none());
+        assert!(extra.is_empty());
+    }
+
+    #[test]
+    fn test_parse_optional_identifier_only_flags_preserves_flags() {
+        // Regression: `glab mr view -R group/project` previously triggered
+        // "MR number required". Now flags must round-trip into `extra`.
+        let args: Vec<String> = vec!["-R".into(), "group/project".into()];
+        let (id, extra) = parse_optional_identifier(&args);
+        assert!(id.is_none());
+        assert_eq!(extra, vec!["-R", "group/project"]);
+    }
+
+    #[test]
+    fn test_parse_optional_identifier_with_id_matches_extract() {
+        let args: Vec<String> = vec!["-R".into(), "group/project".into(), "42".into()];
+        let (id, extra) = parse_optional_identifier(&args);
+        assert_eq!(id.as_deref(), Some("42"));
+        assert_eq!(extra, vec!["-R", "group/project"]);
     }
 
     // ── has_output_flag tests ───────────────────────────────────────────

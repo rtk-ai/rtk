@@ -16,36 +16,63 @@ use std::io::Write;
 /// | 2    | (none)   | Deny rule matched — hook defers to Claude Code native deny.  |
 /// | 3    | rewritten| Ask rule matched — hook rewrites but lets Claude Code prompt.|
 pub fn run(cmd: &str) -> anyhow::Result<()> {
-    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
-        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
-        .unwrap_or_default();
+    let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
 
-    // SECURITY: check deny/ask BEFORE rewrite so non-RTK commands are also covered.
-    let verdict = check_command(cmd);
+    match evaluate(cmd, &excluded, &transparent_prefixes) {
+        RewriteOutcome::Allow(rewritten) => {
+            print!("{}", rewritten);
+            let _ = std::io::stdout().flush();
+            Ok(())
+        }
+        RewriteOutcome::Ask(rewritten) => {
+            print!("{}", rewritten);
+            let _ = std::io::stdout().flush();
+            std::process::exit(3);
+        }
+        RewriteOutcome::Deny => std::process::exit(2),
+        RewriteOutcome::Passthrough => std::process::exit(1),
+    }
+}
 
+#[derive(Debug, PartialEq)]
+enum RewriteOutcome {
+    Allow(String),
+    Passthrough,
+    Deny,
+    Ask(String),
+}
+
+fn evaluate(cmd: &str, excluded: &[String], transparent_prefixes: &[String]) -> RewriteOutcome {
+    evaluate_with_verdict(cmd, check_command(cmd), excluded, transparent_prefixes)
+}
+
+/// Decision logic for [`evaluate`] with the permission verdict supplied by the
+/// caller, mirroring [`check_command_with_rules`](super::permissions::check_command_with_rules).
+///
+/// `check_command` reads the machine's Claude Code settings files, so tests that
+/// call [`evaluate`] directly would change verdict with the developer's local
+/// `settings.local.json`. Taking the verdict as a parameter keeps the rewrite
+/// logic under test independent of the host configuration (#3146).
+fn evaluate_with_verdict(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+) -> RewriteOutcome {
     if verdict == PermissionVerdict::Deny {
-        std::process::exit(2);
+        return RewriteOutcome::Deny;
     }
 
-    match registry::rewrite_command(cmd, &excluded, &transparent_prefixes) {
+    if crate::discover::lexer::contains_unattestable_construct(cmd) {
+        return RewriteOutcome::Passthrough;
+    }
+
+    match registry::rewrite_command(cmd, excluded, transparent_prefixes) {
         Some(rewritten) => match verdict {
-            PermissionVerdict::Allow => {
-                print!("{}", rewritten);
-                let _ = std::io::stdout().flush();
-                Ok(())
-            }
-            PermissionVerdict::Ask | PermissionVerdict::Default => {
-                print!("{}", rewritten);
-                let _ = std::io::stdout().flush();
-                std::process::exit(3);
-            }
-            PermissionVerdict::Deny => unreachable!(),
+            PermissionVerdict::Allow => RewriteOutcome::Allow(rewritten),
+            _ => RewriteOutcome::Ask(rewritten),
         },
-        None => {
-            // No RTK equivalent. Exit 1 = passthrough.
-            // Claude Code independently evaluates its own ask rules on the original cmd.
-            std::process::exit(1);
-        }
+        None => RewriteOutcome::Passthrough,
     }
 }
 
@@ -73,6 +100,106 @@ mod tests {
             rewrite_command_no_prefixes("rtk git status"),
             Some("rtk git status".into())
         );
+    }
+
+    /// The verdict still drives the outcome: an allow rule yields `Allow`.
+    /// Pinning both directions keeps the mapping covered without depending
+    /// on which rules the developer happens to have configured.
+    #[test]
+    fn test_allow_verdict_yields_allow() {
+        assert!(matches!(
+            evaluate_with_verdict("git status", PermissionVerdict::Allow, &[], &[]),
+            RewriteOutcome::Allow(_)
+        ));
+    }
+
+    #[test]
+    fn test_deny_verdict_yields_deny() {
+        assert_eq!(
+            evaluate_with_verdict("git status", PermissionVerdict::Deny, &[], &[]),
+            RewriteOutcome::Deny
+        );
+    }
+
+    /// Commands with an unattestable construct are always a passthrough,
+    /// regardless of permission verdict.
+    ///
+    /// The verdict is pinned to `Default` rather than going through `evaluate`,
+    /// which reads the developer's own `.claude/settings.local.json`: a
+    /// `Bash(git *)` allow rule turns the expected `Ask` into `Allow` and these
+    /// tests fail on that machine only (#3146). Pinning the verdict keeps the
+    /// assertions about the rewrite logic and nothing about the host.
+    mod unattestable_passthrough {
+        use super::super::{evaluate_with_verdict, RewriteOutcome};
+        use crate::hooks::permissions::PermissionVerdict;
+
+        #[test]
+        fn test_backtick_substitution_passthrough() {
+            assert_eq!(
+                evaluate_with_verdict(
+                    "git status `rm -rf /tmp/x`",
+                    PermissionVerdict::Default,
+                    &[],
+                    &[]
+                ),
+                RewriteOutcome::Passthrough
+            );
+        }
+
+        #[test]
+        fn test_dollar_substitution_passthrough() {
+            assert_eq!(
+                evaluate_with_verdict(
+                    "git status $(rm -rf /tmp/x)",
+                    PermissionVerdict::Default,
+                    &[],
+                    &[]
+                ),
+                RewriteOutcome::Passthrough
+            );
+        }
+
+        #[test]
+        fn test_double_quoted_substitution_passthrough() {
+            assert_eq!(
+                evaluate_with_verdict(
+                    "git log --pretty=\"$(rm -rf /tmp/x)\"",
+                    PermissionVerdict::Default,
+                    &[],
+                    &[]
+                ),
+                RewriteOutcome::Passthrough
+            );
+        }
+
+        #[test]
+        fn test_file_redirect_passthrough() {
+            assert_eq!(
+                evaluate_with_verdict(
+                    "git log > /tmp/out.txt",
+                    PermissionVerdict::Default,
+                    &[],
+                    &[]
+                ),
+                RewriteOutcome::Passthrough
+            );
+        }
+
+        #[test]
+        fn test_fd_dup_redirect_still_rewrites() {
+            assert!(matches!(
+                evaluate_with_verdict("git status 2>&1", PermissionVerdict::Default, &[], &[]),
+                RewriteOutcome::Ask(_)
+            ));
+        }
+
+        #[test]
+        fn test_plain_command_still_rewrites() {
+            assert!(matches!(
+                evaluate_with_verdict("git status", PermissionVerdict::Default, &[], &[]),
+                RewriteOutcome::Ask(_)
+            ));
+        }
     }
 
     /// SECURITY: Verify the exit code protocol for permission verdicts.

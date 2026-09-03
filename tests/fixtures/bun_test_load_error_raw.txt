@@ -1,0 +1,14 @@
+bun test v1.3.6 (d530ed99)
+
+loadfail.test.ts:
+
+# Unhandled error between tests
+-------------------------------
+error: Cannot find module './does-not-exist' from '/home/user/project/loadfail.test.ts'
+-------------------------------
+
+
+ 0 pass
+ 1 fail
+ 1 error
+Ran 1 test across 1 file. [52.00ms]

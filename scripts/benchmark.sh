@@ -13,9 +13,15 @@ fi
 BENCH_DIR="$(pwd)/scripts/benchmark"
 RTK_ROOT="$(pwd)"
 
+# Only the gitignored output subdirectories get wiped between local runs.
+# `$BENCH_DIR` itself is tracked — it also holds the TypeScript VM-benchmark
+# harness (run.ts, cleanup.ts, lib/) — so `rm -rf "$BENCH_DIR"` deleted that
+# harness from the working tree on every local run.
 if [ -z "$CI" ]; then
-  rm -rf "$BENCH_DIR"
-  mkdir -p "$BENCH_DIR/unix" "$BENCH_DIR/rtk" "$BENCH_DIR/diff"
+  for bench_output_dir in unix rtk diff; do
+    rm -rf "${BENCH_DIR:?}/$bench_output_dir"
+    mkdir -p "$BENCH_DIR/$bench_output_dir"
+  done
 fi
 
 safe_name() {
@@ -190,8 +196,66 @@ bench "read -n" "cat -n src/main.rs" "$RTK read src/main.rs -n"
 section "find"
 bench "find *" "find . -type f" "$RTK find '*'"
 bench "find *.rs" "find . -name '*.rs' -type f" "$RTK find '*.rs'"
-bench "find --max 10" "find . -not -path './target/*' -not -path './.git/*' -type f | head -10" "$RTK find '*' --max 10"
-bench "find --max 100" "find . -not -path './target/*' -not -path './.git/*' -type f | head -100" "$RTK find '*' --max 100"
+# `rtk find --max N` caps how many names are DISPLAYED but still scans and
+# summarizes the whole tree, so the honest baseline is the full `find` a user
+# would otherwise read, not a `head -N`-truncated slice — that measures a
+# different, early-terminated operation.
+# A single row carries the savings: the baseline is identical for every N, so a
+# second row would only add the same token count to the totals twice.
+bench "find --max 100" "find . -not -path './target/*' -not -path './.git/*' -type f" "$RTK find '*' --max 100"
+
+# That baseline no longer scales with N, so it cannot detect a --max that stops
+# limiting. Assert the cap directly instead: `rtk find --max N` displays exactly
+# min(N, total) names, so a --max that is ignored (falling back to the default
+# cap) fails whether N sits below or above that default.
+count_find_names() {
+  awk '
+    /^[0-9]+F [0-9]+D:$/ { next }   # "356F 63D:" summary header
+    /^\+[0-9]+ more$/    { next }   # "+256 more" truncation marker
+    /^ext: /             { next }   # extension histogram footer
+    NF == 0              { next }
+    { n += NF - ($1 ~ /\/$/ ? 1 : 0) }   # grouped lines lead with "dir/"
+    END { print n + 0 }
+  '
+}
+
+# Total tree size as rtk itself reports it: the "NNNF" header when it groups,
+# otherwise the displayed names plus whatever "+N more" hides.
+count_find_total() {
+  awk '
+    /^[0-9]+F [0-9]+D:$/ { total = $1 + 0; next }
+    /^\+[0-9]+ more$/    { more = substr($1, 2) + 0; next }
+    /^ext: /             { next }
+    NF == 0              { next }
+    { shown += NF - ($1 ~ /\/$/ ? 1 : 0) }
+    END { print (total ? total : shown + more) + 0 }
+  '
+}
+
+bench_find_max() {
+  local max="$1"
+  local out displayed total expected
+
+  out=$(eval "$RTK find '*' --max $max" 2>/dev/null || true)
+  displayed=$(printf '%s\n' "$out" | count_find_names)
+  total=$(printf '%s\n' "$out" | count_find_total)
+  expected=$([ "$max" -lt "$total" ] && echo "$max" || echo "$total")
+
+  TOTAL_TESTS=$((TOTAL_TESTS + 1))
+
+  if [ "$displayed" -eq "$expected" ] && [ "$expected" -gt 0 ]; then
+    printf "✅ %-24s │ %-40s │ %s/%s names displayed\n" \
+      "find --max $max cap" "rtk find '*' --max $max" "$displayed" "$total"
+    GOOD_TESTS=$((GOOD_TESTS + 1))
+  else
+    printf "❌ %-24s │ %-40s │ %s names displayed (expected %s of %s)\n" \
+      "find --max $max cap" "rtk find '*' --max $max" "$displayed" "$expected" "$total"
+    FAIL_TESTS=$((FAIL_TESTS + 1))
+  fi
+}
+
+bench_find_max 10
+bench_find_max 100
 
 # ===================
 # git
@@ -207,10 +271,19 @@ bench "git show" "git show HEAD --stat 2>/dev/null || true" "$RTK git show HEAD 
 # grep
 # ===================
 section "grep"
-bench "grep fn" "grep -rn 'fn ' src/ || true" "$RTK grep 'fn ' src/"
-bench "grep struct" "grep -rn 'struct ' src/ || true" "$RTK grep 'struct ' src/"
-bench "grep -l 40" "grep -rn 'fn ' src/ || true" "$RTK grep 'fn ' src/ -l 40"
-bench "grep -c" "grep -ron 'fn ' src/ || true" "$RTK grep 'fn ' src/ -c"
+bench "grep fn" "grep -rn 'fn ' src/ || true" "$RTK grep -rn 'fn ' src/"
+bench "grep struct" "grep -rn 'struct ' src/ || true" "$RTK grep -rn 'struct ' src/"
+bench "grep --max-len 40" "grep -rn 'fn ' src/ || true" "$RTK grep --max-len 40 -rn 'fn ' src/"
+bench "grep -c" "grep -ron 'fn ' src/ || true" "$RTK grep -rc 'fn ' src/"
+
+# ===================
+# rg (native ripgrep, recursive by default, same output filter)
+# ===================
+section "rg"
+bench "rg fn" "rg -n 'fn ' src/ || true" "$RTK rg 'fn ' src/"
+bench "rg struct" "rg -n 'struct ' src/ || true" "$RTK rg 'struct ' src/"
+bench "rg -l files" "rg -l 'fn ' src/ || true" "$RTK rg -l 'fn ' src/"
+bench "rg -c count" "rg -c 'fn ' src/ || true" "$RTK rg -c 'fn ' src/"
 
 # ===================
 # json
@@ -248,7 +321,6 @@ bench "deps" "cat Cargo.toml" "$RTK deps"
 section "env"
 bench "env" "env" "$RTK env"
 bench "env -f PATH" "env | grep PATH" "$RTK env -f PATH"
-bench "env --show-all" "env" "$RTK env --show-all"
 
 # ===================
 # err
@@ -334,21 +406,98 @@ section "wc"
 bench "wc" "wc Cargo.toml src/main.rs" "$RTK wc Cargo.toml src/main.rs"
 
 # ===================
-# curl
+# curl / wget — fully offline. mockhttp.org was both a network dependency and
+# non-deterministic (its /json output is random), which made the benchmark flaky.
+# Serve fixed fixtures locally instead. The JSON is pretty-printed on purpose so
+# `rtk` actually exercises JSON minification (a pre-minified body leaves nothing
+# to compact).
 # ===================
-section "curl"
-if command -v curl &> /dev/null; then
-  bench "curl json" "curl -s https://httpbin.org/json" "$RTK curl https://httpbin.org/json"
-  bench "curl text" "curl -s https://httpbin.org/robots.txt" "$RTK curl https://httpbin.org/robots.txt"
+NET_FIXTURE_DIR="$(mktemp -d)"
+# Server log lives outside the served directory so it is never itself served.
+NET_HTTP_LOG="$(mktemp)"
+NET_HTTP_PID=""
+# Every step is failure-tolerant: this runs from an EXIT trap under `set -e`, so
+# a single failing command (e.g. `kill` on a server that already died) would
+# otherwise abort the trap and leak the fixture dir and downloaded files.
+cleanup_net_fixtures() {
+  if [ -n "$NET_HTTP_PID" ]; then
+    kill "$NET_HTTP_PID" 2>/dev/null || true
+  fi
+  rm -rf "$NET_FIXTURE_DIR" "$NET_HTTP_LOG" || true
+  # `rtk wget <url>/data.json` saves to ./data.json (default basename); remove
+  # that download and any numbered duplicates from repeated runs.
+  rm -f data.json data.json.* 2>/dev/null || true
+}
+trap cleanup_net_fixtures EXIT
+
+cat > "$NET_FIXTURE_DIR/data.json" << 'JSONEOF'
+{
+    "message": "Hello from RTK benchmark",
+    "status": "success",
+    "code": 200,
+    "items": [
+        { "id": 1, "name": "first" },
+        { "id": 2, "name": "second" }
+    ]
+}
+JSONEOF
+cat > "$NET_FIXTURE_DIR/robots.txt" << 'TXTEOF'
+User-agent: *
+Disallow: /private/
+Allow: /
+Sitemap: https://example.com/sitemap.xml
+TXTEOF
+
+# Bring up a loopback HTTP server once so both curl and wget get real response
+# headers (`Content-Type: application/json`) — that's what lets rtk detect JSON
+# and minify it. file:// carries no headers, so it can't demonstrate that path.
+#
+# Port 0 asks the kernel for a free port, so a busy fixed port can never make the
+# benchmark fail. `python3 -u` keeps stdout unbuffered, so the "Serving HTTP on
+# 127.0.0.1 port NNNNN" line — printed only once the socket is bound and
+# listening — reaches the log as soon as the server is ready.
+readonly NET_HTTP_EPHEMERAL_PORT=0
+readonly NET_HTTP_READY_ATTEMPTS=25
+readonly NET_HTTP_READY_DELAY=0.2
+NET_HTTP_URL=""
+if command -v python3 &> /dev/null; then
+  ( cd "$NET_FIXTURE_DIR" \
+      && exec python3 -u -m http.server "$NET_HTTP_EPHEMERAL_PORT" --bind 127.0.0.1 ) \
+    > "$NET_HTTP_LOG" 2>&1 &
+  NET_HTTP_PID=$!
+  for _ in $(seq 1 "$NET_HTTP_READY_ATTEMPTS"); do
+    net_http_port="$(sed -n 's/.*port \([0-9][0-9]*\).*/\1/p' "$NET_HTTP_LOG" | head -1)"
+    if [ -n "$net_http_port" ]; then
+      NET_HTTP_URL="http://127.0.0.1:$net_http_port"
+      break
+    fi
+    sleep "$NET_HTTP_READY_DELAY"
+  done
 fi
 
-# ===================
-# wget
-# ===================
+section "curl"
+if command -v curl &> /dev/null; then
+  if [ -n "$NET_HTTP_URL" ]; then
+    bench "curl json" "curl -s $NET_HTTP_URL/data.json" "$RTK curl $NET_HTTP_URL/data.json"
+    bench "curl text" "curl -s $NET_HTTP_URL/robots.txt" "$RTK curl $NET_HTTP_URL/robots.txt"
+  else
+    # No python3 to host a local server — fall back to file:// (no headers, so
+    # no JSON minification, but still fully offline and deterministic).
+    bench "curl json" "curl -s file://$NET_FIXTURE_DIR/data.json" "$RTK curl file://$NET_FIXTURE_DIR/data.json"
+    bench "curl text" "curl -s file://$NET_FIXTURE_DIR/robots.txt" "$RTK curl file://$NET_FIXTURE_DIR/robots.txt"
+  fi
+fi
+
+# wget has no offline fallback: it rejects file:// outright ("Unsupported
+# scheme"), so without the loopback server there is nothing local to fetch. Say
+# so explicitly instead of letting the case disappear from the report.
 if command -v wget &> /dev/null; then
   section "wget"
-  bench "wget" "wget -qO- https://httpbin.org/json" "$RTK wget https://httpbin.org/json"
-  rm -f json 2>/dev/null
+  if [ -n "$NET_HTTP_URL" ]; then
+    bench "wget" "wget -qO- $NET_HTTP_URL/data.json" "$RTK wget $NET_HTTP_URL/data.json"
+  else
+    echo "⏭️  wget (no local HTTP server available, skipped)"
+  fi
 fi
 
 # ===================

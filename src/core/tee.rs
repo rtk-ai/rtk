@@ -5,7 +5,7 @@ use crate::core::config::Config;
 use std::path::PathBuf;
 
 /// Minimum output size to tee (smaller outputs don't need recovery)
-const MIN_TEE_SIZE: usize = 500;
+pub(crate) const MIN_TEE_SIZE: usize = 500;
 
 /// Default max files to keep in tee directory
 const DEFAULT_MAX_FILES: usize = 20;
@@ -14,8 +14,10 @@ const DEFAULT_MAX_FILES: usize = 20;
 const DEFAULT_MAX_FILE_SIZE: usize = 1_048_576;
 
 /// Sanitize a command slug for use in filenames.
-/// Replaces non-alphanumeric chars (except underscore/hyphen) with underscore,
-/// truncates at 40 chars.
+/// Replaces non-alphanumeric chars (except underscore/hyphen) with underscore.
+/// Long slugs (usually an embedded file path that duplicates the command the LLM
+/// already issued) collapse to a short readable prefix plus a short disambiguating
+/// hash, keeping recovery filenames unique but compact — fewer tokens per tee hint.
 fn sanitize_slug(slug: &str) -> String {
     let sanitized: String = slug
         .chars()
@@ -27,11 +29,22 @@ fn sanitize_slug(slug: &str) -> String {
             }
         })
         .collect();
-    if sanitized.len() > 40 {
-        sanitized[..40].to_string()
-    } else {
-        sanitized
+    const MAX_READABLE: usize = 24;
+    if sanitized.len() <= MAX_READABLE {
+        return sanitized;
     }
+    let prefix: String = sanitized.chars().take(8).collect();
+    format!("{}_{}", prefix, short_hash(&sanitized))
+}
+
+/// First 6 hex chars (24 bits) of the SHA-256 of `s` — a compact tag to keep
+/// shortened slugs distinct. Not collision-resistant on its own: 24 bits hits a
+/// birthday collision after only a few thousand distinct slugs. It's safe here
+/// because a clash also requires the identical readable prefix *and* the same
+/// epoch second, which together scope tee writes exactly as before.
+fn short_hash(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(s.as_bytes()))[..6].to_string()
 }
 
 /// Get the tee directory, respecting config and env overrides.
@@ -102,6 +115,15 @@ fn should_tee(
     tee_dir
 }
 
+/// Creates the parent as its own step, otherwise `create_dir_all` leaves the
+/// data root at the umask as an intermediate.
+fn create_tee_dir(tee_dir: &std::path::Path) -> Option<()> {
+    if let Some(parent) = tee_dir.parent() {
+        let _ = crate::core::utils::create_private_dir(parent);
+    }
+    crate::core::utils::create_private_dir(tee_dir).ok()
+}
+
 /// Write raw output to a tee file in the given directory.
 /// Returns file path on success.
 fn write_tee_file(
@@ -111,7 +133,7 @@ fn write_tee_file(
     max_file_size: usize,
     max_files: usize,
 ) -> Option<PathBuf> {
-    std::fs::create_dir_all(tee_dir).ok()?;
+    create_tee_dir(tee_dir)?;
 
     let slug = sanitize_slug(command_slug);
     let epoch = std::time::SystemTime::now()
@@ -138,7 +160,16 @@ fn write_tee_file(
         raw.to_string()
     };
 
-    std::fs::write(&filepath, content).ok()?;
+    let mut file = crate::core::utils::open_private(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true),
+        &filepath,
+    )
+    .ok()?;
+    use std::io::Write;
+    file.write_all(content.as_bytes()).ok()?;
 
     // Rotate old files
     cleanup_old_files(tee_dir, max_files);
@@ -168,19 +199,70 @@ pub fn tee_raw(raw: &str, command_slug: &str, exit_code: i32) -> Option<PathBuf>
     )
 }
 
-/// Format the hint line with ~ shorthand for home directory.
-fn format_hint(path: &std::path::Path) -> String {
-    let display = if let Some(home) = dirs::home_dir() {
+fn display_path(path: &std::path::Path) -> String {
+    if let Some(home) = dirs::home_dir() {
         if let Ok(relative) = path.strip_prefix(&home) {
-            format!("~/{}", relative.display())
-        } else {
-            path.display().to_string()
+            return format!("~/{}", relative.display());
         }
-    } else {
-        path.display().to_string()
-    };
+    }
+    path.display().to_string()
+}
 
-    format!("[full output: {}]", display)
+fn needs_shell_quoting(path: &str) -> bool {
+    path.chars().any(|c| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '\'' | '"'
+                    | '\\'
+                    | '$'
+                    | '`'
+                    | '!'
+                    | '#'
+                    | '&'
+                    | '('
+                    | ')'
+                    | ';'
+                    | '<'
+                    | '>'
+                    | '?'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '|'
+                    | '*'
+            )
+    })
+}
+
+fn escape_double_quoted_path(path: &str) -> String {
+    let mut escaped = String::with_capacity(path.len());
+    for c in path.chars() {
+        if matches!(c, '\\' | '"' | '$' | '`') {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
+}
+
+fn display_shell_path(path: &std::path::Path) -> String {
+    let display = display_path(path);
+    if !needs_shell_quoting(&display) {
+        return display;
+    }
+
+    if let Some(relative) = display.strip_prefix("~/") {
+        let relative = relative.replace(std::path::MAIN_SEPARATOR, "/");
+        return format!("\"$HOME/{}\"", escape_double_quoted_path(&relative));
+    }
+
+    format!("\"{}\"", escape_double_quoted_path(&display))
+}
+
+fn format_hint(path: &std::path::Path) -> String {
+    format!("[full output: {}]", display_shell_path(path))
 }
 
 /// Convenience: tee + format hint in one call.
@@ -190,42 +272,51 @@ pub fn tee_and_hint(raw: &str, command_slug: &str, exit_code: i32) -> Option<Str
     Some(format_hint(&path))
 }
 
-/// Force tee output regardless of exit code (used when filters truncate).
-/// Always writes file if size >= MIN_TEE_SIZE and tee is enabled.
-/// Returns hint string if file was written, None if skipped/disabled.
-///
-/// Used by AWS filters when FilterResult.truncated = true, ensuring
-/// the LLM has access to full untruncated output via the hint path.
-pub fn force_tee_hint(raw: &str, command_slug: &str) -> Option<String> {
-    // Check RTK_TEE=0 env override (disable)
+fn force_tee_path(content: &str, command_slug: &str) -> Option<PathBuf> {
     if std::env::var("RTK_TEE").ok().as_deref() == Some("0") {
         return None;
     }
 
-    // Skip if output too small
-    if raw.len() < MIN_TEE_SIZE {
+    if content.is_empty() {
         return None;
     }
 
     let config = Config::load().ok()?;
 
-    // Respect enabled flag but ignore mode (force tee)
     if !config.tee.enabled {
         return None;
     }
 
     let tee_dir = get_tee_dir(&config)?;
-    let tee_dir = std::fs::create_dir_all(&tee_dir).ok().and(Some(tee_dir))?;
+    let tee_dir = create_tee_dir(&tee_dir).and(Some(tee_dir))?;
 
-    let path = write_tee_file(
-        raw,
+    write_tee_file(
+        content,
         command_slug,
         &tee_dir,
         config.tee.max_file_size,
         config.tee.max_files,
-    )?;
+    )
+}
 
+/// Returns `[full output: ~/path]`, or None if tee is disabled/skipped.
+pub fn force_tee_hint(raw: &str, command_slug: &str) -> Option<String> {
+    let path = force_tee_path(raw, command_slug)?;
     Some(format_hint(&path))
+}
+
+/// Returns `[see remaining: tail -n +{line_offset} ~/path]`, or None if tee is disabled/skipped.
+pub fn force_tee_tail_hint(
+    content: &str,
+    command_slug: &str,
+    line_offset: usize,
+) -> Option<String> {
+    let path = force_tee_path(content, command_slug)?;
+    Some(format!(
+        "[see remaining: tail -n +{} {}]",
+        line_offset,
+        display_shell_path(&path)
+    ))
 }
 
 /// TeeMode controls when tee writes files.
@@ -272,9 +363,23 @@ mod tests {
         assert_eq!(sanitize_slug("cargo test"), "cargo_test");
         assert_eq!(sanitize_slug("cargo-test"), "cargo-test");
         assert_eq!(sanitize_slug("go/test/./pkg"), "go_test___pkg");
-        // Truncate at 40
-        let long = "a".repeat(50);
-        assert_eq!(sanitize_slug(&long).len(), 40);
+        // Long slugs (embedded paths) collapse to a readable prefix + hash, staying short.
+        let long = format!("grep_0_{}", "a".repeat(50));
+        let short = sanitize_slug(&long);
+        assert!(
+            short.len() < 24,
+            "long slug should shorten, got '{}'",
+            short
+        );
+        assert!(
+            short.starts_with("grep_0_a"),
+            "keeps a readable prefix, got '{}'",
+            short
+        );
+        // Deterministic, and different slugs never collide onto the same filename.
+        assert_eq!(sanitize_slug(&long), short);
+        let other = sanitize_slug(&format!("grep_1_{}", "a".repeat(50)));
+        assert_ne!(other, short, "distinct slugs must not collide");
     }
 
     #[test]
@@ -346,6 +451,48 @@ mod tests {
         assert!(path.exists());
         let written = fs::read_to_string(&path).unwrap();
         assert!(written.contains("error: test failed"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_tee_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let tee_dir = tmpdir.path().join("tee");
+        let path = write_tee_file(
+            "secret output\n",
+            "grep",
+            &tee_dir,
+            DEFAULT_MAX_FILE_SIZE,
+            20,
+        )
+        .expect("tee file written");
+
+        let mode = |p: &std::path::Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600, "tee file must be owner-only");
+        assert_eq!(mode(&tee_dir), 0o700, "tee dir must be owner-only");
+    }
+
+    // umask is process-global, so this must not run alongside another test that
+    // depends on it. Restored before the assertion can unwind.
+    #[test]
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    fn test_write_tee_file_owner_only_under_permissive_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // nosemgrep: unsafe-block
+        let previous = unsafe { libc::umask(0o000) };
+        let tmpdir = tempfile::tempdir().unwrap();
+        let tee_dir = tmpdir.path().join("tee");
+        let written = write_tee_file("secret\n", "grep", &tee_dir, DEFAULT_MAX_FILE_SIZE, 20);
+        // nosemgrep: unsafe-block
+        unsafe { libc::umask(previous) };
+
+        let path = written.expect("tee file written");
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "umask 000 must not widen the tee file");
     }
 
     #[test]
@@ -441,6 +588,71 @@ mod tests {
     }
 
     #[test]
+    fn test_display_shell_path_preserves_simple_paths() {
+        let path = PathBuf::from("/tmp/rtk/tee/123_cargo_test.log");
+        assert_eq!(display_shell_path(&path), "/tmp/rtk/tee/123_cargo_test.log");
+    }
+
+    #[test]
+    fn test_display_shell_path_quotes_paths_with_spaces() {
+        let path = PathBuf::from("/tmp/rtk/Application Support/123_go_test.log");
+        assert_eq!(
+            display_shell_path(&path),
+            "\"/tmp/rtk/Application Support/123_go_test.log\""
+        );
+    }
+
+    #[test]
+    fn test_display_shell_path_quotes_backslashes() {
+        let path = PathBuf::from(r"/tmp/rtk/tee/path\segment.log");
+        assert_eq!(
+            display_shell_path(&path),
+            r#""/tmp/rtk/tee/path\\segment.log""#
+        );
+    }
+
+    #[test]
+    fn test_display_shell_path_uses_home_var_for_home_paths_with_spaces() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let path = home
+            .join("Library")
+            .join("Application Support")
+            .join("rtk")
+            .join("tee")
+            .join("123_go_test.log");
+
+        assert_eq!(
+            display_shell_path(&path),
+            "\"$HOME/Library/Application Support/rtk/tee/123_go_test.log\""
+        );
+    }
+
+    #[test]
+    fn test_format_hint_avoids_backslash_escaped_whitespace() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let path = home
+            .join("Library")
+            .join("Application Support")
+            .join("rtk")
+            .join("tee")
+            .join("123_go_test.log");
+        let hint = format_hint(&path);
+
+        assert_eq!(
+            hint,
+            "[full output: \"$HOME/Library/Application Support/rtk/tee/123_go_test.log\"]"
+        );
+        assert!(
+            !hint.contains("\\ "),
+            "hint should not encourage backslash-escaped whitespace"
+        );
+    }
+
+    #[test]
     fn test_tee_config_default() {
         let config = TeeConfig::default();
         assert!(config.enabled);
@@ -487,11 +699,9 @@ directory = "/tmp/rtk-tee"
     }
 
     #[test]
-    fn test_force_tee_hint_skip_small_output() {
-        // force_tee_hint should respect MIN_TEE_SIZE
-        let small_output = "short error";
-        let hint = force_tee_hint(small_output, "test_cmd");
-        assert!(hint.is_none(), "Should skip output < MIN_TEE_SIZE");
+    fn test_force_tee_hint_skip_empty() {
+        let hint = force_tee_hint("", "test_cmd");
+        assert!(hint.is_none(), "Should skip empty content");
     }
 
     #[test]
@@ -502,5 +712,21 @@ directory = "/tmp/rtk-tee"
         let hint = force_tee_hint(&large_output, "test_cmd");
         std::env::remove_var("RTK_TEE");
         assert!(hint.is_none(), "Should respect RTK_TEE=0");
+    }
+
+    #[test]
+    fn test_force_tee_tail_hint_skip_empty() {
+        let hint = force_tee_tail_hint("", "test_cmd", 22);
+        assert!(hint.is_none(), "Should skip empty content");
+    }
+
+    #[test]
+    fn test_force_tee_tail_hint_format() {
+        let path = std::path::PathBuf::from("/tmp/rtk/tee/123_docker_images.log");
+        let display = display_path(&path);
+        let hint = format!("[see remaining: tail -n +{} {}]", 22, display);
+        assert!(hint.starts_with("[see remaining: tail -n +22 "));
+        assert!(hint.ends_with(']'));
+        assert!(hint.contains("123_docker_images.log"));
     }
 }

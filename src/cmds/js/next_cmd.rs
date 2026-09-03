@@ -1,9 +1,11 @@
 //! Filters Next.js build output down to route metrics and bundle sizes.
 
 use crate::core::runner;
+use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
 use regex::Regex;
+use std::sync::LazyLock;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     // Try next directly first, fallback to npx if not found
@@ -39,17 +41,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
 /// Filter Next.js build output - extract routes, bundles, warnings
 fn filter_next_build(output: &str) -> String {
-    lazy_static::lazy_static! {
-        // Route line pattern: ○ /dashboard    1.2 kB  132 kB
-        static ref ROUTE_PATTERN: Regex = Regex::new(
-            r"^[○●◐λ✓]\s+(/[^\s]*)\s+(\d+(?:\.\d+)?)\s*(kB|B)"
-        ).unwrap();
-
-        // Bundle size pattern
-        static ref BUNDLE_PATTERN: Regex = Regex::new(
-            r"^[○●◐λ✓]\s+([\w/\-\.]+)\s+(\d+(?:\.\d+)?)\s*(kB|B)\s+(\d+(?:\.\d+)?)\s*(kB|B)"
-        ).unwrap();
-    }
+    // Bundle size pattern
+    static BUNDLE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^[○●◐λ✓]\s+([\w/\-\.]+)\s+(\d+(?:\.\d+)?)\s*(kB|B)\s+(\d+(?:\.\d+)?)\s*(kB|B)")
+            .unwrap()
+    });
 
     let mut routes_static = 0;
     let mut routes_dynamic = 0;
@@ -114,7 +110,6 @@ fn filter_next_build(output: &str) -> String {
     // Build filtered output
     let mut result = String::new();
     result.push_str("Next.js Build\n");
-    result.push_str("═══════════════════════════════════════\n");
 
     if already_built && routes_total == 0 {
         result.push_str("Already built (using cache)\n\n");
@@ -131,7 +126,8 @@ fn filter_next_build(output: &str) -> String {
         // Sort by size (descending) and show top 10
         bundles.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        for (route, size, pct_change) in bundles.iter().take(10) {
+        const MAX_BUNDLES: usize = CAP_WARNINGS;
+        for (route, size, pct_change) in bundles.iter().take(MAX_BUNDLES) {
             let warning_marker = if let Some(pct) = pct_change {
                 if *pct > 10.0 {
                     format!(" [warn] (+{:.0}%)", pct)
@@ -150,8 +146,11 @@ fn filter_next_build(output: &str) -> String {
             ));
         }
 
-        if bundles.len() > 10 {
-            result.push_str(&format!("\n  ... +{} more routes\n", bundles.len() - 10));
+        if bundles.len() > MAX_BUNDLES {
+            result.push_str(&format!(
+                "\n  ... +{} more routes\n",
+                bundles.len() - MAX_BUNDLES
+            ));
         }
 
         result.push('\n');
@@ -169,9 +168,8 @@ fn filter_next_build(output: &str) -> String {
 
 /// Extract time from build output (e.g., "Compiled in 34.2s")
 fn extract_time(line: &str) -> Option<String> {
-    lazy_static::lazy_static! {
-        static ref TIME_RE: Regex = Regex::new(r"(\d+(?:\.\d+)?)\s*(s|ms)").unwrap();
-    }
+    static TIME_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(\d+(?:\.\d+)?)\s*(s|ms)").unwrap());
 
     TIME_RE
         .captures(line)
