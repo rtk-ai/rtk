@@ -128,6 +128,18 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^ast-grep\s+",
+        rtk_cmd: "rtk ast-grep",
+        // Unlike grep/rg, `rtk ast-grep`'s run() execs with stdin null (no
+        // piped-stdin support yet), so it must not be rewritten as a
+        // pipeline's final stage — that would silently drop the pipe input.
+        pipeline_final_safe: false,
+        rewrite_prefixes: &["ast-grep"],
+        category: "Files",
+        savings_pct: 60.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^ls(\s|$)",
         rtk_cmd: "rtk ls",
         rewrite_prefixes: &["ls"],

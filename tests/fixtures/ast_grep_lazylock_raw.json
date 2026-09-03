@@ -1,0 +1,3674 @@
+[
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(\n        r\"(?i)(unexpected argument|unknown (option|flag)|unrecognized (option|flag)|invalid (option|flag))\"\n    ).unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 1272,
+      "end": 1432
+    },
+    "start": {
+      "line": 50,
+      "column": 42
+    },
+    "end": {
+      "line": 54,
+      "column": 2
+    }
+  },
+  "file": "src/learn/detector.rs",
+  "lines": "static UNKNOWN_FLAG_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(\n        r\"(?i)(unexpected argument|unknown (option|flag)|unrecognized (option|flag)|invalid (option|flag))\"\n    ).unwrap()\n});",
+  "charCount": {
+    "leading": 42,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(\n        r\"(?i)(command not found|not recognized as an internal|no such file or directory.*command)\",\n    )\n    .unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 1478,
+      "end": 1636
+    },
+    "start": {
+      "line": 56,
+      "column": 43
+    },
+    "end": {
+      "line": 61,
+      "column": 2
+    }
+  },
+  "file": "src/learn/detector.rs",
+  "lines": "static CMD_NOT_FOUND_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(\n        r\"(?i)(command not found|not recognized as an internal|no such file or directory.*command)\",\n    )\n    .unwrap()\n});",
+  "charCount": {
+    "leading": 43,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"(?i)(no such file or directory|cannot find the path|file not found)\").unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 1679,
+      "end": 1796
+    },
+    "start": {
+      "line": 63,
+      "column": 40
+    },
+    "end": {
+      "line": 65,
+      "column": 2
+    }
+  },
+  "file": "src/learn/detector.rs",
+  "lines": "static WRONG_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"(?i)(no such file or directory|cannot find the path|file not found)\").unwrap()\n});",
+  "charCount": {
+    "leading": 40,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(\n        r\"(?i)(requires a value|requires an argument|missing (required )?argument|expected.*argument)\"\n    ).unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 1840,
+      "end": 1995
+    },
+    "start": {
+      "line": 67,
+      "column": 41
+    },
+    "end": {
+      "line": 71,
+      "column": 2
+    }
+  },
+  "file": "src/learn/detector.rs",
+  "lines": "static MISSING_ARG_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(\n        r\"(?i)(requires a value|requires an argument|missing (required )?argument|expected.*argument)\"\n    ).unwrap()\n});",
+  "charCount": {
+    "leading": 41,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"(?i)(permission denied|access denied|not permitted)\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 2049,
+      "end": 2142
+    },
+    "start": {
+      "line": 74,
+      "column": 4
+    },
+    "end": {
+      "line": 74,
+      "column": 97
+    }
+  },
+  "file": "src/learn/detector.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"(?i)(permission denied|access denied|not permitted)\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(\n        r\"(?i)(user (doesn't want|declined|rejected|cancelled)|operation (cancelled|aborted) by user)\"\n    ).unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 2236,
+      "end": 2391
+    },
+    "start": {
+      "line": 77,
+      "column": 44
+    },
+    "end": {
+      "line": 81,
+      "column": 2
+    }
+  },
+  "file": "src/learn/detector.rs",
+  "lines": "static USER_REJECTION_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(\n        r\"(?i)(user (doesn't want|declined|rejected|cancelled)|operation (cancelled|aborted) by user)\"\n    ).unwrap()\n});",
+  "charCount": {
+    "leading": 44,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"(?s)<!--.*?-->\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 513,
+      "end": 569
+    },
+    "start": {
+      "line": 15,
+      "column": 42
+    },
+    "end": {
+      "line": 15,
+      "column": 98
+    }
+  },
+  "file": "src/cmds/git/gh_cmd.rs",
+  "lines": "static HTML_COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"(?s)<!--.*?-->\").unwrap());",
+  "charCount": {
+    "leading": 42,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"(?m)^\\s*\\[!\\[[^\\]]*\\]\\([^)]*\\)\\]\\([^)]*\\)\\s*$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 615,
+      "end": 702
+    },
+    "start": {
+      "line": 17,
+      "column": 4
+    },
+    "end": {
+      "line": 17,
+      "column": 91
+    }
+  },
+  "file": "src/cmds/git/gh_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"(?m)^\\s*\\[!\\[[^\\]]*\\]\\([^)]*\\)\\]\\([^)]*\\)\\s*$\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"(?m)^\\s*!\\[[^\\]]*\\]\\([^)]*\\)\\s*$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 753,
+      "end": 827
+    },
+    "start": {
+      "line": 19,
+      "column": 4
+    },
+    "end": {
+      "line": 19,
+      "column": 78
+    }
+  },
+  "file": "src/cmds/git/gh_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"(?m)^\\s*!\\[[^\\]]*\\]\\([^)]*\\)\\s*$\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"(?m)^\\s*(?:---+|\\*\\*\\*+|___+)\\s*$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 878,
+      "end": 953
+    },
+    "start": {
+      "line": 21,
+      "column": 4
+    },
+    "end": {
+      "line": 21,
+      "column": 79
+    }
+  },
+  "file": "src/cmds/git/gh_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"(?m)^\\s*(?:---+|\\*\\*\\*+|___+)\\s*$\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"\\n{3,}\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 996,
+      "end": 1044
+    },
+    "start": {
+      "line": 22,
+      "column": 41
+    },
+    "end": {
+      "line": 22,
+      "column": 89
+    }
+  },
+  "file": "src/cmds/git/gh_cmd.rs",
+  "lines": "static MULTI_BLANK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"\\n{3,}\").unwrap());",
+  "charCount": {
+    "leading": 41,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"\\n{3,}\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 4667,
+      "end": 4715
+    },
+    "start": {
+      "line": 157,
+      "column": 47
+    },
+    "end": {
+      "line": 157,
+      "column": 95
+    }
+  },
+  "file": "src/core/filter.rs",
+  "lines": "static MULTIPLE_BLANK_LINES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"\\n{3,}\").unwrap());",
+  "charCount": {
+    "leading": 47,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^(use |import |from |require\\(|#include)\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 7177,
+      "end": 7259
+    },
+    "start": {
+      "line": 232,
+      "column": 4
+    },
+    "end": {
+      "line": 232,
+      "column": 86
+    }
+  },
+  "file": "src/core/filter.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^(use |import |from |require\\(|#include)\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(\n        r\"^(pub\\s+)?(async\\s+)?(fn|def|function|func|class|struct|enum|trait|interface|type)\\s+\\w+\",\n    )\n    .unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 7302,
+      "end": 7460
+    },
+    "start": {
+      "line": 233,
+      "column": 41
+    },
+    "end": {
+      "line": 238,
+      "column": 2
+    }
+  },
+  "file": "src/core/filter.rs",
+  "lines": "static FUNC_SIGNATURE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(\n        r\"^(pub\\s+)?(async\\s+)?(fn|def|function|func|class|struct|enum|trait|interface|type)\\s+\\w+\",\n    )\n    .unwrap()\n});",
+  "charCount": {
+    "leading": 41,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"\\x1b\\[[0-9;]*[a-zA-Z]\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 1515,
+      "end": 1578
+    },
+    "start": {
+      "line": 53,
+      "column": 8
+    },
+    "end": {
+      "line": 53,
+      "column": 71
+    }
+  },
+  "file": "src/core/utils.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"\\x1b\\[[0-9;]*[a-zA-Z]\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| regex::Regex::new(r\"^\\d+\\)\\s+(Failure|Error):$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 5087,
+      "end": 5162
+    },
+    "start": {
+      "line": 167,
+      "column": 8
+    },
+    "end": {
+      "line": 167,
+      "column": 83
+    }
+  },
+  "file": "src/cmds/ruby/rake_cmd.rs",
+  "lines": "        LazyLock::new(|| regex::Regex::new(r\"^\\d+\\)\\s+(Failure|Error):$\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(TomlFilterRegistry::load)",
+  "range": {
+    "byteOffset": {
+      "start": 13362,
+      "end": 13401
+    },
+    "start": {
+      "line": 398,
+      "column": 48
+    },
+    "end": {
+      "line": 398,
+      "column": 87
+    }
+  },
+  "file": "src/core/toml_filter.rs",
+  "lines": "static REGISTRY: LazyLock<TomlFilterRegistry> = LazyLock::new(TomlFilterRegistry::load);",
+  "charCount": {
+    "leading": 48,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(build_match_set)",
+  "range": {
+    "byteOffset": {
+      "start": 14019,
+      "end": 14049
+    },
+    "start": {
+      "line": 421,
+      "column": 39
+    },
+    "end": {
+      "line": 421,
+      "column": 69
+    }
+  },
+  "file": "src/core/toml_filter.rs",
+  "lines": "static MATCH_SET: LazyLock<RegexSet> = LazyLock::new(build_match_set);",
+  "charCount": {
+    "leading": 39,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 397,
+      "end": 489
+    },
+    "start": {
+      "line": 12,
+      "column": 4
+    },
+    "end": {
+      "line": 12,
+      "column": 96
+    }
+  },
+  "file": "src/cmds/git/gt_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(\n        r#\"(?:Created|Pushed|pushed|Deleted|deleted)\\s+branch\\s+[`\"']?([a-zA-Z0-9/_.\\-+@]+)\"#,\n    )\n    .unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 532,
+      "end": 684
+    },
+    "start": {
+      "line": 13,
+      "column": 41
+    },
+    "end": {
+      "line": 18,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/git/gt_cmd.rs",
+  "lines": "static BRANCH_NAME_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(\n        r#\"(?:Created|Pushed|pushed|Deleted|deleted)\\s+branch\\s+[`\"']?([a-zA-Z0-9/_.\\-+@]+)\"#,\n    )\n    .unwrap()\n});",
+  "charCount": {
+    "leading": 41,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"(Created|Updated)\\s+pull\\s+request\\s+#(\\d+)\\s+for\\s+([^\\s:]+)(?::\\s*(\\S+))?\")\n        .unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 723,
+      "end": 857
+    },
+    "start": {
+      "line": 19,
+      "column": 37
+    },
+    "end": {
+      "line": 22,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/git/gt_cmd.rs",
+  "lines": "static PR_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"(Created|Updated)\\s+pull\\s+request\\s+#(\\d+)\\s+for\\s+([^\\s:]+)(?::\\s*(\\S+))?\")\n        .unwrap()\n});",
+  "charCount": {
+    "leading": 37,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    RegexSet::new(RULES.iter().map(|r| r.pattern)).expect(\"invalid regex patterns\")\n})",
+  "range": {
+    "byteOffset": {
+      "start": 1484,
+      "end": 1589
+    },
+    "start": {
+      "line": 53,
+      "column": 39
+    },
+    "end": {
+      "line": 55,
+      "column": 2
+    }
+  },
+  "file": "src/discover/registry.rs",
+  "lines": "static REGEX_SET: LazyLock<RegexSet> = LazyLock::new(|| {\n    RegexSet::new(RULES.iter().map(|r| r.pattern)).expect(\"invalid regex patterns\")\n});",
+  "charCount": {
+    "leading": 39,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    RULES\n        .iter()\n        .map(|r| Regex::new(r.pattern).expect(\"invalid regex\"))\n        .collect()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 1631,
+      "end": 1761
+    },
+    "start": {
+      "line": 56,
+      "column": 40
+    },
+    "end": {
+      "line": 61,
+      "column": 2
+    }
+  },
+  "file": "src/discover/registry.rs",
+  "lines": "static COMPILED: LazyLock<Vec<Regex>> = LazyLock::new(|| {\n    RULES\n        .iter()\n        .map(|r| Regex::new(r.pattern).expect(\"invalid regex\"))\n        .collect()\n});",
+  "charCount": {
+    "leading": 40,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    let double_quoted = r#\"\"(?:[^\"\\\\]|\\\\.)*\"\"#;\n    let single_quoted = r#\"'(?:[^'\\\\]|\\\\.)*'\"#;\n    let unquoted = r#\"[^\\s]*\"#;\n    let env_value = format!(\"(?:{}|{}|{})\", double_quoted, single_quoted, unquoted);\n    let env_assign = format!(r#\"[A-Z_][A-Z0-9_]*={}\"#, env_value);\n    Regex::new(&format!(r#\"^(?:sudo\\s+|env\\s+|{}\\s+)+\"#, env_assign)).unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 1800,
+      "end": 2180
+    },
+    "start": {
+      "line": 62,
+      "column": 37
+    },
+    "end": {
+      "line": 69,
+      "column": 2
+    }
+  },
+  "file": "src/discover/registry.rs",
+  "lines": "static ENV_PREFIX: LazyLock<Regex> = LazyLock::new(|| {\n    let double_quoted = r#\"\"(?:[^\"\\\\]|\\\\.)*\"\"#;\n    let single_quoted = r#\"'(?:[^'\\\\]|\\\\.)*'\"#;\n    let unquoted = r#\"[^\\s]*\"#;\n    let env_value = format!(\"(?:{}|{}|{})\", double_quoted, single_quoted, unquoted);\n    let env_assign = format!(r#\"[A-Z_][A-Z0-9_]*={}\"#, env_value);\n    Regex::new(&format!(r#\"^(?:sudo\\s+|env\\s+|{}\\s+)+\"#, env_assign)).unwrap()\n});",
+  "charCount": {
+    "leading": 37,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"^(?:(?:-C\\s+\\S+|-c\\s+\\S+|--git-dir(?:=\\S+|\\s+\\S+)|--work-tree(?:=\\S+|\\s+\\S+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\\s+)+\").unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 2373,
+      "end": 2563
+    },
+    "start": {
+      "line": 72,
+      "column": 41
+    },
+    "end": {
+      "line": 74,
+      "column": 2
+    }
+  },
+  "file": "src/discover/registry.rs",
+  "lines": "static GIT_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"^(?:(?:-C\\s+\\S+|-c\\s+\\S+|--git-dir(?:=\\S+|\\s+\\S+)|--work-tree(?:=\\S+|\\s+\\S+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\\s+)+\").unwrap()\n});",
+  "charCount": {
+    "leading": 41,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^head\\s+-(\\d+)\\s+(\\S+)$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 2914,
+      "end": 2979
+    },
+    "start": {
+      "line": 79,
+      "column": 33
+    },
+    "end": {
+      "line": 79,
+      "column": 98
+    }
+  },
+  "file": "src/discover/registry.rs",
+  "lines": "static HEAD_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"^head\\s+-(\\d+)\\s+(\\S+)$\").unwrap());",
+  "charCount": {
+    "leading": 33,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^head\\s+--lines=(\\d+)\\s+(\\S+)$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 3022,
+      "end": 3094
+    },
+    "start": {
+      "line": 81,
+      "column": 4
+    },
+    "end": {
+      "line": 81,
+      "column": 76
+    }
+  },
+  "file": "src/discover/registry.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^head\\s+--lines=(\\d+)\\s+(\\S+)$\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^tail\\s+-(\\d+)\\s+(\\S+)$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 3129,
+      "end": 3194
+    },
+    "start": {
+      "line": 82,
+      "column": 33
+    },
+    "end": {
+      "line": 82,
+      "column": 98
+    }
+  },
+  "file": "src/discover/registry.rs",
+  "lines": "static TAIL_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"^tail\\s+-(\\d+)\\s+(\\S+)$\").unwrap());",
+  "charCount": {
+    "leading": 33,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^tail\\s+-n\\s+(\\d+)\\s+(\\S+)$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 3239,
+      "end": 3308
+    },
+    "start": {
+      "line": 84,
+      "column": 4
+    },
+    "end": {
+      "line": 84,
+      "column": 73
+    }
+  },
+  "file": "src/discover/registry.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^tail\\s+-n\\s+(\\d+)\\s+(\\S+)$\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^tail\\s+--lines=(\\d+)\\s+(\\S+)$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 3354,
+      "end": 3426
+    },
+    "start": {
+      "line": 86,
+      "column": 4
+    },
+    "end": {
+      "line": 86,
+      "column": 76
+    }
+  },
+  "file": "src/discover/registry.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^tail\\s+--lines=(\\d+)\\s+(\\S+)$\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^tail\\s+--lines\\s+(\\d+)\\s+(\\S+)$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 3475,
+      "end": 3549
+    },
+    "start": {
+      "line": 88,
+      "column": 4
+    },
+    "end": {
+      "line": 88,
+      "column": 78
+    }
+  },
+  "file": "src/discover/registry.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^tail\\s+--lines\\s+(\\d+)\\s+(\\S+)$\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"(?m)[ \\t\\x0B\\x0C]*\\\\\\r?\\n[ \\t\\x0B\\x0C]*\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 18010,
+      "end": 18091
+    },
+    "start": {
+      "line": 538,
+      "column": 4
+    },
+    "end": {
+      "line": 538,
+      "column": 85
+    }
+  },
+  "file": "src/discover/registry.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"(?m)[ \\t\\x0B\\x0C]*\\\\\\r?\\n[ \\t\\x0B\\x0C]*\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"\\\\\\r?\\n\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 18133,
+      "end": 18182
+    },
+    "start": {
+      "line": 540,
+      "column": 39
+    },
+    "end": {
+      "line": 540,
+      "column": 88
+    }
+  },
+  "file": "src/discover/registry.rs",
+  "lines": "static BASH_JOIN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"\\\\\\r?\\n\").unwrap());",
+  "charCount": {
+    "leading": 39,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"(?i)running via spring preloader\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 875,
+      "end": 949
+    },
+    "start": {
+      "line": 21,
+      "column": 4
+    },
+    "end": {
+      "line": 21,
+      "column": 78
+    }
+  },
+  "file": "src/cmds/ruby/rspec_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"(?i)running via spring preloader\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"(?i)(coverage report|simplecov|coverage/|\\.simplecov|All Files.*Lines)\").unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 990,
+      "end": 1110
+    },
+    "start": {
+      "line": 22,
+      "column": 39
+    },
+    "end": {
+      "line": 24,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/ruby/rspec_cmd.rs",
+  "lines": "static RE_SIMPLECOV: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"(?i)(coverage report|simplecov|coverage/|\\.simplecov|All Files.*Lines)\").unwrap()\n});",
+  "charCount": {
+    "leading": 39,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^DEPRECATION WARNING:\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 1157,
+      "end": 1220
+    },
+    "start": {
+      "line": 26,
+      "column": 4
+    },
+    "end": {
+      "line": 26,
+      "column": 67
+    }
+  },
+  "file": "src/cmds/ruby/rspec_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^DEPRECATION WARNING:\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^Finished in \\d\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 1263,
+      "end": 1320
+    },
+    "start": {
+      "line": 27,
+      "column": 41
+    },
+    "end": {
+      "line": 27,
+      "column": 98
+    }
+  },
+  "file": "src/cmds/ruby/rspec_cmd.rs",
+  "lines": "static RE_FINISHED_IN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"^Finished in \\d\").unwrap());",
+  "charCount": {
+    "leading": 41,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"saved screenshot to (.+)\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 1366,
+      "end": 1432
+    },
+    "start": {
+      "line": 29,
+      "column": 4
+    },
+    "end": {
+      "line": 29,
+      "column": 70
+    }
+  },
+  "file": "src/cmds/ruby/rspec_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"saved screenshot to (.+)\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"(\\d+) examples?, (\\d+) failures?\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 1481,
+      "end": 1555
+    },
+    "start": {
+      "line": 31,
+      "column": 4
+    },
+    "end": {
+      "line": 31,
+      "column": 78
+    }
+  },
+  "file": "src/cmds/ruby/rspec_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"(\\d+) examples?, (\\d+) failures?\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(\n        r\"(?s)^\\s*(?:\\d+/(\\d+)\\s+)?Test\\s+#(\\d+):\\s+(.+?)\\s+\\.{2,}\\s*(?:\\*{3})?\\s*(.+?)\\s+([\\d.]+)\\s+sec\\s*$\",\n    )\n    .expect(\"invalid ctest result regex\")\n})",
+  "range": {
+    "byteOffset": {
+      "start": 880,
+      "end": 1076
+    },
+    "start": {
+      "line": 23,
+      "column": 34
+    },
+    "end": {
+      "line": 28,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/system/ctest_cmd.rs",
+  "lines": "static TEST_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(\n        r\"(?s)^\\s*(?:\\d+/(\\d+)\\s+)?Test\\s+#(\\d+):\\s+(.+?)\\s+\\.{2,}\\s*(?:\\*{3})?\\s*(.+?)\\s+([\\d.]+)\\s+sec\\s*$\",\n    )\n    .expect(\"invalid ctest result regex\")\n});",
+  "charCount": {
+    "leading": 34,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"^\\s*(?:\\d+/\\d+\\s+)?Test\\s+#\\d+:\")\n        .expect(\"invalid ctest result prefix regex\")\n})",
+  "range": {
+    "byteOffset": {
+      "start": 1121,
+      "end": 1246
+    },
+    "start": {
+      "line": 29,
+      "column": 43
+    },
+    "end": {
+      "line": 32,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/system/ctest_cmd.rs",
+  "lines": "static RESULT_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"^\\s*(?:\\d+/\\d+\\s+)?Test\\s+#\\d+:\")\n        .expect(\"invalid ctest result prefix regex\")\n});",
+  "charCount": {
+    "leading": 43,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"[\\d.]+\\s+sec\\s*$\").expect(\"invalid ctest result terminator regex\")\n})",
+  "range": {
+    "byteOffset": {
+      "start": 1295,
+      "end": 1400
+    },
+    "start": {
+      "line": 33,
+      "column": 47
+    },
+    "end": {
+      "line": 35,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/system/ctest_cmd.rs",
+  "lines": "static RESULT_TERMINATOR_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"[\\d.]+\\s+sec\\s*$\").expect(\"invalid ctest result terminator regex\")\n});",
+  "charCount": {
+    "leading": 47,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"^\\s*Start\\s+(\\d+):\\s*(.*?)\\s*$\").expect(\"invalid ctest start regex\")\n})",
+  "range": {
+    "byteOffset": {
+      "start": 1437,
+      "end": 1544
+    },
+    "start": {
+      "line": 36,
+      "column": 35
+    },
+    "end": {
+      "line": 38,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/system/ctest_cmd.rs",
+  "lines": "static START_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"^\\s*Start\\s+(\\d+):\\s*(.*?)\\s*$\").expect(\"invalid ctest start regex\")\n});",
+  "charCount": {
+    "leading": 35,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"^\\s*\\d+%\\s+tests passed,\\s+(\\d+)\\s+tests failed out of\\s+(\\d+)\")\n        .expect(\"invalid ctest summary regex\")\n})",
+  "range": {
+    "byteOffset": {
+      "start": 1583,
+      "end": 1733
+    },
+    "start": {
+      "line": 39,
+      "column": 37
+    },
+    "end": {
+      "line": 42,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/system/ctest_cmd.rs",
+  "lines": "static SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"^\\s*\\d+%\\s+tests passed,\\s+(\\d+)\\s+tests failed out of\\s+(\\d+)\")\n        .expect(\"invalid ctest summary regex\")\n});",
+  "charCount": {
+    "leading": 37,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"^\\s*Total Test time \\(real\\)\\s+=\\s+([\\d.]+)\\s+sec\")\n        .expect(\"invalid ctest time regex\")\n})",
+  "range": {
+    "byteOffset": {
+      "start": 1769,
+      "end": 1903
+    },
+    "start": {
+      "line": 43,
+      "column": 34
+    },
+    "end": {
+      "line": 46,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/system/ctest_cmd.rs",
+  "lines": "static TIME_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"^\\s*Total Test time \\(real\\)\\s+=\\s+([\\d.]+)\\s+sec\")\n        .expect(\"invalid ctest time regex\")\n});",
+  "charCount": {
+    "leading": 34,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"(\\d+)\\s+(passed|failed|flaky|skipped)\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 5146,
+      "end": 5225
+    },
+    "start": {
+      "line": 167,
+      "column": 8
+    },
+    "end": {
+      "line": 167,
+      "column": 87
+    }
+  },
+  "file": "src/cmds/js/playwright_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"(\\d+)\\s+(passed|failed|flaky|skipped)\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"\\((\\d+(?:\\.\\d+)?)(ms|s|m)\\)\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 5277,
+      "end": 5346
+    },
+    "start": {
+      "line": 169,
+      "column": 8
+    },
+    "end": {
+      "line": 169,
+      "column": 77
+    }
+  },
+  "file": "src/cmds/js/playwright_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"\\((\\d+(?:\\.\\d+)?)(ms|s|m)\\)\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"[×✗]\\s+.*?›\\s+([^›]+\\.spec\\.[tj]sx?)\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 6657,
+      "end": 6742
+    },
+    "start": {
+      "line": 219,
+      "column": 8
+    },
+    "end": {
+      "line": 219,
+      "column": 86
+    }
+  },
+  "file": "src/cmds/js/playwright_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"[×✗]\\s+.*?›\\s+([^›]+\\.spec\\.[tj]sx?)\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n        Regex::new(r\"^[○●◐λ✓]\\s+([\\w/\\-\\.]+)\\s+(\\d+(?:\\.\\d+)?)\\s*(kB|B)\\s+(\\d+(?:\\.\\d+)?)\\s*(kB|B)\")\n            .unwrap()\n    })",
+  "range": {
+    "byteOffset": {
+      "start": 1175,
+      "end": 1332
+    },
+    "start": {
+      "line": 44,
+      "column": 45
+    },
+    "end": {
+      "line": 47,
+      "column": 6
+    }
+  },
+  "file": "src/cmds/js/next_cmd.rs",
+  "lines": "    static BUNDLE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {\n        Regex::new(r\"^[○●◐λ✓]\\s+([\\w/\\-\\.]+)\\s+(\\d+(?:\\.\\d+)?)\\s*(kB|B)\\s+(\\d+(?:\\.\\d+)?)\\s*(kB|B)\")\n            .unwrap()\n    });",
+  "charCount": {
+    "leading": 45,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"(\\d+(?:\\.\\d+)?)\\s*(s|ms)\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 5202,
+      "end": 5268
+    },
+    "start": {
+      "line": 171,
+      "column": 8
+    },
+    "end": {
+      "line": 171,
+      "column": 74
+    }
+  },
+  "file": "src/cmds/js/next_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"(\\d+(?:\\.\\d+)?)\\s*(s|ms)\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"[\\u{2500}-\\u{257F}\\u{2580}-\\u{259F}\\u{25A0}-\\u{25FF}\\u{27A0}-\\u{27BF}]+\").unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 239,
+      "end": 360
+    },
+    "start": {
+      "line": 7,
+      "column": 39
+    },
+    "end": {
+      "line": 9,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/php/artisan_cmd.rs",
+  "lines": "static BOX_CHARS_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"[\\u{2500}-\\u{257F}\\u{2580}-\\u{259F}\\u{25A0}-\\u{25FF}\\u{27A0}-\\u{27BF}]+\").unwrap()\n});",
+  "charCount": {
+    "leading": 39,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"\\.{3,}\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 396,
+      "end": 444
+    },
+    "start": {
+      "line": 10,
+      "column": 34
+    },
+    "end": {
+      "line": 10,
+      "column": 82
+    }
+  },
+  "file": "src/cmds/php/artisan_cmd.rs",
+  "lines": "static DOTS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"\\.{3,}\").unwrap());",
+  "charCount": {
+    "leading": 34,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"[ \\t]{2,}\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 487,
+      "end": 538
+    },
+    "start": {
+      "line": 11,
+      "column": 41
+    },
+    "end": {
+      "line": 11,
+      "column": 92
+    }
+  },
+  "file": "src/cmds/php/artisan_cmd.rs",
+  "lines": "static MULTI_SPACE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"[ \\t]{2,}\").unwrap());",
+  "charCount": {
+    "leading": 41,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"\\n{3,}\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 581,
+      "end": 629
+    },
+    "start": {
+      "line": 12,
+      "column": 41
+    },
+    "end": {
+      "line": 12,
+      "column": 89
+    }
+  },
+  "file": "src/cmds/php/artisan_cmd.rs",
+  "lines": "static MULTI_BLANK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"\\n{3,}\").unwrap());",
+  "charCount": {
+    "leading": 41,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^([^\\x00]+)\\x00(\\d+)([:-])(.*)$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 24488,
+      "end": 24561
+    },
+    "start": {
+      "line": 738,
+      "column": 8
+    },
+    "end": {
+      "line": 738,
+      "column": 81
+    }
+  },
+  "file": "src/cmds/system/search.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"^([^\\x00]+)\\x00(\\d+)([:-])(.*)$\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"Tests\\s+(?:(\\d+)\\s+failed\\s+\\|\\s+)?(\\d+)\\s+passed\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 3900,
+      "end": 3991
+    },
+    "start": {
+      "line": 120,
+      "column": 8
+    },
+    "end": {
+      "line": 120,
+      "column": 99
+    }
+  },
+  "file": "src/cmds/js/vitest_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"Tests\\s+(?:(\\d+)\\s+failed\\s+\\|\\s+)?(\\d+)\\s+passed\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"Duration\\s+([\\d.]+)(ms|s)\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 4043,
+      "end": 4110
+    },
+    "start": {
+      "line": 122,
+      "column": 8
+    },
+    "end": {
+      "line": 122,
+      "column": 75
+    }
+  },
+  "file": "src/cmds/js/vitest_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"Duration\\s+([\\d.]+)(ms|s)\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"\\x1b\\[[0-9;]*[A-Za-z]\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 207,
+      "end": 270
+    },
+    "start": {
+      "line": 6,
+      "column": 34
+    },
+    "end": {
+      "line": 6,
+      "column": 97
+    }
+  },
+  "file": "src/cmds/php/utils.rs",
+  "lines": "static ANSI_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"\\x1b\\[[0-9;]*[A-Za-z]\").unwrap());",
+  "charCount": {
+    "leading": 34,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 313,
+      "end": 387
+    },
+    "start": {
+      "line": 8,
+      "column": 4
+    },
+    "end": {
+      "line": 8,
+      "column": 78
+    }
+  },
+  "file": "src/cmds/php/utils.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(\n        r\"\\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{1,2}\\s+(?:\\d{4}|\\d{2}:\\d{2})\\s+\"\n    )\n    .unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 501,
+      "end": 659
+    },
+    "start": {
+      "line": 13,
+      "column": 37
+    },
+    "end": {
+      "line": 18,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/system/ls.rs",
+  "lines": "static LS_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(\n        r\"\\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{1,2}\\s+(?:\\d{4}|\\d{2}:\\d{2})\\s+\"\n    )\n    .unwrap()\n});",
+  "charCount": {
+    "leading": 37,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"(?s)<!--.*?-->\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 918,
+      "end": 974
+    },
+    "start": {
+      "line": 22,
+      "column": 42
+    },
+    "end": {
+      "line": 22,
+      "column": 98
+    }
+  },
+  "file": "src/cmds/git/glab_cmd.rs",
+  "lines": "static HTML_COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"(?s)<!--.*?-->\").unwrap());",
+  "charCount": {
+    "leading": 42,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"(?m)^\\s*\\[!\\[[^\\]]*\\]\\([^)]*\\)\\]\\([^)]*\\)\\s*$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 1020,
+      "end": 1107
+    },
+    "start": {
+      "line": 24,
+      "column": 4
+    },
+    "end": {
+      "line": 24,
+      "column": 91
+    }
+  },
+  "file": "src/cmds/git/glab_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"(?m)^\\s*\\[!\\[[^\\]]*\\]\\([^)]*\\)\\]\\([^)]*\\)\\s*$\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"(?m)^\\s*!\\[[^\\]]*\\]\\([^)]*\\)\\s*$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 1158,
+      "end": 1232
+    },
+    "start": {
+      "line": 26,
+      "column": 4
+    },
+    "end": {
+      "line": 26,
+      "column": 78
+    }
+  },
+  "file": "src/cmds/git/glab_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"(?m)^\\s*!\\[[^\\]]*\\]\\([^)]*\\)\\s*$\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"(?m)^\\s*(?:---+|\\*\\*\\*+|___+)\\s*$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 1283,
+      "end": 1358
+    },
+    "start": {
+      "line": 28,
+      "column": 4
+    },
+    "end": {
+      "line": 28,
+      "column": 79
+    }
+  },
+  "file": "src/cmds/git/glab_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"(?m)^\\s*(?:---+|\\*\\*\\*+|___+)\\s*$\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"\\n{3,}\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 1401,
+      "end": 1449
+    },
+    "start": {
+      "line": 29,
+      "column": 41
+    },
+    "end": {
+      "line": 29,
+      "column": 89
+    }
+  },
+  "file": "src/cmds/git/glab_cmd.rs",
+  "lines": "static MULTI_BLANK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"\\n{3,}\").unwrap());",
+  "charCount": {
+    "leading": 41,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"/-/merge_requests/(\\d+)\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 1491,
+      "end": 1556
+    },
+    "start": {
+      "line": 31,
+      "column": 4
+    },
+    "end": {
+      "line": 31,
+      "column": 69
+    }
+  },
+  "file": "src/cmds/git/glab_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"/-/merge_requests/(\\d+)\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"section_(?:start|end):\\d+:[a-z0-9_]+(?:\\x1b\\[0K|\\[0K)*\").unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 1675,
+      "end": 1779
+    },
+    "start": {
+      "line": 33,
+      "column": 44
+    },
+    "end": {
+      "line": 35,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/git/glab_cmd.rs",
+  "lines": "static SECTION_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"section_(?:start|end):\\d+:[a-z0-9_]+(?:\\x1b\\[0K|\\[0K)*\").unwrap()\n});",
+  "charCount": {
+    "leading": 44,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"\\[[\\d;]+[A-Za-z]\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 1903,
+      "end": 1961
+    },
+    "start": {
+      "line": 37,
+      "column": 39
+    },
+    "end": {
+      "line": 37,
+      "column": 97
+    }
+  },
+  "file": "src/cmds/git/glab_cmd.rs",
+  "lines": "static BARE_ANSI_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"\\[[\\d;]+[A-Za-z]\").unwrap());",
+  "charCount": {
+    "leading": 39,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^\\d+\\) \\S\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 822,
+      "end": 873
+    },
+    "start": {
+      "line": 19,
+      "column": 45
+    },
+    "end": {
+      "line": 19,
+      "column": 96
+    }
+  },
+  "file": "src/cmds/php/phpunit_cmd.rs",
+  "lines": "static FAILURE_HEADING_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"^\\d+\\) \\S\").unwrap());",
+  "charCount": {
+    "leading": 45,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"^(.+?)\\((\\d+),(\\d+)\\):\\s+(error|warning)\\s+(TS\\d+):\\s+(.+)$\").unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 978,
+      "end": 1087
+    },
+    "start": {
+      "line": 21,
+      "column": 36
+    },
+    "end": {
+      "line": 23,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/js/tsc_cmd.rs",
+  "lines": "static TSC_ERROR: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"^(.+?)\\((\\d+),(\\d+)\\):\\s+(error|warning)\\s+(TS\\d+):\\s+(.+)$\").unwrap()\n});",
+  "charCount": {
+    "leading": 36,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"^(.+?):(\\d+):(\\d+)\\s+-\\s+(error|warning)\\s+(TS\\d+):\\s+(.+)$\").unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 1220,
+      "end": 1329
+    },
+    "start": {
+      "line": 25,
+      "column": 43
+    },
+    "end": {
+      "line": 27,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/js/tsc_cmd.rs",
+  "lines": "static TSC_PRETTY_ERROR: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"^(.+?):(\\d+):(\\d+)\\s+-\\s+(error|warning)\\s+(TS\\d+):\\s+(.+)$\").unwrap()\n});",
+  "charCount": {
+    "leading": 43,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^(error|warning)\\s+(TS\\d+):\\s+(.+)$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 1378,
+      "end": 1455
+    },
+    "start": {
+      "line": 29,
+      "column": 4
+    },
+    "end": {
+      "line": 29,
+      "column": 81
+    }
+  },
+  "file": "src/cmds/js/tsc_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^(error|warning)\\s+(TS\\d+):\\s+(.+)$\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n        // Matches a status line. Anchor: either start-of-line (\"FAIL desc [x.phpt]\")\n        // or immediately after the test bracket (\"TEST N/M [x.phpt]PASS desc [x.phpt]\").\n        // We only accept the token after `]` or at line start so that prose like\n        // \"FAILED TEST SUMMARY\" does not match.\n        Regex::new(\n            r\"(?:^|\\])(PASS|FAIL|SKIP|BORK|WARN|XLEAK|LEAK|XFAIL)\\s+(.*?)\\s*\\[([^\\[\\]]+\\.phpt)\\]\",\n        )\n        .unwrap()\n    })",
+  "range": {
+    "byteOffset": {
+      "start": 4848,
+      "end": 5327
+    },
+    "start": {
+      "line": 162,
+      "column": 40
+    },
+    "end": {
+      "line": 171,
+      "column": 6
+    }
+  },
+  "file": "src/cmds/php/phpt_cmd.rs",
+  "lines": "    static STATUS_RE: LazyLock<Regex> = LazyLock::new(|| {\n        // Matches a status line. Anchor: either start-of-line (\"FAIL desc [x.phpt]\")\n        // or immediately after the test bracket (\"TEST N/M [x.phpt]PASS desc [x.phpt]\").\n        // We only accept the token after `]` or at line start so that prose like\n        // \"FAILED TEST SUMMARY\" does not match.\n        Regex::new(\n            r\"(?:^|\\])(PASS|FAIL|SKIP|BORK|WARN|XLEAK|LEAK|XFAIL)\\s+(.*?)\\s*\\[([^\\[\\]]+\\.phpt)\\]\",\n        )\n        .unwrap()\n    });",
+  "charCount": {
+    "leading": 40,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n        Regex::new(\n            r\"^\\s*(Tests passed|Tests failed|Tests skipped|Tests warned|Expected fail|Expected leak|Tests leaked|Tests borked)\\s*:\\s*(\\d+)\",\n        )\n        .unwrap()\n    })",
+  "range": {
+    "byteOffset": {
+      "start": 5367,
+      "end": 5581
+    },
+    "start": {
+      "line": 172,
+      "column": 38
+    },
+    "end": {
+      "line": 177,
+      "column": 6
+    }
+  },
+  "file": "src/cmds/php/phpt_cmd.rs",
+  "lines": "    static STAT_RE: LazyLock<Regex> = LazyLock::new(|| {\n        Regex::new(\n            r\"^\\s*(Tests passed|Tests failed|Tests skipped|Tests warned|Expected fail|Expected leak|Tests leaked|Tests borked)\\s*:\\s*(\\d+)\",\n        )\n        .unwrap()\n    });",
+  "charCount": {
+    "leading": 38,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^\\s*Number of tests\\s*:\\s*(\\d+)\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 5640,
+      "end": 5713
+    },
+    "start": {
+      "line": 179,
+      "column": 8
+    },
+    "end": {
+      "line": 179,
+      "column": 81
+    }
+  },
+  "file": "src/cmds/php/phpt_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"^\\s*Number of tests\\s*:\\s*(\\d+)\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^\\s*Time taken\\s*:\\s*([0-9.]+)\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 5761,
+      "end": 5833
+    },
+    "start": {
+      "line": 181,
+      "column": 8
+    },
+    "end": {
+      "line": 181,
+      "column": 80
+    }
+  },
+  "file": "src/cmds/php/phpt_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"^\\s*Time taken\\s*:\\s*([0-9.]+)\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    vec![\n        // Generic errors\n        Regex::new(r\"(?i)^.*error[\\s:\\[].*$\").unwrap(),\n        Regex::new(r\"(?i)^.*\\berr\\b.*$\").unwrap(),\n        Regex::new(r\"(?i)^.*warning[\\s:\\[].*$\").unwrap(),\n        Regex::new(r\"(?i)^.*\\bwarn\\b.*$\").unwrap(),\n        Regex::new(r\"(?i)^.*failed.*$\").unwrap(),\n        Regex::new(r\"(?i)^.*failure.*$\").unwrap(),\n        Regex::new(r\"(?i)^.*exception.*$\").unwrap(),\n        Regex::new(r\"(?i)^.*panic.*$\").unwrap(),\n        // Rust specific\n        Regex::new(r\"^error\\[E\\d+\\]:.*$\").unwrap(),\n        Regex::new(r\"^\\s*--> .*:\\d+:\\d+$\").unwrap(),\n        // Python\n        Regex::new(r\"^Traceback.*$\").unwrap(),\n        Regex::new(r#\"^\\s*File \".*\", line \\d+.*$\"#).unwrap(),\n        // JavaScript/TypeScript\n        Regex::new(r\"^\\s*at .*:\\d+:\\d+.*$\").unwrap(),\n        // Go\n        Regex::new(r\"^.*\\.go:\\d+:.*$\").unwrap(),\n    ]\n})",
+  "range": {
+    "byteOffset": {
+      "start": 393,
+      "end": 1283
+    },
+    "start": {
+      "line": 12,
+      "column": 46
+    },
+    "end": {
+      "line": 34,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/rust/runner.rs",
+  "lines": "static ERROR_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {\n    vec![\n        // Generic errors\n        Regex::new(r\"(?i)^.*error[\\s:\\[].*$\").unwrap(),\n        Regex::new(r\"(?i)^.*\\berr\\b.*$\").unwrap(),\n        Regex::new(r\"(?i)^.*warning[\\s:\\[].*$\").unwrap(),\n        Regex::new(r\"(?i)^.*\\bwarn\\b.*$\").unwrap(),\n        Regex::new(r\"(?i)^.*failed.*$\").unwrap(),\n        Regex::new(r\"(?i)^.*failure.*$\").unwrap(),\n        Regex::new(r\"(?i)^.*exception.*$\").unwrap(),\n        Regex::new(r\"(?i)^.*panic.*$\").unwrap(),\n        // Rust specific\n        Regex::new(r\"^error\\[E\\d+\\]:.*$\").unwrap(),\n        Regex::new(r\"^\\s*--> .*:\\d+:\\d+$\").unwrap(),\n        // Python\n        Regex::new(r\"^Traceback.*$\").unwrap(),\n        Regex::new(r#\"^\\s*File \".*\", line \\d+.*$\"#).unwrap(),\n        // JavaScript/TypeScript\n        Regex::new(r\"^\\s*at .*:\\d+:\\d+.*$\").unwrap(),\n        // Go\n        Regex::new(r\"^.*\\.go:\\d+:.*$\").unwrap(),\n    ]\n});",
+  "charCount": {
+    "leading": 46,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"^\\d{4}[-/]\\d{2}[-/]\\d{2}[T ]\\d{2}:\\d{2}:\\d{2}[.,]?\\d*\\s*\").unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 377,
+      "end": 483
+    },
+    "start": {
+      "line": 13,
+      "column": 39
+    },
+    "end": {
+      "line": 15,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/system/log_cmd.rs",
+  "lines": "static TIMESTAMP_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"^\\d{4}[-/]\\d{2}[-/]\\d{2}[T ]\\d{2}:\\d{2}:\\d{2}[.,]?\\d*\\s*\").unwrap()\n});",
+  "charCount": {
+    "leading": 39,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\")\n        .unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 519,
+      "end": 653
+    },
+    "start": {
+      "line": 16,
+      "column": 34
+    },
+    "end": {
+      "line": 19,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/system/log_cmd.rs",
+  "lines": "static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\")\n        .unwrap()\n});",
+  "charCount": {
+    "leading": 34,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"0x[0-9a-fA-F]+\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 688,
+      "end": 744
+    },
+    "start": {
+      "line": 20,
+      "column": 33
+    },
+    "end": {
+      "line": 20,
+      "column": 89
+    }
+  },
+  "file": "src/cmds/system/log_cmd.rs",
+  "lines": "static HEX_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"0x[0-9a-fA-F]+\").unwrap());",
+  "charCount": {
+    "leading": 33,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"\\b\\d{4,}\\b\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 779,
+      "end": 831
+    },
+    "start": {
+      "line": 21,
+      "column": 33
+    },
+    "end": {
+      "line": 21,
+      "column": 85
+    }
+  },
+  "file": "src/cmds/system/log_cmd.rs",
+  "lines": "static NUM_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"\\b\\d{4,}\\b\").unwrap());",
+  "charCount": {
+    "leading": 33,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"/[\\w./\\-]+\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 867,
+      "end": 919
+    },
+    "start": {
+      "line": 22,
+      "column": 34
+    },
+    "end": {
+      "line": 22,
+      "column": 86
+    }
+  },
+  "file": "src/cmds/system/log_cmd.rs",
+  "lines": "static PATH_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"/[\\w./\\-]+\").unwrap());",
+  "charCount": {
+    "leading": 34,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(\n        r\"(?m)^\\s*(?P<file>[^\\r\\n:(]+)\\((?P<line>\\d+),(?P<column>\\d+)\\):\\s*(?P<kind>error|warning)\\s*(?:(?P<code>[A-Za-z]+\\d+)\\s*:\\s*)?(?P<msg>.*)$\"\n    )\n    .expect(\"valid regex\")\n})",
+  "range": {
+    "byteOffset": {
+      "start": 1296,
+      "end": 1515
+    },
+    "start": {
+      "line": 54,
+      "column": 35
+    },
+    "end": {
+      "line": 59,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/dotnet/binlog.rs",
+  "lines": "static ISSUE_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(\n        r\"(?m)^\\s*(?P<file>[^\\r\\n:(]+)\\((?P<line>\\d+),(?P<column>\\d+)\\):\\s*(?P<kind>error|warning)\\s*(?:(?P<code>[A-Za-z]+\\d+)\\s*:\\s*)?(?P<msg>.*)$\"\n    )\n    .expect(\"valid regex\")\n});",
+  "charCount": {
+    "leading": 35,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"(?mi)^\\s*(?P<count>\\d+)\\s+(?P<kind>warning|error)\\(s\\)\").expect(\"valid regex\")\n})",
+  "range": {
+    "byteOffset": {
+      "start": 1560,
+      "end": 1677
+    },
+    "start": {
+      "line": 60,
+      "column": 43
+    },
+    "end": {
+      "line": 62,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/dotnet/binlog.rs",
+  "lines": "static BUILD_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"(?mi)^\\s*(?P<count>\\d+)\\s+(?P<kind>warning|error)\\(s\\)\").expect(\"valid regex\")\n});",
+  "charCount": {
+    "leading": 43,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"(?i)\\b(?P<count>\\d+)\\s+error\\(s\\)\").expect(\"valid regex\"))",
+  "range": {
+    "byteOffset": {
+      "start": 1724,
+      "end": 1812
+    },
+    "start": {
+      "line": 64,
+      "column": 4
+    },
+    "end": {
+      "line": 64,
+      "column": 92
+    }
+  },
+  "file": "src/cmds/dotnet/binlog.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"(?i)\\b(?P<count>\\d+)\\s+error\\(s\\)\").expect(\"valid regex\"));",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"(?i)\\b(?P<count>\\d+)\\s+warning\\(s\\)\").expect(\"valid regex\"))",
+  "range": {
+    "byteOffset": {
+      "start": 1861,
+      "end": 1951
+    },
+    "start": {
+      "line": 66,
+      "column": 4
+    },
+    "end": {
+      "line": 66,
+      "column": 94
+    }
+  },
+  "file": "src/cmds/dotnet/binlog.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"(?i)\\b(?P<count>\\d+)\\s+warning\\(s\\)\").expect(\"valid regex\"));",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"(?mi)^.+\\(\\d+,\\d+\\):\\s*error(?:\\s+[A-Za-z]{2,}\\d{3,})?(?:\\s*:.*)?$\")\n        .expect(\"valid regex\")\n})",
+  "range": {
+    "byteOffset": {
+      "start": 2002,
+      "end": 2140
+    },
+    "start": {
+      "line": 67,
+      "column": 49
+    },
+    "end": {
+      "line": 70,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/dotnet/binlog.rs",
+  "lines": "static FALLBACK_ERROR_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"(?mi)^.+\\(\\d+,\\d+\\):\\s*error(?:\\s+[A-Za-z]{2,}\\d{3,})?(?:\\s*:.*)?$\")\n        .expect(\"valid regex\")\n});",
+  "charCount": {
+    "leading": 49,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"(?mi)^.+\\(\\d+,\\d+\\):\\s*warning(?:\\s+[A-Za-z]{2,}\\d{3,})?(?:\\s*:.*)?$\")\n        .expect(\"valid regex\")\n})",
+  "range": {
+    "byteOffset": {
+      "start": 2193,
+      "end": 2333
+    },
+    "start": {
+      "line": 71,
+      "column": 51
+    },
+    "end": {
+      "line": 74,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/dotnet/binlog.rs",
+  "lines": "static FALLBACK_WARNING_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"(?mi)^.+\\(\\d+,\\d+\\):\\s*warning(?:\\s+[A-Za-z]{2,}\\d{3,})?(?:\\s*:.*)?$\")\n        .expect(\"valid regex\")\n});",
+  "charCount": {
+    "leading": 51,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"(?m)^\\s*Time Elapsed\\s+(?P<duration>[^\\r\\n]+)$\").expect(\"valid regex\")\n})",
+  "range": {
+    "byteOffset": {
+      "start": 2373,
+      "end": 2482
+    },
+    "start": {
+      "line": 75,
+      "column": 38
+    },
+    "end": {
+      "line": 77,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/dotnet/binlog.rs",
+  "lines": "static DURATION_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"(?m)^\\s*Time Elapsed\\s+(?P<duration>[^\\r\\n]+)$\").expect(\"valid regex\")\n});",
+  "charCount": {
+    "leading": 38,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(\n        r\"(?m)(?:Passed!|Failed!)\\s*-\\s*Failed:\\s*(?P<failed>\\d+),\\s*Passed:\\s*(?P<passed>\\d+),\\s*Skipped:\\s*(?P<skipped>\\d+),\\s*Total:\\s*(?P<total>\\d+),\\s*Duration:\\s*(?P<duration>[^\\r\\n-]+)\"\n    )\n    .expect(\"valid regex\")\n})",
+  "range": {
+    "byteOffset": {
+      "start": 2525,
+      "end": 2788
+    },
+    "start": {
+      "line": 78,
+      "column": 41
+    },
+    "end": {
+      "line": 83,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/dotnet/binlog.rs",
+  "lines": "static TEST_RESULT_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(\n        r\"(?m)(?:Passed!|Failed!)\\s*-\\s*Failed:\\s*(?P<failed>\\d+),\\s*Passed:\\s*(?P<passed>\\d+),\\s*Skipped:\\s*(?P<skipped>\\d+),\\s*Total:\\s*(?P<total>\\d+),\\s*Duration:\\s*(?P<duration>[^\\r\\n-]+)\"\n    )\n    .expect(\"valid regex\")\n});",
+  "charCount": {
+    "leading": 41,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(\n        r\"(?mi)^\\s*Test summary:\\s*total:\\s*(?P<total>\\d+),\\s*failed:\\s*(?P<failed>\\d+),\\s*(?:succeeded|passed):\\s*(?P<passed>\\d+),\\s*skipped:\\s*(?P<skipped>\\d+),\\s*duration:\\s*(?P<duration>[^\\r\\n]+)$\"\n    )\n    .expect(\"valid regex\")\n})",
+  "range": {
+    "byteOffset": {
+      "start": 2832,
+      "end": 3104
+    },
+    "start": {
+      "line": 84,
+      "column": 42
+    },
+    "end": {
+      "line": 89,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/dotnet/binlog.rs",
+  "lines": "static TEST_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(\n        r\"(?mi)^\\s*Test summary:\\s*total:\\s*(?P<total>\\d+),\\s*failed:\\s*(?P<failed>\\d+),\\s*(?:succeeded|passed):\\s*(?P<passed>\\d+),\\s*skipped:\\s*(?P<skipped>\\d+),\\s*duration:\\s*(?P<duration>[^\\r\\n]+)$\"\n    )\n    .expect(\"valid regex\")\n});",
+  "charCount": {
+    "leading": 42,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"(?m)^\\s*Failed\\s+(?P<name>[^\\r\\n\\[]+)\\s+\\[[^\\]\\r\\n]+\\]\\s*$\").expect(\"valid regex\")\n})",
+  "range": {
+    "byteOffset": {
+      "start": 3152,
+      "end": 3273
+    },
+    "start": {
+      "line": 90,
+      "column": 46
+    },
+    "end": {
+      "line": 92,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/dotnet/binlog.rs",
+  "lines": "static FAILED_TEST_HEAD_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"(?m)^\\s*Failed\\s+(?P<name>[^\\r\\n\\[]+)\\s+\\[[^\\]\\r\\n]+\\]\\s*$\").expect(\"valid regex\")\n});",
+  "charCount": {
+    "leading": 46,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"(?m)^\\s*Restored\\s+.+\\.csproj\\s*\\(\").expect(\"valid regex\"))",
+  "range": {
+    "byteOffset": {
+      "start": 3324,
+      "end": 3413
+    },
+    "start": {
+      "line": 94,
+      "column": 4
+    },
+    "end": {
+      "line": 94,
+      "column": 93
+    }
+  },
+  "file": "src/cmds/dotnet/binlog.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"(?m)^\\s*Restored\\s+.+\\.csproj\\s*\\(\").expect(\"valid regex\"));",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(\n        r\"(?mi)^\\s*(?:(?P<file>.+?)\\s+:\\s+)?(?P<kind>warning|error)\\s+(?P<code>[A-Za-z]{2,}\\d{3,})\\s*:\\s*(?P<msg>.+)$\"\n    )\n    .expect(\"valid regex\")\n})",
+  "range": {
+    "byteOffset": {
+      "start": 3463,
+      "end": 3652
+    },
+    "start": {
+      "line": 95,
+      "column": 48
+    },
+    "end": {
+      "line": 100,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/dotnet/binlog.rs",
+  "lines": "static RESTORE_DIAGNOSTIC_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(\n        r\"(?mi)^\\s*(?:(?P<file>.+?)\\s+:\\s+)?(?P<kind>warning|error)\\s+(?P<code>[A-Za-z]{2,}\\d{3,})\\s*:\\s*(?P<msg>.+)$\"\n    )\n    .expect(\"valid regex\")\n});",
+  "charCount": {
+    "leading": 48,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"(?m)^\\s*([A-Za-z]:)?[^\\r\\n]*\\.csproj(?:\\s|$)\").expect(\"valid regex\")\n})",
+  "range": {
+    "byteOffset": {
+      "start": 3696,
+      "end": 3803
+    },
+    "start": {
+      "line": 101,
+      "column": 42
+    },
+    "end": {
+      "line": 103,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/dotnet/binlog.rs",
+  "lines": "static PROJECT_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"(?m)^\\s*([A-Za-z]:)?[^\\r\\n]*\\.csproj(?:\\s|$)\").expect(\"valid regex\")\n});",
+  "charCount": {
+    "leading": 42,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"[\\x20-\\x7E]{5,}\").expect(\"valid regex\"))",
+  "range": {
+    "byteOffset": {
+      "start": 3852,
+      "end": 3922
+    },
+    "start": {
+      "line": 105,
+      "column": 4
+    },
+    "end": {
+      "line": 105,
+      "column": 74
+    }
+  },
+  "file": "src/cmds/dotnet/binlog.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"[\\x20-\\x7E]{5,}\").expect(\"valid regex\"));",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^[A-Za-z]{2,}\\d{3,}$\").expect(\"valid regex\"))",
+  "range": {
+    "byteOffset": {
+      "start": 3973,
+      "end": 4048
+    },
+    "start": {
+      "line": 107,
+      "column": 4
+    },
+    "end": {
+      "line": 107,
+      "column": 79
+    }
+  },
+  "file": "src/cmds/dotnet/binlog.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^[A-Za-z]{2,}\\d{3,}$\").expect(\"valid regex\"));",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"(?i)([A-Za-z]:)?[/\\\\][^\\s]+\\.(cs|vb|fs)\").expect(\"valid regex\"))",
+  "range": {
+    "byteOffset": {
+      "start": 4095,
+      "end": 4189
+    },
+    "start": {
+      "line": 109,
+      "column": 4
+    },
+    "end": {
+      "line": 109,
+      "column": 98
+    }
+  },
+  "file": "src/cmds/dotnet/binlog.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"(?i)([A-Za-z]:)?[/\\\\][^\\s]+\\.(cs|vb|fs)\").expect(\"valid regex\"));",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    let keys = SENSITIVE_ENV_VARS\n        .iter()\n        .map(|key| regex::escape(key))\n        .collect::<Vec<_>>()\n        .join(\"|\");\n    Regex::new(&format!(\n        r\"(?P<prefix>\\b(?:{})\\s*(?:=|:)\\s*)(?P<value>[^\\s;]+)\",\n        keys\n    ))\n    .expect(\"valid regex\")\n})",
+  "range": {
+    "byteOffset": {
+      "start": 4234,
+      "end": 4529
+    },
+    "start": {
+      "line": 110,
+      "column": 43
+    },
+    "end": {
+      "line": 121,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/dotnet/binlog.rs",
+  "lines": "static SENSITIVE_ENV_RE: LazyLock<Regex> = LazyLock::new(|| {\n    let keys = SENSITIVE_ENV_VARS\n        .iter()\n        .map(|key| regex::escape(key))\n        .collect::<Vec<_>>()\n        .join(\"|\");\n    Regex::new(&format!(\n        r\"(?P<prefix>\\b(?:{})\\s*(?:=|:)\\s*)(?P<value>[^\\s;]+)\",\n        keys\n    ))\n    .expect(\"valid regex\")\n});",
+  "charCount": {
+    "leading": 43,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^> Task :\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 442,
+      "end": 493
+    },
+    "start": {
+      "line": 12,
+      "column": 36
+    },
+    "end": {
+      "line": 12,
+      "column": 87
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "static TASK_LINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"^> Task :\").unwrap());",
+  "charCount": {
+    "leading": 36,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^\\* Try:|^> Run with --|^> Get more help at\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 537,
+      "end": 622
+    },
+    "start": {
+      "line": 14,
+      "column": 4
+    },
+    "end": {
+      "line": 14,
+      "column": 89
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^\\* Try:|^> Run with --|^> Get more help at\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^BUILD (SUCCESSFUL|FAILED)\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 667,
+      "end": 735
+    },
+    "start": {
+      "line": 16,
+      "column": 4
+    },
+    "end": {
+      "line": 16,
+      "column": 72
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^BUILD (SUCCESSFUL|FAILED)\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^\\d+ actionable tasks?\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 778,
+      "end": 842
+    },
+    "start": {
+      "line": 18,
+      "column": 4
+    },
+    "end": {
+      "line": 18,
+      "column": 68
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^\\d+ actionable tasks?\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n        Regex::new(\n            r\"^(Starting a Gradle Daemon|Daemon will be stopped|Reusing configuration cache|Calculating task graph|> Configure project|Deprecated Gradle features|You can use|For more on this|Configuration cache entry)\"\n        )\n        .unwrap()\n    })",
+  "range": {
+    "byteOffset": {
+      "start": 5911,
+      "end": 6203
+    },
+    "start": {
+      "line": 179,
+      "column": 42
+    },
+    "end": {
+      "line": 184,
+      "column": 6
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "    static DAEMON_LINE: LazyLock<Regex> = LazyLock::new(|| {\n        Regex::new(\n            r\"^(Starting a Gradle Daemon|Daemon will be stopped|Reusing configuration cache|Calculating task graph|> Configure project|Deprecated Gradle features|You can use|For more on this|Configuration cache entry)\"\n        )\n        .unwrap()\n    });",
+  "charCount": {
+    "leading": 42,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n        Regex::new(r\"^\\s*\\d+%|^Downloading|^Configuring|^Resolving|^\\[Incubating\\]|^Wrote HTML report|^class \\S+ could not|^\\[android-\")\n                .unwrap()\n    })",
+  "range": {
+    "byteOffset": {
+      "start": 6244,
+      "end": 6432
+    },
+    "start": {
+      "line": 185,
+      "column": 39
+    },
+    "end": {
+      "line": 188,
+      "column": 6
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "    static PROGRESS: LazyLock<Regex> = LazyLock::new(|| {\n        Regex::new(r\"^\\s*\\d+%|^Downloading|^Configuring|^Resolving|^\\[Incubating\\]|^Wrote HTML report|^class \\S+ could not|^\\[android-\")\n                .unwrap()\n    });",
+  "charCount": {
+    "leading": 39,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n        Regex::new(\n            r\"(?i)(^FAILURE:|^\\* What went wrong:|^\\* Where:|> Could not|e: |error:|^Execution failed|Lint found \\d+ error)\"\n        )\n        .unwrap()\n    })",
+  "range": {
+    "byteOffset": {
+      "start": 6475,
+      "end": 6673
+    },
+    "start": {
+      "line": 189,
+      "column": 41
+    },
+    "end": {
+      "line": 194,
+      "column": 6
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "    static ERROR_LINE: LazyLock<Regex> = LazyLock::new(|| {\n        Regex::new(\n            r\"(?i)(^FAILURE:|^\\* What went wrong:|^\\* Where:|> Could not|e: |error:|^Execution failed|Lint found \\d+ error)\"\n        )\n        .unwrap()\n    });",
+  "charCount": {
+    "leading": 41,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^(w: |warning:|Warning:|WARNING:)\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 6817,
+      "end": 6892
+    },
+    "start": {
+      "line": 197,
+      "column": 8
+    },
+    "end": {
+      "line": 197,
+      "column": 83
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"^(w: |warning:|Warning:|WARNING:)\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"gradle\\.com/s/|Publishing build scan\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 6943,
+      "end": 7021
+    },
+    "start": {
+      "line": 199,
+      "column": 8
+    },
+    "end": {
+      "line": 199,
+      "column": 86
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"gradle\\.com/s/|Publishing build scan\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"FAILED$| FAILED \").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 8236,
+      "end": 8294
+    },
+    "start": {
+      "line": 233,
+      "column": 8
+    },
+    "end": {
+      "line": 233,
+      "column": 66
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"FAILED$| FAILED \").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\" PASSED$| SKIPPED$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 8349,
+      "end": 8409
+    },
+    "start": {
+      "line": 235,
+      "column": 8
+    },
+    "end": {
+      "line": 235,
+      "column": 68
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\" PASSED$| SKIPPED$\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n        Regex::new(\n            r\"\\d+ tests? completed|\\d+ tests? failed|There were failing tests|See the report at\",\n        )\n        .unwrap()\n    })",
+  "range": {
+    "byteOffset": {
+      "start": 8454,
+      "end": 8625
+    },
+    "start": {
+      "line": 236,
+      "column": 43
+    },
+    "end": {
+      "line": 241,
+      "column": 6
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "    static SUMMARY_LINE: LazyLock<Regex> = LazyLock::new(|| {\n        Regex::new(\n            r\"\\d+ tests? completed|\\d+ tests? failed|There were failing tests|See the report at\",\n        )\n        .unwrap()\n    });",
+  "charCount": {
+    "leading": 43,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^INSTRUMENTATION_STATUS[_CODE]*:\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 10881,
+      "end": 10955
+    },
+    "start": {
+      "line": 311,
+      "column": 8
+    },
+    "end": {
+      "line": 311,
+      "column": 82
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"^INSTRUMENTATION_STATUS[_CODE]*:\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^INSTRUMENTATION_RESULT:\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 11018,
+      "end": 11084
+    },
+    "start": {
+      "line": 313,
+      "column": 8
+    },
+    "end": {
+      "line": 313,
+      "column": 74
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"^INSTRUMENTATION_RESULT:\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^INSTRUMENTATION_CODE:\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 11145,
+      "end": 11209
+    },
+    "start": {
+      "line": 315,
+      "column": 8
+    },
+    "end": {
+      "line": 315,
+      "column": 72
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"^INSTRUMENTATION_CODE:\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^Starting \\d+ tests? on \").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 11264,
+      "end": 11330
+    },
+    "start": {
+      "line": 317,
+      "column": 8
+    },
+    "end": {
+      "line": 317,
+      "column": 74
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"^Starting \\d+ tests? on \").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^Installing APK\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 11385,
+      "end": 11442
+    },
+    "start": {
+      "line": 319,
+      "column": 8
+    },
+    "end": {
+      "line": 319,
+      "column": 65
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"^Installing APK\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"[^:]+:\\d+:.*[Ee]rror:.*\\[\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 12945,
+      "end": 13012
+    },
+    "start": {
+      "line": 362,
+      "column": 8
+    },
+    "end": {
+      "line": 362,
+      "column": 75
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"[^:]+:\\d+:.*[Ee]rror:.*\\[\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"[^:]+:\\d+:.*[Ww]arning:.*\\[\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 13155,
+      "end": 13224
+    },
+    "start": {
+      "line": 365,
+      "column": 8
+    },
+    "end": {
+      "line": 365,
+      "column": 77
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"[^:]+:\\d+:.*[Ww]arning:.*\\[\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"[^:]+:\\d+:\\d+:.*[Ll]int\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 13332,
+      "end": 13397
+    },
+    "start": {
+      "line": 368,
+      "column": 8
+    },
+    "end": {
+      "line": 368,
+      "column": 73
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"[^:]+:\\d+:\\d+:.*[Ll]int\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"[^:]+:\\d+:\\d+:.*error\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 13500,
+      "end": 13563
+    },
+    "start": {
+      "line": 371,
+      "column": 8
+    },
+    "end": {
+      "line": 371,
+      "column": 71
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"[^:]+:\\d+:\\d+:.*error\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"\\d+ (issues?|errors?|warnings?)\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 13637,
+      "end": 13710
+    },
+    "start": {
+      "line": 374,
+      "column": 8
+    },
+    "end": {
+      "line": 374,
+      "column": 81
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "        LazyLock::new(|| Regex::new(r\"\\d+ (issues?|errors?|warnings?)\").unwrap());",
+  "charCount": {
+    "leading": 8,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n        Regex::new(r\"Wrote (HTML|XML|text) report|file://|/build/reports/lint\").unwrap()\n    })",
+  "range": {
+    "byteOffset": {
+      "start": 13796,
+      "end": 13910
+    },
+    "start": {
+      "line": 376,
+      "column": 42
+    },
+    "end": {
+      "line": 378,
+      "column": 6
+    }
+  },
+  "file": "src/cmds/jvm/gradlew_cmd.rs",
+  "lines": "    static REPORT_LINE: LazyLock<Regex> = LazyLock::new(|| {\n        Regex::new(r\"Wrote (HTML|XML|text) report|file://|/build/reports/lint\").unwrap()\n    });",
+  "charCount": {
+    "leading": 42,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r#\"^\\s*File \".*\", line \\d+.*$\"#).unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 904,
+      "end": 974
+    },
+    "start": {
+      "line": 19,
+      "column": 4
+    },
+    "end": {
+      "line": 19,
+      "column": 74
+    }
+  },
+  "file": "src/cmds/python/uv_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r#\"^\\s*File \".*\", line \\d+.*$\"#).unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^\\s*[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception):\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 1026,
+      "end": 1115
+    },
+    "start": {
+      "line": 21,
+      "column": 4
+    },
+    "end": {
+      "line": 21,
+      "column": 93
+    }
+  },
+  "file": "src/cmds/python/uv_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^\\s*[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception):\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^\\s*at .+:\\d+:\\d+.*$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 1159,
+      "end": 1221
+    },
+    "start": {
+      "line": 23,
+      "column": 4
+    },
+    "end": {
+      "line": 23,
+      "column": 66
+    }
+  },
+  "file": "src/cmds/python/uv_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^\\s*at .+:\\d+:\\d+.*$\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    vec![\n        Regex::new(r\"(?i)\\berror\\b\").unwrap(),\n        Regex::new(r\"(?i)\\bfailed\\b\").unwrap(),\n        Regex::new(r\"(?i)\\bfailure\\b\").unwrap(),\n        Regex::new(r\"(?i)\\bexception\\b\").unwrap(),\n        Regex::new(r\"(?i)\\bpanic\\b\").unwrap(),\n        Regex::new(r\"(?i)\\bwarn(?:ing)?\\b\").unwrap(),\n        Regex::new(r\"(?i)\\bassert(?:ion)?\\b\").unwrap(),\n        Regex::new(r\"^\\s*FAILED\\b\").unwrap(),\n        Regex::new(r\"^\\s*ERROR\\b\").unwrap(),\n        Regex::new(r\"^\\s*E\\s+\").unwrap(),\n        Regex::new(r\"^\\s*Caused by:\").unwrap(),\n        Regex::new(r\"^\\s*note:\").unwrap(),\n        Regex::new(r\"^\\s*help:\").unwrap(),\n    ]\n})",
+  "range": {
+    "byteOffset": {
+      "start": 1275,
+      "end": 1931
+    },
+    "start": {
+      "line": 24,
+      "column": 52
+    },
+    "end": {
+      "line": 40,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/python/uv_cmd.rs",
+  "lines": "static ERROR_START_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {\n    vec![\n        Regex::new(r\"(?i)\\berror\\b\").unwrap(),\n        Regex::new(r\"(?i)\\bfailed\\b\").unwrap(),\n        Regex::new(r\"(?i)\\bfailure\\b\").unwrap(),\n        Regex::new(r\"(?i)\\bexception\\b\").unwrap(),\n        Regex::new(r\"(?i)\\bpanic\\b\").unwrap(),\n        Regex::new(r\"(?i)\\bwarn(?:ing)?\\b\").unwrap(),\n        Regex::new(r\"(?i)\\bassert(?:ion)?\\b\").unwrap(),\n        Regex::new(r\"^\\s*FAILED\\b\").unwrap(),\n        Regex::new(r\"^\\s*ERROR\\b\").unwrap(),\n        Regex::new(r\"^\\s*E\\s+\").unwrap(),\n        Regex::new(r\"^\\s*Caused by:\").unwrap(),\n        Regex::new(r\"^\\s*note:\").unwrap(),\n        Regex::new(r\"^\\s*help:\").unwrap(),\n    ]\n});",
+  "charCount": {
+    "leading": 52,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n        Regex::new(r\"^(.+?):(\\d+)(?::\\d+)?: (error|warning|note): (.+?)(?:\\s+\\[(.+)\\])?$\").unwrap()\n    })",
+  "range": {
+    "byteOffset": {
+      "start": 1507,
+      "end": 1632
+    },
+    "start": {
+      "line": 56,
+      "column": 40
+    },
+    "end": {
+      "line": 58,
+      "column": 6
+    }
+  },
+  "file": "src/cmds/python/mypy_cmd.rs",
+  "lines": "    static MYPY_DIAG: LazyLock<Regex> = LazyLock::new(|| {\n        Regex::new(r\"^(.+?):(\\d+)(?::\\d+)?: (error|warning|note): (.+?)(?:\\s+\\[(.+)\\])?$\").unwrap()\n    });",
+  "charCount": {
+    "leading": 40,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"-\\[ RECORD \\d+ \\]-\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 507,
+      "end": 567
+    },
+    "start": {
+      "line": 16,
+      "column": 4
+    },
+    "end": {
+      "line": 16,
+      "column": 64
+    }
+  },
+  "file": "src/cmds/cloud/psql_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"-\\[ RECORD \\d+ \\]-\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^[-+]+$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 605,
+      "end": 654
+    },
+    "start": {
+      "line": 17,
+      "column": 36
+    },
+    "end": {
+      "line": 17,
+      "column": 85
+    }
+  },
+  "file": "src/cmds/cloud/psql_cmd.rs",
+  "lines": "static SEPARATOR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"^[-+]+$\").unwrap());",
+  "charCount": {
+    "leading": 36,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^\\(\\d+ rows?\\)$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 692,
+      "end": 749
+    },
+    "start": {
+      "line": 18,
+      "column": 36
+    },
+    "end": {
+      "line": 18,
+      "column": 93
+    }
+  },
+  "file": "src/cmds/cloud/psql_cmd.rs",
+  "lines": "static ROW_COUNT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"^\\(\\d+ rows?\\)$\").unwrap());",
+  "charCount": {
+    "leading": 36,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^-\\[ RECORD (\\d+) \\]-\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 795,
+      "end": 858
+    },
+    "start": {
+      "line": 20,
+      "column": 4
+    },
+    "end": {
+      "line": 20,
+      "column": 67
+    }
+  },
+  "file": "src/cmds/cloud/psql_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^-\\[ RECORD (\\d+) \\]-\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(\n        r\"Tests: succeeded (\\d+), failed (\\d+), canceled (\\d+), ignored (\\d+), pending (\\d+)\",\n    )\n    .unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 336,
+      "end": 488
+    },
+    "start": {
+      "line": 9,
+      "column": 42
+    },
+    "end": {
+      "line": 14,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/scala/sbt_cmd.rs",
+  "lines": "static TEST_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(\n        r\"Tests: succeeded (\\d+), failed (\\d+), canceled (\\d+), ignored (\\d+), pending (\\d+)\",\n    )\n    .unwrap()\n});",
+  "charCount": {
+    "leading": 42,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"^\\[info\\] (?:Passed|Failed): Total \\d+, Failed (\\d+), Errors (\\d+), Passed (\\d+)\")\n        .unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 727,
+      "end": 866
+    },
+    "start": {
+      "line": 19,
+      "column": 43
+    },
+    "end": {
+      "line": 22,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/scala/sbt_cmd.rs",
+  "lines": "static MUNIT_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"^\\[info\\] (?:Passed|Failed): Total \\d+, Failed (\\d+), Errors (\\d+), Passed (\\d+)\")\n        .unwrap()\n});",
+  "charCount": {
+    "leading": 43,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"Suites: completed (\\d+), aborted (\\d+)\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 981,
+      "end": 1061
+    },
+    "start": {
+      "line": 27,
+      "column": 4
+    },
+    "end": {
+      "line": 27,
+      "column": 84
+    }
+  },
+  "file": "src/cmds/scala/sbt_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"Suites: completed (\\d+), aborted (\\d+)\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"Run completed in (\\d+) seconds?\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 1153,
+      "end": 1226
+    },
+    "start": {
+      "line": 31,
+      "column": 4
+    },
+    "end": {
+      "line": 31,
+      "column": 77
+    }
+  },
+  "file": "src/cmds/scala/sbt_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"Run completed in (\\d+) seconds?\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"\\[info\\] Compiling (\\d+) Scala source\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 1323,
+      "end": 1402
+    },
+    "start": {
+      "line": 35,
+      "column": 4
+    },
+    "end": {
+      "line": 35,
+      "column": 83
+    }
+  },
+  "file": "src/cmds/scala/sbt_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"\\[info\\] Compiling (\\d+) Scala source\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"\\[success\\] Total time: (\\d+) s\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 1488,
+      "end": 1561
+    },
+    "start": {
+      "line": 39,
+      "column": 4
+    },
+    "end": {
+      "line": 39,
+      "column": 77
+    }
+  },
+  "file": "src/cmds/scala/sbt_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"\\[success\\] Total time: (\\d+) s\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^\\[error\\]\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 1625,
+      "end": 1677
+    },
+    "start": {
+      "line": 42,
+      "column": 35
+    },
+    "end": {
+      "line": 42,
+      "column": 87
+    }
+  },
+  "file": "src/cmds/scala/sbt_cmd.rs",
+  "lines": "static ERROR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"^\\[error\\]\").unwrap());",
+  "charCount": {
+    "leading": 35,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(\n        r\"^\\[info\\] (welcome to sbt|loading |set current project|Updating |Resolved |Fetching |downloading |Done )\"\n    ).unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 1784,
+      "end": 1952
+    },
+    "start": {
+      "line": 45,
+      "column": 35
+    },
+    "end": {
+      "line": 49,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/scala/sbt_cmd.rs",
+  "lines": "static NOISE_RE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(\n        r\"^\\[info\\] (welcome to sbt|loading |set current project|Updating |Resolved |Fetching |downloading |Done )\"\n    ).unwrap()\n});",
+  "charCount": {
+    "leading": 35,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^\\[INFO\\] Running \").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 1613,
+      "end": 1673
+    },
+    "start": {
+      "line": 33,
+      "column": 34
+    },
+    "end": {
+      "line": 33,
+      "column": 94
+    }
+  },
+  "file": "src/cmds/jvm/mvn_cmd.rs",
+  "lines": "static RUNNING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"^\\[INFO\\] Running \").unwrap());",
+  "charCount": {
+    "leading": 34,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^\\[INFO\\] Running \\S+\\s*$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 2301,
+      "end": 2368
+    },
+    "start": {
+      "line": 44,
+      "column": 4
+    },
+    "end": {
+      "line": 44,
+      "column": 71
+    }
+  },
+  "file": "src/cmds/jvm/mvn_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^\\[INFO\\] Running \\S+\\s*$\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(\n        r\"^\\[(?:INFO|ERROR|WARNING)\\] Tests run: \\d+, Failures: (\\d+), Errors: (\\d+), Skipped: \\d+, Time elapsed: [^ ]+ s(?:\\s+<<<\\s*(?:FAILURE|ERROR)!)?\\s+--?\\s+in (.+)$\"\n    ).unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 2931,
+      "end": 3155
+    },
+    "start": {
+      "line": 54,
+      "column": 32
+    },
+    "end": {
+      "line": 58,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/jvm/mvn_cmd.rs",
+  "lines": "static CLOSE: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(\n        r\"^\\[(?:INFO|ERROR|WARNING)\\] Tests run: \\d+, Failures: (\\d+), Errors: (\\d+), Skipped: \\d+, Time elapsed: [^ ]+ s(?:\\s+<<<\\s*(?:FAILURE|ERROR)!)?\\s+--?\\s+in (.+)$\"\n    ).unwrap()\n});",
+  "charCount": {
+    "leading": 32,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^\\[(?:INFO|ERROR)\\] BUILD (?:SUCCESS|FAILURE)$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 3223,
+      "end": 3311
+    },
+    "start": {
+      "line": 62,
+      "column": 4
+    },
+    "end": {
+      "line": 62,
+      "column": 92
+    }
+  },
+  "file": "src/cmds/jvm/mvn_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^\\[(?:INFO|ERROR)\\] BUILD (?:SUCCESS|FAILURE)$\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^\\[INFO\\] Results:\\s*$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 3402,
+      "end": 3466
+    },
+    "start": {
+      "line": 65,
+      "column": 34
+    },
+    "end": {
+      "line": 65,
+      "column": 98
+    }
+  },
+  "file": "src/cmds/jvm/mvn_cmd.rs",
+  "lines": "static RESULTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r\"^\\[INFO\\] Results:\\s*$\").unwrap());",
+  "charCount": {
+    "leading": 34,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"^\\[(?:INFO|ERROR)\\] Tests run: \\d+, Failures: \\d+, Errors: \\d+, Skipped: \\d+\\s*$\")\n        .unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 3559,
+      "end": 3698
+    },
+    "start": {
+      "line": 68,
+      "column": 30
+    },
+    "end": {
+      "line": 71,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/jvm/mvn_cmd.rs",
+  "lines": "static AGG: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"^\\[(?:INFO|ERROR)\\] Tests run: \\d+, Failures: \\d+, Errors: \\d+, Skipped: \\d+\\s*$\")\n        .unwrap()\n});",
+  "charCount": {
+    "leading": 30,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^\\[INFO\\] --- .* @ .* ---$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 3813,
+      "end": 3881
+    },
+    "start": {
+      "line": 75,
+      "column": 4
+    },
+    "end": {
+      "line": 75,
+      "column": 72
+    }
+  },
+  "file": "src/cmds/jvm/mvn_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^\\[INFO\\] --- .* @ .* ---$\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n    Regex::new(r\"^\\[INFO\\] --- (?:maven-)?(surefire|failsafe)(?:-plugin)?:\\S+ \\([^)]*\\) @ .* ---$\")\n        .unwrap()\n})",
+  "range": {
+    "byteOffset": {
+      "start": 5833,
+      "end": 5972
+    },
+    "start": {
+      "line": 108,
+      "column": 45
+    },
+    "end": {
+      "line": 111,
+      "column": 2
+    }
+  },
+  "file": "src/cmds/jvm/mvn_cmd.rs",
+  "lines": "static TEST_PLUGIN_BANNER: LazyLock<Regex> = LazyLock::new(|| {\n    Regex::new(r\"^\\[INFO\\] --- (?:maven-)?(surefire|failsafe)(?:-plugin)?:\\S+ \\([^)]*\\) @ .* ---$\")\n        .unwrap()\n});",
+  "charCount": {
+    "leading": 45,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^\\[INFO\\] Building .*\\[\\d+/\\d+\\]\\s*$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 6735,
+      "end": 6813
+    },
+    "start": {
+      "line": 124,
+      "column": 4
+    },
+    "end": {
+      "line": 124,
+      "column": 82
+    }
+  },
+  "file": "src/cmds/jvm/mvn_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^\\[INFO\\] Building .*\\[\\d+/\\d+\\]\\s*$\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^\\[INFO\\] -+< .+ >-+$\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 6909,
+      "end": 6972
+    },
+    "start": {
+      "line": 128,
+      "column": 4
+    },
+    "end": {
+      "line": 128,
+      "column": 67
+    }
+  },
+  "file": "src/cmds/jvm/mvn_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^\\[INFO\\] -+< .+ >-+$\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^\\[INFO\\] Reactor Summary for \").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 7130,
+      "end": 7202
+    },
+    "start": {
+      "line": 133,
+      "column": 4
+    },
+    "end": {
+      "line": 133,
+      "column": 76
+    }
+  },
+  "file": "src/cmds/jvm/mvn_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^\\[INFO\\] Reactor Summary for \").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"/[^:]+\\.java:\\[\\d+,\\d+\\]\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 7325,
+      "end": 7391
+    },
+    "start": {
+      "line": 137,
+      "column": 4
+    },
+    "end": {
+      "line": 137,
+      "column": 70
+    }
+  },
+  "file": "src/cmds/jvm/mvn_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"/[^:]+\\.java:\\[\\d+,\\d+\\]\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| {\n            regex::Regex::new(\n                r\"test result: (\\w+)\\.\\s+(\\d+) passed;\\s+(\\d+) failed;\\s+(\\d+) ignored;\\s+(\\d+) measured;\\s+(\\d+) filtered out(?:;\\s+finished in ([\\d.]+)s)?\"\n            ).unwrap()\n        })",
+  "range": {
+    "byteOffset": {
+      "start": 33582,
+      "end": 33823
+    },
+    "start": {
+      "line": 1049,
+      "column": 44
+    },
+    "end": {
+      "line": 1053,
+      "column": 10
+    }
+  },
+  "file": "src/cmds/rust/cargo_cmd.rs",
+  "lines": "        static RE: LazyLock<regex::Regex> = LazyLock::new(|| {\n            regex::Regex::new(\n                r\"test result: (\\w+)\\.\\s+(\\d+) passed;\\s+(\\d+) failed;\\s+(\\d+) ignored;\\s+(\\d+) measured;\\s+(\\d+) filtered out(?:;\\s+finished in ([\\d.]+)s)?\"\n            ).unwrap()\n        });",
+  "charCount": {
+    "leading": 44,
+    "trailing": 1
+  },
+  "language": "Rust"
+},
+{
+  "text": "LazyLock::new(|| Regex::new(r\"^(upload|download|delete|copy|move):\").unwrap())",
+  "range": {
+    "byteOffset": {
+      "start": 45536,
+      "end": 45614
+    },
+    "start": {
+      "line": 1326,
+      "column": 4
+    },
+    "end": {
+      "line": 1326,
+      "column": 82
+    }
+  },
+  "file": "src/cmds/cloud/aws_cmd.rs",
+  "lines": "    LazyLock::new(|| Regex::new(r\"^(upload|download|delete|copy|move):\").unwrap());",
+  "charCount": {
+    "leading": 4,
+    "trailing": 1
+  },
+  "language": "Rust"
+}
+]
