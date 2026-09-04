@@ -213,6 +213,141 @@ fn git_log_dash_p_pathspec_after_double_dash_is_not_patch_flag() {
 }
 
 #[test]
+fn git_show_dash_dash_stat_pathspec_after_double_dash_is_not_stat_flag() {
+    // Regression: `rtk git show -- --stat` must not be misread as a request for the real
+    // `--stat` summary flag. Before restore_double_dash + arg_tokenizer, run_show's
+    // wants_stat_only check was a raw `arg == "--stat"` scan with no `--`-boundary awareness, so
+    // a file literally named "--stat" after the boundary was wrongly treated as the flag and
+    // sent down the raw-passthrough path instead of RTK's own compacted-diff path.
+    let dir = init_git_repo();
+    std::fs::write(dir.path().join("--stat"), "not a summary flag\n").expect("write --stat file");
+    git_in_dir(dir.path(), &["add", "--", "--stat"]);
+    git_in_dir(
+        dir.path(),
+        &["commit", "-q", "-m", "add dash-dash-stat file"],
+    );
+
+    let (stdout, stderr, code) = rtk_output_in_dir(dir.path(), &["git", "show", "--", "--stat"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert!(
+        !stdout.contains("diff --git"),
+        "-- --stat should stay on RTK's compacted-diff path, not raw passthrough: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("--stat") && stdout.contains("+1"),
+        "expected RTK's compacted diff summary for the --stat file: {stdout:?}"
+    );
+}
+
+#[test]
+fn git_diff_dash_dash_stat_pathspec_after_double_dash_is_not_stat_flag() {
+    // Regression: `rtk git diff -- --stat` must not be misread as a request for the real
+    // `--stat` diffstat-only flag. Before this fix, run_diff's wants_stat check was a raw
+    // `arg == "--stat"` scan with no `--`-boundary awareness, so a file literally named "--stat"
+    // after the boundary was wrongly treated as the flag and sent down the raw-passthrough path
+    // (plain diffstat output) instead of RTK's own stat+compacted-diff path.
+    let dir = init_git_repo();
+    std::fs::write(dir.path().join("--stat"), "line one\n").expect("write --stat file");
+    git_in_dir(dir.path(), &["add", "--", "--stat"]);
+    git_in_dir(
+        dir.path(),
+        &["commit", "-q", "-m", "add dash-dash-stat file"],
+    );
+    std::fs::write(dir.path().join("--stat"), "line one\nline two\n").expect("modify --stat file");
+
+    let (stdout, stderr, code) = rtk_output_in_dir(dir.path(), &["git", "diff", "--", "--stat"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert!(
+        !stdout.contains("diff --git"),
+        "-- --stat should stay on RTK's stat+compacted-diff path, not raw passthrough: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("--stat | 1 +") && stdout.contains("Changes:"),
+        "expected RTK's stat-summary-plus-compacted-diff output for the modified --stat file: {stdout:?}"
+    );
+}
+
+#[test]
+fn git_diff_name_only_passes_through_raw() {
+    // Regression: run_diff's wants_stat check only recognized --stat/--numstat/--shortstat, a
+    // narrower list than requests_raw_diff_shape (which run_log already used, covering
+    // --name-only/--name-status/--raw/--dirstat/--summary/-p/-u too). `--name-only` fell through
+    // to RTK's default stat+compacted-diff path instead of a raw passthrough of git's own
+    // name-only output.
+    let dir = init_git_repo();
+    std::fs::write(dir.path().join("file.txt"), "one\n").expect("write file");
+    git_in_dir(dir.path(), &["add", "file.txt"]);
+    git_in_dir(dir.path(), &["commit", "-q", "-m", "add file"]);
+    std::fs::write(dir.path().join("file.txt"), "one\ntwo\n").expect("modify file");
+
+    let (stdout, stderr, code) = rtk_output_in_dir(dir.path(), &["git", "diff", "--name-only"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert_eq!(
+        stdout.trim(),
+        "file.txt",
+        "--name-only should pass through as git's own bare filename list: {stdout:?}"
+    );
+}
+
+#[test]
+fn git_branch_dash_prefixed_name_after_double_dash_attempts_creation_not_a_silent_list() {
+    // Regression: `rtk git branch -- -weird` must be classified as a branch-creation attempt
+    // (and let real git's own ref-name validation reject it), not silently fall through to list
+    // mode as if no branch name were given. Before restore_double_dash + arg_tokenizer,
+    // run_branch's has_positional_arg check was a raw `!a.starts_with('-')` scan with no
+    // `--`-boundary awareness, so a branch name starting with '-' after the separator was
+    // misclassified as a flag: has_positional_arg came back false, and (with no list flag
+    // either) rtk silently ran `git branch -a --no-color -- -weird-branch` -- a harmless, empty,
+    // exit-0 *list* filtered on a pattern that matches nothing, giving no indication the
+    // requested branch was never created. A real branch named "-weird-branch" is impossible
+    // (git's own check-ref-format forbids a leading '-'), so the observable signal here is that
+    // rtk actually attempts the creation and surfaces git's real rejection, instead of quietly
+    // doing nothing and exiting 0.
+    let dir = init_git_repo();
+
+    let (stdout, stderr, code) =
+        rtk_output_in_dir(dir.path(), &["git", "branch", "--", "-weird-branch"]);
+
+    assert_ne!(
+        code,
+        Some(0),
+        "a creation attempt for an invalid ref name must fail, not silently succeed as an empty list: stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("-weird-branch"),
+        "expected git's own rejection to mention the attempted branch name: {stderr:?}"
+    );
+}
+
+#[test]
+fn git_log_malformed_digit_run_propagates_real_git_error() {
+    // "-5x" isn't a valid git log limit; real git rejects it outright ("fatal: '5x': not an
+    // integer", verified against git 2.51). run_log's internal limit-parsing for this
+    // malformed input differs before/after arg_tokenizer (5 vs the old fallback of 10), but
+    // that's never observable here: run_log bails out on the real git failure before ever
+    // reaching the formatting code that would use it.
+    let dir = init_git_repo();
+
+    let raw = Command::new("git")
+        .args(["log", "-5x"])
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn raw git log");
+    assert!(!raw.status.success(), "expected real git to reject -5x");
+
+    let (_, rtk_stderr, rtk_code) = rtk_output_in_dir(dir.path(), &["git", "log", "-5x"]);
+
+    assert_eq!(rtk_code, raw.status.code());
+    assert!(
+        rtk_stderr.contains("not an integer"),
+        "rtk should surface git's own error verbatim: {rtk_stderr:?}"
+    );
+}
+
+#[test]
 fn git_stash_show_no_stash_emits_empty_and_propagates_failure() {
     // Regression: previously printed "Empty stash" and returned Ok(0), masking
     // the underlying `git stash show` failure.
@@ -251,13 +386,39 @@ fn git_checkout_new_branch_emits_compact_ok() {
 }
 
 #[test]
-fn git_checkout_reset_branch_does_not_claim_new_branch() {
+fn git_checkout_dash_b_capital_reports_what_git_actually_did() {
     let dir = init_git_repo();
 
+    // `-B` creates *or* resets, and only git knows which. Reading the branch name out of the
+    // args and returning early claimed neither, so a created branch lost its `(new)` marker.
+    //
+    // rtk_output_in_dir pins LC_ALL=C, which is what makes the English scan land. Under
+    // another locale this degrades to the args fallback ("ok feature/test") rather than
+    // claiming a marker it cannot verify -- weaker, never wrong -- so `(new)` is asserted
+    // here only because the locale is pinned.
     let (out, code) = rtk_in_dir(dir.path(), &["git", "checkout", "-B", "feature/test"]);
-
     assert_eq!(code, Some(0));
-    assert_eq!(out.trim(), "ok feature/test");
+    assert_eq!(
+        out.trim(),
+        "ok feature/test (new)",
+        "git: Switched to a new branch"
+    );
+
+    // Reset of a branch that already exists: not new, and the args fallback names it.
+    git_in_dir(dir.path(), &["checkout", "-q", "main"]);
+    let (out, code) = rtk_in_dir(dir.path(), &["git", "checkout", "-B", "feature/test"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        out.trim(),
+        "ok feature/test",
+        "git: Switched to and reset branch -- matches no scan prefix, so the args name it"
+    );
+
+    // Glued spelling routes identically; the string scans it replaced could not read it.
+    git_in_dir(dir.path(), &["checkout", "-q", "main"]);
+    let (out, code) = rtk_in_dir(dir.path(), &["git", "checkout", "-Bfeature/glued"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(out.trim(), "ok feature/glued (new)");
 }
 
 #[test]

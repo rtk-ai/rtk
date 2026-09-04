@@ -5,6 +5,7 @@
 ## Specifics
 
 - **git.rs** uses `trailing_var_arg = true` + `allow_hyphen_values = true` so native git flags (`--oneline`, `--cached`, etc.) pass through correctly
+- Flag grammar (which flags take a value, what `-u`/`-p` mean) is per-subcommand, not shared wholesale between `log`/`diff`/`show`/`stash show` — see [`src/core/README.md`](../../core/README.md#argument-tokenizer-arg_tokenizerrs)
 - Default `git status` uses `--porcelain -b` so the compact output never exceeds raw `git status` (an untracked directory collapses to a single line, matching git's default); branch/short-only flags reuse the compact path, other explicit args still pass through unchanged
 - Global git options (`-C`, `--git-dir`, `--work-tree`, `--no-pager`) are prepended before the subcommand
 - Exit code propagation is critical for CI/CD pipelines

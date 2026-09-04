@@ -107,6 +107,28 @@ Key functions available to all command modules:
 | `ruby_exec(tool)` | Auto-detect `bundle exec` when `Gemfile` exists |
 | `count_tokens(text)` | Estimate tokens: `ceil(chars / 4.0)` |
 
+## Argument Tokenizer (arg_tokenizer.rs)
+
+Shared classifier for an already-`--`-restored args slice (see `args_utils::restore_double_dash`) into flags, their values, and positionals. `tokenize_grammar` takes a `takes_value(kind, name)` predicate the caller supplies — the list of which flags take a value is per-tool, but the token-walking around it isn't. `tokenize(args)` is the structural-only entry point, for a caller asking which arguments are flags and where `--` is; it assumes **no flag takes a value**, so anything reading a value or counting free positionals needs `tokenize_grammar`.
+
+**Use it for anything that decides what an argument is.** A new command filter, a new flag on an existing one, or a fix to how one is detected goes through `tokenize_grammar` — not `starts_with('-')`, not `args.iter().any(|a| a == "--flag")`. Those miss exactly what this module exists for: a flag's own value (`git log --grep -p` searches for the string "-p"), an attached value (`--flag=v`, `/bl:x`), a short cluster (`-rn`), and everything past `--`. Every bug the migration fixed was one of those four.
+
+Four rules, each of which cost a real bug before it was written down:
+
+- **One grammar per tool and subcommand.** Never reuse a sibling's predicate wholesale because it looks close enough — `-u` means `-p` in `git log` but `--include-untracked` in `git stash show`, and `-T` is `--initial-tab` in grep but `--type-not` in rg. Transcribe from the tool's own `--help` and verify against the real binary; grep and rg share 13 of ~50 value-taking flags, so one merged table is wrong for both.
+- **Scope the lookup to the region the tool parses.** Everything past `--` is a pathspec or an argument forwarded to another program — `before_dashdash` gives the tool's own tokens. `Dialect::Msbuild` keeps classifying past the boundary (it forwards rather than ending option parsing), which makes this explicit slice mandatory there, not optional.
+- **Inject before the boundary.** RTK's own flags go at `injection_point`, never appended: dotnet parks anything after `--` in UnparsedTokens and git reads it as a pathspec, so an appended `--verify-no-changes` silently does nothing.
+- **Detect and act with one rule.** Strip or inject using the detected token's `source_index`; re-matching the text lets the two disagree, which deleted a pathspec named `--no-compact` and swallowed a forwarded `--write`.
+
+`takes_value` returns `Option<ValueSpec>`, not a `bool`: one table per tool, answering every question the tokenizer has about a flag's value rather than one predicate per question, which is how two lists start drifting apart.
+
+- `ValueSpec::value()` — `--flag=v` or `--flag v`, and a literal `--` is the boundary. The common case.
+- `ValueSpec::attached_only()` — `--flag=v` only, the next argument is never the value (git's `-M`/`-U`/`-C`/`-B` take an optional attached number and nothing else).
+- `ValueSpec::solo_only()` — a `Short` flag takes a separate value only when it is the whole argument: `git log -n 2` does, `git log -pn 2` does not. No meaning for a `Long` flag.
+- `.claiming_dash_dash()` — lets a literal `--` be this flag's value. A per-tool split, not per-flag: grep and rg let any value-taking flag swallow it, git and cargo reject it whichever flag is asking.
+
+The dialect is the one axis that is not per-flag, so it stays a parameter: `tokenize_grammar(args, takes_value, Dialect::Msbuild)`.
+
 ## Consumer Contracts
 
 Core provides infrastructure that `cmds/` and other components consume. These contracts define expected usage.

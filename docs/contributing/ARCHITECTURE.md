@@ -38,7 +38,7 @@
 
 ### Hook Architecture (v0.9.5+)
 
-> For the hook interception diagram and agent-specific JSON formats, see [TECHNICAL.md](TECHNICAL.md#32-hook-interception-command-rewriting) and [hooks/README.md](hooks/README.md).
+> For the hook interception diagram and agent-specific JSON formats, see [TECHNICAL.md](TECHNICAL.md#32-hook-interception-command-rewriting) and [hooks/README.md](../../src/hooks/README.md).
 
 Two hook strategies:
 
@@ -181,7 +181,7 @@ Savings by ecosystem:
 ### Module Breakdown
 
 - **Command Modules**: `src/cmds/` — organized by ecosystem (git, rust, js, python, go, dotnet, cloud, system, ruby). Each ecosystem README lists its files.
-- **Core Infrastructure**: `src/core/` — utils, filter, tracking, tee, config, toml_filter, display_helpers, telemetry
+- **Core Infrastructure**: `src/core/` — utils, filter, tracking, tee, config, toml_filter, display_helpers, telemetry, arg_tokenizer
 - **Hook System**: `src/hooks/` — init, rewrite, permissions, hook_cmd, hook_check, hook_audit, verify, trust, integrity
 - **Analytics**: `src/analytics/` — gain, cc_economics, ccusage, session_cmd
 
@@ -571,7 +571,13 @@ When adding Python/Go module support:
 
 ### Utilities Layer
 
-> For the full utilities API (`truncate`, `strip_ansi`, `execute_command`, `ruby_exec`, etc.), see [src/core/README.md](src/core/README.md). Used by most command modules.
+> For the full utilities API (`truncate`, `strip_ansi`, `execute_command`, `ruby_exec`, etc.), see [src/core/README.md](../../src/core/README.md). Used by most command modules.
+
+### Argument Handling
+
+Every command that inspects its own arguments — which flags were passed, which tokens are paths, what to inject or strip — classifies them with `src/core/arg_tokenizer.rs`. String scans (`starts_with('-')`, `arg == "--flag"`) miss a flag's own value, attached values, short clusters and everything past `--`, which is where this module's whole bug class lives.
+
+> For the predicate contract and the four rules that come with it (one grammar per subcommand, scope the lookup to the region the tool parses, inject before the boundary, detect and act with one rule), see [src/core/README.md](../../src/core/README.md#argument-tokenizer-arg_tokenizerrs).
 
 ### Package Manager Detection Pattern
 
@@ -872,7 +878,7 @@ Modules with Exit Code Preservation:
 
 ### Configuration
 
-> For config file format, tee settings, tracking database path, and TOML filter tiers, see [src/core/README.md](src/core/README.md).
+> For config file format, tee settings, tracking database path, and TOML filter tiers, see [src/core/README.md](../../src/core/README.md).
 
 Two tiers: **User settings** (`~/.config/rtk/config.toml`) and **LLM integration** (CLAUDE.md via `rtk init`).
 
@@ -997,7 +1003,7 @@ Overhead Sources:
 
 ## Extensibility Guide
 
-> For the complete step-by-step process to add a new command (module file, enum variant, routing, tests, documentation), see [src/cmds/README.md — Adding a New Command Filter](src/cmds/README.md#adding-a-new-command-filter).
+> For the complete step-by-step process to add a new command (module file, enum variant, routing, tests, documentation), see [src/cmds/README.md — Adding a New Command Filter](../../src/cmds/README.md#adding-a-new-command-filter).
 
 ---
 
@@ -1035,7 +1041,7 @@ Overhead Sources:
 ## Resources
 
 - **[TECHNICAL.md](TECHNICAL.md)**: Guided tour of end-to-end flow
-- **[CONTRIBUTING.md](CONTRIBUTING.md)**: Design philosophy, contribution workflow, checklist
+- **[CONTRIBUTING.md](../../CONTRIBUTING.md)**: Design philosophy, contribution workflow, checklist
 - **CLAUDE.md**: Quick reference for AI agents (dev commands, build verification)
 - **README.md**: User guide, installation, examples
 - **Cargo.toml**: Dependencies, build profiles, package metadata
