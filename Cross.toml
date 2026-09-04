@@ -1,0 +1,6 @@
+[build.env]
+# Forward compile-time telemetry vars used by option_env!() into cross containers.
+passthrough = [
+    "RTK_TELEMETRY_URL",
+    "RTK_TELEMETRY_TOKEN",
+]
