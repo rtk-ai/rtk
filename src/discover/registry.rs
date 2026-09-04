@@ -4084,45 +4084,18 @@ mod tests {
         let commands = vec![
             "npm exec biome",
             "npm exec eslint",
-            "npm rum biome",
-            "npm rum eslint",
-            "npm rum lint",
-            "npm run biome",
-            "npm run eslint",
-            "npm run lint",
-            "npm run-script biome",
-            "npm run-script eslint",
-            "npm run-script lint",
-            "npm urn biome",
-            "npm urn eslint",
-            "npm urn lint",
             "npm x biome",
             "npm x eslint",
             "pnpm dlx biome",
             "pnpm dlx eslint",
             "pnpm exec biome",
             "pnpm exec eslint",
-            "pnpm run biome",
-            "pnpm run eslint",
-            "pnpm run lint",
-            "pnpm run-script biome",
-            "pnpm run-script eslint",
-            "pnpm run-script lint",
-            "npm biome",
-            "npm eslint",
-            "npm lint",
             "npx biome",
             "npx eslint",
-            "npx lint",
-            "pnpm biome",
-            "pnpm eslint",
-            "pnpm lint",
             "pnpx biome",
             "pnpx eslint",
-            "pnpx lint",
             "biome",
             "eslint",
-            "lint",
         ];
         for command in commands {
             assert!(
@@ -4137,13 +4110,11 @@ mod tests {
                 command
             );
         }
-    }
 
-    #[test]
-    fn test_rewrite_lint() {
-        let commands = vec![
-            "npm exec biome",
-            "npm exec eslint",
+        let script_commands = vec![
+            "npm biome",
+            "npm eslint",
+            "npm lint",
             "npm rum biome",
             "npm rum eslint",
             "npm rum lint",
@@ -4156,33 +4127,51 @@ mod tests {
             "npm urn biome",
             "npm urn eslint",
             "npm urn lint",
-            "npm x biome",
-            "npm x eslint",
-            "pnpm dlx biome",
-            "pnpm dlx eslint",
-            "pnpm exec biome",
-            "pnpm exec eslint",
+            "npx lint",
+            "pnpm biome",
+            "pnpm eslint",
+            "pnpm lint",
             "pnpm run biome",
             "pnpm run eslint",
             "pnpm run lint",
             "pnpm run-script biome",
             "pnpm run-script eslint",
             "pnpm run-script lint",
-            "npm biome",
-            "npm eslint",
-            "npm lint",
+            "pnpx lint",
+            "lint",
+        ];
+        for command in script_commands {
+            assert!(
+                !matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk lint",
+                        ..
+                    }
+                ),
+                "Unexpected rtk lint classification for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_lint() {
+        let commands = vec![
+            "npm exec biome",
+            "npm exec eslint",
+            "npm x biome",
+            "npm x eslint",
+            "pnpm dlx biome",
+            "pnpm dlx eslint",
+            "pnpm exec biome",
+            "pnpm exec eslint",
             "npx biome",
             "npx eslint",
-            "npx lint",
-            "pnpm biome",
-            "pnpm eslint",
-            "pnpm lint",
             "pnpx biome",
             "pnpx eslint",
-            "pnpx lint",
             "biome",
             "eslint",
-            "lint",
         ];
         for command in commands {
             assert_eq!(
@@ -4192,6 +4181,61 @@ mod tests {
                 command
             );
         }
+
+        let script_commands = vec![
+            "npm biome",
+            "npm eslint",
+            "npm lint",
+            "npm rum biome",
+            "npm rum eslint",
+            "npm rum lint",
+            "npm run biome",
+            "npm run eslint",
+            "npm run lint",
+            "npm run-script biome",
+            "npm run-script eslint",
+            "npm run-script lint",
+            "npm urn biome",
+            "npm urn eslint",
+            "npm urn lint",
+            "npx lint",
+            "pnpm biome",
+            "pnpm eslint",
+            "pnpm lint",
+            "pnpm run biome",
+            "pnpm run eslint",
+            "pnpm run lint",
+            "pnpm run-script biome",
+            "pnpm run-script eslint",
+            "pnpm run-script lint",
+            "pnpx lint",
+            "lint",
+        ];
+        for command in script_commands {
+            assert_ne!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some("rtk lint".into()),
+                "Unexpected rtk lint rewrite for command: {}",
+                command
+            );
+        }
+
+        assert_eq!(rewrite_command_no_prefixes("pnpm lint a.ts", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("pnpm eslint a.ts", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("npm lint a.ts", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("npm eslint a.ts", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm run eslint a.ts", &[]),
+            Some("rtk pnpm run eslint a.ts".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("npm run eslint a.ts", &[]),
+            Some("rtk npm run eslint a.ts".into())
+        );
+        assert_ne!(
+            rewrite_command_no_prefixes("pnpm lint a.ts", &[]),
+            Some("rtk lint a.ts".into())
+        );
     }
 
     #[test]
