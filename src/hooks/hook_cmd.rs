@@ -1751,6 +1751,17 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_pipeline_rewrites_producer_when_consumers_safe() {
+        let result = run_claude_inner(&claude_input("git log | tail -5")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk git log | tail -5");
+    }
+
+    #[test]
     fn test_claude_json_output_structure() {
         let result = run_claude_inner(&claude_input("git status")).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
