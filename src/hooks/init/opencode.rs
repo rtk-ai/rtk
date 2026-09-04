@@ -88,7 +88,7 @@ pub(crate) fn resolve_opencode_dir() -> Result<PathBuf> {
     resolve_home_subdir(CONFIG_DIR).map(|p| p.join(OPENCODE_SUBDIR))
 }
 
-// ─── Pi coding agent support ──────────────────────────────────────────
+// Pi coding agent support
 
 /// Resolve Pi config directory, honouring `PI_CODING_AGENT_DIR` override.
 pub(crate) fn resolve_pi_dir() -> Result<PathBuf> {
@@ -837,7 +837,7 @@ mod tests {
         assert!(!plugin_path.exists());
     }
 
-    // ─── Pi integration tests ───────────────────────────────────────────
+    // Pi integration tests
 
     #[test]
     fn test_run_pi_mode_global_installs_plugin() {

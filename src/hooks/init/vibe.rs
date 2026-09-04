@@ -2,7 +2,7 @@
 
 use super::*;
 
-// ── Vibe integration ────────────────────────────────────────
+// Vibe integration
 
 pub(crate) fn resolve_vibe_dir() -> Result<PathBuf> {
     resolve_home_subdir(VIBE_DIR)
@@ -347,7 +347,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    // ── Vibe tests ────────────────────────────────────────────
+    // Vibe tests
 
     #[test]
     fn test_vibe_detects_rtk_entry_by_name_field() {

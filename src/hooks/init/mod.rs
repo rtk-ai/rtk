@@ -2468,7 +2468,7 @@ mod tests {
         assert!(!removed);
     }
 
-    // ─── Legacy migration tests ──────────────────────────────────────
+    // Legacy migration tests
 
     #[test]
     fn test_remove_legacy_hook_entries_strips_old_script() {

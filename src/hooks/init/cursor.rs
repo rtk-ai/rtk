@@ -2,7 +2,7 @@
 
 use super::*;
 
-// ─── Cursor Agent support ─────────────────────────────────────────────
+// Cursor Agent support
 
 pub(crate) fn resolve_cursor_dir() -> Result<PathBuf> {
     resolve_home_subdir(CURSOR_DIR)
@@ -321,7 +321,7 @@ pub(crate) fn remove_cursor_hook_from_json(root: &mut serde_json::Value) -> bool
 mod tests {
     use super::*;
 
-    // ─── Cursor hooks.json tests ───
+    // Cursor hooks.json tests
 
     #[test]
     fn test_cursor_hook_already_present_legacy_script() {

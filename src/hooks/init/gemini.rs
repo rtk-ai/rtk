@@ -2,7 +2,7 @@
 
 use super::*;
 
-// ─── Gemini CLI support ───────────────────────────────────────────
+// Gemini CLI support
 
 /// Gemini hook wrapper script — delegates to `rtk hook gemini`
 pub(crate) const GEMINI_HOOK_SCRIPT: &str = r#"#!/bin/bash
