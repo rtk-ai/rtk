@@ -286,9 +286,10 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
         shown,
     );
 
-    // golangci-lint: exit 0 = clean, exit 1 = lint issues found (not an error),
-    // exit 2+ = config/build error, None = killed by signal (OOM, SIGKILL)
-    Ok(if exit_code == 1 { 0 } else { exit_code })
+    // golangci-lint exit codes must reach callers unchanged: 0 = clean,
+    // 1 = lint issues found (pre-commit hooks, Makefiles and agents gate on
+    // this), 2+ = config/build error.
+    Ok(exit_code)
 }
 
 /// Parse go test -json output (NDJSON format)
