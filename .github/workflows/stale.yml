@@ -26,7 +26,7 @@ jobs:
           permission-issues: write
           permission-pull-requests: write
 
-      - uses: actions/stale@v9
+      - uses: actions/stale@v11
         with:
           repo-token: ${{ steps.app-token.outputs.token }}
           # --- Issues & PRs ---
