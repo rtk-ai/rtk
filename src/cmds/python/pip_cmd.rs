@@ -74,8 +74,8 @@ fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, Str
         eprintln!("Running: {} pip list --format=json", base_cmd);
     }
 
-    let result = exec_capture(&mut cmd)
-        .with_context(|| format!("Failed to run {} pip list", base_cmd))?;
+    let result =
+        exec_capture(&mut cmd).with_context(|| format!("Failed to run {} pip list", base_cmd))?;
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 

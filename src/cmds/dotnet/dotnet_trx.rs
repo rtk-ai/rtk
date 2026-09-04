@@ -2,8 +2,8 @@
 
 use crate::binlog::{FailedTest, TestSummary};
 use chrono::{DateTime, FixedOffset};
-use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 

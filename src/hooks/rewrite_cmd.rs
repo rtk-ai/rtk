@@ -1,6 +1,6 @@
 //! Translates a raw shell command into its RTK-optimized equivalent.
 
-use super::permissions::{check_command, PermissionVerdict};
+use super::permissions::{PermissionVerdict, check_command};
 use crate::discover::registry;
 use std::io::Write;
 
@@ -130,7 +130,7 @@ mod tests {
     /// tests fail on that machine only (#3146). Pinning the verdict keeps the
     /// assertions about the rewrite logic and nothing about the host.
     mod unattestable_passthrough {
-        use super::super::{evaluate_with_verdict, RewriteOutcome};
+        use super::super::{RewriteOutcome, evaluate_with_verdict};
         use crate::hooks::permissions::PermissionVerdict;
 
         #[test]
@@ -216,7 +216,7 @@ mod tests {
     /// See: https://github.com/rtk-ai/rtk/issues/1155
     mod exit_code_protocol {
         use super::registry;
-        use crate::hooks::permissions::{check_command_with_rules, PermissionVerdict};
+        use crate::hooks::permissions::{PermissionVerdict, check_command_with_rules};
 
         /// Exit code that `run()` returns for each verdict:
         ///   Allow  → 0 (exit Ok(()))

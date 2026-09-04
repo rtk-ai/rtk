@@ -6,7 +6,7 @@
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::{ok_confirmation, resolved_command, truncate};
-use crate::git;
+use crate::git_cmd;
 use anyhow::Result;
 use regex::Regex;
 use serde_json::Value;
@@ -267,7 +267,13 @@ fn format_pr_list(json: &Value, ultra_compact: bool) -> String {
             let state = pr["state"].as_str().unwrap_or("???");
             let author = pr["author"]["login"].as_str().unwrap_or("???");
             let icon = state_icon(state, ultra_compact);
-            format!("  {} #{} {} ({})", icon, number, truncate(title, 60), author)
+            format!(
+                "  {} #{} {} ({})",
+                icon,
+                number,
+                truncate(title, 60),
+                author
+            )
         })
         .collect();
     const MAX_LIST: usize = CAP_LIST;
@@ -277,7 +283,8 @@ fn format_pr_list(json: &Value, ultra_compact: bool) -> String {
     if all_lines.len() > MAX_LIST {
         out.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_LIST));
         let all_text = all_lines.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "gh-prs", MAX_LIST + 1) {
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "gh-prs", MAX_LIST + 1)
+        {
             out.push_str(&format!("  {}\n", hint));
         }
     }
@@ -425,17 +432,17 @@ fn format_pr_view(json: &Value, ultra_compact: bool) -> String {
 
     out.push_str(&format!("  {}\n", url));
 
-    if let Some(body) = json["body"].as_str() {
-        if !body.is_empty() {
-            let body_filtered = filter_markdown_body(body);
-            if !body_filtered.is_empty() {
-                out.push('\n');
-                for line in body_filtered.lines() {
-                    out.push_str(&format!("  {}\n", line));
-                }
-            } else {
-                out.push_str("\n  (body contained only badges/images/comments)\n");
+    if let Some(body) = json["body"].as_str()
+        && !body.is_empty()
+    {
+        let body_filtered = filter_markdown_body(body);
+        if !body_filtered.is_empty() {
+            out.push('\n');
+            for line in body_filtered.lines() {
+                out.push_str(&format!("  {}\n", line));
             }
+        } else {
+            out.push_str("\n  (body contained only badges/images/comments)\n");
         }
     }
 
@@ -636,7 +643,9 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
     if all_lines.len() > MAX_LIST {
         out.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_LIST));
         let all_text = all_lines.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "gh-issues", MAX_LIST + 1) {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_text, "gh-issues", MAX_LIST + 1)
+        {
             out.push_str(&format!("  {}\n", hint));
         }
     }
@@ -687,17 +696,17 @@ fn format_issue_view(json: &Value) -> String {
     out.push_str(&format!("  Status: {}\n", state));
     out.push_str(&format!("  URL: {}\n", url));
 
-    if let Some(body) = json["body"].as_str() {
-        if !body.is_empty() {
-            let body_filtered = filter_markdown_body(body);
-            if !body_filtered.is_empty() {
-                out.push_str("\n  Description:\n");
-                for line in body_filtered.lines() {
-                    out.push_str(&format!("    {}\n", line));
-                }
-            } else {
-                out.push_str("\n  Description: (body contained only badges/images/comments)\n");
+    if let Some(body) = json["body"].as_str()
+        && !body.is_empty()
+    {
+        let body_filtered = filter_markdown_body(body);
+        if !body_filtered.is_empty() {
+            out.push_str("\n  Description:\n");
+            for line in body_filtered.lines() {
+                out.push_str(&format!("    {}\n", line));
             }
+        } else {
+            out.push_str("\n  Description: (body contained only badges/images/comments)\n");
         }
     }
     out
@@ -955,7 +964,7 @@ fn pr_diff(args: &[String], _verbose: u8) -> Result<i32> {
             if raw.trim().is_empty() {
                 "No diff".to_string()
             } else {
-                git::compact_diff(raw, 500)
+                git_cmd::compact_diff(raw, 500)
             }
         },
         RunOptions::stdout_only().early_exit_on_failure(),
@@ -1023,7 +1032,7 @@ mod tests {
         // Emoji: 🚀 = 4 bytes, 1 char
         assert_eq!(truncate("🚀🎉🔥abc", 6), "🚀🎉🔥abc"); // 6 chars, fits
         assert_eq!(truncate("🚀🎉🔥abcdef", 8), "🚀🎉🔥ab..."); // 10 chars > 8
-                                                                // Edge case: all multibyte
+        // Edge case: all multibyte
         assert_eq!(truncate("🚀🎉🔥🌟🎯", 5), "🚀🎉🔥🌟🎯"); // exact fit
         assert_eq!(truncate("🚀🎉🔥🌟🎯x", 5), "🚀🎉..."); // 6 chars > 5
     }

@@ -15,12 +15,12 @@ use crate::hooks::constants::{
 
 use super::constants::{
     BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, DROID_DIR,
-    DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR,
-    DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
-    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
+    DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOK_COMMAND, DROID_HOOKS_FILE,
+    DROID_HOOKS_SUBDIR, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGIN_INIT_FILE,
+    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HERMES_PLUGINS_SUBDIR, HOOKS_JSON,
     HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
     PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR,
-    VIBE_HOOKS_FILE, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
+    VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_HOOKS_FILE, VIBE_PROMPT_FILE, VIBE_PROMPTS_SUBDIR,
 };
 use super::integrity;
 use super::is_claude_hook_command;
@@ -707,7 +707,9 @@ pub fn uninstall(
     }
 
     if !global {
-        anyhow::bail!("Uninstall only works with --global flag. For local projects, manually remove RTK from CLAUDE.md");
+        anyhow::bail!(
+            "Uninstall only works with --global flag. For local projects, manually remove RTK from CLAUDE.md"
+        );
     }
 
     let claude_dir = resolve_claude_dir()?;
@@ -1273,10 +1275,10 @@ fn migrate_old_hook_script(ctx: InitContext) {
                     eprintln!("  [ok] Removed old hook script: {}", old_hook.display());
                 }
                 // Clean up the stale settings.json entry that pointed to the deleted script
-                if let Err(e) = remove_legacy_settings_entries(ctx) {
-                    if verbose > 0 {
-                        eprintln!("  [warn] Failed to clean legacy settings.json entry: {e}");
-                    }
+                if let Err(e) = remove_legacy_settings_entries(ctx)
+                    && verbose > 0
+                {
+                    eprintln!("  [warn] Failed to clean legacy settings.json entry: {e}");
                 }
             }
         }
@@ -1593,10 +1595,11 @@ fn run_claude_md_mode(global: bool, install_opencode: bool, ctx: InitContext) ->
         PathBuf::from(CLAUDE_MD)
     };
 
-    if global && !dry_run {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+    if global
+        && !dry_run
+        && let Some(parent) = path.parent()
+    {
+        fs::create_dir_all(parent)?;
     }
 
     if verbose > 0 {
@@ -2105,10 +2108,10 @@ fn ensure_previous_yaml_line_ends_with_newline(lines: &mut [String], insert_idx:
         return;
     }
 
-    if let Some(previous) = lines.get_mut(insert_idx - 1) {
-        if !previous.ends_with('\n') {
-            previous.push('\n');
-        }
+    if let Some(previous) = lines.get_mut(insert_idx - 1)
+        && !previous.ends_with('\n')
+    {
+        previous.push('\n');
     }
 }
 
@@ -2408,15 +2411,16 @@ fn run_codex_mode_with_paths(
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
-    if global && !dry_run {
-        if let Some(parent) = agents_md_path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create Codex config directory: {}",
-                    parent.display()
-                )
-            })?;
-        }
+    if global
+        && !dry_run
+        && let Some(parent) = agents_md_path.parent()
+    {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create Codex config directory: {}",
+                parent.display()
+            )
+        })?;
     }
 
     // ISSUE #892: In global mode, use absolute path so @RTK.md resolves
@@ -3028,24 +3032,23 @@ fn resolve_droid_install_target(droid_dir: &Path) -> Result<DroidHookFile> {
         None
     };
 
-    if let Some(path) = &live_hooks_json {
-        if let Some(json) = read_droid_json(path)? {
-            if droid_has_pre_tool_use(&json, DroidLayout::Root) {
-                return Ok(DroidHookFile {
-                    path: path.clone(),
-                    layout: DroidLayout::Root,
-                });
-            }
-        }
+    if let Some(path) = &live_hooks_json
+        && let Some(json) = read_droid_json(path)?
+        && droid_has_pre_tool_use(&json, DroidLayout::Root)
+    {
+        return Ok(DroidHookFile {
+            path: path.clone(),
+            layout: DroidLayout::Root,
+        });
     }
 
-    if let Some(json) = read_droid_json(&settings)? {
-        if droid_has_pre_tool_use(&json, DroidLayout::Nested) {
-            return Ok(DroidHookFile {
-                path: settings,
-                layout: DroidLayout::Nested,
-            });
-        }
+    if let Some(json) = read_droid_json(&settings)?
+        && droid_has_pre_tool_use(&json, DroidLayout::Nested)
+    {
+        return Ok(DroidHookFile {
+            path: settings,
+            layout: DroidLayout::Nested,
+        });
     }
 
     Ok(DroidHookFile {
@@ -3214,14 +3217,14 @@ fn insert_droid_hook_entry(root: &mut serde_json::Value, layout: DroidLayout) ->
             .get("matcher")
             .and_then(|m| m.as_str())
             .unwrap_or_default();
-        if matcher == DROID_EXECUTE_MATCHER {
-            if let Some(hook_array) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
-                hook_array.push(serde_json::json!({
-                    "type": "command",
-                    "command": DROID_HOOK_COMMAND
-                }));
-                return Ok(());
-            }
+        if matcher == DROID_EXECUTE_MATCHER
+            && let Some(hook_array) = entry.get_mut("hooks").and_then(|h| h.as_array_mut())
+        {
+            hook_array.push(serde_json::json!({
+                "type": "command",
+                "command": DROID_HOOK_COMMAND
+            }));
+            return Ok(());
         }
     }
 
@@ -3369,10 +3372,9 @@ fn remove_droid_hook_from_json(root: &mut serde_json::Value, layout: DroidLayout
             .get("hooks")
             .and_then(|h| h.as_object())
             .is_some_and(|o| o.is_empty())
+        && let Some(obj) = root.as_object_mut()
     {
-        if let Some(obj) = root.as_object_mut() {
-            obj.remove("hooks");
-        }
+        obj.remove("hooks");
     }
 
     modified
@@ -3390,10 +3392,10 @@ fn resolve_opencode_dir() -> Result<PathBuf> {
 
 /// Resolve Pi config directory, honouring `PI_CODING_AGENT_DIR` override.
 fn resolve_pi_dir() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var(PI_CODING_AGENT_DIR_ENV) {
-        if !dir.is_empty() {
-            return Ok(PathBuf::from(dir));
-        }
+    if let Ok(dir) = std::env::var(PI_CODING_AGENT_DIR_ENV)
+        && !dir.is_empty()
+    {
+        return Ok(PathBuf::from(dir));
     }
     resolve_home_subdir(PI_DIR)
 }
@@ -3541,15 +3543,13 @@ fn prepare_opencode_plugin_path() -> Result<PathBuf> {
 fn ensure_opencode_plugin_installed(path: &Path, ctx: InitContext) -> Result<bool> {
     let InitContext { dry_run, .. } = ctx;
     // Ensure parent dir exists (skip in dry-run)
-    if !dry_run {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create OpenCode plugin directory: {}",
-                    parent.display()
-                )
-            })?;
-        }
+    if !dry_run && let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create OpenCode plugin directory: {}",
+                parent.display()
+            )
+        })?;
     }
     write_if_changed(path, OPENCODE_PLUGIN, "OpenCode plugin", ctx)
 }
@@ -3607,10 +3607,10 @@ fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
         }
         // Clean stale hooks.json entry pointing to the deleted script
         let hooks_json_path = cursor_dir.join(HOOKS_JSON);
-        if let Err(e) = remove_legacy_cursor_hooks_json_entries(&hooks_json_path, ctx) {
-            if verbose > 0 {
-                eprintln!("  [warn] Failed to clean legacy Cursor hooks.json entry: {e}");
-            }
+        if let Err(e) = remove_legacy_cursor_hooks_json_entries(&hooks_json_path, ctx)
+            && verbose > 0
+        {
+            eprintln!("  [warn] Failed to clean legacy Cursor hooks.json entry: {e}");
         }
     }
 
@@ -3839,29 +3839,28 @@ fn remove_cursor_hooks(ctx: InitContext) -> Result<Vec<String>> {
             .with_context(|| format!("Failed to read {}", hooks_json_path.display()))?;
         let content = strip_leading_bom(&content);
 
-        if !content.trim().is_empty() {
-            if let Ok(mut root) = from_json_str::<serde_json::Value>(content) {
-                if remove_cursor_hook_from_json(&mut root) {
-                    if dry_run {
-                        println!(
-                            "[dry-run] would remove RTK entry from Cursor hooks.json: {}",
-                            hooks_json_path.display()
-                        );
-                    } else {
-                        let backup_path = hooks_json_path.with_extension("json.bak");
-                        fs::copy(&hooks_json_path, &backup_path).ok();
+        if !content.trim().is_empty()
+            && let Ok(mut root) = from_json_str::<serde_json::Value>(content)
+            && remove_cursor_hook_from_json(&mut root)
+        {
+            if dry_run {
+                println!(
+                    "[dry-run] would remove RTK entry from Cursor hooks.json: {}",
+                    hooks_json_path.display()
+                );
+            } else {
+                let backup_path = hooks_json_path.with_extension("json.bak");
+                fs::copy(&hooks_json_path, &backup_path).ok();
 
-                        let serialized = serde_json::to_string_pretty(&root)
-                            .context("Failed to serialize hooks.json")?;
-                        atomic_write(&hooks_json_path, &serialized)?;
+                let serialized = serde_json::to_string_pretty(&root)
+                    .context("Failed to serialize hooks.json")?;
+                atomic_write(&hooks_json_path, &serialized)?;
 
-                        if verbose > 0 {
-                            eprintln!("Removed RTK hook from Cursor hooks.json");
-                        }
-                    }
-                    removed.push("Cursor hooks.json: removed RTK entry".to_string());
+                if verbose > 0 {
+                    eprintln!("Removed RTK hook from Cursor hooks.json");
                 }
             }
+            removed.push("Cursor hooks.json: removed RTK entry".to_string());
         }
     }
 
@@ -4054,67 +4053,70 @@ fn show_claude_config() -> Result<()> {
     }
 
     // Check OpenCode plugin
-    if let Ok(opencode_dir) = resolve_opencode_dir() {
-        let plugin = opencode_plugin_path(&opencode_dir);
-        if plugin.exists() {
-            println!("[ok] OpenCode: plugin installed ({})", plugin.display());
-        } else {
-            println!("[--] OpenCode: plugin not found");
+    match resolve_opencode_dir() {
+        Ok(opencode_dir) => {
+            let plugin = opencode_plugin_path(&opencode_dir);
+            if plugin.exists() {
+                println!("[ok] OpenCode: plugin installed ({})", plugin.display());
+            } else {
+                println!("[--] OpenCode: plugin not found");
+            }
         }
-    } else {
-        println!("[--] OpenCode: config dir not found");
+        _ => println!("[--] OpenCode: config dir not found"),
     }
 
     // Check Cursor hooks
-    if let Ok(cursor_dir) = resolve_cursor_dir() {
-        let cursor_hook = cursor_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
-        let cursor_hooks_json = cursor_dir.join(HOOKS_JSON);
+    match resolve_cursor_dir() {
+        Ok(cursor_dir) => {
+            let cursor_hook = cursor_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+            let cursor_hooks_json = cursor_dir.join(HOOKS_JSON);
 
-        // Check for binary command in hooks.json first
-        let cursor_binary_registered = if cursor_hooks_json.exists() {
-            let content = fs::read_to_string(&cursor_hooks_json).unwrap_or_default();
-            if let Ok(root) = from_json_str::<serde_json::Value>(&content) {
-                cursor_hook_already_present(&root)
+            // Check for binary command in hooks.json first
+            let cursor_binary_registered = if cursor_hooks_json.exists() {
+                let content = fs::read_to_string(&cursor_hooks_json).unwrap_or_default();
+                if let Ok(root) = from_json_str::<serde_json::Value>(&content) {
+                    cursor_hook_already_present(&root)
+                } else {
+                    false
+                }
             } else {
                 false
-            }
-        } else {
-            false
-        };
+            };
 
-        if cursor_binary_registered {
-            println!("[ok] Cursor hook: registered in hooks.json");
-        } else if cursor_hook.exists() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let meta = fs::metadata(&cursor_hook)?;
-                let is_executable = meta.permissions().mode() & 0o111 != 0;
-                let content = fs::read_to_string(&cursor_hook)?;
-                let _is_thin = content.contains("rtk rewrite");
+            if cursor_binary_registered {
+                println!("[ok] Cursor hook: registered in hooks.json");
+            } else if cursor_hook.exists() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let meta = fs::metadata(&cursor_hook)?;
+                    let is_executable = meta.permissions().mode() & 0o111 != 0;
 
-                if !is_executable {
-                    println!(
-                        "[warn] Cursor hook: {} (legacy script, NOT executable)",
-                        cursor_hook.display()
-                    );
-                } else {
+                    if !is_executable {
+                        println!(
+                            "[warn] Cursor hook: {} (legacy script, NOT executable)",
+                            cursor_hook.display()
+                        );
+                    } else {
+                        println!(
+                            "[warn] Cursor hook: {} (legacy script — run `rtk init -g --agent cursor` to upgrade)",
+                            cursor_hook.display()
+                        );
+                    }
+                }
+
+                #[cfg(not(unix))]
+                {
                     println!(
                         "[warn] Cursor hook: {} (legacy script — run `rtk init -g --agent cursor` to upgrade)",
                         cursor_hook.display()
                     );
                 }
+            } else {
+                println!("[--] Cursor hook: not found");
             }
-
-            #[cfg(not(unix))]
-            {
-                println!("[warn] Cursor hook: {} (legacy script — run `rtk init -g --agent cursor` to upgrade)", cursor_hook.display());
-            }
-        } else {
-            println!("[--] Cursor hook: not found");
         }
-    } else {
-        println!("[--] Cursor: home dir not found");
+        _ => println!("[--] Cursor: home dir not found"),
     }
 
     println!("\nUsage:");
@@ -4126,7 +4128,9 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --claude-md     # Legacy: full injection into ~/.claude/CLAUDE.md");
     println!("  rtk init -g --hook-only     # Hook only, no RTK.md");
     println!("  rtk init --codex            # Configure local AGENTS.md + RTK.md");
-    println!("  rtk init -g --codex         # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
+    println!(
+        "  rtk init -g --codex         # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)"
+    );
     println!("  rtk init -g --opencode      # OpenCode plugin only");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
 
@@ -4183,7 +4187,9 @@ fn show_codex_config() -> Result<()> {
 
     println!("\nUsage:");
     println!("  rtk init --codex              # Configure local AGENTS.md + RTK.md");
-    println!("  rtk init -g --codex           # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
+    println!(
+        "  rtk init -g --codex           # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)"
+    );
     println!("  rtk init -g --codex --uninstall  # Remove global Codex RTK artifacts");
 
     Ok(())
@@ -4276,7 +4282,9 @@ pub fn run_gemini(
             println!("  GEMINI.md: {}", gemini_dir.join(GEMINI_MD).display());
         }
         if settings_parse_failed {
-            println!("  settings.json: NOT patched (existing file could not be parsed; see warning above)");
+            println!(
+                "  settings.json: NOT patched (existing file could not be parsed; see warning above)"
+            );
         }
         println!("  Restart Gemini CLI. Test with: git status\n");
     }
@@ -4342,19 +4350,18 @@ fn patch_gemini_settings(
     };
 
     let before_tool_pointer = format!("/hooks/{}", BEFORE_TOOL_KEY);
-    if let Some(hooks) = settings.pointer(&before_tool_pointer) {
-        if let Some(arr) = hooks.as_array() {
-            if arr.iter().any(|h| {
-                h.pointer("/hooks/0/command")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|c| c.contains("rtk"))
-            }) {
-                if verbose > 0 {
-                    eprintln!("Gemini settings.json already has RTK hook");
-                }
-                return Ok(false);
-            }
+    if let Some(hooks) = settings.pointer(&before_tool_pointer)
+        && let Some(arr) = hooks.as_array()
+        && arr.iter().any(|h| {
+            h.pointer("/hooks/0/command")
+                .and_then(|v| v.as_str())
+                .is_some_and(|c| c.contains("rtk"))
+        })
+    {
+        if verbose > 0 {
+            eprintln!("Gemini settings.json already has RTK hook");
         }
+        return Ok(false);
     }
 
     // Ask user before patching
@@ -6661,11 +6668,13 @@ mod tests {
 
         // Should create full structure
         assert!(json_content.get("hooks").is_some());
-        assert!(json_content
-            .get("hooks")
-            .unwrap()
-            .get("PreToolUse")
-            .is_some());
+        assert!(
+            json_content
+                .get("hooks")
+                .unwrap()
+                .get("PreToolUse")
+                .is_some()
+        );
 
         let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(pre_tool_use.len(), 1);
@@ -7223,37 +7232,21 @@ mod tests {
     }
 
     use std::sync::Mutex;
-    static CLAUDE_DIR_LOCK: Mutex<()> = Mutex::new(());
-    static PI_DIR_LOCK: Mutex<()> = Mutex::new(());
     /// Serialises all tests that mutate the process-wide working directory.
     static CWD_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
-        let _guard = CLAUDE_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let claude_dir = tmp.path().join(CLAUDE_DIR);
         fs::create_dir_all(&claude_dir).unwrap();
 
-        let orig = std::env::var_os("CLAUDE_CONFIG_DIR");
-        std::env::set_var("CLAUDE_CONFIG_DIR", &claude_dir);
-        f(&claude_dir);
-        match orig {
-            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
-            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
-        }
+        temp_env::with_var("CLAUDE_CONFIG_DIR", Some(&claude_dir), || f(&claude_dir));
     }
 
     fn with_pi_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
-        let _guard = PI_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let pi_dir = tmp.path().join("pi_agent");
         fs::create_dir_all(&pi_dir).unwrap();
 
-        let orig = std::env::var_os(PI_CODING_AGENT_DIR_ENV);
-        std::env::set_var(PI_CODING_AGENT_DIR_ENV, &pi_dir);
-        f(&pi_dir);
-        match orig {
-            Some(v) => std::env::set_var(PI_CODING_AGENT_DIR_ENV, v),
-            None => std::env::remove_var(PI_CODING_AGENT_DIR_ENV),
-        }
+        temp_env::with_var(PI_CODING_AGENT_DIR_ENV, Some(&pi_dir), || f(&pi_dir));
     }
 
     #[test]
@@ -7726,18 +7719,10 @@ mod tests {
     fn test_run_pi_mode_global_creates_plugin_when_dir_absent() {
         let tmp = TempDir::new().unwrap();
         let absent_dir = tmp.path().join("no_such_pi_dir");
-        let _guard = PI_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let orig = std::env::var_os(PI_CODING_AGENT_DIR_ENV);
-        std::env::set_var(PI_CODING_AGENT_DIR_ENV, &absent_dir);
-
-        let result = run_pi_mode(true, InitContext::default());
-
-        match orig {
-            Some(v) => std::env::set_var(PI_CODING_AGENT_DIR_ENV, v),
-            None => std::env::remove_var(PI_CODING_AGENT_DIR_ENV),
-        }
-
-        result.unwrap();
+        temp_env::with_var(PI_CODING_AGENT_DIR_ENV, Some(&absent_dir), || {
+            run_pi_mode(true, InitContext::default())
+        })
+        .unwrap();
 
         let plugin = absent_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
         assert!(
@@ -8521,10 +8506,12 @@ mod tests {
         run_vibe_mode_at(&vibe_dir, true, PatchMode::Auto, InitContext::default()).unwrap();
 
         assert!(vibe_dir.join(VIBE_HOOKS_FILE).exists());
-        assert!(!vibe_dir
-            .join(VIBE_PROMPTS_SUBDIR)
-            .join(VIBE_PROMPT_FILE)
-            .exists());
+        assert!(
+            !vibe_dir
+                .join(VIBE_PROMPTS_SUBDIR)
+                .join(VIBE_PROMPT_FILE)
+                .exists()
+        );
     }
 
     #[test]
@@ -8536,20 +8523,24 @@ mod tests {
         fs::write(vibe_dir.join(VIBE_HOOKS_FILE), user_hook).unwrap();
 
         run_vibe_mode_at(&vibe_dir, false, PatchMode::Auto, InitContext::default()).unwrap();
-        assert!(vibe_dir
-            .join(VIBE_PROMPTS_SUBDIR)
-            .join(VIBE_PROMPT_FILE)
-            .exists());
+        assert!(
+            vibe_dir
+                .join(VIBE_PROMPTS_SUBDIR)
+                .join(VIBE_PROMPT_FILE)
+                .exists()
+        );
 
         let removed_first = uninstall_vibe_at(&vibe_dir, InitContext::default()).unwrap();
         let removed_second = uninstall_vibe_at(&vibe_dir, InitContext::default()).unwrap();
 
         assert_eq!(removed_first.len(), 2);
         assert!(removed_second.is_empty());
-        assert!(!vibe_dir
-            .join(VIBE_PROMPTS_SUBDIR)
-            .join(VIBE_PROMPT_FILE)
-            .exists());
+        assert!(
+            !vibe_dir
+                .join(VIBE_PROMPTS_SUBDIR)
+                .join(VIBE_PROMPT_FILE)
+                .exists()
+        );
 
         let remaining = fs::read_to_string(vibe_dir.join(VIBE_HOOKS_FILE)).unwrap();
         assert!(remaining.contains(r#"name = "user-audit""#));

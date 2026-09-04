@@ -7,7 +7,7 @@
 //! `file:line:content` shape.
 
 use crate::core::stream::{
-    self, exec_capture, exec_capture_stdin, CaptureResult, FilterMode, StdinMode, StreamFilter,
+    self, CaptureResult, FilterMode, StdinMode, StreamFilter, exec_capture, exec_capture_stdin,
 };
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, strip_ansi};
@@ -398,8 +398,7 @@ fn show_file(paths: &[String], extra_args: &[String]) -> bool {
 }
 
 fn show_line(extra_args: &[String]) -> bool {
-    (has_short_flag(extra_args, 'n')
-        || extra_args.iter().any(|f| f == "--line-number"))
+    (has_short_flag(extra_args, 'n') || extra_args.iter().any(|f| f == "--line-number"))
         && !has_short_flag(extra_args, 'N')
         && !extra_args.iter().any(|f| f == "--no-line-number")
 }
@@ -679,11 +678,15 @@ pub fn run(
         // Tee the file's full matches (real path) so the tail hint recovers them
         // openably, skipping the lines already shown.
         let full_block = match_block(file, entries);
-        match crate::core::tee::force_tee_tail_hint(&full_block, &grep_slug(idx, file), file_shown + 1)
-        {
-            Some(hint) => {
-                body.push_str(&format!("  +{} more in {} {}\n", remaining, file_display, hint))
-            }
+        match crate::core::tee::force_tee_tail_hint(
+            &full_block,
+            &grep_slug(idx, file),
+            file_shown + 1,
+        ) {
+            Some(hint) => body.push_str(&format!(
+                "  +{} more in {} {}\n",
+                remaining, file_display, hint
+            )),
             None => body.push_str(&format!("  +{} more in {}\n", remaining, file_display)),
         }
     }
@@ -786,12 +789,12 @@ fn has_format_flag<T: AsRef<str>>(extra_args: &[T]) -> bool {
 fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &str) -> String {
     let trimmed = line.trim();
 
-    if let Some(re) = context_re {
-        if let Some(m) = re.find(trimmed) {
-            let matched = m.as_str();
-            if matched.len() <= max_len {
-                return matched.to_string();
-            }
+    if let Some(re) = context_re
+        && let Some(m) = re.find(trimmed)
+    {
+        let matched = m.as_str();
+        if matched.len() <= max_len {
+            return matched.to_string();
         }
     }
 
@@ -1621,7 +1624,8 @@ mod tests {
     #[test]
     fn test_unparsed_signal_context_lines_parse_ok() {
         // Context lines (dash separator) parse via the updated regex → not counted.
-        let stdout = "file.txt\x003-context_before\nfile.txt\x004:match\nfile.txt\x005-context_after\n";
+        let stdout =
+            "file.txt\x003-context_before\nfile.txt\x004:match\nfile.txt\x005-context_after\n";
         assert_eq!(unparsed_signal(stdout), 0);
     }
 

@@ -530,15 +530,21 @@ mod tests {
     fn test_hidden_hint_note_variants() {
         let t = vec!["x  1B".to_string()];
         let f = vec!["target/".to_string()];
-        assert!(hidden_hint(&t, &[])
-            .expect("hint")
-            .starts_with("... (1 more)"));
-        assert!(hidden_hint(&[], &f)
-            .expect("hint")
-            .starts_with("... (1 filtered)"));
-        assert!(hidden_hint(&t, &f)
-            .expect("hint")
-            .starts_with("... (1 more, 1 filtered)"));
+        assert!(
+            hidden_hint(&t, &[])
+                .expect("hint")
+                .starts_with("... (1 more)")
+        );
+        assert!(
+            hidden_hint(&[], &f)
+                .expect("hint")
+                .starts_with("... (1 filtered)")
+        );
+        assert!(
+            hidden_hint(&t, &f)
+                .expect("hint")
+                .starts_with("... (1 more, 1 filtered)")
+        );
     }
 
     #[test]

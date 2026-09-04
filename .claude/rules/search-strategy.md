@@ -87,7 +87,7 @@ Grep pattern="fn filter_git_log\|fn run\b" type="rust"
 
 ```
 Glob pattern="src/cmds/**/*_cmd.rs"
-# Also: src/cmds/git/git.rs, src/cmds/rust/runner.rs, src/cmds/cloud/container.rs
+# Also: src/cmds/git/git_cmd.rs, src/cmds/rust/runner.rs, src/cmds/cloud/container.rs
 ```
 
 ### "Find all LazyLock regex definitions"

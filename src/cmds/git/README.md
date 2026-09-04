@@ -4,7 +4,7 @@
 
 ## Specifics
 
-- **git.rs** uses `trailing_var_arg = true` + `allow_hyphen_values = true` so native git flags (`--oneline`, `--cached`, etc.) pass through correctly
+- **git_cmd.rs** uses `trailing_var_arg = true` + `allow_hyphen_values = true` so native git flags (`--oneline`, `--cached`, etc.) pass through correctly
 - Default `git status` uses `--porcelain -b` so the compact output never exceeds raw `git status` (an untracked directory collapses to a single line, matching git's default); branch/short-only flags reuse the compact path, other explicit args still pass through unchanged
 - Global git options (`-C`, `--git-dir`, `--work-tree`, `--no-pager`) are prepended before the subcommand
 - Exit code propagation is critical for CI/CD pipelines
@@ -19,8 +19,8 @@
 
 ## Cross-command
 
-- `gh_cmd.rs` imports `compact_diff()` from `git.rs` for diff formatting; markdown helpers (`filter_markdown_body`, `filter_markdown_segment`) are defined in `gh_cmd.rs` itself
-- `glab_cmd.rs` also uses `compact_diff()` from `git.rs` for `mr diff`; its `filter_markdown_body` is currently **duplicated** from `gh_cmd.rs` (shared-module refactor deferred)
+- `gh_cmd.rs` imports `compact_diff()` from `git_cmd.rs` for diff formatting; markdown helpers (`filter_markdown_body`, `filter_markdown_segment`) are defined in `gh_cmd.rs` itself
+- `glab_cmd.rs` also uses `compact_diff()` from `git_cmd.rs` for `mr diff`; its `filter_markdown_body` is currently **duplicated** from `gh_cmd.rs` (shared-module refactor deferred)
 - `diff_cmd.rs` is a standalone ultra-condensed diff (separate from `git diff`)
 
 ## glab vs gh JSON schema quick-ref

@@ -211,21 +211,21 @@ fn parse(stripped: &str) -> Parsed {
             continue;
         }
 
-        if p.env.version.is_empty() {
-            if let Some(rest) = line.strip_prefix("PHP_VERSION") {
-                p.env.version = after_colon(rest);
-            }
+        if p.env.version.is_empty()
+            && let Some(rest) = line.strip_prefix("PHP_VERSION")
+        {
+            p.env.version = after_colon(rest);
         }
-        if p.env.sapi.is_empty() {
-            if let Some(rest) = line.strip_prefix("PHP_SAPI") {
-                p.env.sapi = after_colon(rest);
-            }
+        if p.env.sapi.is_empty()
+            && let Some(rest) = line.strip_prefix("PHP_SAPI")
+        {
+            p.env.sapi = after_colon(rest);
         }
-        if p.env.os.is_empty() {
-            if let Some(rest) = line.strip_prefix("PHP_OS") {
-                let val = after_colon(rest);
-                p.env.os = val.split(" - ").next().unwrap_or(&val).trim().to_string();
-            }
+        if p.env.os.is_empty()
+            && let Some(rest) = line.strip_prefix("PHP_OS")
+        {
+            let val = after_colon(rest);
+            p.env.os = val.split(" - ").next().unwrap_or(&val).trim().to_string();
         }
 
         if let Some(cap) = STATUS_RE.captures(line) {
@@ -404,7 +404,11 @@ mod tests {
         let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
         // Unrelated --show-* flags don't produce diffs, so they must not suppress
         // our injected --show-diff.
-        assert!(!args_already_show_diff(&s(&["--show-slow", "1000", "ext/standard/"])));
+        assert!(!args_already_show_diff(&s(&[
+            "--show-slow",
+            "1000",
+            "ext/standard/"
+        ])));
         assert!(!args_already_show_diff(&s(&["ext/standard/"])));
         // The two flags that do produce diffs suppress the injection.
         assert!(args_already_show_diff(&s(&["--show-diff"])));

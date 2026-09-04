@@ -1,0 +1,10 @@
+# Bulk-formatting commits, ignored so `git blame` reports the author who wrote
+# a line rather than whoever last reformatted it. GitHub's web blame applies
+# this automatically; locally it needs opting in once:
+#
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Only commits with no behaviour change belong here.
+
+# chore: reformat under rustfmt style edition 2024
+086046069cf311049a0d145fa34b049914219be5

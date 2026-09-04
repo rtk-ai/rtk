@@ -191,12 +191,11 @@ pub fn run(
                 stream::run_streaming(&mut cmd, StdinMode::Null, FilterMode::Streaming(filter))
                     .with_context(|| format!("Failed to run {}", tool_name))?;
 
-            if let Some(label) = opts.tee_label {
-                if let Some(hint) =
+            if let Some(label) = opts.tee_label
+                && let Some(hint) =
                     crate::core::tee::tee_and_hint(&result.raw, label, result.exit_code)
-                {
-                    println!("{}", hint);
-                }
+            {
+                println!("{}", hint);
             }
 
             timer.track(

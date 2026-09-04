@@ -29,7 +29,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let has_tb_flag = args.iter().any(|a| a.starts_with("--tb"));
     let has_quiet_flag = args.iter().any(|a| a == "-q" || a == "--quiet");
     // Only treat a short `-r…` as pytest's report flag (not `--randomly-seed` etc.)
-    let has_report_flag = args.iter().any(|a| a.starts_with("-r") && !a.starts_with("--"));
+    let has_report_flag = args
+        .iter()
+        .any(|a| a.starts_with("-r") && !a.starts_with("--"));
 
     if !has_tb_flag {
         cmd.arg("--tb=short");
@@ -225,7 +227,9 @@ fn build_pytest_summary(
         if xfail_lines.len() > MAX_XFAIL {
             result.push_str(&format!("  … +{} more\n", xfail_lines.len() - MAX_XFAIL));
             let all_xfail = xfail_lines.join("\n");
-            if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_xfail, "pytest-xfail", MAX_XFAIL + 1) {
+            if let Some(hint) =
+                crate::core::tee::force_tee_tail_hint(&all_xfail, "pytest-xfail", MAX_XFAIL + 1)
+            {
                 result.push_str(&format!("  {}\n", hint));
             }
         }
@@ -423,10 +427,7 @@ collected 0 items
         assert_eq!((c.passed, c.failed, c.skipped), (3, 1, 2));
 
         let c = parse_summary_line("=== 2 passed, 1 failed, 2 xfailed, 1 xpassed in 1.0s ===");
-        assert_eq!(
-            (c.passed, c.failed, c.xfailed, c.xpassed),
-            (2, 1, 2, 1)
-        );
+        assert_eq!((c.passed, c.failed, c.xfailed, c.xpassed), (2, 1, 2, 1));
     }
 
     #[test]
@@ -453,10 +454,7 @@ collected 0 items
             .lines()
             .filter(|l| l.trim().starts_with("XFAIL"))
             .count();
-        assert!(
-            listed <= 10,
-            "MAX_XFAIL cap not enforced: listed {listed}"
-        );
+        assert!(listed <= 10, "MAX_XFAIL cap not enforced: listed {listed}");
         assert!(result.contains("… +5 more"), "missing '+N more': {result}");
     }
 

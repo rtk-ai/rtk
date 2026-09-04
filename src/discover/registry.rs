@@ -6,10 +6,10 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use super::lexer::{
-    advance_quote_state, coalesce_words, is_crlf_at, shell_split, split_on_operators, tokenize,
-    tokenize_with_newlines, ParsedToken, PipeKind, TokenKind,
+    ParsedToken, PipeKind, TokenKind, advance_quote_state, coalesce_words, is_crlf_at, shell_split,
+    split_on_operators, tokenize, tokenize_with_newlines,
 };
-use super::rules::{RtkRule, IGNORED_EXACT, IGNORED_PREFIXES, RULES};
+use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
 
@@ -337,13 +337,12 @@ fn normalize_php_tool_path(path: &str) -> String {
         normalized = stripped.to_string();
     }
 
-    if let Some((stem, ext)) = normalized.rsplit_once('.') {
-        if ["bat", "cmd", "exe", "ps1"]
+    if let Some((stem, ext)) = normalized.rsplit_once('.')
+        && ["bat", "cmd", "exe", "ps1"]
             .iter()
             .any(|candidate| ext.eq_ignore_ascii_case(candidate))
-        {
-            normalized = stem.to_string();
-        }
+    {
+        normalized = stem.to_string();
     }
 
     normalized
@@ -404,10 +403,10 @@ fn parse_golangci_run_parts(cmd: &str) -> Option<GolangciRunParts<'_>> {
             return None;
         }
 
-        if let Some(flag) = split_golangci_flag_name(token) {
-            if golangci_flag_takes_separate_value(token, flag) {
-                i += 1;
-            }
+        if let Some(flag) = split_golangci_flag_name(token)
+            && golangci_flag_takes_separate_value(token, flag)
+        {
+            i += 1;
         }
 
         i += 1;
@@ -957,11 +956,7 @@ fn rewrite_multiline_block(
         i = end + 1;
     }
 
-    if any_changed {
-        Some(result)
-    } else {
-        None
-    }
+    if any_changed { Some(result) } else { None }
 }
 
 /// Pipeline boundaries used to rewrite its final stage.
@@ -1161,11 +1156,7 @@ fn rewrite_compound(
     }
     result.push_str(&rewritten);
 
-    if any_changed {
-        Some(result)
-    } else {
-        None
-    }
+    if any_changed { Some(result) } else { None }
 }
 
 fn rewrite_line_range(cmd: &str) -> Option<String> {
@@ -2998,10 +2989,10 @@ mod tests {
             .ok()
             .and_then(|p| std::fs::metadata(p).ok())
             .and_then(|m| m.modified().ok());
-        if let (Some(rtk_t), Some(test_t)) = (rtk_mtime, test_mtime) {
-            if rtk_t < test_t {
-                return;
-            }
+        if let (Some(rtk_t), Some(test_t)) = (rtk_mtime, test_mtime)
+            && rtk_t < test_t
+        {
+            return;
         }
 
         let output = std::process::Command::new(&rtk_bin)
@@ -5185,11 +5176,13 @@ mod tests {
             );
         }
         // A different PHP tool is untouched.
-        assert!(rewrite_command_no_prefixes(
-            "php vendor/bin/phpstan analyse src",
-            &["phpunit".to_string()]
-        )
-        .is_some());
+        assert!(
+            rewrite_command_no_prefixes(
+                "php vendor/bin/phpstan analyse src",
+                &["phpunit".to_string()]
+            )
+            .is_some()
+        );
     }
 
     #[test]

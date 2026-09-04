@@ -311,7 +311,8 @@ error: PackageNotFound - "nonexistent-pkg" not found in registry
 
     #[test]
     fn test_filter_bun_install_handles_remove() {
-        let output = "bun remove v1.2.20 (6ad208bc)\n- express@4.18.2\n1 package removed [7.00ms]\n";
+        let output =
+            "bun remove v1.2.20 (6ad208bc)\n- express@4.18.2\n1 package removed [7.00ms]\n";
         let result = filter_bun_pkg(output);
         assert!(!result.contains("bun remove v1.2.20"));
         assert!(result.contains("- express@4.18.2"));
@@ -370,7 +371,10 @@ error: PackageNotFound - "nonexistent-pkg" not found in registry
         let raw = include_str!("../../../tests/fixtures/bun_pm_ls_all_raw.txt");
         let out = filter_bun_pm_ls(raw);
         assert!(out.starts_with("68 deps"), "{out}");
-        assert!(!out.contains('\u{251c}'), "tree glyphs must be stripped: {out}");
+        assert!(
+            !out.contains('\u{251c}'),
+            "tree glyphs must be stripped: {out}"
+        );
 
         let json = r#"{"express": {"version": "4.18.2"}}"#;
         let out = filter_bun_pm_ls(json);
@@ -383,7 +387,8 @@ error: PackageNotFound - "nonexistent-pkg" not found in registry
 
     #[test]
     fn test_filter_bun_pm_ls_text_strips_ansi() {
-        let raw = "\x1b[31merror: No package.json was found\x1b[0m\n\x1b[2mnote: Run bun init\x1b[0m";
+        let raw =
+            "\x1b[31merror: No package.json was found\x1b[0m\n\x1b[2mnote: Run bun init\x1b[0m";
         let out = filter_bun_pm_ls_text(raw);
         assert!(!out.contains('\x1b'), "{out:?}");
         assert!(out.contains("No package.json"), "{out}");

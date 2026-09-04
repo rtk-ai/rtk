@@ -12,14 +12,14 @@ use std::collections::HashMap;
 
 use provider::{ClaudeProvider, SessionProvider};
 use registry::{
-    category_avg_tokens, classify_command, split_command_chain, strip_disabled_prefix,
-    Classification, ExcludePattern,
+    Classification, ExcludePattern, category_avg_tokens, classify_command, split_command_chain,
+    strip_disabled_prefix,
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
 use crate::core::tracking::{HookDecisionRecord, Tracker};
 use crate::discover::registry::prefix_contains_rtk_disabled;
-use crate::hooks::hook_check::{status as hook_status, HookStatus};
+use crate::hooks::hook_check::{HookStatus, status as hook_status};
 use crate::hooks::permissions::{self, PermissionVerdict};
 
 /// Whether a `Supported` command was actually routed through RTK, and how
@@ -604,11 +604,7 @@ pub fn run(
 /// Extract the subcommand from a command string (second word).
 fn extract_subcmd(cmd: &str) -> &str {
     let parts: Vec<&str> = cmd.trim().splitn(3, char::is_whitespace).collect();
-    if parts.len() >= 2 {
-        parts[1]
-    } else {
-        ""
-    }
+    if parts.len() >= 2 { parts[1] } else { "" }
 }
 
 /// Truncate a command for display (keep first meaningful portion).

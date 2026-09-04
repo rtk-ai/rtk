@@ -58,8 +58,8 @@ where
 fn docker_ps(_verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let base = exec_capture(resolved_command("docker").args(["ps"]))
-        .context("Failed to run docker ps")?;
+    let base =
+        exec_capture(resolved_command("docker").args(["ps"])).context("Failed to run docker ps")?;
     if !base.success() {
         eprint!("{}", base.stderr);
         print!("{}", base.stdout);
@@ -119,7 +119,12 @@ fn docker_ps_all(_verbose: u8) -> Result<i32> {
     if !base.success() {
         eprint!("{}", base.stderr);
         print!("{}", base.stdout);
-        timer.track("docker ps -a", "rtk docker ps -a", &base.stdout, &base.stdout);
+        timer.track(
+            "docker ps -a",
+            "rtk docker ps -a",
+            &base.stdout,
+            &base.stdout,
+        );
         return Ok(base.exit_code);
     }
     let raw = base.stdout;
@@ -186,7 +191,11 @@ fn docker_ps_all(_verbose: u8) -> Result<i32> {
         }
     }
     if truncated {
-        let full: String = running_lines.iter().chain(stopped_lines.iter()).cloned().collect();
+        let full: String = running_lines
+            .iter()
+            .chain(stopped_lines.iter())
+            .cloned()
+            .collect();
         if let Some(hint) = crate::core::tee::force_tee_hint(&full, "docker-ps-a") {
             rtk.push_str(&format!("{}\n", hint));
         }
@@ -235,7 +244,12 @@ fn docker_images(_verbose: u8) -> Result<i32> {
     if !base.success() {
         eprint!("{}", base.stderr);
         print!("{}", base.stdout);
-        timer.track("docker images", "rtk docker images", &base.stdout, &base.stdout);
+        timer.track(
+            "docker images",
+            "rtk docker images",
+            &base.stdout,
+            &base.stdout,
+        );
         return Ok(base.exit_code);
     }
     let raw = base.stdout;
@@ -267,10 +281,10 @@ fn docker_images(_verbose: u8) -> Result<i32> {
                 if let Ok(n) = size_str.replace("GB", "").trim().parse::<f64>() {
                     total_size_mb += n * 1024.0;
                 }
-            } else if size_str.contains("MB") {
-                if let Ok(n) = size_str.replace("MB", "").trim().parse::<f64>() {
-                    total_size_mb += n;
-                }
+            } else if size_str.contains("MB")
+                && let Ok(n) = size_str.replace("MB", "").trim().parse::<f64>()
+            {
+                total_size_mb += n;
             }
         }
     }
@@ -308,7 +322,9 @@ fn docker_images(_verbose: u8) -> Result<i32> {
     }
     if image_lines.len() > MAX_IMAGES {
         rtk.push_str(&format!("  … +{} more\n", image_lines.len() - MAX_IMAGES));
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&full_rtk, "docker-images", MAX_IMAGES + 2) {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&full_rtk, "docker-images", MAX_IMAGES + 2)
+        {
             rtk.push_str(&format!("{}\n", hint));
         }
     }
@@ -385,11 +401,11 @@ fn format_kubectl_pods(json: &Value) -> String {
             _ => {
                 if let Some(containers) = pod["status"]["containerStatuses"].as_array() {
                     for c in containers {
-                        if let Some(w) = c["state"]["waiting"]["reason"].as_str() {
-                            if w.contains("CrashLoop") || w.contains("Error") {
-                                failed += 1;
-                                issues.push(format!("{}/{} {}", ns, name, w));
-                            }
+                        if let Some(w) = c["state"]["waiting"]["reason"].as_str()
+                            && (w.contains("CrashLoop") || w.contains("Error"))
+                        {
+                            failed += 1;
+                            issues.push(format!("{}/{} {}", ns, name, w));
                         }
                     }
                 }
@@ -421,9 +437,11 @@ fn format_kubectl_pods(json: &Value) -> String {
         if issues.len() > MAX_PODS_ISSUES {
             out.push_str(&format!("  … +{} more", issues.len() - MAX_PODS_ISSUES));
             let all_issues = issues.join("\n");
-            if let Some(hint) =
-                crate::core::tee::force_tee_tail_hint(&all_issues, "kubectl-pods", MAX_PODS_ISSUES + 1)
-            {
+            if let Some(hint) = crate::core::tee::force_tee_tail_hint(
+                &all_issues,
+                "kubectl-pods",
+                MAX_PODS_ISSUES + 1,
+            ) {
                 out.push_str(&format!(" {}", hint));
             }
         }
@@ -480,11 +498,16 @@ fn format_kubectl_services(json: &Value) -> String {
         out.push_str(&format!("{}\n", line));
     }
     if all_lines.len() > MAX_KUBECTL_SERVICES {
-        out.push_str(&format!("  … +{} more", all_lines.len() - MAX_KUBECTL_SERVICES));
+        out.push_str(&format!(
+            "  … +{} more",
+            all_lines.len() - MAX_KUBECTL_SERVICES
+        ));
         let all_text = all_lines.join("\n");
-        if let Some(hint) =
-            crate::core::tee::force_tee_tail_hint(&all_text, "kubectl-services", MAX_KUBECTL_SERVICES + 1)
-        {
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(
+            &all_text,
+            "kubectl-services",
+            MAX_KUBECTL_SERVICES + 1,
+        ) {
             out.push_str(&format!(" {}", hint));
         }
         out.push('\n');
@@ -557,7 +580,10 @@ pub fn format_compose_ps(raw: &str) -> String {
                     format!(" [{}]", compact)
                 }
             };
-            Some(format!("  {} ({}) {}{}", name, short_image, status, port_str))
+            Some(format!(
+                "  {} ({}) {}{}",
+                name, short_image, status, port_str
+            ))
         })
         .collect();
 
@@ -566,9 +592,14 @@ pub fn format_compose_ps(raw: &str) -> String {
         result.push('\n');
     }
     if all_formatted.len() > MAX_COMPOSE_SERVICES {
-        result.push_str(&format!("  … +{} more\n", all_formatted.len() - MAX_COMPOSE_SERVICES));
+        result.push_str(&format!(
+            "  … +{} more\n",
+            all_formatted.len() - MAX_COMPOSE_SERVICES
+        ));
         let all_text = all_formatted.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "compose-ps", MAX_COMPOSE_SERVICES + 1) {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_text, "compose-ps", MAX_COMPOSE_SERVICES + 1)
+        {
             result.push_str(&format!("  {}\n", hint));
         }
     }
@@ -618,13 +649,13 @@ pub fn format_compose_build(raw: &str) -> String {
     // find('[') returns byte offset — use byte slicing throughout
     // '[' and ']' are single-byte ASCII, so byte arithmetic is safe
     for line in raw.lines() {
-        if let Some(start) = line.find('[') {
-            if let Some(end) = line[start + 1..].find(']') {
-                let bracket = &line[start + 1..start + 1 + end];
-                let svc = bracket.split_whitespace().next().unwrap_or("");
-                if !svc.is_empty() && svc != "+" && !services.contains(&svc.to_string()) {
-                    services.push(svc.to_string());
-                }
+        if let Some(start) = line.find('[')
+            && let Some(end) = line[start + 1..].find(']')
+        {
+            let bracket = &line[start + 1..start + 1 + end];
+            let svc = bracket.split_whitespace().next().unwrap_or("");
+            if !svc.is_empty() && svc != "+" && !services.contains(&svc.to_string()) {
+                services.push(svc.to_string());
             }
         }
     }
@@ -659,11 +690,7 @@ fn compact_ports(ports: &str) -> String {
     if port_nums.len() <= 3 {
         port_nums.join(", ")
     } else {
-        format!(
-            "{}, … +{}",
-            port_nums[..2].join(", "),
-            port_nums.len() - 2
-        )
+        format!("{}, … +{}", port_nums[..2].join(", "), port_nums.len() - 2)
     }
 }
 
@@ -709,8 +736,16 @@ pub fn run_compose_ps(all: bool, verbose: u8) -> Result<i32> {
     let rtk = format_compose_ps(&structured);
     let shown = never_worse(&raw, &rtk);
     println!("{}", shown);
-    let label = if all { "docker compose ps -a" } else { "docker compose ps" };
-    let rtk_label = if all { "rtk docker compose ps -a" } else { "rtk docker compose ps" };
+    let label = if all {
+        "docker compose ps -a"
+    } else {
+        "docker compose ps"
+    };
+    let rtk_label = if all {
+        "rtk docker compose ps -a"
+    } else {
+        "rtk docker compose ps"
+    };
     timer.track(label, rtk_label, &raw, shown);
     Ok(0)
 }
@@ -952,14 +987,20 @@ api-1  | Connected to database";
 
     #[test]
     fn test_compact_ports_many() {
-        let result = compact_ports("0.0.0.0:80->80/tcp, 0.0.0.0:443->443/tcp, 0.0.0.0:8080->8080/tcp, 0.0.0.0:9090->9090/tcp");
+        let result = compact_ports(
+            "0.0.0.0:80->80/tcp, 0.0.0.0:443->443/tcp, 0.0.0.0:8080->8080/tcp, 0.0.0.0:9090->9090/tcp",
+        );
         assert!(result.contains("…"), "should truncate for >3 ports");
     }
 
     #[test]
     fn test_k8s_get_target_pods_aliases() {
         for resource in ["po", "pod", "pods"] {
-            let args = vec![resource.to_string(), "-n".to_string(), "default".to_string()];
+            let args = vec![
+                resource.to_string(),
+                "-n".to_string(),
+                "default".to_string(),
+            ];
 
             assert_eq!(
                 k8s_get_target(&args),

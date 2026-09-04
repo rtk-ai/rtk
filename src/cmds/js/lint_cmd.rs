@@ -4,7 +4,7 @@ use crate::core::config;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_ERRORS, CAP_WARNINGS};
-use crate::core::utils::{resolved_command, tool_exec, truncate, MissingTool};
+use crate::core::utils::{MissingTool, resolved_command, tool_exec, truncate};
 use crate::mypy_cmd;
 use crate::ruff_cmd;
 use anyhow::{Context, Result};
@@ -75,7 +75,10 @@ fn strip_pm_prefix(args: &[String]) -> usize {
 /// The package runner named at the front of the args, if any. `bunx eslint`
 /// and `pnpm exec eslint` both name one; a bare `exec` does not.
 fn named_runner(args: &[String], skip: usize) -> Option<&str> {
-    args[..skip].iter().map(String::as_str).find(|a| *a != "exec")
+    args[..skip]
+        .iter()
+        .map(String::as_str)
+        .find(|a| *a != "exec")
 }
 
 /// Detect the linter name from args (after stripping PM prefixes).
@@ -405,7 +408,6 @@ fn filter_pylint_json(output: &str) -> String {
         result.push('\n');
     }
 
-
     // Show top symbols (rules)
     let mut symbol_counts: Vec<_> = by_symbol.iter().collect();
     symbol_counts.sort_by(|a, b| b.1.cmp(a.1));
@@ -441,7 +443,10 @@ fn filter_pylint_json(output: &str) -> String {
     }
 
     if file_counts.len() > MAX_FILES {
-        result.push_str(&format!("\n… +{} more files\n", file_counts.len() - MAX_FILES));
+        result.push_str(&format!(
+            "\n… +{} more files\n",
+            file_counts.len() - MAX_FILES
+        ));
         let all_file_lines = file_counts
             .iter()
             .map(|(file, count)| format!("{} ({} issues)", compact_path(file), count))
@@ -723,11 +728,17 @@ mod tests {
 
     #[test]
     fn test_named_runner_recovers_the_stripped_prefix() {
-        let args: Vec<String> = ["bunx", "eslint", "."].iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = ["bunx", "eslint", "."]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let skip = strip_pm_prefix(&args);
         assert_eq!(named_runner(&args, skip), Some("bunx"));
 
-        let args: Vec<String> = ["pnpm", "exec", "eslint"].iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = ["pnpm", "exec", "eslint"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let skip = strip_pm_prefix(&args);
         assert_eq!(named_runner(&args, skip), Some("pnpm"));
 
@@ -736,4 +747,3 @@ mod tests {
         assert_eq!(named_runner(&args, skip), None);
     }
 }
-

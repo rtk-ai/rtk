@@ -759,7 +759,7 @@ Levels:
 │ -vvv    │ + Raw output before filtering                        │
 └─────────┴──────────────────────────────────────────────────────┘
 
-Example (git.rs:67-69):
+Example (git_cmd.rs:67-69):
 if verbose > 0 {
     eprintln!("Git diff summary:");
 }
@@ -833,7 +833,7 @@ std::process::exit(1)
 │                    Exit Code Handling Strategy                         │
 └────────────────────────────────────────────────────────────────────────┘
 
-Standard Pattern (git.rs:45-48, PR #5):
+Standard Pattern (git_cmd.rs:45-48, PR #5):
 
 let output = Command::new("git").args(args).output()?;
 
@@ -859,7 +859,7 @@ Why This Matters:
 • Git workflows require proper exit code propagation (PR #5 fix)
 
 Modules with Exit Code Preservation:
-• git.rs (all git commands)
+• git_cmd.rs (all git commands)
 • lint_cmd.rs (linter failures)
 • tsc_cmd.rs (TypeScript errors)
 • vitest_cmd.rs (test failures)

@@ -457,10 +457,9 @@ fn collect_match_patterns() -> Vec<String> {
             status,
             crate::hooks::trust::TrustStatus::Trusted
                 | crate::hooks::trust::TrustStatus::EnvOverride
-        ) {
-            if let Some(content) = content {
-                patterns.extend(match_patterns_in(&content));
-            }
+        ) && let Some(content) = content
+        {
+            patterns.extend(match_patterns_in(&content));
         }
     }
     patterns.extend(match_patterns_in(BUILTIN_TOML));
@@ -609,10 +608,10 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
         let blob = lines.join("\n");
         for rule in &filter.match_output {
             if rule.pattern.is_match(&blob) {
-                if let Some(ref unless_re) = rule.unless {
-                    if unless_re.is_match(&blob) {
-                        continue; // errors/warnings present — skip this rule
-                    }
+                if let Some(ref unless_re) = rule.unless
+                    && unless_re.is_match(&blob)
+                {
+                    continue; // errors/warnings present — skip this rule
                 }
                 return (rule.message.clone(), Lossiness::Whole);
             }
@@ -664,32 +663,32 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
             lines.push(format!("... ({} lines omitted)", total - head));
             head_cut = Some(head);
         }
-    } else if let Some(tail) = filter.tail_lines {
-        if total > tail {
-            let omitted = total - tail;
-            lines = lines[omitted..].to_vec();
-            lines.insert(0, format!("... ({} lines omitted)", omitted));
-            noncontiguous_drop = true;
-        }
+    } else if let Some(tail) = filter.tail_lines
+        && total > tail
+    {
+        let omitted = total - tail;
+        lines = lines[omitted..].to_vec();
+        lines.insert(0, format!("... ({} lines omitted)", omitted));
+        noncontiguous_drop = true;
     }
 
     // 7. max_lines — absolute cap applied after head/tail (includes omit messages)
     let mut max_cut: Option<usize> = None;
-    if let Some(max) = filter.max_lines {
-        if lines.len() > max {
-            let dropped = lines.len() - max;
-            lines.truncate(max);
-            lines.push(format!("... ({} lines truncated)", dropped));
-            max_cut = Some(max);
-        }
+    if let Some(max) = filter.max_lines
+        && lines.len() > max
+    {
+        let dropped = lines.len() - max;
+        lines.truncate(max);
+        lines.push(format!("... ({} lines truncated)", dropped));
+        max_cut = Some(max);
     }
 
     // 8. on_empty
     let result = lines.join("\n");
-    if result.trim().is_empty() {
-        if let Some(ref msg) = filter.on_empty {
-            return (msg.clone(), Lossiness::None);
-        }
+    if result.trim().is_empty()
+        && let Some(ref msg) = filter.on_empty
+    {
+        return (msg.clone(), Lossiness::None);
     }
 
     let loss = if let Some(snapshot) = pre_cut {
@@ -806,10 +805,10 @@ fn collect_test_outcomes(
 
     // Run tests
     for (filter_name, tests) in file.tests {
-        if let Some(name) = filter_name_opt {
-            if filter_name != name {
-                continue;
-            }
+        if let Some(name) = filter_name_opt
+            && filter_name != name
+        {
+            continue;
         }
 
         tested_filter_names.insert(filter_name.clone());
@@ -2144,9 +2143,11 @@ match_command = "^make\\b"
         let unanchored =
             "schema_version = 1\n[filters.mytool]\nmatch_command = \"(?:^|/)mytool\\\\b\"\n";
         assert!(match_patterns_in(unanchored).is_empty());
-        assert!(TomlFilterRegistry::parse_and_compile(unanchored, "test")
-            .expect("schema is valid")
-            .is_empty());
+        assert!(
+            TomlFilterRegistry::parse_and_compile(unanchored, "test")
+                .expect("schema is valid")
+                .is_empty()
+        );
 
         let anchored = "schema_version = 1\n[filters.mytool]\nmatch_command = \"^mytool\\\\b\"\n";
         assert_eq!(match_patterns_in(anchored), vec!["^mytool\\b".to_string()]);

@@ -1,7 +1,7 @@
 [package]
 name = "rtk"
 version = "0.42.4"
-edition = "2021"
+edition = "2024"
 rust-version = "1.91"
 authors = ["Patrick Szymkowiak"]
 description = "Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption"
@@ -40,7 +40,6 @@ getrandom = "0.4"
 flate2 = "1.0"
 quick-xml = "0.37"
 which = "8"
-automod = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -53,6 +52,12 @@ windows-sys = { version = "0.59", features = [
 
 [build-dependencies]
 toml = "0.8"
+
+[dev-dependencies]
+# Safe, closure-scoped env mutation for tests. std::env::set_var is unsafe
+# in edition 2024 and has no safe std replacement; temp-env restores the
+# previous value on completion or panic and serializes callers internally.
+temp-env = "0.3"
 
 [profile.release]
 opt-level = 3

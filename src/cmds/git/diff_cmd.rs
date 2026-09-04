@@ -152,10 +152,12 @@ fn format_classic_diff(diff: &DiffResult) -> String {
                     out.push_str(&format!("> {}\n", line));
                 }
             }
-            DiffChange::Removed(start, _) if matches!(
-                diff.changes.get(index + 1),
-                Some(DiffChange::Added(line, _)) if line == start
-            ) => {
+            DiffChange::Removed(start, _)
+                if matches!(
+                    diff.changes.get(index + 1),
+                    Some(DiffChange::Added(line, _)) if line == start
+                ) =>
+            {
                 let start = *start;
                 let mut end = start;
                 let mut old_lines = Vec::new();
@@ -522,8 +524,7 @@ mod tests {
 
     #[test]
     fn test_render_identical_files_exit_zero() {
-        let (out, code) =
-            render_test_diff("a.yaml", "b.yaml", "a: 1\nb: 2\n", "a: 1\nb: 2\n");
+        let (out, code) = render_test_diff("a.yaml", "b.yaml", "a: 1\nb: 2\n", "a: 1\nb: 2\n");
         assert!(out.contains("[ok] Files are identical"));
         assert_eq!(code, 0);
     }
@@ -539,12 +540,7 @@ mod tests {
 
     #[test]
     fn test_render_crlf_vs_lf_not_identical() {
-        let (out, code) = render_test_diff(
-            "a.txt",
-            "b.txt",
-            "alpha\nbeta\n",
-            "alpha\r\nbeta\r\n",
-        );
+        let (out, code) = render_test_diff("a.txt", "b.txt", "alpha\nbeta\n", "alpha\r\nbeta\r\n");
         assert!(
             !out.contains("identical"),
             "CRLF-vs-LF difference reported as identical:\n{}",
@@ -555,7 +551,10 @@ mod tests {
             "expected the whitespace/line-ending message, got:\n{}",
             out
         );
-        assert_eq!(code, 1, "byte-different files must exit 1 (diff convention)");
+        assert_eq!(
+            code, 1,
+            "byte-different files must exit 1 (diff convention)"
+        );
     }
 
     #[test]
@@ -580,8 +579,7 @@ mod tests {
     fn test_never_worse_fallback_is_a_classic_diff() {
         let diff = compute_diff(&["alpha beta"], &["alpha zzzz"]);
         let fallback = format_classic_diff(&diff);
-        let (rendered, code) =
-            render_diff(Path::new("before"), Path::new("after"), &diff, false);
+        let (rendered, code) = render_diff(Path::new("before"), Path::new("after"), &diff, false);
         let shown = select_file_diff_output(&diff, &fallback, &rendered);
 
         assert_eq!(code, 1);
@@ -727,8 +725,7 @@ diff --git a/b.rs b/b.rs
         assert!(
             !result.lines().any(|l| {
                 let trimmed = l.trim_start();
-                trimmed.len() != l.len()
-                    && (trimmed.starts_with('+') || trimmed.starts_with('-'))
+                trimmed.len() != l.len() && (trimmed.starts_with('+') || trimmed.starts_with('-'))
             }),
             "change lines must not be indented:\n{}",
             result

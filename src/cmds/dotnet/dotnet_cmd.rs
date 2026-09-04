@@ -9,8 +9,8 @@ use crate::core::utils::{resolved_command, truncate};
 use crate::dotnet_format_report;
 use crate::dotnet_trx;
 use anyhow::{Context, Result};
-use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::events::Event;
 use serde_json::Value;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -65,10 +65,8 @@ pub fn run_format(args: &[String], verbose: u8) -> Result<i32> {
         shown,
     );
 
-    if cleanup_report_path {
-        if let Some(path) = report_path.as_deref() {
-            cleanup_temp_file(path);
-        }
+    if cleanup_report_path && let Some(path) = report_path.as_deref() {
+        cleanup_temp_file(path);
     }
 
     Ok(result.exit_code)
@@ -239,10 +237,8 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
     );
 
     cleanup_temp_file(&binlog_path);
-    if cleanup_trx_results_dir {
-        if let Some(dir) = trx_results_dir.as_deref() {
-            cleanup_temp_dir(dir);
-        }
+    if cleanup_trx_results_dir && let Some(dir) = trx_results_dir.as_deref() {
+        cleanup_temp_dir(dir);
     }
 
     if verbose > 0 {
@@ -312,11 +308,11 @@ fn build_effective_dotnet_format_args(args: &[String], report_path: Option<&Path
         effective.push("--verify-no-changes".to_string());
     }
 
-    if !has_report_arg(args) {
-        if let Some(path) = report_path {
-            effective.push("--report".to_string());
-            effective.push(path.display().to_string());
-        }
+    if !has_report_arg(args)
+        && let Some(path) = report_path
+    {
+        effective.push("--report".to_string());
+        effective.push(path.display().to_string());
     }
 
     effective
@@ -400,7 +396,10 @@ fn format_dotnet_format_output(
     }
 
     if changed_count > MAX_FORMAT_FILES {
-        output.push_str(&format!("\n… +{} more files", changed_count - MAX_FORMAT_FILES));
+        output.push_str(&format!(
+            "\n… +{} more files",
+            changed_count - MAX_FORMAT_FILES
+        ));
         let all_files = summary
             .files_with_changes
             .iter()
@@ -451,10 +450,10 @@ fn merge_test_summary_from_trx(
         }
     }
 
-    if trx_summary.is_none() {
-        if let Some(trx) = fallback_trx_path {
-            trx_summary = dotnet_trx::parse_trx_file_since(&trx, command_started_at);
-        }
+    if trx_summary.is_none()
+        && let Some(trx) = fallback_trx_path
+    {
+        trx_summary = dotnet_trx::parse_trx_file_since(&trx, command_started_at);
     }
 
     let Some(trx_summary) = trx_summary else {
@@ -518,11 +517,11 @@ fn build_effective_dotnet_args(
                     effective.push("--logger".to_string());
                     effective.push("trx".to_string());
                 }
-                if !has_results_directory_arg(args) {
-                    if let Some(results_dir) = trx_results_dir {
-                        effective.push("--results-directory".to_string());
-                        effective.push(results_dir.display().to_string());
-                    }
+                if !has_results_directory_arg(args)
+                    && let Some(results_dir) = trx_results_dir
+                {
+                    effective.push("--results-directory".to_string());
+                    effective.push(results_dir.display().to_string());
                 }
                 effective.extend(args.iter().cloned());
             }
@@ -618,10 +617,10 @@ fn scan_mtp_kind_in_file(path: &Path) -> MtpProjectKind {
                 );
             }
             Ok(Event::Text(e)) if inside_mtp_element => {
-                if let Ok(text) = e.unescape() {
-                    if text.trim().eq_ignore_ascii_case("true") {
-                        return MtpProjectKind::VsTestBridge;
-                    }
+                if let Ok(text) = e.unescape()
+                    && text.trim().eq_ignore_ascii_case("true")
+                {
+                    return MtpProjectKind::VsTestBridge;
                 }
             }
             Ok(Event::End(_)) => inside_mtp_element = false,
@@ -759,10 +758,10 @@ fn has_trx_logger_arg(args: &[String]) -> bool {
         }
 
         for prefix in ["--logger:", "--logger="] {
-            if let Some(value) = lower.strip_prefix(prefix) {
-                if value == "trx" || value.starts_with("trx;") {
-                    return true;
-                }
+            if let Some(value) = lower.strip_prefix(prefix)
+                && (value == "trx" || value.starts_with("trx;"))
+            {
+                return true;
             }
         }
     }
@@ -813,14 +812,13 @@ fn extract_report_arg(args: &[String]) -> Option<PathBuf> {
             continue;
         }
 
-        if let Some((_, value)) = arg.split_once('=') {
-            if arg
+        if let Some((_, value)) = arg.split_once('=')
+            && arg
                 .split('=')
                 .next()
                 .is_some_and(|key| key.eq_ignore_ascii_case("--report"))
-            {
-                return Some(PathBuf::from(value));
-            }
+        {
+            return Some(PathBuf::from(value));
         }
     }
 
@@ -848,14 +846,13 @@ fn extract_results_directory_arg(args: &[String]) -> Option<PathBuf> {
             continue;
         }
 
-        if let Some((_, value)) = arg.split_once('=') {
-            if arg
+        if let Some((_, value)) = arg.split_once('=')
+            && arg
                 .split('=')
                 .next()
                 .is_some_and(|key| key.eq_ignore_ascii_case("--results-directory"))
-            {
-                return Some(PathBuf::from(value));
-            }
+        {
+            return Some(PathBuf::from(value));
         }
     }
 
@@ -1267,7 +1264,12 @@ fn format_test_output(
 
     // Status line emitted last; see format_build_output (issue #1574).
     // Warnings before errors: errors survive `| tail -N` immediately above the verdict.
-    [failed_tests_section, warnings_section, errors_section, header]
+    [
+        failed_tests_section,
+        warnings_section,
+        errors_section,
+        header,
+    ]
     .into_iter()
     .filter(|s| !s.is_empty())
     .collect::<Vec<_>>()
@@ -1548,8 +1550,7 @@ mod tests {
         // The raw stdout contains the inline failure; the filtered section also
         // contains it. With needs_raw_fallback=false, the failure must appear once.
         let raw_stdout = "  failed MyTests.HasRestriction\n    Assert.True() Failure";
-        let filtered =
-            "Failed Tests:\n  MyTests.HasRestriction\n    Assert.True() Failure\n\nfail dotnet test: 717 passed, 5 failed";
+        let filtered = "Failed Tests:\n  MyTests.HasRestriction\n    Assert.True() Failure\n\nfail dotnet test: 717 passed, 5 failed";
         let output = compose_failure_output(false, false, raw_stdout, "", filtered);
 
         assert_eq!(output, filtered);
@@ -1938,9 +1939,11 @@ mod tests {
         assert_eq!(merged.skipped, 8);
         assert_eq!(merged.total, 948);
         assert_eq!(merged.failed_tests.len(), 1);
-        assert!(merged.failed_tests[0]
-            .name
-            .contains("CreateInstance_should_initialize"));
+        assert!(
+            merged.failed_tests[0]
+                .name
+                .contains("CreateInstance_should_initialize")
+        );
     }
 
     #[test]
@@ -2101,12 +2104,16 @@ mod tests {
         ];
 
         let injected = build_dotnet_args_for_test("test", &args, true);
-        assert!(!injected
-            .windows(2)
-            .any(|w| w[0] == "--results-directory" && w[1] == "/tmp/test results"));
-        assert!(injected
-            .windows(2)
-            .any(|w| w[0] == "--results-directory" && w[1] == "/custom/results"));
+        assert!(
+            !injected
+                .windows(2)
+                .any(|w| w[0] == "--results-directory" && w[1] == "/tmp/test results")
+        );
+        assert!(
+            injected
+                .windows(2)
+                .any(|w| w[0] == "--results-directory" && w[1] == "/custom/results")
+        );
     }
 
     #[test]

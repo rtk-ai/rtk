@@ -267,11 +267,12 @@ pub fn filter_ruff_format(output: &str) -> String {
                     let words: Vec<&str> = part.split_whitespace().collect();
                     // Look for number before "file" or "files"
                     for (i, word) in words.iter().enumerate() {
-                        if (word == &"file" || word == &"files") && i > 0 {
-                            if let Ok(count) = words[i - 1].parse::<usize>() {
-                                files_checked = count;
-                                break;
-                            }
+                        if (word == &"file" || word == &"files")
+                            && i > 0
+                            && let Ok(count) = words[i - 1].parse::<usize>()
+                        {
+                            files_checked = count;
+                            break;
                         }
                     }
                     break;

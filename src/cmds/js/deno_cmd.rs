@@ -209,7 +209,12 @@ error: Module not found "https://deno.land/x/nonexistent/mod.ts"
 
     #[test]
     fn test_chose_output_format_detects_a_named_reporter() {
-        for a in ["--reporter=junit", "--reporter", "--junit-path", "--junit-path=r.xml"] {
+        for a in [
+            "--reporter=junit",
+            "--reporter",
+            "--junit-path",
+            "--junit-path=r.xml",
+        ] {
             let args = vec![a.to_string()];
             assert!(chose_output_format(&args), "{a}");
         }
@@ -219,4 +224,3 @@ error: Module not found "https://deno.land/x/nonexistent/mod.ts"
         }
     }
 }
-

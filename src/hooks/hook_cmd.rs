@@ -6,7 +6,7 @@
 use super::constants::PRE_TOOL_USE_KEY;
 use super::permissions::{self, PermissionVerdict};
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{self, Read, Write};
 
 use crate::core::tracking::HookOutcome;
@@ -103,16 +103,14 @@ fn detect_format(v: &Value) -> HookFormat {
         if matches!(
             tool_name,
             "runTerminalCommand" | "run_in_terminal" | "Bash" | "bash"
-        ) {
-            if let Some(cmd) = v
-                .pointer("/tool_input/command")
-                .and_then(|c| c.as_str())
-                .filter(|c| !c.is_empty())
-            {
-                return HookFormat::VsCode {
-                    command: cmd.to_string(),
-                };
-            }
+        ) && let Some(cmd) = v
+            .pointer("/tool_input/command")
+            .and_then(|c| c.as_str())
+            .filter(|c| !c.is_empty())
+        {
+            return HookFormat::VsCode {
+                command: cmd.to_string(),
+            };
         }
         return HookFormat::PassThrough;
     }
@@ -124,27 +122,24 @@ fn detect_format(v: &Value) -> HookFormat {
     // registers this schema itself, like JetBrains/IntelliJ's Copilot plugin
     // (toolName "run_in_terminal").
     if let Some(tool_name) = v.get("toolName").and_then(|t| t.as_str()) {
-        if matches!(tool_name, "bash" | "powershell" | "run_in_terminal") {
-            if let Some(tool_args_str) = v.get("toolArgs").and_then(|t| t.as_str()) {
-                if let Ok(tool_args) = serde_json::from_str::<Value>(tool_args_str) {
-                    if let Some(cmd) = tool_args
-                        .get("command")
-                        .and_then(|c| c.as_str())
-                        .filter(|c| !c.is_empty())
-                    {
-                        return if tool_name == "run_in_terminal" {
-                            HookFormat::CopilotIde {
-                                command: cmd.to_string(),
-                            }
-                        } else {
-                            HookFormat::CopilotCli {
-                                command: cmd.to_string(),
-                                args: tool_args,
-                            }
-                        };
-                    }
+        if matches!(tool_name, "bash" | "powershell" | "run_in_terminal")
+            && let Some(tool_args_str) = v.get("toolArgs").and_then(|t| t.as_str())
+            && let Ok(tool_args) = serde_json::from_str::<Value>(tool_args_str)
+            && let Some(cmd) = tool_args
+                .get("command")
+                .and_then(|c| c.as_str())
+                .filter(|c| !c.is_empty())
+        {
+            return if tool_name == "run_in_terminal" {
+                HookFormat::CopilotIde {
+                    command: cmd.to_string(),
                 }
-            }
+            } else {
+                HookFormat::CopilotCli {
+                    command: cmd.to_string(),
+                    args: tool_args,
+                }
+            };
         }
         return HookFormat::PassThrough;
     }
@@ -623,13 +618,13 @@ fn process_claude_payload_from_decision(
             return PayloadAction::Skip {
                 decision: HookOutcome::Deny,
                 cmd: cmd.to_string(),
-            }
+            };
         }
         HookDecision::Defer => {
             return PayloadAction::Skip {
                 decision: HookOutcome::Defer,
                 cmd: cmd.to_string(),
-            }
+            };
         }
         HookDecision::AllowRewrite(r) => (r, true),
         HookDecision::AskRewrite(r) => (r, false),
@@ -1232,24 +1227,28 @@ mod tests {
 
     #[test]
     fn test_copilot_cli_deny_returns_none() {
-        assert!(copilot_cli_response_from_decision(
-            &cli_args("cargo test"),
-            HookDecision::Deny,
-            "cargo test",
-        )
-        .is_none());
+        assert!(
+            copilot_cli_response_from_decision(
+                &cli_args("cargo test"),
+                HookDecision::Deny,
+                "cargo test",
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn test_copilot_cli_defer_returns_none() {
         // Defer covers both "no rewrite available" and the unattestable-construct gate.
         // The hook must emit NO modifiedArgs for CVE bypass forms — no laundering.
-        assert!(copilot_cli_response_from_decision(
-            &cli_args("git status & rm -rf /tmp/x"),
-            HookDecision::Defer,
-            "git status & rm -rf /tmp/x",
-        )
-        .is_none());
+        assert!(
+            copilot_cli_response_from_decision(
+                &cli_args("git status & rm -rf /tmp/x"),
+                HookDecision::Defer,
+                "git status & rm -rf /tmp/x",
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1260,10 +1259,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(response["permissionDecision"], "deny");
-        assert!(response["permissionDecisionReason"]
-            .as_str()
-            .unwrap()
-            .contains("rtk git status"));
+        assert!(
+            response["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("rtk git status")
+        );
         assert!(response.get("modifiedArgs").is_none());
     }
 
@@ -1277,10 +1278,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(response["permissionDecision"], "deny");
-        assert!(response["permissionDecisionReason"]
-            .as_str()
-            .unwrap()
-            .contains("rtk git status"));
+        assert!(
+            response["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("rtk git status")
+        );
         assert!(response.get("modifiedArgs").is_none());
     }
 
@@ -1927,8 +1930,9 @@ mod tests {
 
     #[test]
     fn test_audit_log_silent_when_disabled() {
-        std::env::remove_var("RTK_HOOK_AUDIT");
-        audit_log("test", "git status", "rtk git status");
+        temp_env::with_var_unset("RTK_HOOK_AUDIT", || {
+            audit_log("test", "git status", "rtk git status");
+        });
     }
 
     #[test]

@@ -31,7 +31,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -1912,19 +1912,16 @@ mod tests {
         ));
         // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
         let _ = std::fs::remove_file(&db_path);
-        env::set_var("RTK_DB_PATH", &db_path);
+        temp_env::with_var("RTK_DB_PATH", Some(&db_path), || {
+            let timer = TimedExecution::start();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            timer.track("test cmd", "rtk test", "raw input data", "filtered");
 
-        let timer = TimedExecution::start();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        timer.track("test cmd", "rtk test", "raw input data", "filtered");
-
-        // Verify via DB that record exists
-        let tracker = Tracker::new().expect("Failed to create tracker");
-        let recent = tracker.get_recent(5).expect("Failed to get recent");
-        assert!(recent.iter().any(|r| r.rtk_cmd == "rtk test"));
-
-        drop(tracker);
-        env::remove_var("RTK_DB_PATH");
+            // Verify via DB that record exists
+            let tracker = Tracker::new().expect("Failed to create tracker");
+            let recent = tracker.get_recent(5).expect("Failed to get recent");
+            assert!(recent.iter().any(|r| r.rtk_cmd == "rtk test"));
+        });
         // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
         let _ = std::fs::remove_file(&db_path);
     }
@@ -1941,49 +1938,48 @@ mod tests {
         ));
         // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
         let _ = std::fs::remove_file(&db_path);
-        env::set_var("RTK_DB_PATH", &db_path);
+        temp_env::with_var("RTK_DB_PATH", Some(&db_path), || {
+            let timer = TimedExecution::start();
+            timer.track_passthrough("git tag", "rtk git tag (passthrough)");
 
-        let timer = TimedExecution::start();
-        timer.track_passthrough("git tag", "rtk git tag (passthrough)");
+            let tracker = Tracker::new().expect("Failed to create tracker");
+            let recent = tracker.get_recent(5).expect("Failed to get recent");
 
-        let tracker = Tracker::new().expect("Failed to create tracker");
-        let recent = tracker.get_recent(5).expect("Failed to get recent");
+            let pt = recent
+                .iter()
+                .find(|r| r.rtk_cmd.contains("passthrough"))
+                .expect("Passthrough record not found");
 
-        let pt = recent
-            .iter()
-            .find(|r| r.rtk_cmd.contains("passthrough"))
-            .expect("Passthrough record not found");
-
-        // savings_pct should be 0 for passthrough
-        assert_eq!(pt.savings_pct, 0.0);
-        assert_eq!(pt.saved_tokens, 0);
-
-        drop(tracker);
-        env::remove_var("RTK_DB_PATH");
+            // savings_pct should be 0 for passthrough
+            assert_eq!(pt.savings_pct, 0.0);
+            assert_eq!(pt.saved_tokens, 0);
+        });
         // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
         let _ = std::fs::remove_file(&db_path);
     }
 
     // 7. get_db_path respects environment variable RTK_DB_PATH
     // 8. get_db_path falls back to default when no custom config
-    // Combined into one test to avoid env var race between parallel tests
+    // Combined into one test so the set and unset cases cannot interleave.
     #[test]
     fn test_db_path_env_and_default() {
         use std::env;
         let _guard = ENV_LOCK.lock().unwrap();
 
         let custom_path = env::temp_dir().join("rtk_test_custom.db");
-        env::set_var("RTK_DB_PATH", &custom_path);
-        let db_path = get_db_path().expect("Failed to get db path");
-        assert_eq!(db_path, custom_path);
+        temp_env::with_var("RTK_DB_PATH", Some(&custom_path), || {
+            let db_path = get_db_path().expect("Failed to get db path");
+            assert_eq!(db_path, custom_path);
+        });
 
-        env::remove_var("RTK_DB_PATH");
-        let db_path = get_db_path().expect("Failed to get db path");
-        assert!(
-            db_path.ends_with("rtk/history.db"),
-            "expected default path ending with rtk/history.db, got: {}",
-            db_path.display()
-        );
+        temp_env::with_var_unset("RTK_DB_PATH", || {
+            let db_path = get_db_path().expect("Failed to get db path");
+            assert!(
+                db_path.ends_with("rtk/history.db"),
+                "expected default path ending with rtk/history.db, got: {}",
+                db_path.display()
+            );
+        });
     }
 
     // 8b. Tracker::new() gates schema migration behind PRAGMA user_version, so a
@@ -1998,24 +1994,22 @@ mod tests {
             env::temp_dir().join(format!("rtk_test_schema_version_{}.db", std::process::id()));
         // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
         let _ = std::fs::remove_file(&db_path);
-        env::set_var("RTK_DB_PATH", &db_path);
+        temp_env::with_var("RTK_DB_PATH", Some(&db_path), || {
+            let tracker = Tracker::new().expect("first open should run migrations");
+            let version: i64 = tracker
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .expect("user_version should be readable");
+            assert_eq!(version, SCHEMA_VERSION);
+            drop(tracker);
 
-        let tracker = Tracker::new().expect("first open should run migrations");
-        let version: i64 = tracker
-            .conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .expect("user_version should be readable");
-        assert_eq!(version, SCHEMA_VERSION);
-        drop(tracker);
-
-        // Second open on the same file must skip migrations without erroring, and
-        // the DB must still be fully usable (tables from the first open persist).
-        let tracker2 = Tracker::new().expect("second open should skip migrations cleanly");
-        tracker2
-            .record("git status", "rtk git status", 100, 20, 50)
-            .expect("commands table should already exist and accept writes");
-
-        env::remove_var("RTK_DB_PATH");
+            // Second open on the same file must skip migrations without erroring, and
+            // the DB must still be fully usable (tables from the first open persist).
+            let tracker2 = Tracker::new().expect("second open should skip migrations cleanly");
+            tracker2
+                .record("git status", "rtk git status", 100, 20, 50)
+                .expect("commands table should already exist and accept writes");
+        });
         // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
         let _ = std::fs::remove_file(&db_path);
     }
@@ -2297,10 +2291,12 @@ mod tests {
     fn test_earliest_hook_decision_timestamp() {
         let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
 
-        assert!(tracker
-            .earliest_hook_decision_timestamp()
-            .expect("query failed")
-            .is_none());
+        assert!(
+            tracker
+                .earliest_hook_decision_timestamp()
+                .expect("query failed")
+                .is_none()
+        );
 
         tracker
             .record_hook_decision(
@@ -2314,10 +2310,12 @@ mod tests {
             )
             .expect("Failed to record hook decision");
 
-        assert!(tracker
-            .earliest_hook_decision_timestamp()
-            .expect("query failed")
-            .is_some());
+        assert!(
+            tracker
+                .earliest_hook_decision_timestamp()
+                .expect("query failed")
+                .is_some()
+        );
     }
 
     #[test]
@@ -2338,10 +2336,12 @@ mod tests {
 
         tracker.reset_all().expect("Failed to reset");
 
-        assert!(tracker
-            .earliest_hook_decision_timestamp()
-            .expect("query failed")
-            .is_none());
+        assert!(
+            tracker
+                .earliest_hook_decision_timestamp()
+                .expect("query failed")
+                .is_none()
+        );
     }
 
     // rtk-ai/rtk#3206 review: hook_decisions grows unbounded for a user whose

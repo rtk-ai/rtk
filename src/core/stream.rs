@@ -340,10 +340,10 @@ pub fn run_streaming(
                 let mut writer = BufWriter::new(child_stdin);
                 let stdin_handle = io::stdin();
                 for line in read_lines_lossy(stdin_handle.lock()) {
-                    if let Some(out) = filter.feed_line(&line) {
-                        if writeln!(writer, "{}", out).is_err() {
-                            break;
-                        }
+                    if let Some(out) = filter.feed_line(&line)
+                        && writeln!(writer, "{}", out).is_err()
+                    {
+                        break;
                     }
                 }
                 let tail = filter.flush();
@@ -528,19 +528,19 @@ pub fn run_streaming(
     let exit_code = status_to_exit_code(status);
     let raw = format!("{}{}", raw_stdout, raw_stderr);
 
-    if let Some(mut f) = saved_filter {
-        if let Some(post) = f.on_exit(exit_code, &raw) {
-            filtered.push_str(&post);
-            let mut dest: Box<dyn Write> = if filter_fd_is_stderr {
-                Box::new(io::stderr().lock())
-            } else {
-                Box::new(io::stdout().lock())
-            };
-            match write!(dest, "{}", post) {
-                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
-                Err(e) => return Err(e.into()),
-                Ok(_) => {}
-            }
+    if let Some(mut f) = saved_filter
+        && let Some(post) = f.on_exit(exit_code, &raw)
+    {
+        filtered.push_str(&post);
+        let mut dest: Box<dyn Write> = if filter_fd_is_stderr {
+            Box::new(io::stderr().lock())
+        } else {
+            Box::new(io::stdout().lock())
+        };
+        match write!(dest, "{}", post) {
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
+            Err(e) => return Err(e.into()),
+            Ok(_) => {}
         }
     }
 

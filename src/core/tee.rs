@@ -200,10 +200,10 @@ pub fn tee_raw(raw: &str, command_slug: &str, exit_code: i32) -> Option<PathBuf>
 }
 
 fn display_path(path: &std::path::Path) -> String {
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(relative) = path.strip_prefix(&home) {
-            return format!("~/{}", relative.display());
-        }
+    if let Some(home) = dirs::home_dir()
+        && let Ok(relative) = path.strip_prefix(&home)
+    {
+        return format!("~/{}", relative.display());
     }
     path.display().to_string()
 }
@@ -707,10 +707,10 @@ directory = "/tmp/rtk-tee"
     #[test]
     fn test_force_tee_hint_respects_env_disable() {
         // When RTK_TEE=0, force_tee_hint should return None
-        std::env::set_var("RTK_TEE", "0");
         let large_output = "x".repeat(1000);
-        let hint = force_tee_hint(&large_output, "test_cmd");
-        std::env::remove_var("RTK_TEE");
+        let hint = temp_env::with_var("RTK_TEE", Some("0"), || {
+            force_tee_hint(&large_output, "test_cmd")
+        });
         assert!(hint.is_none(), "Should respect RTK_TEE=0");
     }
 

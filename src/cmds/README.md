@@ -295,7 +295,7 @@ Adding a new filter or command requires changes in multiple places. For TOML-vs-
    - **Exit codes**: handled automatically by `run_filtered()` — just return its result
    - **Truncation**: if the filter caps any list at N items, emit `force_tee_tail_hint` (flat lists) or `force_tee_hint` (multi-line blocks) so the agent can recover hidden items — see [Internal Truncation Recovery](#internal-truncation-recovery). Use a named constant for the cap; derive the offset from it (`MAX_XXX + 1`)
 2. **Register module**:
-   - Ecosystem `mod.rs` files use `automod::dir!()` — any `.rs` file in the directory becomes a public module automatically. No manual `pub mod` needed, but be aware: WIP or helper files will also be exposed. Only commit command-ready modules.
+   - Add `pub mod mycmd_cmd;` to the ecosystem `mod.rs`, keeping the list alphabetical. Modules are listed explicitly rather than generated from the directory: rustfmt only follows literal `mod` items and cannot expand macros, so a generated list hides every file under `src/cmds/` from `cargo fmt` — and therefore from CI's fmt gate. `build.rs` fails the build if a `.rs` file here is missing from its `mod.rs`, since an undeclared module is never compiled, linted, or tested.
    - Add variant to `Commands` enum in `main.rs` with `#[arg(trailing_var_arg = true, allow_hyphen_values = true)]`
    - Add routing match arm in `main.rs`: `Commands::Mycmd { args } => mycmd_cmd::run(&args, cli.verbose)?,`
 3. **Add rewrite pattern** — Entry in `src/discover/rules.rs` (PATTERNS + RULES arrays at matching index) so hooks auto-rewrite the command
