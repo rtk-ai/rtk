@@ -199,6 +199,32 @@ pub fn tee_raw(raw: &str, command_slug: &str, exit_code: i32) -> Option<PathBuf>
     )
 }
 
+/// Delete all tee recovery `.log` files.
+///
+/// Returns (dir, files_deleted) if the tee directory is determinable; count is
+/// 0 when the dir doesn't exist.
+pub fn purge_tee_logs() -> Option<(PathBuf, usize)> {
+    let config = Config::load().ok()?;
+    let tee_dir = get_tee_dir(&config)?;
+    if !tee_dir.exists() {
+        return Some((tee_dir, 0));
+    }
+
+    let mut deleted = 0;
+    if let Ok(entries) = std::fs::read_dir(&tee_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "log")
+                && std::fs::remove_file(&path).is_ok()
+            {
+                deleted += 1;
+            }
+        }
+    }
+
+    Some((tee_dir, deleted))
+}
+
 fn display_path(path: &std::path::Path) -> String {
     if let Some(home) = dirs::home_dir() {
         if let Ok(relative) = path.strip_prefix(&home) {
@@ -576,6 +602,25 @@ mod tests {
             let filename = format!("{:010}_{}.log", 1000000 + i, "test");
             assert!(dir.join(&filename).exists());
         }
+    }
+
+    #[test]
+    fn test_purge_tee_logs_only_removes_logs() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path();
+        let log_path = dir.join("123_test.log");
+        let other_path = dir.join("notes.txt");
+
+        fs::write(&log_path, "raw output").unwrap();
+        fs::write(&other_path, "keep me").unwrap();
+
+        std::env::set_var("RTK_TEE_DIR", dir);
+        let result = purge_tee_logs();
+        std::env::remove_var("RTK_TEE_DIR");
+
+        assert_eq!(result, Some((dir.to_path_buf(), 1)));
+        assert!(!log_path.exists());
+        assert!(other_path.exists());
     }
 
     #[test]

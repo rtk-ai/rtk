@@ -228,6 +228,18 @@ fn run_forget() -> Result<()> {
         }
     }
 
+    // Purge tee recovery logs (may contain raw command output)
+    if let Some((tee_dir, deleted)) = super::tee::purge_tee_logs() {
+        if deleted > 0 {
+            println!(
+                "Tee recovery logs deleted: {} ({} file{})",
+                tee_dir.display(),
+                deleted,
+                if deleted == 1 { "" } else { "s" }
+            );
+        }
+    }
+
     // Send server-side erasure request
     if let Some(hash) = device_hash {
         match send_erasure_request(&hash) {

@@ -83,6 +83,8 @@ Your AI assistant can then read the file if it needs more detail, without re-run
 | Min size | 500 bytes | Outputs shorter than this are not saved |
 | Max file size | 1 MB | Truncated above this |
 
+Tee logs are removed by `rtk telemetry forget`; the directory is `~/.local/share/rtk/tee/` (override with `RTK_TEE_DIR` or `tee.directory`).
+
 ## Excluding commands from auto-rewrite
 
 Prevent specific commands from being rewritten by the hook:
