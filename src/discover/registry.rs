@@ -1351,6 +1351,20 @@ fn rewrite_segment_inner(
         return Some(format!("{}{}", env_prefix, rewritten));
     }
 
+    // #2726: GNU `timeout` wrapper — strip the `timeout [opts] DURATION` prefix,
+    // rewrite the inner command, then re-prepend the prefix verbatim.
+    if let Some((timeout_prefix, inner)) = strip_timeout_prefix(trimmed) {
+        // A timeout wrapper must not make a TOML-only command routable. The
+        // TOML path normalizes absolute command paths, while wrappers preserve
+        // argv[0] verbatim; routing it here would produce an invalid command.
+        if matches!(classify_command(inner), Classification::Unsupported { .. }) {
+            return None;
+        }
+        let rewritten =
+            rewrite_segment_inner(inner, excluded, transparent_prefixes, context, depth + 1)?;
+        return Some(format!("{}{}", timeout_prefix, rewritten));
+    }
+
     for (prefix, routable) in builtin_transparent_prefixes() {
         if let Some(rest) = strip_word_prefix(trimmed, prefix) {
             if rest.is_empty() {
@@ -1595,6 +1609,97 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
     }
 }
 
+/// Strip a leading GNU `timeout` prefix, returning the verbatim prefix and inner command.
+///
+/// Returns `None` when `cmd` is not a `timeout` invocation or no inner command follows a
+/// valid duration.
+fn strip_timeout_prefix(cmd: &str) -> Option<(&str, &str)> {
+    let rest = cmd.strip_prefix("timeout")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+
+    let bytes = cmd.as_bytes();
+    let mut pos = "timeout".len();
+
+    loop {
+        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        if pos >= bytes.len() {
+            return None;
+        }
+
+        let token_start = pos;
+        while pos < bytes.len() && !bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        let token = &cmd[token_start..pos];
+
+        if matches!(token, "-k" | "--kill-after" | "-s" | "--signal") {
+            while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+                pos += 1;
+            }
+            if pos >= bytes.len() {
+                return None;
+            }
+            while pos < bytes.len() && !bytes[pos].is_ascii_whitespace() {
+                pos += 1;
+            }
+            continue;
+        }
+
+        if token.starts_with('-') {
+            continue;
+        }
+
+        if !is_timeout_duration(token) {
+            return None;
+        }
+
+        let mut inner_start = pos;
+        while inner_start < bytes.len() && bytes[inner_start].is_ascii_whitespace() {
+            inner_start += 1;
+        }
+        if inner_start >= bytes.len() {
+            return None;
+        }
+        return Some((&cmd[..inner_start], &cmd[inner_start..]));
+    }
+}
+
+/// Validate a GNU timeout duration token: `N[.N][s|m|h|d]`.
+fn is_timeout_duration(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    let mut i = 0;
+    let mut seen_integer = false;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        seen_integer = true;
+        i += 1;
+    }
+    if !seen_integer {
+        return false;
+    }
+    if i < bytes.len() && bytes[i] == b'.' {
+        i += 1;
+        let mut seen_fraction = false;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            seen_fraction = true;
+            i += 1;
+        }
+        if !seen_fraction {
+            return false;
+        }
+    }
+    if i < bytes.len() {
+        match bytes[i] {
+            b's' | b'm' | b'h' | b'd' => i += 1,
+            _ => return false,
+        }
+    }
+    i == bytes.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::report::RtkStatus;
@@ -1602,6 +1707,110 @@ mod tests {
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
+    }
+
+    mod timeout_prefix {
+        use super::rewrite_command_no_prefixes;
+
+        #[test]
+        fn rewrites_plain_duration() {
+            assert_eq!(
+                rewrite_command_no_prefixes("timeout 10 git diff", &[]),
+                Some("timeout 10 rtk git diff".into())
+            );
+        }
+
+        #[test]
+        fn rewrites_duration_with_unit() {
+            assert_eq!(
+                rewrite_command_no_prefixes("timeout 5m grep -rn foo .", &[]),
+                Some("timeout 5m rtk grep -rn foo .".into())
+            );
+        }
+
+        #[test]
+        fn rewrites_decimal_duration() {
+            assert_eq!(
+                rewrite_command_no_prefixes("timeout 1.5h go test ./...", &[]),
+                Some("timeout 1.5h rtk go test ./...".into())
+            );
+        }
+
+        #[test]
+        fn rewrites_signal_option_with_value() {
+            assert_eq!(
+                rewrite_command_no_prefixes("timeout -s KILL 300 git status", &[]),
+                Some("timeout -s KILL 300 rtk git status".into())
+            );
+        }
+
+        #[test]
+        fn rewrites_kill_after_option_with_value() {
+            assert_eq!(
+                rewrite_command_no_prefixes("timeout -k 10 300 ls -la", &[]),
+                Some("timeout -k 10 300 rtk ls -la".into())
+            );
+        }
+
+        #[test]
+        fn rewrites_long_option_with_value() {
+            assert_eq!(
+                rewrite_command_no_prefixes("timeout --signal TERM 10 git diff", &[]),
+                Some("timeout --signal TERM 10 rtk git diff".into())
+            );
+        }
+
+        #[test]
+        fn rewrites_preserve_status_flag() {
+            assert_eq!(
+                rewrite_command_no_prefixes("timeout --preserve-status 10 cat -n file.go", &[]),
+                Some("timeout --preserve-status 10 rtk read -n file.go".into())
+            );
+        }
+
+        #[test]
+        fn preserves_quoted_inner_arguments() {
+            let rewritten =
+                rewrite_command_no_prefixes("timeout 90 grep -n 'foo bar baz' src", &[])
+                    .expect("timeout-wrapped grep should rewrite");
+
+            assert!(rewritten.starts_with("timeout 90 rtk grep -n "));
+            assert!(rewritten.contains("'foo bar baz'"));
+        }
+
+        #[test]
+        fn passes_through_without_inner_command() {
+            assert_eq!(rewrite_command_no_prefixes("timeout 300", &[]), None);
+        }
+
+        #[test]
+        fn does_not_confuse_the_timeout_word_boundary() {
+            assert_eq!(rewrite_command_no_prefixes("timeoutx git diff", &[]), None);
+        }
+
+        #[test]
+        fn passes_through_invalid_duration() {
+            assert_eq!(
+                rewrite_command_no_prefixes("timeout abc git diff", &[]),
+                None
+            );
+        }
+
+        #[test]
+        fn rewrites_compound_commands() {
+            assert_eq!(
+                rewrite_command_no_prefixes("timeout 10 git diff && ls", &[]),
+                Some("timeout 10 rtk git diff && rtk ls".into())
+            );
+        }
+
+        #[test]
+        fn leaves_non_timeout_commands_unaffected() {
+            assert_eq!(
+                rewrite_command_no_prefixes("git diff", &[]),
+                Some("rtk git diff".into())
+            );
+        }
     }
 
     mod multiline_blocks {
