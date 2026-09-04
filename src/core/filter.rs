@@ -185,6 +185,15 @@ impl FilterStrategy for MinimalFilter {
 
             // Handle Python docstrings (keep them in minimal mode)
             if *lang == Language::Python && trimmed.starts_with("\"\"\"") {
+                // Single-line docstring: both opens and closes on this line
+                // e.g. """Short docstring."""
+                if trimmed.ends_with("\"\"\"") {
+                    // Single-line docstring — don't toggle, just keep the line
+                    result.push_str(line);
+                    result.push('\n');
+                    continue;
+                }
+                // Multi-line docstring start or end — toggle the flag
                 in_docstring = !in_docstring;
                 result.push_str(line);
                 result.push('\n');
@@ -262,10 +271,14 @@ impl FilterStrategy for AggressiveFilter {
 
             // Always keep function/struct/class signatures
             if FUNC_SIGNATURE.is_match(trimmed) {
+                // Count braces on the signature line (e.g. "fn foo() {")
+                // before continuing, so a trailing '{' is reflected in brace_depth
+                let sig_open = trimmed.matches('{').count() as i32;
+                let sig_close = trimmed.matches('}').count() as i32;
                 result.push_str(line);
                 result.push('\n');
                 in_impl_body = true;
-                brace_depth = 0;
+                brace_depth = sig_open - sig_close;
                 continue;
             }
 
@@ -454,6 +467,33 @@ mod tests {
     }
 
     #[test]
+    fn test_aggressive_filter_trailing_brace_on_signature() {
+        // When a function signature has trailing '{' on the same line,
+        // brace_depth must be counted before continuing, so the function body
+        // is correctly identified as implementation.
+        let input = r#"fn compute(x: i32) -> i32 {
+    let result = x * 2;
+    let extra = result + 1;
+    extra
+}
+"#;
+        let filter = AggressiveFilter;
+        let result = filter.filter(input, &Language::Rust);
+        assert!(
+            !result.contains("let result = x * 2;"),
+            "let binding inside function body should be filtered out"
+        );
+        assert!(
+            !result.contains("let extra = result + 1;"),
+            "let binding inside function body should be filtered out"
+        );
+        assert!(
+            result.contains("fn compute(x: i32) -> i32 {"),
+            "function signature with trailing brace should be kept"
+        );
+    }
+
+    #[test]
     fn test_minimal_filter_removes_comments() {
         let code = r#"
 // This is a comment
@@ -465,6 +505,33 @@ fn main() {
         let result = filter.filter(code, &Language::Rust);
         assert!(!result.contains("// This is a comment"));
         assert!(result.contains("fn main()"));
+    }
+
+    #[test]
+    fn test_minimal_python_single_line_docstring() {
+        // Single-line docstrings like """Short docstring.""" should not
+        // toggle in_docstring — the closing """ is on the same line.
+        let input = r#"def foo():
+    """Short docstring."""
+    # this comment should be stripped
+    x = 1
+    # another comment to strip
+    return x
+"#;
+        let filter = MinimalFilter;
+        let result = filter.filter(input, &Language::Python);
+        assert!(
+            !result.contains("# this comment should be stripped"),
+            "comment after single-line docstring should be stripped"
+        );
+        assert!(
+            !result.contains("# another comment to strip"),
+            "subsequent comment should also be stripped"
+        );
+        assert!(
+            result.contains("\"\"\"Short docstring.\"\"\""),
+            "single-line docstring should be preserved"
+        );
     }
 
     // --- truncation accuracy ---
