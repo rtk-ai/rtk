@@ -1,0 +1,25 @@
+[filters.crontab]
+description = "Compact crontab output — strip comments and blank lines"
+match_command = "^crontab\\s+-l\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*#",
+]
+max_lines = 80
+truncate_lines_at = 160
+
+[[tests.crontab]]
+name = "crontab list strips comments and blanks"
+input = """
+# Edit this file to introduce tasks to be run by cron.
+
+*/5 * * * * /home/user/bin/sync-tv-state
+0 3 * * * /home/user/bin/nightly-backup
+"""
+expected = "*/5 * * * * /home/user/bin/sync-tv-state\n0 3 * * * /home/user/bin/nightly-backup"
+
+[[tests.crontab]]
+name = "empty input passes through"
+input = ""
+expected = ""

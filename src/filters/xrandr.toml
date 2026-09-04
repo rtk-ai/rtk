@@ -1,0 +1,24 @@
+[filters.xrandr]
+description = "Compact xrandr output — strip blanks, cap monitor listings"
+match_command = "^xrandr\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+]
+max_lines = 60
+truncate_lines_at = 160
+
+[[tests.xrandr]]
+name = "listmonitors output strips blanks"
+input = """
+Monitors: 2
+ 0: +*HDMI-1 1920/510x1080/290+0+0  HDMI-1
+
+ 1: +DP-1 1920/520x1080/290+1920+0  DP-1
+"""
+expected = "Monitors: 2\n 0: +*HDMI-1 1920/510x1080/290+0+0  HDMI-1\n 1: +DP-1 1920/520x1080/290+1920+0  DP-1"
+
+[[tests.xrandr]]
+name = "empty input passes through"
+input = ""
+expected = ""

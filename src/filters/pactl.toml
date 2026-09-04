@@ -1,0 +1,23 @@
+[filters.pactl]
+description = "Compact pactl output — strip blanks, cap verbose audio state"
+match_command = "^pactl\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+]
+max_lines = 80
+truncate_lines_at = 160
+
+[[tests.pactl]]
+name = "list short sinks strips blanks"
+input = """
+42	alsa_output.pci-0000_00_1f.3.analog-stereo	PipeWire	s32le 2ch 48000Hz	RUNNING
+
+43	bluez_output.00_11_22_33_44_55.1	PipeWire	s16le 2ch 44100Hz	SUSPENDED
+"""
+expected = "42\talsa_output.pci-0000_00_1f.3.analog-stereo\tPipeWire\ts32le 2ch 48000Hz\tRUNNING\n43\tbluez_output.00_11_22_33_44_55.1\tPipeWire\ts16le 2ch 44100Hz\tSUSPENDED"
+
+[[tests.pactl]]
+name = "empty input passes through"
+input = ""
+expected = ""

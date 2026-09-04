@@ -1,0 +1,23 @@
+[filters.python3]
+description = "Compact python3 output — strip blank lines, cap script output"
+match_command = "^python3\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+]
+max_lines = 120
+truncate_lines_at = 160
+
+[[tests.python3]]
+name = "script output strips blanks"
+input = """
+starting climate refresh
+
+updated living-room display
+"""
+expected = "starting climate refresh\nupdated living-room display"
+
+[[tests.python3]]
+name = "empty input passes through"
+input = ""
+expected = ""

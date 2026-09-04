@@ -2,6 +2,7 @@
 description = "Compact ssh output — strip connection banners, keep command output"
 match_command = "^ssh(?:\\s|$)"
 strip_ansi = true
+filter_stderr = true
 strip_lines_matching = [
   "^\\s*$",
   "^Warning: Permanently added",

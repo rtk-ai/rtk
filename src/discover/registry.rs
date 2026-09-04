@@ -5699,6 +5699,60 @@ mod tests {
     }
 
     #[test]
+    fn test_python3_script_rewrite() {
+        assert_eq!(
+            rewrite_command_no_prefixes("python3 /home/user/scripts/clima_full.py --tv", &[]),
+            Some("rtk python3 /home/user/scripts/clima_full.py --tv".into())
+        );
+    }
+
+    #[test]
+    fn test_python3_m_mypy_stays_specialized() {
+        assert_eq!(
+            rewrite_command_no_prefixes("python3 -m mypy --strict", &[]),
+            Some("rtk mypy --strict".into())
+        );
+    }
+
+    #[test]
+    fn test_linux_automation_command_rewrites() {
+        let cases = [
+            (
+                "systemctl --user restart voz-daemon.service",
+                "rtk systemctl --user restart voz-daemon.service",
+            ),
+            (
+                "ssh -o ConnectTimeout=4 -o BatchMode=yes host uptime",
+                "rtk ssh -o ConnectTimeout=4 -o BatchMode=yes host uptime",
+            ),
+            (
+                "adb shell getprop service.adb.tcp.port",
+                "rtk adb shell getprop service.adb.tcp.port",
+            ),
+            ("pgrep -af scrcpy", "rtk pgrep -af scrcpy"),
+            ("pactl list short sinks", "rtk pactl list short sinks"),
+            ("pactl info", "rtk pactl info"),
+            (
+                "DISPLAY=:0 xrandr --listmonitors",
+                "DISPLAY=:0 rtk xrandr --listmonitors",
+            ),
+            (
+                "pkill -f \"scrcpy.*serial\"",
+                "rtk pkill -f \"scrcpy.*serial\"",
+            ),
+            ("crontab -l", "rtk crontab -l"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                Some(expected.into()),
+                "rewrite mismatch for {input}"
+            );
+        }
+    }
+
+    #[test]
     fn test_pip_show() {
         assert_eq!(
             rewrite_command_no_prefixes("pip show flask", &[]),
