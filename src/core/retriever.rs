@@ -359,7 +359,15 @@ fn record_tee_recall_on(conn: &Connection, slug: &str, path: &str) {
 }
 
 pub fn record_tee_recall(slug: &str, path: &str) {
+    if matches!(std::env::var("RTK_RECALL").ok().as_deref(), Some("0"))
+        || matches!(std::env::var("RTK_TEE").ok().as_deref(), Some("0"))
+    {
+        return;
+    }
     let cfg = Config::load().unwrap_or_default().retriever;
+    if cfg.mode == RecoveryMode::Disabled {
+        return;
+    }
     if let Ok(conn) = open(&cfg) {
         record_tee_recall_on(&conn, slug, path);
     }
@@ -897,6 +905,21 @@ mod tests {
             (s.elisions, s.recalls),
             (1, 1),
             "re-reading the same entry must not inflate the rate"
+        );
+    }
+
+    #[test]
+    fn test_record_tee_recall_respects_kill_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("guard.db");
+        std::env::set_var("RTK_RECALL_DB", &db);
+        std::env::set_var("RTK_RECALL", "0");
+        record_tee_recall("grep", "/tee/1_grep.log");
+        std::env::remove_var("RTK_RECALL");
+        std::env::remove_var("RTK_RECALL_DB");
+        assert!(
+            !db.exists(),
+            "RTK_RECALL=0 must prevent any recall.db write from the hook path"
         );
     }
 
