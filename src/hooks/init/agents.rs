@@ -2,7 +2,7 @@
 
 use super::*;
 
-// ─── Cline / Roo Code support ─────────────────────────────────
+// Cline / Roo Code support
 
 pub(crate) fn run_cline_mode(ctx: InitContext) -> Result<()> {
     let InitContext {
@@ -99,7 +99,7 @@ pub(crate) fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
-// ─── Kilo Code support ────────────────────────────────────────
+// Kilo Code support
 
 pub fn run_kilocode_mode(ctx: InitContext) -> Result<()> {
     run_kilocode_mode_at(&std::env::current_dir()?, ctx)
@@ -158,7 +158,7 @@ pub(crate) fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<
     Ok(())
 }
 
-// ─── Google Antigravity support ───────────────────────────────
+// Google Antigravity support
 
 pub fn run_antigravity_mode(ctx: InitContext) -> Result<()> {
     run_antigravity_mode_at(&std::env::current_dir()?, ctx)
@@ -216,7 +216,7 @@ pub(crate) fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Resu
     Ok(())
 }
 
-// ─── Kimi AI support ──────────────────────────────────────────
+// Kimi AI support
 //
 // Kimi Code CLI has NO `.kimirules` convention — that file is never read.
 // It loads project-level instructions from `AGENTS.md` in the project root

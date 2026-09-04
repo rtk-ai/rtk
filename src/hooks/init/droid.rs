@@ -2,7 +2,7 @@
 
 use super::*;
 
-// ─── Factory Droid support ──────────────────────────────────────────
+// Factory Droid support
 
 /// Resolve Droid config directory, honouring `FACTORY_HOME_OVERRIDE`.
 ///

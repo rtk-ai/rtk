@@ -2,7 +2,7 @@
 
 use super::*;
 
-// ─── Hermes support ────────────────────────────────────────────
+// Hermes support
 
 pub(crate) const HERMES_PLUGIN_INIT: &str =
     include_str!("../../../hooks/hermes/rtk-rewrite/__init__.py");

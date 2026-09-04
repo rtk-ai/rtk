@@ -2,7 +2,7 @@
 
 use super::*;
 
-// ── Copilot integration ─────────────────────────────────────
+// Copilot integration
 
 // Single PascalCase `PreToolUse` entry, shared by VS Code Copilot Chat and
 // Copilot CLI. Previously this file also declared a camelCase `preToolUse`
@@ -319,7 +319,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    // ─── Copilot tests ───────────────────────────────────────────────
+    // Copilot tests
 
     #[test]
     fn test_copilot_init_preserves_existing_instructions() {
