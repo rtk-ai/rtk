@@ -32,6 +32,7 @@ colored = "3"
 dirs = "5"
 rusqlite = { version = "0.31", features = ["bundled"] }
 toml = "0.8"
+toml_edit = "0.22"
 chrono = "0.4"
 tempfile = "3"
 sha2 = "0.10"

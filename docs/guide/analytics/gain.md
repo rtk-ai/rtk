@@ -28,6 +28,7 @@ rtk gain --graph          # ASCII graph, last 30 days
 rtk gain --history        # last 10 commands
 rtk gain --quota          # monthly quota savings estimate (default tier: 20x)
 rtk gain --quota -t pro   # use pro tier token budget for estimate
+rtk gain --recalls        # recall efficiency per filter (calibration)
 
 # Export
 rtk gain --all --format json > savings.json
@@ -199,6 +200,40 @@ The tiers (`pro`, `5x`, `20x`) correspond to Anthropic Claude API subscription l
 :::tip[Find missed savings]
 `rtk gain` shows what RTK saved. To find commands that ran *without* RTK and calculate what you lost, see [rtk discover](./discover.md).
 :::
+
+## Recall efficiency
+
+`--recalls` measures how often your AI assistant goes back for output a filter elided — the signal that a filter's cap is too aggressive for your workflow. Every time a filter stores elided output (an *elision*) and every time the assistant retrieves it (a *recall*), RTK counts it per filter:
+
+```bash
+rtk gain --recalls
+```
+
+```
+Recall efficiency  (current mode: sqlite)
+
+SQLITE (exact — reads go through rtk recall)
+FILTER                   ELISIONS RECALLED   RATE
+vitest                         67       29    43%
+docker-images                 142        3     2%
+
+TEE (lower bound — bash reads only, Read tool invisible)
+FILTER                   ELISIONS RECALLED   RATE
+cargo_test                     38        4   ≥10%
+```
+
+How to read it:
+
+- **RATE** is the share of elided outputs the assistant went back for. Re-reading the same entry counts once — the rate measures *entries consulted*, not read commands.
+- A **high rate** (say above 30%) means that filter regularly hides output the assistant needs: every recall is an extra API round-trip you paid for. Consider raising that filter's cap.
+- A **low rate** means the filter's cap is well calibrated — the elided output was noise.
+
+The two sections are never merged because the data quality differs:
+
+- **SQLITE (exact)**: reads go through `rtk recall <hash>`, the only access path, so the count is exact.
+- **TEE (lower bound)**: in legacy [tee mode](../getting-started/configuration.md#recall-system), reads are shell commands (`tail`, `cat`, `grep`, …) detected by the rewrite hook. Reads made through an editor or the assistant's file-reading tool are invisible, so the rate is displayed as `≥` — a floor, not an exact figure. A high floor is still a reliable signal that the cap is too aggressive.
+
+Stats survive entry eviction and retention cleanup: calibration data is kept even after the underlying outputs are purged.
 
 ## Troubleshooting
 

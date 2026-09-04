@@ -469,6 +469,9 @@ enum Commands {
         /// Show parse failure log (commands that fell back to raw execution)
         #[arg(short = 'F', long)]
         failures: bool,
+        /// Show recall efficiency per filter (elisions vs agent recalls)
+        #[arg(long)]
+        recalls: bool,
         /// Reset all token savings stats to zero
         #[arg(long)]
         reset: bool,
@@ -496,11 +499,13 @@ enum Commands {
         format: String,
     },
 
-    /// Show or create configuration file
+    /// Show or modify configuration
     Config {
         /// Create default config file
         #[arg(long)]
         create: bool,
+        #[command(subcommand)]
+        action: Option<ConfigAction>,
     },
 
     /// Jest commands with compact output
@@ -681,6 +686,27 @@ enum Commands {
         /// Command and arguments to execute
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<OsString>,
+    },
+
+    /// Recall output a filter elided, by content hash
+    Recall {
+        /// Hash from a recovery hint (a unique prefix is enough)
+        hash: Option<String>,
+        /// Return the complete output, not just the missed part
+        #[arg(long)]
+        full: bool,
+        /// Start from this 1-based line of the full output
+        #[arg(long)]
+        from: Option<usize>,
+        /// Return only the first N lines of the full output
+        #[arg(long, conflicts_with = "from")]
+        lines: Option<usize>,
+        /// Filter recalled lines by regex
+        #[arg(long)]
+        grep: Option<String>,
+        /// List stored entries
+        #[arg(long)]
+        list: bool,
     },
 
     /// Read stdin, apply filter, print filtered output (Unix pipe mode)
@@ -1315,6 +1341,15 @@ enum GoCommands {
     /// Passthrough: runs any unsupported go subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigAction {
+    /// Show or set the recovery mode (sqlite | tee | disabled)
+    Recall {
+        /// New mode; omit to show the current one
+        mode: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2319,6 +2354,7 @@ fn run_cli() -> Result<i32> {
             all,
             format,
             failures,
+            recalls,
             reset,
             yes,
         } => {
@@ -2334,6 +2370,7 @@ fn run_cli() -> Result<i32> {
                 all,
                 &format,
                 failures,
+                recalls,
                 reset,
                 yes,
                 cli.verbose,
@@ -2352,12 +2389,32 @@ fn run_cli() -> Result<i32> {
             0
         }
 
-        Commands::Config { create } => {
-            if create {
-                let path = core::config::Config::create_default()?;
-                println!("Created: {}", path.display());
-            } else {
-                core::config::show_config()?;
+        Commands::Config { create, action } => {
+            match action {
+                Some(ConfigAction::Recall { mode: None }) => {
+                    core::config::show_recall_mode()?;
+                }
+                Some(ConfigAction::Recall { mode: Some(mode) }) => {
+                    use core::retriever::RecoveryMode;
+                    let parsed = match mode.as_str() {
+                        "sqlite" => RecoveryMode::Sqlite,
+                        "tee" => RecoveryMode::Tee,
+                        "disabled" => RecoveryMode::Disabled,
+                        other => anyhow::bail!(
+                            "unknown recall mode '{other}' (expected: sqlite, tee, disabled)"
+                        ),
+                    };
+                    let path = core::config::set_recall_mode(parsed)?;
+                    println!("recall mode set to {mode} in {}", path.display());
+                }
+                None => {
+                    if create {
+                        let path = core::config::Config::create_default()?;
+                        println!("Created: {}", path.display());
+                    } else {
+                        core::config::show_config()?;
+                    }
+                }
             }
             0
         }
@@ -2734,6 +2791,22 @@ fn run_cli() -> Result<i32> {
                 core::utils::exit_code_from_status(&status, "run")
             }
         }
+
+        Commands::Recall {
+            hash,
+            full,
+            from,
+            lines,
+            grep,
+            list,
+        } => core::retriever::run_recall(core::retriever::RecallArgs {
+            hash: hash.as_deref(),
+            full,
+            from,
+            lines,
+            grep: grep.as_deref(),
+            list,
+        })?,
 
         Commands::Proxy { args } => {
             use std::io::{Read, Write};

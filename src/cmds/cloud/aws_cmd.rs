@@ -364,7 +364,7 @@ fn run_aws_filtered(
     let hint = if result.truncated {
         crate::core::tee::force_tee_hint(&raw, &slug)
     } else {
-        crate::core::tee::tee_and_hint(&raw, &slug, 0)
+        None
     };
     let shown = crate::core::runner::emit_guarded(&result.text, hint.as_deref(), &raw);
 
