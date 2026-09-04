@@ -765,6 +765,26 @@ impl Tracker {
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Reasons, folded to their first line. Grouping in SQL would keep the
+        // usage block, so the same cause would appear once per command shape.
+        let mut stmt = self.conn.prepare(
+            "SELECT error_message, COUNT(*) as cnt FROM parse_failures GROUP BY error_message",
+        )?;
+        let mut reason_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for row in stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+        })? {
+            let (message, count) = row?;
+            *reason_counts
+                .entry(parse_error_reason(&message))
+                .or_insert(0) += count;
+        }
+        let mut top_errors: Vec<(String, usize)> = reason_counts.into_iter().collect();
+        // Count first, then reason, so equal counts keep a stable order.
+        top_errors.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        top_errors.truncate(10);
+
         // Recent 10
         let mut stmt = self.conn.prepare(
             "SELECT timestamp, raw_command, error_message, fallback_succeeded
@@ -787,6 +807,7 @@ impl Tracker {
             total: total as usize,
             recovery_rate,
             top_commands,
+            top_errors,
             recent,
         })
     }
@@ -1613,7 +1634,6 @@ pub fn ensure_schema_fresh() -> Result<()> {
 pub struct ParseFailureRecord {
     pub timestamp: String,
     pub raw_command: String,
-    #[allow(dead_code)]
     pub error_message: String,
     pub fallback_succeeded: bool,
 }
@@ -1624,7 +1644,24 @@ pub struct ParseFailureSummary {
     pub total: usize,
     pub recovery_rate: f64,
     pub top_commands: Vec<(String, usize)>,
+    /// Distinct fallback reasons, most frequent first. A thousand rows of
+    /// "it fell back" collapse into the handful of causes behind them.
+    pub top_errors: Vec<(String, usize)>,
     pub recent: Vec<ParseFailureRecord>,
+}
+
+/// One-line form of a recorded parse error.
+///
+/// Clap errors carry a usage block and a "try --help" footer under the first
+/// line, so grouping on the raw text would split one cause into as many rows as
+/// there are commands. The first non-empty line is the cause.
+pub fn parse_error_reason(error_message: &str) -> String {
+    error_message
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.trim_start_matches("error: ").to_string())
+        .unwrap_or_else(|| "no reason recorded".to_string())
 }
 
 /// Record a parse failure without ever crashing.
@@ -2146,6 +2183,61 @@ mod tests {
         let summary = tracker.get_parse_failure_summary().unwrap();
         // Isolated DB, so the rate is now exact: 2/3 successes ≈ 66.7%.
         assert!((summary.recovery_rate - 66.7).abs() < 0.1);
+    }
+
+    // 14. the reason a command fell back survives to the summary
+    #[test]
+    fn test_parse_error_reason_is_the_first_line_without_the_error_prefix() {
+        let clap_error = "error: unexpected argument '-oE' found\n\nUsage: rtk grep [OPTIONS]\n\nFor more information, try '--help'.";
+        assert_eq!(
+            parse_error_reason(clap_error),
+            "unexpected argument '-oE' found"
+        );
+        assert_eq!(parse_error_reason("\n\n  boom  \n"), "boom");
+        assert_eq!(parse_error_reason(""), "no reason recorded");
+        assert_eq!(parse_error_reason("   \n \n"), "no reason recorded");
+    }
+
+    #[test]
+    fn test_top_errors_group_one_cause_across_different_commands() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+
+        // Same cause, different usage blocks: clap prints the offending command
+        // under the first line, so the raw messages differ.
+        tracker
+            .record_parse_failure(
+                "grep -oE (a|b) one.txt",
+                "error: unexpected argument '-oE' found\n\nUsage: rtk grep one.txt",
+                true,
+            )
+            .unwrap();
+        tracker
+            .record_parse_failure(
+                "grep -oE [A-Z]+ two.txt",
+                "error: unexpected argument '-oE' found\n\nUsage: rtk grep two.txt",
+                true,
+            )
+            .unwrap();
+        tracker
+            .record_parse_failure(
+                "poetry install",
+                "error: unrecognized subcommand 'poetry'",
+                true,
+            )
+            .unwrap();
+
+        let summary = tracker.get_parse_failure_summary().unwrap();
+
+        assert_eq!(
+            summary.top_errors,
+            vec![
+                ("unexpected argument '-oE' found".to_string(), 2),
+                ("unrecognized subcommand 'poetry'".to_string(), 1),
+            ],
+            "two commands sharing one cause must collapse into one reason"
+        );
+        // Grouping by command alone cannot say this: three commands, two causes.
+        assert_eq!(summary.top_commands.len(), 3);
     }
 
     #[test]
