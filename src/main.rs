@@ -9,7 +9,7 @@ mod parser;
 // Re-export command modules for routing
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
-use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
+use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd, svn_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
     bun_cmd, deno_cmd, lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd,
@@ -168,6 +168,14 @@ enum Commands {
 
         #[command(subcommand)]
         command: GitCommands,
+    },
+
+    /// Apache Subversion commands with compact log output
+    #[command(disable_help_flag = true)]
+    Svn {
+        /// Native SVN subcommand and arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     /// GitHub CLI (gh) commands with token-optimized output
@@ -1962,6 +1970,11 @@ fn run_cli() -> Result<i32> {
             }
         }
 
+        Commands::Svn { args } => {
+            let args = core::args_utils::restore_double_dash(&args);
+            svn_cmd::run(&args, cli.verbose)?
+        }
+
         Commands::Gh { subcommand, args } => {
             gh_cmd::run(&subcommand, &args, cli.verbose, cli.ultra_compact)?
         }
@@ -2962,6 +2975,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Read { .. }
             | Commands::Smart { .. }
             | Commands::Git { .. }
+            | Commands::Svn { .. }
             | Commands::Gh { .. }
             | Commands::Glab { .. }
             | Commands::Pnpm { .. }
@@ -3155,6 +3169,49 @@ mod tests {
     fn test_try_parse_valid_git_status() {
         let result = Cli::try_parse_from(["rtk", "git", "status"]);
         assert!(result.is_ok(), "git status should parse successfully");
+    }
+
+    #[test]
+    fn test_svn_preserves_native_arguments() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "svn",
+            "log",
+            "--username",
+            "buildbot",
+            "--password",
+            "secret",
+            "--",
+            "-leading-dash-path",
+        ])
+        .expect("svn command should parse");
+
+        match cli.command {
+            Commands::Svn { args } => assert_eq!(
+                args,
+                vec![
+                    "log",
+                    "--username",
+                    "buildbot",
+                    "--password",
+                    "secret",
+                    "--",
+                    "-leading-dash-path"
+                ]
+            ),
+            _ => panic!("Expected SVN command"),
+        }
+    }
+
+    #[test]
+    fn test_svn_help_is_forwarded_to_native_client() {
+        let cli = Cli::try_parse_from(["rtk", "svn", "--help"])
+            .expect("native svn help flag should parse");
+
+        match cli.command {
+            Commands::Svn { args } => assert_eq!(args, vec!["--help"]),
+            _ => panic!("Expected SVN command"),
+        }
     }
 
     #[test]
@@ -3366,6 +3423,7 @@ mod tests {
             "read",
             "rg",
             "git",
+            "svn",
             "gh",
             "glab",
             "aws",

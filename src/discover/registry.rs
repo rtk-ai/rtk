@@ -141,6 +141,13 @@ pub fn classify_command(cmd: &str) -> Classification {
     let cmd_normalized = strip_golangci_global_opts(&cmd_normalized);
     let cmd_clean = cmd_normalized.as_str();
 
+    // Detailed, structured, and search-oriented SVN logs are native
+    // passthrough at runtime, so the hook must not rewrite them and claim
+    // savings. Direct `rtk svn ...` still preserves those invocations.
+    if svn_log_requests_passthrough(cmd_clean) {
+        return Classification::Ignored;
+    }
+
     // Exclude cat/head/tail with redirect operators — these are writes, not reads (#315)
     if cmd_clean.starts_with("cat ")
         || cmd_clean.starts_with("head ")
@@ -370,6 +377,13 @@ fn strip_golangci_global_opts(cmd: &str) -> String {
         Some(parts) => format!("golangci-lint {}", parts.run_segment),
         None => cmd.to_string(),
     }
+}
+
+fn svn_log_requests_passthrough(cmd: &str) -> bool {
+    let tokens = shell_split(cmd);
+    tokens.first().is_some_and(|token| token == "svn")
+        && tokens.get(1).is_some_and(|token| token == "log")
+        && crate::cmds::git::svn_cmd::requests_raw_log_output(&tokens[2..])
 }
 
 /// Parse supported golangci-lint invocations with optional global flags before `run`.
@@ -2012,6 +2026,56 @@ mod tests {
                 status: RtkStatus::Existing,
             }
         );
+    }
+
+    #[test]
+    fn test_classify_svn_log() {
+        assert_eq!(
+            classify_command("svn log -l 20"),
+            Classification::Supported {
+                rtk_equivalent: "rtk svn",
+                category: "Git",
+                estimated_savings_pct: 37.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_svn_log_only() {
+        assert_eq!(
+            rewrite_command_no_prefixes("svn log -l 20", &[]),
+            Some("rtk svn log -l 20".to_string())
+        );
+        assert_eq!(rewrite_command_no_prefixes("svn status", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("svn diff", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("svn commit -m message", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_svn_raw_log_shapes_are_not_classified_or_rewritten() {
+        for command in [
+            "svn log --xml",
+            "svn log --diff",
+            "svn log --quiet",
+            "svn log -v",
+            "svn log --search 'OPS-*'",
+        ] {
+            assert_eq!(
+                classify_command(command),
+                Classification::Ignored,
+                "{command}"
+            );
+            assert_eq!(rewrite_command_no_prefixes(command, &[]), None, "{command}");
+        }
+
+        assert!(matches!(
+            classify_command("svn log -- --xml"),
+            Classification::Supported { .. }
+        ));
     }
 
     #[test]

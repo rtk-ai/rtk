@@ -5,6 +5,10 @@
 ## Specifics
 
 - **git.rs** uses `trailing_var_arg = true` + `allow_hyphen_values = true` so native git flags (`--oneline`, `--cached`, etc.) pass through correctly
+- **svn_cmd.rs** defaults native `svn log` to 10 revisions with a recovery hint unless the caller supplies a limit/revision/change window, then removes only structurally proven separators; `svn status`, `svn diff`, search/detailed log shapes, global-option-first invocations, and unsupported or mutating subcommands remain exact passthrough
+- Filtered SVN logs inherit stdin and relay stderr chunks live for authentication/certificate prompts; password-bearing arguments are redacted from verbose/tracking labels without changing the forwarded argv
+- Captured logs above 10 MiB switch to complete native stdout streaming instead of truncating output
+- The SVN 1.14 log fixture was captured from a real local `svnadmin` repository; its filter keeps complete headers/messages and measures above the 20% contribution threshold
 - Default `git status` uses `--porcelain -b` so the compact output never exceeds raw `git status` (an untracked directory collapses to a single line, matching git's default); branch/short-only flags reuse the compact path, other explicit args still pass through unchanged
 - Global git options (`-C`, `--git-dir`, `--work-tree`, `--no-pager`) are prepended before the subcommand
 - Exit code propagation is critical for CI/CD pipelines

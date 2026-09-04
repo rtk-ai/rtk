@@ -262,6 +262,7 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "read",
     "smart",
     "git",
+    "svn",
     "gh",
     "aws",
     "psql",
@@ -940,6 +941,7 @@ mod tests {
     #[test]
     fn test_is_rtk_reserved_command() {
         assert!(is_rtk_reserved_command("git"));
+        assert!(is_rtk_reserved_command("svn"));
         assert!(is_rtk_reserved_command("cargo"));
         assert!(is_rtk_reserved_command("json"));
         assert!(is_rtk_reserved_command("rewrite"));

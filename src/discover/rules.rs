@@ -51,6 +51,14 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^svn\s+log(\s|$)",
+        rtk_cmd: "rtk svn",
+        rewrite_prefixes: &["svn"],
+        category: "Git",
+        savings_pct: 37.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^gh\s+(pr|issue|run|repo|api|release)",
         rtk_cmd: "rtk gh",
         rewrite_prefixes: &["gh"],

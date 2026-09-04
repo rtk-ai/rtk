@@ -49,6 +49,7 @@ RTK intercepts shell commands and compresses their output before your agent read
 | `git diff` | Reduced context, headers stripped |
 | `git log` | Hash, author and subject only |
 | `git add/commit/push` | Confirmation line instead of full progress output |
+| `svn log` | Latest 10 revisions by default; separators removed, displayed messages kept complete |
 | `cargo test` / `npm test` | Failures only, passing tests collapsed to a count |
 | `ruff check` | Grouped by rule and file |
 | `pytest` | Failures only, traceback trimmed |
@@ -175,6 +176,15 @@ rtk git add                     # -> "ok"
 rtk git commit -m "msg"         # -> "ok abc1234"
 rtk git push                    # -> "ok main"
 rtk git pull                    # -> "ok 3 files +10 -2"
+```
+
+### Subversion
+```bash
+rtk svn log                    # Compact latest 10 revisions with a recovery hint
+rtk svn log -l 20              # Explicit limits override the default
+rtk svn log -r 100:1           # Explicit revision/change windows are preserved
+rtk svn status                 # Native passthrough
+rtk svn diff                   # Native passthrough while SVN diff parsing matures
 ```
 
 ### GitHub CLI
