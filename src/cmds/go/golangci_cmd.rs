@@ -6,7 +6,7 @@ use crate::core::stream::exec_capture;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::ffi::OsString;
 
@@ -69,7 +69,11 @@ struct Issue {
     text: String,
     #[serde(rename = "Pos")]
     pos: Position,
-    #[serde(rename = "SourceLines", default)]
+    #[serde(
+        rename = "SourceLines",
+        default,
+        deserialize_with = "deserialize_source_lines"
+    )]
     source_lines: Vec<String>,
     #[serde(rename = "Severity", default)]
     #[allow(dead_code)]
@@ -80,6 +84,13 @@ struct Issue {
 struct GolangciOutput {
     #[serde(rename = "Issues")]
     issues: Vec<Issue>,
+}
+
+fn deserialize_source_lines<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// Parse major version number from `golangci-lint --version` output.
@@ -664,6 +675,30 @@ mod tests {
         assert!(
             !result.contains("→"),
             "no source line to show, should degrade gracefully"
+        );
+    }
+
+    #[test]
+    fn test_filter_v2_null_source_lines_graceful() {
+        let output = r#"{
+  "Issues": [
+    {
+      "FromLinter": "errcheck",
+      "Text": "Error return value not checked",
+      "Severity": "",
+      "SourceLines": null,
+      "Pos": {"Filename": "main.go", "Line": 42, "Column": 5, "Offset": 0}
+    }
+  ]
+}"#;
+        let result = filter_golangci_json(output, 2);
+        assert!(result.contains("golangci-lint: 1 issues in 1 files"));
+        assert!(result.contains("errcheck"));
+        assert!(result.contains("main.go"));
+        assert!(!result.contains("JSON parse failed"));
+        assert!(
+            !result.contains("→"),
+            "null source lines should degrade gracefully"
         );
     }
 
