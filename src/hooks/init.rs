@@ -11,6 +11,8 @@ use crate::core::utils::{from_json_str, strip_leading_bom};
 use crate::hooks::constants::{
     CONFIG_DIR, COPILOT_HOME_ENV, COPILOT_HOOK_FILE, COPILOT_INSTRUCTIONS_FILE, COPILOT_USER_DIR,
     CURSOR_DIR, GEMINI_DIR, GITHUB_DIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+    VSCODE_CONFIG_ENV, VSCODE_INSIDERS_DIR, VSCODE_PROMPTS_SUBDIR, VSCODE_STABLE_DIR,
+    VSCODE_USER_SUBDIR,
 };
 
 use super::constants::{
@@ -5039,12 +5041,36 @@ pub(crate) fn copilot_user_dir() -> Result<PathBuf> {
     Ok(home.join(COPILOT_USER_DIR))
 }
 
-pub fn run_copilot_global(ctx: InitContext) -> Result<()> {
-    let copilot_dir = copilot_user_dir()?;
-    run_copilot_global_at(&copilot_dir, ctx)
+fn vscode_prompt_dirs() -> Vec<PathBuf> {
+    let config_dir = if let Ok(custom) = std::env::var(VSCODE_CONFIG_ENV) {
+        PathBuf::from(custom)
+    } else if let Some(config_dir) = dirs::config_dir() {
+        config_dir
+    } else {
+        return Vec::new();
+    };
+
+    let mut prompt_dirs = Vec::new();
+    for dir_name in [VSCODE_STABLE_DIR, VSCODE_INSIDERS_DIR] {
+        let user_dir = config_dir.join(dir_name).join(VSCODE_USER_SUBDIR);
+        if user_dir.exists() {
+            prompt_dirs.push(user_dir.join(VSCODE_PROMPTS_SUBDIR));
+        }
+    }
+    prompt_dirs
 }
 
-fn run_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<()> {
+pub fn run_copilot_global(ctx: InitContext) -> Result<()> {
+    let copilot_dir = copilot_user_dir()?;
+    let vscode_dirs = vscode_prompt_dirs();
+    run_copilot_global_at(&copilot_dir, &vscode_dirs, ctx)
+}
+
+fn run_copilot_global_at(
+    copilot_dir: &Path,
+    vscode_prompt_dirs: &[PathBuf],
+    ctx: InitContext,
+) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
     let hooks_dir = copilot_dir.join(HOOKS_SUBDIR);
 
@@ -5062,6 +5088,23 @@ fn run_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<()> {
         ctx,
     )?;
 
+    let mut vscode_instruction_paths = Vec::new();
+    for prompt_dir in vscode_prompt_dirs {
+        if !dry_run {
+            fs::create_dir_all(prompt_dir)
+                .with_context(|| format!("Failed to create {} directory", prompt_dir.display()))?;
+        }
+        let vscode_instructions_path = prompt_dir.join(COPILOT_INSTRUCTIONS_FILE);
+        write_rtk_block(
+            &vscode_instructions_path,
+            COPILOT_INSTRUCTIONS,
+            "VS Code Copilot user instructions",
+            "rtk init --global --copilot",
+            ctx,
+        )?;
+        vscode_instruction_paths.push(vscode_instructions_path);
+    }
+
     let hook_path = hooks_dir.join(COPILOT_HOOK_FILE);
     write_if_changed(
         &hook_path,
@@ -5076,8 +5119,16 @@ fn run_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<()> {
         println!("\nGitHub Copilot global integration installed (user-scoped).\n");
         println!("  Hook config:    {}", hook_path.display());
         println!("  Instructions:   {}", instructions_path.display());
+        for path in &vscode_instruction_paths {
+            println!("  VS Code:        {}", path.display());
+        }
         println!("\n  Applies to all Copilot CLI sessions on this machine.");
-        println!("  Restart your Copilot CLI session to activate.\n");
+        if vscode_instruction_paths.is_empty() {
+            println!("  Restart your Copilot CLI session to activate.\n");
+        } else {
+            println!("  Also applies to detected VS Code Copilot profiles.");
+            println!("  Restart your Copilot CLI and VS Code sessions to activate.\n");
+        }
     }
 
     Ok(())
@@ -5085,8 +5136,9 @@ fn run_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<()> {
 
 pub fn uninstall_copilot_global(ctx: InitContext) -> Result<()> {
     let copilot_dir = copilot_user_dir()?;
+    let vscode_dirs = vscode_prompt_dirs();
     let InitContext { dry_run, .. } = ctx;
-    let removed = uninstall_copilot_global_at(&copilot_dir, ctx)?;
+    let removed = uninstall_copilot_global_at(&copilot_dir, &vscode_dirs, ctx)?;
 
     if removed.is_empty() {
         println!("RTK global Copilot support was not installed (nothing to remove)");
@@ -5101,7 +5153,7 @@ pub fn uninstall_copilot_global(ctx: InitContext) -> Result<()> {
             println!("  - {}", item);
         }
         if !dry_run {
-            println!("\nRestart your Copilot CLI session to apply changes.");
+            println!("\nRestart your Copilot CLI and VS Code sessions to apply changes.");
         }
     }
 
@@ -5111,7 +5163,11 @@ pub fn uninstall_copilot_global(ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
-fn uninstall_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+fn uninstall_copilot_global_at(
+    copilot_dir: &Path,
+    vscode_prompt_dirs: &[PathBuf],
+    ctx: InitContext,
+) -> Result<Vec<String>> {
     let InitContext { dry_run, .. } = ctx;
     let hook_path = copilot_dir.join(HOOKS_SUBDIR).join(COPILOT_HOOK_FILE);
     let mut removed = Vec::new();
@@ -5151,6 +5207,33 @@ fn uninstall_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<V
                     "{}: removed rtk-instructions block",
                     COPILOT_INSTRUCTIONS_FILE
                 ));
+            }
+        }
+    }
+
+    for prompt_dir in vscode_prompt_dirs {
+        let instructions_path = prompt_dir.join(COPILOT_INSTRUCTIONS_FILE);
+        if instructions_path.exists() {
+            let content = fs::read_to_string(&instructions_path)
+                .with_context(|| format!("Failed to read {}", instructions_path.display()))?;
+            if content.contains(RTK_BLOCK_START) {
+                let (cleaned, did_remove) = remove_rtk_block(&content);
+                if did_remove {
+                    if dry_run {
+                        println!(
+                            "[dry-run] would remove rtk-instructions block from {}",
+                            instructions_path.display()
+                        );
+                    } else {
+                        atomic_write(&instructions_path, &cleaned).with_context(|| {
+                            format!("Failed to write {}", instructions_path.display())
+                        })?;
+                    }
+                    removed.push(format!(
+                        "{}: removed rtk-instructions block",
+                        instructions_path.display()
+                    ));
+                }
             }
         }
     }
@@ -7225,6 +7308,7 @@ mod tests {
     use std::sync::Mutex;
     static CLAUDE_DIR_LOCK: Mutex<()> = Mutex::new(());
     static PI_DIR_LOCK: Mutex<()> = Mutex::new(());
+    static VSCODE_CONFIG_LOCK: Mutex<()> = Mutex::new(());
     /// Serialises all tests that mutate the process-wide working directory.
     static CWD_LOCK: Mutex<()> = Mutex::new(());
 
@@ -7253,6 +7337,20 @@ mod tests {
         match orig {
             Some(v) => std::env::set_var(PI_CODING_AGENT_DIR_ENV, v),
             None => std::env::remove_var(PI_CODING_AGENT_DIR_ENV),
+        }
+    }
+
+    fn with_vscode_config_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
+        let _guard = VSCODE_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let orig = std::env::var_os(VSCODE_CONFIG_ENV);
+        std::env::set_var(VSCODE_CONFIG_ENV, tmp.path());
+        f(tmp.path());
+        match orig {
+            Some(v) => std::env::set_var(VSCODE_CONFIG_ENV, v),
+            None => std::env::remove_var(VSCODE_CONFIG_ENV),
         }
     }
 
@@ -8243,7 +8341,7 @@ mod tests {
     #[test]
     fn test_copilot_global_install_writes_hook() {
         let temp = TempDir::new().unwrap();
-        run_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+        run_copilot_global_at(temp.path(), &[], InitContext::default()).unwrap();
 
         let hook_path = temp.path().join("hooks").join("rtk-rewrite.json");
         assert!(hook_path.exists());
@@ -8289,7 +8387,7 @@ mod tests {
     #[test]
     fn test_copilot_global_install_writes_instructions() {
         let temp = TempDir::new().unwrap();
-        run_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+        run_copilot_global_at(temp.path(), &[], InitContext::default()).unwrap();
         let instructions = temp.path().join(COPILOT_INSTRUCTIONS_FILE);
         assert!(
             instructions.exists(),
@@ -8306,7 +8404,7 @@ mod tests {
         let instructions = temp.path().join(COPILOT_INSTRUCTIONS_FILE);
         fs::write(&instructions, "# My rules\n\nAlways use pnpm.\n").unwrap();
 
-        run_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+        run_copilot_global_at(temp.path(), &[], InitContext::default()).unwrap();
 
         let content = fs::read_to_string(&instructions).unwrap();
         assert!(
@@ -8322,8 +8420,8 @@ mod tests {
         let instructions = temp.path().join(COPILOT_INSTRUCTIONS_FILE);
         fs::write(&instructions, "# My rules\n\nAlways use pnpm.\n").unwrap();
 
-        run_copilot_global_at(temp.path(), InitContext::default()).unwrap();
-        uninstall_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+        run_copilot_global_at(temp.path(), &[], InitContext::default()).unwrap();
+        uninstall_copilot_global_at(temp.path(), &[], InitContext::default()).unwrap();
 
         let content = fs::read_to_string(&instructions).unwrap();
         assert!(content.contains("Always use pnpm."));
@@ -8331,13 +8429,108 @@ mod tests {
     }
 
     #[test]
+    fn test_copilot_global_install_writes_vscode_instructions() {
+        let temp = TempDir::new().unwrap();
+        let config = TempDir::new().unwrap();
+        let stable_user = config
+            .path()
+            .join(VSCODE_STABLE_DIR)
+            .join(VSCODE_USER_SUBDIR);
+        let insiders_user = config
+            .path()
+            .join(VSCODE_INSIDERS_DIR)
+            .join(VSCODE_USER_SUBDIR);
+        fs::create_dir_all(&stable_user).unwrap();
+        fs::create_dir_all(&insiders_user).unwrap();
+
+        with_vscode_config_override(&config, |_| {
+            let vscode_dirs = vscode_prompt_dirs();
+            run_copilot_global_at(temp.path(), &vscode_dirs, InitContext::default()).unwrap();
+        });
+
+        for user_dir in [stable_user, insiders_user] {
+            let instructions = user_dir
+                .join(VSCODE_PROMPTS_SUBDIR)
+                .join(COPILOT_INSTRUCTIONS_FILE);
+            assert!(
+                instructions.exists(),
+                "VS Code instructions must be written"
+            );
+            let content = fs::read_to_string(&instructions).unwrap();
+            assert!(content.contains(RTK_BLOCK_START));
+            assert!(content.contains("rtk cargo test"));
+        }
+    }
+
+    #[test]
+    fn test_copilot_global_install_preserves_existing_vscode_instructions() {
+        let temp = TempDir::new().unwrap();
+        let prompts_dir = temp.path().join("vscode-prompts");
+        fs::create_dir_all(&prompts_dir).unwrap();
+        let instructions = prompts_dir.join(COPILOT_INSTRUCTIONS_FILE);
+        fs::write(&instructions, "# My rules\n\nAlways use pnpm.\n").unwrap();
+
+        run_copilot_global_at(temp.path(), &[prompts_dir], InitContext::default()).unwrap();
+
+        let content = fs::read_to_string(&instructions).unwrap();
+        assert!(
+            content.contains("Always use pnpm."),
+            "user content must be preserved"
+        );
+        assert!(content.contains(RTK_BLOCK_START));
+    }
+
+    #[test]
+    fn test_copilot_global_uninstall_preserves_existing_vscode_instructions() {
+        let temp = TempDir::new().unwrap();
+        let prompts_dir = temp.path().join("vscode-prompts");
+        fs::create_dir_all(&prompts_dir).unwrap();
+        let instructions = prompts_dir.join(COPILOT_INSTRUCTIONS_FILE);
+        fs::write(&instructions, "# My rules\n\nAlways use pnpm.\n").unwrap();
+
+        run_copilot_global_at(
+            temp.path(),
+            std::slice::from_ref(&prompts_dir),
+            InitContext::default(),
+        )
+        .unwrap();
+        uninstall_copilot_global_at(temp.path(), &[prompts_dir], InitContext::default()).unwrap();
+
+        let content = fs::read_to_string(&instructions).unwrap();
+        assert!(content.contains("Always use pnpm."));
+        assert!(!content.contains(RTK_BLOCK_START), "RTK block removed");
+    }
+
+    #[test]
+    fn test_vscode_prompt_dirs_skips_absent_variants() {
+        let config = TempDir::new().unwrap();
+        let stable_user = config
+            .path()
+            .join(VSCODE_STABLE_DIR)
+            .join(VSCODE_USER_SUBDIR);
+        fs::create_dir_all(&stable_user).unwrap();
+
+        with_vscode_config_override(&config, |config_dir| {
+            let vscode_dirs = vscode_prompt_dirs();
+            assert_eq!(
+                vscode_dirs,
+                vec![stable_user.join(VSCODE_PROMPTS_SUBDIR)]
+            );
+            assert!(
+                !config_dir.join(VSCODE_INSIDERS_DIR).exists(),
+                "absent VS Code variants must not be created"
+            );
+        });
+    }
+
+    #[test]
     fn test_copilot_global_uninstall_removes_hook() {
         let temp = TempDir::new().unwrap();
-        run_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+        run_copilot_global_at(temp.path(), &[], InitContext::default()).unwrap();
         let hook_path = temp.path().join("hooks").join("rtk-rewrite.json");
         assert!(hook_path.exists());
 
-        let removed = uninstall_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+        let removed = uninstall_copilot_global_at(temp.path(), &[], InitContext::default()).unwrap();
         assert!(!removed.is_empty());
         assert!(!hook_path.exists());
     }
@@ -8345,7 +8538,7 @@ mod tests {
     #[test]
     fn test_copilot_global_uninstall_nothing_when_absent() {
         let temp = TempDir::new().unwrap();
-        let removed = uninstall_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+        let removed = uninstall_copilot_global_at(temp.path(), &[], InitContext::default()).unwrap();
         assert!(removed.is_empty());
     }
 
@@ -8358,7 +8551,7 @@ mod tests {
         let payload = r#"{"version":1,"hooks":{"agentStop":[{"type":"command","bash":"true"}]}}"#;
         fs::write(&other, payload).unwrap();
 
-        run_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+        run_copilot_global_at(temp.path(), &[], InitContext::default()).unwrap();
 
         assert_eq!(fs::read_to_string(&other).unwrap(), payload);
     }
@@ -8366,13 +8559,13 @@ mod tests {
     #[test]
     fn test_copilot_global_uninstall_does_not_touch_other_hooks() {
         let temp = TempDir::new().unwrap();
-        run_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+        run_copilot_global_at(temp.path(), &[], InitContext::default()).unwrap();
         let hooks_dir = temp.path().join("hooks");
         let other = hooks_dir.join("notification-hooks.json");
         let payload = r#"{"version":1,"hooks":{"agentStop":[{"type":"command","bash":"true"}]}}"#;
         fs::write(&other, payload).unwrap();
 
-        uninstall_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+        uninstall_copilot_global_at(temp.path(), &[], InitContext::default()).unwrap();
 
         assert!(other.exists());
         assert_eq!(fs::read_to_string(&other).unwrap(), payload);
@@ -8386,7 +8579,7 @@ mod tests {
             verbose: 0,
             dry_run: true,
         };
-        run_copilot_global_at(temp.path(), ctx).unwrap();
+        run_copilot_global_at(temp.path(), &[], ctx).unwrap();
         assert!(!temp.path().join("hooks").join("rtk-rewrite.json").exists());
     }
 
