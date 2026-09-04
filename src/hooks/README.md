@@ -23,8 +23,8 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 
 | Mode | Command | Creates | Patches |
 |------|---------|---------|----------|
-| Default (global) | `rtk init -g` | Hook, SHA-256 hash, RTK.md | settings.json, CLAUDE.md |
-| Hook only | `rtk init -g --hook-only` | Hook, SHA-256 hash | settings.json |
+| Default (global) | `rtk init -g` | RTK.md | settings.json, CLAUDE.md |
+| Hook only | `rtk init -g --hook-only` | -- | settings.json |
 | Claude-MD (legacy) | `rtk init --claude-md` | 134-line RTK block | CLAUDE.md |
 | Windsurf | `rtk init -g --agent windsurf` | `.windsurfrules` | -- |
 | Cline | `rtk init --agent cline` | `.clinerules` | -- |
@@ -34,15 +34,17 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |
 
 
-## Integrity Verification
+## Legacy Shell-Hook Integrity Verification
 
-The integrity system prevents unauthorized hook modifications:
+Current Claude Code installs run the RTK binary directly, so they do not create
+a hook script or hash file. The integrity system remains for older
+`rtk-rewrite.sh` installations until they are migrated:
 
 1. At install: `integrity::store_hash()` computes SHA-256 of the hook file, writes to `~/.claude/hooks/.rtk-hook.sha256` (read-only 0o444)
 2. At runtime: `integrity::runtime_check()` re-computes hash and compares; blocks execution if tampered
 3. On demand: `rtk verify` prints detailed verification status (PASS/FAIL/WARN/SKIP)
 
-Five integrity states:
+Five legacy integrity states:
 - **Verified**: Hash matches stored value
 - **Tampered**: Hash mismatch (blocks execution)
 - **NoBaseline**: Hook exists but no hash stored (old install)
@@ -58,6 +60,12 @@ Controls how `rtk init` modifies agent settings files:
 | Ask (default) | -- | Prompts user `[y/N]`; defaults to No if stdin not terminal |
 | Auto | `--auto-patch` | Patches without prompting; for CI/scripted installs |
 | Skip | `--no-patch` | Prints manual instructions; user patches manually |
+
+Claude Code is registered without a shell wrapper: `settings.json` stores
+`"command": "rtk"` and `"args": ["hook", "claude"]`. Detection also accepts
+absolute `rtk`/`rtk.exe` paths with the same arguments and the legacy combined
+command string. When patching is allowed, `rtk init -g` upgrades the exact
+legacy entry it previously generated while preserving fields such as `timeout`.
 
 ## Atomicity and Safety
 
@@ -84,7 +92,7 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 
 | Tool | ask support | Behavior on Default |
 |------|------------|-------------------|
-| Claude Code (rtk-rewrite.sh) | Yes | `permissionDecision: "ask"` — user prompted |
+| Claude Code (`rtk hook claude`) | Yes | `permissionDecision: "ask"` — user prompted |
 | Copilot VS Code (rtk hook copilot) | Yes | `permissionDecision: "ask"` — user prompted |
 | Cursor (rtk hook cursor) | Ready | `permission: "ask",` — users will be prompted when Cursor enforces the permission; in the meantime, allow |
 | Gemini CLI (rtk hook gemini) | No (allow/deny only) | allow (limitation — no ask mode in Gemini) |

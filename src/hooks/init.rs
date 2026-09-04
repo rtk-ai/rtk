@@ -14,16 +14,17 @@ use crate::hooks::constants::{
 };
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, DROID_DIR,
-    DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR,
-    DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
-    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
-    HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
-    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR,
-    VIBE_HOOKS_FILE, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
+    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_ARGS, CLAUDE_HOOK_BINARY, CLAUDE_HOOK_COMMAND,
+    CODEX_DIR, CURSOR_HOOK_COMMAND, DROID_DIR, DROID_EXECUTE_MATCHER, DROID_HOME_ENV,
+    DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR, DROID_HOOK_COMMAND, DROID_SETTINGS_FILE,
+    GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
+    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
+    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOKS_FILE,
+    VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
 };
 use super::integrity;
-use super::is_claude_hook_command;
+use super::{is_claude_hook_command, is_claude_hook_entry};
 
 // Embedded OpenCode plugin (auto-rewrite)
 const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
@@ -545,24 +546,31 @@ fn prompt_telemetry_consent() -> Result<()> {
     Ok(())
 }
 
-fn print_manual_instructions(hook_command: &str, include_opencode: bool) {
+fn print_manual_instructions(hook_command: &str, include_opencode: bool) -> Result<()> {
     let settings_path = resolve_claude_dir()
         .unwrap_or_else(|_| PathBuf::from(format!("~/{}", CLAUDE_DIR)))
         .join(SETTINGS_JSON);
-    println!("\n  MANUAL STEP: Add this to {}:", settings_path.display());
-    println!("  {{");
-    println!("    \"hooks\": {{ \"PreToolUse\": [{{");
-    println!("      \"matcher\": \"Bash\",");
-    println!("      \"hooks\": [{{ \"type\": \"command\",");
-    println!("        \"command\": \"{}\"", hook_command);
-    println!("      }}]");
-    println!("    }}]}}");
-    println!("  }}");
+    println!(
+        "\n  MANUAL STEP: Use this RTK hook configuration in {} (replace older RTK hook entries):",
+        settings_path.display()
+    );
+    let manual_config = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": "Bash",
+                "hooks": [command_hook_entry(hook_command)]
+            }]
+        }
+    });
+    let rendered = serde_json::to_string_pretty(&manual_config)
+        .context("Failed to serialize manual hook configuration")?;
+    println!("{}", rendered);
     if include_opencode {
         println!("\n  Then restart Claude Code and OpenCode. Test with: git status\n");
     } else {
         println!("\n  Then restart Claude Code. Test with: git status\n");
     }
+    Ok(())
 }
 
 fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
@@ -579,22 +587,36 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
         None => return false,
     };
 
-    let original_len = pre_tool_use_array.len();
-    pre_tool_use_array.retain(|entry| {
-        if let Some(hooks_array) = entry.get("hooks").and_then(|h| h.as_array()) {
-            for hook in hooks_array {
-                if let Some(command) = hook.get("command").and_then(|c| c.as_str()) {
-                    // Match both legacy script path and new binary command
-                    if command.contains(REWRITE_HOOK_FILE) || is_claude_hook_command(command) {
-                        return false;
-                    }
-                }
-            }
+    let mut removed = false;
+    let mut empty_managed_groups = Vec::new();
+    for (entry_index, entry) in pre_tool_use_array.iter_mut().enumerate() {
+        let removable_empty_group =
+            is_bash_hook_group(entry) && entry.as_object().is_some_and(|object| object.len() == 2);
+        let Some(hooks_array) = entry
+            .get_mut("hooks")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        let original_len = hooks_array.len();
+        hooks_array.retain(|hook| {
+            let Some(command) = hook.get("command").and_then(serde_json::Value::as_str) else {
+                return true;
+            };
+            !(is_claude_hook_entry(hook)
+                || is_command_hook(hook) && command.contains(REWRITE_HOOK_FILE))
+        });
+        let removed_here = hooks_array.len() < original_len;
+        removed |= removed_here;
+        if removed_here && hooks_array.is_empty() && removable_empty_group {
+            empty_managed_groups.push(entry_index);
         }
-        true
-    });
+    }
+    for entry_index in empty_managed_groups.into_iter().rev() {
+        pre_tool_use_array.remove(entry_index);
+    }
 
-    pre_tool_use_array.len() < original_len
+    removed
 }
 
 /// Remove RTK hook from settings.json file
@@ -996,8 +1018,12 @@ fn patch_settings_json_command(
         serde_json::json!({})
     };
 
-    // Check idempotency
-    if hook_already_present(&root, hook_command) {
+    let managed_shell_hook_present =
+        is_claude_hook_command(hook_command) && has_managed_claude_shell_hook(&root);
+
+    // An exec-form hook is already at the target state. The exact shell-form
+    // entry written by older RTK versions is handled below as an upgrade.
+    if hook_already_present(&root, hook_command) && !managed_shell_hook_present {
         if verbose > 0 {
             eprintln!("settings.json: hook already present");
         }
@@ -1007,7 +1033,7 @@ fn patch_settings_json_command(
     // Handle mode
     match mode {
         PatchMode::Skip => {
-            print_manual_instructions(hook_command, include_opencode);
+            print_manual_instructions(hook_command, include_opencode)?;
             return Ok(PatchResult::Skipped);
         }
         PatchMode::Ask => {
@@ -1018,7 +1044,7 @@ fn patch_settings_json_command(
                     settings_path.display()
                 );
             } else if !prompt_user_consent(&settings_path)? {
-                print_manual_instructions(hook_command, include_opencode);
+                print_manual_instructions(hook_command, include_opencode)?;
                 return Ok(PatchResult::Declined);
             }
         }
@@ -1027,7 +1053,11 @@ fn patch_settings_json_command(
         }
     }
 
-    insert_hook_entry(&mut root, hook_command)?;
+    if managed_shell_hook_present {
+        upgrade_managed_claude_shell_hooks(&mut root);
+    } else {
+        insert_hook_entry(&mut root, hook_command)?;
+    }
 
     let serialized =
         serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
@@ -1056,7 +1086,7 @@ fn patch_settings_json_command(
     // Atomic write
     atomic_write(&settings_path, &serialized)?;
 
-    println!("\n  settings.json: hook added");
+    println!("\n  settings.json: hook configured");
     if settings_path.with_extension("json.bak").exists() {
         println!(
             "  Backup: {}",
@@ -1104,6 +1134,101 @@ fn clean_double_blanks(content: &str) -> String {
 
 /// Deep-merge RTK hook entry into settings.json
 /// Creates hooks.PreToolUse structure if missing, preserves existing hooks
+fn command_hook_entry(hook_command: &str) -> serde_json::Value {
+    if is_claude_hook_command(hook_command) {
+        serde_json::json!({
+            "type": "command",
+            "command": CLAUDE_HOOK_BINARY,
+            "args": CLAUDE_HOOK_ARGS
+        })
+    } else {
+        serde_json::json!({
+            "type": "command",
+            "command": hook_command
+        })
+    }
+}
+
+fn is_bash_hook_group(entry: &serde_json::Value) -> bool {
+    entry.get("matcher").and_then(serde_json::Value::as_str) == Some("Bash")
+}
+
+fn is_command_hook(hook: &serde_json::Value) -> bool {
+    hook.get("type").and_then(serde_json::Value::as_str) == Some("command")
+}
+
+fn is_managed_claude_shell_hook(hook: &serde_json::Value) -> bool {
+    is_command_hook(hook)
+        && hook.get("args").is_none()
+        && hook
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|command| command == CLAUDE_HOOK_COMMAND)
+}
+
+#[cfg(test)]
+fn claude_hook_entries(root: &serde_json::Value) -> impl Iterator<Item = &serde_json::Value> {
+    root.get("hooks")
+        .and_then(|hooks| hooks.get(PRE_TOOL_USE_KEY))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+}
+
+fn has_managed_claude_shell_hook(root: &serde_json::Value) -> bool {
+    root.get("hooks")
+        .and_then(|hooks| hooks.get(PRE_TOOL_USE_KEY))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| is_bash_hook_group(entry))
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .any(is_managed_claude_shell_hook)
+}
+
+fn upgrade_managed_claude_shell_hooks(root: &mut serde_json::Value) -> bool {
+    let Some(pre_tool_use) = root
+        .get_mut("hooks")
+        .and_then(|hooks| hooks.get_mut(PRE_TOOL_USE_KEY))
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+
+    let mut upgraded = false;
+    for entry in pre_tool_use.iter_mut() {
+        if !is_bash_hook_group(entry) {
+            continue;
+        }
+        let Some(hooks) = entry
+            .get_mut("hooks")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+
+        for hook in hooks {
+            if !is_managed_claude_shell_hook(hook) {
+                continue;
+            }
+            let Some(object) = hook.as_object_mut() else {
+                continue;
+            };
+            object.insert(
+                "command".to_string(),
+                serde_json::Value::String(CLAUDE_HOOK_BINARY.to_string()),
+            );
+            object.insert("args".to_string(), serde_json::json!(CLAUDE_HOOK_ARGS));
+            upgraded = true;
+        }
+    }
+
+    upgraded
+}
+
 fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result<()> {
     let root_obj = match root.as_object_mut() {
         Some(obj) => obj,
@@ -1127,10 +1252,7 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result
 
     pre_tool_use.push(serde_json::json!({
         "matcher": "Bash",
-        "hooks": [{
-            "type": "command",
-            "command": hook_command
-        }]
+        "hooks": [command_hook_entry(hook_command)]
     }));
     Ok(())
 }
@@ -1151,9 +1273,13 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .iter()
         .filter_map(|entry| entry.get("hooks")?.as_array())
         .flatten()
-        .filter_map(|hook| hook.get("command")?.as_str())
-        .any(|cmd| {
-            cmd == hook_command || is_claude_hook_command(cmd) || cmd.contains(REWRITE_HOOK_FILE)
+        .any(|hook| {
+            let Some(command) = hook.get("command").and_then(|value| value.as_str()) else {
+                return false;
+            };
+            (is_command_hook(hook) && hook.get("args").is_none() && command == hook_command)
+                || is_claude_hook_entry(hook)
+                || (is_command_hook(hook) && command.contains(REWRITE_HOOK_FILE))
         })
 }
 
@@ -6634,6 +6760,25 @@ mod tests {
     }
 
     #[test]
+    fn test_hook_already_present_exec_form() {
+        let json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": r"C:\Users\me\.local\bin\rtk.exe",
+                        "args": ["hook", "claude"],
+                        "timeout": 10
+                    }]
+                }]
+            }
+        });
+
+        assert!(hook_already_present(&json_content, CLAUDE_HOOK_COMMAND));
+    }
+
+    #[test]
     fn test_hook_not_present_other_hooks() {
         let json_content = serde_json::json!({
             "hooks": {
@@ -6649,6 +6794,19 @@ mod tests {
 
         let hook_command = "/Users/test/.claude/hooks/rtk-rewrite.sh";
         assert!(!hook_already_present(&json_content, hook_command));
+
+        let prompt_hook = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "prompt",
+                        "command": CLAUDE_HOOK_COMMAND
+                    }]
+                }]
+            }
+        });
+        assert!(!hook_already_present(&prompt_hook, CLAUDE_HOOK_COMMAND));
     }
 
     // Tests for insert_hook_entry()
@@ -6672,6 +6830,165 @@ mod tests {
 
         let command = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(command, hook_command);
+    }
+
+    #[test]
+    fn test_insert_claude_hook_entry_uses_exec_form() {
+        let mut json_content = serde_json::json!({});
+
+        insert_hook_entry(&mut json_content, CLAUDE_HOOK_COMMAND).unwrap();
+
+        let hook = &json_content["hooks"]["PreToolUse"][0]["hooks"][0];
+        assert_eq!(hook["command"], "rtk");
+        assert_eq!(hook["args"], serde_json::json!(["hook", "claude"]));
+    }
+
+    #[test]
+    fn test_upgrade_managed_claude_hook_preserves_fields_order_and_group() {
+        let mut root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "description": "user-owned group metadata",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "third-party-hook"
+                        },
+                        {
+                            "type": "command",
+                            "command": CLAUDE_HOOK_COMMAND,
+                            "timeout": 10,
+                            "statusMessage": "Optimizing command"
+                        },
+                        {
+                            "type": "command",
+                            "command": "another-third-party-hook"
+                        }
+                    ]
+                }]
+            }
+        });
+
+        assert!(upgrade_managed_claude_shell_hooks(&mut root));
+
+        let hooks = root["hooks"]["PreToolUse"][0]["hooks"].as_array().unwrap();
+        assert_eq!(hooks.len(), 3);
+        assert_eq!(
+            root["hooks"]["PreToolUse"][0]["description"],
+            "user-owned group metadata"
+        );
+        assert_eq!(hooks[0]["command"], "third-party-hook");
+        assert_eq!(hooks[1]["command"], CLAUDE_HOOK_BINARY);
+        assert_eq!(hooks[1]["args"], serde_json::json!(CLAUDE_HOOK_ARGS));
+        assert_eq!(hooks[1]["timeout"], 10);
+        assert_eq!(hooks[1]["statusMessage"], "Optimizing command");
+        assert_eq!(hooks[2]["command"], "another-third-party-hook");
+    }
+
+    #[test]
+    fn test_upgrade_managed_claude_hook_upgrades_each_entry_without_deduplication() {
+        let mut root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            { "type": "command", "command": "third-party-hook" },
+                            { "type": "command", "command": CLAUDE_HOOK_COMMAND }
+                        ]
+                    },
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": r"C:\Users\me\.local\bin\rtk.exe",
+                                "args": ["hook", "claude"]
+                            },
+                            {
+                                "type": "command",
+                                "command": CLAUDE_HOOK_COMMAND,
+                                "once": true
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        assert!(upgrade_managed_claude_shell_hooks(&mut root));
+        assert_eq!(
+            claude_hook_entries(&root)
+                .filter(|hook| is_claude_hook_entry(hook))
+                .count(),
+            3
+        );
+        assert_eq!(
+            root["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "third-party-hook"
+        );
+        assert_eq!(
+            root["hooks"]["PreToolUse"][0]["hooks"][1]["command"],
+            CLAUDE_HOOK_BINARY
+        );
+        assert_eq!(
+            root["hooks"]["PreToolUse"][0]["hooks"][1]["args"],
+            serde_json::json!(CLAUDE_HOOK_ARGS)
+        );
+        assert_eq!(
+            root["hooks"]["PreToolUse"][1]["hooks"][0]["command"],
+            r"C:\Users\me\.local\bin\rtk.exe"
+        );
+        assert_eq!(
+            root["hooks"]["PreToolUse"][1]["hooks"][1]["command"],
+            CLAUDE_HOOK_BINARY
+        );
+        assert_eq!(
+            root["hooks"]["PreToolUse"][1]["hooks"][1]["args"],
+            serde_json::json!(CLAUDE_HOOK_ARGS)
+        );
+        assert_eq!(root["hooks"]["PreToolUse"][1]["hooks"][1]["once"], true);
+    }
+
+    #[test]
+    fn test_upgrade_managed_claude_hook_leaves_unmanaged_entries_unchanged() {
+        let mut root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "/opt/homebrew/bin/rtk hook claude"
+                            },
+                            {
+                                "type": "prompt",
+                                "command": CLAUDE_HOOK_COMMAND
+                            },
+                            {
+                                "type": "command",
+                                "command": CLAUDE_HOOK_COMMAND,
+                                "args": null
+                            }
+                        ]
+                    },
+                    {
+                        "matcher": "Read",
+                        "hooks": [{
+                            "type": "command",
+                            "command": CLAUDE_HOOK_COMMAND
+                        }]
+                    }
+                ]
+            }
+        });
+        let before = root.clone();
+
+        assert!(!upgrade_managed_claude_shell_hooks(&mut root));
+        assert_eq!(root, before);
+        assert!(hook_already_present(&root, CLAUDE_HOOK_COMMAND));
     }
 
     #[test]
@@ -6918,6 +7235,82 @@ mod tests {
             pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap(),
             "/some/other/hook.sh"
         );
+    }
+
+    #[test]
+    fn test_remove_hook_from_json_exec_form() {
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "/some/other/hook.sh"
+                        },
+                        {
+                            "type": "prompt",
+                            "command": CLAUDE_HOOK_BINARY,
+                            "args": ["hook", "claude"]
+                        },
+                        {
+                            "type": "command",
+                            "command": r"C:\Users\me\.local\bin\rtk.exe",
+                            "args": ["hook", "claude"]
+                        }
+                    ]
+                }]
+            }
+        });
+
+        assert!(remove_hook_from_json(&mut json_content));
+        let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool_use.len(), 1);
+        assert_eq!(pre_tool_use[0]["hooks"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap(),
+            "/some/other/hook.sh"
+        );
+        assert_eq!(pre_tool_use[0]["hooks"][1]["type"], "prompt");
+    }
+
+    #[test]
+    fn test_remove_hook_preserves_unrelated_empty_and_extended_groups() {
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": []
+                    },
+                    {
+                        "matcher": "Bash",
+                        "description": "keep this group metadata",
+                        "hooks": [{
+                            "type": "command",
+                            "command": CLAUDE_HOOK_BINARY,
+                            "args": CLAUDE_HOOK_ARGS
+                        }]
+                    },
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": CLAUDE_HOOK_BINARY,
+                            "args": CLAUDE_HOOK_ARGS
+                        }]
+                    }
+                ]
+            }
+        });
+
+        assert!(remove_hook_from_json(&mut json_content));
+
+        let groups = json_content["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0]["hooks"], serde_json::json!([]));
+        assert_eq!(groups[1]["description"], "keep this group metadata");
+        assert_eq!(groups[1]["hooks"], serde_json::json!([]));
     }
 
     #[test]
@@ -7228,6 +7621,18 @@ mod tests {
     /// Serialises all tests that mutate the process-wide working directory.
     static CWD_LOCK: Mutex<()> = Mutex::new(());
 
+    fn claude_hook_entry_count(root: &serde_json::Value) -> usize {
+        root.get("hooks")
+            .and_then(|hooks| hooks.get(PRE_TOOL_USE_KEY))
+            .and_then(|pre_tool_use| pre_tool_use.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.get("hooks")?.as_array())
+            .flatten()
+            .filter(|hook| is_claude_hook_entry(hook))
+            .count()
+    }
+
     fn with_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
         let _guard = CLAUDE_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let claude_dir = tmp.path().join(CLAUDE_DIR);
@@ -7256,6 +7661,73 @@ mod tests {
         }
     }
 
+    fn managed_shell_settings() -> String {
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": CLAUDE_HOOK_COMMAND,
+                        "timeout": 10
+                    }]
+                }]
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_global_default_mode_upgrades_managed_shell_hook() {
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let settings_path = claude_dir.join(SETTINGS_JSON);
+            fs::write(&settings_path, managed_shell_settings()).unwrap();
+
+            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+
+            let root: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(settings_path).unwrap()).unwrap();
+            assert_eq!(claude_hook_entry_count(&root), 1);
+            let hook = claude_hook_entries(&root).next().unwrap();
+            assert_eq!(hook["command"], CLAUDE_HOOK_BINARY);
+            assert_eq!(hook["args"], serde_json::json!(CLAUDE_HOOK_ARGS));
+            assert_eq!(hook["timeout"], 10);
+        });
+    }
+
+    #[test]
+    fn test_shell_hook_upgrade_respects_skip_and_dry_run_modes() {
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let settings_path = claude_dir.join(SETTINGS_JSON);
+            let original = managed_shell_settings();
+            let cases = [
+                (PatchMode::Skip, InitContext::default()),
+                (
+                    PatchMode::Auto,
+                    InitContext {
+                        dry_run: true,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    PatchMode::Ask,
+                    InitContext {
+                        dry_run: true,
+                        ..Default::default()
+                    },
+                ),
+            ];
+
+            for (mode, ctx) in cases {
+                fs::write(&settings_path, &original).unwrap();
+                patch_settings_json_command(CLAUDE_HOOK_COMMAND, mode, false, ctx).unwrap();
+                assert_eq!(fs::read_to_string(&settings_path).unwrap(), original);
+            }
+        });
+    }
+
     #[test]
     fn test_global_default_mode_creates_artifacts() {
         let tmp = TempDir::new().unwrap();
@@ -7271,8 +7743,9 @@ mod tests {
             let settings = claude_dir.join(SETTINGS_JSON);
             assert!(settings.exists(), "settings.json must be created");
             let content = fs::read_to_string(&settings).unwrap();
+            let root = serde_json::from_str(&content).unwrap();
             assert!(
-                content.contains(CLAUDE_HOOK_COMMAND),
+                hook_already_present(&root, CLAUDE_HOOK_COMMAND),
                 "settings.json must contain hook command"
             );
         });
@@ -7402,8 +7875,9 @@ mod tests {
             assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
             let settings_content =
                 fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap_or_default();
+            let root = serde_json::from_str(&settings_content).unwrap();
             assert!(
-                !settings_content.contains(CLAUDE_HOOK_COMMAND),
+                !hook_already_present(&root, CLAUDE_HOOK_COMMAND),
                 "hook entry must be removed from settings.json"
             );
         });
@@ -7417,7 +7891,8 @@ mod tests {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
 
             let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
-            let count = settings.matches(CLAUDE_HOOK_COMMAND).count();
+            let root = serde_json::from_str(&settings).unwrap();
+            let count = claude_hook_entry_count(&root);
             assert_eq!(count, 1, "hook command must appear exactly once");
         });
     }
@@ -7437,8 +7912,9 @@ mod tests {
 
             assert!(claude_dir.join(RTK_MD).exists(), "RTK.md must be created");
             let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
+            let root = serde_json::from_str(&settings).unwrap();
             assert!(
-                settings.contains(CLAUDE_HOOK_COMMAND),
+                hook_already_present(&root, CLAUDE_HOOK_COMMAND),
                 "hook must be in settings.json after upgrade"
             );
         });
@@ -7476,8 +7952,9 @@ mod tests {
                 "RTK.md must NOT be created in hook-only mode"
             );
             let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
+            let root = serde_json::from_str(&settings).unwrap();
             assert!(
-                settings.contains(CLAUDE_HOOK_COMMAND),
+                hook_already_present(&root, CLAUDE_HOOK_COMMAND),
                 "settings.json must contain hook command"
             );
         });

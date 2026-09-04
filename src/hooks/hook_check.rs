@@ -2,7 +2,7 @@
 
 use super::constants::{HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON};
 use super::init::resolve_claude_dir;
-use super::is_claude_hook_command;
+use super::is_claude_hook_entry;
 use crate::core::constants::RTK_DATA_DIR;
 use crate::core::utils::from_json_str;
 use std::path::PathBuf;
@@ -81,8 +81,7 @@ fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
         .iter()
         .filter_map(|entry| entry.get("hooks")?.as_array())
         .flatten()
-        .filter_map(|hook| hook.get("command")?.as_str())
-        .any(is_claude_hook_command)
+        .any(is_claude_hook_entry)
 }
 
 /// Check if the installed hook is missing or outdated, warn once per day.
@@ -224,6 +223,30 @@ mod tests {
                             "type": "command",
                             "command": "/opt/homebrew/bin/rtk hook claude",
                             "timeout": 5
+                        }]
+                    }]
+                }
+            }"#,
+        )
+        .expect("write settings");
+
+        assert!(binary_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_binary_hook_registered_accepts_windows_exec_form() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join(SETTINGS_JSON),
+            r#"{
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "C:\\Users\\me\\.local\\bin\\rtk.exe",
+                            "args": ["hook", "claude"],
+                            "timeout": 10
                         }]
                     }]
                 }

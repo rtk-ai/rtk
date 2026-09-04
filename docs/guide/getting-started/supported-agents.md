@@ -28,7 +28,7 @@ Agent runs "cargo test"
 
 | Agent | Integration tier | Can rewrite transparently? |
 |-------|-----------------|---------------------------|
-| Claude Code | Shell hook (`PreToolUse`) | Yes |
+| Claude Code | Rust binary (`rtk hook claude`, `PreToolUse`) | Yes |
 | VS Code Copilot Chat | Shell hook (`PreToolUse`) | Yes |
 | GitHub Copilot CLI | Shell hook (`PreToolUse`) | Yes |
 | Cursor | Shell hook (`preToolUse`) | Yes |
@@ -232,13 +232,15 @@ Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on
 
 ## Windows support
 
-The shell hook (`rtk-rewrite.sh`) requires a Unix shell. On native Windows:
+Claude Code uses the native RTK binary on every platform. `rtk init -g`
+registers `rtk` as the executable and passes `hook claude` as an argument array,
+so native Windows does not need a Unix shell for this hook. Existing absolute
+paths ending in `rtk.exe` are recognized as installed when they use the same
+arguments.
 
-- `rtk init -g` automatically falls back to **CLAUDE.md injection mode** (prompt-level instructions)
-- Filters work normally (`rtk cargo test`, `rtk git status`)
-- Auto-rewrite does not work — the AI assistant is instructed to use RTK but commands are not intercepted
-
-For full hook support on Windows, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). Inside WSL, all agents with shell hook integration (Claude Code, Cursor, Gemini) work identically to Linux.
+Legacy `rtk-rewrite.sh` integrations still require a Unix shell. Re-run
+`rtk init -g` to migrate RTK's older combined Claude Code command entry to the
+native form; use WSL only when another shell-script integration requires it.
 
 ## Graceful degradation
 
