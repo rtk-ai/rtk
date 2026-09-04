@@ -4647,6 +4647,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_rewrite_bloop_filtered_subcommands() {
+        assert_eq!(
+            rewrite_command_no_prefixes("bloop test", &[]),
+            Some("rtk bloop test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("bloop test myproj --only '*MySpec'", &[]),
+            Some("rtk bloop test myproj --only '*MySpec'".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("bloop compile myproj", &[]),
+            Some("rtk bloop compile myproj".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("bloop run myproj", &[]),
+            Some("rtk bloop run myproj".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bloop_does_not_match_unrelated_subcommands() {
+        assert_eq!(rewrite_command_no_prefixes("bloop testify", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("bloop compilefoo", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("bloop projects", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("bloop bsp", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_bloop_producer_stays_raw_in_pipeline() {
+        assert_eq!(
+            rewrite_command_no_prefixes("bloop test myproj | grep FAIL", &[]),
+            Some("bloop test myproj | rtk grep FAIL".into())
+        );
+    }
+
     // --- Maven ---
 
     #[test]
