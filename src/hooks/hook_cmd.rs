@@ -8,23 +8,39 @@ use super::permissions::{self, PermissionVerdict};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::{self, Read, Write};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
 
 use crate::core::tracking::HookOutcome;
 use crate::core::utils::strip_leading_bom;
 use crate::discover::registry::{has_heredoc, rewrite_command};
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
+const STDIN_READ_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn read_stdin_limited() -> Result<String> {
-    let mut input = String::new();
-    io::stdin()
-        .take((STDIN_CAP + 1) as u64)
-        .read_to_string(&mut input)
-        .context("Failed to read stdin")?;
-    if input.len() > STDIN_CAP {
-        anyhow::bail!("hook stdin exceeds {} byte limit", STDIN_CAP);
+    let (tx, rx) = mpsc::sync_channel(1);
+
+    thread::spawn(move || {
+        let mut input = String::new();
+        let result = io::stdin()
+            .take((STDIN_CAP + 1) as u64)
+            .read_to_string(&mut input)
+            .context("Failed to read stdin")
+            .and_then(|_| {
+                if input.len() > STDIN_CAP {
+                    anyhow::bail!("hook stdin exceeds {} byte limit", STDIN_CAP);
+                }
+                Ok(input)
+            });
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(STDIN_READ_TIMEOUT) {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => Ok(String::new()),
     }
-    Ok(input)
 }
 
 // ── Copilot hook (VS Code + Copilot CLI) ──────────────────────
