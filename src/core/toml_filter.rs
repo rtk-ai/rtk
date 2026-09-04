@@ -14,6 +14,7 @@
 ///   - `RTK_TOML_DEBUG=1`  — print which filter matched and line counts to stderr
 ///
 /// Pipeline stages (applied in order):
+///   0. pass_through_if_args  - if any invoked arg matches (exact or prefix), skip filtering entirely
 ///   1. strip_ansi           — remove ANSI escape codes
 ///   2. replace              — regex substitutions, line-by-line, chainable
 ///   3. match_output         — short-circuit: if blob matches a pattern, return message immediately
@@ -106,6 +107,13 @@ struct TomlFilterDef {
     /// Use for tools like liquibase that emit banners/logs to stderr.
     #[serde(default)]
     filter_stderr: bool,
+    /// Skip filtering entirely when the invoked command carries any of these
+    /// argument prefixes (exact match or prefix). Lets declarative filters stay
+    /// flag-aware where truncation would drop the answer itself: e.g. `du -s`
+    /// emits one independent total per root, so a line cap would hide the
+    /// largest consumers. Matching args fall through to raw passthrough.
+    #[serde(default)]
+    pass_through_if_args: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +159,38 @@ pub struct CompiledFilter {
     on_empty: Option<String>,
     /// When true, the runner should capture stderr and merge it with stdout.
     pub filter_stderr: bool,
+    /// If any invoked arg matches (exact or prefix), the filter is skipped and
+    /// the command runs as raw passthrough.
+    pass_through_if_args: Vec<String>,
+}
+
+impl CompiledFilter {
+    /// True when any invoked arg matches (exact or prefix) an entry in
+    /// `pass_through_if_args`. Prefix matching covers combined short flags
+    /// (`-sk`) and value-bearing long flags (`--max-depth=1`). Short-option
+    /// clusters where the target flag is not first (`-hs`, `-hd1`) are matched
+    /// by scanning the cluster for the single-char needle.
+    pub fn should_pass_through(&self, args: &[String]) -> bool {
+        self.pass_through_if_args.iter().any(|needle| {
+            args.iter().any(|arg| {
+                if arg == needle || arg.starts_with(needle) {
+                    return true;
+                }
+                // Short-option cluster: a single-dash token carrying the
+                // needle's char somewhere (du -hs, -hd1). Long flags (--) are
+                // handled by the exact/prefix branch above.
+                let single = needle
+                    .strip_prefix('-')
+                    .filter(|c| !needle.starts_with("--") && c.chars().count() == 1);
+                match single {
+                    Some(c) => {
+                        arg.starts_with('-') && !arg.starts_with("--") && arg[1..].contains(c)
+                    }
+                    None => false,
+                }
+            })
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -398,6 +438,7 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
         max_lines: def.max_lines,
         on_empty: def.on_empty,
         filter_stderr: def.filter_stderr,
+        pass_through_if_args: def.pass_through_if_args,
     })
 }
 
@@ -895,6 +936,50 @@ mod tests {
                 "match-set disagreed with registry for {cmd:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_pass_through_if_args_exact_and_prefix() {
+        let filter = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+pass_through_if_args = ["-s", "--summarize", "-d", "--max-depth"]
+"#,
+        );
+        // Exact match.
+        assert!(filter.should_pass_through(&["-s".into()]));
+        // Combined short flag: `-sk` starts with `-s`.
+        assert!(filter.should_pass_through(&["-sk".into(), "/tmp".into()]));
+        // Value-bearing long flag.
+        assert!(filter.should_pass_through(&["--max-depth=1".into()]));
+        // Space-separated long flag value.
+        assert!(filter.should_pass_through(&["--max-depth".into(), "1".into()]));
+        // Depth flag among other args.
+        assert!(filter.should_pass_through(&["-h".into(), "-d1".into(), "/tmp".into()]));
+        // Short-option clusters where the target flag is not first.
+        assert!(filter.should_pass_through(&["-hs".into(), "/tmp".into()]));
+        assert!(filter.should_pass_through(&["-hd1".into(), "/tmp".into()]));
+        assert!(filter.should_pass_through(&["-ahd1".into()]));
+        // Flags that must NOT opt out.
+        assert!(!filter.should_pass_through(&["-h".into(), "/tmp".into()]));
+        assert!(!filter.should_pass_through(&["/tmp".into()]));
+        assert!(!filter.should_pass_through(&["-a".into(), "-c".into()]));
+        // Capitalized short flags are distinct flags, not the needle.
+        assert!(!filter.should_pass_through(&["-S".into()]));
+    }
+
+    #[test]
+    fn test_pass_through_if_args_empty_never_opts_out() {
+        let filter = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+"#,
+        );
+        assert!(!filter.should_pass_through(&["-s".into(), "--anything".into()]));
     }
 
     #[test]
