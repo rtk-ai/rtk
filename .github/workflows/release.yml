@@ -100,7 +100,7 @@ jobs:
           cd ../../..
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rtk-${{ matrix.target }}
           path: rtk-${{ matrix.target }}.${{ matrix.archive }}
@@ -125,7 +125,7 @@ jobs:
           RTK_TELEMETRY_TOKEN: ${{ secrets.RTK_TELEMETRY_TOKEN }}
 
       - name: Upload DEB
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rtk-deb
           path: target/debian/*.deb
@@ -155,7 +155,7 @@ jobs:
         run: cargo generate-rpm
 
       - name: Upload RPM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rtk-rpm
           path: target/generate-rpm/*.rpm
