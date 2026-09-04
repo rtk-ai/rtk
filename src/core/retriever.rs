@@ -436,9 +436,20 @@ fn store_inner(
 
     let conn = open(cfg)?;
     conn.execute(
-        "INSERT OR REPLACE INTO recall
+        "INSERT INTO recall
          (hash, command, cwd, exit_code, created_at, total_lines, shown_upto, byte_size, truncated, codec, blob)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT(hash) DO UPDATE SET
+             command = excluded.command,
+             cwd = excluded.cwd,
+             exit_code = excluded.exit_code,
+             created_at = excluded.created_at,
+             total_lines = excluded.total_lines,
+             shown_upto = excluded.shown_upto,
+             byte_size = excluded.byte_size,
+             truncated = excluded.truncated,
+             codec = excluded.codec,
+             blob = excluded.blob",
         params![
             hash,
             command,
@@ -903,6 +914,26 @@ mod tests {
             .find(|s| s.slug == "docker-images" && s.mode == "tee")
             .expect("row");
         assert_eq!(s.recalls, 2, "one count per distinct tee file");
+    }
+
+    #[test]
+    fn test_identical_restore_preserves_recalled_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let stored = store_inner(&cfg, b"same fail\n", "cargo_test", 1, 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        mark_recalled(&conn, &stored.hash, "cargo_test");
+        store_inner(&cfg, b"same fail\n", "cargo_test", 1, 1).unwrap();
+        mark_recalled(&conn, &stored.hash, "cargo_test");
+        let stats = stats_snapshot_with(&cfg).unwrap();
+        let s = stats
+            .iter()
+            .find(|s| s.slug == "cargo_test" && s.mode == "sqlite")
+            .expect("row");
+        assert_eq!(
+            s.recalls, 1,
+            "identical re-store must not reset recalled and re-count reads"
+        );
     }
 
     #[test]
