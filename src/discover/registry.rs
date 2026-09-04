@@ -105,7 +105,7 @@ struct GolangciRunParts<'a> {
 
 /// Classify a single (already-split) command.
 pub fn classify_command(cmd: &str) -> Classification {
-    let trimmed = cmd.trim();
+    let trimmed = strip_leading_comment_lines(cmd.trim());
     if trimmed.is_empty() {
         return Classification::Ignored;
     }
@@ -254,6 +254,19 @@ fn extract_base_command(cmd: &str) -> &str {
             }
         }
     }
+}
+
+/// Peel leading full-line shell comments off a segment so the command that
+/// follows is classified instead of the comment text.
+fn strip_leading_comment_lines(cmd: &str) -> &str {
+    let mut rest = cmd.trim_start();
+    while rest.starts_with('#') {
+        match rest.find('\n') {
+            Some(nl) => rest = rest[nl + 1..].trim_start(),
+            None => return "",
+        }
+    }
+    rest
 }
 
 /// Quote-aware heredoc detection — `<<` inside quotes is not a heredoc.
@@ -2134,6 +2147,37 @@ mod tests {
         assert_eq!(
             classify_command("echo hello world"),
             Classification::Ignored
+        );
+    }
+
+    #[test]
+    fn test_classify_leading_comment_lines_ignored() {
+        assert_eq!(
+            classify_command("# Check the postgres user grants\ndocker ps"),
+            Classification::Supported {
+                rtk_equivalent: "rtk docker",
+                category: "Infra",
+                estimated_savings_pct: 85.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_pure_comment_ignored() {
+        assert_eq!(classify_command("# just a note"), Classification::Ignored);
+    }
+
+    #[test]
+    fn test_classify_leading_comment_before_supported_command() {
+        assert_eq!(
+            classify_command("# build it\ncargo build"),
+            Classification::Supported {
+                rtk_equivalent: "rtk cargo",
+                category: "Cargo",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
         );
     }
 
