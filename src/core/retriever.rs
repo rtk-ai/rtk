@@ -398,7 +398,7 @@ pub fn store(
     cfg: &RetrieverConfig,
     content: &[u8],
     command: &str,
-    exit_code: i32,
+    exit_code: Option<i32>,
     shown_upto: usize,
 ) -> Stored {
     if content.is_empty() {
@@ -414,7 +414,7 @@ fn store_inner(
     cfg: &RetrieverConfig,
     content: &[u8],
     command: &str,
-    exit_code: i32,
+    exit_code: Option<i32>,
     shown_upto: usize,
 ) -> Result<StoredRef> {
     let total_lines = count_lines(content);
@@ -736,7 +736,7 @@ mod tests {
         nasty.extend_from_slice("漢字\n".as_bytes());
         nasty.extend_from_slice(b"no-eol-tail");
 
-        let stored = store_inner(&cfg, &nasty, "nasty-cmd", 0, 1).expect("store");
+        let stored = store_inner(&cfg, &nasty, "nasty-cmd", Some(0), 1).expect("store");
         let conn = open(&cfg).unwrap();
         let row = load_by_hash(&conn, &stored.hash).unwrap().expect("row");
         assert_eq!(
@@ -754,7 +754,7 @@ mod tests {
             ..temp_cfg(dir.path())
         };
         let data = vec![0u8, 1, 2, 255, b'\n', b'x'];
-        let stored = store_inner(&cfg, &data, "c", 0, 1).unwrap();
+        let stored = store_inner(&cfg, &data, "c", Some(0), 1).unwrap();
         let conn = open(&cfg).unwrap();
         let row = load_by_hash(&conn, &stored.hash).unwrap().unwrap();
         assert_eq!(row.codec, "raw");
@@ -766,7 +766,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
         let content = b"i1\ni2\ni3\ni4\ni5\n";
-        let stored = store_inner(&cfg, content, "list", 0, 3).unwrap();
+        let stored = store_inner(&cfg, content, "list", Some(0), 3).unwrap();
         assert_eq!(stored.hidden_lines, 3);
         let conn = open(&cfg).unwrap();
         let row = load_by_hash(&conn, &stored.hash).unwrap().unwrap();
@@ -782,7 +782,7 @@ mod tests {
             ..temp_cfg(dir.path())
         };
         let big = vec![b'a'; 100];
-        let stored = store_inner(&cfg, &big, "big", 0, 1).unwrap();
+        let stored = store_inner(&cfg, &big, "big", Some(0), 1).unwrap();
         let conn = open(&cfg).unwrap();
         let row = load_by_hash(&conn, &stored.hash).unwrap().unwrap();
         assert!(row.truncated);
@@ -796,7 +796,7 @@ mod tests {
             max_entry_bytes: 12,
             ..temp_cfg(dir.path())
         };
-        let stored = store_inner(&cfg, b"aaaa\nbbbb\ncccc\n", "cmd", 0, 1).unwrap();
+        let stored = store_inner(&cfg, b"aaaa\nbbbb\ncccc\n", "cmd", Some(0), 1).unwrap();
         let conn = open(&cfg).unwrap();
         let row = load_by_hash(&conn, &stored.hash).unwrap().unwrap();
         assert!(row.truncated);
@@ -811,7 +811,7 @@ mod tests {
             ..temp_cfg(dir.path())
         };
         let big = vec![b'a'; 100];
-        let stored = store_inner(&cfg, &big, "big", 0, 1).unwrap();
+        let stored = store_inner(&cfg, &big, "big", Some(0), 1).unwrap();
         let conn = open(&cfg).unwrap();
         let row = load_by_hash(&conn, &stored.hash).unwrap().unwrap();
         assert!(row.truncated);
@@ -854,7 +854,7 @@ mod tests {
         };
         for i in 0..5 {
             let content = format!("output-{i}");
-            store_inner(&cfg, content.as_bytes(), &format!("cmd{i}"), 0, 1).unwrap();
+            store_inner(&cfg, content.as_bytes(), &format!("cmd{i}"), Some(0), 1).unwrap();
         }
         let conn = open(&cfg).unwrap();
         let count: i64 = conn
@@ -867,8 +867,8 @@ mod tests {
     fn test_dedup_same_content_same_hash() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
-        let a = store_inner(&cfg, b"same output\n", "cmd", 0, 1).unwrap();
-        let b = store_inner(&cfg, b"same output\n", "cmd", 0, 1).unwrap();
+        let a = store_inner(&cfg, b"same output\n", "cmd", Some(0), 1).unwrap();
+        let b = store_inner(&cfg, b"same output\n", "cmd", Some(0), 1).unwrap();
         assert_eq!(a.hash, b.hash);
         let conn = open(&cfg).unwrap();
         let count: i64 = conn
@@ -881,8 +881,8 @@ mod tests {
     fn test_stats_elision_counted_on_store() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
-        store_inner(&cfg, b"out1\n", "cargo-test", 1, 1).unwrap();
-        store_inner(&cfg, b"out2\n", "cargo-test", 1, 1).unwrap();
+        store_inner(&cfg, b"out1\n", "cargo-test", Some(1), 1).unwrap();
+        store_inner(&cfg, b"out2\n", "cargo-test", Some(1), 1).unwrap();
         let stats = stats_snapshot_with(&cfg).unwrap();
         let row = stats
             .iter()
@@ -917,7 +917,7 @@ mod tests {
     fn test_stats_recall_deduped_per_entry() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
-        let stored = store_inner(&cfg, b"x\ny\n", "vitest", 1, 1).unwrap();
+        let stored = store_inner(&cfg, b"x\ny\n", "vitest", Some(1), 1).unwrap();
         let conn = open(&cfg).unwrap();
         mark_recalled(&conn, &stored.hash, "vitest");
         mark_recalled(&conn, &stored.hash, "vitest");
@@ -966,13 +966,29 @@ mod tests {
     }
 
     #[test]
+    fn test_force_path_stores_null_exit_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let stored = store_inner(&cfg, b"trimmed list\n", "docker-images", None, 2).unwrap();
+        let conn = open(&cfg).unwrap();
+        let exit: Option<i64> = conn
+            .query_row(
+                "SELECT exit_code FROM recall WHERE hash = ?1",
+                params![stored.hash],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exit, None, "unknown exit codes must be stored as NULL, not 0");
+    }
+
+    #[test]
     fn test_identical_restore_preserves_recalled_flag() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
-        let stored = store_inner(&cfg, b"same fail\n", "cargo_test", 1, 1).unwrap();
+        let stored = store_inner(&cfg, b"same fail\n", "cargo_test", Some(1), 1).unwrap();
         let conn = open(&cfg).unwrap();
         mark_recalled(&conn, &stored.hash, "cargo_test");
-        store_inner(&cfg, b"same fail\n", "cargo_test", 1, 1).unwrap();
+        store_inner(&cfg, b"same fail\n", "cargo_test", Some(1), 1).unwrap();
         mark_recalled(&conn, &stored.hash, "cargo_test");
         let stats = stats_snapshot_with(&cfg).unwrap();
         let s = stats
@@ -989,7 +1005,7 @@ mod tests {
     fn test_stats_recall_counted_on_read() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
-        let stored = store_inner(&cfg, b"a\nb\nc\n", "gh-prs", 0, 2).unwrap();
+        let stored = store_inner(&cfg, b"a\nb\nc\n", "gh-prs", Some(0), 2).unwrap();
         let conn = open(&cfg).unwrap();
         let row = load_by_hash(&conn, &stored.hash).unwrap().unwrap();
         bump_stat(&conn, &row.command, "sqlite", "recalls");
@@ -1010,7 +1026,7 @@ mod tests {
             ..temp_cfg(dir.path())
         };
         for i in 0..4 {
-            store_inner(&cfg, format!("o{i}\n").as_bytes(), "find", 1, 1).unwrap();
+            store_inner(&cfg, format!("o{i}\n").as_bytes(), "find", Some(1), 1).unwrap();
         }
         let conn = open(&cfg).unwrap();
         let entries: i64 = conn
@@ -1044,7 +1060,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let stored = store_inner(&cfg, b"x\ny\n", "vitest", 1, 1).expect("store on old schema");
+        let stored = store_inner(&cfg, b"x\ny\n", "vitest", Some(1), 1).expect("store on old schema");
         let conn = open(&cfg).unwrap();
         mark_recalled(&conn, &stored.hash, "vitest");
         let stats = stats_snapshot_with(&cfg).unwrap();
@@ -1155,7 +1171,7 @@ mod tests {
     fn test_load_by_hash_prefix() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
-        let stored = store_inner(&cfg, b"hello world\n", "cmd", 0, 1).unwrap();
+        let stored = store_inner(&cfg, b"hello world\n", "cmd", Some(0), 1).unwrap();
         let conn = open(&cfg).unwrap();
         let prefix = &stored.hash[..6];
         assert!(load_by_hash(&conn, prefix).unwrap().is_some());

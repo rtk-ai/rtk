@@ -15,7 +15,7 @@ fn active() -> Option<(RecoveryMode, RetrieverConfig)> {
     }
 }
 
-fn store_hint(cfg: &RetrieverConfig, content: &str, slug: &str, exit_code: i32) -> Option<String> {
+fn store_hint(cfg: &RetrieverConfig, content: &str, slug: &str, exit_code: Option<i32>) -> Option<String> {
     match retriever::store(cfg, content.as_bytes(), slug, exit_code, 1) {
         Stored::Saved(s) => Some(format!("[full output: rtk recall {}]", s.hash)),
         Stored::Unavailable | Stored::Empty => None,
@@ -31,7 +31,7 @@ pub fn tee_and_hint(raw: &str, command_slug: &str, exit_code: i32) -> Option<Str
         RecoveryMode::Disabled => None,
         RecoveryMode::Tee => super::tee_file::tee_and_hint(&cfg, raw, command_slug)
             .inspect(|_| retriever::record_tee_elision(&cfg, command_slug)),
-        RecoveryMode::Sqlite => store_hint(&cfg, raw, command_slug, exit_code),
+        RecoveryMode::Sqlite => store_hint(&cfg, raw, command_slug, Some(exit_code)),
     }
 }
 
@@ -44,7 +44,7 @@ pub fn force_tee_hint(content: &str, command_slug: &str) -> Option<String> {
         RecoveryMode::Disabled => None,
         RecoveryMode::Tee => super::tee_file::force_tee_hint(&cfg, content, command_slug)
             .inspect(|_| retriever::record_tee_elision(&cfg, command_slug)),
-        RecoveryMode::Sqlite => store_hint(&cfg, content, command_slug, 0),
+        RecoveryMode::Sqlite => store_hint(&cfg, content, command_slug, None),
     }
 }
 
@@ -64,7 +64,7 @@ pub fn force_tee_tail_hint(
                 .inspect(|_| retriever::record_tee_elision(&cfg, command_slug))
         }
         RecoveryMode::Sqlite => {
-            match retriever::store(&cfg, content.as_bytes(), command_slug, 0, line_offset) {
+            match retriever::store(&cfg, content.as_bytes(), command_slug, None, line_offset) {
                 Stored::Saved(s) => Some(format!(
                     "[+{} hidden: rtk recall {}]",
                     s.hidden_lines, s.hash
