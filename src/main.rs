@@ -363,6 +363,10 @@ enum Commands {
         #[arg(long)]
         opencode: bool,
 
+        /// Install OpenCode v2 plugin (in addition to Claude Code)
+        #[arg(long)]
+        opencode_v2: bool,
+
         /// Initialize for Gemini CLI instead of Claude Code
         #[arg(long)]
         gemini: bool,
@@ -2168,6 +2172,7 @@ fn run_cli() -> Result<i32> {
         Commands::Init {
             global,
             opencode,
+            opencode_v2,
             gemini,
             agent,
             show,
@@ -2253,7 +2258,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
             } else {
                 let install_opencode = opencode;
-                let install_claude = !opencode;
+                let install_opencode_v2 = opencode_v2;
+                let install_claude = !opencode && !opencode_v2;
                 let install_cursor = agent == Some(AgentTarget::Cursor);
                 let install_windsurf = agent == Some(AgentTarget::Windsurf);
                 let install_cline = agent == Some(AgentTarget::Cline);
@@ -2269,6 +2275,7 @@ fn run_cli() -> Result<i32> {
                     global,
                     install_claude,
                     install_opencode,
+                    install_opencode_v2,
                     install_cursor,
                     install_windsurf,
                     install_cline,
