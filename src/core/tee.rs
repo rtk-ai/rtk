@@ -1,6 +1,7 @@
 //! Recovery-hint dispatch — routes to the sqlite store or legacy tee per `[retriever] mode`.
 
 use crate::core::config::Config;
+pub(crate) use crate::core::retriever::MIN_FAILURE_BYTES as MIN_TEE_SIZE;
 use crate::core::retriever::{self, RecoveryMode, RetrieverConfig, Stored, MIN_FAILURE_BYTES};
 
 fn active() -> Option<(RecoveryMode, RetrieverConfig)> {

@@ -516,12 +516,12 @@ mod tests {
             !hint.contains("full output"),
             "must not point at already-seen output: {hint}"
         );
-        // Tee availability depends on environment; when present the hint is
-        // the standard one-shot retrieval command over the hidden-only file.
+        // Recovery availability depends on environment; when present the hint
+        // is the standard one-shot retrieval command over the hidden entries.
         if hint.lines().count() > 1 {
             assert!(
-                hint.contains("[see remaining: tail -n +1 "),
-                "tee hint must be the standard tail form: {hint}"
+                hint.contains("[see remaining: tail -n +1 ") || hint.contains("hidden: rtk recall "),
+                "recovery hint must be a standard retrieval form: {hint}"
             );
         }
     }
