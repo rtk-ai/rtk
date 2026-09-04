@@ -398,8 +398,10 @@ pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
 /// Split a shell command on operators (`&&`, `||`, `;`) and optionally pipes (`|`),
 /// respecting quoted strings via the lexer.
 ///
-/// When `stop_at_pipe` is true, returns only segments before the first `|`
-/// (used by command rewriting — only the left side of a pipe gets rewritten).
+/// When `stop_at_pipe` is true, only the first segment of each pipeline is
+/// returned: the rest of the pipeline is skipped and splitting resumes after
+/// the next `&&`/`||`/`;` (used by discovery — the left side of a pipe is the
+/// rewrite candidate, and segments chained after the pipeline still count).
 /// When false, splits through pipes too (used by permission checking —
 /// every segment must be validated).
 pub fn split_on_operators(cmd: &str, stop_at_pipe: bool) -> Vec<&str> {
@@ -411,33 +413,45 @@ pub fn split_on_operators(cmd: &str, stop_at_pipe: bool) -> Vec<&str> {
     let tokens = tokenize(trimmed);
     let mut results = Vec::new();
     let mut seg_start: usize = 0;
+    // True while inside the tail of a pipeline whose head was already pushed;
+    // segments are skipped until the next chain operator.
+    let mut in_pipeline_tail = false;
 
     for tok in &tokens {
         match tok.kind {
             TokenKind::Operator => {
-                let segment = trimmed[seg_start..tok.offset].trim();
-                if !segment.is_empty() {
-                    results.push(segment);
+                if !in_pipeline_tail {
+                    let segment = trimmed[seg_start..tok.offset].trim();
+                    if !segment.is_empty() {
+                        results.push(segment);
+                    }
                 }
+                in_pipeline_tail = false;
                 seg_start = tok.offset + tok.value.len();
             }
             TokenKind::Pipe(_) => {
+                if in_pipeline_tail {
+                    continue;
+                }
                 let segment = trimmed[seg_start..tok.offset].trim();
                 if !segment.is_empty() {
                     results.push(segment);
                 }
                 if stop_at_pipe {
-                    return results;
+                    in_pipeline_tail = true;
+                } else {
+                    seg_start = tok.offset + tok.value.len();
                 }
-                seg_start = tok.offset + tok.value.len();
             }
             _ => {}
         }
     }
 
-    let tail = trimmed[seg_start..].trim();
-    if !tail.is_empty() {
-        results.push(tail);
+    if !in_pipeline_tail {
+        let tail = trimmed[seg_start..].trim();
+        if !tail.is_empty() {
+            results.push(tail);
+        }
     }
 
     results
@@ -1165,6 +1179,18 @@ mod tests {
     fn test_split_on_operators_stop_at_pipe() {
         assert_eq!(split_on_operators("a | b | c", true), vec!["a"]);
         assert_eq!(split_on_operators("a && b | c", true), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_split_on_operators_stop_at_pipe_resumes_after_chain_operator() {
+        assert_eq!(split_on_operators("a | b; c", true), vec!["a", "c"]);
+        assert_eq!(split_on_operators("a | b && c", true), vec!["a", "c"]);
+        assert_eq!(
+            split_on_operators("a | b || c | d; e", true),
+            vec!["a", "c", "e"]
+        );
+        // Pipeline tail at end of input stays dropped.
+        assert_eq!(split_on_operators("a; b | c", true), vec!["a", "b"]);
     }
 
     #[test]

@@ -2298,6 +2298,18 @@ mod tests {
     }
 
     #[test]
+    fn test_split_chain_continues_after_pipeline() {
+        // Commands chained after a pipeline must not be lost (#discover
+        // undercount): only the pipeline tail is skipped, the chain goes on.
+        assert_eq!(
+            split_command_chain(
+                "RTK_DISABLED=1 grep -n a f | head -10; RTK_DISABLED=1 grep -n b f"
+            ),
+            vec!["RTK_DISABLED=1 grep -n a f", "RTK_DISABLED=1 grep -n b f"]
+        );
+    }
+
+    #[test]
     fn test_split_single() {
         assert_eq!(split_command_chain("git status"), vec!["git status"]);
     }
