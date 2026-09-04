@@ -160,9 +160,10 @@ fn run_filtered(original_args: &[String], invocation: &RunInvocation, verbose: u
         crate::core::runner::RunOptions::stdout_only(),
     )?;
 
-    // golangci-lint: exit 0 = clean, exit 1 = lint issues found (not an error),
-    // exit 2+ = config/build error, None = killed by signal (OOM, SIGKILL)
-    Ok(if exit_code == 1 { 0 } else { exit_code })
+    // golangci-lint exit codes must reach callers unchanged: 0 = clean,
+    // 1 = lint issues found (pre-commit hooks, Makefiles and agents gate on
+    // this), 2+ = config/build error.
+    Ok(exit_code)
 }
 
 fn run_passthrough(args: &[String], verbose: u8) -> Result<i32> {
