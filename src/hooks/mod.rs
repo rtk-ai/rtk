@@ -19,8 +19,7 @@ pub fn is_claude_hook_command(command: &str) -> bool {
     };
 
     let binary_name = binary.rsplit(['/', '\\']).next().unwrap_or(binary);
-
-    binary_name == "rtk" && hook == "hook" && claude == "claude"
+    (binary_name == "rtk" || binary_name == "rtk.exe") && hook == "hook" && claude == "claude"
 }
 
 #[cfg(test)]
@@ -31,14 +30,16 @@ mod tests {
     fn claude_hook_command_matches_bare_and_absolute_rtk() {
         assert!(is_claude_hook_command("rtk hook claude"));
         assert!(is_claude_hook_command("/opt/homebrew/bin/rtk hook claude"));
+        assert!(is_claude_hook_command(r"C:\Users\Test\Documents\rtk.exe hook claude"));
         assert!(is_claude_hook_command(
             "\"/opt/homebrew/bin/rtk\" hook claude"
         ));
     }
-
+    
     #[test]
     fn claude_hook_command_rejects_other_commands() {
         assert!(!is_claude_hook_command("not-rtk hook claude"));
+        assert!(!is_claude_hook_command(r"C:\Users\Test\Documents\rtk.exe hook cursor"));
         assert!(!is_claude_hook_command("/opt/homebrew/bin/rtk hook cursor"));
         assert!(!is_claude_hook_command("echo rtk hook claude"));
     }
