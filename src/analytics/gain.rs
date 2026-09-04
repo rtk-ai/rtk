@@ -431,7 +431,6 @@ fn print_efficiency_meter(pct: f64) {
     }
 }
 
-/// Resolve project scope from --project flag. // added
 fn colorize_recall_rate(pct: i64, padded: &str) -> String {
     if !std::io::stdout().is_terminal() {
         return padded.to_string();
@@ -520,6 +519,7 @@ fn show_recall_stats() -> Result<()> {
     Ok(())
 }
 
+/// Resolve project scope from --project flag. // added
 fn resolve_project_scope(project: bool) -> Result<Option<String>> {
     if !project {
         return Ok(None);

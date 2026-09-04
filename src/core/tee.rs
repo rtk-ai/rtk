@@ -15,7 +15,12 @@ fn active() -> Option<(RecoveryMode, RetrieverConfig)> {
     }
 }
 
-fn store_hint(cfg: &RetrieverConfig, content: &str, slug: &str, exit_code: Option<i32>) -> Option<String> {
+fn store_hint(
+    cfg: &RetrieverConfig,
+    content: &str,
+    slug: &str,
+    exit_code: Option<i32>,
+) -> Option<String> {
     match retriever::store(cfg, content.as_bytes(), slug, exit_code, 1) {
         Stored::Saved(s) => Some(format!("[full output: rtk recall {}]", s.hash)),
         Stored::Unavailable | Stored::Empty => None,

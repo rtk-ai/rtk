@@ -293,9 +293,7 @@ fn stats_snapshot_with(cfg: &RetrieverConfig) -> Result<Vec<RecallStat>> {
         std::collections::BTreeMap::new();
     for row in rows.filter_map(|r| r.ok()) {
         let (slug, mode, elisions, recalls) = row;
-        let entry = agg
-            .entry((mode, stat_key(&slug)))
-            .or_insert((0, 0));
+        let entry = agg.entry((mode, stat_key(&slug))).or_insert((0, 0));
         entry.0 += elisions;
         entry.1 += recalls;
     }
@@ -590,7 +588,14 @@ pub fn run_recall(args: RecallArgs) -> Result<i32> {
         slice_from_line(&full, row.shown_upto).to_vec()
     };
     let out = match args.grep {
-        Some(pat) => grep_bytes(&sliced, pat),
+        Some(pat) => {
+            if regex::bytes::Regex::new(pat).is_err() {
+                eprintln!(
+                    "rtk recall: note: --grep pattern is not a valid regex, matching it literally"
+                );
+            }
+            grep_bytes(&sliced, pat)
+        }
         None => sliced,
     };
 
@@ -978,7 +983,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(exit, None, "unknown exit codes must be stored as NULL, not 0");
+        assert_eq!(
+            exit, None,
+            "unknown exit codes must be stored as NULL, not 0"
+        );
     }
 
     #[test]
@@ -1060,7 +1068,8 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let stored = store_inner(&cfg, b"x\ny\n", "vitest", Some(1), 1).expect("store on old schema");
+        let stored =
+            store_inner(&cfg, b"x\ny\n", "vitest", Some(1), 1).expect("store on old schema");
         let conn = open(&cfg).unwrap();
         mark_recalled(&conn, &stored.hash, "vitest");
         let stats = stats_snapshot_with(&cfg).unwrap();
@@ -1102,7 +1111,12 @@ mod tests {
         bump_stat(&conn, &filename_slug, "tee", "recalls");
         let stats = stats_snapshot_with(&cfg).unwrap();
         let rows: Vec<_> = stats.iter().filter(|s| s.mode == "tee").collect();
-        assert_eq!(rows.len(), 1, "one reconciled row, got: {:?}", rows.iter().map(|r| &r.slug).collect::<Vec<_>>());
+        assert_eq!(
+            rows.len(),
+            1,
+            "one reconciled row, got: {:?}",
+            rows.iter().map(|r| &r.slug).collect::<Vec<_>>()
+        );
         assert_eq!((rows[0].elisions, rows[0].recalls), (1, 1));
     }
 
