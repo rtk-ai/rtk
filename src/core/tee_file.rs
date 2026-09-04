@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Long slugs (usually an embedded file path that duplicates the command the LLM
 /// already issued) collapse to a short readable prefix plus a short disambiguating
 /// hash, keeping recovery filenames unique but compact — fewer tokens per tee hint.
-fn sanitize_slug(slug: &str) -> String {
+pub(crate) fn sanitize_slug(slug: &str) -> String {
     let sanitized: String = slug
         .chars()
         .map(|c| {

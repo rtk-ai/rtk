@@ -235,8 +235,28 @@ fn stat_family(slug: &str) -> &str {
     }
 }
 
+fn strip_shortened_hash(s: &str) -> &str {
+    let b = s.as_bytes();
+    if b.len() == 15
+        && b[8] == b'_'
+        && s[9..]
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+    {
+        &s[..8]
+    } else {
+        s
+    }
+}
+
+fn stat_key(slug: &str) -> String {
+    let sanitized = crate::core::tee_file::sanitize_slug(slug);
+    stat_family(strip_shortened_hash(&sanitized)).to_string()
+}
+
 fn bump_stat(conn: &Connection, slug: &str, mode: &str, column: &str) {
-    let slug = stat_family(slug);
+    let slug = stat_key(slug);
+    let slug = slug.as_str();
     let sql = match column {
         "elisions" => {
             "INSERT INTO recall_stats (slug, mode, elisions, recalls) VALUES (?1, ?2, 1, 0)
@@ -274,7 +294,7 @@ fn stats_snapshot_with(cfg: &RetrieverConfig) -> Result<Vec<RecallStat>> {
     for row in rows.filter_map(|r| r.ok()) {
         let (slug, mode, elisions, recalls) = row;
         let entry = agg
-            .entry((mode, stat_family(&slug).to_string()))
+            .entry((mode, stat_key(&slug)))
             .or_insert((0, 0));
         entry.0 += elisions;
         entry.1 += recalls;
@@ -953,6 +973,41 @@ mod tests {
             .find(|s| s.slug == "vitest" && s.mode == "sqlite")
             .expect("row");
         assert_eq!(s.recalls, 1, "recalled column must be added to old DBs");
+    }
+
+    #[test]
+    fn test_stat_key_canonical_across_elision_and_recall_sides() {
+        let raw = "helm install a-very-long-release-name ./some/long/chart/path";
+        let filename_slug = crate::core::tee_file::sanitize_slug(raw);
+        assert_eq!(
+            stat_key(raw),
+            stat_key(&filename_slug),
+            "raw slug and tee-filename slug must map to the same stats key"
+        );
+    }
+
+    #[test]
+    fn test_stat_key_bounds_toml_raw_command_slugs() {
+        let a = stat_key("helm install myapp ./chart");
+        let b = stat_key("helm install other ./elsewhere --wait");
+        assert_eq!(a, b, "same subcommand family must aggregate");
+        assert!(a.len() <= 24, "key stays bounded: {a}");
+        assert!(a.starts_with("helm"), "key stays readable: {a}");
+    }
+
+    #[test]
+    fn test_bump_stat_uses_canonical_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let conn = open(&cfg).unwrap();
+        let raw = "helm install a-very-long-release-name ./some/long/chart/path";
+        bump_stat(&conn, raw, "tee", "elisions");
+        let filename_slug = crate::core::tee_file::sanitize_slug(raw);
+        bump_stat(&conn, &filename_slug, "tee", "recalls");
+        let stats = stats_snapshot_with(&cfg).unwrap();
+        let rows: Vec<_> = stats.iter().filter(|s| s.mode == "tee").collect();
+        assert_eq!(rows.len(), 1, "one reconciled row, got: {:?}", rows.iter().map(|r| &r.slug).collect::<Vec<_>>());
+        assert_eq!((rows[0].elisions, rows[0].recalls), (1, 1));
     }
 
     #[test]
