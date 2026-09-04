@@ -495,12 +495,13 @@ fn has_context_flag(flags: &[String]) -> bool {
 pub fn run(
     engine: Engine,
     max_line_len: usize,
-    max_results: usize,
+    max_results: Option<usize>,
     context_only: bool,
     args: &[String],
     verbose: u8,
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let max_results = max_results.unwrap_or_else(|| config::limits().grep_max_results);
 
     // --version / --help: pass through to the engine without filtering.
     // Note: Clap strips `--` before populating trailing_var_arg, so both
@@ -695,7 +696,7 @@ pub fn run(
         body.push_str(&format!("+{} more files{}\n", skipped_files, hint));
     }
 
-    // Switch to the grouped form only when capping actually shrank the output;
+    // Switch to the grouped form when capping actually shrank the output;
     // otherwise emit the faithful baseline, so RTK never exceeds the real command.
     let capped = shown < total_matches || skipped_files > 0;
     let rtk_output = if capped {
@@ -709,11 +710,7 @@ pub fn run(
         body
     };
 
-    let output = if capped && rtk_output.len() < plain.len() {
-        rtk_output
-    } else {
-        plain
-    };
+    let output = if capped { rtk_output } else { plain };
 
     print!("{}", output);
     timer.track(&real_cmd, &rtk_label, &raw_output, &output);

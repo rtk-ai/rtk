@@ -333,8 +333,8 @@ enum Commands {
         // flows to extra_args and is forwarded verbatim to grep/rg, which applies
         // genuine --max-count while RTK still compacts (matches how `rtk rg -m`
         // already behaves). --max keeps its long form.
-        #[arg(long, default_value = "200")]
-        max: usize,
+        #[arg(long)]
+        max: Option<usize>,
         /// Show only match context (not full line)
         #[arg(long)]
         context_only: bool,
@@ -2161,9 +2161,14 @@ fn run_cli() -> Result<i32> {
             &extra_args,
             cli.verbose,
         )?,
-        Commands::Rg { extra_args } => {
-            search::run(search::Engine::Rg, 80, 200, false, &extra_args, cli.verbose)?
-        }
+        Commands::Rg { extra_args } => search::run(
+            search::Engine::Rg,
+            80,
+            None,
+            false,
+            &extra_args,
+            cli.verbose,
+        )?,
 
         Commands::Init {
             global,
@@ -3207,7 +3212,7 @@ mod tests {
     #[test]
     fn test_try_parse_grep_dash_m_is_max_count() {
         // Regression: `-m` is GNU grep's --max-count, not RTK's --max. It must
-        // parse (not consume the pattern), keep `max` at its default, and reach
+        // parse (not consume the pattern), leave `max` unset, and reach
         // extra_args so it is forwarded to grep as a real --max-count.
         let cli = Cli::try_parse_from(["rtk", "grep", "-m", "5", "pattern", "file"]).unwrap();
 
@@ -3215,7 +3220,7 @@ mod tests {
             Commands::Grep {
                 max, extra_args, ..
             } => {
-                assert_eq!(max, 200, "max must stay at its default, not consume `-m`");
+                assert_eq!(max, None, "max must stay unset, not consume `-m`");
                 assert_eq!(extra_args, vec!["-m", "5", "pattern", "file"]);
             }
             _ => panic!("Expected Grep command"),
@@ -3994,7 +3999,7 @@ mod tests {
     }
 
     /// Parse `rtk grep …` into the full `Grep` field set for inspection.
-    fn parse_grep(args: &[&str]) -> Result<(usize, usize, bool, Vec<String>), clap::Error> {
+    fn parse_grep(args: &[&str]) -> Result<(usize, Option<usize>, bool, Vec<String>), clap::Error> {
         match Cli::try_parse_from(args)?.command {
             Commands::Grep {
                 max_len,
@@ -4004,6 +4009,15 @@ mod tests {
             } => Ok((max_len, max, context_only, extra_args)),
             _ => unreachable!("parsed a grep command"),
         }
+    }
+
+    #[test]
+    fn test_grep_max_is_optional_cli_override() {
+        let (_, max, _, _) = parse_grep(&["rtk", "grep", "FOO", "path"]).unwrap();
+        assert_eq!(max, None);
+
+        let (_, max, _, _) = parse_grep(&["rtk", "grep", "--max", "5", "FOO", "path"]).unwrap();
+        assert_eq!(max, Some(5));
     }
 
     #[test]
@@ -4023,7 +4037,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(max_len, 40);
-        assert_eq!(max, 5);
+        assert_eq!(max, Some(5));
         assert!(context_only);
         assert_eq!(extra_args, vec!["FOO", "path"]);
     }
