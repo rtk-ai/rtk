@@ -57,6 +57,8 @@ pub enum AgentTarget {
     Hermes,
     /// Factory Droid CLI
     Droid,
+    /// Crush CLI
+    Crush,
     /// Mistral Vibe CLI
     Vibe,
 }
@@ -920,6 +922,8 @@ enum HookCommands {
     Claude,
     /// Process Cursor Agent hook (reads JSON from stdin)
     Cursor,
+    /// Process Crush PreToolUse hook (reads JSON from stdin)
+    Crush,
     /// Process Gemini CLI BeforeTool hook (reads JSON from stdin)
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
@@ -1742,6 +1746,8 @@ where
         uninstall_hermes(ctx)
     } else if agent == Some(AgentTarget::Droid) {
         hooks::init::uninstall_droid(global, ctx)
+    } else if agent == Some(AgentTarget::Crush) {
+        hooks::init::uninstall_crush(global, ctx)
     } else if agent == Some(AgentTarget::Vibe) {
         hooks::init::uninstall_vibe(ctx)
     } else {
@@ -2242,6 +2248,15 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_hermes_mode(ctx)?;
             } else if agent == Some(AgentTarget::Droid) {
                 hooks::init::run_droid_mode(global, ctx)?;
+            } else if agent == Some(AgentTarget::Crush) {
+                let patch_mode = if auto_patch {
+                    hooks::init::PatchMode::Auto
+                } else if no_patch {
+                    hooks::init::PatchMode::Skip
+                } else {
+                    hooks::init::PatchMode::Ask
+                };
+                hooks::init::run_crush_mode(global, patch_mode, ctx)?;
             } else if agent == Some(AgentTarget::Vibe) {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -2665,6 +2680,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Cursor => {
                 hooks::hook_cmd::run_cursor()?;
+                0
+            }
+            HookCommands::Crush => {
+                hooks::hook_cmd::run_crush()?;
                 0
             }
             HookCommands::Gemini => {
@@ -3169,6 +3188,17 @@ mod tests {
     }
 
     #[test]
+    fn test_try_parse_init_agent_crush() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "crush"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Crush));
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
     fn test_try_parse_kubectl_get_alias() {
         let cli = Cli::try_parse_from(["rtk", "kubectl", "get", "pods", "-n", "default"]).unwrap();
 
@@ -3486,6 +3516,17 @@ mod tests {
             cli.command,
             Commands::Hook {
                 command: HookCommands::Claude
+            }
+        ));
+    }
+
+    #[test]
+    fn test_hook_crush_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "crush"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::Crush
             }
         ));
     }

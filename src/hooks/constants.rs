@@ -16,6 +16,8 @@ pub const CURSOR_HOOK_COMMAND: &str = "rtk hook cursor";
 pub const DROID_HOOK_COMMAND: &str = "rtk hook droid";
 /// Native Rust hook command for Mistral Vibe.
 pub const VIBE_HOOK_COMMAND: &str = "rtk hook vibe";
+/// Native Rust hook command for Crush.
+pub const CRUSH_HOOK_COMMAND: &str = "rtk hook crush";
 
 pub const CONFIG_DIR: &str = ".config";
 pub const OPENCODE_SUBDIR: &str = "opencode";
@@ -67,3 +69,10 @@ pub const VIBE_PROMPTS_SUBDIR: &str = "prompts";
 pub const VIBE_PROMPT_FILE: &str = "rtk.md";
 pub const VIBE_HOOK_NAME: &str = "rtk-rewrite";
 pub const VIBE_BASH_MATCH: &str = "bash";
+
+pub const CRUSH_DIR: &str = ".config/crush";
+pub const CRUSH_GLOBAL_CONFIG_ENV: &str = "CRUSH_GLOBAL_CONFIG";
+pub const CRUSH_RC_FILE: &str = "crushrc";
+pub const CRUSH_LOCAL_RC_FILE: &str = ".crushrc";
+pub const CRUSH_HOOK_NAME: &str = "rtk-rewrite";
+pub const CRUSH_BASH_MATCHER: &str = "^bash$";

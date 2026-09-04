@@ -35,6 +35,7 @@ pub fn check_command(cmd: &str) -> PermissionVerdict {
 pub enum Host {
     Claude,
     Cursor,
+    Crush,
     Gemini,
     Droid,
     Vibe,
@@ -55,6 +56,7 @@ pub(crate) fn load_rules_for(host: Host) -> (Vec<String>, Vec<String>, Vec<Strin
     match host {
         Host::Claude => load_permission_rules(),
         Host::Cursor => load_cursor_rules(),
+        Host::Crush => (Vec::new(), Vec::new(), Vec::new()),
         Host::Gemini => load_gemini_rules(),
         Host::Droid => load_droid_rules(),
         Host::Vibe => (Vec::new(), Vec::new(), Vec::new()),
