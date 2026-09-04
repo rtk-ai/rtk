@@ -1,6 +1,5 @@
 //! Optional usage ping so we know which commands people run most.
 
-use super::constants::RTK_DATA_DIR;
 use crate::core::config;
 use crate::core::tracking;
 use crate::hooks::constants::CLAUDE_DIR;
@@ -217,10 +216,7 @@ fn random_salt() -> String {
 }
 
 pub fn salt_file_path() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("rtk")
-        .join(".device_salt")
+    crate::core::constants::data_dir_under("/tmp").join(".device_salt")
 }
 
 fn get_stats(tracker: &tracking::Tracker) -> (i64, Vec<String>, Option<f64>, i64, i64) {
@@ -449,9 +445,7 @@ fn install_method_from_path(path: &str) -> &'static str {
 }
 
 pub fn telemetry_marker_path() -> PathBuf {
-    let data_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(RTK_DATA_DIR);
+    let data_dir = crate::core::constants::data_dir_under("/tmp");
     let _ = crate::core::utils::create_private_dir(&data_dir);
     data_dir.join(".telemetry_last_ping")
 }

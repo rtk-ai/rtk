@@ -62,7 +62,7 @@ fn project_filter_params(project_path: Option<&str>) -> (Option<String>, Option<
     }
 }
 
-use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB, RTK_DATA_DIR};
+use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB};
 
 /// Main tracking interface for recording and querying command history.
 ///
@@ -1511,8 +1511,7 @@ pub(crate) fn get_db_path() -> Result<PathBuf> {
     }
 
     // Priority 3: Default platform-specific location
-    let data_dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-    Ok(data_dir.join(RTK_DATA_DIR).join(HISTORY_DB))
+    Ok(crate::core::constants::data_dir_under(".").join(HISTORY_DB))
 }
 
 /// Whether to gate schema migrations behind `user_version` (the hot-path
@@ -1523,11 +1522,28 @@ enum MigrationMode {
     Always,
 }
 
+/// The database to open: `RTK_DB_PATH` where set, and in a test build a
+/// scratch file rather than the user's real one.
+///
+/// A test exercising a command path reaches `TimedExecution::track`, which
+/// builds its own `Tracker` and takes no path, leaving it no way to redirect
+/// itself. The rows it writes are indistinguishable from real usage in the
+/// developer's history.
+fn resolve_db_path() -> Result<PathBuf> {
+    #[cfg(test)]
+    {
+        if std::env::var_os("RTK_DB_PATH").is_none() {
+            return Ok(crate::core::test_isolation::db_path());
+        }
+    }
+    get_db_path()
+}
+
 /// Open (creating if needed) the tracking DB, apply pragmas, and run schema
 /// migrations per `mode`. Shared by `Tracker::new()` (hot path, gated) and
 /// `ensure_schema_fresh` (`rtk init`, unconditional).
 fn open_and_prepare(mode: MigrationMode) -> Result<Connection> {
-    let db_path = get_db_path()?;
+    let db_path = resolve_db_path()?;
 
     // `create_private_dir` is cheap even when the directory already exists (its own
     // chmod is a no-op past the first call — see `utils::set_owner_only`), so it
@@ -1795,6 +1811,7 @@ pub fn args_display(args: &[OsString]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::test_isolation;
     use std::sync::Mutex;
 
     /// Serializes tests that mutate the process-global `RTK_DB_PATH` env var.
@@ -1906,7 +1923,7 @@ mod tests {
     fn test_timed_execution_records_time() {
         use std::env;
         let _guard = ENV_LOCK.lock().unwrap();
-        let db_path = env::temp_dir().join(format!(
+        let db_path = test_isolation::scratch_dir().join(format!(
             "rtk_test_timed_exec_records_{}.db",
             std::process::id()
         ));
@@ -1935,7 +1952,7 @@ mod tests {
     fn test_timed_execution_passthrough() {
         use std::env;
         let _guard = ENV_LOCK.lock().unwrap();
-        let db_path = env::temp_dir().join(format!(
+        let db_path = test_isolation::scratch_dir().join(format!(
             "rtk_test_timed_exec_passthrough_{}.db",
             std::process::id()
         ));
@@ -1964,6 +1981,30 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
     }
 
+    /// A test asking for a specific database still gets it; a test asking for
+    /// none gets this process's scratch file rather than the developer's own
+    /// history.
+    #[test]
+    fn test_resolve_db_path_never_defaults_to_the_real_db_in_tests() {
+        use std::env;
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        // Resolve both before asserting: a failure between the two would leave
+        // RTK_DB_PATH set for every other test in the process.
+        //
+        // Inside the scratch directory, because setting RTK_DB_PATH publishes
+        // this path to every test running in parallel, and the first to open
+        // it chmods its parent to 0700.
+        let chosen = test_isolation::scratch_dir().join("resolve_explicit.db");
+        env::set_var("RTK_DB_PATH", &chosen);
+        let explicit = resolve_db_path();
+        env::remove_var("RTK_DB_PATH");
+        let fallback = resolve_db_path();
+
+        assert_eq!(explicit.expect("explicit path"), chosen);
+        assert_eq!(fallback.expect("fallback path"), test_isolation::db_path());
+    }
+
     // 7. get_db_path respects environment variable RTK_DB_PATH
     // 8. get_db_path falls back to default when no custom config
     // Combined into one test to avoid env var race between parallel tests
@@ -1972,7 +2013,7 @@ mod tests {
         use std::env;
         let _guard = ENV_LOCK.lock().unwrap();
 
-        let custom_path = env::temp_dir().join("rtk_test_custom.db");
+        let custom_path = test_isolation::scratch_dir().join("rtk_test_custom.db");
         env::set_var("RTK_DB_PATH", &custom_path);
         let db_path = get_db_path().expect("Failed to get db path");
         assert_eq!(db_path, custom_path);
@@ -1994,8 +2035,8 @@ mod tests {
         use std::env;
         let _guard = ENV_LOCK.lock().unwrap();
 
-        let db_path =
-            env::temp_dir().join(format!("rtk_test_schema_version_{}.db", std::process::id()));
+        let db_path = test_isolation::scratch_dir()
+            .join(format!("rtk_test_schema_version_{}.db", std::process::id()));
         // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
         let _ = std::fs::remove_file(&db_path);
         env::set_var("RTK_DB_PATH", &db_path);
@@ -2035,7 +2076,7 @@ mod tests {
     // without its own RTK_DB_PATH override could observe it.
     #[test]
     fn test_run_schema_migrations_heals_dropped_table_when_forced() {
-        let db_path = std::env::temp_dir().join(format!(
+        let db_path = test_isolation::scratch_dir().join(format!(
             "rtk_test_heal_migrations_{}.db",
             std::process::id()
         ));

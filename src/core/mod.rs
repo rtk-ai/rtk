@@ -11,6 +11,8 @@ pub mod stream;
 pub mod tee;
 pub mod telemetry;
 pub mod telemetry_cmd;
+#[cfg(test)]
+pub mod test_isolation;
 pub mod toml_filter;
 pub mod tracking;
 pub mod truncate;

@@ -47,8 +47,9 @@ pub enum TrustStatus {
 // ---------------------------------------------------------------------------
 
 fn store_path() -> Result<PathBuf> {
-    let data_dir = dirs::data_local_dir().context("Cannot determine local data directory")?;
-    Ok(data_dir.join(RTK_DATA_DIR).join(TRUSTED_FILTERS_JSON))
+    let data_dir =
+        crate::core::constants::data_dir().context("Cannot determine local data directory")?;
+    Ok(data_dir.join(TRUSTED_FILTERS_JSON))
 }
 
 fn read_store() -> Result<TrustStore> {

@@ -1,6 +1,5 @@
 //! Raw output recovery -- saves unfiltered output to disk on command failure.
 
-use super::constants::RTK_DATA_DIR;
 use crate::core::config::Config;
 use std::path::PathBuf;
 
@@ -48,6 +47,11 @@ fn short_hash(s: &str) -> String {
 }
 
 /// Get the tee directory, respecting config and env overrides.
+///
+/// In a test build only `RTK_TEE_DIR` is honoured, and anything else resolves
+/// under `constants::data_dir`: `Config::load()` reads the developer's own
+/// `config.toml`, so obeying `[tee] directory` here would rotate the spool
+/// they keep recovered output in. `resolve_db_path` draws the same line.
 fn get_tee_dir(config: &Config) -> Option<PathBuf> {
     // Env var override
     if let Ok(dir) = std::env::var("RTK_TEE_DIR") {
@@ -55,12 +59,15 @@ fn get_tee_dir(config: &Config) -> Option<PathBuf> {
     }
 
     // Config override
+    #[cfg(not(test))]
     if let Some(ref dir) = config.tee.directory {
         return Some(dir.clone());
     }
+    #[cfg(test)]
+    let _ = config;
 
     // Default: ~/.local/share/rtk/tee/
-    dirs::data_local_dir().map(|d| d.join(RTK_DATA_DIR).join("tee"))
+    super::constants::data_dir().map(|d| d.join("tee"))
 }
 
 /// Rotate old tee files: keep only the last `max_files`, delete oldest.

@@ -1,8 +1,9 @@
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
-const RTK_BIN: &str = env!("CARGO_BIN_EXE_rtk");
+mod common;
+
 const DIFF_SUBCOMMAND: &str = "diff";
 const LF_FILE: &str = "lf.txt";
 const CRLF_FILE: &str = "crlf.txt";
@@ -16,7 +17,7 @@ fn run_rtk_diff(file1: &Path, file2: &Path) -> Output {
     let file1 = file1.display().to_string();
     let file2 = file2.display().to_string();
 
-    Command::new(RTK_BIN)
+    common::rtk_command()
         .args([DIFF_SUBCOMMAND, &file1, &file2])
         .output()
         .expect("run rtk diff")

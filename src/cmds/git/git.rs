@@ -4451,17 +4451,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
         let tmp = std::env::temp_dir().join("rtk_test_not_a_repo");
         let _ = std::fs::create_dir_all(&tmp);
 
-        // Build the path to the test binary
-        let bin_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("rtk");
-        assert!(
-            bin_path.exists(),
-            "Debug binary not found at {:?} — run `cargo build` first",
-            bin_path
-        );
-        let output = std::process::Command::new(&bin_path)
+        let output = crate::core::test_isolation::rtk_command()
             .args(["git", "status"])
             .current_dir(&tmp)
             .output()

@@ -3806,17 +3806,7 @@ mod tests {
     #[test]
     #[ignore] // Integration test: requires `cargo build` first
     fn test_broken_pipe_does_not_crash() {
-        let bin_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("rtk");
-        assert!(
-            bin_path.exists(),
-            "Debug binary not found at {:?} - run `cargo build` first",
-            bin_path
-        );
-
-        let mut child = std::process::Command::new(&bin_path)
+        let mut child = crate::core::test_isolation::rtk_command()
             .args(["git", "log", "--oneline", "-50"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

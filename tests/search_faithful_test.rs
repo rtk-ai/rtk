@@ -8,8 +8,10 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
+mod common;
+
 fn rtk() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_rtk"))
+    common::rtk_command()
 }
 
 /// Run rtk with `input` fed on stdin; returns (stdout, exit_code).
