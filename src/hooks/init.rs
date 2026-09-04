@@ -331,7 +331,6 @@ pub fn run(
                 }
             }
 
-            // Cursor hooks (additive, installed alongside Claude Code)
             if install_cursor {
                 install_cursor_hooks(ctx)?;
             }
@@ -3616,6 +3615,14 @@ fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
 
     // Create or patch hooks.json with binary command
     let hooks_json_path = cursor_dir.join(HOOKS_JSON);
+    if !dry_run {
+        fs::create_dir_all(&cursor_dir).with_context(|| {
+            format!(
+                "Failed to create Cursor config directory: {}",
+                cursor_dir.display()
+            )
+        })?;
+    }
     let patched = patch_cursor_hooks_json(&hooks_json_path, ctx)?;
 
     // Report (skip in dry-run)
@@ -7225,6 +7232,7 @@ mod tests {
     use std::sync::Mutex;
     static CLAUDE_DIR_LOCK: Mutex<()> = Mutex::new(());
     static PI_DIR_LOCK: Mutex<()> = Mutex::new(());
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
     /// Serialises all tests that mutate the process-wide working directory.
     static CWD_LOCK: Mutex<()> = Mutex::new(());
 
@@ -7254,6 +7262,59 @@ mod tests {
             Some(v) => std::env::set_var(PI_CODING_AGENT_DIR_ENV, v),
             None => std::env::remove_var(PI_CODING_AGENT_DIR_ENV),
         }
+    }
+
+    fn with_home_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let orig = std::env::var_os("HOME");
+        std::env::set_var("HOME", tmp.path());
+        f(tmp.path());
+        match orig {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn test_run_cursor_only_global_skips_claude_artifacts() {
+        let tmp = TempDir::new().unwrap();
+        with_home_override(&tmp, |_| {
+            with_claude_dir_override(&tmp, |claude_dir| {
+                run(
+                    true,
+                    false,
+                    false,
+                    true,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    PatchMode::Skip,
+                    InitContext::default(),
+                )
+                .unwrap();
+
+                assert!(
+                    !claude_dir.join(RTK_MD).exists(),
+                    "cursor-only init must not create RTK.md"
+                );
+                assert!(
+                    !claude_dir.join(CLAUDE_MD).exists(),
+                    "cursor-only init must not create CLAUDE.md"
+                );
+                assert!(
+                    !claude_dir.join(SETTINGS_JSON).exists(),
+                    "cursor-only init must not create settings.json"
+                );
+
+                let hooks_json = tmp.path().join(".cursor").join(HOOKS_JSON);
+                assert!(
+                    hooks_json.exists(),
+                    "cursor-only init must create ~/.cursor/hooks.json"
+                );
+            });
+        });
     }
 
     #[test]
