@@ -1,0 +1,405 @@
+src/analytics/ccusage.rs
+struct: CcusageMetrics, CcusagePeriod
+enum: Granularity
+function: fetch
+
+src/parser/formatter.rs
+enum: FormatMode
+interface: TokenFormatter
+function: from_verbosity
+
+src/hooks/rewrite_cmd.rs
+function: run
+
+src/parser/types.rs
+struct: TestResult, TestFailure, DependencyState, Dependency
+
+src/learn/detector.rs
+struct: CorrectionPair, CorrectionRule, CommandExecution
+enum: ErrorType
+function: as_str, is_command_error, classify_error, extract_base_command, command_similarity, find_corrections, deduplicate_corrections
+
+src/hooks/verify_cmd.rs
+function: run
+
+src/cmds/system/local_llm.rs
+function: run
+
+src/core/tee.rs
+struct: TeeConfig
+enum: TeeMode
+function: tee_raw, tee_and_hint, force_tee_hint, force_tee_tail_hint
+constant: MIN_TEE_SIZE
+
+src/learn/mod.rs
+module: detector, report
+function: run
+
+src/cmds/system/read.rs
+function: run, run_stdin
+
+src/hooks/integrity.rs
+enum: IntegrityStatus
+function: compute_hash, compute_hash_bytes, hash_path_for, store_hash, remove_hash, verify_hook, verify_hook_at, resolve_hook_path, run_verify, runtime_check
+
+src/learn/report.rs
+function: format_console_report, write_rules_file
+
+src/parser/mod.rs
+module: formatter, types, formatter::{FormatMode, TokenFormatter}, types::*
+enum: ParseResult
+interface: OutputParser
+function: unwrap, tier, is_ok, map, warnings, truncate_passthrough, truncate_output, emit_degradation_warning, emit_passthrough_warning, extract_json_object
+
+src/analytics/cc_economics.rs
+struct: PeriodEconomics
+function: run
+
+src/cmds/system/summary.rs
+function: run
+
+src/analytics/session_cmd.rs
+function: run
+
+src/core/utils.rs
+enum: MissingTool
+function: days_ago_cutoff, truncate, strip_ansi, strip_leading_bom, from_json_str, format_tokens, format_usd, format_cpt, join_with_overflow, truncate_iso_date, ok_confirmation, exit_code_from_output, exit_code_from_status, fallback_tail, create_private_dir, restrict_file, open_private, ruby_exec, count_tokens, detect_package_manager, detect_package_manager_in, package_manager_exec, exec_runner, tool_exec, resolve_binary, resolved_command, composer_bin_dirs, composer_tool_paths, join_or_ok, tool_exists, env_is_some, shorten_arn, human_bytes, decode_process_output
+
+src/main.rs
+enum: AgentTarget
+
+src/hooks/hook_check.rs
+enum: HookStatus
+function: status, maybe_warn, parse_hook_version
+
+src/core/tracking.rs
+struct: Tracker, CommandRecord, HookDecisionRecord, GainSummary, DayStats, WeekStats, MonthStats, ParseFailureRecord, ParseFailureSummary, TimedExecution
+enum: HookOutcome
+function: is_covered, new, new_in_memory, record, reset_all, record_parse_failure, record_hook_decision, hook_decisions_since, earliest_hook_decision_timestamp, get_parse_failure_summary, get_summary, get_summary_filtered, get_all_days, get_all_days_filtered, get_by_week, get_by_week_filtered, get_by_month, get_by_month_filtered, get_recent, get_recent_filtered, count_commands_since, top_commands, overall_savings_pct, total_tokens_saved, tokens_saved_24h, top_passthrough, parse_failures_since, low_savings_commands, avg_savings_per_command, count_meta_command, first_seen_days, active_days_30d, commands_total, ecosystem_mix, tokens_saved_30d, projects_count, get_db_path, ensure_schema_fresh, record_parse_failure_silent, estimate_tokens, start, track, track_passthrough, args_display
+
+src/discover/registry.rs
+enum: Classification, ExcludePattern
+function: category_avg_tokens, classify_command, has_heredoc, split_command_chain, prefix_contains_rtk_disabled, cmd_has_rtk_disabled_prefix, strip_disabled_prefix, rewrite_command, rewrite_command_precompiled, compile_exclude_patterns, normalize_transparent_prefixes
+
+src/core/mod.rs
+module: args_utils, config, constants, display_helpers, filter, guard, runner, stream, tee, telemetry, telemetry_cmd, toml_filter, tracking, truncate, utils
+
+src/analytics/gain.rs
+function: run
+
+src/hooks/constants.rs
+constant: REWRITE_HOOK_FILE, GEMINI_HOOK_FILE, CLAUDE_DIR, HOOKS_SUBDIR, SETTINGS_JSON, SETTINGS_LOCAL_JSON, HOOKS_JSON, PRE_TOOL_USE_KEY, BEFORE_TOOL_KEY, CLAUDE_HOOK_COMMAND, CURSOR_HOOK_COMMAND, DROID_HOOK_COMMAND, VIBE_HOOK_COMMAND, CONFIG_DIR, OPENCODE_SUBDIR, PLUGIN_SUBDIR, OPENCODE_PLUGIN_FILE, CURSOR_DIR, CODEX_DIR, GEMINI_DIR, GITHUB_DIR, COPILOT_HOOK_FILE, COPILOT_INSTRUCTIONS_FILE, COPILOT_USER_DIR, COPILOT_HOME_ENV, PI_DIR, PI_LOCAL_DIR, PI_EXTENSIONS_SUBDIR, PI_PLUGIN_FILE, PI_CODING_AGENT_DIR_ENV, DROID_DIR, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR, DROID_SETTINGS_FILE, DROID_EXECUTE_MATCHER, DROID_HOME_ENV, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_NAME, HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, VIBE_DIR, VIBE_HOOKS_FILE, VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE, VIBE_HOOK_NAME, VIBE_BASH_MATCH
+
+src/discover/provider.rs
+struct: ExtractedCommand, ClaudeProvider
+interface: SessionProvider
+function: encode_project_path
+
+src/cmds/system/constants.rs
+constant: NOISE_DIRS
+
+src/analytics/mod.rs
+module: cc_economics, ccusage, gain, session_cmd
+
+src/discover/rules.rs
+struct: RtkRule
+constant: DEFAULT, RULES, IGNORED_PREFIXES, IGNORED_EXACT
+
+src/cmds/system/ctest_cmd.rs
+function: run, looks_like_ctest_output, filter_ctest_output
+
+src/core/toml_filter.rs
+struct: TomlFilterTestDef, CompiledFilter, TestOutcome, VerifyResults, TomlFilterRegistry
+enum: Lossiness
+function: is_rtk_reserved_command, toml_disabled, active_filter_summaries, filter_parse_error, command_matches_filter, find_filter_in, apply_filter, apply_filter_with_info, run_filter_tests, find_matching_filter
+
+src/core/stream.rs
+module: tests
+struct: BlockStreamFilter, LineStreamFilter, RegexBlockFilter, StreamResult, CaptureResult
+enum: FilterMode, StdinMode
+interface: StreamFilter, BlockHandler, LineHandler, StdinFilter
+function: new ×3, skip_prefix, skip_prefixes, success ×2, status_to_exit_code, run_streaming, combined, exec_capture, exec_capture_stdin
+constant: RAW_CAP
+
+src/cmds/system/format_cmd.rs
+function: run
+
+src/hooks/hook_audit_cmd.rs
+function: run
+
+src/core/constants.rs
+constant: RTK_DATA_DIR, HISTORY_DB, CONFIG_TOML, FILTERS_TOML, TRUSTED_FILTERS_JSON, DEFAULT_HISTORY_DAYS, RTK_META_COMMANDS
+
+src/core/filter.rs
+struct: CommentPatterns, NoFilter, MinimalFilter, AggressiveFilter
+enum: FilterLevel, Language
+interface: FilterStrategy
+function: from_extension, comment_patterns, get_filter, smart_truncate
+
+src/discover/report.rs
+struct: SupportedEntry, UnsupportedEntry, AgentIntegrationStatus, DiscoverReport
+enum: RtkStatus
+function: as_str, detect, total_saveable_tokens, total_supported_count, format_text, format_json
+
+src/discover/mod.rs
+module: lexer, provider, registry, rules
+function: is_already_rtk, run
+
+src/core/display_helpers.rs
+interface: PeriodStats
+function: format_duration, print_period_table
+
+src/core/args_utils.rs
+function: restore_double_dash, restore_double_dash_with_raw
+
+src/cmds/go/golangci_cmd.rs
+function: parse_major_version, detect_major_version, run, filter_golangci_json
+
+src/hooks/hook_cmd.rs
+function: run_copilot, run_gemini, run_vibe, run_claude, run_cursor, run_droid
+
+src/cmds/rust/runner.rs
+function: run_err, run_test
+
+src/core/telemetry.rs
+function: endpoint_url, maybe_ping, generate_device_hash, salt_file_path, telemetry_marker_path
+
+src/cmds/cloud/aws_cmd.rs
+function: run
+
+src/core/truncate.rs
+function: reduced
+constant: CAP_ERRORS, CAP_WARNINGS, CAP_LIST, CAP_INVENTORY
+
+src/core/guard.rs
+function: never_worse
+
+src/cmds/system/search.rs
+enum: Engine
+function: label, run
+
+src/core/config.rs
+struct: Config, HooksConfig, TrackingConfig, DisplayConfig, FilterConfig, TelemetryConfig, LimitsConfig
+function: limits, hook_rewrite_params, cached_config, load, save, create_default, show_config
+
+src/discover/lexer.rs
+struct: ParsedToken
+enum: PipeKind, TokenKind
+function: tokenize, tokenize_with_newlines, contains_unattestable_construct, split_for_permissions, split_on_operators, strip_quotes, shell_split
+
+src/core/runner.rs
+struct: RunOptions
+enum: RunMode, TestEcosystem
+function: emit_guarded, print_with_hint, with_tee, stdout_only, tee, early_exit_on_failure, no_trailing_newline, inherit_stdin, run, run_filtered, run_filtered_with_exit, run_passthrough, run_streamed, run_err_cmd, detect, is_watch_mode, run_test_cmd
+
+src/hooks/permissions.rs
+enum: PermissionVerdict, Host
+function: check_command, check_command_for, load_rules_for, check_command_with_rules, droid_rules_from_settings, extract_bash_pattern, command_matches_pattern
+
+src/cmds/cloud/psql_cmd.rs
+function: run
+
+src/cmds/cloud/curl_cmd.rs
+function: run
+
+src/cmds/go/go_cmd.rs
+function: run_test, run_build, run_vet, run_other, filter_go_test_json, filter_go_build
+
+src/cmds/system/pipe_cmd.rs
+function: resolve_filter, auto_detect_filter, run
+
+src/core/telemetry_cmd.rs
+enum: TelemetrySubcommand
+function: run, telemetry_disabled_by_env
+
+src/hooks/mod.rs
+module: constants, hook_audit_cmd, hook_check, hook_cmd, init, integrity, permissions, rewrite_cmd, trust, verify_cmd
+function: is_claude_hook_command
+
+src/hooks/trust.rs
+struct: TrustEntry
+enum: TrustStatus
+function: check_trust, check_trust_with_content, trust_filter_with_hash, untrust_filter, list_trusted, gated_filter_paths, gated_filter_paths_labeled, untrusted_active_filter_count, run_trust, print_filter_notice, confirm_enable_at_tty, run_untrust
+
+src/cmds/mod.rs
+module: cloud, dotnet, git, go, js, jvm, php, python, ruby, rust, scala, system
+
+src/cmds/rust/cargo_cmd.rs
+enum: CargoCommand
+function: run, filter_cargo_test, run_passthrough
+
+src/cmds/system/ls.rs
+function: run
+
+src/cmds/jvm/gradlew_cmd.rs
+function: run
+
+src/cmds/cloud/container.rs
+enum: ContainerCmd
+function: run, k8s_pods, k8s_services, k8s_logs, format_compose_ps, format_compose_logs, format_compose_build, run_docker_passthrough, run_compose_ps, run_compose_logs, run_compose_build, run_compose_passthrough, run_kubectl_get, run_kubectl_passthrough, run_oc_get, run_oc_passthrough
+
+src/cmds/system/env_cmd.rs
+function: run
+
+src/cmds/cloud/wget_cmd.rs
+function: run, run_stdout
+
+src/cmds/ruby/rspec_cmd.rs
+function: run
+
+src/cmds/ruby/rubocop_cmd.rs
+function: run
+
+src/cmds/scala/sbt_cmd.rs
+function: run_test, run_compile, run_run, run_other
+
+src/cmds/python/pip_cmd.rs
+function: run
+
+src/cmds/system/json_cmd.rs
+function: run, run_stdin, filter_json_compact, filter_json_string
+
+src/cmds/dotnet/dotnet_trx.rs
+function: parse_trx_file, parse_trx_file_since, parse_trx_files_in_dir, parse_trx_files_in_dir_since, find_recent_trx_in_testresults
+
+src/cmds/python/ruff_cmd.rs
+function: run, filter_ruff_check_json, filter_ruff_format
+
+src/cmds/dotnet/binlog.rs
+struct: BinlogIssue, BuildSummary, FailedTest, TestSummary, RestoreSummary
+function: parse_build, parse_test, parse_restore, scrub_sensitive_env_vars, parse_build_from_text, parse_test_from_text, parse_restore_from_text, parse_restore_issues_from_text
+
+src/cmds/ruby/rake_cmd.rs
+function: run
+
+src/cmds/python/mypy_cmd.rs
+function: run, filter_mypy_output
+
+src/cmds/dotnet/dotnet_format_report.rs
+struct: ChangeDetail, FileWithChanges, FormatSummary
+function: parse_format_report
+
+src/cmds/system/deps.rs
+function: run
+
+src/cmds/python/pytest_cmd.rs
+function: run, filter_pytest_output
+
+src/cmds/python/uv_cmd.rs
+function: run
+
+src/cmds/system/wc_cmd.rs
+function: run
+
+src/cmds/git/git.rs
+enum: GitCommand
+function: run, compact_diff, filter_log_output, format_status_output, format_status_output_detached, run_passthrough
+
+src/cmds/system/ast_grep_cmd.rs
+function: run
+
+src/cmds/git/gt_cmd.rs
+function: run_log, run_submit, run_sync, run_restack, run_create, run_branch, run_other
+
+src/cmds/jvm/mvn_cmd.rs
+enum: MvnPhase
+function: detect_phase, filter_surefire, filter_compile, filter_package, filter_quiet, run, run_daemon
+
+src/cmds/js/pnpm_cmd.rs
+struct: PnpmListParser, PnpmOutdatedParser
+enum: PnpmCommand
+function: run, run_passthrough
+
+src/cmds/dotnet/dotnet_cmd.rs
+function: run_build, run_test, run_restore, run_format, run_passthrough
+
+src/cmds/git/gh_cmd.rs
+function: run
+
+src/cmds/git/glab_cmd.rs
+function: run
+
+src/cmds/js/prettier_cmd.rs
+function: run, filter_prettier_output
+
+src/cmds/system/tree.rs
+function: run
+
+src/cmds/system/find_cmd.rs
+function: run_from_args, run
+
+src/cmds/js/deno_cmd.rs
+function: filter_deno_output, run_lint, run_check, run_compile, run_test, run_passthrough
+
+src/cmds/js/next_cmd.rs
+function: run
+
+src/cmds/js/prisma_cmd.rs
+enum: PrismaCommand, MigrateSubcommand
+function: run
+
+src/cmds/system/log_cmd.rs
+function: run_file, run_stdin, run_stdin_str
+
+src/cmds/js/playwright_cmd.rs
+struct: PlaywrightParser
+function: run
+
+src/cmds/git/diff_cmd.rs
+function: run, run_stdin
+
+src/cmds/js/bun_cmd.rs
+function: filter_bun_pkg, filter_bun_pm_ls_json, filter_bun_pm_ls_text, run_pkg, run_pm_ls, run_build, run_test, run_bunx, run_passthrough
+
+src/cmds/php/utils.rs
+enum: PhpTestRunner
+function: php_tool_command, strip_ansi_and_controls, detect_php_test_runner
+
+src/cmds/php/artisan_cmd.rs
+function: filter_artisan_output, filter_artisan_test_output
+
+src/cmds/php/test_output.rs
+function: filter_test_runner_output
+
+src/cmds/js/vitest_cmd.rs
+struct: VitestParser
+function: run_test
+
+src/cmds/php/php_cmd.rs
+function: run
+
+src/cmds/php/phpunit_cmd.rs
+function: run, filter_phpunit_output
+
+src/cmds/php/ecs_cmd.rs
+function: run, filter_ecs_output
+
+src/cmds/js/tsc_cmd.rs
+function: run, filter_tsc_output
+
+src/cmds/php/paratest_cmd.rs
+function: run
+
+src/cmds/js/npm_cmd.rs
+function: run, exec, exec_with
+
+src/cmds/php/phpt_cmd.rs
+function: run, filter_phpt_output
+
+src/cmds/php/pint_cmd.rs
+function: run, filter_pint_json
+
+src/cmds/php/pest_cmd.rs
+function: run
+
+src/cmds/php/phpstan_cmd.rs
+function: run, filter_phpstan_json, filter_phpstan_text
+
+src/cmds/js/lint_cmd.rs
+function: run
+
+src/hooks/init.rs
+struct: InitContext
+enum: PatchMode, FilterTrust, PatchResult
+function: run, save_telemetry_consent, uninstall, finalize_filter_trust, run_kilocode_mode, run_antigravity_mode, run_hermes_mode, uninstall_hermes, run_kimi_mode, resolve_claude_dir, run_droid_mode, uninstall_droid, run_pi_mode, show_config, run_gemini, run_vibe_mode, uninstall_vibe, run_copilot, uninstall_copilot, copilot_user_dir, run_copilot_global, uninstall_copilot_global
+constant: COPILOT_HOOK_JSON
