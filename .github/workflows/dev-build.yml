@@ -1,0 +1,175 @@
+name: Dev Build
+
+# Manual cross-platform build for sharing test binaries.
+#
+# Unlike release.yml this workflow needs no GitHub App secrets — it runs on the
+# default GITHUB_TOKEN, so it works on a fork out of the box. Artifacts are
+# attached to the workflow run (downloadable for 14 days) and, optionally,
+# published as a GitHub pre-release.
+on:
+  workflow_dispatch:
+    inputs:
+      publish_prerelease:
+        description: 'Also publish a GitHub pre-release with the binaries'
+        type: boolean
+        default: false
+      tag:
+        description: 'Tag for the pre-release (only used when publishing, e.g. dev-kiro-1)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS (Apple Silicon)
+            target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - label: macOS (Intel)
+            target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - label: Linux (x86_64, static musl)
+            target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+            musl: true
+          - label: Linux (ARM64)
+            target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+          - label: Windows (x86_64)
+            target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: devbuild-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install cross-compilation tools
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: Install musl tools
+        if: matrix.musl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: tar -czvf rtk-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release rtk
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: 7z a rtk-${{ matrix.target }}.zip ./target/${{ matrix.target }}/release/rtk.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rtk-${{ matrix.target }}
+          path: rtk-${{ matrix.target }}.${{ matrix.archive }}
+          retention-days: 14
+
+  publish:
+    name: Publish pre-release
+    needs: build
+    if: ${{ inputs.publish_prerelease }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect binaries
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release/ \;
+          cd release
+          sha256sum * > checksums.txt
+          ls -la
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="dev-$(date +%Y%m%d)-${{ github.run_number }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: RTK dev build ${{ steps.tag.outputs.tag }}
+          body: |
+            Unofficial development build for testing — not a stable release.
+
+            Built from `${{ github.ref_name }}` at commit ${{ github.sha }}.
+
+            ## Install
+
+            **macOS / Linux**
+            ```bash
+            # pick the archive for your platform, then:
+            tar -xzf rtk-<target>.tar.gz
+            chmod +x rtk
+            mkdir -p ~/.local/bin && mv rtk ~/.local/bin/
+            # ensure ~/.local/bin is on PATH
+            rtk --version
+            ```
+
+            On macOS, Gatekeeper blocks unsigned binaries. Clear the quarantine flag:
+            ```bash
+            xattr -d com.apple.quarantine ~/.local/bin/rtk
+            ```
+
+            **Windows**
+
+            Extract `rtk.exe` from the zip and place it in a directory on your `PATH`.
+
+            ## Which archive do I need?
+
+            | Platform | Archive |
+            | --- | --- |
+            | macOS, Apple Silicon (M1/M2/M3/M4) | `rtk-aarch64-apple-darwin.tar.gz` |
+            | macOS, Intel | `rtk-x86_64-apple-darwin.tar.gz` |
+            | Linux x86_64 | `rtk-x86_64-unknown-linux-musl.tar.gz` |
+            | Linux ARM64 | `rtk-aarch64-unknown-linux-gnu.tar.gz` |
+            | Windows x86_64 | `rtk-x86_64-pc-windows-msvc.zip` |
+
+            Verify downloads against `checksums.txt`.
+          files: release/*
+          prerelease: true

@@ -54,6 +54,9 @@ windows-sys = { version = "0.59", features = [
 [build-dependencies]
 toml = "0.8"
 
+[dev-dependencies]
+proptest = "1"
+
 [profile.release]
 opt-level = 3
 lto = true

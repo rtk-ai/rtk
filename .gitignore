@@ -51,3 +51,6 @@ claudedocs
 
 # icm 
 .fastembed_cache/
+
+tmp
+.kiro

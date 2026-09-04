@@ -4,7 +4,9 @@
 
 set -e
 
-REPO="rtk-ai/rtk"
+# Source repository. Override with RTK_REPO to install from a fork, e.g.
+#   curl -fsSL <raw-url>/install.sh | RTK_REPO=owner/rtk sh
+REPO="${RTK_REPO:-rtk-ai/rtk}"
 BINARY_NAME="rtk"
 INSTALL_DIR="${RTK_INSTALL_DIR:-$HOME/.local/bin}"
 
@@ -165,6 +167,9 @@ verify() {
 
 main() {
     info "Installing $BINARY_NAME..."
+    if [ "$REPO" != "rtk-ai/rtk" ]; then
+        warn "Installing from fork: ${REPO} (not the official rtk-ai/rtk)"
+    fi
 
     detect_os
     detect_arch

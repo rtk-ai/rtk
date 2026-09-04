@@ -1,0 +1,16 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "RTK Rewrite",
+      "trigger": "PreToolUse",
+      "description": "Sugere equivalentes rtk para comandos shell, economizando 60-90% de tokens.",
+      "matcher": "execute_bash",
+      "action": {
+        "type": "command",
+        "command": "rtk hook kiro",
+        "timeout": 5
+      }
+    }
+  ]
+}

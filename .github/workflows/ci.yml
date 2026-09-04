@@ -64,6 +64,72 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all
 
+      - name: "Smoke: rtk hook kiro (cross-platform)"
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --quiet
+          RTK=./target/debug/rtk
+          # On Windows the binary has .exe suffix
+          if [[ "$RUNNER_OS" == "Windows" ]]; then RTK="${RTK}.exe"; fi
+
+          # Runs the hook with the given stdin, capturing stderr and the exit code
+          # without tripping `set -e` when the hook intentionally exits 2.
+          run_hook() {
+            HOOK_ERR=$(mktemp)
+            set +e
+            printf '%s' "$1" | $RTK hook kiro 2>"$HOOK_ERR" >/dev/null
+            HOOK_EXIT=$?
+            set -e
+            HOOK_STDERR=$(cat "$HOOK_ERR")
+            rm -f "$HOOK_ERR"
+          }
+
+          # Rewritable payload → exit 2 (block) + rtk suggestion on stderr
+          run_hook '{"tool_name":"executeBash","tool_input":{"command":"git status"}}'
+          if [[ "$HOOK_EXIT" != "2" ]]; then
+            echo "FAIL: rewritable payload must exit 2, got $HOOK_EXIT" >&2
+            exit 1
+          fi
+          if ! grep -q "rtk git status" <<<"$HOOK_STDERR"; then
+            echo "FAIL: stderr must suggest 'rtk git status', got: $HOOK_STDERR" >&2
+            exit 1
+          fi
+
+          # Re-issued rtk command → exit 0 (no block loop)
+          run_hook '{"tool_name":"executeBash","tool_input":{"command":"rtk git status"}}'
+          if [[ "$HOOK_EXIT" != "0" ]]; then
+            echo "FAIL: already-rtk payload must exit 0, got $HOOK_EXIT" >&2
+            exit 1
+          fi
+
+          # Non-rewritable payload → exit 0, no suggestion on stderr
+          run_hook '{"tool_name":"executeBash","tool_input":{"command":"echo hello"}}'
+          if [[ "$HOOK_EXIT" != "0" ]]; then
+            echo "FAIL: non-rewritable payload must exit 0, got $HOOK_EXIT" >&2
+            exit 1
+          fi
+          if grep -q "RTK: use" <<<"$HOOK_STDERR"; then
+            echo "FAIL: non-rewritable payload must not suggest anything, got: $HOOK_STDERR" >&2
+            exit 1
+          fi
+
+          # Invalid JSON → exit 0 (never block on a broken hook)
+          run_hook 'garbage'
+          if [[ "$HOOK_EXIT" != "0" ]]; then
+            echo "FAIL: invalid JSON must exit 0, got $HOOK_EXIT" >&2
+            exit 1
+          fi
+
+          # Empty stdin → exit 0
+          run_hook ''
+          if [[ "$HOOK_EXIT" != "0" ]]; then
+            echo "FAIL: empty stdin must exit 0, got $HOOK_EXIT" >&2
+            exit 1
+          fi
+
+          echo "Kiro hook smoke test passed (deny-with-suggestion contract)"
+
   security:
     name: Security Scan
     needs: clippy

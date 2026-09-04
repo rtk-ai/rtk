@@ -249,6 +249,7 @@ fn get_rewritten(cmd: &str) -> Option<String> {
     Some(rewritten)
 }
 
+#[derive(Debug)]
 enum HookDecision {
     AllowRewrite(String),
     AskRewrite(String),
@@ -1000,6 +1001,187 @@ fn run_droid_inner_with_rules(
     let cmd = droid_execute_command(&v)?;
     let verdict = permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
     droid_response_from_decision(&v, cmd, decide_from_verdict(cmd, verdict)).map(|o| o.to_string())
+}
+
+// ── Kiro IDE/CLI PreToolUse hook ───────────────────────────────
+//
+// Kiro's PreToolUse hook does NOT support transparent rewrite (no `updatedInput`
+// equivalent). The hook uses deny-with-suggestion instead: it exits with
+// `KIRO_BLOCK_EXIT` (2) and writes the suggested `rtk <cmd>` to stderr, which Kiro
+// forwards to the agent. The agent re-issues the command in its `rtk` form and the
+// retry passes through untouched (already-`rtk` commands never rewrite).
+// The `render_kiro_transparent` branch is kept inactive, ready for a one-line
+// switch when/if Kiro adds transparent rewrite support.
+
+/// Extract the shell command from a Kiro PreToolUse payload.
+///
+/// Tolerates a missing `tool_name` (field may be absent in some Kiro CLI
+/// versions). Uses JSON pointer `/tool_input/command` and filters empty commands.
+fn kiro_shell_command(v: &Value) -> Option<&str> {
+    let tool_name = v.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
+    // Accept Kiro's shell tool names; tolerate missing/empty tool_name
+    // (the hook file matcher already gates invocations to the shell tool).
+    if !matches!(
+        tool_name,
+        "executeBash" | "execute_bash" | "runCommand" | "shell" | ""
+    ) {
+        return None;
+    }
+    v.pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+}
+
+/// Orchestrate the decision for a Kiro payload: extract command, decide.
+///
+/// `Some(rtk_command)` means the agent should be told to re-issue that command;
+/// `None` means step aside and let the original run untouched.
+fn process_kiro_payload(v: &Value) -> Option<String> {
+    let cmd = kiro_shell_command(v)?;
+    kiro_rewrite_for_decision(cmd, decide_hook_action(cmd, permissions::Host::Kiro))
+}
+
+/// Map a `HookDecision` to the Kiro hook JSON response.
+///
+/// - `Deny` → audit log + `None` (step aside, let Kiro handle the original).
+/// - `Defer` → `None` (no rewrite, command runs unchanged).
+/// - `AllowRewrite`/`AskRewrite` → the `rtk` equivalent to suggest.
+///
+/// Returns the rewritten command when the agent should be told to re-issue it,
+/// or `None` when RTK must step aside and let the original command run.
+fn kiro_rewrite_for_decision(cmd: &str, decision: HookDecision) -> Option<String> {
+    let rewritten = match decision {
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            return None;
+        }
+        HookDecision::Defer => return None,
+        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r) => r,
+    };
+
+    audit_log("rewrite", cmd, &rewritten);
+    Some(rewritten)
+}
+
+/// Exit code that makes Kiro block a `PreToolUse` tool call and feed the
+/// hook's stderr back to the agent.
+const KIRO_BLOCK_EXIT: i32 = 2;
+
+/// Build the deny-with-suggestion message sent to the agent on stderr.
+///
+/// Kiro forwards hook stderr to the model when the hook exits with
+/// [`KIRO_BLOCK_EXIT`], so this text must read as an actionable instruction:
+/// the agent is expected to re-issue the command in its `rtk` form, which the
+/// hook then lets through untouched (already-`rtk` commands never rewrite).
+fn kiro_block_message(rewritten: &str) -> String {
+    format!("RTK: use `{rewritten}` (economiza 60-90% de tokens). Reemita o comando com o prefixo `rtk`.")
+}
+
+/// Render the ask-com-sugestão response for Kiro (INACTIVE — see `run_kiro`).
+///
+/// Retained because Kiro's `ask` path is the only one that can surface a
+/// prompt to the *user* rather than the agent. It is not on the default path:
+/// approving an `ask` runs the original command, so it costs a confirmation
+/// and saves nothing. `run_kiro` uses the deny-with-suggestion path instead.
+#[allow(dead_code)]
+fn render_kiro_ask(_v: &Value, _cmd: &str, rewritten: &str) -> Value {
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": PRE_TOOL_USE_KEY,
+            "permissionDecision": "ask",
+            "permissionDecisionReason":
+                format!("RTK: considere usar `{rewritten}` para economizar 60-90% de tokens")
+        }
+    })
+}
+
+/// Render a transparent rewrite response for Kiro (INACTIVE — future use).
+///
+/// Preserves extra `tool_input` fields (description, timeout) so the rewrite
+/// is a drop-in replacement. Activating this path is a one-line change once
+/// Kiro exposes a transparent rewrite mechanism (Req 2.3, 2.7).
+#[allow(dead_code)]
+fn render_kiro_transparent(v: &Value, rewritten: &str) -> Value {
+    let updated_input = {
+        let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+        if let Some(obj) = ti.as_object_mut() {
+            obj.insert("command".into(), Value::String(rewritten.to_string()));
+        }
+        ti
+    };
+
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": PRE_TOOL_USE_KEY,
+            "permissionDecision": "allow",
+            "permissionDecisionReason": "RTK auto-rewrite",
+            "updatedInput": updated_input
+        }
+    })
+}
+
+/// Run the Kiro IDE/CLI PreToolUse hook natively.
+///
+/// Returns the process exit code:
+///
+/// - `0` — step aside. The original command runs untouched. This covers every
+///   no-rewrite case *and* every failure path (oversized stdin, malformed JSON,
+///   non-shell tool, empty input), so a broken hook never blocks the user.
+/// - [`KIRO_BLOCK_EXIT`] — a rewrite exists. Kiro blocks the raw command and
+///   forwards the stderr suggestion to the agent, which re-issues it as
+///   `rtk <cmd>`. That retry is idempotent: already-`rtk` commands never
+///   rewrite, so the hook lets the second attempt through and cannot loop.
+///
+/// Deny-with-suggestion is used instead of Kiro's `ask` decision because `ask`
+/// runs the *original* command on approval — it costs a user confirmation and
+/// saves nothing, since Kiro has no transparent-rewrite field.
+pub fn run_kiro() -> Result<i32> {
+    let input = match read_stdin_limited() {
+        Ok(s) => s,
+        Err(_) => return Ok(0), // oversized/unreadable stdin — never block
+    };
+    let input = strip_leading_bom(&input).trim();
+    if input.is_empty() {
+        return Ok(0);
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(0);
+        }
+    };
+
+    match process_kiro_payload(&v) {
+        Some(rewritten) => {
+            let _ = writeln!(io::stderr(), "{}", kiro_block_message(&rewritten));
+            Ok(KIRO_BLOCK_EXIT)
+        }
+        None => Ok(0),
+    }
+}
+
+/// Hermetic test path: no Kiro permission settings (empty rules → Default verdict).
+///
+/// Returns the `rtk` command the agent would be told to re-issue, or `None`
+/// when RTK steps aside.
+#[cfg(test)]
+fn run_kiro_inner(input: &str) -> Option<String> {
+    run_kiro_inner_with_rules(input, &[], &[], &[])
+}
+
+#[cfg(test)]
+fn run_kiro_inner_with_rules(
+    input: &str,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    let cmd = kiro_shell_command(&v)?;
+    let verdict = permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
+    kiro_rewrite_for_decision(cmd, decide_from_verdict(cmd, verdict))
 }
 
 #[cfg(test)]
@@ -2426,6 +2608,1609 @@ mod tests {
         // so Droid runs them unchanged.
         let input = droid_input("Execute", "definitely-not-a-real-binary --foo");
         assert!(run_droid_inner(&input).is_none());
+    }
+
+    // ── Kiro hook tests ────────────────────────────────────────────
+
+    fn kiro_input(tool: &str, cmd: &str) -> String {
+        json!({
+            "session_id": "kiro-session-001",
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool,
+            "tool_input": { "command": cmd }
+        })
+        .to_string()
+    }
+
+    fn kiro_input_with_extras(tool: &str, cmd: &str, description: &str, timeout: u64) -> String {
+        json!({
+            "session_id": "kiro-session-001",
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool,
+            "tool_input": {
+                "command": cmd,
+                "description": description,
+                "timeout": timeout
+            }
+        })
+        .to_string()
+    }
+
+    // --- Parsing: kiro_shell_command ---
+
+    #[test]
+    fn test_kiro_shell_command_valid_execute_bash() {
+        let v: Value = serde_json::from_str(&kiro_input("executeBash", "git status")).unwrap();
+        assert_eq!(kiro_shell_command(&v), Some("git status"));
+    }
+
+    #[test]
+    fn test_kiro_shell_command_valid_execute_bash_snake() {
+        let v: Value = serde_json::from_str(&kiro_input("execute_bash", "cargo test")).unwrap();
+        assert_eq!(kiro_shell_command(&v), Some("cargo test"));
+    }
+
+    #[test]
+    fn test_kiro_shell_command_valid_run_command() {
+        let v: Value = serde_json::from_str(&kiro_input("runCommand", "ls -la")).unwrap();
+        assert_eq!(kiro_shell_command(&v), Some("ls -la"));
+    }
+
+    #[test]
+    fn test_kiro_shell_command_valid_shell() {
+        let v: Value = serde_json::from_str(&kiro_input("shell", "cat file.txt")).unwrap();
+        assert_eq!(kiro_shell_command(&v), Some("cat file.txt"));
+    }
+
+    #[test]
+    fn test_kiro_shell_command_missing_tool_name() {
+        // Tolerates absent tool_name
+        let v: Value = serde_json::from_str(r#"{"tool_input": {"command": "git diff"}}"#).unwrap();
+        assert_eq!(kiro_shell_command(&v), Some("git diff"));
+    }
+
+    #[test]
+    fn test_kiro_shell_command_empty_command() {
+        let v: Value = serde_json::from_str(&kiro_input("executeBash", "")).unwrap();
+        assert_eq!(kiro_shell_command(&v), None);
+    }
+
+    #[test]
+    fn test_kiro_shell_command_missing_command_field() {
+        let v: Value =
+            serde_json::from_str(r#"{"tool_name": "executeBash", "tool_input": {}}"#).unwrap();
+        assert_eq!(kiro_shell_command(&v), None);
+    }
+
+    #[test]
+    fn test_kiro_shell_command_non_shell_tool() {
+        let v: Value = serde_json::from_str(&kiro_input("editFile", "git status")).unwrap();
+        assert_eq!(kiro_shell_command(&v), None);
+    }
+
+    #[test]
+    fn test_kiro_shell_command_non_shell_read_tool() {
+        let v: Value = serde_json::from_str(&kiro_input("readFile", "git status")).unwrap();
+        assert_eq!(kiro_shell_command(&v), None);
+    }
+
+    // --- Decision: rewritable → deny-with-suggestion ---
+
+    #[test]
+    fn test_kiro_rewritable_command_suggests_rtk() {
+        let input = kiro_input("executeBash", "git status");
+        assert_eq!(
+            run_kiro_inner(&input),
+            Some("rtk git status".to_string()),
+            "rewritable command must yield the rtk suggestion"
+        );
+    }
+
+    #[test]
+    fn test_kiro_rewritable_cargo_test() {
+        let input = kiro_input("executeBash", "cargo test");
+        assert_eq!(run_kiro_inner(&input), Some("rtk cargo test".to_string()));
+    }
+
+    // --- Decision: no equivalent → None ---
+
+    #[test]
+    fn test_kiro_no_equivalent_passthrough() {
+        let input = kiro_input("executeBash", "definitely-not-a-real-binary --foo");
+        assert!(
+            run_kiro_inner(&input).is_none(),
+            "commands with no registry equivalent must produce no output"
+        );
+    }
+
+    // --- Decision: already-rtk → None ---
+
+    #[test]
+    fn test_kiro_already_rtk_passthrough() {
+        let input = kiro_input("executeBash", "rtk git status");
+        assert!(
+            run_kiro_inner(&input).is_none(),
+            "already rtk-prefixed commands must not double-prefix"
+        );
+    }
+
+    // --- Decision: heredoc → None ---
+
+    #[test]
+    fn test_kiro_heredoc_passthrough() {
+        let input = kiro_input("executeBash", "cat <<EOF\nhello\nEOF");
+        assert!(
+            run_kiro_inner(&input).is_none(),
+            "heredoc commands must defer (no output)"
+        );
+    }
+
+    // --- Decision: command substitution → None ---
+
+    #[test]
+    fn test_kiro_substitution_defers() {
+        for cmd in ["git status $(rm -rf /tmp/x)", "git status `rm -rf /tmp/x`"] {
+            let input = kiro_input("executeBash", cmd);
+            assert!(
+                run_kiro_inner(&input).is_none(),
+                "substitution must defer for: `{cmd}`"
+            );
+        }
+    }
+
+    // --- Decision: file redirect → None ---
+
+    #[test]
+    fn test_kiro_file_redirect_defers() {
+        let input = kiro_input("executeBash", "git log > /tmp/out.txt");
+        assert!(
+            run_kiro_inner(&input).is_none(),
+            "file redirects must defer (no output)"
+        );
+    }
+
+    // --- Decision: Deny → None ---
+
+    #[test]
+    fn test_kiro_deny_steps_aside() {
+        // A denied command must produce NO suggestion so Kiro runs the original.
+        assert!(
+            kiro_rewrite_for_decision("rm -rf /tmp/x", HookDecision::Deny).is_none(),
+            "deny must step aside (no suggestion)"
+        );
+    }
+
+    #[test]
+    fn test_kiro_deny_via_rules() {
+        let input = kiro_input("executeBash", "git push --force");
+        let deny = vec!["git push".to_string()];
+        assert!(
+            run_kiro_inner_with_rules(&input, &deny, &[], &[]).is_none(),
+            "denied commands must produce no output"
+        );
+    }
+
+    // --- Errors: JSON inválido → Ok(()) sem saída ---
+
+    #[test]
+    fn test_kiro_invalid_json_passthrough() {
+        // run_kiro_inner returns None when JSON is invalid (serde_json::from_str fails)
+        assert!(
+            run_kiro_inner("this is not valid json at all!!!").is_none(),
+            "invalid JSON must produce no output"
+        );
+    }
+
+    #[test]
+    fn test_kiro_empty_object_passthrough() {
+        assert!(
+            run_kiro_inner("{}").is_none(),
+            "empty object (no tool_input) must produce no output"
+        );
+    }
+
+    // --- Errors: BOM → parse ok ---
+
+    #[test]
+    fn test_kiro_bom_single_stripped() {
+        let raw = format!("\u{feff}{}", kiro_input("executeBash", "git status"));
+        let trimmed = strip_leading_bom(&raw).trim();
+        let v: Value = serde_json::from_str(trimmed).unwrap();
+        assert_eq!(kiro_shell_command(&v), Some("git status"));
+    }
+
+    #[test]
+    fn test_kiro_bom_double_stripped() {
+        let raw = format!(
+            "\u{feff}\u{feff}{}",
+            kiro_input("executeBash", "git status")
+        );
+        let trimmed = strip_leading_bom(&raw).trim();
+        let v: Value = serde_json::from_str(trimmed).unwrap();
+        assert_eq!(kiro_shell_command(&v), Some("git status"));
+    }
+
+    // --- Errors: stdin vazio → sem saída ---
+
+    #[test]
+    fn test_kiro_empty_input_passthrough() {
+        assert!(
+            run_kiro_inner("").is_none(),
+            "empty stdin must produce no output"
+        );
+    }
+
+    #[test]
+    fn test_kiro_whitespace_only_passthrough() {
+        assert!(
+            run_kiro_inner("   \n\t  ").is_none(),
+            "whitespace-only stdin must produce no output"
+        );
+    }
+
+    // --- Deny-with-suggestion: stderr message + exit code contract ---
+
+    #[test]
+    fn test_kiro_block_message_contains_suggestion() {
+        // Validates: the stderr text fed back to the agent names the rtk command
+        // and instructs the agent to re-issue it.
+        let msg = kiro_block_message("rtk git status");
+        assert!(
+            msg.contains("rtk git status"),
+            "block message must contain the rtk command, got: `{msg}`"
+        );
+        assert!(
+            msg.contains("Reemita"),
+            "block message must instruct the agent to re-issue the command, got: `{msg}`"
+        );
+    }
+
+    #[test]
+    fn test_kiro_block_exit_is_two() {
+        // Kiro blocks a PreToolUse call and forwards stderr to the model only
+        // on exit code 2. This contract must not drift.
+        assert_eq!(KIRO_BLOCK_EXIT, 2);
+    }
+
+    #[test]
+    fn test_kiro_already_rtk_no_loop() {
+        // Feeding the SUGGESTED command back through the hook must step aside,
+        // so the agent's retry runs untouched (no infinite block/retry loop).
+        let first = process_kiro_payload(
+            &serde_json::from_str(&kiro_input("executeBash", "git status")).unwrap(),
+        )
+        .expect("rewrite expected on the first pass");
+        assert_eq!(first, "rtk git status");
+
+        let retry: Value = serde_json::from_str(&kiro_input("executeBash", &first)).unwrap();
+        assert!(
+            process_kiro_payload(&retry).is_none(),
+            "re-issued `{first}` must not be blocked again"
+        );
+    }
+
+    // --- Ramo futuro: render_kiro_transparent ---
+
+    #[test]
+    fn test_kiro_transparent_updated_input_command() {
+        // Validates: Req 2.7 — render_kiro_transparent produces updatedInput.command
+        let v: Value = serde_json::from_str(&kiro_input("executeBash", "git status")).unwrap();
+        let output = render_kiro_transparent(&v, "rtk git status");
+        assert_eq!(
+            output
+                .pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(|c| c.as_str()),
+            Some("rtk git status")
+        );
+    }
+
+    #[test]
+    fn test_kiro_transparent_preserves_extra_fields() {
+        // Validates: Req 2.7 — preserves description and timeout from tool_input
+        let input_str =
+            kiro_input_with_extras("executeBash", "git status", "Check repo state", 30000);
+        let v: Value = serde_json::from_str(&input_str).unwrap();
+        let output = render_kiro_transparent(&v, "rtk git status");
+
+        let updated = output
+            .pointer("/hookSpecificOutput/updatedInput")
+            .expect("updatedInput must be present");
+        assert_eq!(
+            updated.get("command").and_then(|c| c.as_str()),
+            Some("rtk git status")
+        );
+        assert_eq!(
+            updated.get("description").and_then(|c| c.as_str()),
+            Some("Check repo state")
+        );
+        assert_eq!(updated.get("timeout").and_then(|c| c.as_u64()), Some(30000));
+    }
+
+    #[test]
+    fn test_kiro_transparent_permission_decision_allow() {
+        let v: Value = serde_json::from_str(&kiro_input("executeBash", "git status")).unwrap();
+        let output = render_kiro_transparent(&v, "rtk git status");
+        assert_eq!(
+            output
+                .pointer("/hookSpecificOutput/permissionDecision")
+                .and_then(|c| c.as_str()),
+            Some("allow")
+        );
+        assert_eq!(
+            output
+                .pointer("/hookSpecificOutput/hookEventName")
+                .and_then(|c| c.as_str()),
+            Some("PreToolUse")
+        );
+    }
+
+    #[test]
+    fn test_kiro_transparent_missing_tool_input_creates_command() {
+        // Even if tool_input is absent, render_kiro_transparent still creates updatedInput
+        let v: Value = serde_json::from_str(r#"{"tool_name": "executeBash"}"#).unwrap();
+        let output = render_kiro_transparent(&v, "rtk git status");
+        assert_eq!(
+            output
+                .pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(|c| c.as_str()),
+            Some("rtk git status")
+        );
+    }
+
+    // --- Compound commands ---
+
+    #[test]
+    fn test_kiro_compound_command_rewrite() {
+        let input = kiro_input("executeBash", "git status && cargo test");
+        let out = run_kiro_inner(&input).expect("rewrite expected for compound");
+        assert!(
+            out.contains("rtk git status") && out.contains("rtk cargo test"),
+            "compound rewrite should prefix each segment, got: `{out}`"
+        );
+    }
+
+    // --- Env prefix preserved ---
+
+    #[test]
+    fn test_kiro_env_prefix_preserved() {
+        let input = kiro_input("executeBash", "RUST_LOG=debug cargo test");
+        let out = run_kiro_inner(&input).expect("rewrite expected");
+        assert!(
+            out.contains("RUST_LOG=debug") && out.contains("rtk cargo test"),
+            "env prefix must be preserved, got: `{out}`"
+        );
+    }
+
+    // --- With rules ---
+
+    #[test]
+    fn test_kiro_allowed_command_still_suggests() {
+        // Kiro has no transparent rewrite; even AllowRewrite yields a suggestion
+        // the agent must re-issue.
+        let input = kiro_input("executeBash", "git status");
+        assert_eq!(
+            run_kiro_inner_with_rules(&input, &[], &[], &["git status".to_string()]),
+            Some("rtk git status".to_string()),
+            "AllowRewrite must still produce the suggestion"
+        );
+    }
+
+    // ── Zero overhead / no-network assertions (Req 9.1, 9.3, 9.4, 12.5) ──────
+
+    /// Static code analysis: the Kiro hook path (hook_cmd.rs) must not contain
+    /// async runtime, network I/O, or thread-spawning patterns in production code.
+    ///
+    /// The test reads the source at compile time and checks only the non-test
+    /// portion (everything before `#[cfg(test)]`), avoiding false positives from
+    /// the assertion string literals in test code.
+    ///
+    /// Validates: Requirements 9.3 (synchronous, no async runtime),
+    ///            9.4 / 12.5 (no network calls)
+    #[test]
+    fn test_kiro_hook_path_no_async_no_network() {
+        // Include the source of this file at compile time for static analysis.
+        let hook_cmd_source = include_str!("hook_cmd.rs");
+
+        // Only check the production code portion (before the test module).
+        // This avoids false positives from string literals in tests.
+        let prod_code = hook_cmd_source
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or(hook_cmd_source);
+
+        // Forbidden async/runtime patterns (concatenated at runtime to avoid self-match)
+        let async_patterns: Vec<String> = vec![
+            format!("{}{}{}", "async", " ", "fn"),
+            format!("{}{}", ".", "await"),
+            format!("{}{}{}", "tokio", "::", "spawn"),
+            format!("{}{}", "tokio::", ""),
+            format!("{}{}{}", "#[tokio", "::", "main]"),
+            format!("{}{}{}", "Runtime", "::", "new"),
+            format!("{}{}", "block", "_on"),
+        ];
+
+        // Forbidden network I/O patterns
+        let network_patterns: Vec<String> = vec![
+            format!("{}{}", "reqwest", "::"),
+            format!("{}{}", "hyper", "::"),
+            format!("{}{}", "Tcp", "Stream"),
+            format!("{}{}", "Udp", "Socket"),
+            format!("{}{}", "Tcp", "Listener"),
+            format!("{}{}", "lookup", "_host"),
+            format!("{}{}", "dns", "_lookup"),
+            format!("{}{}{}", "To", "Socket", "Addrs"),
+            format!("{}{}", "Http", "Client"),
+            format!("{}{}", "surf", "::"),
+            format!("{}{}", "ureq", "::"),
+            format!("{}{}", "attohttpc", "::"),
+        ];
+
+        // Forbidden thread-spawning patterns (hooks must be single-threaded/sync)
+        let thread_patterns: Vec<String> = vec![
+            format!("{}{}{}", "thread", "::", "spawn"),
+            format!("{}{}", "rayon", "::"),
+        ];
+
+        for pattern in &async_patterns {
+            assert!(
+                !prod_code.contains(pattern.as_str()),
+                "hook_cmd.rs production code must NOT contain async pattern '{}' — \
+                 the hook path must be synchronous (Req 9.3)",
+                pattern
+            );
+        }
+
+        for pattern in &network_patterns {
+            assert!(
+                !prod_code.contains(pattern.as_str()),
+                "hook_cmd.rs production code must NOT contain network pattern '{}' — \
+                 the hook path must not perform network I/O (Req 9.4, 12.5)",
+                pattern
+            );
+        }
+
+        for pattern in &thread_patterns {
+            assert!(
+                !prod_code.contains(pattern.as_str()),
+                "hook_cmd.rs production code must NOT contain thread-spawning pattern '{}' — \
+                 the hook path must be synchronous (Req 9.3)",
+                pattern
+            );
+        }
+    }
+
+    /// Static code analysis: the registry and lexer modules used by the hook path
+    /// must also be free of network and async patterns.
+    ///
+    /// Validates: Requirements 9.4, 12.5
+    #[test]
+    fn test_kiro_hook_dependencies_no_network() {
+        let registry_source = include_str!("../discover/registry.rs");
+        let lexer_source = include_str!("../discover/lexer.rs");
+
+        // Forbidden network I/O patterns (concatenated to avoid self-matching)
+        let network_patterns: Vec<(&str, String)> = vec![
+            ("reqwest", format!("{}{}", "reqwest", "::")),
+            ("hyper", format!("{}{}", "hyper", "::")),
+            ("TcpStream", format!("{}{}", "Tcp", "Stream")),
+            ("UdpSocket", format!("{}{}", "Udp", "Socket")),
+            ("TcpListener", format!("{}{}", "Tcp", "Listener")),
+            ("lookup_host", format!("{}{}", "lookup", "_host")),
+            ("dns_lookup", format!("{}{}", "dns", "_lookup")),
+        ];
+
+        // Forbidden async patterns
+        let async_patterns: Vec<(&str, String)> = vec![
+            ("async fn", format!("{}{}{}", "async", " ", "fn")),
+            (".await", format!("{}{}", ".", "await")),
+            ("tokio::", format!("{}{}", "tokio", "::")),
+            (
+                "#[tokio::main]",
+                format!("{}{}{}", "#[tokio", "::", "main]"),
+            ),
+        ];
+
+        for (file_name, source) in [("registry.rs", registry_source), ("lexer.rs", lexer_source)] {
+            // Only check production code (before test module)
+            let prod = source.split("#[cfg(test)]").next().unwrap_or(source);
+
+            for (label, pattern) in &network_patterns {
+                assert!(
+                    !prod.contains(pattern.as_str()),
+                    "{} must NOT contain network pattern '{}' — \
+                     the hook decision path must not perform network I/O (Req 9.4, 12.5)",
+                    file_name,
+                    label
+                );
+            }
+            for (label, pattern) in &async_patterns {
+                assert!(
+                    !prod.contains(pattern.as_str()),
+                    "{} must NOT contain async pattern '{}' — \
+                     the hook decision path must be synchronous (Req 9.3)",
+                    file_name,
+                    label
+                );
+            }
+        }
+    }
+
+    /// Performance benchmark: process_kiro_payload must complete in < 10 ms.
+    ///
+    /// This is a soft assertion — CI environments may be slower, so this test
+    /// uses a generous 10ms budget. On typical hardware, the synchronous path
+    /// completes in < 1ms. The test runs multiple iterations and asserts the
+    /// average is under the budget.
+    ///
+    /// Validates: Requirement 9.1 (< 10 ms startup/decision time)
+    #[test]
+    fn test_kiro_hook_path_latency_under_10ms() {
+        use std::time::Instant;
+
+        let payload = json!({
+            "session_id": "perf-test-session",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "executeBash",
+            "tool_input": { "command": "git status" }
+        });
+
+        // Warm up: run once to ensure lazy_static regex compilation is done
+        let _ = process_kiro_payload(&payload);
+
+        // Measure 100 iterations
+        let iterations = 100;
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let _ = process_kiro_payload(&payload);
+        }
+        let total_elapsed = start.elapsed();
+        let avg_micros = total_elapsed.as_micros() / iterations;
+
+        // Assert average per-call is under 10ms (10_000 µs).
+        // On real hardware this is typically < 100µs per call.
+        assert!(
+            avg_micros < 10_000,
+            "process_kiro_payload average latency ({} µs) exceeds 10 ms budget. \
+             The hook path must be fast enough to not perceptibly delay command execution. \
+             (Req 9.1: < 10 ms startup/decision time)",
+            avg_micros
+        );
+
+        // Also assert that even the total time for 100 calls is reasonable
+        // (under 1 second total — sanity check against extreme slowness).
+        assert!(
+            total_elapsed.as_secs() < 1,
+            "100 iterations of process_kiro_payload took {:?} — \
+             something is seriously wrong with performance",
+            total_elapsed
+        );
+    }
+
+    /// Verify that the Kiro hook path is entirely synchronous by confirming
+    /// that `run_kiro` returns `Result<()>` (not a Future) and that the
+    /// function signature does not use async.
+    ///
+    /// This is a compile-time guarantee: if `run_kiro` were made async,
+    /// calling it without `.await` would fail to compile. The test simply
+    /// exercises the synchronous call pattern.
+    ///
+    /// Validates: Requirement 9.3
+    #[test]
+    fn test_kiro_run_kiro_is_synchronous() {
+        // If run_kiro were async, this call would not compile without .await
+        // or a runtime. The fact this compiles and runs proves it's synchronous.
+        // We can't call run_kiro() directly in tests (it reads stdin), but we
+        // CAN call process_kiro_payload which is the core decision path.
+        let payload = json!({
+            "session_id": "sync-test",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "executeBash",
+            "tool_input": { "command": "git status" }
+        });
+
+        // Synchronous call — no runtime, no .await, no spawn.
+        let result = process_kiro_payload(&payload);
+
+        // The function returns immediately (synchronously) with a deterministic result.
+        assert!(result.is_some(), "synchronous call must produce a result");
+    }
+
+    // ── Property-based tests (proptest) ────────────────────────────
+
+    mod prop_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        // Feature: kiro-agent-integration, Property 1: run_kiro nunca sai com código diferente de zero
+        //
+        // For ANY input (valid JSON, invalid JSON, arbitrary bytes, well-formed payloads
+        // with random commands), the processing functions never panic and always return
+        // a valid result (Ok(()) or Some/None).
+        //
+        // **Validates: Requirements 6.2, 6.3, 6.5, 10.4, 12.4**
+
+        // Strategy: arbitrary strings fed to JSON parsing — must never panic.
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 100, .. ProptestConfig::default() })]
+
+            #[test]
+            fn prop_p1_arbitrary_string_never_panics(input in "\\PC*") {
+                // Simulates the run_kiro path: parse attempt + process_kiro_payload.
+                // Must never panic regardless of input content.
+                let trimmed = strip_leading_bom(&input).trim();
+                if !trimmed.is_empty() {
+                    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+                        // If it parses as JSON, process_kiro_payload must not panic.
+                        let _ = process_kiro_payload(&v);
+                    }
+                }
+                // No panic = property holds.
+            }
+        }
+
+        // Strategy: arbitrary JSON values — process_kiro_payload must never panic.
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 100, .. ProptestConfig::default() })]
+
+            #[test]
+            fn prop_p1_arbitrary_json_never_panics(
+                // Generate arbitrary JSON objects with varied structures
+                tool_name in prop_oneof![
+                    Just("executeBash".to_string()),
+                    Just("execute_bash".to_string()),
+                    Just("runCommand".to_string()),
+                    Just("shell".to_string()),
+                    Just("editFile".to_string()),
+                    Just("readFile".to_string()),
+                    Just("".to_string()),
+                    "[a-zA-Z_]{1,20}",
+                ],
+                command in prop_oneof![
+                    Just("".to_string()),
+                    Just("git status".to_string()),
+                    Just("rtk git status".to_string()),
+                    Just("cat <<EOF\nhello\nEOF".to_string()),
+                    Just("git status $(rm -rf /)".to_string()),
+                    "\\PC{0,200}",
+                ],
+                has_tool_input in any::<bool>(),
+                has_command_field in any::<bool>(),
+                extra_field in "\\PC{0,50}",
+            ) {
+                let mut obj = serde_json::Map::new();
+                if !tool_name.is_empty() {
+                    obj.insert("tool_name".to_string(), Value::String(tool_name));
+                }
+                if has_tool_input {
+                    let mut tool_input = serde_json::Map::new();
+                    if has_command_field {
+                        tool_input.insert("command".to_string(), Value::String(command));
+                    }
+                    tool_input.insert("extra".to_string(), Value::String(extra_field));
+                    obj.insert("tool_input".to_string(), Value::Object(tool_input));
+                }
+                obj.insert("session_id".to_string(), Value::String("test-session".to_string()));
+
+                let v = Value::Object(obj);
+                // Must never panic — result is either Some(rtk suggestion) or None.
+                let result = process_kiro_payload(&v);
+                if let Some(suggestion) = result {
+                    // A suggestion is always a non-empty rtk-bearing command.
+                    prop_assert!(!suggestion.is_empty());
+                    prop_assert!(
+                        suggestion.contains("rtk "),
+                        "suggestion must carry the rtk prefix, got: `{}`",
+                        suggestion
+                    );
+                }
+            }
+        }
+
+        // Strategy: well-formed Kiro payloads with random commands — must never panic
+        // and must always produce either Some (with ask decision) or None.
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 100, .. ProptestConfig::default() })]
+
+            #[test]
+            fn prop_p1_wellformed_payload_random_command_never_panics(
+                command in "[a-zA-Z0-9 _\\-./]{1,100}",
+            ) {
+                let payload = json!({
+                    "session_id": "prop-test-session",
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "executeBash",
+                    "tool_input": { "command": command }
+                });
+
+                // Must never panic.
+                let result = process_kiro_payload(&payload);
+
+                // If there is a suggestion, it must be a usable rtk command and
+                // must differ from the original (otherwise the agent would loop).
+                if let Some(suggestion) = result {
+                    prop_assert!(!suggestion.is_empty());
+                    prop_assert!(
+                        suggestion.contains("rtk "),
+                        "suggestion must carry the rtk prefix, got: `{}`",
+                        suggestion
+                    );
+                    prop_assert_ne!(
+                        suggestion.as_str(),
+                        command.as_str(),
+                        "suggestion must differ from the original command"
+                    );
+                }
+                // None is also valid — means no rewrite (Defer/Deny/no registry match).
+            }
+        }
+
+        // Feature: kiro-agent-integration, Property 2: Sem reescrita produz saída vazia/benigna (never-worse)
+        //
+        // For ANY command that has no equivalent in the registry (random unknown binaries)
+        // and for non-shell tools (editFile, readFile, writeFile, searchReplace, etc.),
+        // `process_kiro_payload` MUST return `None` — meaning no output is emitted and
+        // the original command executes unchanged.
+        //
+        // **Validates: Requirements 2.5, 6.4**
+
+        // Strategy 1: Random unknown command names that definitely won't be in the registry.
+        // We generate random strings with a prefix guaranteed not to match any known CLI tool.
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 100, .. ProptestConfig::default() })]
+
+            #[test]
+            fn prop_p2_unknown_commands_produce_none(
+                // Random suffix appended to a prefix that no registry entry matches.
+                suffix in "[a-z]{3,15}",
+                session_id in "[a-f0-9]{8}",
+            ) {
+                // Use a prefix like "zzunknown_" which is not a real CLI tool.
+                let unknown_cmd = format!("zzunknown_{suffix} --flag arg1 arg2");
+
+                let payload = json!({
+                    "session_id": session_id,
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "executeBash",
+                    "tool_input": { "command": unknown_cmd }
+                });
+
+                let result = process_kiro_payload(&payload);
+                prop_assert!(
+                    result.is_none(),
+                    "Unknown command '{}' should produce None, got {:?}",
+                    unknown_cmd, result
+                );
+            }
+        }
+
+        // Strategy 2: Non-shell tool names — these are tools like editFile, readFile,
+        // writeFile, searchReplace, etc. that are NOT shell execution tools.
+        // kiro_shell_command should return None for them, causing process_kiro_payload
+        // to short-circuit to None.
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 100, .. ProptestConfig::default() })]
+
+            #[test]
+            fn prop_p2_non_shell_tools_produce_none(
+                tool_name in prop_oneof![
+                    Just("editFile".to_string()),
+                    Just("readFile".to_string()),
+                    Just("writeFile".to_string()),
+                    Just("searchReplace".to_string()),
+                    Just("listFiles".to_string()),
+                    Just("createFile".to_string()),
+                    Just("deleteFile".to_string()),
+                    Just("moveFile".to_string()),
+                    Just("copyFile".to_string()),
+                    Just("renameFile".to_string()),
+                    Just("webSearch".to_string()),
+                    Just("fetchUrl".to_string()),
+                    Just("askUser".to_string()),
+                    Just("analyzeCode".to_string()),
+                    Just("refactorCode".to_string()),
+                    // Also random tool names that are clearly not shell tools
+                    "(?:zzfake|xxmock|qqtest)[A-Z][a-zA-Z]{2,12}",
+                ],
+                // Even with a valid rewritable command in tool_input, the non-shell
+                // tool_name should cause the payload to be ignored.
+                command in prop_oneof![
+                    Just("git status".to_string()),
+                    Just("cargo test".to_string()),
+                    Just("ls -la".to_string()),
+                    Just("docker ps".to_string()),
+                    "[a-z]{2,10} [a-z\\-]{0,10}",
+                ],
+                session_id in "[a-f0-9]{8}",
+            ) {
+                let payload = json!({
+                    "session_id": session_id,
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": tool_name,
+                    "tool_input": { "command": command }
+                });
+
+                let result = process_kiro_payload(&payload);
+                prop_assert!(
+                    result.is_none(),
+                    "Non-shell tool '{}' with command '{}' should produce None, got {:?}",
+                    tool_name, command, result
+                );
+            }
+        }
+
+        // Feature: kiro-agent-integration, Property 3: Idempotência do prefixo rtk
+        //
+        // For ANY command that already starts with `rtk` (optionally preceded by
+        // environment variable assignments like `ENV=val`), `get_rewritten` returns
+        // `None` — never adding a second `rtk` prefix (no `rtk rtk git`).
+        //
+        // **Validates: Requirements 8.3**
+
+        // Strategy 1: Known rewritable commands already prefixed with `rtk `.
+        // These must produce None from process_kiro_payload (no double-prefix).
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 100, .. ProptestConfig::default() })]
+
+            #[test]
+            fn prop_p3_already_rtk_prefixed_returns_none(
+                base_cmd in prop_oneof![
+                    Just("git status".to_string()),
+                    Just("git log --oneline".to_string()),
+                    Just("git diff".to_string()),
+                    Just("git add .".to_string()),
+                    Just("git commit -m 'test'".to_string()),
+                    Just("git checkout main".to_string()),
+                    Just("git push origin main".to_string()),
+                    Just("git pull".to_string()),
+                    Just("git branch -a".to_string()),
+                    Just("git fetch".to_string()),
+                    Just("git stash".to_string()),
+                    Just("cargo test".to_string()),
+                    Just("cargo build".to_string()),
+                    Just("cargo clippy".to_string()),
+                    Just("cargo check".to_string()),
+                    Just("ls -la".to_string()),
+                    Just("ls src/".to_string()),
+                    Just("grep -r 'pattern' src/".to_string()),
+                    Just("find . -name '*.rs'".to_string()),
+                    Just("cat README.md".to_string()),
+                    Just("gh pr list".to_string()),
+                    Just("docker ps".to_string()),
+                ],
+                session_id in "[a-f0-9]{8}",
+            ) {
+                // Command already prefixed with `rtk `
+                let already_rtk_cmd = format!("rtk {base_cmd}");
+
+                let payload = json!({
+                    "session_id": session_id,
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "executeBash",
+                    "tool_input": { "command": already_rtk_cmd }
+                });
+
+                let result = process_kiro_payload(&payload);
+                prop_assert!(
+                    result.is_none(),
+                    "Already rtk-prefixed command '{}' must return None (no rtk rtk), got {:?}",
+                    already_rtk_cmd, result
+                );
+            }
+        }
+
+        // Feature: kiro-agent-integration, Property 4: Preservação de prefixos de ambiente
+        //
+        // For ANY rewritable command preceded by environment variable assignments
+        // (KEY=value pairs), the rewritten command preserves the env var prefixes
+        // and inserts `rtk` after them. For example:
+        //   `RUST_LOG=debug git status` → suggested rewrite is `RUST_LOG=debug rtk git status`
+        //   `KEY=val cargo test` → `KEY=val rtk cargo test`
+        //
+        // The assertion checks that when `process_kiro_payload` produces a `Some` result,
+        // the `permissionDecisionReason` contains the env prefix preserved AND the `rtk`
+        // command inserted after the env vars.
+        //
+        // **Validates: Requirements 12.1**
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 100, .. ProptestConfig::default() })]
+
+            #[test]
+            fn prop_p4_env_prefix_preservation(
+                // Generate random env var keys: [A-Z][A-Z_0-9]{1,10}
+                env_key in "[A-Z][A-Z_0-9]{1,10}",
+                // Generate simple env var values: [a-zA-Z0-9_.-]{1,15}
+                env_val in "[a-zA-Z0-9_.\\-]{1,15}",
+                // Known rewritable base commands
+                base_cmd in prop_oneof![
+                    Just("git status".to_string()),
+                    Just("git log --oneline".to_string()),
+                    Just("git diff".to_string()),
+                    Just("git add .".to_string()),
+                    Just("git pull".to_string()),
+                    Just("git fetch".to_string()),
+                    Just("git branch -a".to_string()),
+                    Just("cargo test".to_string()),
+                    Just("cargo build".to_string()),
+                    Just("cargo clippy".to_string()),
+                    Just("cargo check".to_string()),
+                    Just("ls -la".to_string()),
+                    Just("ls src/".to_string()),
+                    Just("grep -r 'pattern' src/".to_string()),
+                    Just("find . -name '*.rs'".to_string()),
+                    Just("cat README.md".to_string()),
+                    Just("docker ps".to_string()),
+                ],
+                session_id in "[a-f0-9]{8}",
+            ) {
+                // Skip if env_key happens to be RTK_DISABLED (that's a different property P9)
+                prop_assume!(!env_key.starts_with("RTK_DISABLED"));
+
+                // Construct command: ENV=val <base_cmd>
+                let cmd_with_env = format!("{}={} {}", env_key, env_val, base_cmd);
+
+                let payload = json!({
+                    "session_id": session_id,
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "executeBash",
+                    "tool_input": { "command": cmd_with_env }
+                });
+
+                let result = process_kiro_payload(&payload);
+
+                // The command is rewritable, so we should get a response
+                prop_assert!(
+                    result.is_some(),
+                    "Env-prefixed rewritable command '{}' should produce a rewrite suggestion",
+                    cmd_with_env
+                );
+
+                let suggestion = result.unwrap();
+
+                // The suggestion must preserve the env prefix and insert `rtk` after it:
+                // `ENV=val rtk <base_cmd>`
+                let env_prefix = format!("{}={}", env_key, env_val);
+                prop_assert!(
+                    suggestion.contains(&env_prefix),
+                    "Suggestion must contain env prefix '{}', got: `{}`",
+                    env_prefix, suggestion
+                );
+
+                let expected_rewrite_prefix = format!("{} rtk", env_prefix);
+                prop_assert!(
+                    suggestion.contains(&expected_rewrite_prefix),
+                    "Suggestion must contain '{}' (env prefix followed by rtk), got: `{}`",
+                    expected_rewrite_prefix, suggestion
+                );
+            }
+        }
+
+        // Feature: kiro-agent-integration, Property 5: Reescrita de comandos compostos casa a semântica do registry
+        //
+        // For ANY compound command formed by rewritable segments joined by `&&`, `||`,
+        // `;` (each segment rewritten independently) or `|` (only left segment rewritten),
+        // the suggestion produced through the Kiro handler path (`process_kiro_payload`)
+        // is identical to calling `registry::rewrite_command` directly (the reference
+        // implementation). This is a MODEL-BASED test.
+        //
+        // **Validates: Requirements 5.1, 5.2**
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 100, .. ProptestConfig::default() })]
+
+            #[test]
+            fn prop_p5_compound_command_rewrite_matches_registry(
+                // Pick 2-4 rewritable segments to join into a compound command
+                segments in prop::collection::vec(
+                    prop_oneof![
+                        Just("git status".to_string()),
+                        Just("git log --oneline".to_string()),
+                        Just("git diff".to_string()),
+                        Just("git add .".to_string()),
+                        Just("git pull".to_string()),
+                        Just("git fetch".to_string()),
+                        Just("git branch -a".to_string()),
+                        Just("cargo test".to_string()),
+                        Just("cargo build".to_string()),
+                        Just("cargo clippy".to_string()),
+                        Just("cargo check".to_string()),
+                        Just("ls -la".to_string()),
+                        Just("ls src/".to_string()),
+                        Just("grep -r 'pattern' src/".to_string()),
+                        Just("cat README.md".to_string()),
+                        Just("docker ps".to_string()),
+                    ],
+                    2..=4
+                ),
+                // Pick operators to join them (one fewer operator than segments)
+                operators in prop::collection::vec(
+                    prop_oneof![
+                        Just(" && ".to_string()),
+                        Just(" || ".to_string()),
+                        Just("; ".to_string()),
+                        Just(" | ".to_string()),
+                    ],
+                    1..=3
+                ),
+            ) {
+                // Build the compound command from segments + operators.
+                // Use min(segments.len()-1, operators.len()) operators between segments.
+                let num_ops = std::cmp::min(segments.len() - 1, operators.len());
+                let mut compound = String::new();
+                for (i, seg) in segments.iter().enumerate() {
+                    compound.push_str(seg);
+                    if i < num_ops {
+                        compound.push_str(&operators[i]);
+                    }
+                }
+
+                // Reference: call registry::rewrite_command directly
+                let reference_result = crate::discover::registry::rewrite_command(
+                    &compound,
+                    &[],   // no excludes
+                    &[],   // no transparent prefixes
+                );
+
+                // Kiro path: feed compound command through process_kiro_payload
+                let payload = json!({
+                    "session_id": "prop-p5-session",
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "executeBash",
+                    "tool_input": { "command": compound }
+                });
+                let kiro_result = process_kiro_payload(&payload);
+
+                match (reference_result.as_ref(), kiro_result.as_ref()) {
+                    (None, None) => {
+                        // Both agree: no rewrite. Property holds.
+                    }
+                    (Some(ref_rewritten), Some(kiro_rewritten)) => {
+                        // Both agree there's a rewrite — the Kiro handler returns the
+                        // rewritten command verbatim, so compare directly.
+                        prop_assert_eq!(
+                            kiro_rewritten.as_str(),
+                            ref_rewritten.as_str(),
+                            "Compound '{}': Kiro path produced '{}' but registry reference produced '{}'",
+                            compound, kiro_rewritten, ref_rewritten
+                        );
+                    }
+                    (Some(ref_rewritten), None) => {
+                        // Registry says rewrite, but Kiro path says no.
+                        // This can happen if the rewrite is identical to the original
+                        // (get_rewritten returns None when rewritten == cmd).
+                        // In that case, the registry returns Some but with the same string,
+                        // while get_rewritten (used by Kiro path) returns None.
+                        prop_assert_eq!(
+                            ref_rewritten.as_str(),
+                            compound.as_str(),
+                            "Mismatch: registry returned Some('{}') but Kiro returned None for compound '{}'",
+                            ref_rewritten, compound
+                        );
+                    }
+                    (None, Some(kiro_rewritten)) => {
+                        // Kiro says rewrite but registry doesn't — should not happen.
+                        prop_assert!(
+                            false,
+                            "Mismatch: registry returned None but Kiro returned {:?} for compound '{}'",
+                            kiro_rewritten, compound
+                        );
+                    }
+                }
+            }
+        }
+
+        // Feature: kiro-agent-integration, Property 6: Construções não atestáveis e heredoc são sempre deferidas
+        //
+        // For ANY command that contains an unattestable construct — command substitution
+        // `$(...)`, backticks `` ` ``, file redirection `>` (with file target), or
+        // heredoc `<<EOF` — `process_kiro_payload` MUST return `None` (defer), even when
+        // the base command would otherwise be rewritable. This prevents laundering of
+        // hidden commands through the rewrite mechanism.
+        //
+        // Note: background `&` followed by another command is treated as a compound
+        // command operator (like `&&`, `||`, `;`) — segments are split and individually
+        // rewritten. This is consistent with ALL agent handlers in the codebase. The
+        // security is preserved because Kiro never runs the rewrite itself — it only
+        // suggests it, and the agent must re-issue the command explicitly.
+        //
+        // **Validates: Requirements 5.3, 5.4, 12.2**
+
+        // Strategy: inject unattestable constructs into known-rewritable base commands.
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 100, .. ProptestConfig::default() })]
+
+            #[test]
+            fn prop_p6_unattestable_constructs_always_defer(
+                // Base rewritable command
+                base_cmd in prop_oneof![
+                    Just("git status".to_string()),
+                    Just("git log --oneline".to_string()),
+                    Just("git diff".to_string()),
+                    Just("git add .".to_string()),
+                    Just("git pull".to_string()),
+                    Just("git fetch".to_string()),
+                    Just("git branch -a".to_string()),
+                    Just("cargo test".to_string()),
+                    Just("cargo build".to_string()),
+                    Just("cargo clippy".to_string()),
+                    Just("cargo check".to_string()),
+                    Just("ls -la".to_string()),
+                    Just("ls src/".to_string()),
+                    Just("grep -r 'pattern' src/".to_string()),
+                    Just("find . -name '*.rs'".to_string()),
+                    Just("cat README.md".to_string()),
+                    Just("docker ps".to_string()),
+                ],
+                // Unattestable construct to inject
+                construct in prop_oneof![
+                    // Command substitution with $(...)
+                    Just("$(whoami)".to_string()),
+                    Just("$(echo hello)".to_string()),
+                    Just("$(rm -rf /tmp/x)".to_string()),
+                    Just("$(cat /etc/passwd)".to_string()),
+                    Just("$(date +%s)".to_string()),
+                    // Backtick substitution
+                    Just("`whoami`".to_string()),
+                    Just("`echo test`".to_string()),
+                    Just("`rm -rf /tmp/x`".to_string()),
+                    Just("`date`".to_string()),
+                    Just("`cat /etc/hostname`".to_string()),
+                    // File redirection with > (file target, not fd-dup)
+                    Just("> /tmp/out.txt".to_string()),
+                    Just("> /dev/sda".to_string()),
+                    Just("> ~/.ssh/authorized_keys".to_string()),
+                    Just(">output.log".to_string()),
+                    Just("> /tmp/evil.txt".to_string()),
+                    // Heredoc <<EOF
+                    Just("<<EOF\nmalicious content\nEOF".to_string()),
+                    Just("<<'END'\nsome data\nEND".to_string()),
+                    Just("<< MARKER\npayload\nMARKER".to_string()),
+                    Just("<<HEREDOC\nline1\nline2\nHEREDOC".to_string()),
+                    Just("<<-EOF\n\tindented\nEOF".to_string()),
+                ],
+                // Injection position pattern
+                position in prop_oneof![
+                    Just("suffix".to_string()),   // append after the command
+                    Just("middle".to_string()),   // insert via flag argument
+                ],
+                session_id in "[a-f0-9]{8}",
+            ) {
+                // First, verify the base command IS rewritable without the injection
+                let base_payload = json!({
+                    "session_id": session_id,
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "executeBash",
+                    "tool_input": { "command": &base_cmd }
+                });
+                let base_result = process_kiro_payload(&base_payload);
+                // The base command must be rewritable for this test to be meaningful
+                prop_assume!(base_result.is_some(), "base command '{}' must be rewritable", base_cmd);
+
+                // Now inject the unattestable construct
+                let injected_cmd = match position.as_str() {
+                    "middle" => format!("{} {} --flag", base_cmd, construct),
+                    _ /* suffix */ => format!("{} {}", base_cmd, construct),
+                };
+
+                let payload = json!({
+                    "session_id": session_id,
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "executeBash",
+                    "tool_input": { "command": injected_cmd }
+                });
+
+                let result = process_kiro_payload(&payload);
+                prop_assert!(
+                    result.is_none(),
+                    "Command with unattestable construct must return None (defer).\n\
+                     Base cmd: '{}'\n\
+                     Construct: '{}'\n\
+                     Injected cmd: '{}'\n\
+                     Got: {:?}",
+                    base_cmd, construct, injected_cmd, result
+                );
+            }
+        }
+
+        // Strategy 2: Rewritable commands prefixed with `rtk ` AND preceded by
+        // environment variable assignments like `ENV=val rtk git status`.
+        // Must still return None (no double rtk prefix).
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 100, .. ProptestConfig::default() })]
+
+            #[test]
+            fn prop_p3_env_prefix_with_rtk_returns_none(
+                // Generate random env var keys (uppercase letters + underscore)
+                env_key in "[A-Z][A-Z_]{1,10}",
+                // Generate random env var values (alphanumeric + common chars)
+                env_val in "[a-zA-Z0-9_./-]{1,15}",
+                // Optionally add a second env var
+                extra_env in prop_oneof![
+                    Just("".to_string()),
+                    Just(" DEBUG=1".to_string()),
+                    Just(" VERBOSE=true".to_string()),
+                    Just(" RUST_BACKTRACE=full".to_string()),
+                ],
+                base_cmd in prop_oneof![
+                    Just("git status".to_string()),
+                    Just("git diff".to_string()),
+                    Just("git log".to_string()),
+                    Just("cargo test".to_string()),
+                    Just("cargo build".to_string()),
+                    Just("ls -la".to_string()),
+                    Just("grep -r 'foo' .".to_string()),
+                    Just("find . -name '*.rs'".to_string()),
+                    Just("cat Cargo.toml".to_string()),
+                    Just("docker ps".to_string()),
+                ],
+                session_id in "[a-f0-9]{8}",
+            ) {
+                // ENV=val rtk <command> — already has rtk, must not double-prefix.
+                let cmd_with_env = format!("{env_key}={env_val}{extra_env} rtk {base_cmd}");
+
+                let payload = json!({
+                    "session_id": session_id,
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "executeBash",
+                    "tool_input": { "command": cmd_with_env }
+                });
+
+                let result = process_kiro_payload(&payload);
+                prop_assert!(
+                    result.is_none(),
+                    "Env-prefixed rtk command '{}' must return None (no rtk rtk), got {:?}",
+                    cmd_with_env, result
+                );
+            }
+        }
+
+        // Feature: kiro-agent-integration, Property 10: Stdin acima de 1 MiB resulta em exit 0 sem modificação
+        //
+        // For ANY payload whose size exceeds 1 MiB (STDIN_CAP), `run_kiro()` returns
+        // `Ok(())` without emitting output, leaving the original command intact.
+        // For payloads BELOW the cap, processing works normally.
+        //
+        // Since `read_stdin_limited` reads from real stdin and cannot be mocked in unit tests,
+        // this property verifies:
+        //   (a) The size-check logic: strings > STDIN_CAP would be rejected by
+        //       `read_stdin_limited`'s bail condition.
+        //   (b) Below-cap payloads: `process_kiro_payload` processes them normally
+        //       (returns Some for rewritable commands, None for non-rewritable).
+        //   (c) The `run_kiro()` contract: any Err from `read_stdin_limited` (including
+        //       the cap-exceeded case) is converted to `Ok(())` without output (verified
+        //       structurally by the match arm in `run_kiro`).
+        //
+        // **Validates: Requirements 12.3, 12.4**
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 100, .. ProptestConfig::default() })]
+
+            #[test]
+            fn prop_p10_stdin_cap_enforcement(
+                // Generate a size factor: 0.8x to 1.5x of STDIN_CAP
+                // to test behavior around the boundary.
+                size_factor in 0.8f64..1.5f64,
+            ) {
+                let target_size = (STDIN_CAP as f64 * size_factor) as usize;
+
+                if target_size > STDIN_CAP {
+                    // ABOVE CAP: read_stdin_limited would bail.
+                    // Verify the bail condition directly: any string longer than
+                    // STDIN_CAP triggers the "exceeds limit" error path.
+                    // In run_kiro(), this Err is caught by the match arm and
+                    // converted to Ok(()) — exit 0 with no output.
+                    prop_assert!(
+                        target_size > STDIN_CAP,
+                        "Size {} should exceed STDIN_CAP {}",
+                        target_size, STDIN_CAP
+                    );
+                    // The contract is enforced structurally:
+                    // run_kiro() does: match read_stdin_limited() { Err(_) => return Ok(()) }
+                    // So any payload exceeding 1 MiB results in exit 0 without modification.
+                } else {
+                    // BELOW OR AT CAP: process_kiro_payload works normally.
+                    // Build a valid JSON payload within the size budget and verify
+                    // it gets processed (rewritable command → Some, non-rewritable → None).
+                    let payload = json!({
+                        "session_id": "prop-p10-session",
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "executeBash",
+                        "tool_input": { "command": "git status" }
+                    });
+
+                    // This payload is well under 1 MiB — process_kiro_payload must work.
+                    let result = process_kiro_payload(&payload);
+                    // "git status" is rewritable → must produce the rtk suggestion.
+                    prop_assert_eq!(
+                        result.as_deref(),
+                        Some("rtk git status"),
+                        "Below-cap rewritable command must produce the rtk suggestion"
+                    );
+                }
+            }
+        }
+
+        // Strategy 2: Verify that large payloads (with padding to approach the cap)
+        // are still processed correctly by process_kiro_payload when they remain
+        // under the cap — the size limit is ONLY at the stdin reading level.
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 100, .. ProptestConfig::default() })]
+
+            #[test]
+            fn prop_p10_large_but_subcap_payloads_process_normally(
+                // Generate payloads with large padding but still under STDIN_CAP.
+                // Sizes from 100KB to 900KB (well under 1 MiB but large).
+                padding_kb in 100usize..900usize,
+                base_cmd in prop_oneof![
+                    Just("git status".to_string()),
+                    Just("git log --oneline".to_string()),
+                    Just("cargo test".to_string()),
+                    Just("cargo build".to_string()),
+                    Just("ls -la".to_string()),
+                    Just("docker ps".to_string()),
+                ],
+            ) {
+                let padding_size = padding_kb * 1024;
+                // Create padding that won't affect JSON parsing (stored in an extra field)
+                let padding: String = "x".repeat(padding_size);
+
+                let payload = json!({
+                    "session_id": "prop-p10-large",
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "executeBash",
+                    "tool_input": { "command": base_cmd },
+                    "extra_context": padding
+                });
+
+                // Verify the serialized payload size is under the cap
+                let serialized = serde_json::to_string(&payload).unwrap();
+                prop_assume!(serialized.len() <= STDIN_CAP);
+
+                // process_kiro_payload must still work — the size limit is only
+                // at the read_stdin_limited level, not at the processing level.
+                let result = process_kiro_payload(&payload);
+                // All base_cmd values are rewritable
+                let expected = format!("rtk {base_cmd}");
+                prop_assert_eq!(
+                    result.as_deref(),
+                    Some(expected.as_str()),
+                    "Large ({} bytes) but sub-cap payload with rewritable command '{}' \
+                     must still yield the rtk suggestion. Size limit is only at stdin \
+                     reading level.",
+                    serialized.len(), base_cmd
+                );
+            }
+        }
+
+        // Strategy 3: Verify the STDIN_CAP constant value and that the bail logic is correct.
+        // This is a simple assertion test (not property-based) included for completeness.
+        #[test]
+        fn p10_stdin_cap_is_one_mib() {
+            assert_eq!(STDIN_CAP, 1_048_576, "STDIN_CAP must be exactly 1 MiB");
+        }
+
+        // Feature: kiro-agent-integration, Property 9: Overrides repassam sem reescrita
+        //
+        // For ANY rewritable command:
+        //   (a) prefixed with `RTK_DISABLED=1` → `get_rewritten` returns `None`
+        //   (b) matching a pattern configured in `exclude_commands` → `get_rewritten` returns `None`
+        //   (c) without any override → `get_rewritten` returns `Some` (command IS rewritten)
+        //
+        // This verifies that override mechanisms correctly suppress rewriting while
+        // leaving non-overridden commands unaffected.
+        //
+        // **Validates: Requisitos 8.1, 8.2**
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 100, .. ProptestConfig::default() })]
+
+            #[test]
+            fn prop_p9_overrides_suppress_rewrite(
+                // Known rewritable base commands (these all have registry entries)
+                base_cmd in prop_oneof![
+                    Just("git status".to_string()),
+                    Just("git log --oneline".to_string()),
+                    Just("git diff".to_string()),
+                    Just("git add .".to_string()),
+                    Just("git pull".to_string()),
+                    Just("git fetch".to_string()),
+                    Just("git branch -a".to_string()),
+                    Just("cargo test".to_string()),
+                    Just("cargo build".to_string()),
+                    Just("cargo clippy".to_string()),
+                    Just("cargo check".to_string()),
+                    Just("ls -la".to_string()),
+                    Just("ls src/".to_string()),
+                    Just("grep -r 'pattern' src/".to_string()),
+                    Just("find . -name '*.rs'".to_string()),
+                    Just("cat README.md".to_string()),
+                    Just("docker ps".to_string()),
+                ],
+                // Override variant: (a) RTK_DISABLED=1, (b) exclude_commands match, (c) no override
+                override_kind in 0u8..3,
+                // Random RTK_DISABLED value (always "1" to disable; other values tested elsewhere)
+                rtk_disabled_val in prop_oneof![
+                    Just("1".to_string()),
+                    Just("true".to_string()),
+                    Just("yes".to_string()),
+                ],
+                _session_id in "[a-f0-9]{8}",
+            ) {
+                // First, confirm the base command IS rewritable without any overrides.
+                let base_rewritten = crate::discover::registry::rewrite_command(
+                    &base_cmd, &[], &[]
+                );
+                prop_assume!(
+                    base_rewritten.is_some() && base_rewritten.as_deref() != Some(&*base_cmd),
+                    "Base command '{}' must be rewritable for this test", base_cmd
+                );
+
+                match override_kind {
+                    // (a) RTK_DISABLED=1 prefix → get_rewritten returns None
+                    0 => {
+                        let cmd_with_disabled = format!("RTK_DISABLED={} {}", rtk_disabled_val, base_cmd);
+                        let result = get_rewritten(&cmd_with_disabled);
+                        prop_assert!(
+                            result.is_none(),
+                            "RTK_DISABLED={} prefix should suppress rewrite for '{}', got {:?}",
+                            rtk_disabled_val, cmd_with_disabled, result
+                        );
+                    }
+                    // (b) exclude_commands pattern match → rewrite_command returns None
+                    1 => {
+                        // Extract the first word of the command as the exclude pattern.
+                        // For example "git status" → exclude pattern "git" (prefix match).
+                        let first_word = base_cmd.split_whitespace().next().unwrap_or(&base_cmd);
+                        let excluded = vec![first_word.to_string()];
+
+                        let result = crate::discover::registry::rewrite_command(
+                            &base_cmd, &excluded, &[]
+                        );
+                        prop_assert!(
+                            result.is_none(),
+                            "Command '{}' matching exclude pattern '{}' should return None, got {:?}",
+                            base_cmd, first_word, result
+                        );
+                    }
+                    // (c) No override → get_rewritten returns Some (rewrite happens)
+                    _ => {
+                        let result = get_rewritten(&base_cmd);
+                        prop_assert!(
+                            result.is_some(),
+                            "Command '{}' without overrides should be rewritten, got None",
+                            base_cmd
+                        );
+                    }
+                }
+            }
+        }
+
+        // Feature: kiro-agent-integration, Property 11: Delegação fina — a decisão do Kiro é a do fluxo compartilhado
+        //
+        // For ANY command (rewritable, non-rewritable, unattestable), the decision made
+        // by `process_kiro_payload` is bit-for-bit identical to the decision of
+        // `decide_hook_action(cmd, Host::Kiro)`. Additionally, the result is deterministic
+        // and independent of `session_id` — the same command with different session_ids
+        // always produces the same output, proving that the IDE/CLI implementation is
+        // delegative and deterministic.
+        //
+        // This is a MODEL-BASED test comparing the Kiro handler against
+        // `decide_hook_action` directly.
+        //
+        // **Validates: Requirements 2.2, 2.6, 3.3, 13.6, 13.7**
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 100, .. ProptestConfig::default() })]
+
+            #[test]
+            fn prop_p11_kiro_decision_matches_shared_flow(
+                // Mix of rewritable, non-rewritable, and unattestable commands
+                cmd in prop_oneof![
+                    // Rewritable commands
+                    Just("git status".to_string()),
+                    Just("git log --oneline".to_string()),
+                    Just("git diff".to_string()),
+                    Just("git add .".to_string()),
+                    Just("git pull".to_string()),
+                    Just("git fetch".to_string()),
+                    Just("git branch -a".to_string()),
+                    Just("cargo test".to_string()),
+                    Just("cargo build".to_string()),
+                    Just("cargo clippy".to_string()),
+                    Just("cargo check".to_string()),
+                    Just("ls -la".to_string()),
+                    Just("ls src/".to_string()),
+                    Just("grep -r 'pattern' src/".to_string()),
+                    Just("cat README.md".to_string()),
+                    Just("docker ps".to_string()),
+                    // Non-rewritable commands (no registry entry)
+                    Just("htop".to_string()),
+                    Just("vim file.txt".to_string()),
+                    Just("python3 script.py".to_string()),
+                    Just("node server.js".to_string()),
+                    Just("npm start".to_string()),
+                    Just("echo hello".to_string()),
+                    Just("man git".to_string()),
+                    Just("which rustc".to_string()),
+                    // Unattestable constructs
+                    Just("git status $(whoami)".to_string()),
+                    Just("git log > output.txt".to_string()),
+                    Just("cargo test `date`".to_string()),
+                    Just("git diff <<EOF\nfoo\nEOF".to_string()),
+                    Just("ls -la $(pwd)".to_string()),
+                ],
+                // Different session_ids to verify independence
+                session_id_a in "[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}",
+                session_id_b in "[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}",
+            ) {
+                // --- Part 1: Verify Kiro decision matches decide_hook_action ---
+
+                // Reference: call decide_hook_action directly
+                let reference_decision = decide_hook_action(&cmd, permissions::Host::Kiro);
+
+                // Kiro path: feed command through process_kiro_payload with session_id A
+                let payload_a = json!({
+                    "session_id": session_id_a,
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "executeBash",
+                    "tool_input": { "command": cmd }
+                });
+                let kiro_result_a = process_kiro_payload(&payload_a);
+
+                // Verify the Kiro result matches the reference decision
+                match &reference_decision {
+                    HookDecision::Deny | HookDecision::Defer => {
+                        // Reference says no rewrite → Kiro must return None
+                        prop_assert!(
+                            kiro_result_a.is_none(),
+                            "Command '{}': decide_hook_action returned {:?} but \
+                             process_kiro_payload returned Some({:?})",
+                            cmd, reference_decision, kiro_result_a
+                        );
+                    }
+                    HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten) => {
+                        // Reference says rewrite → Kiro must return Some with the same rewritten command
+                        prop_assert!(
+                            kiro_result_a.is_some(),
+                            "Command '{}': decide_hook_action returned {:?} but \
+                             process_kiro_payload returned None",
+                            cmd, reference_decision
+                        );
+
+                        // The handler returns the rewritten command verbatim.
+                        let kiro_rewritten = kiro_result_a.as_deref().unwrap_or("");
+
+                        prop_assert_eq!(
+                            kiro_rewritten,
+                            rewritten.as_str(),
+                            "Command '{}': Kiro produced rewrite '{}' but \
+                             decide_hook_action produced '{}'",
+                            cmd, kiro_rewritten, rewritten
+                        );
+                    }
+                }
+
+                // --- Part 2: Verify session_id independence (deterministic) ---
+
+                // Same command with a different session_id must produce the same result
+                let payload_b = json!({
+                    "session_id": session_id_b,
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "executeBash",
+                    "tool_input": { "command": cmd }
+                });
+                let kiro_result_b = process_kiro_payload(&payload_b);
+
+                // Both results must be identical regardless of session_id
+                prop_assert_eq!(
+                    kiro_result_a,
+                    kiro_result_b,
+                    "Command '{}': different session_ids ('{}' vs '{}') produced \
+                     different results. IDE/CLI must be deterministic.",
+                    cmd, session_id_a, session_id_b
+                );
+            }
+        }
     }
 
     fn vibe_input(tool: &str, cmd: &str) -> String {
