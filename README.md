@@ -124,6 +124,7 @@ rtk init --agent kimi           # Kimi AI
 rtk init -g --agent pi          # Pi
 rtk init --agent hermes         # Hermes
 rtk init -g --agent droid       # Factory Droid
+rtk init -g --agent zcode       # ZCode Agent
 
 # 2. Restart your AI tool, then test
 git status  # Automatically rewritten to rtk git status
@@ -394,7 +395,7 @@ rtk init -g
 
 ## Supported AI Tools
 
-RTK supports 16 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
+RTK supports 17 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -415,6 +416,7 @@ RTK supports 16 AI coding tools. Each integration rewrites shell commands to `rt
 | **Google Antigravity** | `rtk init --agent antigravity` | .agents/rules/antigravity-rtk-rules.md (project-scoped) |
 | **Kimi AI** | `rtk init --agent kimi` | AGENTS.md (project-scoped) |
 | **Factory Droid** | `rtk init -g --agent droid` (or per-project) | PreToolUse hook in `~/.factory/hooks.json` (matcher `Execute`) |
+| **ZCode Agent** | `rtk init -g --agent zcode` | User-level `~/.zcode/AGENTS.md` instructions |
 
 For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents). The Hermes plugin source and tests live in `hooks/hermes/`; installed Hermes runtime files still live under `~/.hermes/plugins/rtk-rewrite/`.
 
