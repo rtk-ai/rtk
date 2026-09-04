@@ -212,35 +212,46 @@ impl Config {
 
     fn from_toml(content: &str) -> Result<Self> {
         let value: toml::Value = toml::from_str(content)?;
+        let explicit: Vec<String> = value
+            .get("retriever")
+            .and_then(|r| r.as_table())
+            .map(|t| t.keys().cloned().collect())
+            .unwrap_or_default();
         let has_retriever = value.get("retriever").is_some();
         let mut config = Config::deserialize(value)?;
-        config.migrate_legacy_tee(has_retriever);
+        config.migrate_legacy_tee(has_retriever, &explicit);
         Ok(config)
     }
 
-    fn migrate_legacy_tee(&mut self, has_retriever: bool) {
+    fn migrate_legacy_tee(&mut self, has_retriever: bool, explicit_retriever_keys: &[String]) {
         let Some(tee) = self.tee.take() else {
             return;
         };
-        if has_retriever {
-            return;
-        }
-        self.migrated_from_legacy_tee = true;
         use crate::core::retriever::RecoveryMode;
+        let explicit = |key: &str| explicit_retriever_keys.iter().any(|k| k == key);
         let r = &mut self.retriever;
-        if tee.enabled == Some(false) || tee.mode.as_deref() == Some("never") {
-            r.mode = RecoveryMode::Disabled;
-        } else {
-            r.mode = RecoveryMode::Tee;
+        if !has_retriever {
+            self.migrated_from_legacy_tee = true;
+            if tee.enabled == Some(false) || tee.mode.as_deref() == Some("never") {
+                r.mode = RecoveryMode::Disabled;
+            } else {
+                r.mode = RecoveryMode::Tee;
+            }
         }
         if let Some(v) = tee.max_files {
-            r.tee_max_files = v;
+            if !explicit("tee_max_files") {
+                r.tee_max_files = v;
+            }
         }
         if let Some(v) = tee.max_file_size {
-            r.tee_max_file_size = v;
+            if !explicit("tee_max_file_size") {
+                r.tee_max_file_size = v;
+            }
         }
         if let Some(d) = tee.directory {
-            r.tee_directory = Some(d);
+            if !explicit("tee_directory") {
+                r.tee_directory = Some(d);
+            }
         }
     }
 
@@ -516,6 +527,28 @@ enabled = false
         assert!(!explicit.migrated_from_legacy_tee);
         let fresh = Config::from_toml("").expect("valid");
         assert!(!fresh.migrated_from_legacy_tee);
+    }
+
+    #[test]
+    fn test_coexisting_tee_fields_merge_as_fallback() {
+        use crate::core::retriever::RecoveryMode;
+        let toml = "[retriever]\nretention_days = 90\nmode = \"tee\"\n\n[tee]\nmax_files = 100\ndirectory = \"/mnt/big-disk/tee\"\n";
+        let config = Config::from_toml(toml).expect("valid");
+        assert_eq!(config.retriever.mode, RecoveryMode::Tee);
+        assert_eq!(config.retriever.retention_days, 90);
+        assert_eq!(config.retriever.tee_max_files, 100);
+        assert_eq!(
+            config.retriever.tee_directory,
+            Some(PathBuf::from("/mnt/big-disk/tee"))
+        );
+        assert!(!config.migrated_from_legacy_tee);
+    }
+
+    #[test]
+    fn test_explicit_retriever_field_beats_legacy_tee_field() {
+        let toml = "[retriever]\ntee_max_files = 5\n\n[tee]\nmax_files = 100\n";
+        let config = Config::from_toml(toml).expect("valid");
+        assert_eq!(config.retriever.tee_max_files, 5);
     }
 
     #[test]
