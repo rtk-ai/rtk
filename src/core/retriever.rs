@@ -385,8 +385,8 @@ fn evict(conn: &Connection, cfg: &RetrieverConfig) {
         let excess = count - cfg.max_entries as i64;
         if excess > 0 {
             let _ = conn.execute(
-                "DELETE FROM recall WHERE hash IN (
-                    SELECT hash FROM recall ORDER BY created_at ASC, hash ASC LIMIT ?1
+                "DELETE FROM recall WHERE rowid IN (
+                    SELECT rowid FROM recall ORDER BY rowid ASC LIMIT ?1
                 )",
                 params![excess],
             );
@@ -816,6 +816,32 @@ mod tests {
         let row = load_by_hash(&conn, &stored.hash).unwrap().unwrap();
         assert!(row.truncated);
         assert_eq!(decode(&row).unwrap().len(), 10);
+    }
+
+    #[test]
+    fn test_eviction_same_second_keeps_newest_insertions() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            max_entries: 2,
+            retention_days: 0,
+            ..temp_cfg(dir.path())
+        };
+        let conn = open(&cfg).unwrap();
+        insert_row(&conn, "zzz999999999", "old1");
+        insert_row(&conn, "yyy888888888", "old2");
+        insert_row(&conn, "aaa111111111", "newest");
+        evict(&conn, &cfg);
+        let newest: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM recall WHERE hash = 'aaa111111111'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            newest, 1,
+            "the just-inserted row must survive same-second eviction ties"
+        );
     }
 
     #[test]
