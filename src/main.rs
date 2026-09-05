@@ -85,6 +85,14 @@ struct Cli {
     /// Set SKIP_ENV_VALIDATION=1 for child processes (Next.js, tsc, lint, prisma)
     #[arg(long = "skip-env", global = true)]
     skip_env: bool,
+
+    /// Output mode: human (default), llm, json, ultra
+    /// human: 1-2 sentence summary
+    /// llm: prefix-key-value format (F/E/W/C) — lowest tokens
+    /// json: structured JSON for downstream tools
+    /// ultra: single line summary
+    #[arg(long = "mode", global = true, default_value = "human")]
+    mode: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -503,6 +511,30 @@ enum Commands {
         /// Create default config file
         #[arg(long)]
         create: bool,
+    },
+
+    /// Reformat command output into LLM-optimized or machine-readable formats.
+    /// Reads cleaned output from stdin or file, writes structured output to stdout.
+    ///
+    /// Modes:
+    ///   human (default) — 1-2 sentence summary
+    ///   llm  — key-value format (F/E/W/C) for minimum tokens, maximum clarity
+    ///   json — structured JSON for downstream tooling
+    ///   ultra — single-line summary
+    ///
+    /// Supported command types: jest, vitest, pytest, cargo-test, npm-test
+    Structured {
+        /// Command type to parse (jest, vitest, pytest, cargo-test, npm-test)
+        #[arg(value_enum)]
+        tool: String,
+
+        /// Output mode
+        #[arg(short, long, default_value = "llm")]
+        mode: String,
+
+        /// File to read (omit for stdin)
+        #[arg(short, long)]
+        file: Option<std::path::PathBuf>,
     },
 
     /// Jest commands with compact output
@@ -2361,6 +2393,35 @@ fn run_cli() -> Result<i32> {
                 println!("Created: {}", path.display());
             } else {
                 core::config::show_config()?;
+            }
+            0
+        }
+
+        Commands::Structured { ref tool, ref mode, ref file } => {
+            let mode = core::structured::OutputMode::from_str(mode)
+                .unwrap_or(core::structured::OutputMode::Llm);
+
+            let input = if let Some(path) = file {
+                std::fs::read_to_string(path)
+                    .context("Failed to read input file")?
+            } else {
+                use std::io::Read;
+                let mut buffer = String::new();
+                std::io::stdin().read_to_string(&mut buffer)
+                    .context("Failed to read stdin")?;
+                buffer
+            };
+
+            match tool.as_str() {
+                "jest" | "vitest" | "pytest" | "cargo-test" | "npm-test" => {
+                    let parsed = core::structured::parse_test_output(tool, &input);
+                    let formatted = core::structured::format_test_result(&parsed, mode);
+                    println!("{}", formatted);
+                }
+                _ => {
+                    eprintln!("Unknown tool: {}. Supported: jest, vitest, pytest, cargo-test, npm-test", tool);
+                    std::process::exit(1);
+                }
             }
             0
         }
