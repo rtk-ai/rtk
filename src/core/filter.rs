@@ -185,6 +185,17 @@ impl FilterStrategy for MinimalFilter {
 
             // Handle Python docstrings (keep them in minimal mode)
             if *lang == Language::Python && trimmed.starts_with("\"\"\"") {
+                // Check for single-line docstring: opens and closes on the same line.
+                // e.g. """Short docstring.""" — skip the toggle since the docstring
+                // is fully contained on one line.
+                let rest = &trimmed[3..];
+                if rest.contains("\"\"\"") {
+                    // Single-line docstring: emit the line but don't toggle
+                    in_docstring = false;
+                    result.push_str(line);
+                    result.push('\n');
+                    continue;
+                }
                 in_docstring = !in_docstring;
                 result.push_str(line);
                 result.push('\n');
@@ -465,6 +476,35 @@ fn main() {
         let result = filter.filter(code, &Language::Rust);
         assert!(!result.contains("// This is a comment"));
         assert!(result.contains("fn main()"));
+    }
+
+    #[test]
+    fn test_minimal_filter_single_line_docstring() {
+        // Regression test for #1322: single-line Python docstrings like
+        // """Short docstring.""" should not leave in_docstring=true,
+        // which would suppress comment stripping on subsequent lines.
+        let code = r#"def foo():
+    """Short docstring."""
+    # this comment should be stripped
+    x = 1
+    # another comment to strip
+    return x
+"#;
+        let filter = MinimalFilter;
+        let result = filter.filter(code, &Language::Python);
+        assert!(
+            !result.contains("# this comment should be stripped"),
+            "comment after single-line docstring should be stripped"
+        );
+        assert!(
+            !result.contains("# another comment to strip"),
+            "second comment after single-line docstring should be stripped"
+        );
+        // Docstring itself should be preserved
+        assert!(
+            result.contains("\"\"\"Short docstring.\"\"\""),
+            "single-line docstring should be kept"
+        );
     }
 
     // --- truncation accuracy ---
