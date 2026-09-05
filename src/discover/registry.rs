@@ -1876,6 +1876,12 @@ fn rewrite_powershell_select_string(
     args: &[(&str, usize, usize)],
     redirect_suffix: &str,
 ) -> Option<String> {
+    // PowerShell binds comma expressions as arrays; native grep would receive
+    // a joined value instead. Defer even quoted commas rather than guess binding.
+    if args.iter().skip(1).any(|(token, _, _)| token.contains(',')) {
+        return None;
+    }
+
     let mut pattern: Option<&str> = None;
     let mut paths: Vec<&str> = Vec::new();
     let mut extra: Vec<&str> = Vec::new();
@@ -1912,6 +1918,10 @@ fn rewrite_powershell_select_string(
     }
 
     let pattern = pattern?;
+    // The compact grep route accepts one path. Never silently discard the rest.
+    if paths.len() > 1 {
+        return None;
+    }
     let mut output_args = vec![pattern];
     if let Some(path) = paths.first().copied() {
         output_args.push(path);
@@ -7222,6 +7232,22 @@ mod tests {
             ),
             Some(r#"rtk grep "fn main" src\main.rs"#.into())
         );
+    }
+
+    #[test]
+    fn test_select_string_array_arguments_passthrough() {
+        for command in [
+            "Select-String -LiteralPath 'a.kt','b.kt' -SimpleMatch -Pattern 'TopAppBar'",
+            "Select-String -Path 'a.kt', 'b.kt' -Pattern 'TopAppBar'",
+            "sls -Pattern 'TopAppBar','BottomAppBar' -LiteralPath 'a.kt'",
+            "Select-String -Pattern 'TopAppBar' -Path a.kt b.kt",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "PowerShell must retain ownership of array binding: {command}"
+            );
+        }
     }
 
     #[test]
