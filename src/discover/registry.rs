@@ -1397,6 +1397,11 @@ fn rewrite_segment_inner(
         return Some(trimmed.to_string());
     }
 
+    // Lifecycle targets have native semantics; do not replace them with a filter wrapper.
+    if cmd_part.starts_with("make ") && make_has_lifecycle_target(cmd_part) {
+        return None;
+    }
+
     if context == RewriteContext::Normal
         && (cmd_part.starts_with("head -") || cmd_part.starts_with("tail "))
     {
@@ -1458,6 +1463,9 @@ fn rewrite_segment_inner(
 
     // Find the matching rule (rtk_cmd values are unique across all rules)
     let rule = RULES.iter().find(|r| r.rtk_cmd == rtk_equivalent)?;
+    if !cpp_rewrite_is_safe(rule.rtk_cmd, cmd_part) {
+        return None;
+    }
     if context == RewriteContext::PipelineFinal
         && (!rule.pipeline_final_safe || !pipeline_final_command_is_safe(rule.rtk_cmd, cmd_part))
     {
@@ -1580,6 +1588,184 @@ fn tool_form(cmd_clean: &str, rtk_equivalent: &str) -> String {
         .unwrap_or(normalized)
 }
 
+fn cpp_rewrite_is_safe(rtk_cmd: &str, command: &str) -> bool {
+    if !matches!(
+        rtk_cmd,
+        "rtk cmake" | "rtk ctest" | "rtk make" | "rtk ninja" | "rtk msbuild"
+    ) {
+        return true;
+    }
+    let args = shell_split(command);
+    let mut options = args.iter().skip(1);
+    match rtk_cmd {
+        "rtk cmake" => {
+            !options.clone().any(|arg| {
+                matches!(
+                    arg.as_str(),
+                    "-E" | "-P" | "--find-package" | "--workflow" | "--install" | "--open"
+                ) || arg == "--version"
+                    || arg == "--help"
+                    || arg.starts_with("--help-")
+            }) && options.clone().any(|arg| arg == "--build" || arg == "-B")
+        }
+        "rtk ctest" => !options.clone().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "-N" | "--show-only" | "--print-labels" | "--help" | "--version"
+            ) || arg.starts_with("--show-only=")
+                || arg.starts_with("--help-")
+        }),
+        "rtk make" => !make_has_unsafe_option(command),
+        "rtk ninja" => !options.clone().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "-t" | "-n"
+                    | "--dry-run"
+                    | "-d"
+                    | "-v"
+                    | "--verbose"
+                    | "-h"
+                    | "--help"
+                    | "--version"
+            )
+        }),
+        "rtk msbuild" => !options.any(|arg| {
+            let lower = arg.to_ascii_lowercase();
+            matches!(
+                lower.as_str(),
+                "-help"
+                    | "/help"
+                    | "/?"
+                    | "-version"
+                    | "/version"
+                    | "-getproperty"
+                    | "/getproperty"
+                    | "-getitem"
+                    | "/getitem"
+                    | "-gettargetresult"
+                    | "/gettargetresult"
+                    | "-preprocess"
+                    | "/preprocess"
+                    | "-targets"
+                    | "/targets"
+            ) || lower.starts_with("-getproperty:")
+                || lower.starts_with("/getproperty:")
+                || lower.starts_with("-getitem:")
+                || lower.starts_with("/getitem:")
+                || lower.starts_with("-gettargetresult:")
+                || lower.starts_with("/gettargetresult:")
+                || lower.starts_with("-preprocess:")
+                || lower.starts_with("/preprocess:")
+        }),
+        _ => true,
+    }
+}
+
+fn make_has_unsafe_option(command: &str) -> bool {
+    let mut args = shell_split(command).into_iter().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            break;
+        }
+        if !arg.starts_with('-') || arg == "-" {
+            continue;
+        }
+        if arg.starts_with("--") {
+            if matches!(
+                arg.as_str(),
+                "--dry-run"
+                    | "--just-print"
+                    | "--recon"
+                    | "--question"
+                    | "--print-data-base"
+                    | "--debug"
+                    | "--trace"
+                    | "--help"
+                    | "--version"
+            ) || arg.starts_with("--debug=")
+            {
+                return true;
+            }
+            if matches!(
+                arg.as_str(),
+                "--directory"
+                    | "--file"
+                    | "--makefile"
+                    | "--include-dir"
+                    | "--old-file"
+                    | "--assume-old"
+                    | "--what-if"
+                    | "--new-file"
+                    | "--assume-new"
+                    | "--eval"
+            ) {
+                let _ = args.next();
+            }
+            continue;
+        }
+
+        let mut short_options = arg[1..].chars().peekable();
+        while let Some(flag) = short_options.next() {
+            if matches!(flag, 'n' | 'q' | 'p' | 'd' | 'h' | 'v') {
+                return true;
+            }
+            if matches!(flag, 'C' | 'f' | 'I' | 'o' | 'W' | 'E') {
+                if short_options.peek().is_none() {
+                    let _ = args.next();
+                }
+                break;
+            }
+        }
+    }
+    false
+}
+
+fn make_has_lifecycle_target(command: &str) -> bool {
+    let mut skip_next = false;
+    let mut after_options = true;
+    for (idx, arg) in shell_split(command).into_iter().enumerate() {
+        if idx == 0 {
+            continue;
+        }
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "--" {
+            after_options = false;
+            continue;
+        }
+        if after_options
+            && matches!(
+                arg.as_str(),
+                "-C" | "--directory" | "-f" | "--file" | "-I" | "--include-dir"
+            )
+        {
+            skip_next = true;
+            continue;
+        }
+        if after_options
+            && (arg.starts_with("--directory=")
+                || arg.starts_with("--file=")
+                || arg.starts_with("--include-dir=")
+                || arg.starts_with("-C")
+                || arg.starts_with("-f"))
+        {
+            continue;
+        }
+        if after_options && arg.starts_with('-') {
+            continue;
+        }
+        if arg.contains('=') {
+            continue;
+        }
+        if matches!(arg.as_str(), "install" | "clean" | "distclean") {
+            return true;
+        }
+    }
+    false
+}
+
 /// Strip a command prefix with word-boundary check.
 /// Returns the remainder of the command after the prefix, or `None` if no match.
 fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
@@ -1700,6 +1886,172 @@ mod tests {
                 rewrite_command_no_prefixes(cmd, &[]),
                 Some("rtk git status 2>&1 && rtk cargo build".into())
             );
+        }
+    }
+
+    #[test]
+    fn cpp_build_rewrites_preserve_arguments() {
+        let cases = [
+            (
+                "cmake --build build --config Release",
+                "rtk cmake --build build --config Release",
+            ),
+            ("cmake -B build", "rtk cmake -B build"),
+            ("cmake -S src -B build", "rtk cmake -S src -B build"),
+            (
+                "cmake -G Ninja -S src -B build",
+                "rtk cmake -G Ninja -S src -B build",
+            ),
+            (
+                "ctest --test-dir build -C Release",
+                "rtk ctest --test-dir build -C Release",
+            ),
+            ("make -j8 all", "rtk make -j8 all"),
+            ("make -B all", "rtk make -B all"),
+            ("make -C build all", "rtk make -C build all"),
+            ("make -Cbuild all", "rtk make -Cbuild all"),
+            ("make -f Makefile -B all", "rtk make -f Makefile -B all"),
+            ("make -fMakefile -B all", "rtk make -fMakefile -B all"),
+            ("make -I include -B all", "rtk make -I include -B all"),
+            ("make -Iinclude -B all", "rtk make -Iinclude -B all"),
+            ("make -o output -B all", "rtk make -o output -B all"),
+            ("make -ooutput -B all", "rtk make -ooutput -B all"),
+            ("make -W file -B all", "rtk make -W file -B all"),
+            ("make -Wfile -B all", "rtk make -Wfile -B all"),
+            ("make MODE=-q all", "rtk make MODE=-q all"),
+            ("make TARGET=-p build", "rtk make TARGET=-p build"),
+            ("make -- -q", "rtk make -- -q"),
+            ("make -- -p", "rtk make -- -p"),
+            ("ninja -C build app", "rtk ninja -C build app"),
+            (
+                "msbuild app.sln /t:Link /p:Configuration=Release",
+                "rtk msbuild app.sln /t:Link /p:Configuration=Release",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                Some(expected.into())
+            );
+        }
+    }
+
+    #[test]
+    fn cpp_build_rewrite_exclusions_preserve_native_commands() {
+        for input in [
+            "make clean",
+            "make install",
+            "make distclean",
+            "make -C build clean",
+            "make --directory build clean",
+            "make -f Makefile install",
+            "make VAR=value distclean",
+            "make all clean",
+            "make -j8 install",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(input, &[]), None);
+        }
+        for input in [
+            "make",
+            "make all",
+            "make -C build all",
+            "make MODE=clean all",
+            "make TARGET=install build",
+            "make cleanly",
+            "make install-tools",
+            "make MODE=x all",
+            "make MODE=-q all",
+            "make TARGET=-p build",
+            "make --directory build all",
+            "make -f Makefile all",
+            "make --file Makefile all",
+            "make -C -q all",
+            "make -f -n all",
+            "make --directory -q all",
+            "make --file -n all",
+        ] {
+            assert!(rewrite_command_no_prefixes(input, &[]).is_some(), "{input}");
+        }
+        for input in [
+            "cmake --version",
+            "cmake --help",
+            "cmake --help-full",
+            "cmake -E echo -B",
+            "cmake -P script.cmake -B build",
+            "cmake --find-package -B build",
+            "cmake --workflow workflow --preset default -B build",
+            "cmake --install build -B other",
+            "cmake --open build -B other",
+            "ctest -N",
+            "ctest --show-only=json-v1",
+            "ctest --print-labels",
+            "ctest --help-full",
+            "ctest --version",
+            "make -n all",
+            "make --dry-run all",
+            "make --just-print all",
+            "make --recon all",
+            "make -q all",
+            "make --question all",
+            "make -p all",
+            "make --print-data-base all",
+            "make -d all",
+            "make --debug all",
+            "make --debug=basic all",
+            "make --trace all",
+            "make --help",
+            "make --version",
+            "make -qp",
+            "make -pq",
+            "make -nB all",
+            "make -dB all",
+            "make -h",
+            "make -v",
+            "make -C build -qp",
+            "make -Cbuild -qp",
+            "make -f Makefile -n all",
+            "make all -n",
+            "make MODE=x -n all",
+            "make all -q",
+            "make all -qp",
+            "make -C build all -n",
+            "make -Cbuild all -q",
+            "make --directory build all -n",
+            "make --directory build -qp",
+            "make -f Makefile all -q",
+            "make --file Makefile all -q",
+            "make TARGET=x all --question",
+            "make clean -n",
+            "make all --debug=basic",
+            "make all -v",
+            "ninja -t targets",
+            "ninja -t compdb",
+            "ninja -n",
+            "ninja --dry-run",
+            "ninja -d explain",
+            "ninja -v",
+            "ninja --verbose",
+            "ninja -h",
+            "ninja --help",
+            "ninja --version",
+            "msbuild -version",
+            "msbuild -getProperty:TargetPath app.vcxproj",
+            "msbuild -getProperty TargetPath app.vcxproj",
+            "msbuild /GETITEM TargetPath app.vcxproj",
+            "msbuild -getTargetResult Target app.vcxproj",
+            "msbuild /preprocess:out.xml app.vcxproj",
+            "msbuild /targets app.vcxproj",
+            "cmakex -B build",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(input, &[]), None);
+        }
+        for input in [
+            "dirname src/main.rs",
+            "dir",
+            "Get-Content README.md",
+            "powershell -NoProfile",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(input, &[]), None);
         }
     }
 

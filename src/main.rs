@@ -8,6 +8,7 @@ mod parser;
 
 // Re-export command modules for routing
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use cmds::cpp::{cmake_cmd, make_cmd, msbuild_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
@@ -905,6 +906,30 @@ enum Commands {
     Rewrite {
         /// Raw command to rewrite (e.g. "git status", "cargo test && git push")
         /// Accepts multiple args: `rtk rewrite ls -al` is equivalent to `rtk rewrite "ls -al"`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// CMake build / configure with compact diagnostics
+    Cmake {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// make with compact diagnostics
+    Make {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// ninja with compact diagnostics
+    Ninja {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// MSBuild with compact compiler/linker diagnostics
+    Msbuild {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2655,6 +2680,13 @@ fn run_cli() -> Result<i32> {
         Commands::Mvn { args } => mvn_cmd::run(&args, cli.verbose)?,
 
         Commands::Mvnd { args } => mvn_cmd::run_daemon(&args, cli.verbose)?,
+        Commands::Cmake { args } => cmake_cmd::run(&args, cli.verbose)?,
+
+        Commands::Make { args } => make_cmd::run_make(&args, cli.verbose)?,
+
+        Commands::Ninja { args } => make_cmd::run_ninja(&args, cli.verbose)?,
+
+        Commands::Msbuild { args } => msbuild_cmd::run(&args, cli.verbose)?,
 
         Commands::HookAudit { since } => {
             hooks::hook_audit_cmd::run(since, cli.verbose)?;
@@ -3018,6 +3050,10 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Bun { .. }
             | Commands::Bunx { .. }
             | Commands::Deno { .. }
+            | Commands::Cmake { .. }
+            | Commands::Make { .. }
+            | Commands::Ninja { .. }
+            | Commands::Msbuild { .. }
     )
 }
 
@@ -3478,6 +3514,11 @@ mod tests {
             "mvn",
             "mvnd",
             "sbt",
+            "cmake",
+            "ctest",
+            "make",
+            "ninja",
+            "msbuild",
             "php",
             "phpunit",
             "phpstan",

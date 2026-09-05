@@ -33,11 +33,37 @@ pub fn print_with_hint(
     emit_guarded(filtered, hint.as_deref(), guard_raw)
 }
 
+fn select_filtered_output(
+    tool_name: &str,
+    filtered: &str,
+    hint: Option<&str>,
+    raw: &str,
+    exit_code: i32,
+    preserve_filtered_failure_output: bool,
+) -> String {
+    let filtered =
+        if preserve_filtered_failure_output && exit_code != 0 && filtered.trim().is_empty() {
+            format!("{}: failed (exit {})", tool_name, exit_code)
+        } else {
+            filtered.to_string()
+        };
+    let body = match hint {
+        Some(h) => format!("{}\n{}", filtered, h),
+        None => filtered,
+    };
+    if preserve_filtered_failure_output && exit_code != 0 {
+        body
+    } else {
+        crate::core::guard::never_worse(raw, &body).to_string()
+    }
+}
+
 #[derive(Default)]
 pub struct RunOptions<'a> {
     pub tee_label: Option<&'a str>,
     pub filter_stdout_only: bool,
     pub skip_filter_on_failure: bool,
+    pub preserve_filtered_failure_output: bool,
     pub no_trailing_newline: bool,
     /// Forward rtk's own stdin to the child process. Needed for commands that
     /// can read from a pipe (e.g. `cat file | rtk wc`); without it the child
@@ -67,6 +93,11 @@ impl<'a> RunOptions<'a> {
 
     pub fn early_exit_on_failure(mut self) -> Self {
         self.skip_filter_on_failure = true;
+        self
+    }
+
+    pub fn preserve_filtered_failure_output(mut self) -> Self {
+        self.preserve_filtered_failure_output = true;
         self
     }
 
@@ -139,9 +170,34 @@ where
     };
 
     let shown = if let Some(label) = opts.tee_label {
-        print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
+        if opts.preserve_filtered_failure_output && exit_code != 0 {
+            let hint = crate::core::tee::tee_and_hint(raw, label, exit_code);
+            let shown = select_filtered_output(
+                tool_name,
+                &filtered,
+                hint.as_deref(),
+                raw_for_tracking,
+                exit_code,
+                true,
+            );
+            if opts.no_trailing_newline {
+                print!("{}", shown);
+            } else {
+                println!("{}", shown);
+            }
+            shown
+        } else {
+            print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
+        }
     } else {
-        let guarded = crate::core::guard::never_worse(raw_for_tracking, &filtered).to_string();
+        let guarded = select_filtered_output(
+            tool_name,
+            &filtered,
+            None,
+            raw_for_tracking,
+            exit_code,
+            opts.preserve_filtered_failure_output,
+        );
         if opts.no_trailing_newline {
             print!("{}", guarded);
         } else {
