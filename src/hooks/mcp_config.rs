@@ -1060,6 +1060,7 @@ fn patch_toml(path: &Path, rtk_exe: &Path) -> Result<String> {
         toml::Value::Array(vec![toml::Value::String("mcp".to_string())]),
     );
     servers.insert(SERVER_NAME.to_string(), toml::Value::Table(server));
+    ensure_codex_pre_tool_use_hook(root_table, rtk_exe)?;
     toml::to_string_pretty(&root).context("Failed to serialize Codex MCP config")
 }
 
@@ -1071,19 +1072,143 @@ fn remove_toml(path: &Path) -> Result<Option<String>> {
     let Some(root_table) = root.as_table_mut() else {
         anyhow::bail!("MCP config root must be a TOML table: {}", path.display());
     };
-    let Some(servers) = root_table
+    let mut changed = false;
+    if let Some(servers) = root_table
         .get_mut("mcp_servers")
         .and_then(toml::Value::as_table_mut)
-    else {
-        return Ok(None);
-    };
-    if servers.remove(SERVER_NAME).is_none() {
-        return Ok(None);
+    {
+        changed |= servers.remove(SERVER_NAME).is_some();
+        if servers.is_empty() {
+            root_table.remove("mcp_servers");
+        }
     }
-    if servers.is_empty() {
-        root_table.remove("mcp_servers");
+    changed |= remove_codex_pre_tool_use_hook(root_table)?;
+    if !changed {
+        return Ok(None);
     }
     Ok(Some(toml::to_string_pretty(&root)?))
+}
+
+fn ensure_codex_pre_tool_use_hook(
+    root: &mut toml::map::Map<String, toml::Value>,
+    rtk_exe: &Path,
+) -> Result<()> {
+    let hooks = root
+        .entry("hooks")
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+        .as_table_mut()
+        .context("`hooks` must be a TOML table in Codex config")?;
+    let groups = hooks
+        .entry("PreToolUse")
+        .or_insert_with(|| toml::Value::Array(Vec::new()))
+        .as_array_mut()
+        .context("`hooks.PreToolUse` must be a TOML array in Codex config")?;
+    let command = codex_hook_command(rtk_exe);
+    let handler = toml::Value::Table(toml::map::Map::from_iter([
+        (
+            "type".to_string(),
+            toml::Value::String("command".to_string()),
+        ),
+        ("command".to_string(), toml::Value::String(command.clone())),
+    ]));
+
+    if let Some(group) = groups.iter_mut().find(|group| {
+        group
+            .get("matcher")
+            .and_then(toml::Value::as_str)
+            .is_some_and(|matcher| matcher == "Bash")
+    }) {
+        let group = group
+            .as_table_mut()
+            .context("Codex PreToolUse matcher must be a TOML table")?;
+        let handlers = group
+            .entry("hooks")
+            .or_insert_with(|| toml::Value::Array(Vec::new()))
+            .as_array_mut()
+            .context("Codex PreToolUse hooks must be a TOML array")?;
+        if !handlers.iter().any(|existing| {
+            existing
+                .get("command")
+                .and_then(toml::Value::as_str)
+                .is_some_and(|existing| existing == command)
+        }) {
+            handlers.push(handler);
+        }
+    } else {
+        groups.push(toml::Value::Table(toml::map::Map::from_iter([
+            (
+                "matcher".to_string(),
+                toml::Value::String("Bash".to_string()),
+            ),
+            ("hooks".to_string(), toml::Value::Array(vec![handler])),
+        ])));
+    }
+    Ok(())
+}
+
+fn remove_codex_pre_tool_use_hook(root: &mut toml::map::Map<String, toml::Value>) -> Result<bool> {
+    let Some(hooks) = root.get_mut("hooks").and_then(toml::Value::as_table_mut) else {
+        return Ok(false);
+    };
+    let Some(groups) = hooks
+        .get_mut("PreToolUse")
+        .and_then(toml::Value::as_array_mut)
+    else {
+        return Ok(false);
+    };
+
+    let mut changed = false;
+    for group in groups.iter_mut() {
+        let Some(group_table) = group.as_table_mut() else {
+            continue;
+        };
+        let Some(handlers) = group_table
+            .get_mut("hooks")
+            .and_then(toml::Value::as_array_mut)
+        else {
+            continue;
+        };
+        let before = handlers.len();
+        handlers.retain(|handler| {
+            !handler
+                .get("command")
+                .and_then(toml::Value::as_str)
+                .is_some_and(is_rtk_codex_hook)
+        });
+        changed |= handlers.len() != before;
+        if handlers.is_empty() {
+            group_table.remove("hooks");
+        }
+    }
+    groups.retain(|group| {
+        group
+            .get("hooks")
+            .and_then(toml::Value::as_array)
+            .is_some_and(|handlers| !handlers.is_empty())
+    });
+    if groups.is_empty() {
+        hooks.remove("PreToolUse");
+    }
+    if hooks.is_empty() {
+        root.remove("hooks");
+    }
+    Ok(changed)
+}
+
+fn codex_hook_command(rtk_exe: &Path) -> String {
+    let executable = rtk_exe.to_string_lossy();
+    if executable.chars().any(char::is_whitespace) {
+        format!("\"{executable}\" hook codex")
+    } else {
+        format!("{executable} hook codex")
+    }
+}
+
+fn is_rtk_codex_hook(command: &str) -> bool {
+    let command = command.trim();
+    command
+        .strip_suffix(" hook codex")
+        .is_some_and(|executable| executable.to_ascii_lowercase().contains("rtk"))
 }
 
 fn patch_hermes_yaml(path: &Path, rtk_exe: &Path) -> Result<String> {
@@ -1464,6 +1589,40 @@ mod tests {
             parsed["mcp_servers"]["rtk"]["args"].as_array().unwrap(),
             &[toml::Value::String("mcp".to_string())]
         );
+    }
+
+    #[test]
+    fn codex_toml_installs_an_idempotent_pre_tool_use_hook() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("config.toml");
+        fs::write(
+            &path,
+            "[hooks]\n[[hooks.PreToolUse]]\nmatcher = \"Edit\"\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"other-hook\"\n",
+        )
+        .unwrap();
+
+        let first = patch_toml(&path, Path::new(r"C:\Program Files\RTK\rtk.exe")).unwrap();
+        fs::write(&path, &first).unwrap();
+        let second = patch_toml(&path, Path::new(r"C:\Program Files\RTK\rtk.exe")).unwrap();
+        let parsed: toml::Value = second.parse().unwrap();
+        let groups = parsed["hooks"]["PreToolUse"].as_array().unwrap();
+
+        assert_eq!(
+            groups
+                .iter()
+                .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+                .filter(|hook| hook["command"]
+                    .as_str()
+                    .is_some_and(|command| command.ends_with(" hook codex")))
+                .count(),
+            1
+        );
+        assert_eq!(groups[0]["matcher"].as_str(), Some("Edit"));
+
+        fs::write(&path, &second).unwrap();
+        let removed = remove_toml(&path).unwrap().unwrap();
+        assert!(!removed.contains("hook codex"));
+        assert!(removed.contains("command = \"other-hook\""));
     }
 
     #[test]

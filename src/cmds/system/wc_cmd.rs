@@ -42,10 +42,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         RunOptions::stdout_only()
     };
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "wc",
         &args.join(" "),
+        crate::core::ai_output::BudgetClass::Collection,
         |stdout| filter_wc_output(stdout, &mode),
         opts,
     )

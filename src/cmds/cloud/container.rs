@@ -38,16 +38,22 @@ fn run_k8s_json<F>(cmd: Command, tool: &str, label: &str, filter_fn: F) -> Resul
 where
     F: Fn(&Value) -> String,
 {
-    runner::run_filtered(
+    runner::run_ai_filtered_with_exit(
         cmd,
         tool,
         label,
-        |stdout| match serde_json::from_str::<Value>(stdout) {
-            Ok(json) => filter_fn(&json),
-            Err(e) => {
-                eprintln!("[rtk] {}: JSON parse failed: {}", tool, e);
-                stdout.to_string()
-            }
+        crate::core::ai_output::BudgetClass::Collection,
+        |stdout, exit_code| {
+            let filtered = match serde_json::from_str::<Value>(stdout) {
+                Ok(json) => filter_fn(&json),
+                Err(e) => {
+                    eprintln!("[rtk] {}: JSON parse failed: {}", tool, e);
+                    stdout.to_string()
+                }
+            };
+            Ok(runner::document_from_filtered(
+                stdout, &filtered, label, exit_code,
+            ))
         },
         RunOptions::stdout_only()
             .early_exit_on_failure()
@@ -330,10 +336,11 @@ fn docker_logs(args: &[String], _verbose: u8) -> Result<i32> {
     cmd.args(["logs", "--tail", "100", container]);
 
     let label = format!("logs {}", container);
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "docker",
         &label,
+        crate::core::ai_output::BudgetClass::Diagnostic,
         |raw| {
             format!(
                 "[docker] Logs for {}:\n{}",
@@ -506,10 +513,11 @@ pub fn k8s_logs(tool: &str, args: &[String], _verbose: u8) -> Result<i32> {
     }
 
     let label = format!("logs {}", pod);
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         tool,
         &label,
+        crate::core::ai_output::BudgetClass::Diagnostic,
         |stdout| {
             format!(
                 "Logs for {}:\n{}",
@@ -724,10 +732,11 @@ pub fn run_compose_logs(service: Option<&str>, tail: u32, verbose: u8) -> Result
     }
 
     let svc_label = service.unwrap_or("all");
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "docker",
         &format!("compose logs {}", svc_label),
+        crate::core::ai_output::BudgetClass::Diagnostic,
         |raw| {
             if verbose > 0 {
                 eprintln!("raw docker compose logs:\n{}", raw);
@@ -746,10 +755,11 @@ pub fn run_compose_build(service: Option<&str>, verbose: u8) -> Result<i32> {
     }
 
     let svc_label = service.unwrap_or("all");
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "docker",
         &format!("compose build {}", svc_label),
+        crate::core::ai_output::BudgetClass::Diagnostic,
         |raw| {
             if verbose > 0 {
                 eprintln!("raw docker compose build:\n{}", raw);

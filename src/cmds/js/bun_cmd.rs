@@ -159,10 +159,11 @@ pub fn run_pkg(subcmd: &str, args: &[String], verbose: u8) -> Result<i32> {
 
     let display = format!("{} {}", subcmd, args.join(" "));
     let tee_label = format!("bun_{}", subcmd);
-    crate::core::runner::run_filtered(
+    crate::core::runner::run_ai_from_filter(
         cmd,
         "bun",
         display.trim_end(),
+        crate::core::ai_output::BudgetClass::Diagnostic,
         filter_bun_pkg,
         crate::core::runner::RunOptions::with_tee(&tee_label),
     )
@@ -183,10 +184,11 @@ pub fn run_pm_ls(args: &[String], verbose: u8) -> Result<i32> {
     }
 
     let display = format!("pm ls {}", args.join(" "));
-    crate::core::runner::run_filtered(
+    crate::core::runner::run_ai_from_filter(
         cmd,
         "bun",
         display.trim_end(),
+        crate::core::ai_output::BudgetClass::Collection,
         filter_bun_pm_ls,
         crate::core::runner::RunOptions::with_tee("bun_pm_ls"),
     )

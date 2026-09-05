@@ -21,10 +21,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: paratest {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "paratest",
         &args.join(" "),
+        crate::core::ai_output::BudgetClass::Diagnostic,
         filter_test_runner_output,
         runner::RunOptions::default(),
     )

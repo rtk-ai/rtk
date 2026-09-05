@@ -244,13 +244,19 @@ fn run_glab_json<F>(cmd: Command, label: &str, filter_fn: F) -> Result<i32>
 where
     F: Fn(&Value) -> String,
 {
-    runner::run_filtered(
+    runner::run_ai_filtered_with_exit(
         cmd,
         "glab",
         label,
-        |stdout| match serde_json::from_str::<Value>(stdout) {
-            Ok(json) => filter_fn(&json),
-            Err(_) => stdout.to_string(),
+        crate::core::ai_output::BudgetClass::Collection,
+        |stdout, exit_code| {
+            let filtered = match serde_json::from_str::<Value>(stdout) {
+                Ok(json) => filter_fn(&json),
+                Err(_) => stdout.to_string(),
+            };
+            Ok(runner::document_from_filtered(
+                stdout, &filtered, label, exit_code,
+            ))
         },
         RunOptions::stdout_only()
             .early_exit_on_failure()
@@ -454,10 +460,11 @@ fn mr_create(args: &[String], _verbose: u8) -> Result<i32> {
     for arg in args {
         cmd.arg(arg);
     }
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "glab",
         "mr create",
+        crate::core::ai_output::BudgetClass::Acknowledgement,
         |stdout| {
             // glab mr create outputs the URL on success
             let url = stdout.trim();
@@ -479,10 +486,11 @@ fn mr_diff(args: &[String], _verbose: u8) -> Result<i32> {
     for arg in args {
         cmd.arg(arg);
     }
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "glab",
         "mr diff",
+        crate::core::ai_output::BudgetClass::Source,
         |stdout| {
             if stdout.trim().is_empty() {
                 "No diff\n".to_string()
@@ -508,10 +516,11 @@ fn mr_action(subcmd: &str, label: &str, args: &[String], _verbose: u8) -> Result
         .map(|(id, _)| format!("!{}", id))
         .unwrap_or_default();
     let label = label.to_string();
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "glab",
         &format!("mr {}", subcmd),
+        crate::core::ai_output::BudgetClass::Acknowledgement,
         move |_stdout| ok_confirmation(&label, &mr_num),
         RunOptions::stdout_only().early_exit_on_failure(),
     )
@@ -760,10 +769,11 @@ fn ci_status(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> 
     for arg in args {
         cmd.arg(arg);
     }
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "glab",
         "ci status",
+        crate::core::ai_output::BudgetClass::Diagnostic,
         |stdout| format_ci_status(stdout, ultra_compact),
         RunOptions::stdout_only().early_exit_on_failure(),
     )
@@ -775,10 +785,11 @@ fn ci_trace(args: &[String]) -> Result<i32> {
     for arg in args {
         cmd.arg(arg);
     }
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "glab",
         "ci trace",
+        crate::core::ai_output::BudgetClass::Diagnostic,
         filter_ci_trace,
         RunOptions::stdout_only().early_exit_on_failure(),
     )
@@ -909,10 +920,11 @@ fn release_list(args: &[String]) -> Result<i32> {
     for arg in args {
         cmd.arg(arg);
     }
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "glab",
         "release list",
+        crate::core::ai_output::BudgetClass::Collection,
         |stdout| format_release_list(stdout).unwrap_or_else(|| stdout.to_string()),
         RunOptions::stdout_only().early_exit_on_failure(),
     )
@@ -924,10 +936,11 @@ fn release_view(args: &[String]) -> Result<i32> {
     for arg in args {
         cmd.arg(arg);
     }
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "glab",
         "release view",
+        crate::core::ai_output::BudgetClass::Source,
         filter_release_view,
         RunOptions::stdout_only().early_exit_on_failure(),
     )

@@ -71,10 +71,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: rubocop {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "rubocop",
         &args.join(" "),
+        crate::core::ai_output::BudgetClass::Diagnostic,
         move |stdout| {
             if has_format || is_autocorrect {
                 filter_rubocop_text(stdout)

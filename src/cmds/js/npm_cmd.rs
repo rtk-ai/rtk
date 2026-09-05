@@ -1,6 +1,7 @@
 //! Filters npm output and auto-injects the "run" subcommand when appropriate.
 
 use std::io::IsTerminal;
+use crate::core::ai_output::BudgetClass;
 use crate::core::runner;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
@@ -116,7 +117,7 @@ pub fn exec_with(runner: &str, args: &[String], verbose: u8, skip_env: bool) -> 
 /// Shared command-execution path for `run` (npm) and `exec` (npx).
 ///
 /// Builds the resolved command, appends args, applies `SKIP_ENV_VALIDATION`,
-/// emits the verbose log line, and routes through `runner::run_filtered` with
+/// emits the verbose log line, and routes through the shared semantic runner
 /// the npm output filter.
 /// `forward_piped_stdin` sends the caller's stdin to the child when it is a
 /// pipe rather than a terminal. The filtered path buffers output until exit, so
@@ -152,10 +153,11 @@ fn run_filtered(
         opts = opts.inherit_stdin();
     }
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         name,
         &args_display,
+        BudgetClass::Diagnostic,
         filter_npm_output,
         opts,
     )

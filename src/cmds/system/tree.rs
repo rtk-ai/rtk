@@ -7,6 +7,7 @@
 //! unless -a flag is present (respecting user intent).
 
 use super::constants::NOISE_DIRS;
+use crate::core::ai_output::BudgetClass;
 use crate::core::runner::{self, RunOptions};
 use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::Result;
@@ -36,10 +37,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         cmd.arg(arg);
     }
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "tree",
         &args.join(" "),
+        BudgetClass::Collection,
         |raw| {
             let filtered = filter_tree_output(raw);
             if verbose > 0 {

@@ -11,7 +11,10 @@ use crate::core::stream::{
 };
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, strip_ansi};
-use crate::core::ai_output::{AiDocument, AiRecord, BudgetClass, ExactReason, Severity};
+use crate::core::ai_output::{
+    prepare_emission_with_baseline, render_with_max_tokens, AiDocument, AiRecord, BudgetClass,
+    EmissionMeta, ExactReason, Omission, OutputContract, Severity,
+};
 use crate::core::{args_utils, config, path_inventory, runner};
 use anyhow::{anyhow, Context, Result};
 use regex::Regex;
@@ -19,7 +22,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::process::Command;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex};
 
 /// Short single-char flags that consume one following token (or inline remainder)
 /// as their value. `-e` is handled separately — its value goes to `patterns`.
@@ -568,11 +571,19 @@ fn clean_rg_line(content: &str, anchors: &[String], preserve_exact: bool) -> (St
 }
 
 fn rg_match_document_from_entries(entries: Vec<RgMatchEntry>) -> AiDocument {
-    let mut document = AiDocument::new(Some("search"));
     let matches = entries
         .iter()
         .filter(|(_, _, is_match, _, _)| *is_match)
         .count();
+    rg_match_document_from_entries_with_counts(entries, matches, 0)
+}
+
+fn rg_match_document_from_entries_with_counts(
+    entries: Vec<RgMatchEntry>,
+    matches: usize,
+    omitted_items: usize,
+) -> AiDocument {
+    let mut document = AiDocument::new(Some("search"));
     document.fact("matches", matches.to_string());
 
     let mut blocks: Vec<RgMatchBlock> = Vec::new();
@@ -611,6 +622,12 @@ fn rg_match_document_from_entries(entries: Vec<RgMatchEntry>) -> AiDocument {
         }
     }
 
+    if omitted_items > 0 {
+        document = document.with_omission(Omission {
+            items: omitted_items,
+            groups: 0,
+        });
+    }
     document
 }
 
@@ -711,6 +728,237 @@ fn append_rg_parse_aids(cmd: &mut Command, args: &[String], aids: &[&str]) {
     }
 }
 
+const RG_STREAM_LINE_CAP: usize = 64 * 1024;
+
+/// Bounded semantic search state. The producer is drained once, while only a
+/// bounded number of parsed records and a bounded raw baseline are retained.
+/// This is deliberately separate from the legacy streaming grep filter: an
+/// oversized search line must be summarized, not replayed as an unbounded raw
+/// fallback.
+struct RgAiStreamFilter {
+    route: RgRoute,
+    patterns: Vec<String>,
+    paths: Vec<String>,
+    extra_args: Vec<String>,
+    entries: Vec<RgMatchEntry>,
+    max_entries: usize,
+    total_matches: usize,
+    omitted_items: usize,
+    truncated_lines: usize,
+    truncated_stored: usize,
+    parse_errors: Vec<String>,
+    raw_parse_aid: String,
+    raw_complete: bool,
+    stats: Arc<Mutex<EmissionMeta>>,
+}
+
+impl RgAiStreamFilter {
+    fn new(
+        route: RgRoute,
+        patterns: Vec<String>,
+        paths: Vec<String>,
+        extra_args: Vec<String>,
+        stats: Arc<Mutex<EmissionMeta>>,
+    ) -> Self {
+        Self {
+            route,
+            patterns,
+            paths,
+            extra_args,
+            entries: Vec::new(),
+            max_entries: config::limits().grep_max_results.max(1),
+            total_matches: 0,
+            omitted_items: 0,
+            truncated_lines: 0,
+            truncated_stored: 0,
+            parse_errors: Vec::new(),
+            raw_parse_aid: String::new(),
+            raw_complete: true,
+            stats,
+        }
+    }
+
+    fn retain_raw_line(&mut self, line: &str) {
+        if !self.raw_complete {
+            return;
+        }
+        let required = line.len().saturating_add(1);
+        if self.raw_parse_aid.len().saturating_add(required) > stream::RAW_CAP
+            || line.ends_with(stream::TRUNCATED_LINE_MARKER)
+        {
+            self.raw_complete = false;
+            return;
+        }
+        self.raw_parse_aid.push_str(line);
+        self.raw_parse_aid.push('\n');
+    }
+
+    fn record_parse_error(&mut self, line: &str) {
+        if self.parse_errors.len() < 4 {
+            let sample = line.chars().take(512).collect::<String>();
+            self.parse_errors.push(sample);
+        }
+    }
+
+    fn render_bounded(&mut self) -> String {
+        let truncated_items = self
+            .truncated_lines
+            .saturating_sub(self.truncated_stored);
+        let declared_omissions = self
+            .omitted_items
+            .saturating_add(self.truncated_stored)
+            .saturating_add(truncated_items);
+
+        let mut document = if self.parse_errors.is_empty() {
+            rg_match_document_from_entries_with_counts(
+                std::mem::take(&mut self.entries),
+                self.total_matches,
+                declared_omissions,
+            )
+        } else {
+            let sample = self.parse_errors.join("\n");
+            let mut document = AiDocument::parse_failure(&sample, "unrecognized rg record");
+            document.fact("observed_matches", self.total_matches.to_string());
+            document
+        };
+        if self.truncated_lines > 0 {
+            document.fact("truncated_lines", self.truncated_lines.to_string());
+        }
+
+        let rendered = render_with_max_tokens(
+            &document,
+            BudgetClass::Source,
+            runner::requested_max_tokens(),
+        );
+
+        if self.raw_complete && self.parse_errors.is_empty() && self.truncated_lines == 0 {
+            let baseline = rg_faithful_match_baseline(
+                &self.raw_parse_aid,
+                &self.paths,
+                &self.extra_args,
+            )
+            .unwrap_or_else(|_| self.raw_parse_aid.clone());
+            let prepared = prepare_emission_with_baseline(
+                &baseline,
+                &baseline,
+                "rg",
+                rendered,
+                true,
+            );
+            let meta = prepared.meta();
+            if let Ok(mut current) = self.stats.lock() {
+                *current = meta;
+            }
+            return prepared.as_str().to_string();
+        }
+
+        let omission = rendered.omission.clone();
+        let mut output = rendered.text;
+        if let Some(ref omission) = omission {
+            output.push_str(&format!(
+                "\nomitted items={} groups={} recovery=unavailable",
+                omission.items, omission.groups
+            ));
+        } else {
+            output.push_str("\nrecovery=unavailable");
+        }
+        let output = format!("{}\n", output.trim_end_matches('\n'));
+        let meta = EmissionMeta {
+            omitted_items: omission
+                .as_ref()
+                .map_or(declared_omissions, |value| value.items),
+            omitted_groups: omission.as_ref().map_or(0, |value| value.groups),
+            parser_failed: !self.parse_errors.is_empty(),
+            runtime_error: Some("capture_incomplete"),
+            ..EmissionMeta::default()
+        };
+        if let Ok(mut current) = self.stats.lock() {
+            *current = meta;
+        }
+        output
+    }
+}
+
+impl StreamFilter for RgAiStreamFilter {
+    fn feed_line(&mut self, line: &str) -> Option<String> {
+        self.retain_raw_line(line);
+        if line == "--" {
+            return None;
+        }
+
+        let preserve_exact = matches!(self.route, RgRoute::OnlyMatching);
+        let Some((path, line_number, is_match, content)) = parse_match_line(line) else {
+            self.record_parse_error(line);
+            return None;
+        };
+        if is_match {
+            self.total_matches = self.total_matches.saturating_add(1);
+        }
+        let line_was_truncated = line.ends_with(stream::TRUNCATED_LINE_MARKER);
+        if line_was_truncated {
+            self.truncated_lines = self.truncated_lines.saturating_add(1);
+        }
+        let (content, was_shortened) = clean_rg_line(content, &self.patterns, preserve_exact);
+        if self.entries.len() >= self.max_entries {
+            self.omitted_items = self.omitted_items.saturating_add(1);
+        } else {
+            self.entries
+                .push((path, line_number, is_match, content, was_shortened));
+            if line_was_truncated {
+                self.truncated_stored = self.truncated_stored.saturating_add(1);
+            }
+        }
+        None
+    }
+
+    fn flush(&mut self) -> String {
+        String::new()
+    }
+
+    fn on_exit(&mut self, _exit_code: i32, _raw: &str) -> Option<String> {
+        Some(self.render_bounded())
+    }
+}
+
+fn run_rg_ai_streaming(
+    route: RgRoute,
+    args: &[String],
+    patterns: Vec<String>,
+    paths: Vec<String>,
+    extra_args: Vec<String>,
+) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+    let stats = Arc::new(Mutex::new(EmissionMeta::default()));
+    let filter = RgAiStreamFilter::new(
+        route,
+        patterns,
+        paths,
+        extra_args,
+        Arc::clone(&stats),
+    );
+    let mut command = rg_semantic_command(route, args);
+    let result = stream::run_streaming_with_line_cap(
+        &mut command,
+        StdinMode::Null,
+        FilterMode::StreamingStdout(Box::new(filter)),
+        Some(RG_STREAM_LINE_CAP),
+    )
+    .context("search failed")?;
+    let meta = stats.lock().map(|value| *value).unwrap_or_default();
+    let output_tokens = tracking::estimate_tokens(&format!(
+        "{}{}",
+        result.raw_stderr, result.filtered
+    ));
+    timer.track_output_tokens(
+        &format!("rg {}", args.join(" ")),
+        &format!("rtk rg {}", args.join(" ")),
+        tracking::estimate_tokens_from_bytes(result.observed_output_bytes()),
+        output_tokens,
+        runner::output_tracking_from_emission(OutputContract::AiOwned(BudgetClass::Source), meta),
+    );
+    Ok(result.exit_code)
+}
+
 fn rg_semantic_command(route: RgRoute, args: &[String]) -> Command {
     let mut cmd = resolved_command("rg");
     match route {
@@ -727,6 +975,9 @@ fn rg_semantic_command(route: RgRoute, args: &[String]) -> Command {
 fn run_rg_ai(route: RgRoute, args: &[String]) -> Result<i32> {
     let (mut patterns, paths, extra_args) = extract_pattern_path(args);
     patterns.extend(rg_replacement_values(args));
+    if matches!(route, RgRoute::Matches | RgRoute::OnlyMatching) {
+        return run_rg_ai_streaming(route, args, patterns, paths, extra_args);
+    }
     let budget = match route {
         RgRoute::Inventory => BudgetClass::Collection,
         RgRoute::Matches | RgRoute::JsonEvents | RgRoute::Counts | RgRoute::OnlyMatching => {
@@ -1700,6 +1951,52 @@ mod tests {
             , rendered.text.len()
         );
         assert!(rendered.text.contains("a.rs"));
+    }
+
+    #[test]
+    fn bounded_rg_preview_does_not_replay_a_huge_line() {
+        let stats = Arc::new(Mutex::new(EmissionMeta::default()));
+        let mut filter = RgAiStreamFilter::new(
+            RgRoute::Matches,
+            vec!["needle".into()],
+            vec!["a.rs".into()],
+            Vec::new(),
+            Arc::clone(&stats),
+        );
+        let line = format!(
+            "a.rs\x00180:needle {}{}",
+            "x".repeat(RG_STREAM_LINE_CAP),
+            stream::TRUNCATED_LINE_MARKER
+        );
+        filter.feed_line(&line);
+        let output = filter.on_exit(0, "").expect("bounded preview");
+
+        assert!(output.contains("matches=1"));
+        assert!(output.contains("truncated_lines=1"));
+        assert!(output.contains("recovery=unavailable"));
+        assert!(output.len() < 4_096);
+        assert_eq!(stats.lock().unwrap().runtime_error, Some("capture_incomplete"));
+    }
+
+    #[test]
+    fn bounded_rg_preview_keeps_total_matches_when_result_cap_is_reached() {
+        let stats = Arc::new(Mutex::new(EmissionMeta::default()));
+        let mut filter = RgAiStreamFilter::new(
+            RgRoute::Matches,
+            vec!["needle".into()],
+            vec!["a.rs".into()],
+            Vec::new(),
+            stats,
+        );
+        filter.max_entries = 1;
+        filter.feed_line("a.rs\x001:needle first");
+        filter.feed_line("a.rs\x002:needle second");
+        filter.raw_complete = false;
+        let output = filter.on_exit(0, "").expect("bounded preview");
+
+        assert!(output.contains("matches=2"));
+        assert!(output.contains("omitted items=1"));
+        assert!(!output.contains("second"));
     }
 
     #[test]

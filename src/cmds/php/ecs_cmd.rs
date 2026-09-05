@@ -14,10 +14,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: ecs {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "ecs",
         &args.join(" "),
+        crate::core::ai_output::BudgetClass::Diagnostic,
         filter_ecs_output,
         runner::RunOptions::default(),
     )

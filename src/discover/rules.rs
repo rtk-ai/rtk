@@ -831,6 +831,38 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^cmake\b",
+        rtk_cmd: "rtk cmake",
+        rewrite_prefixes: &["cmake"],
+        category: "Build",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^ninja\b",
+        rtk_cmd: "rtk ninja",
+        rewrite_prefixes: &["ninja"],
+        category: "Build",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^idf\.py\b",
+        rtk_cmd: "rtk idf",
+        rewrite_prefixes: &["idf.py"],
+        category: "Build",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^cppcheck\b",
+        rtk_cmd: "rtk cppcheck",
+        rewrite_prefixes: &["cppcheck"],
+        category: "Build",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^markdownlint\b",
         rtk_cmd: "rtk markdownlint",
         rewrite_prefixes: &["markdownlint"],

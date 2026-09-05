@@ -24,18 +24,30 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: mypy {}", args.join(" "));
     }
 
-    runner::run_filtered_with_exit(
+    runner::run_ai_filtered_with_exit(
         cmd,
         "mypy",
         &args.join(" "),
+        crate::core::ai_output::BudgetClass::Diagnostic,
         |raw, exit_code| {
             let clean = strip_ansi(raw);
             let filtered = filter_mypy_output(&clean);
             // Nothing recognised on a failed run means mypy never type-checked.
             if exit_code != 0 && filtered == MYPY_CLEAN {
-                return clean.trim().to_string();
+                let filtered = clean.trim().to_string();
+                return Ok(runner::document_from_filtered(
+                    raw,
+                    &filtered,
+                    "mypy",
+                    exit_code,
+                ));
             }
-            filtered
+            Ok(runner::document_from_filtered(
+                raw,
+                &filtered,
+                "mypy",
+                exit_code,
+            ))
         },
         runner::RunOptions::default(),
     )

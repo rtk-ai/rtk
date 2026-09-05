@@ -468,19 +468,30 @@ struct CollapsedRecord {
 }
 
 pub fn render(document: &AiDocument, budget: BudgetClass) -> RenderedOutput {
+    render_with_max_tokens(document, budget, None)
+}
+
+/// Render a semantic document with an optional request-level token limit.
+/// Legacy documents remain untouched because their output contract is exact.
+pub fn render_with_max_tokens(
+    document: &AiDocument,
+    budget: BudgetClass,
+    max_tokens: Option<usize>,
+) -> RenderedOutput {
+    let max_tokens = max_tokens.unwrap_or_else(|| budget.max_tokens());
     match &document.body {
         DocumentBody::Legacy(text) => RenderedOutput {
             text: text.clone(),
             omission: document.declared_omission.clone(),
             parser_failed: document.parser_failed,
         },
-        DocumentBody::Semantic => render_semantic(document, budget),
+        DocumentBody::Semantic => render_semantic(document, max_tokens),
     }
 }
 
-fn render_semantic(document: &AiDocument, budget: BudgetClass) -> RenderedOutput {
+fn render_semantic(document: &AiDocument, max_tokens: usize) -> RenderedOutput {
     let records = collapsed_records(document);
-    let (mut lines, omitted_summary_items) = summary_lines(document, budget);
+    let (mut lines, omitted_summary_items) = summary_lines(document, max_tokens);
 
     let mut emitted = 0;
     for record in &records {
@@ -491,7 +502,7 @@ fn render_semantic(document: &AiDocument, budget: BudgetClass) -> RenderedOutput
         };
         let mut candidate = lines.clone();
         candidate.push(line.clone());
-        if estimate_joined_tokens(&candidate) > budget.max_tokens() {
+        if estimate_joined_tokens(&candidate) > max_tokens {
             break;
         }
         lines.push(line);
@@ -514,7 +525,7 @@ fn render_semantic(document: &AiDocument, budget: BudgetClass) -> RenderedOutput
                 "omitted items={} groups={}",
                 omission.items, omission.groups
             );
-            if crate::core::tracking::estimate_tokens(&line) <= budget.max_tokens() {
+            if crate::core::tracking::estimate_tokens(&line) <= max_tokens {
                 lines.push(line);
             }
         }
@@ -527,7 +538,7 @@ fn render_semantic(document: &AiDocument, budget: BudgetClass) -> RenderedOutput
     }
 }
 
-fn summary_lines(document: &AiDocument, budget: BudgetClass) -> (Vec<String>, usize) {
+fn summary_lines(document: &AiDocument, max_tokens: usize) -> (Vec<String>, usize) {
     let mut fields = Vec::new();
     if let Some(status) = &document.status {
         fields.push(format!("status={status}"));
@@ -548,7 +559,7 @@ fn summary_lines(document: &AiDocument, budget: BudgetClass) -> (Vec<String>, us
     for field in fields {
         let mut candidate = emitted_fields.clone();
         candidate.push(field.clone());
-        if crate::core::tracking::estimate_tokens(&candidate.join(" ")) <= budget.max_tokens() {
+        if crate::core::tracking::estimate_tokens(&candidate.join(" ")) <= max_tokens {
             emitted_fields.push(field);
         } else {
             omitted_items += 1;
@@ -635,6 +646,24 @@ mod tests {
         assert_eq!(BudgetClass::Collection.max_tokens(), 1_024);
         assert_eq!(BudgetClass::Diagnostic.max_tokens(), 2_048);
         assert_eq!(BudgetClass::Source.max_tokens(), 4_096);
+    }
+
+    #[test]
+    fn explicit_semantic_token_limit_overrides_budget_class() {
+        let mut doc = AiDocument::new(Some("ok"));
+        for index in 0..300 {
+            doc.push(AiRecord::new(
+                Severity::Info,
+                format!("src/generated/{index:03}.rs match=value"),
+            ));
+        }
+
+        let default = render(&doc, BudgetClass::Source);
+        let constrained = render_with_max_tokens(&doc, BudgetClass::Source, Some(64));
+
+        assert!(crate::core::tracking::estimate_tokens(&default.text) > 64);
+        assert!(crate::core::tracking::estimate_tokens(&constrained.text) <= 64);
+        assert!(constrained.omission.is_some());
     }
 
     #[test]

@@ -1,10 +1,11 @@
 //! Apache Maven filter — Surefire/Failsafe block collapse, compile error/warning
 //! dedup, package/install pipeline with mode-toggle.
-//!
+//! 
 //! Replaces the previous `src/filters/mvn-build.toml` filter with a Rust module
 //! capable of state-machine parsing (block collapse, continuation tracking,
 //! mode toggle) that TOML DSL cannot express.
 
+use crate::core::ai_output::BudgetClass;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, strip_ansi};
@@ -1849,10 +1850,11 @@ fn run_tool(args: &[String], daemon: bool, verbose: u8) -> Result<i32> {
             let osargs: Vec<OsString> = args.iter().map(OsString::from).collect();
             return runner::run_passthrough(tool, &osargs, verbose);
         }
-        return runner::run_filtered(
+        return runner::run_ai_from_filter(
             new_mvn_command(args, daemon),
             tool,
             &args_display,
+            BudgetClass::Diagnostic,
             |raw: &str| filter_quiet(raw, daemon),
             RunOptions::with_tee("mvn_quiet"),
         );
@@ -1861,24 +1863,27 @@ fn run_tool(args: &[String], daemon: bool, verbose: u8) -> Result<i32> {
     let phase = detect_phase(args);
 
     match phase {
-        MvnPhase::Test => runner::run_filtered(
+        MvnPhase::Test => runner::run_ai_from_filter(
             new_mvn_command(args, daemon),
             tool,
             &args_display,
+            BudgetClass::Diagnostic,
             move |raw: &str| filter_surefire(raw, daemon),
             RunOptions::with_tee("mvn_test"),
         ),
-        MvnPhase::Compile => runner::run_filtered(
+        MvnPhase::Compile => runner::run_ai_from_filter(
             new_mvn_command(args, daemon),
             tool,
             &args_display,
+            BudgetClass::Diagnostic,
             move |raw: &str| filter_compile(raw, daemon),
             RunOptions::with_tee("mvn_compile"),
         ),
-        MvnPhase::Package => runner::run_filtered(
+        MvnPhase::Package => runner::run_ai_from_filter(
             new_mvn_command(args, daemon),
             tool,
             &args_display,
+            BudgetClass::Diagnostic,
             move |raw: &str| filter_package(raw, daemon),
             RunOptions::with_tee("mvn_package"),
         ),

@@ -1,6 +1,7 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
 use crate::core::args_utils;
+use crate::core::ai_output::{AiDocument, AiRecord, BudgetClass, Omission, Severity};
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::stream::{
@@ -112,7 +113,7 @@ pub fn run(
 fn run_diff(
     args: &[String],
     max_lines: Option<usize>,
-    verbose: u8,
+    _verbose: u8,
     global_args: &[String],
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
@@ -158,61 +159,22 @@ fn run_diff(
         return Ok(0);
     }
 
-    // Default RTK behavior: stat first, then compacted diff
-    let mut cmd = git_cmd(global_args);
-    cmd.arg("diff").arg("--stat");
-
-    for arg in args {
-        cmd.arg(arg);
-    }
-
-    let result = exec_capture(&mut cmd).context("Failed to run git diff")?;
-
-    if !result.success() {
-        if !result.stderr.trim().is_empty() {
-            eprint!("{}", result.stderr);
-        }
-        timer.track(
-            &format!("git diff {}", args.join(" ")),
-            &format!("rtk git diff {}", args.join(" ")),
-            &result.stdout,
-            &result.stdout,
-        );
-        return Ok(result.exit_code);
-    }
-
-    if verbose > 0 {
-        eprintln!("Git diff summary:");
-    }
-
-    // Now get actual diff but compact it
-    let mut diff_cmd = git_cmd(global_args);
-    diff_cmd.arg("diff");
-    for arg in args {
-        diff_cmd.arg(arg);
-    }
-
-    let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git diff")?;
-
-    let printed = if !diff_result.stdout.is_empty() {
-        let compacted = compact_diff(&diff_result.stdout, max_lines.unwrap_or(500));
-        format!("{}\n\nChanges:\n{}", result.stdout.trim(), compacted)
-    } else {
-        result.stdout.trim().to_string()
-    };
-
-    let raw = format!("{}\n{}", result.stdout, diff_result.stdout);
-    let shown = never_worse(&raw, &printed);
-    println!("{}", shown);
-
-    timer.track(
-        &format!("git diff {}", args.join(" ")),
-        &format!("rtk git diff {}", args.join(" ")),
-        &raw,
-        shown,
-    );
-
-    Ok(0)
+    // Human-facing diffs are captured once and rendered through the shared
+    // semantic budget. Explicit stat/word/exact forms returned above retain
+    // their native contract.
+    let mut semantic_cmd = git_cmd(global_args);
+    semantic_cmd.arg("diff");
+    semantic_cmd.args(args);
+    runner::run_ai_filtered_with_exit(
+        semantic_cmd,
+        "git diff",
+        &args.join(" "),
+        BudgetClass::Source,
+        move |raw, exit_code| {
+            Ok(diff_document(raw, max_lines.unwrap_or(500), exit_code))
+        },
+        RunOptions::default().tee("git_diff"),
+    )
 }
 
 fn run_show(
@@ -263,71 +225,101 @@ fn run_show(
         return Ok(0);
     }
 
-    // Get raw output for tracking
-    let mut raw_cmd = git_cmd(global_args);
-    raw_cmd.arg("show");
-    for arg in args {
-        raw_cmd.arg(arg);
-    }
-    let raw_output = exec_capture(&mut raw_cmd)
-        .map(|r| r.stdout)
-        .unwrap_or_default();
+    // Human-facing commit views are captured once and framed by the shared
+    // semantic runner. Explicit stat/format/blob/word-diff requests returned
+    // above retain their native byte-for-byte contract.
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("show");
+    cmd.args(args);
+    let show_limit = max_lines.unwrap_or(500);
+    let show_verbose = verbose > 0;
+    runner::run_ai_from_filter(
+        cmd,
+        "git show",
+        &args.join(" "),
+        BudgetClass::Source,
+        move |raw| compact_show_output(raw, show_limit, show_verbose),
+        RunOptions::default().tee("git_show"),
+    )
+}
 
-    // Step 1: one-line commit summary
-    let mut summary_cmd = git_cmd(global_args);
-    summary_cmd.args(["show", "--no-patch", "--pretty=format:%h %s (%ar) <%an>"]);
-    for arg in args {
-        summary_cmd.arg(arg);
-    }
-    let summary_result = exec_capture(&mut summary_cmd).context("Failed to run git show")?;
-    if !summary_result.success() {
-        eprintln!("{}", summary_result.stderr);
-        return Ok(summary_result.exit_code);
-    }
-    let mut printed = summary_result.stdout.trim().to_string();
-
-    // Step 2: --stat summary
-    let mut stat_cmd = git_cmd(global_args);
-    stat_cmd.args(["show", "--stat", "--pretty=format:"]);
-    for arg in args {
-        stat_cmd.arg(arg);
-    }
-    let stat_result = exec_capture(&mut stat_cmd).context("Failed to run git show --stat")?;
-    let stat_text = stat_result.stdout.trim();
-    if !stat_text.is_empty() {
-        printed.push('\n');
-        printed.push_str(stat_text);
+fn compact_show_output(raw: &str, max_lines: usize, verbose: bool) -> String {
+    if raw.trim().is_empty() {
+        return String::new();
     }
 
-    // Step 3: compacted diff
-    let mut diff_cmd = git_cmd(global_args);
-    diff_cmd.args(["show", "--pretty=format:"]);
-    for arg in args {
-        diff_cmd.arg(arg);
-    }
-    let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git show (diff)")?;
-    let diff_text = diff_result.stdout.trim();
-
-    if !diff_text.is_empty() {
-        if verbose > 0 {
-            printed.push_str("\n\nChanges:");
+    let diff_start = raw
+        .lines()
+        .position(|line| line.starts_with("diff --git ") || line.starts_with("diff --cc "));
+    let (header, diff) = match diff_start {
+        Some(index) => {
+            let mut lines = raw.lines();
+            let header = lines.by_ref().take(index).collect::<Vec<_>>().join("\n");
+            (header, lines.collect::<Vec<_>>().join("\n"))
         }
-        let compacted = compact_diff(diff_text, max_lines.unwrap_or(500));
-        printed.push('\n');
-        printed.push_str(&compacted);
+        None => (raw.trim_end().to_string(), String::new()),
+    };
+
+    let mut shown: Vec<String> = Vec::new();
+    let mut stat_started = false;
+    for line in header.lines() {
+        let trimmed = line.trim();
+        let is_header = line.starts_with("commit ")
+            || line.starts_with("Author:")
+            || line.starts_with("Date:");
+        let is_stat = trimmed.contains(" | ")
+            || trimmed.ends_with("files changed")
+            || trimmed.contains(" insertion(")
+            || trimmed.contains(" deletion(");
+        if is_header || is_stat {
+            if is_stat {
+                stat_started = true;
+            }
+            shown.push(line.to_string());
+        } else if stat_started && !trimmed.is_empty() {
+            shown.push(line.to_string());
+        }
     }
 
-    let shown = never_worse(&raw_output, &printed);
-    println!("{}", shown);
+    if !diff.trim().is_empty() {
+        if verbose {
+            shown.push(String::new());
+            shown.push("Changes:".to_string());
+        }
+        shown.push(compact_diff(&diff, max_lines));
+    }
 
-    timer.track(
-        &format!("git show {}", args.join(" ")),
-        &format!("rtk git show {}", args.join(" ")),
-        &raw_output,
-        shown,
-    );
+    if shown.is_empty() {
+        raw.lines().take(20).collect::<Vec<_>>().join("\n")
+    } else {
+        shown.join("\n")
+    }
+}
 
-    Ok(0)
+#[cfg(test)]
+mod semantic_show_tests {
+    use super::compact_show_output;
+
+    #[test]
+    fn compact_show_keeps_commit_header_stat_and_late_diff() {
+        let raw = concat!(
+            "commit 1234567890\n",
+            "Author: Example <example@example.com>\n",
+            "Date: today\n\n",
+            "    message\n\n",
+            " src/lib.rs | 2 +-\n",
+            " 1 file changed, 1 insertion(+), 1 deletion(-)\n",
+            "diff --git a/src/lib.rs b/src/lib.rs\n",
+            "@@ -1 +1 @@\n-old\n+new\n"
+        );
+
+        let shown = compact_show_output(raw, 20, false);
+
+        assert!(shown.contains("commit 1234567890"));
+        assert!(shown.contains("src/lib.rs | 2 +-"));
+        assert!(shown.contains("-old"));
+        assert!(shown.contains("+new"));
+    }
 }
 
 /// Whether these args make git emit a word diff rather than a line diff.
@@ -839,8 +831,6 @@ fn run_log(
         return run_passthrough(&passthrough_args, global_args, verbose);
     }
 
-    let timer = tracking::TimedExecution::start();
-
     let mut cmd = git_cmd(global_args);
     cmd.arg("log");
 
@@ -899,30 +889,21 @@ fn run_log(
         cmd.arg(arg);
     }
 
-    let result = exec_capture(&mut cmd).context("Failed to run git log")?;
-
-    if !result.success() {
-        eprintln!("{}", result.stderr);
-        return Ok(result.exit_code);
-    }
-
     if verbose > 0 {
         eprintln!("Git log output:");
     }
 
-    // Post-process: truncate long messages, cap lines only if RTK set the default
-    let filtered = filter_log_output(&result.stdout, limit, user_set_limit, has_format_flag);
-    let filtered = never_worse(&result.stdout, &filtered).to_string();
-    println!("{}", filtered);
-
-    timer.track(
-        &format!("git log {}", args.join(" ")),
-        &format!("rtk git log {}", args.join(" ")),
-        &result.stdout,
-        &filtered,
-    );
-
-    Ok(0)
+    runner::run_ai_filtered_with_exit(
+        cmd,
+        "git log",
+        &args.join(" "),
+        BudgetClass::Collection,
+        move |raw, exit_code| {
+            let filtered = filter_log_output(raw, limit, user_set_limit, has_format_flag);
+            Ok(git_summary_document(raw, filtered, "log", exit_code))
+        },
+        RunOptions::default().tee("git_log"),
+    )
 }
 
 /// True for git log/diff options that take their value as a separate,
@@ -1199,6 +1180,7 @@ pub(crate) fn format_status_output_detached(porcelain: &str, detached_ref: &str)
     format_status_inner(porcelain, Some(detached_ref))
 }
 
+#[cfg(test)]
 pub(crate) fn format_status_output_with_limits(
     porcelain: &str,
     detached_ref: Option<&str>,
@@ -1282,6 +1264,170 @@ fn format_status_inner_with_limits(
     }
 
     output.join("\n")
+}
+
+fn status_document(
+    raw: &str,
+    exit_code: i32,
+    limits: &crate::core::config::LimitsConfig,
+) -> AiDocument {
+    let mut document = AiDocument::new(Some(if exit_code == 0 { "status" } else { "failed" }));
+    if exit_code != 0 {
+        document.fact("exit", exit_code.to_string());
+    }
+
+    let mut section = "";
+    let mut changed_seen = 0usize;
+    let mut untracked_seen = 0usize;
+    let mut omitted = 0usize;
+    let mut has_changes = false;
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("(use \"git")
+            || trimmed.starts_with("(create/copy files")
+        {
+            continue;
+        }
+        if let Some(branch) = trimmed.strip_prefix("On branch ") {
+            document.fact("branch", branch);
+            continue;
+        }
+        if trimmed.starts_with("HEAD detached ") {
+            continue;
+        }
+        if trimmed == "Changes to be committed:" {
+            section = "staged";
+            continue;
+        }
+        if trimmed == "Changes not staged for commit:" {
+            section = "unstaged";
+            continue;
+        }
+        if trimmed == "Unmerged paths:" {
+            section = "conflicts";
+            continue;
+        }
+        if trimmed == "Untracked files:" {
+            section = "untracked";
+            continue;
+        }
+        if trimmed.starts_with("nothing to commit")
+            || trimmed.starts_with("nothing added to commit")
+        {
+            continue;
+        }
+
+        let is_file = matches!(
+            section,
+            "staged" | "unstaged" | "conflicts" | "untracked"
+        );
+        if !is_file {
+            document.push(AiRecord::new(Severity::Info, trimmed));
+            continue;
+        }
+
+        has_changes = true;
+        let is_untracked = section == "untracked";
+        let seen = if is_untracked {
+            &mut untracked_seen
+        } else {
+            &mut changed_seen
+        };
+        let limit = if is_untracked {
+            limits.status_max_untracked
+        } else {
+            limits.status_max_files
+        };
+        if *seen < limit {
+            let severity = if section == "conflicts" {
+                Severity::Error
+            } else {
+                Severity::Info
+            };
+            document.push(AiRecord::new(severity, format!("{section}: {trimmed}")));
+            *seen += 1;
+        } else {
+            omitted = omitted.saturating_add(1);
+        }
+    }
+
+    if let Some(detached) = extract_detached_head(raw) {
+        document.fact("head", detached);
+    }
+    if let Some(state) = extract_state_header(raw) {
+        document.fact("state", state);
+    }
+    if !has_changes && exit_code == 0 {
+        document.fact("clean", "true");
+    }
+    if omitted > 0 {
+        document = document.with_omission(Omission {
+            items: omitted,
+            groups: 0,
+        });
+    }
+    document
+}
+
+fn git_summary_document(
+    raw: &str,
+    summary: String,
+    label: &'static str,
+    exit_code: i32,
+) -> AiDocument {
+    let mut document = AiDocument::new(
+        (!raw.trim().is_empty() || exit_code != 0).then_some(if exit_code == 0 {
+            label
+        } else {
+            "failed"
+        }),
+    );
+    if exit_code != 0 {
+        document.fact("exit", exit_code.to_string());
+    }
+    for line in summary.lines().filter(|line| !line.trim().is_empty()) {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        let severity = if exit_code != 0
+            || lower.contains("error")
+            || lower.contains("failed")
+            || lower.contains("failure")
+        {
+            Severity::Error
+        } else {
+            Severity::Info
+        };
+        document.push(AiRecord::new(severity, trimmed));
+    }
+    if exit_code != 0 && summary.trim().is_empty() {
+        document.push(AiRecord::new(
+            Severity::Error,
+            "producer failed; no diagnostic text was captured",
+        ));
+    }
+    if summary.trim() != raw.trim() && !raw.trim().is_empty() {
+        let raw_items = raw.lines().filter(|line| !line.trim().is_empty()).count();
+        let shown_items = summary
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count();
+        document = document.with_omission(Omission {
+            items: raw_items.saturating_sub(shown_items).max(1),
+            groups: 0,
+        });
+    }
+    document
+}
+
+fn diff_document(raw: &str, max_lines: usize, exit_code: i32) -> AiDocument {
+    git_summary_document(
+        raw,
+        compact_diff(raw, max_lines),
+        "diff",
+        exit_code,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1474,75 +1620,21 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         return Ok(0);
     }
 
-    let mut raw_cmd = git_cmd_c_locale(global_args);
-    raw_cmd.arg("status");
-    raw_cmd.args(args);
-    let raw_output = exec_capture(&mut raw_cmd)
-        .map(|r| r.stdout)
-        .unwrap_or_default();
-
-    let mut cmd = build_status_command(args, global_args);
-    let result = exec_capture(&mut cmd).context("Failed to run git status")?;
-
-    if !result.success() {
-        let message = if result.stderr.contains("not a git repository") {
-            "Not a git repository".to_string()
-        } else {
-            result.stderr.trim().to_string()
-        };
-        if !message.is_empty() {
-            eprintln!("{}", message);
-        }
-        let original_cmd = if args.is_empty() {
-            "git status".to_string()
-        } else {
-            format!("git status {}", args.join(" "))
-        };
-        let rtk_cmd = if args.is_empty() {
-            "rtk git status".to_string()
-        } else {
-            format!("rtk git status {}", args.join(" "))
-        };
-        let shown = never_worse(&raw_output, &message);
-        timer.track(&original_cmd, &rtk_cmd, &raw_output, shown);
-        return Ok(result.exit_code);
-    }
-
+    // Plain status is captured once and rendered semantically. This avoids
+    // the former second porcelain invocation, which could observe a different
+    // repository state and made status a legacy tracking route.
+    let mut semantic_cmd = git_cmd_c_locale(global_args);
+    semantic_cmd.arg("status");
+    semantic_cmd.args(args);
     let limits = crate::core::config::limits();
-    let formatted = match extract_detached_head(&raw_output) {
-        Some(detached_ref) => format_status_output_with_limits(
-            &result.stdout,
-            Some(&detached_ref),
-            &limits,
-        ),
-        None => format_status_output_with_limits(&result.stdout, None, &limits),
-    };
-
-    // Surface in-progress state (rebase/merge/cherry-pick/bisect/am) from the
-    // plain-status output we already captured for tracking. Porcelain omits it
-    // and hiding it misleads the user about the true repo state.
-    let final_output = match extract_state_header(&raw_output) {
-        Some(state) => format!("{}\n{}", state, formatted),
-        None => formatted,
-    };
-
-    let shown = never_worse(&raw_output, &final_output);
-    println!("{}", shown);
-
-    let original_cmd = if args.is_empty() {
-        "git status".to_string()
-    } else {
-        format!("git status {}", args.join(" "))
-    };
-    let rtk_cmd = if args.is_empty() {
-        "rtk git status".to_string()
-    } else {
-        format!("rtk git status {}", args.join(" "))
-    };
-
-    timer.track(&original_cmd, &rtk_cmd, &raw_output, shown);
-
-    Ok(0)
+    runner::run_ai_filtered_with_exit(
+        semantic_cmd,
+        "git status",
+        &args.join(" "),
+        BudgetClass::State,
+        move |raw, exit_code| Ok(status_document(raw, exit_code, &limits)),
+        RunOptions::default().tee("git_status"),
+    )
 }
 
 fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
@@ -2190,33 +2282,17 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         cmd.arg(arg);
     }
 
-    let result = exec_capture(&mut cmd).context("Failed to run git branch")?;
-
-    if !result.success() {
-        if !result.stderr.trim().is_empty() {
-            eprint!("{}", result.stderr);
-        }
-        timer.track(
-            &format!("git branch {}", args.join(" ")),
-            &format!("rtk git branch {}", args.join(" ")),
-            &result.stdout,
-            &result.stdout,
-        );
-        return Ok(result.exit_code);
-    }
-
-    let filtered = filter_branch_output(&result.stdout);
-    let filtered = never_worse(&result.stdout, &filtered).to_string();
-    println!("{}", filtered);
-
-    timer.track(
-        &format!("git branch {}", args.join(" ")),
-        &format!("rtk git branch {}", args.join(" ")),
-        &result.stdout,
-        &filtered,
-    );
-
-    Ok(0)
+    runner::run_ai_filtered_with_exit(
+        cmd,
+        "git branch",
+        &args.join(" "),
+        BudgetClass::Collection,
+        move |raw, exit_code| {
+            let filtered = filter_branch_output(raw);
+            Ok(git_summary_document(raw, filtered, "branch", exit_code))
+        },
+        RunOptions::default().tee("git_branch"),
+    )
 }
 
 fn filter_branch_output(output: &str) -> String {
@@ -2632,32 +2708,17 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
     // Default: list mode
     let mut cmd = git_cmd(global_args);
     cmd.args(["worktree", "list"]);
-    let result = exec_capture(&mut cmd).context("Failed to run git worktree list")?;
-
-    if !result.success() {
-        if !result.stderr.trim().is_empty() {
-            eprintln!("{}", result.stderr);
-        }
-        timer.track(
-            "git worktree list",
-            "rtk git worktree",
-            &result.stdout,
-            &result.stderr,
-        );
-        return Ok(result.exit_code);
-    }
-
-    let filtered = filter_worktree_list(&result.stdout);
-    let filtered = never_worse(&result.stdout, &filtered).to_string();
-    println!("{}", filtered);
-    timer.track(
+    runner::run_ai_filtered_with_exit(
+        cmd,
         "git worktree list",
-        "rtk git worktree",
-        &result.stdout,
-        &filtered,
-    );
-
-    Ok(0)
+        "",
+        BudgetClass::Collection,
+        move |raw, exit_code| {
+            let filtered = filter_worktree_list(raw);
+            Ok(git_summary_document(raw, filtered, "worktree", exit_code))
+        },
+        RunOptions::default().tee("git_worktree"),
+    )
 }
 
 fn filter_worktree_list(output: &str) -> String {
@@ -2861,6 +2922,32 @@ mod tests {
         let output = format_status_output_with_limits("## HEAD\n M file.rs\n", Some("abc123"), &limits);
         assert!(output.starts_with("* abc123"));
         assert!(output.contains("... 1 changed files omitted"));
+    }
+
+    #[test]
+    fn status_document_keeps_branch_changes_conflicts_and_omissions() {
+        let raw = concat!(
+            "On branch feature/demo\n",
+            "Changes to be committed:\n",
+            "  (use \"git restore --staged <file>...\" to unstage)\n",
+            "        modified:   staged.rs\n",
+            "Unmerged paths:\n",
+            "        both modified: conflict.rs\n",
+            "Untracked files:\n",
+            "        untracked.txt\n",
+        );
+        let limits = crate::core::config::LimitsConfig {
+            status_max_files: 2,
+            status_max_untracked: 0,
+            ..Default::default()
+        };
+        let document = status_document(raw, 0, &limits);
+        let rendered = crate::core::ai_output::render(&document, BudgetClass::State);
+
+        assert!(rendered.text.contains("branch=feature/demo"));
+        assert!(rendered.text.contains("staged: modified:   staged.rs"));
+        assert!(rendered.text.contains("conflicts: both modified: conflict.rs"));
+        assert_eq!(rendered.omission.unwrap().items, 1);
     }
 
     #[test]

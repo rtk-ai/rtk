@@ -5,7 +5,7 @@ use super::init::resolve_claude_dir;
 use super::is_claude_hook_command;
 use crate::core::constants::RTK_DATA_DIR;
 use crate::core::utils::from_json_str;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const CURRENT_HOOK_VERSION: u8 = 3;
 const WARN_INTERVAL_SECS: u64 = 24 * 3600;
@@ -19,6 +19,36 @@ pub enum HookStatus {
     Outdated,
     /// No hook file found (but Claude Code is installed).
     Missing,
+}
+
+/// Native Codex hook installation status.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum CodexHookStatus {
+    /// A single usable RTK Bash PreToolUse hook is configured.
+    Ready,
+    /// Codex's config.toml does not exist.
+    MissingConfig,
+    /// config.toml exists but has no usable RTK Bash hook.
+    MissingHook,
+    /// Codex config.toml cannot be parsed or has an invalid hook shape.
+    InvalidConfig,
+    /// More than one RTK Codex hook is registered.
+    ConflictingConfig,
+    /// The configured absolute RTK executable no longer exists.
+    MissingBinary,
+}
+
+impl CodexHookStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::MissingConfig => "missing-config",
+            Self::MissingHook => "missing-hook",
+            Self::InvalidConfig => "invalid-config",
+            Self::ConflictingConfig => "conflicting-config",
+            Self::MissingBinary => "missing-binary",
+        }
+    }
 }
 
 /// Return true when any supported RTK integration is present for this user.
@@ -75,7 +105,101 @@ fn codex_integration_installed(home: &std::path::Path) -> bool {
             instructions_are_rtk
         );
     }
-    agents_has_rtk || instructions_are_rtk
+    agents_has_rtk || instructions_are_rtk || codex_status_in(&codex_dir) == CodexHookStatus::Ready
+}
+
+/// Inspect the effective Codex config without modifying it or starting Codex.
+/// The hook is considered ready only when exactly one RTK Bash handler is
+/// registered and an absolute executable path, if supplied, still exists.
+pub fn codex_status() -> CodexHookStatus {
+    let Some(home) = dirs::home_dir() else {
+        return CodexHookStatus::MissingConfig;
+    };
+    let codex_home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| home.join(super::constants::CODEX_DIR));
+    codex_status_in(&codex_home)
+}
+
+/// Testable Codex hook status inspection for one config directory.
+pub fn codex_status_in(codex_home: &Path) -> CodexHookStatus {
+    let config_path = codex_home.join("config.toml");
+    if !config_path.is_file() {
+        return CodexHookStatus::MissingConfig;
+    }
+    let Ok(content) = std::fs::read_to_string(&config_path) else {
+        return CodexHookStatus::InvalidConfig;
+    };
+    let Ok(root) = content.parse::<toml::Value>() else {
+        return CodexHookStatus::InvalidConfig;
+    };
+    let Some(hooks) = root.get("hooks").and_then(toml::Value::as_table) else {
+        return CodexHookStatus::MissingHook;
+    };
+    let Some(groups) = hooks.get("PreToolUse").and_then(toml::Value::as_array) else {
+        return CodexHookStatus::MissingHook;
+    };
+
+    let mut rtk_hooks = Vec::new();
+    for group in groups {
+        let Some(group) = group.as_table() else {
+            return CodexHookStatus::InvalidConfig;
+        };
+        if group.get("matcher").and_then(toml::Value::as_str) != Some("Bash") {
+            continue;
+        }
+        let Some(handlers) = group.get("hooks").and_then(toml::Value::as_array) else {
+            return CodexHookStatus::InvalidConfig;
+        };
+        for handler in handlers {
+            let Some(handler) = handler.as_table() else {
+                return CodexHookStatus::InvalidConfig;
+            };
+            let Some(command) = handler.get("command").and_then(toml::Value::as_str) else {
+                continue;
+            };
+            if let Some(executable) = codex_hook_executable(command) {
+                rtk_hooks.push(executable.to_string());
+            }
+        }
+    }
+
+    match rtk_hooks.as_slice() {
+        [] => CodexHookStatus::MissingHook,
+        [_first, _second, ..] => CodexHookStatus::ConflictingConfig,
+        [executable] if codex_executable_missing(executable) => CodexHookStatus::MissingBinary,
+        [_] => CodexHookStatus::Ready,
+    }
+}
+
+fn codex_hook_executable(command: &str) -> Option<&str> {
+    let executable = command.strip_suffix(" hook codex")?.trim();
+    let executable = executable
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            executable
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(executable)
+        .trim();
+    let binary = executable.rsplit(['/', '\\']).next()?;
+    if binary.eq_ignore_ascii_case("rtk") || binary.eq_ignore_ascii_case("rtk.exe") {
+        Some(executable)
+    } else {
+        None
+    }
+}
+
+fn codex_executable_missing(executable: &str) -> bool {
+    if !executable.contains('/') && !executable.contains('\\') {
+        // A bare `rtk`/`rtk.exe` is resolved by Codex through PATH; checking
+        // it here would make the status depend on the checker's own PATH.
+        return false;
+    }
+    !Path::new(executable).is_file()
 }
 
 pub(crate) fn claude_hook_installed_in(claude_dir: &std::path::Path) -> bool {
@@ -377,6 +501,49 @@ mod tests {
         )
         .unwrap();
         assert!(!integration_installed_in(tmp.path()));
+    }
+
+    #[test]
+    fn test_codex_status_requires_a_valid_bash_hook_and_binary() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let rtk = tmp
+            .path()
+            .join(if cfg!(windows) { "rtk.exe" } else { "rtk" });
+        std::fs::write(&rtk, b"rtk").expect("write fake rtk");
+        let rtk_toml_path = rtk.to_string_lossy().replace('\\', "/");
+        let config = format!(
+            "[mcp_servers.rtk]\ncommand = \"{}\"\nargs = [\"mcp\"]\n\n[hooks]\n[[hooks.PreToolUse]]\nmatcher = \"Bash\"\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"{} hook codex\"\n",
+            rtk_toml_path,
+            rtk_toml_path
+        );
+        std::fs::write(tmp.path().join("config.toml"), config).expect("write config");
+
+        assert_eq!(codex_status_in(tmp.path()), CodexHookStatus::Ready);
+    }
+
+    #[test]
+    fn test_codex_status_reports_missing_binary_and_duplicate_hooks() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            "[hooks]\n[[hooks.PreToolUse]]\nmatcher = \"Bash\"\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"C:\\\\missing\\\\rtk.exe hook codex\"\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"rtk hook codex\"\n",
+        )
+        .expect("write config");
+
+        assert_eq!(
+            codex_status_in(tmp.path()),
+            CodexHookStatus::ConflictingConfig
+        );
+    }
+
+    #[test]
+    fn test_codex_status_reports_missing_config_and_hook() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert_eq!(codex_status_in(tmp.path()), CodexHookStatus::MissingConfig);
+
+        std::fs::write(tmp.path().join("config.toml"), "model = \"gpt-test\"\n")
+            .expect("write config");
+        assert_eq!(codex_status_in(tmp.path()), CodexHookStatus::MissingHook);
     }
 
     #[test]

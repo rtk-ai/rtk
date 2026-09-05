@@ -8,6 +8,79 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 
+/// An inclusive, one-based source line range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Parse an inclusive one-based line range such as `120:160`.
+pub fn parse_line_range(value: &str) -> Result<LineRange> {
+    let (start, end) = value
+        .split_once(':')
+        .context("line range must use START:END syntax")?;
+    if start.is_empty() || end.is_empty() || end.contains(':') {
+        anyhow::bail!("line range must use START:END syntax");
+    }
+    let start = start
+        .parse::<usize>()
+        .context("line range bounds must be positive integers")?;
+    let end = end
+        .parse::<usize>()
+        .context("line range bounds must be positive integers")?;
+    if start == 0 || end == 0 {
+        anyhow::bail!("line range bounds must be greater than zero");
+    }
+    if start > end {
+        anyhow::bail!("line range start must not exceed end");
+    }
+    Ok(LineRange { start, end })
+}
+
+/// Clap-compatible parser for [`LineRange`].
+pub fn parse_line_range_arg(value: &str) -> std::result::Result<LineRange, String> {
+    parse_line_range(value).map_err(|error| error.to_string())
+}
+
+/// Select a source range while preserving the bytes, line endings, and source
+/// line addresses represented by the selected portion.
+pub fn select_line_range(content: &str, range: LineRange) -> Result<String> {
+    let line_count = content_line_count(content);
+    if line_count == 0 || range.start > line_count {
+        anyhow::bail!("line range starts after the end of the file");
+    }
+    let end = range.end.min(line_count);
+    let start_offset = line_start_offset(content, range.start).expect("validated start line");
+    let end_offset = line_start_offset(content, end + 1).unwrap_or(content.len());
+    Ok(content[start_offset..end_offset].to_string())
+}
+
+fn content_line_count(content: &str) -> usize {
+    if content.is_empty() {
+        0
+    } else {
+        content.bytes().filter(|byte| *byte == b'\n').count()
+            + usize::from(!content.ends_with('\n'))
+    }
+}
+
+fn line_start_offset(content: &str, line: usize) -> Option<usize> {
+    if line == 1 {
+        return Some(0);
+    }
+    let mut current = 1usize;
+    for (offset, byte) in content.bytes().enumerate() {
+        if byte == b'\n' {
+            current += 1;
+            if current == line {
+                return Some(offset + 1);
+            }
+        }
+    }
+    None
+}
+
 fn source_document(file: &str, lines: &[filter::FilteredLine]) -> AiDocument {
     let mut document = AiDocument::new(Some("source"));
     document.fact("file", file);
@@ -31,6 +104,7 @@ struct AiSourceRequest<'a> {
     max_lines: Option<usize>,
     tail_lines: Option<usize>,
     line_numbers: bool,
+    line_offset: usize,
     fallback_baseline: &'a str,
     verbose: u8,
 }
@@ -47,11 +121,15 @@ fn emit_ai_source(request: AiSourceRequest<'_>) -> bool {
         max_lines,
         tail_lines,
         line_numbers,
+        line_offset,
         fallback_baseline,
         verbose,
     } = request;
     let filter = filter::get_filter(level);
-    let lines = filter.filter_lines(content, lang);
+    let mut lines = filter.filter_lines(content, lang);
+    for line in &mut lines {
+        line.original_line += line_offset;
+    }
     let selected = select_filtered_line_window(&lines, max_lines, tail_lines);
     if selected.is_empty() {
         return false;
@@ -86,13 +164,13 @@ fn emit_ai_source(request: AiSourceRequest<'_>) -> bool {
         });
     }
     let native_output = if line_numbers {
-        format_with_line_numbers(content)
+        format_with_line_numbers_from(content, line_offset + 1)
     } else {
         content.to_string()
     };
     let fallback = if max_lines.is_some() || tail_lines.is_some() {
         if line_numbers {
-            format_with_line_numbers(fallback_baseline)
+            format_with_line_numbers_from(fallback_baseline, line_offset + 1)
         } else {
             fallback_baseline.to_string()
         }
@@ -121,6 +199,7 @@ pub fn run(
     max_lines: Option<usize>,
     tail_lines: Option<usize>,
     line_numbers: bool,
+    line_range: Option<LineRange>,
     verbose: u8,
 ) -> Result<()> {
     let timer = tracking::TimedExecution::start();
@@ -132,6 +211,13 @@ pub fn run(
     // Read file content
     let content = fs::read_to_string(file)
         .with_context(|| format!("Failed to read file: {}", file.display()))?;
+
+    let line_offset = line_range.map(|range| range.start - 1).unwrap_or(0);
+    let content = if let Some(range) = line_range {
+        select_line_range(&content, range)?
+    } else {
+        content
+    };
 
     // Detect language from extension
     let lang = file
@@ -162,8 +248,8 @@ pub fn run(
 
     let (raw, rtk_output) = if line_numbers {
         (
-            format_with_line_numbers(&content),
-            format_with_line_numbers(&filtered),
+            format_with_line_numbers_from(&content, line_offset + 1),
+            format_with_line_numbers_from(&filtered, line_offset + 1),
         )
     } else {
         (content.clone(), filtered.clone())
@@ -183,6 +269,7 @@ pub fn run(
             max_lines,
             tail_lines,
             line_numbers,
+            line_offset,
             fallback_baseline: if max_lines.is_none() && tail_lines.is_none() {
                 &content
             } else {
@@ -224,6 +311,7 @@ pub fn run_stdin(
     max_lines: Option<usize>,
     tail_lines: Option<usize>,
     line_numbers: bool,
+    line_range: Option<LineRange>,
     verbose: u8,
 ) -> Result<()> {
     use std::io::{self, Read as IoRead};
@@ -240,6 +328,13 @@ pub fn run_stdin(
         .lock()
         .read_to_string(&mut content)
         .context("Failed to read from stdin")?;
+
+    let line_offset = line_range.map(|range| range.start - 1).unwrap_or(0);
+    let content = if let Some(range) = line_range {
+        select_line_range(&content, range)?
+    } else {
+        content
+    };
 
     // No file extension, so use Unknown language
     let lang = Language::Unknown;
@@ -265,8 +360,8 @@ pub fn run_stdin(
 
     let (raw, rtk_output) = if line_numbers {
         (
-            format_with_line_numbers(&content),
-            format_with_line_numbers(&filtered),
+            format_with_line_numbers_from(&content, line_offset + 1),
+            format_with_line_numbers_from(&filtered, line_offset + 1),
         )
     } else {
         (content.clone(), filtered.clone())
@@ -284,6 +379,7 @@ pub fn run_stdin(
             max_lines,
             tail_lines,
             line_numbers,
+            line_offset,
             fallback_baseline: if max_lines.is_none() && tail_lines.is_none() {
                 &content
             } else {
@@ -316,12 +412,17 @@ pub fn run_stdin(
     Ok(())
 }
 
-fn format_with_line_numbers(content: &str) -> String {
+fn format_with_line_numbers_from(content: &str, first_line: usize) -> String {
     let lines: Vec<&str> = content.lines().collect();
-    let width = lines.len().to_string().len();
+    let width = first_line.saturating_add(lines.len().saturating_sub(1)).to_string().len();
     let mut out = String::new();
     for (i, line) in lines.iter().enumerate() {
-        out.push_str(&format!("{:>width$} │ {}\n", i + 1, line, width = width));
+        out.push_str(&format!(
+            "{:>width$} │ {}\n",
+            first_line + i,
+            line,
+            width = width
+        ));
     }
     out
 }
@@ -387,7 +488,7 @@ fn main() {{
         )?;
 
         // Just verify it doesn't panic
-        run(file.path(), FilterLevel::Minimal, None, None, false, 0)?;
+        run(file.path(), FilterLevel::Minimal, None, None, false, None, 0)?;
         Ok(())
     }
 
@@ -494,6 +595,20 @@ fn main() {{
         let input = "a\nb\nc\nd";
         let output = apply_line_window(input, None, Some(2), &Language::Unknown);
         assert_eq!(output, "c\nd");
+    }
+
+    #[test]
+    fn line_range_preserves_crlf_and_original_selection() -> Result<()> {
+        let selected = select_line_range("L001\r\nL002\r\nL003\r\n", LineRange { start: 2, end: 2 })?;
+        assert_eq!(selected, "L002\r\n");
+        Ok(())
+    }
+
+    #[test]
+    fn line_range_rejects_invalid_bounds() {
+        for value in ["0:5", "10:3", "10", "10:", ":10", "1:2:3"] {
+            assert!(parse_line_range(value).is_err(), "accepted {value}");
+        }
     }
 
     #[test]

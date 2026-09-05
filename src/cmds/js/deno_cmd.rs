@@ -35,10 +35,11 @@ fn run_filtered_subcmd(subcmd: &str, args: &[String], verbose: u8) -> Result<i32
 
     let display = format!("{} {}", subcmd, args.join(" "));
     let tee_label = format!("deno_{}", subcmd);
-    crate::core::runner::run_filtered(
+    crate::core::runner::run_ai_from_filter(
         cmd,
         "deno",
         display.trim_end(),
+        crate::core::ai_output::BudgetClass::Diagnostic,
         filter_deno_output,
         crate::core::runner::RunOptions::with_tee(&tee_label),
     )

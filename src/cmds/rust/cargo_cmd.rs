@@ -1,8 +1,11 @@
 //! Filters cargo output — build errors, test results, clippy warnings.
 
 use crate::core::args_utils;
+use crate::core::ai_output::{AiDocument, AiRecord, BudgetClass, ExactReason, Omission, Severity};
 use crate::core::runner;
-use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
+use crate::core::stream::BlockHandler;
+#[cfg(test)]
+use crate::core::stream::BlockStreamFilter;
 use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{join_with_overflow, resolved_command, truncate};
 use anyhow::Result;
@@ -40,6 +43,7 @@ struct CargoBuildHandler {
     warnings: usize,
     error_count: usize,
     finished_line: Option<String>,
+    #[allow(dead_code)]
     label: &'static str,
 }
 
@@ -122,6 +126,7 @@ impl BlockHandler for CargoBuildHandler {
     }
 }
 
+#[cfg(test)]
 struct CargoTestHandler {
     in_failure_section: bool,
     in_failure_names: bool,
@@ -129,6 +134,7 @@ struct CargoTestHandler {
     has_compile_errors: bool,
 }
 
+#[cfg(test)]
 impl CargoTestHandler {
     fn new() -> Self {
         Self {
@@ -199,6 +205,7 @@ impl CargoTestHandler {
     }
 }
 
+#[cfg(test)]
 impl BlockHandler for CargoTestHandler {
     fn should_skip(&mut self, line: &str) -> bool {
         let trimmed = line.trim_start();
@@ -287,19 +294,71 @@ where
         eprintln!("Running: cargo {} {}", subcommand, restored_args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         &format!("cargo {}", subcommand),
         &restored_args.join(" "),
+        BudgetClass::Diagnostic,
         filter_fn,
         runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
     )
 }
 
-/// Same as `run_cargo_filtered` but the filter also receives the child exit code,
-/// so it can tell a genuine failure from a clean run when no diagnostics parse.
-fn run_cargo_filtered_with_exit<F>(
-    subcommand: &str,
+fn cargo_summary_document(
+    raw: &str,
+    summary: String,
+    label: &'static str,
+    exit_code: i32,
+) -> AiDocument {
+    let mut document = AiDocument::new((!raw.trim().is_empty() || exit_code != 0).then_some(
+        if exit_code == 0 { "ok" } else { "failed" },
+    ));
+    document.fact("command", format!("cargo {label}"));
+    if exit_code != 0 {
+        document.fact("exit", exit_code.to_string());
+    }
+
+    for line in summary.lines().filter(|line| !line.trim().is_empty()) {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        let severity = if exit_code != 0
+            || lower.contains("error")
+            || lower.contains("failed")
+            || lower.contains("failure")
+            || lower.contains("panic")
+        {
+            Severity::Error
+        } else if lower.contains("warning") || lower.contains("warn") {
+            Severity::Warning
+        } else {
+            Severity::Info
+        };
+        document.push(AiRecord::new(severity, trimmed));
+    }
+
+    if exit_code != 0 && summary.trim().is_empty() {
+        document.push(AiRecord::new(
+            Severity::Error,
+            "producer failed; no diagnostic text was captured",
+        ));
+    }
+
+    if summary.trim() != raw.trim() {
+        let raw_items = raw.lines().filter(|line| !line.trim().is_empty()).count();
+        let shown_items = summary
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count();
+        document = document.with_omission(Omission {
+            items: raw_items.saturating_sub(shown_items).max(1),
+            groups: 0,
+        });
+    }
+    document
+}
+
+fn run_cargo_semantic<F>(
+    subcommand: &'static str,
     args: &[String],
     verbose: u8,
     filter_fn: F,
@@ -311,47 +370,22 @@ where
     cmd.arg(subcommand);
 
     let restored_args = args_utils::restore_double_dash(args);
-    for arg in &restored_args {
-        cmd.arg(arg);
-    }
+    cmd.args(&restored_args);
 
     if verbose > 0 {
         eprintln!("Running: cargo {} {}", subcommand, restored_args.join(" "));
     }
 
-    runner::run_filtered_with_exit(
+    runner::run_ai_filtered_with_exit(
         cmd,
         &format!("cargo {}", subcommand),
         &restored_args.join(" "),
-        filter_fn,
-        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
-    )
-}
-
-fn run_cargo_streamed(
-    subcommand: &str,
-    args: &[String],
-    verbose: u8,
-    filter: Box<dyn StreamFilter>,
-) -> Result<i32> {
-    let mut cmd = resolved_command("cargo");
-    cmd.arg(subcommand);
-
-    let restored_args = args_utils::restore_double_dash(args);
-    for arg in &restored_args {
-        cmd.arg(arg);
-    }
-
-    if verbose > 0 {
-        eprintln!("Running: cargo {} {}", subcommand, restored_args.join(" "));
-    }
-
-    runner::run_streamed(
-        cmd,
-        &format!("cargo {}", subcommand),
-        &restored_args.join(" "),
-        filter,
-        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
+        BudgetClass::Diagnostic,
+        move |raw, exit_code| {
+            let summary = filter_fn(raw, exit_code);
+            Ok(cargo_summary_document(raw, summary, subcommand, exit_code))
+        },
+        runner::RunOptions::default().tee(&format!("cargo_{}", subcommand)),
     )
 }
 
@@ -370,52 +404,73 @@ fn has_json_message_format(args: &[String]) -> bool {
     json
 }
 
-fn run_build(args: &[String], verbose: u8) -> Result<i32> {
-    if has_json_message_format(args) {
-        return run_cargo_filtered_with_exit("build", args, verbose, |o, exit| {
-            filter_cargo_build_labeled(o, "build", exit)
-        });
+fn cargo_exact_reason(args: &[String]) -> Option<ExactReason> {
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        return Some(ExactReason::Interactive);
     }
-    run_cargo_streamed(
-        "build",
-        args,
-        verbose,
-        Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label("build"))),
-    )
+    if args.iter().any(|arg| arg == "--version") {
+        return Some(ExactReason::Interactive);
+    }
+    if has_json_message_format(args)
+        || args
+            .iter()
+            .any(|arg| arg == "--timings=json" || arg.starts_with("--timings=json="))
+    {
+        return Some(ExactReason::Structured);
+    }
+    None
+}
+
+fn run_cargo_exact(
+    subcommand: &'static str,
+    args: &[String],
+    verbose: u8,
+    reason: ExactReason,
+) -> Result<i32> {
+    let restored_args = args_utils::restore_double_dash(args);
+    let command_args = std::iter::once(OsString::from(subcommand))
+        .chain(restored_args.iter().map(OsString::from))
+        .collect::<Vec<_>>();
+    runner::run_passthrough_with_reason("cargo", &command_args, verbose, reason)
+}
+
+fn run_build(args: &[String], verbose: u8) -> Result<i32> {
+    if let Some(reason) = cargo_exact_reason(args) {
+        return run_cargo_exact("build", args, verbose, reason);
+    }
+    run_cargo_semantic("build", args, verbose, |output, exit| {
+        filter_cargo_build_labeled(output, "build", exit)
+    })
 }
 
 fn run_test(args: &[String], verbose: u8) -> Result<i32> {
-    // No json branch here on purpose: --message-format=json only reformats the
-    // build phase, the test harness output stays human-readable. CargoTestHandler
-    // reads both — it aggregates the `test result:` lines and, on a compile error,
-    // parses the json diagnostics in format_summary.
-    run_cargo_streamed(
-        "test",
-        args,
-        verbose,
-        Box::new(BlockStreamFilter::new(CargoTestHandler::new())),
-    )
+    if let Some(reason) = cargo_exact_reason(args) {
+        return run_cargo_exact("test", args, verbose, reason);
+    }
+    // The shared semantic runner captures the complete human-readable test
+    // stream once, then lets the existing summary parser select failures and
+    // aggregate pass totals under the diagnostic budget.
+    run_cargo_semantic("test", args, verbose, |output, _exit| {
+        filter_cargo_test(output)
+    })
 }
 
 fn run_clippy(args: &[String], verbose: u8) -> Result<i32> {
-    if has_json_message_format(args) {
-        return run_cargo_filtered_with_exit("clippy", args, verbose, filter_cargo_clippy_json);
+    if let Some(reason) = cargo_exact_reason(args) {
+        return run_cargo_exact("clippy", args, verbose, reason);
     }
-    run_cargo_filtered("clippy", args, verbose, filter_cargo_clippy)
+    run_cargo_semantic("clippy", args, verbose, |output, _exit| {
+        filter_cargo_clippy(output)
+    })
 }
 
 fn run_check(args: &[String], verbose: u8) -> Result<i32> {
-    if has_json_message_format(args) {
-        return run_cargo_filtered_with_exit("check", args, verbose, |o, exit| {
-            filter_cargo_build_labeled(o, "check", exit)
-        });
+    if let Some(reason) = cargo_exact_reason(args) {
+        return run_cargo_exact("check", args, verbose, reason);
     }
-    run_cargo_streamed(
-        "check",
-        args,
-        verbose,
-        Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label("check"))),
-    )
+    run_cargo_semantic("check", args, verbose, |output, exit| {
+        filter_cargo_build_labeled(output, "check", exit)
+    })
 }
 
 fn run_install(args: &[String], verbose: u8) -> Result<i32> {
@@ -1435,6 +1490,7 @@ fn filter_cargo_clippy(output: &str) -> String {
     result.trim().to_string()
 }
 
+#[cfg(test)]
 fn filter_cargo_clippy_json(output: &str, exit_code: i32) -> String {
     let json = extract_json_diagnostics(output);
     if json.errors.is_empty() && json.warnings.is_empty() && exit_code == 0 {
@@ -1646,6 +1702,37 @@ test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
         );
         assert!(!result.contains("Compiling"));
         assert!(!result.contains("test utils"));
+    }
+
+    #[test]
+    fn cargo_semantic_document_preserves_failure_identity_and_exit() {
+        let raw = "test result: FAILED. 998 passed; 2 failed\n";
+        let document = cargo_summary_document(
+            raw,
+            "FAILURES (2):\n1. test alpha::one\n2. test beta::two\n".into(),
+            "test",
+            101,
+        );
+        let rendered = crate::core::ai_output::render(&document, BudgetClass::Diagnostic);
+
+        assert!(rendered.text.contains("status=failed"));
+        assert!(rendered.text.contains("exit=101"));
+        assert!(rendered.text.contains("alpha::one"));
+        assert!(rendered.text.contains("beta::two"));
+        assert!(rendered.omission.is_some());
+    }
+
+    #[test]
+    fn cargo_semantic_document_reports_empty_failure_without_success() {
+        let document = cargo_summary_document("", String::new(), "build", 101);
+        let rendered = crate::core::ai_output::render(&document, BudgetClass::Diagnostic);
+
+        assert!(rendered.text.contains("status=failed"));
+        assert!(rendered.text.contains("exit=101"));
+        assert!(rendered
+            .text
+            .contains("producer failed; no diagnostic text was captured"));
+        assert!(!rendered.text.contains("ok"));
     }
 
     #[test]

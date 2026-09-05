@@ -29,10 +29,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: phpunit {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "phpunit",
         &args.join(" "),
+        crate::core::ai_output::BudgetClass::Diagnostic,
         filter_phpunit_output,
         runner::RunOptions::stdout_only().tee("phpunit"),
     )

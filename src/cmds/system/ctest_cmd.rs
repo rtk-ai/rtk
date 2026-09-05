@@ -85,10 +85,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: ctest {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "ctest",
         &args.join(" "),
+        crate::core::ai_output::BudgetClass::Diagnostic,
         filter_ctest_output,
         RunOptions::with_tee("ctest"),
     )

@@ -76,13 +76,14 @@ Exact routes retain native I/O and record why semantic capture is unsafe through
 
 ### Filter modes
 
-Captured and passthrough execution is implemented by `core::stream::run_streaming()` with one of four `FilterMode` variants. Production command-module wrappers currently select `CaptureOnly`, `Streaming`, or `Passthrough`; `Buffered` remains internal/test support and has no current wrapper call site. These modes explain existing internals, not an authoring menu. New routes select the semantic or exact contract above, while `run_filtered()` and `run_streamed()` remain only for migration compatibility.
+Captured and passthrough execution is implemented by `core::stream::run_streaming()` with one of five `FilterMode` variants. Production command-module wrappers select semantic capture, bounded stdout streaming, passthrough, or a narrowly retained legacy acknowledgement path; `Buffered` remains internal/test support. These modes explain existing internals, not an authoring menu. New routes select the semantic or exact contract above.
 
 | FilterMode | How it works | Used by |
 |------------|-------------|---------|
 | **`CaptureOnly`** | Buffers stdout, then produces an `AiDocument` or a legacy string post-hoc. Stderr streams to the terminal in real time. | `run_ai_filtered()`; legacy `run_filtered()` |
 | **`Buffered`** | Buffers stdout, applies a string filter, then prints the result. Stderr streams live. | Retained internal/test support; no current command-module runner selects it |
-| **`Streaming`** | Feeds each stdout line to a legacy `StreamFilter`, emitting strings immediately and flushing after process exit. | Legacy `run_streamed()` compatibility paths |
+| **`Streaming`** | Feeds each stdout line to a legacy `StreamFilter`, emitting strings immediately and flushing after process exit. | Legacy `run_streamed()` compatibility paths and tests |
+| **`StreamingStdout`** | Feeds bounded, lossy-decoded stdout lines to a semantic `StreamFilter`; stderr remains outside the parser and full producer byte counts are tracked. | Bounded high-volume search output |
 | **`Passthrough`** | Inherits the parent TTY directly — no piping, buffering, or captured residual size. | `run_passthrough_with_reason()` |
 
 ### When to use which
@@ -90,12 +91,14 @@ Captured and passthrough execution is implemented by `core::stream::run_streamin
 | Scenario | Runner | FilterMode | Why |
 |----------|--------|------------|-----|
 | Parse safe semantic text into facts/records | `run_ai_filtered()` | CaptureOnly | Parser produces an `AiDocument`; shared rendering enforces its budget |
+| Adapt an existing bounded filter while its parser is being replaced | `run_ai_from_filter()` | CaptureOnly | Adds semantic framing and recovery accounting without changing the specialized filter's selection logic |
 | Preserve an existing string filter during migration | `run_filtered()` | CaptureOnly | Compatibility only; current wrapper does not select Buffered; do not use for new routes |
 | Preserve an existing streamed string filter during migration | `run_streamed()` | Streaming | Compatibility only; do not use for new routes |
 | New long-running or streaming output | `run_passthrough_with_reason(..., ExactReason::Streaming)` | Passthrough | Preserves timing, ordering, and native stream semantics |
+| Bounded line-oriented semantic output | `run_streaming_with_line_cap(..., FilterMode::StreamingStdout)` | StreamingStdout | Drains arbitrarily long producer lines without retaining them unboundedly; use only with a parser that declares incomplete recovery |
 | New interactive output | `run_passthrough_with_reason(..., ExactReason::Interactive)` | Passthrough | Preserves the native TTY and user interaction |
 | Output must remain exact | `run_passthrough_with_reason()` | Passthrough | Preserves native I/O and records the exact-route reason |
-| Custom direct output logic | Manual with `exec_capture()` | CaptureOnly | Migration debt; move it behind a shared runner when that command family is migrated |
+| Custom direct output logic | Manual with `exec_capture()` | CaptureOnly | Remaining migration debt; record the exact/compatibility reason in `docs/validation/legacy-output-inventory.md` |
 
 ### Phases
 

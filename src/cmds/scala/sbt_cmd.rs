@@ -102,10 +102,11 @@ fn run_task(
         format!("{} {}", sbt_task, rest.join(" "))
     };
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "sbt",
         &args_display,
+        crate::core::ai_output::BudgetClass::Diagnostic,
         filter,
         RunOptions::with_tee(tee_label),
     )
@@ -161,10 +162,11 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
             format!("{} {}", subcommand, rest.join(" "))
         };
 
-        return runner::run_filtered(
+        return runner::run_ai_from_filter(
             cmd,
             "sbt",
             &args_display,
+            crate::core::ai_output::BudgetClass::Diagnostic,
             filter_sbt_test,
             RunOptions::with_tee(tee_label),
         );

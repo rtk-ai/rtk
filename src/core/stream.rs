@@ -23,20 +23,106 @@ use regex::Regex;
 /// [`decode_process_output`](super::utils::decode_process_output) exists to
 /// read, so the streamed path decodes them the same way the captured path
 /// does rather than going straight to U+FFFD.
-fn read_lines_lossy(reader: impl Read) -> impl Iterator<Item = String> {
-    BufReader::new(reader).split(b'\n').filter_map(|res| {
-        let mut buf = match res {
-            Ok(buf) => buf,
-            Err(e) => {
-                eprintln!("rtk: stream read error: {}", e);
-                return None;
-            }
-        };
-        if buf.last() == Some(&b'\r') {
-            buf.pop();
+pub(crate) const TRUNCATED_LINE_MARKER: &str = " [rtk: line truncated]";
+
+struct DecodedLine {
+    text: String,
+    /// Number of producer bytes consumed for this line, including its newline
+    /// when one was present. This remains exact when the retained text is
+    /// bounded, so accounting does not mistake a huge line for a tiny result.
+    bytes: usize,
+}
+
+struct LossyLines<R> {
+    reader: BufReader<R>,
+    max_line_bytes: Option<usize>,
+}
+
+impl<R: Read> LossyLines<R> {
+    fn new(reader: R, max_line_bytes: Option<usize>) -> Self {
+        Self {
+            reader: BufReader::new(reader),
+            max_line_bytes,
         }
-        Some(super::utils::decode_process_output(&buf))
-    })
+    }
+}
+
+impl<R: Read> Iterator for LossyLines<R> {
+    type Item = DecodedLine;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let max_line_bytes = self.max_line_bytes;
+        let mut retained = Vec::new();
+        let mut consumed = 0usize;
+        let mut truncated = false;
+
+        loop {
+            let buffer = match self.reader.fill_buf() {
+                Ok(buffer) => buffer,
+                Err(error) => {
+                    eprintln!("rtk: stream read error: {}", error);
+                    return None;
+                }
+            };
+            if buffer.is_empty() {
+                if consumed == 0 {
+                    return None;
+                }
+                break;
+            }
+
+            let buffer_len = buffer.len();
+            let before_newline = buffer
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .unwrap_or(buffer_len);
+            let retain_limit = max_line_bytes.unwrap_or(usize::MAX);
+            let available = retain_limit.saturating_sub(retained.len());
+            let retain = before_newline.min(available);
+            if retain > 0 {
+                retained.extend_from_slice(&buffer[..retain]);
+            }
+            if retain < before_newline {
+                truncated = true;
+            }
+
+            let has_newline = before_newline < buffer_len;
+            let consumed_now = if has_newline {
+                before_newline + 1
+            } else {
+                buffer_len
+            };
+            self.reader.consume(consumed_now);
+            consumed = consumed.saturating_add(consumed_now);
+
+            if has_newline {
+                break;
+            }
+        }
+
+        if !truncated && retained.last() == Some(&b'\r') {
+            retained.pop();
+        }
+        if truncated {
+            retained.extend_from_slice(TRUNCATED_LINE_MARKER.as_bytes());
+        }
+
+        Some(DecodedLine {
+            text: super::utils::decode_process_output(&retained),
+            bytes: consumed,
+        })
+    }
+}
+
+fn read_lines_lossy(reader: impl Read) -> impl Iterator<Item = String> {
+    LossyLines::new(reader, None).map(|line| line.text)
+}
+
+fn read_decoded_lines(
+    reader: impl Read,
+    max_line_bytes: Option<usize>,
+) -> impl Iterator<Item = DecodedLine> {
+    LossyLines::new(reader, max_line_bytes)
 }
 
 pub trait StreamFilter {
@@ -47,6 +133,7 @@ pub trait StreamFilter {
     }
 }
 
+#[allow(dead_code)]
 pub trait BlockHandler {
     /// Rewrite a raw line before it is matched or emitted — the place to
     /// strip ANSI escapes for tools that colour by default. Identity unless
@@ -60,6 +147,7 @@ pub trait BlockHandler {
     fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String>;
 }
 
+#[allow(dead_code)]
 pub struct BlockStreamFilter<H: BlockHandler> {
     handler: H,
     in_block: bool,
@@ -67,6 +155,7 @@ pub struct BlockStreamFilter<H: BlockHandler> {
     blocks_emitted: usize,
 }
 
+#[allow(dead_code)]
 impl<H: BlockHandler> BlockStreamFilter<H> {
     pub fn new(handler: H) -> Self {
         Self {
@@ -240,6 +329,10 @@ pub trait StdinFilter: Send {
 
 pub enum FilterMode<'a> {
     Streaming(Box<dyn StreamFilter + 'a>),
+    /// Stream stdout through a filter while preserving stderr byte-for-byte.
+    /// This is useful for semantic adapters whose producer diagnostics must
+    /// remain on stderr and must never be parsed as stdout records.
+    StreamingStdout(Box<dyn StreamFilter + 'a>),
     #[allow(dead_code)]
     Buffered(Box<dyn Fn(&str) -> String + 'a>),
     CaptureOnly,
@@ -473,6 +566,20 @@ pub fn run_streaming(
     stdin_mode: StdinMode,
     stdout_mode: FilterMode<'_>,
 ) -> Result<StreamResult> {
+    run_streaming_with_line_cap(cmd, stdin_mode, stdout_mode, None)
+}
+
+/// Like [`run_streaming`], but bounds the memory used for an individual
+/// producer line. The producer is still drained to completion and the returned
+/// byte count remains the full observed size. A bounded line gets an explicit
+/// marker in the text delivered to the filter, so semantic adapters can report
+/// loss without treating the prefix as complete native output.
+pub fn run_streaming_with_line_cap(
+    cmd: &mut Command,
+    stdin_mode: StdinMode,
+    stdout_mode: FilterMode<'_>,
+    max_line_bytes: Option<usize>,
+) -> Result<StreamResult> {
     if matches!(stdout_mode, FilterMode::Passthrough) {
         match &stdin_mode {
             StdinMode::Inherit => {
@@ -516,7 +623,11 @@ pub fn run_streaming(
         }
     }
 
-    let is_streaming = matches!(stdout_mode, FilterMode::Streaming(_));
+    let is_streaming = matches!(
+        stdout_mode,
+        FilterMode::Streaming(_) | FilterMode::StreamingStdout(_)
+    );
+    let filter_stdout_only = matches!(stdout_mode, FilterMode::StreamingStdout(_));
     let is_capture_only = matches!(stdout_mode, FilterMode::CaptureOnly);
 
     let mut child = ChildGuard(cmd.spawn().context("Failed to spawn process")?);
@@ -553,7 +664,7 @@ pub fn run_streaming(
     let mut raw_stderr = String::new();
     let mut raw_stdout_bytes = Vec::new();
     let mut raw_stderr_bytes = Vec::new();
-    let mut observed_output_bytes = 0;
+    let mut observed_output_bytes: usize = 0;
     let mut filtered = String::new();
     let mut capped_out = false;
     let mut capped_err = false;
@@ -563,39 +674,47 @@ pub fn run_streaming(
 
     if is_streaming {
         enum StreamLine {
-            Stdout(String),
-            Stderr(String),
+            Stdout(DecodedLine),
+            Stderr(DecodedLine),
         }
 
         let (tx, rx) = mpsc::channel();
         let tx_out = tx.clone();
         let stdout_thread = std::thread::spawn(move || {
-            for line in read_lines_lossy(stdout) {
+            for line in read_decoded_lines(stdout, max_line_bytes) {
                 if tx_out.send(StreamLine::Stdout(line)).is_err() {
                     break;
                 }
             }
         });
         let tx_err = tx;
+        let stderr_line_cap = if filter_stdout_only {
+            None
+        } else {
+            max_line_bytes
+        };
         let stderr_thread = std::thread::spawn(move || {
-            for line in read_lines_lossy(stderr) {
+            for line in read_decoded_lines(stderr, stderr_line_cap) {
                 if tx_err.send(StreamLine::Stderr(line)).is_err() {
                     break;
                 }
             }
         });
 
-        if let FilterMode::Streaming(mut filter) = stdout_mode {
+        if let FilterMode::Streaming(mut filter) | FilterMode::StreamingStdout(mut filter) =
+            stdout_mode
+        {
             let stdout_handle = io::stdout();
             let mut out = stdout_handle.lock();
             let stderr_handle = io::stderr();
             let mut err_out = stderr_handle.lock();
 
             for msg in rx {
-                let (line, is_stderr) = match msg {
-                    StreamLine::Stderr(l) => (l, true),
-                    StreamLine::Stdout(l) => (l, false),
+                let (line, line_bytes, is_stderr) = match msg {
+                    StreamLine::Stderr(line) => (line.text, line.bytes, true),
+                    StreamLine::Stdout(line) => (line.text, line.bytes, false),
                 };
+                observed_output_bytes = observed_output_bytes.saturating_add(line_bytes);
                 if is_stderr {
                     if !capped_err {
                         if raw_stderr.len() + line.len() < RAW_CAP {
@@ -615,6 +734,13 @@ pub fn run_streaming(
                         eprintln!("[rtk] warning: stdout exceeds 10 MiB — filter input truncated");
                     }
                 }
+                if filter_stdout_only && is_stderr {
+                    if writeln!(err_out, "{}", line).is_err() {
+                        break;
+                    }
+                    continue;
+                }
+
                 filter_fd_is_stderr = is_stderr;
                 if let Some(output) = filter.feed_line(&line) {
                     filtered.push_str(&output);
@@ -712,7 +838,9 @@ pub fn run_streaming(
 
             match stdout_mode {
                 FilterMode::Passthrough => unreachable!("handled by early-return above"),
-                FilterMode::Streaming(_) => unreachable!("handled by is_streaming branch"),
+                FilterMode::Streaming(_) | FilterMode::StreamingStdout(_) => {
+                    unreachable!("handled by is_streaming branch")
+                }
                 FilterMode::Buffered(filter_fn) => {
                     for line in read_lines_lossy(stdout) {
                         if raw_stdout.len() + line.len() < RAW_CAP {
@@ -878,6 +1006,22 @@ pub(crate) mod tests {
     fn test_read_lines_lossy_no_trailing_newline() {
         let lines: Vec<String> = read_lines_lossy(&b"only line"[..]).collect();
         assert_eq!(lines, vec!["only line".to_string()]);
+    }
+
+    #[test]
+    fn bounded_lines_keep_the_prefix_marker_and_full_byte_count() {
+        let input = format!("prefix{}\nnext\n", "x".repeat(32));
+        let mut lines = LossyLines::new(input.as_bytes(), Some(16));
+
+        let first = lines.next().expect("first line");
+        assert_eq!(first.bytes, 39);
+        assert!(first.text.starts_with("prefixxxxxxxxxxx"));
+        assert!(first.text.ends_with(TRUNCATED_LINE_MARKER));
+
+        let second = lines.next().expect("second line");
+        assert_eq!(second.text, "next");
+        assert_eq!(second.bytes, 5);
+        assert!(lines.next().is_none());
     }
 
     #[test]

@@ -120,6 +120,13 @@ enum Commands {
         /// Keep only last N lines
         #[arg(long, conflicts_with = "max_lines")]
         tail_lines: Option<usize>,
+        /// Read an inclusive one-based source range (START:END)
+        #[arg(
+            long,
+            value_parser = read::parse_line_range_arg,
+            conflicts_with_all = ["max_lines", "tail_lines"]
+        )]
+        lines: Option<read::LineRange>,
         /// Show line numbers
         #[arg(short = 'n', long)]
         line_numbers: bool,
@@ -534,6 +541,39 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// CMake build/configuration output with compact diagnostics
+    Cmake {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Ninja build output with compact diagnostics
+    Ninja {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// ESP-IDF output with compact diagnostics
+    Idf {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// cppcheck output with compact diagnostics
+    Cppcheck {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Run a resolved compiler executable with compact diagnostics
+    Compiler {
+        /// Target compiler executable or full path; never replaced by host gcc.
+        #[arg(long)]
+        program: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Prisma commands with compact output (no ASCII art)
     Prisma {
         #[command(subcommand)]
@@ -641,8 +681,15 @@ enum Commands {
         format: String,
     },
 
-    /// Show RTK adoption across Claude Code sessions
-    Session {},
+    /// Show RTK adoption across an agent's sessions
+    Session {
+        /// Host transcript source: claude or codex
+        #[arg(long, default_value = "claude")]
+        host: String,
+        /// Output format: text or json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
 
     /// Interactive local dashboard for savings, commands, health, and tee artifacts
     #[command(alias = "tui")]
@@ -968,14 +1015,38 @@ enum Commands {
         command: HookCommands,
     },
 
+    /// Inspect RTK integration state without changing configuration.
+    Doctor {
+        /// Host to inspect: codex or claude.
+        #[arg(long, default_value = "codex")]
+        agent: String,
+        /// Output format: text or json.
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+
     /// Run the local synchronous stdio MCP server.
-    Mcp,
+    Mcp {
+        /// Default execution response envelope: compact or legacy.
+        #[arg(long, default_value = "compact")]
+        response_mode: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 enum HookCommands {
-    /// Process Claude Code PreToolUse hook (reads JSON from stdin)
-    Claude,
+    /// Process Codex CLI PreToolUse hook (reads JSON from stdin)
+    Codex {
+        /// Hook event: pre-tool-use or subagent-start.
+        #[arg(long, default_value = "pre-tool-use")]
+        event: String,
+    },
+    /// Process Claude Code hook (reads JSON from stdin)
+    Claude {
+        /// Hook event: pre-tool-use or post-tool-use.
+        #[arg(long, default_value = "pre-tool-use")]
+        event: String,
+    },
     /// Process Cursor Agent hook (reads JSON from stdin)
     Cursor,
     /// Process Gemini CLI BeforeTool hook (reads JSON from stdin)
@@ -1921,6 +1992,7 @@ fn run_cli() -> Result<i32> {
             level,
             max_lines,
             tail_lines,
+            lines,
             line_numbers,
         } => {
             if let Some(identifier) = recovery {
@@ -1931,6 +2003,7 @@ fn run_cli() -> Result<i32> {
                         max_lines,
                         tail_lines,
                         line_numbers,
+                        lines,
                         cli.verbose,
                     ) {
                         Ok(()) => 0,
@@ -1954,7 +2027,14 @@ fn run_cli() -> Result<i32> {
                             continue;
                         }
                         stdin_seen = true;
-                        read::run_stdin(level, max_lines, tail_lines, line_numbers, cli.verbose)
+                        read::run_stdin(
+                            level,
+                            max_lines,
+                            tail_lines,
+                            line_numbers,
+                            lines,
+                            cli.verbose,
+                        )
                     } else {
                         read::run(
                             file,
@@ -1962,6 +2042,7 @@ fn run_cli() -> Result<i32> {
                             max_lines,
                             tail_lines,
                             line_numbers,
+                            lines,
                             cli.verbose,
                         )
                     };
@@ -2534,6 +2615,18 @@ fn run_cli() -> Result<i32> {
 
         Commands::Ctest { args } => ctest_cmd::run(&args, cli.verbose)?,
 
+        Commands::Cmake { args } => cmds::build::run_tool("cmake", &args, cli.verbose)?,
+
+        Commands::Ninja { args } => cmds::build::run_tool("ninja", &args, cli.verbose)?,
+
+        Commands::Idf { args } => cmds::build::run_tool("idf.py", &args, cli.verbose)?,
+
+        Commands::Cppcheck { args } => cmds::build::run_tool("cppcheck", &args, cli.verbose)?,
+
+        Commands::Compiler { program, args } => {
+            cmds::build::run_tool(&program, &args, cli.verbose)?
+        }
+
         Commands::Prisma { command } => match command {
             PrismaCommands::Generate { args } => {
                 prisma_cmd::run(prisma_cmd::PrismaCommand::Generate, &args, cli.verbose)?
@@ -2667,8 +2760,8 @@ fn run_cli() -> Result<i32> {
             0
         }
 
-        Commands::Session {} => {
-            analytics::session_cmd::run(cli.verbose)?;
+        Commands::Session { host, format } => {
+            analytics::session_cmd::run(&host, &format, cli.verbose)?;
             0
         }
 
@@ -2830,8 +2923,18 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Hook { command } => match command {
-            HookCommands::Claude => {
-                hooks::hook_cmd::run_claude()?;
+            HookCommands::Codex { event } => {
+                hooks::hook_cmd::run_codex(&event)?;
+                0
+            }
+            HookCommands::Claude { event } => {
+                if event == "post-tool-use" {
+                    hooks::output_adapter::run_claude_post_tool_use()?;
+                } else if event == "pre-tool-use" {
+                    hooks::hook_cmd::run_claude()?;
+                } else {
+                    anyhow::bail!("unsupported Claude hook event: {event}");
+                }
                 0
             }
             HookCommands::Cursor => {
@@ -2854,9 +2957,29 @@ fn run_cli() -> Result<i32> {
                 hooks::hook_cmd::run_vibe()?;
                 0
             }
-            HookCommands::Check { agent: _, command } => {
+            HookCommands::Check { agent, command } => {
                 use crate::discover::registry::rewrite_command;
                 let raw = command.join(" ");
+                if agent.eq_ignore_ascii_case("codex") {
+                    let status = hooks::hook_check::codex_status();
+                    println!("Codex PreToolUse hook: {}", status.as_str());
+                    println!("Codex rewrite policy: only permission_mode=bypassPermissions; approval-mode calls remain unchanged");
+                    if raw.is_empty() {
+                        return Ok(if status == hooks::hook_check::CodexHookStatus::Ready {
+                            0
+                        } else {
+                            1
+                        });
+                    }
+                    println!(
+                        "Codex command check: unchanged (permission mode is supplied by Codex)"
+                    );
+                    return Ok(if status == hooks::hook_check::CodexHookStatus::Ready {
+                        0
+                    } else {
+                        1
+                    });
+                }
                 let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
                 match rewrite_command(&raw, &excluded, &transparent_prefixes) {
                     Some(rewritten) => {
@@ -2871,7 +2994,15 @@ fn run_cli() -> Result<i32> {
             }
         },
 
-        Commands::Mcp => {
+        Commands::Doctor { agent, format } => {
+            hooks::doctor::run(&agent, &format)?;
+            0
+        }
+        Commands::Mcp { response_mode } => {
+            if !matches!(response_mode.as_str(), "compact" | "legacy") {
+                anyhow::bail!("response-mode must be compact or legacy");
+            }
+            std::env::set_var("RTK_MCP_RESPONSE_MODE", &response_mode);
             service::mcp::run()?;
             0
         }
@@ -3734,6 +3865,11 @@ mod tests {
             "bun",
             "bunx",
             "deno",
+            "cmake",
+            "ninja",
+            "idf",
+            "cppcheck",
+            "compiler",
         ];
 
         let unclassified: Vec<String> = Cli::command()
@@ -3811,7 +3947,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Commands::Hook {
-                command: HookCommands::Claude
+                command: HookCommands::Claude { .. }
             }
         ));
     }

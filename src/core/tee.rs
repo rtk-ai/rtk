@@ -542,8 +542,26 @@ fn resolve_lossless_recovery_file(identifier: &str, tee_dir: &std::path::Path) -
     {
         return None;
     }
-    let path = tee_dir.join(identifier);
-    path.is_file().then_some(path)
+    let root = normalize_canonical_path(tee_dir.canonicalize().ok()?);
+    let path = normalize_canonical_path(tee_dir.join(identifier).canonicalize().ok()?);
+    if !path.starts_with(&root) || !path.is_file() {
+        return None;
+    }
+    Some(path)
+}
+
+fn normalize_canonical_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let display = path.to_string_lossy();
+        if let Some(rest) = display.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{}", rest));
+        }
+        if let Some(rest) = display.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    path
 }
 
 pub(crate) fn resolve_lossless_recovery(identifier: &str) -> Option<PathBuf> {

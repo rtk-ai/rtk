@@ -1,5 +1,6 @@
 //! Filters Go command output — test results, build errors, vet warnings.
 
+use crate::core::ai_output::{BudgetClass, ExactReason};
 use crate::core::guard::never_worse;
 use crate::core::runner;
 use crate::core::stream::{exec_capture, CaptureResult};
@@ -67,17 +68,18 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
         );
     }
 
-    let filter: fn(&str) -> String = if skip_json {
-        |s: &str| s.to_string()
-    } else {
-        filter_go_test_json
-    };
+    if skip_json {
+        let mut exact_args = vec![OsString::from("test")];
+        exact_args.extend(args.iter().map(OsString::from));
+        return runner::run_passthrough_with_reason("go", &exact_args, verbose, ExactReason::Structured);
+    }
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "go test",
-        &args.join(" "),
-        filter,
+        &format!("-json {}", args.join(" ")),
+        BudgetClass::Diagnostic,
+        filter_go_test_json,
         crate::core::runner::RunOptions::stdout_only().tee("go_test"),
     )
 }
@@ -94,11 +96,19 @@ pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: go build {}", args.join(" "));
     }
 
-    runner::run_filtered_with_exit(
+    runner::run_ai_filtered_with_exit(
         cmd,
         "go build",
         &args.join(" "),
-        filter_go_build_with_exit,
+        BudgetClass::Diagnostic,
+        |raw, exit_code| {
+            Ok(runner::document_from_filtered(
+                raw,
+                &filter_go_build_with_exit(raw, exit_code),
+                "go build",
+                exit_code,
+            ))
+        },
         crate::core::runner::RunOptions::with_tee("go_build"),
     )
 }
@@ -115,10 +125,11 @@ pub fn run_vet(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: go vet {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "go vet",
         &args.join(" "),
+        BudgetClass::Diagnostic,
         filter_go_vet,
         crate::core::runner::RunOptions::with_tee("go_vet"),
     )

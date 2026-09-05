@@ -1,6 +1,7 @@
 //! Filters directory listings into a compact tree format.
 
 use super::constants::NOISE_DIRS;
+use crate::core::ai_output::BudgetClass;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_INVENTORY;
 use crate::core::utils::resolved_command;
@@ -107,10 +108,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         args.join(" ")
     };
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "ls",
         &label,
+        BudgetClass::Collection,
         |raw| {
             let (entries, parsed_count, truncated, filtered) = compact_ls(raw, show_all, show_long);
 

@@ -2,7 +2,7 @@
 
 use crate::core::utils::format_tokens;
 use crate::discover::is_already_rtk;
-use crate::discover::provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
+use crate::discover::provider::{ClaudeProvider, CodexProvider, ExtractedCommand, SessionProvider};
 use crate::discover::registry::{classify_command, split_command_chain, Classification};
 use anyhow::{Context, Result};
 use std::fs;
@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 /// A summarized session for display.
 struct SessionSummary {
+    host: String,
     id: String,
     date: String,
     total_cmds: usize,
@@ -59,8 +60,12 @@ fn progress_bar(pct: f64, width: usize) -> String {
     format!("{}{}", "@".repeat(filled), ".".repeat(empty))
 }
 
-pub fn run(_verbose: u8) -> Result<()> {
-    let provider = ClaudeProvider;
+pub fn run(host: &str, format: &str, _verbose: u8) -> Result<()> {
+    let provider: Box<dyn SessionProvider> = match host.to_ascii_lowercase().as_str() {
+        "claude" => Box::new(ClaudeProvider),
+        "codex" => Box::new(CodexProvider),
+        _ => anyhow::bail!("host must be claude or codex"),
+    };
     let sessions = provider
         .discover_sessions(None, Some(30))
         .context("Failed to discover Claude Code sessions")?;
@@ -71,14 +76,9 @@ pub fn run(_verbose: u8) -> Result<()> {
         return Ok(());
     }
 
-    // Group JSONL files by parent session (ignore subagent files)
-    let mut session_files: Vec<PathBuf> = sessions
-        .into_iter()
-        .filter(|p| {
-            // Skip subagent files — only top-level session JSONL
-            !p.to_string_lossy().contains("subagents")
-        })
-        .collect();
+    // Keep child sessions in the report. Their identities are separate files
+    // and are not added again to the parent command count.
+    let mut session_files: Vec<PathBuf> = sessions;
 
     // Sort by mtime desc
     session_files.sort_by(|a, b| {
@@ -134,6 +134,7 @@ pub fn run(_verbose: u8) -> Result<()> {
             .unwrap_or_else(|_| "?".to_string());
 
         summaries.push(SessionSummary {
+            host: host.to_ascii_lowercase(),
             id: short_id.to_string(),
             date,
             total_cmds,
@@ -143,12 +144,33 @@ pub fn run(_verbose: u8) -> Result<()> {
     }
 
     if summaries.is_empty() {
-        println!("No sessions with Bash commands found.");
+        println!("No {host} sessions with shell commands found.");
+        return Ok(());
+    }
+
+    if format.eq_ignore_ascii_case("json") {
+        let reports = summaries
+            .iter()
+            .map(|summary| {
+                serde_json::json!({
+                    "host": summary.host,
+                    "session": summary.id,
+                    "date": summary.date,
+                    "commands": summary.total_cmds,
+                    "rtk_commands": summary.rtk_cmds,
+                    "adoption_pct": summary.adoption_pct(),
+                    "output_tokens": summary.output_tokens,
+                    "execution_observed": false,
+                    "coverage_note": "session transcript classification; use tracking DB for observed execution"
+                })
+            })
+            .collect::<Vec<_>>();
+        println!("{}", serde_json::to_string_pretty(&reports)?);
         return Ok(());
     }
 
     // Display table
-    let header = "RTK Session Overview (last 10)";
+    let header = format!("RTK Session Overview ({host}, last 10)");
     println!("{}", header);
     println!("{}", "-".repeat(70));
     println!(
@@ -342,6 +364,7 @@ mod tests {
     #[test]
     fn test_adoption_pct_zero_division() {
         let s = SessionSummary {
+            host: "claude".to_string(),
             id: "x".to_string(),
             date: "Today".to_string(),
             total_cmds: 0,
@@ -354,6 +377,7 @@ mod tests {
     #[test]
     fn test_adoption_pct_75_percent() {
         let s = SessionSummary {
+            host: "claude".to_string(),
             id: "x".to_string(),
             date: "Today".to_string(),
             total_cmds: 20,

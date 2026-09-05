@@ -6,8 +6,8 @@ use std::process::Command;
 use std::sync::LazyLock;
 
 use crate::core::ai_output::{
-    prepare_emission_with_baseline, render, AiDocument, BudgetClass, EmissionMeta, ExactReason,
-    OutputContract,
+    prepare_emission_with_baseline, render, render_with_max_tokens, AiDocument, AiRecord,
+    BudgetClass, EmissionMeta, ExactReason, Omission, OutputContract, Severity,
 };
 use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
 use crate::core::tracking;
@@ -173,6 +173,20 @@ where
         .unwrap_or_else(|error| AiDocument::parse_failure(text, &error.to_string()))
 }
 
+const MIN_REQUESTED_MAX_TOKENS: usize = 64;
+const MAX_REQUESTED_MAX_TOKENS: usize = 65_536;
+
+fn parse_requested_max_tokens(value: Option<&str>) -> Option<usize> {
+    let value = value?.parse().ok()?;
+    (MIN_REQUESTED_MAX_TOKENS..=MAX_REQUESTED_MAX_TOKENS)
+        .contains(&value)
+        .then_some(value)
+}
+
+pub(crate) fn requested_max_tokens() -> Option<usize> {
+    parse_requested_max_tokens(std::env::var("RTK_MAX_OUTPUT_TOKENS").ok().as_deref())
+}
+
 fn track_captured_emission(
     timer: tracking::TimedExecution,
     cmd_label: &str,
@@ -312,6 +326,7 @@ where
         raw
     };
     let document = produce_document(text_to_filter, exit_code, filter_fn);
+    let requested_max_tokens = requested_max_tokens();
 
     let raw_for_tracking = if opts.filter_stdout_only {
         raw_stdout
@@ -340,7 +355,7 @@ where
             (shown, EmissionMeta::default())
         }
         CapturedContract::Ai(budget) => {
-            let rendered = render(&document, budget);
+            let rendered = render_with_max_tokens(&document, budget, requested_max_tokens);
             let command_slug = opts.tee_label.unwrap_or(cmd_label);
             let prepared = prepare_emission_with_baseline(
                 lossless_baseline,
@@ -473,6 +488,7 @@ where
     )
 }
 
+#[allow(dead_code)] // Retained for compatibility with external adapters during migration.
 pub fn run_filtered_with_exit<F>(
     cmd: Command,
     tool_name: &str,
@@ -538,6 +554,108 @@ where
         },
         opts,
     )
+}
+
+/// Adapt an existing bounded string filter to the semantic output contract.
+///
+/// This is intentionally a migration helper, not a replacement for a
+/// command-specific parser. The existing filter remains responsible for
+/// deciding what content is useful; this wrapper adds status/exit facts,
+/// severity ordering, omission accounting, and the shared recovery/no-worse
+/// emission policy.
+pub fn run_ai_from_filter<F>(
+    cmd: Command,
+    tool_name: &str,
+    args_display: &str,
+    budget: BudgetClass,
+    filter_fn: F,
+    opts: RunOptions<'_>,
+) -> Result<i32>
+where
+    F: Fn(&str) -> String,
+{
+    run_ai_filtered_with_exit(
+        cmd,
+        tool_name,
+        args_display,
+        budget,
+        move |raw, exit_code| {
+            let filtered = filter_fn(raw);
+            Ok(document_from_filtered(
+                raw,
+                &filtered,
+                args_display,
+                exit_code,
+            ))
+        },
+        opts,
+    )
+}
+
+/// Build a conservative semantic document around a legacy filter result.
+///
+/// The wrapper deliberately does not invent success when the producer failed
+/// without diagnostics. It also counts removed non-empty lines as omitted
+/// items so the common runner can attach a recovery reference when available.
+pub fn document_from_filtered(
+    raw: &str,
+    filtered: &str,
+    label: &str,
+    exit_code: i32,
+) -> AiDocument {
+    let status = if exit_code == 0 { "ok" } else { "failed" };
+    let mut document = AiDocument::new(Some(status));
+    document.fact("command", label);
+    if exit_code != 0 {
+        document.fact("exit", exit_code.to_string());
+    }
+
+    let filtered = if exit_code != 0 && raw.trim().is_empty() && filtered.trim() == "ok" {
+        ""
+    } else {
+        filtered
+    };
+    let raw_items = raw.lines().filter(|line| !line.trim().is_empty()).count();
+    let filtered_items = filtered
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+
+    if exit_code != 0 && filtered.trim().is_empty() {
+        document.push(AiRecord::new(
+            Severity::Error,
+            "producer failed; no diagnostic text was captured",
+        ));
+    } else {
+        for line in filtered.lines().filter(|line| !line.trim().is_empty()) {
+            document.push(AiRecord::new(classify_filtered_line(line), line));
+        }
+    }
+
+    if raw_items > filtered_items {
+        document = document.with_omission(Omission {
+            items: raw_items - filtered_items,
+            groups: 0,
+        });
+    }
+    document
+}
+
+fn classify_filtered_line(line: &str) -> Severity {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("failure")
+        || lower.contains("fatal")
+    {
+        Severity::Error
+    } else if lower.contains("warn") || lower.contains("deprecated") {
+        Severity::Warning
+    } else if lower.contains("success") || lower.starts_with("ok") || lower.starts_with("passed") {
+        Severity::Success
+    } else {
+        Severity::Info
+    }
 }
 
 pub fn run_passthrough(tool: &str, args: &[std::ffi::OsString], verbose: u8) -> Result<i32> {
@@ -1835,6 +1953,15 @@ mod err_test_runner_tests {
     }
 
     #[test]
+    fn requested_semantic_token_limit_parser_rejects_out_of_range_values() {
+        assert_eq!(parse_requested_max_tokens(Some("64")), Some(64));
+        assert_eq!(parse_requested_max_tokens(Some("65536")), Some(65_536));
+        assert_eq!(parse_requested_max_tokens(Some("63")), None);
+        assert_eq!(parse_requested_max_tokens(Some("65537")), None);
+        assert_eq!(parse_requested_max_tokens(Some("not-a-number")), None);
+    }
+
+    #[test]
     fn passthrough_reason_is_exposed_for_tracking() {
         assert_eq!(ExactReason::Structured.as_str(), "structured");
     }
@@ -1893,5 +2020,32 @@ mod err_test_runner_tests {
             .starts_with("status=error filter=parse-failed"));
         assert!(rendered.text.contains("detail=unexpected_table"));
         assert!(rendered.parser_failed);
+    }
+
+    #[test]
+    fn legacy_filter_adapter_preserves_failure_without_inventing_success() {
+        let document = document_from_filtered("", "ok", "fixture", 17);
+        let rendered = render(&document, BudgetClass::Acknowledgement);
+
+        assert!(rendered.text.contains("status=failed"));
+        assert!(rendered.text.contains("command=fixture"));
+        assert!(rendered.text.contains("exit=17"));
+        assert!(rendered
+            .text
+            .contains("producer failed; no diagnostic text was captured"));
+        assert!(!rendered.text.contains("status=ok"));
+    }
+
+    #[test]
+    fn legacy_filter_adapter_declares_removed_items() {
+        let document = document_from_filtered("one\ntwo\nthree", "one", "fixture", 0);
+        let rendered = render(&document, BudgetClass::Collection);
+
+        assert!(rendered.text.contains("status=ok"));
+        assert!(rendered.text.contains("one"));
+        assert_eq!(
+            rendered.omission.as_ref().map(|omission| omission.items),
+            Some(2)
+        );
     }
 }

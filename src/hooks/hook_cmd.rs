@@ -682,6 +682,41 @@ fn hook_log_fields(v: &Value) -> Option<(&str, &str, &str)> {
 
 /// Log the real hook decision to the tracking DB, keyed by the transcript's
 /// `tool_use_id`, so `rtk discover` can later read ground truth about historical
+/// Process the Codex hook contract without changing the host's authorization
+/// decision. The response only supplies updated input when Codex has already
+/// selected its explicit no-approval mode.
+pub fn run_codex(event: &str) -> Result<()> {
+    match event {
+        super::codex::SUBAGENT_START_EVENT => return Ok(()),
+        "pre-tool-use" => {}
+        _ => anyhow::bail!("unsupported Codex hook event: {event}"),
+    }
+    let input = match read_stdin_limited() {
+        Ok(input) => input,
+        Err(error) => {
+            let _ = writeln!(io::stderr(), "[rtk hook codex] {error}");
+            return Ok(());
+        }
+    };
+    let input = strip_leading_bom(&input).trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+    match super::codex::response_from_input(input) {
+        Ok(Some(response)) => {
+            let mut stdout = io::stdout().lock();
+            serde_json::to_writer(&mut stdout, &response)
+                .context("Failed to write Codex hook response")?;
+            writeln!(stdout).context("Failed to finish Codex hook response")?;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let _ = writeln!(io::stderr(), "[rtk hook codex] invalid JSON input: {error}");
+        }
+    }
+    Ok(())
+}
+
 /// hook coverage instead of re-deriving a guess from today's hook-install state.
 ///
 /// Best-effort only — a tracking failure must never affect the hook's real output
@@ -1639,6 +1674,22 @@ mod tests {
                 panic!("expected Skip, got a different PayloadAction variant instead: {other:?}")
             }
         }
+    }
+
+    #[test]
+    fn codex_pre_tool_use_rewrites_without_granting_permission() {
+        let input = r#"{"hook_event_name":"PreToolUse","permission_mode":"bypassPermissions","tool_name":"Bash","tool_input":{"command":"git status"}}"#;
+        let output = crate::hooks::codex::response_from_input(input)
+            .unwrap()
+            .expect("supported Codex payload");
+        assert_eq!(output["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(
+            output["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk git status"
+        );
+        assert!(output["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none());
     }
 
     fn claude_input_value(cmd: &str) -> Value {

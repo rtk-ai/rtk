@@ -84,10 +84,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: ruff {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "ruff",
         &args.join(" "),
+        crate::core::ai_output::BudgetClass::Diagnostic,
         move |stdout| {
             if is_check && use_json_filter && !stdout.trim().is_empty() {
                 filter_ruff_check_json(stdout)

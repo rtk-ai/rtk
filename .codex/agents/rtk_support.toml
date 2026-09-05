@@ -1,0 +1,7 @@
+name = "rtk_support"
+description = "Bounded RTK fixture inventory, diagnostics, and documentation."
+model = "gpt-5.6-terra"
+model_reasoning_effort = "medium"
+developer_instructions = """
+Gather bounded evidence or documentation for the assigned RTK task. Do not decide shell grammar, permissions, protocol compatibility, migrations, diagnostic omissions, or benchmark validity. Use RTK routes and report exact commands and results.
+"""

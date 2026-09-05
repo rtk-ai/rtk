@@ -1,21 +1,31 @@
 //! Synchronous stdio MCP adapter for RTK.
 
 use super::{
-    debug_enabled, redact_sensitive, rewrite, run_filtered, DEFAULT_MAX_OUTPUT_BYTES,
-    DEFAULT_TIMEOUT_MS,
+    debug_enabled, redact_sensitive, rewrite, run_filtered_with_request, OutputRequest,
+    DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_MS,
 };
 use crate::core::config::Config;
 use crate::core::tracking::Tracker;
 use crate::hooks::agent_policy;
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use regex::Regex;
+use serde_json::{json, Map, Value};
+use std::collections::VecDeque;
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const DEFAULT_LIST_LIMIT: usize = 50;
+const MIN_SEMANTIC_OUTPUT_TOKENS: usize = 64;
+const MAX_SEMANTIC_OUTPUT_TOKENS: usize = 65_536;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseMode {
+    Compact,
+    Legacy,
+}
 
 pub fn run() -> Result<()> {
     let stdin = io::stdin();
@@ -96,7 +106,10 @@ fn tool_definitions() -> Vec<Value> {
                 "cwd": { "type": "string" },
                 "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000 },
                 "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 10485760 },
-                "tee_on_failure": { "type": "boolean" }
+                "tee_on_failure": { "type": "boolean" },
+                "max_tokens": { "type": "integer", "minimum": 64, "maximum": 65536 },
+                "max_output_tokens": { "type": "integer", "minimum": 64, "maximum": 65536 },
+                "response_mode": { "type": "string", "enum": ["compact", "legacy"], "default": "compact" }
             }}
         }),
         json!({
@@ -108,7 +121,10 @@ fn tool_definitions() -> Vec<Value> {
                 "cwd": { "type": "string" },
                 "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000 },
                 "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 10485760 },
-                "tee_on_failure": { "type": "boolean" }
+                "tee_on_failure": { "type": "boolean" },
+                "max_tokens": { "type": "integer", "minimum": 64, "maximum": 65536 },
+                "max_output_tokens": { "type": "integer", "minimum": 64, "maximum": 65536 },
+                "response_mode": { "type": "string", "enum": ["compact", "legacy"], "default": "compact" }
             }}
         }),
         json!({
@@ -119,7 +135,10 @@ fn tool_definitions() -> Vec<Value> {
                 "cwd": { "type": "string" },
                 "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000 },
                 "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 10485760 },
-                "tee_on_failure": { "type": "boolean" }
+                "tee_on_failure": { "type": "boolean" },
+                "max_tokens": { "type": "integer", "minimum": 64, "maximum": 65536 },
+                "max_output_tokens": { "type": "integer", "minimum": 64, "maximum": 65536 },
+                "response_mode": { "type": "string", "enum": ["compact", "legacy"], "default": "compact" }
             }}
         }),
         json!({
@@ -154,6 +173,27 @@ fn tool_definitions() -> Vec<Value> {
                 "max_bytes": { "type": "integer", "minimum": 1, "maximum": 10485760 }
             }}
         }),
+        json!({
+            "name": "read_recovery",
+            "description": "Read a bounded page from a prior RTK recovery artifact by ID. This tool never executes the producer or accepts filesystem paths.",
+            "inputSchema": { "type": "object", "required": ["recovery_id"], "properties": {
+                "recovery_id": { "type": "string", "minLength": 1 },
+                "lines": { "type": "string", "description": "Inclusive one-based range START:END." },
+                "cursor": { "type": "integer", "minimum": 1 },
+                "max_lines": { "type": "integer", "minimum": 1, "maximum": 500 }
+            }}
+        }),
+        json!({
+            "name": "search_recovery",
+            "description": "Search a prior RTK recovery artifact by ID without rerunning its producer.",
+            "inputSchema": { "type": "object", "required": ["recovery_id", "pattern"], "properties": {
+                "recovery_id": { "type": "string", "minLength": 1 },
+                "pattern": { "type": "string", "minLength": 1 },
+                "regex": { "type": "boolean" },
+                "context": { "type": "integer", "minimum": 0, "maximum": 20 },
+                "max_matches": { "type": "integer", "minimum": 1, "maximum": 100 }
+            }}
+        }),
     ]
 }
 
@@ -166,14 +206,25 @@ fn handle_tool_call(id: Option<Value>, params: Option<&Value>) -> Value {
     };
     let arguments = params.get("arguments").unwrap_or(&Value::Null);
 
+    let mode = match response_mode(arguments) {
+        Ok(mode) => mode,
+        Err(error) => return rpc_error(id, -32602, &error.to_string()),
+    };
+
     match call_tool(name, arguments) {
-        Ok(value) => rpc_result(
-            id,
-            json!({
-                "content": [{ "type": "text", "text": value.to_string() }],
-                "structuredContent": value
-            }),
-        ),
+        Ok(value) => {
+            let value = match mode {
+                ResponseMode::Compact => compact_tool_value(name, value),
+                ResponseMode::Legacy => value,
+            };
+            rpc_result(
+                id,
+                json!({
+                    "content": [{ "type": "text", "text": value.to_string() }],
+                    "structuredContent": value
+                }),
+            )
+        }
         Err(error) => {
             let message = error.to_string();
             let code = if !tool_definitions()
@@ -191,6 +242,41 @@ fn handle_tool_call(id: Option<Value>, params: Option<&Value>) -> Value {
             rpc_error(id, code, &message)
         }
     }
+}
+
+fn response_mode(args: &Value) -> Result<ResponseMode> {
+    match args.get("response_mode").and_then(Value::as_str) {
+        None => Ok(default_response_mode()),
+        Some("compact") => Ok(ResponseMode::Compact),
+        Some("legacy") => Ok(ResponseMode::Legacy),
+        Some(_) => anyhow::bail!("response_mode must be compact or legacy"),
+    }
+}
+
+fn default_response_mode() -> ResponseMode {
+    match std::env::var("RTK_MCP_RESPONSE_MODE").ok().as_deref() {
+        Some("legacy") => ResponseMode::Legacy,
+        _ => ResponseMode::Compact,
+    }
+}
+
+fn compact_tool_value(name: &str, value: Value) -> Value {
+    if !matches!(name, "run_cmd" | "run_powershell" | "run_filtered") {
+        return value;
+    }
+    let Some(object) = value.as_object() else {
+        return value;
+    };
+    let mut compact = Map::new();
+    for key in ["exit_code", "stdout", "stderr"] {
+        if let Some(value) = object.get(key) {
+            compact.insert(key.to_string(), value.clone());
+        }
+    }
+    if object.get("truncated") == Some(&Value::Bool(true)) {
+        compact.insert("truncated".to_string(), Value::Bool(true));
+    }
+    Value::Object(compact)
 }
 
 fn is_invalid_tool_argument(message: &str) -> bool {
@@ -224,12 +310,13 @@ fn call_tool(name: &str, args: &Value) -> Result<Value> {
             {
                 let (cwd, timeout, max_output, tee_on_failure) = execution_options(args)?;
                 let rtk_args = vec!["cmd".to_string(), expression.to_string()];
-                Ok(serde_json::to_value(run_filtered(
+                Ok(serde_json::to_value(run_filtered_with_request(
                     &rtk_args,
                     cwd.as_deref(),
                     timeout,
                     max_output,
                     tee_on_failure,
+                    output_request(args)?,
                 )?)?)
             }
         }
@@ -249,24 +336,26 @@ fn call_tool(name: &str, args: &Value) -> Result<Value> {
             {
                 let (cwd, timeout, max_output, tee_on_failure) = execution_options(args)?;
                 let rtk_args = vec![route.to_string(), expression.to_string()];
-                Ok(serde_json::to_value(run_filtered(
+                Ok(serde_json::to_value(run_filtered_with_request(
                     &rtk_args,
                     cwd.as_deref(),
                     timeout,
                     max_output,
                     tee_on_failure,
+                    output_request(args)?,
                 )?)?)
             }
         }
         "run_filtered" => {
             let rtk_args = required_string_array(args, "rtk_args")?;
             let (cwd, timeout, max_output, tee_on_failure) = execution_options(args)?;
-            Ok(serde_json::to_value(run_filtered(
+            Ok(serde_json::to_value(run_filtered_with_request(
                 &rtk_args,
                 cwd.as_deref(),
                 timeout,
                 max_output,
                 tee_on_failure,
+                output_request(args)?,
             )?)?)
         }
         "gain_summary" => {
@@ -297,12 +386,13 @@ fn call_tool(name: &str, args: &Value) -> Result<Value> {
         }
         "discover_unhandled" => {
             let command = discover_command(args)?;
-            let result = run_filtered(
+            let result = run_filtered_with_request(
                 &command,
                 None,
                 Duration::from_millis(DEFAULT_TIMEOUT_MS),
                 DEFAULT_MAX_OUTPUT_BYTES,
                 true,
+                OutputRequest::agent(),
             )?;
             if result.exit_code != 0 {
                 anyhow::bail!(
@@ -343,6 +433,55 @@ fn call_tool(name: &str, args: &Value) -> Result<Value> {
                 "path": redact_sensitive(&path.to_string_lossy()),
                 "content": redact_sensitive(&content)
             }))
+        }
+        "read_recovery" => {
+            let recovery_id = required_string(args, "recovery_id")?;
+            let path = crate::core::tee::resolve_lossless_recovery(recovery_id)
+                .ok_or_else(|| anyhow::anyhow!("recovery artifact not found: {recovery_id}"))?;
+            let line_range = args
+                .get("lines")
+                .map(|value| {
+                    value
+                        .as_str()
+                        .context("lines must use START:END syntax")
+                        .and_then(crate::cmds::system::read::parse_line_range)
+                })
+                .transpose()?;
+            let cursor = args
+                .get("cursor")
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .filter(|value| *value > 0)
+                        .map(|value| value as usize)
+                        .context("cursor must be a positive integer")
+                })
+                .transpose()?;
+            let max_lines = bounded_usize(args, "max_lines", 100, 1, 500)?;
+            Ok(read_recovery_page(
+                recovery_id,
+                &path,
+                line_range,
+                cursor,
+                max_lines,
+            )?)
+        }
+        "search_recovery" => {
+            let recovery_id = required_string(args, "recovery_id")?;
+            let pattern = required_string(args, "pattern")?;
+            let regex = args.get("regex").and_then(Value::as_bool).unwrap_or(false);
+            let context = bounded_usize(args, "context", 1, 0, 20)?;
+            let max_matches = bounded_usize(args, "max_matches", 20, 1, 100)?;
+            let path = crate::core::tee::resolve_lossless_recovery(recovery_id)
+                .ok_or_else(|| anyhow::anyhow!("recovery artifact not found: {recovery_id}"))?;
+            Ok(search_recovery_file(
+                recovery_id,
+                &path,
+                pattern,
+                regex,
+                context,
+                max_matches,
+            )?)
         }
         _ => anyhow::bail!("Unknown tool: {name}"),
     }
@@ -439,6 +578,212 @@ fn read_tee_file(path: &Path, max_bytes: usize) -> Result<String> {
     Ok(String::from_utf8_lossy(&bytes[..bytes.len().min(max_bytes)]).into_owned())
 }
 
+fn read_recovery_page(
+    recovery_id: &str,
+    path: &Path,
+    line_range: Option<crate::cmds::system::read::LineRange>,
+    cursor: Option<usize>,
+    max_lines: usize,
+) -> Result<Value> {
+    const MAX_PAGE_BYTES: usize = 1_048_576;
+    let (start, end) = match line_range {
+        Some(range) => {
+            if cursor.is_some_and(|value| value < range.start.saturating_sub(1)) {
+                anyhow::bail!("cursor is before the requested line range");
+            }
+            (
+                cursor.map_or(range.start, |line| line.saturating_add(1)),
+                range.end,
+            )
+        }
+        None => (cursor.map_or(1, |line| line.saturating_add(1)), usize::MAX),
+    };
+    if start == 0 {
+        anyhow::bail!("recovery page start must be greater than zero");
+    }
+
+    let file = fs::File::open(path)
+        .with_context(|| format!("Failed to open recovery artifact: {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut line_number = 0usize;
+    let mut first_line = None;
+    let mut last_line = None;
+    let mut output = Vec::new();
+    let mut has_more = false;
+
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+        line_number = line_number.saturating_add(1);
+        if line_number < start {
+            continue;
+        }
+        if line_number > end {
+            break;
+        }
+        if last_line.is_some_and(|_| output.len() >= MAX_PAGE_BYTES) {
+            has_more = true;
+            break;
+        }
+        if output.len().saturating_add(line.len()) > MAX_PAGE_BYTES {
+            has_more = true;
+            break;
+        }
+        first_line.get_or_insert(line_number);
+        last_line = Some(line_number);
+        output.extend_from_slice(&line);
+        if last_line
+            .is_some_and(|last| last.saturating_sub(first_line.unwrap_or(last)) + 1 >= max_lines)
+        {
+            if line_number < end {
+                let mut next_line = Vec::new();
+                if reader.read_until(b'\n', &mut next_line)? > 0 {
+                    has_more = true;
+                }
+            }
+            break;
+        }
+    }
+
+    let Some(first_line) = first_line else {
+        anyhow::bail!("recovery page is empty or starts after the end of the artifact");
+    };
+    let last_line = last_line.expect("first recovery line implies last line");
+    let mut result = json!({
+        "recovery_id": recovery_id,
+        "start_line": first_line,
+        "end_line": last_line,
+        "content": String::from_utf8_lossy(&output),
+        "has_more": has_more
+    });
+    if has_more {
+        result["next_cursor"] = json!(last_line);
+    }
+    Ok(result)
+}
+
+struct PendingRecoveryMatch {
+    line: usize,
+    text: String,
+    context: Vec<(usize, String)>,
+    until: usize,
+}
+
+fn search_recovery_file(
+    recovery_id: &str,
+    path: &Path,
+    pattern: &str,
+    use_regex: bool,
+    context: usize,
+    max_matches: usize,
+) -> Result<Value> {
+    let regex = use_regex
+        .then(|| Regex::new(pattern))
+        .transpose()
+        .context("invalid recovery search regex")?;
+    let file = fs::File::open(path)
+        .with_context(|| format!("Failed to open recovery artifact: {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut line_number = 0usize;
+    let mut history = VecDeque::with_capacity(context.saturating_add(1));
+    let mut pending: Vec<PendingRecoveryMatch> = Vec::new();
+    let mut matches: Vec<Value> = Vec::new();
+    let mut truncated = false;
+
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+        line_number = line_number.saturating_add(1);
+        let text = String::from_utf8_lossy(&line)
+            .trim_end_matches(['\r', '\n'])
+            .to_string();
+
+        let mut remaining = Vec::with_capacity(pending.len());
+        for mut found in pending {
+            if line_number <= found.until && line_number > found.line {
+                found.context.push((line_number, text.clone()));
+            }
+            if line_number >= found.until {
+                matches.push(json!({
+                    "line": found.line,
+                    "text": found.text,
+                    "context": found.context.into_iter().map(|(line, text)| json!({
+                        "line": line,
+                        "text": text
+                    })).collect::<Vec<_>>()
+                }));
+            } else {
+                remaining.push(found);
+            }
+        }
+        pending = remaining;
+
+        let is_match = regex
+            .as_ref()
+            .map_or_else(|| text.contains(pattern), |matcher| matcher.is_match(&text));
+        if is_match {
+            if matches.len() + pending.len() >= max_matches {
+                truncated = true;
+                break;
+            }
+            let mut match_context = history
+                .iter()
+                .filter(|(line, _)| *line + context >= line_number)
+                .cloned()
+                .collect::<Vec<_>>();
+            match_context.push((line_number, text.clone()));
+            if context == 0 {
+                matches.push(json!({
+                    "line": line_number,
+                    "text": text,
+                    "context": match_context.into_iter().map(|(line, text)| json!({
+                        "line": line,
+                        "text": text
+                    })).collect::<Vec<_>>()
+                }));
+            } else {
+                pending.push(PendingRecoveryMatch {
+                    line: line_number,
+                    text: text.clone(),
+                    context: match_context,
+                    until: line_number.saturating_add(context),
+                });
+            }
+        }
+
+        history.push_back((line_number, text));
+        while history.len() > context.saturating_add(1) {
+            history.pop_front();
+        }
+    }
+
+    for found in pending {
+        matches.push(json!({
+            "line": found.line,
+            "text": found.text,
+            "context": found.context.into_iter().map(|(line, text)| json!({
+                "line": line,
+                "text": text
+            })).collect::<Vec<_>>()
+        }));
+    }
+
+    Ok(json!({
+        "recovery_id": recovery_id,
+        "pattern": pattern,
+        "regex": use_regex,
+        "match_count": matches.len(),
+        "truncated": truncated,
+        "matches": matches
+    }))
+}
+
 fn tee_dir() -> Result<PathBuf> {
     let config = Config::load().context("Failed to load RTK configuration for tee access")?;
     let dir =
@@ -496,6 +841,36 @@ fn execution_options(args: &Value) -> Result<(Option<PathBuf>, Duration, usize, 
         max_output,
         tee_on_failure,
     ))
+}
+
+fn output_request(args: &Value) -> Result<OutputRequest> {
+    let legacy = optional_token_limit(args, "max_tokens")?;
+    let documented = optional_token_limit(args, "max_output_tokens")?;
+    if legacy.is_some() && documented.is_some() && legacy != documented {
+        anyhow::bail!("max_tokens and max_output_tokens must match when both are supplied");
+    }
+    let max_tokens = documented.or(legacy);
+    if max_tokens.is_some_and(|value| {
+        !(MIN_SEMANTIC_OUTPUT_TOKENS..=MAX_SEMANTIC_OUTPUT_TOKENS).contains(&value)
+    }) {
+        anyhow::bail!(
+            "max_tokens must be between {MIN_SEMANTIC_OUTPUT_TOKENS} and {MAX_SEMANTIC_OUTPUT_TOKENS}"
+        );
+    }
+    Ok(OutputRequest {
+        audience: super::OutputAudience::Agent,
+        max_tokens,
+    })
+}
+
+fn optional_token_limit(args: &Value, key: &str) -> Result<Option<usize>> {
+    let Some(value) = args.get(key) else {
+        return Ok(None);
+    };
+    let Some(value) = value.as_u64() else {
+        anyhow::bail!("{key} must be an integer");
+    };
+    Ok(Some(value as usize))
 }
 
 fn bounded_u64(value: &Value, key: &str, default: u64, min: u64, max: u64) -> Result<u64> {
@@ -580,6 +955,14 @@ mod tests {
         assert!(run_filtered["description"]
             .as_str()
             .is_some_and(|description| description.contains("Do not wrap supported commands")));
+        assert_eq!(
+            run_filtered["inputSchema"]["properties"]["max_tokens"]["minimum"],
+            json!(64)
+        );
+        assert_eq!(
+            run_filtered["inputSchema"]["properties"]["max_tokens"]["maximum"],
+            json!(65_536)
+        );
         let gain = tools
             .iter()
             .find(|tool| tool["name"] == "gain_summary")
@@ -660,6 +1043,14 @@ mod tests {
         let error = call_tool("run_cmd", &json!({ "expression": "echo should not spawn" }))
             .expect_err("run_cmd must be Windows-only");
         assert!(error.to_string().contains("Windows"));
+    }
+
+    #[test]
+    fn output_request_accepts_task_semantic_token_bounds() {
+        assert!(output_request(&json!({ "max_tokens": 64 })).is_ok());
+        assert!(output_request(&json!({ "max_tokens": 65_536 })).is_ok());
+        assert!(output_request(&json!({ "max_tokens": 63 })).is_err());
+        assert!(output_request(&json!({ "max_tokens": 65_537 })).is_err());
     }
 
     #[test]

@@ -520,7 +520,7 @@ pub(crate) fn rewrite_expression_for_command_line(
     cmd_executable: &Path,
     stdout_is_terminal: bool,
 ) -> String {
-    if !stdout_is_terminal {
+    if !stdout_allows_agent_filtering(stdout_is_terminal, agent_output_requested()) {
         return source.to_owned();
     }
     let Some(rtk_path) = rtk_executable.to_str() else {
@@ -585,6 +585,17 @@ pub(crate) fn rewrite_expression_for_command_line(
     } else {
         rewritten
     }
+}
+
+fn agent_output_requested() -> bool {
+    matches!(
+        std::env::var("RTK_OUTPUT_AUDIENCE").ok().as_deref(),
+        Some("agent")
+    )
+}
+
+fn stdout_allows_agent_filtering(stdout_is_terminal: bool, agent_output: bool) -> bool {
+    stdout_is_terminal || agent_output
 }
 
 /// Run the public route. This path intentionally does not track the compound
@@ -892,7 +903,14 @@ fn hex_value(value: u8) -> Result<u8> {
 
 #[cfg(test)]
 mod output_tests {
-    use super::should_attempt_lossy_output;
+    use super::{should_attempt_lossy_output, stdout_allows_agent_filtering};
+
+    #[test]
+    fn captured_agent_output_is_filterable_without_changing_exact_pipes() {
+        assert!(stdout_allows_agent_filtering(true, false));
+        assert!(stdout_allows_agent_filtering(false, true));
+        assert!(!stdout_allows_agent_filtering(false, false));
+    }
 
     #[test]
     fn never_worse_is_checked_before_creating_a_lossy_recovery_artifact() {

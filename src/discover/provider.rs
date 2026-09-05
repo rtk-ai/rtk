@@ -45,6 +45,8 @@ pub trait SessionProvider {
 
 pub struct ClaudeProvider;
 
+pub struct CodexProvider;
+
 impl ClaudeProvider {
     /// Get the base directory for Claude Code projects.
     fn projects_dir() -> Result<PathBuf> {
@@ -285,6 +287,204 @@ impl SessionProvider for ClaudeProvider {
     }
 }
 
+impl CodexProvider {
+    fn codex_dir() -> Result<PathBuf> {
+        if let Some(home) = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
+            return Ok(PathBuf::from(home));
+        }
+        dirs::home_dir()
+            .map(|home| home.join(".codex"))
+            .context("could not determine Codex directory")
+    }
+
+    fn sessions_dir() -> Result<PathBuf> {
+        Ok(Self::codex_dir()?.join("sessions"))
+    }
+}
+
+impl SessionProvider for CodexProvider {
+    fn discover_sessions(
+        &self,
+        project_filter: Option<&str>,
+        since_days: Option<u64>,
+    ) -> Result<Vec<PathBuf>> {
+        let sessions_dir = Self::sessions_dir()?;
+        if !sessions_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let cutoff = since_days.and_then(|days| {
+            days.checked_mul(86_400)
+                .and_then(|seconds| SystemTime::now().checked_sub(Duration::from_secs(seconds)))
+        });
+        let mut result = Vec::new();
+        for entry in WalkDir::new(sessions_dir)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+        {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if let Some(filter) = project_filter {
+                let path_text = path.to_string_lossy();
+                if !path_text.contains(filter) {
+                    continue;
+                }
+            }
+            if let Some(cutoff) = cutoff {
+                if fs::metadata(path)
+                    .and_then(|metadata| metadata.modified())
+                    .is_ok_and(|modified| modified < cutoff)
+                {
+                    continue;
+                }
+            }
+            result.push(path.to_path_buf());
+        }
+        Ok(result)
+    }
+
+    fn extract_commands(&self, path: &Path) -> Result<Vec<ExtractedCommand>> {
+        let file = fs::File::open(path)
+            .with_context(|| format!("failed to open Codex session {}", path.display()))?;
+        let reader = BufReader::new(file);
+        let session_id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let mut pending = Vec::new();
+        let mut results: HashMap<String, (usize, String, bool)> = HashMap::new();
+        let mut sequence_index = 0usize;
+
+        for line in reader.lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(_) => continue,
+            };
+            let value: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            collect_codex_records(&value, &mut pending, &mut results, &mut sequence_index);
+        }
+
+        Ok(pending
+            .into_iter()
+            .map(|(tool_use_id, command, sequence_index)| {
+                let (output_len, output_content, is_error) = results
+                    .get(&tool_use_id)
+                    .map(|(length, content, error)| (Some(*length), Some(content.clone()), *error))
+                    .unwrap_or((None, None, false));
+                ExtractedCommand {
+                    command,
+                    output_len,
+                    session_id: session_id.clone(),
+                    tool_use_id,
+                    output_content,
+                    is_error,
+                    sequence_index,
+                }
+            })
+            .collect())
+    }
+}
+
+fn collect_codex_records(
+    value: &serde_json::Value,
+    pending: &mut Vec<(String, String, usize)>,
+    results: &mut HashMap<String, (usize, String, bool)>,
+    sequence_index: &mut usize,
+) {
+    let Some(object) = value.as_object() else {
+        if let Some(array) = value.as_array() {
+            for child in array {
+                collect_codex_records(child, pending, results, sequence_index);
+            }
+        }
+        return;
+    };
+    let record_type = object
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let call_id = object
+        .get("call_id")
+        .or_else(|| object.get("callId"))
+        .or_else(|| object.get("id"))
+        .and_then(|value| value.as_str());
+
+    if matches!(
+        record_type,
+        "function_call" | "tool_call" | "function_call_item" | "tool_use"
+    ) {
+        let name = object.get("name").and_then(|value| value.as_str());
+        if name
+            .is_some_and(|name| matches!(name, "shell_command" | "run_command" | "Bash" | "bash"))
+        {
+            let command = object
+                .get("arguments")
+                .or_else(|| object.get("input"))
+                .and_then(codex_command)
+                .filter(|command| !command.trim().is_empty());
+            if let (Some(call_id), Some(command)) = (call_id, command) {
+                pending.push((call_id.to_string(), command, *sequence_index));
+                *sequence_index += 1;
+            }
+        }
+    }
+    if matches!(
+        record_type,
+        "function_call_output" | "tool_result" | "function_output"
+    ) {
+        if let Some(call_id) = call_id {
+            let output = object
+                .get("output")
+                .or_else(|| object.get("content"))
+                .map(codex_output_text)
+                .unwrap_or_default();
+            let is_error = object
+                .get("is_error")
+                .or_else(|| object.get("isError"))
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            results.insert(
+                call_id.to_string(),
+                (output.len(), output.chars().take(1000).collect(), is_error),
+            );
+        }
+    }
+
+    for child in object.values() {
+        if child.is_object() || child.is_array() {
+            collect_codex_records(child, pending, results, sequence_index);
+        }
+    }
+}
+
+fn codex_command(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|parsed| codex_command(&parsed))
+            .or_else(|| Some(text.clone())),
+        serde_json::Value::Object(object) => object
+            .get("command")
+            .and_then(|command| command.as_str())
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+fn codex_output_text(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| serde_json::to_string(value).ok())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,6 +536,23 @@ mod tests {
         let provider = ClaudeProvider;
         let cmds = provider.extract_commands(jsonl.path()).unwrap();
         assert_eq!(cmds.len(), 0);
+    }
+
+    #[test]
+    fn test_extract_codex_shell_call_and_result() {
+        let jsonl = make_jsonl(&[
+            r#"{"type":"function_call","call_id":"call_1","name":"shell_command","arguments":"{\"command\":\"git status\"}"}"#,
+            r#"{"type":"function_call_output","call_id":"call_1","output":"On branch main\nnothing to commit","is_error":false}"#,
+        ]);
+        let provider = CodexProvider;
+        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].command, "git status");
+        assert_eq!(
+            cmds[0].output_len,
+            Some("On branch main\nnothing to commit".len())
+        );
+        assert!(!cmds[0].is_error);
     }
 
     #[test]

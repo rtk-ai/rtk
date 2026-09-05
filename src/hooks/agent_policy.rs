@@ -13,7 +13,8 @@ shell built-ins, a script, or control flow that cannot be expressed through an R
 For a Windows PowerShell expression, use `rtk powershell` for Desktop 5.1 or `rtk pwsh` for \
 PowerShell 7+, or the dedicated run_powershell tool with a host and one raw expression. \
 On Windows, raw PowerShell/pwsh and cmd.exe are last-resort fallbacks for exact-output behavior; never wrap an RTK-supported \
-command inside them.";
+command inside them. Execution tools return compact model-facing results by default; use \
+`response_mode: \"legacy\"` only when a client needs the historical diagnostic envelope.";
 
 pub const RUN_FILTERED_DESCRIPTION: &str = "Preferred execution tool for RTK-supported commands. \
 Pass arguments without a leading `rtk` (for example [\"git\",\"status\"], [\"read\",\"file\"], or \

@@ -740,6 +740,10 @@ fn filtering_requested() -> bool {
         || std::env::var("RTK_POWERSHELL_FILTER")
             .ok()
             .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        || matches!(
+            std::env::var("RTK_OUTPUT_AUDIENCE").ok().as_deref(),
+            Some("agent")
+        )
 }
 
 fn contains_opaque_execution_mode(args: &[OsString]) -> bool {

@@ -16,10 +16,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: prettier {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "prettier",
         &args.join(" "),
+        crate::core::ai_output::BudgetClass::Collection,
         filter_prettier_output,
         RunOptions::stdout_only(),
     )

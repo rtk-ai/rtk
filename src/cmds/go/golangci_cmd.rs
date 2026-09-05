@@ -144,18 +144,24 @@ fn run_filtered(original_args: &[String], invocation: &RunInvocation, verbose: u
         );
     }
 
-    let exit_code = runner::run_filtered(
+    let exit_code = runner::run_ai_filtered_with_exit(
         cmd,
         "golangci-lint",
         &original_args.join(" "),
-        |stdout| {
+        crate::core::ai_output::BudgetClass::Diagnostic,
+        |stdout, exit_code| {
             // v2 outputs JSON on first line + trailing text; v1 outputs just JSON
             let json_output = if version >= 2 {
                 stdout.lines().next().unwrap_or("")
             } else {
                 stdout
             };
-            filter_golangci_json(json_output, version)
+            Ok(runner::document_from_filtered(
+                stdout,
+                &filter_golangci_json(json_output, version),
+                "golangci-lint",
+                exit_code,
+            ))
         },
         crate::core::runner::RunOptions::stdout_only(),
     )?;

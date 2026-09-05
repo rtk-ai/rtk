@@ -1,0 +1,3 @@
+Handles  NPM(K)  PM(K)  WS(K)  CPU(s)  Id  ProcessName
+-------  ------  -----  -----  ------  --  -----------
+      1      42   1234   5678    0.01  10  powershell

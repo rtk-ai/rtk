@@ -29,10 +29,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Detected artisan test runner: {:?}", detected_runner);
     }
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "php",
         &args.join(" "),
+        crate::core::ai_output::BudgetClass::Diagnostic,
         move |raw| {
             if is_lint {
                 return filter_php_lint_output(raw);

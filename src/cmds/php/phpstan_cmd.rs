@@ -80,10 +80,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     }
 
     let use_text = matches!(fmt, ErrorFormat::Custom);
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "phpstan",
         &args.join(" "),
+        crate::core::ai_output::BudgetClass::Diagnostic,
         move |stdout| {
             if use_text {
                 filter_phpstan_text(stdout)

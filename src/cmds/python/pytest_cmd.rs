@@ -52,18 +52,30 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: pytest --tb=short -q {}", args.join(" "));
     }
 
-    runner::run_filtered_with_exit(
+    runner::run_ai_filtered_with_exit(
         cmd,
         "pytest",
         &args.join(" "),
+        crate::core::ai_output::BudgetClass::Diagnostic,
         |raw, exit_code| {
             let clean = strip_ansi(raw);
             let filtered = filter_pytest_output(&clean);
             // Any other failure parsed as empty means the run broke before reporting.
             if exit_code != 0 && exit_code != PYTEST_EXIT_NO_TESTS && filtered == PYTEST_NO_TESTS {
-                return truncate(clean.trim(), config::limits().passthrough_max_chars);
+                let filtered = truncate(clean.trim(), config::limits().passthrough_max_chars);
+                return Ok(runner::document_from_filtered(
+                    raw,
+                    &filtered,
+                    "pytest",
+                    exit_code,
+                ));
             }
-            filtered
+            Ok(runner::document_from_filtered(
+                raw,
+                &filtered,
+                "pytest",
+                exit_code,
+            ))
         },
         runner::RunOptions::stdout_only().tee("pytest"),
     )

@@ -34,10 +34,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: psql {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "psql",
         &args.join(" "),
+        crate::core::ai_output::BudgetClass::Collection,
         filter_psql_output,
         RunOptions::stdout_only()
             .tee("psql")

@@ -1,5 +1,5 @@
 use crate::core::runner::{self, RunOptions};
-use crate::core::stream::StreamFilter;
+use crate::core::ai_output::BudgetClass;
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
@@ -100,23 +100,6 @@ fn new_gradle_command(args: &[String]) -> Command {
     cmd
 }
 
-/// `StreamFilter` for build mode: keeps lines for which `filter_build_line` returns true.
-struct BuildLineFilter;
-
-impl StreamFilter for BuildLineFilter {
-    fn feed_line(&mut self, line: &str) -> Option<String> {
-        if filter_build_line(line) {
-            Some(format!("{}\n", line))
-        } else {
-            None
-        }
-    }
-
-    fn flush(&mut self) -> String {
-        String::new()
-    }
-}
-
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     // Verbose flags bypass filtering — user wants full output
     if args
@@ -132,38 +115,43 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let tool = gradlew_binary();
 
     match detect_task(args) {
-        GradlewTask::Build => runner::run_streamed(
+        GradlewTask::Build => runner::run_ai_from_filter(
             cmd,
             tool,
             &args_display,
-            Box::new(BuildLineFilter),
+            BudgetClass::Diagnostic,
+            |raw| raw.lines().filter(|line| filter_build_line(line)).collect::<Vec<_>>().join("\n"),
             RunOptions::with_tee("gradlew_build"),
         ),
-        GradlewTask::Test => runner::run_filtered(
+        GradlewTask::Test => runner::run_ai_from_filter(
             cmd,
             tool,
             &args_display,
+            BudgetClass::Diagnostic,
             filter_test,
             RunOptions::with_tee("gradlew_test"),
         ),
-        GradlewTask::ConnectedTest => runner::run_filtered(
+        GradlewTask::ConnectedTest => runner::run_ai_from_filter(
             cmd,
             tool,
             &args_display,
+            BudgetClass::Diagnostic,
             filter_connected,
             RunOptions::with_tee("gradlew_connected"),
         ),
-        GradlewTask::Lint => runner::run_filtered(
+        GradlewTask::Lint => runner::run_ai_from_filter(
             cmd,
             tool,
             &args_display,
+            BudgetClass::Diagnostic,
             filter_lint,
             RunOptions::with_tee("gradlew_lint"),
         ),
-        GradlewTask::Dependencies => runner::run_filtered(
+        GradlewTask::Dependencies => runner::run_ai_from_filter(
             cmd,
             tool,
             &args_display,
+            BudgetClass::Collection,
             filter_dependencies,
             RunOptions::with_tee("gradlew_deps"),
         ),

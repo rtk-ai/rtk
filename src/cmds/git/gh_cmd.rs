@@ -3,6 +3,7 @@
 //! Provides token-optimized alternatives to verbose `gh` commands.
 //! Focuses on extracting essential information from JSON outputs.
 
+use crate::core::ai_output::BudgetClass;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_LIST;
 use crate::cmds::git::gh_route::{self, FilteredGhCommand, GhRoute};
@@ -173,13 +174,22 @@ fn run_gh_json<F>(cmd: Command, label: &str, filter_fn: F) -> Result<i32>
 where
     F: Fn(&Value) -> String,
 {
-    runner::run_filtered(
+    runner::run_ai_filtered_with_exit(
         cmd,
         "gh",
         label,
-        |stdout| match serde_json::from_str::<Value>(stdout) {
-            Ok(json) => filter_fn(&json),
-            Err(_) => stdout.to_string(),
+        BudgetClass::Collection,
+        |stdout, exit_code| {
+            let filtered = match serde_json::from_str::<Value>(stdout) {
+                Ok(json) => filter_fn(&json),
+                Err(_) => stdout.to_string(),
+            };
+            Ok(runner::document_from_filtered(
+                stdout,
+                &filtered,
+                label,
+                exit_code,
+            ))
         },
         RunOptions::stdout_only()
             .early_exit_on_failure()
@@ -445,10 +455,11 @@ fn pr_checks(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32>
         Some(id) => format!("pr checks {}", id),
         None => "pr checks".to_string(),
     };
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "gh",
         &label,
+        BudgetClass::Collection,
         format_pr_checks,
         RunOptions::stdout_only()
             .early_exit_on_failure()
@@ -768,10 +779,11 @@ fn view_run(args: &[String], _verbose: u8) -> Result<i32> {
         None => "run view".to_string(),
     };
     let run_id_owned = run_id_opt.unwrap_or_default();
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "gh",
         &label,
+        BudgetClass::Diagnostic,
         move |stdout| format_run_view(stdout, &run_id_owned),
         RunOptions::stdout_only()
             .early_exit_on_failure()
@@ -846,10 +858,11 @@ fn pr_diff(args: &[String], _verbose: u8) -> Result<i32> {
     for arg in args {
         cmd.arg(arg);
     }
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "gh",
         "pr diff",
+        BudgetClass::Source,
         |raw| {
             if raw.trim().is_empty() {
                 "No diff".to_string()

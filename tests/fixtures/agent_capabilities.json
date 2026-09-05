@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "git-status-clean",
+      "route": "rtk git",
+      "argv": ["git", "status", "--short"],
+      "consumer": "agent",
+      "requires_tty": false,
+      "expected_exit": 0,
+      "expected_contract": "ai_owned",
+      "fixture": "tests/fixtures/agent_git_status_clean.txt"
+    },
+    {
+      "id": "git-diff-stat",
+      "route": "rtk git",
+      "argv": ["git", "diff", "--stat"],
+      "consumer": "agent",
+      "requires_tty": false,
+      "expected_exit": 0,
+      "expected_contract": "ai_owned",
+      "fixture": "tests/fixtures/agent_git_diff_stat.txt"
+    },
+    {
+      "id": "git-log-machine",
+      "route": "rtk git",
+      "argv": ["git", "log", "--format=%H", "-1"],
+      "consumer": "machine",
+      "requires_tty": false,
+      "expected_exit": 0,
+      "expected_contract": "exact",
+      "fixture": "tests/fixtures/agent_git_log_machine.txt"
+    },
+    {
+      "id": "cargo-test-failure",
+      "route": "rtk cargo",
+      "argv": ["cargo", "test", "--no-run"],
+      "consumer": "agent",
+      "requires_tty": false,
+      "expected_exit": 101,
+      "expected_contract": "ai_owned",
+      "fixture": "tests/fixtures/agent_cargo_test_failure.txt"
+    },
+    {
+      "id": "rg-match",
+      "route": "rtk rg",
+      "argv": ["rg", "TODO", "src"],
+      "consumer": "agent",
+      "requires_tty": false,
+      "expected_exit": 0,
+      "expected_contract": "ai_owned",
+      "fixture": "tests/fixtures/agent_rg_match.txt"
+    },
+    {
+      "id": "cmd-directory-agent",
+      "route": "rtk cmd",
+      "argv": ["cmd", "dir /b"],
+      "consumer": "agent",
+      "requires_tty": false,
+      "expected_exit": 0,
+      "expected_contract": "ai_owned",
+      "fixture": "tests/fixtures/agent_cmd_directory.txt"
+    },
+    {
+      "id": "powershell-process-agent",
+      "route": "rtk powershell",
+      "argv": ["powershell", "Get-Process"],
+      "consumer": "agent",
+      "requires_tty": false,
+      "expected_exit": 0,
+      "expected_contract": "ai_owned",
+      "fixture": "tests/fixtures/agent_powershell_process.txt"
+    },
+    {
+      "id": "cmd-redirection-machine",
+      "route": "cmd.exe",
+      "argv": ["cmd.exe", "/c", "dir /b > result.txt"],
+      "consumer": "machine",
+      "requires_tty": false,
+      "expected_exit": 0,
+      "expected_contract": "exact",
+      "fixture": "tests/fixtures/agent_cmd_redirection.txt"
+    }
+  ]
+}

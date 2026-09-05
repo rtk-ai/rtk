@@ -30,10 +30,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: {} build", tool);
     }
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "next build",
         &args.join(" "),
+        crate::core::ai_output::BudgetClass::Diagnostic,
         filter_next_build,
         runner::RunOptions::default(),
     )

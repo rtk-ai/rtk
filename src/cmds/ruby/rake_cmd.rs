@@ -65,10 +65,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         );
     }
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "rake",
         &args.join(" "),
+        crate::core::ai_output::BudgetClass::Diagnostic,
         filter_minitest_output,
         runner::RunOptions::with_tee("rake"),
     )

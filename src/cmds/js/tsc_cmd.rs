@@ -1,22 +1,31 @@
 //! Filters TypeScript compiler errors, grouping them by file and error code.
 
+use crate::core::ai_output::BudgetClass;
 use crate::core::runner;
+#[cfg(test)]
 use crate::core::stream::{BlockHandler, BlockStreamFilter};
+#[cfg(test)]
 use crate::core::truncate::{reduced, CAP_WARNINGS};
 use crate::core::utils::{MissingTool, exec_runner, strip_ansi, tool_exec, tool_exists, truncate};
 use anyhow::Result;
 use regex::Regex;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::HashSet;
+#[cfg(test)]
+use std::collections::VecDeque;
 use std::sync::LazyLock;
 
 /// Cap on the non-empty lines kept when RTK cannot parse failure output. With
 /// tee disabled (`RTK_TEE=0`, `config.tee.enabled = false`) these lines are the
 /// only surviving copy of the failure.
+#[cfg(test)]
 const MAX_UNPARSED_LINES: usize = CAP_WARNINGS;
 /// tsc and npx print the cause first (`Unknown compiler option`, `This is not
 /// the tsc command`) and boilerplate after it, so spending the whole cap on a
 /// tail would drop the cause.
+#[cfg(test)]
 const MAX_UNPARSED_HEAD_LINES: usize = reduced(MAX_UNPARSED_LINES, 5);
 
 static TSC_ERROR: LazyLock<Regex> = LazyLock::new(|| {
@@ -63,6 +72,7 @@ fn parse_diagnostic(line: &str) -> Option<Diagnostic<'_>> {
     })
 }
 
+#[cfg(test)]
 fn push_dump_line(summary: &mut String, line: &str) {
     summary.push_str(&truncate(line, 120));
     summary.push('\n');
@@ -98,21 +108,31 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: {} {}", via, args.join(" "));
     }
 
-    runner::run_streamed(
+    runner::run_ai_filtered_with_exit(
         cmd,
         "tsc",
         &args.join(" "),
-        Box::new(BlockStreamFilter::new(TscHandler::new())),
+        BudgetClass::Diagnostic,
+        |raw, exit_code| {
+            Ok(runner::document_from_filtered(
+                raw,
+                &filter_tsc_output(raw),
+                "tsc",
+                exit_code,
+            ))
+        },
         runner::RunOptions::with_tee("tsc"),
     )
 }
 
+#[cfg(test)]
 struct TscHandler {
     error_count: usize,
     files: HashSet<String>,
     code_counts: HashMap<String, usize>,
 }
 
+#[cfg(test)]
 impl TscHandler {
     fn new() -> Self {
         Self {
@@ -123,6 +143,7 @@ impl TscHandler {
     }
 }
 
+#[cfg(test)]
 impl BlockHandler for TscHandler {
     /// `--pretty` wraps every field in ANSI escapes; strip them once so
     /// matching and the emitted block both see plain text.

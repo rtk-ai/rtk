@@ -89,10 +89,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: rspec{} {}", injected, args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "rspec",
         &args.join(" "),
+        crate::core::ai_output::BudgetClass::Diagnostic,
         move |stdout| {
             if has_format {
                 let stripped = strip_noise(stdout);

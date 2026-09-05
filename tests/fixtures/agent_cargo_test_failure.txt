@@ -1,0 +1,2 @@
+error: test failed
+error[E0000]: fixture failure

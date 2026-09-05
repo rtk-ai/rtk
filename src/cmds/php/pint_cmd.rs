@@ -64,10 +64,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         }
     };
 
-    runner::run_filtered(
+    runner::run_ai_from_filter(
         cmd,
         "pint",
         &args.join(" "),
+        crate::core::ai_output::BudgetClass::Diagnostic,
         filter,
         runner::RunOptions::stdout_only().tee("pint"),
     )
