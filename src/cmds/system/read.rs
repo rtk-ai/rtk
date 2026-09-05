@@ -65,6 +65,7 @@ pub fn run(
     }
 
     filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
+    filtered = apply_read_ceilings(&filtered, Some(file));
 
     let (raw, rtk_output) = if line_numbers {
         (
@@ -133,6 +134,7 @@ pub fn run_stdin(
     }
 
     filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
+    filtered = apply_read_ceilings(&filtered, None);
 
     let (raw, rtk_output) = if line_numbers {
         (
@@ -147,6 +149,76 @@ pub fn run_stdin(
 
     timer.track("cat - (stdin)", "rtk read -", &raw, shown);
     Ok(())
+}
+
+/// Cap a single absurd line and a runaway total, without losing anything.
+///
+/// `rtk read` defaults to `--level none`, which is the right default for source
+/// code: filtering it hides code the reader came for. But "do not filter" was
+/// also being read as "do not bound", and the two are different promises. A
+/// 15.8 MB log of 29 lines - one of them 7.8 million characters - was returned
+/// whole, and a single `cat` of it cost more than a day of ordinary commands.
+///
+/// So the content is never reinterpreted, only bounded, and every bound says
+/// what it dropped and where the rest is. The file itself is the backup: it is
+/// still on disk, unchanged, and the hint names the command that reads on.
+/// `rtk proxy cat <file>` remains the unbounded escape hatch.
+fn apply_read_ceilings(content: &str, source: Option<&Path>) -> String {
+    let limits = crate::core::config::limits();
+    let max_line = limits.read_max_line_chars;
+    let max_total = limits.read_max_total_chars;
+
+    let mut out = String::new();
+    let mut kept_lines = 0usize;
+    let mut truncated_lines = 0usize;
+    let mut stopped_at: Option<usize> = None;
+
+    for (index, line) in content.lines().enumerate() {
+        if out.len() >= max_total {
+            stopped_at = Some(index + 1);
+            break;
+        }
+        let char_len = line.chars().count();
+        if max_line > 0 && char_len > max_line {
+            let head: String = line.chars().take(max_line).collect();
+            out.push_str(&head);
+            out.push_str(&format!(" …+{} chars\n", char_len - max_line));
+            truncated_lines += 1;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+        kept_lines += 1;
+    }
+
+    if truncated_lines == 0 && stopped_at.is_none() {
+        return content.to_owned();
+    }
+
+    if let Some(next_line) = stopped_at {
+        let remaining = content.lines().count().saturating_sub(kept_lines);
+        match source {
+            Some(path) => out.push_str(&format!(
+                "…+{} more lines [read on: rtk read {} --tail-lines {}]\n",
+                remaining,
+                path.display(),
+                remaining
+            )),
+            None => match crate::core::tee::force_tee_tail_hint(content, "rtk_read", next_line) {
+                Some(hint) => out.push_str(&format!("…+{} more lines {}\n", remaining, hint)),
+                None => out.push_str(&format!("…+{} more lines\n", remaining)),
+            },
+        }
+    }
+    if truncated_lines > 0 {
+        out.push_str(&format!(
+            "[{} line(s) cut at {} chars; full text: rtk proxy cat{}]\n",
+            truncated_lines,
+            max_line,
+            source.map(|p| format!(" {}", p.display())).unwrap_or_default()
+        ));
+    }
+    out
 }
 
 fn format_with_line_numbers(content: &str) -> String {

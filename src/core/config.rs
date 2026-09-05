@@ -131,6 +131,19 @@ pub struct LimitsConfig {
     pub status_max_untracked: usize,
     /// Max chars for parser passthrough fallback (default: 2000)
     pub passthrough_max_chars: usize,
+    /// Max chars of a single line in `rtk read` (default: 2000)
+    ///
+    /// A source line this long is generated, minified or a packed log record,
+    /// never something a reader follows to the end. Without a cap one such line
+    /// is the whole command: a 7.8-million-character line was read in full here.
+    pub read_max_line_chars: usize,
+    /// Max chars of the whole `rtk read` output (default: 400000)
+    ///
+    /// Set well above any hand-written file - the largest source in the project
+    /// that motivated this is ~110 KB - so ordinary reading is untouched and
+    /// only runaway files are cut. What is cut stays recoverable: the file is
+    /// still on disk and the hint says how to read the rest.
+    pub read_max_total_chars: usize,
 }
 
 impl Default for LimitsConfig {
@@ -141,6 +154,8 @@ impl Default for LimitsConfig {
             status_max_files: 15,
             status_max_untracked: 10,
             passthrough_max_chars: 2000,
+            read_max_line_chars: 2000,
+            read_max_total_chars: 400_000,
         }
     }
 }
