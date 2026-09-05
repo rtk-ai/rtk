@@ -54,8 +54,6 @@ windows-sys = { version = "0.59", features = [
 [build-dependencies]
 toml = "0.8"
 
-[dev-dependencies]
-
 [features]
 default = []
 telemetry = ["ureq"]

@@ -150,6 +150,40 @@ pub fn limits() -> LimitsConfig {
     Config::load().map(|c| c.limits).unwrap_or_default()
 }
 
+/// Get `(exclude_commands, transparent_prefixes)` for hook-rewrite decisions.
+/// Falls back to empty (no exclusions/prefixes) if config can't be loaded.
+/// Shared by every place that decides whether/how to rewrite a command
+/// (`hooks::hook_cmd`, `hooks::rewrite_cmd`, `discover`, `rtk rewrite`'s CLI
+/// entry point in `main.rs`) so they can't drift from each other.
+///
+/// Reads the process-wide cached config (see `cached_config`), not a fresh
+/// `Config::load()`: this is on the PreToolUse hook's hot path, and
+/// `tracking::get_db_path` (called via `Tracker::new()` for `hook_decisions`
+/// logging, right after this in the same hook invocation) also reads config —
+/// without caching, that's two full disk-read-plus-TOML-parse round trips per
+/// single Bash tool call instead of one.
+pub fn hook_rewrite_params() -> (Vec<String>, Vec<String>) {
+    let c = cached_config();
+    (
+        c.hooks.exclude_commands.clone(),
+        c.hooks.transparent_prefixes.clone(),
+    )
+}
+
+/// Process-wide cached `Config::load()` result, populated on first use.
+///
+/// Safe for read-only callers on hot paths that may load config multiple times
+/// within a single `rtk` invocation (a `rtk` process is short-lived and exits
+/// after one subcommand, so there's no cross-invocation staleness to worry
+/// about) — but NOT used by any path that mutates and saves config within the
+/// same process run (e.g. `hooks::init::save_telemetry_consent`'s load-mutate-save),
+/// since those must always observe a fresh read. Only reach for this from a
+/// caller that never itself writes config.toml.
+pub(crate) fn cached_config() -> &'static Config {
+    static CACHE: std::sync::OnceLock<Config> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| Config::load().unwrap_or_default())
+}
+
 impl Config {
     pub fn load() -> Result<Self> {
         let path = get_config_path()?;

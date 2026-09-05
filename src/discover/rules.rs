@@ -604,6 +604,14 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^php\s+run-tests\.php(?:\s|$)",
+        rtk_cmd: "rtk phpt",
+        rewrite_prefixes: &["php run-tests.php"],
+        category: "Tests",
+        savings_pct: 99.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^(?:php\s+)?(?:\./)?(?:(?:vendor/)?bin/)?phpunit(?:\s|$)",
         rtk_cmd: "rtk phpunit",
         // rewrite_segment_inner normalizes the php wrapper, `./`, vendor/bin and
@@ -688,6 +696,55 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 75.0,
         ..RtkRule::DEFAULT
     },
+    // Bun/Deno
+    RtkRule {
+        pattern: r"^bun\s+(install|add|remove|test|build|run|pm\s+ls|pm|x)\b",
+        rtk_cmd: "rtk bun",
+        rewrite_prefixes: &["bun"],
+        category: "PackageManager",
+        savings_pct: 75.0,
+        subcmd_savings: &[("test", 90.0), ("install", 70.0), ("pm ls", 70.0)],
+        // Audited against what each subcommand actually does. "pm ls" is
+        // filtered and every other "bun pm" is passthrough, which is why the
+        // pattern captures the two-word form separately. "build" writes its
+        // bundle to stdout unless an output flag is present, so its common form
+        // runs unfiltered and it cannot claim the headline number.
+        subcmd_status: &[
+            ("run", RtkStatus::Passthrough),
+            ("pm", RtkStatus::Passthrough),
+            ("build", RtkStatus::Passthrough),
+        ],
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^bunx\s+",
+        rtk_cmd: "rtk bunx",
+        rewrite_prefixes: &["bunx"],
+        category: "PackageManager",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^deno\s+(test|lint|check|run|task|compile|install)\b",
+        rtk_cmd: "rtk deno",
+        rewrite_prefixes: &["deno"],
+        category: "Build",
+        savings_pct: 75.0,
+        // Measured against real deno 2.9.6 output: the lint and check filters
+        // remove ANSI, download and blank lines and keep every diagnostic, so
+        // they save bytes rather than content.
+        subcmd_savings: &[("test", 90.0), ("lint", 40.0), ("check", 50.0)],
+        // Audited alongside the bun rule above: test, lint and check are
+        // filtered, the rest run unchanged.
+        subcmd_status: &[
+            ("run", RtkStatus::Passthrough),
+            ("task", RtkStatus::Passthrough),
+            ("install", RtkStatus::Passthrough),
+            ("compile", RtkStatus::Passthrough),
+        ],
+        ..RtkRule::DEFAULT
+    },
+    // TOML-filtered commands
     RtkRule {
         pattern: r"^ansible-playbook\b",
         rtk_cmd: "rtk ansible-playbook",
@@ -809,6 +866,21 @@ pub const RULES: &[RtkRule] = &[
         pattern: r"^(?:\./mvnw|mvnw\.cmd|mvnw|mvn)\b(?:\s+\S+)*?\s+(compile|test|integration-test|package|install|verify|deploy)\b",
         rtk_cmd: "rtk mvn",
         rewrite_prefixes: &["./mvnw", "mvnw.cmd", "mvnw", "mvn"],
+        category: "Build",
+        savings_pct: 82.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        // `mvnd` is a separate binary, not a `mvn` wrapper — it must keep its
+        // own rtk_cmd so the daemon is what actually runs. mvnd ships
+        // `mvnd.cmd` on Windows; listed explicitly (longer prefix first) on
+        // both the pattern and rewrite_prefixes, mirroring the mvn rule's
+        // `mvnw.cmd` handling — `^mvnd\b` alone matches the `.` boundary in
+        // `mvnd.cmd` but can't then reach `\s+(compile|...)`, so it silently
+        // fails to classify the command at all.
+        pattern: r"^(?:mvnd\.cmd|mvnd)\b(?:\s+\S+)*?\s+(compile|test|integration-test|package|install|verify|deploy)\b",
+        rtk_cmd: "rtk mvnd",
+        rewrite_prefixes: &["mvnd.cmd", "mvnd"],
         category: "Build",
         savings_pct: 82.0,
         ..RtkRule::DEFAULT

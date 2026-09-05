@@ -88,9 +88,14 @@ pub(crate) fn parse_major_version(version_output: &str) -> u32 {
     // Handles:
     //   "golangci-lint version 1.59.1"
     //   "golangci-lint has version 2.10.0 built with ..."
+    //   "golangci-lint has version v1.64.8 built with ..."
+    //
+    // The `v` prefix varies with how the binary was built, and reading a v2 as a v1
+    // would send it `--out-format=json`, a flag v2 removed.
     for word in version_output.split_whitespace() {
-        if let Some(major) = word.split('.').next().and_then(|s| s.parse::<u32>().ok()) {
-            if word.contains('.') {
+        let version = word.strip_prefix('v').unwrap_or(word);
+        if let Some(major) = version.split('.').next().and_then(|s| s.parse::<u32>().ok()) {
+            if version.contains('.') {
                 return major;
             }
         }
@@ -393,6 +398,7 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::tracking::estimate_tokens;
 
     #[test]
     fn test_filter_golangci_no_issues() {
@@ -466,6 +472,24 @@ mod tests {
     fn test_parse_version_v2_format() {
         assert_eq!(
             parse_major_version("golangci-lint has version 2.10.0 built with go1.26.0 from 95dcb68a on 2026-02-17T13:05:51Z"),
+            2
+        );
+    }
+
+    /// A `go install` build of v1 prints the version `v`-prefixed while the same
+    /// build of v2 does not, so neither spelling may decide the major version.
+    #[test]
+    fn test_parse_version_tolerates_v_prefix() {
+        assert_eq!(
+            parse_major_version(
+                "golangci-lint has version v1.64.8 built with go1.27.0 from (unknown)"
+            ),
+            1
+        );
+        assert_eq!(
+            parse_major_version(
+                "golangci-lint has version v2.13.2 built with go1.27.0 from (unknown)"
+            ),
             2
         );
     }
@@ -711,22 +735,61 @@ mod tests {
         }
     }
 
-    fn count_tokens(text: &str) -> usize {
-        text.split_whitespace().count()
+    #[test]
+    fn test_filter_real_v2_clean_json() {
+        let raw = include_str!("../../../tests/fixtures/golangci_v2_clean_raw.json");
+        assert_eq!(
+            filter_golangci_json(raw.lines().next().unwrap_or(""), 2),
+            "golangci-lint: No issues found"
+        );
     }
 
     #[test]
-    fn test_golangci_v2_token_savings() {
-        let raw = include_str!("../../../tests/fixtures/golangci_v2_json.txt");
+    fn test_filter_real_v2_issues_json() {
+        let raw = include_str!("../../../tests/fixtures/golangci_v2_issues_raw.json");
+        let filtered = filter_golangci_json(raw.lines().next().unwrap_or(""), 2);
 
-        let filtered = filter_golangci_json(raw, 2);
-        let savings = 100.0 - (count_tokens(&filtered) as f64 / count_tokens(raw) as f64 * 100.0);
+        assert!(filtered.contains("golangci-lint: 6 issues in 1 files"));
+        assert!(filtered.contains("errcheck (3x)"));
+        assert!(filtered.contains("ineffassign (3x)"));
+        assert!(filtered.contains("main.go"));
+    }
 
-        assert!(
-            savings >= 60.0,
-            "Expected ≥60% token savings, got {:.1}%\nFiltered output:\n{}",
-            savings,
-            filtered
-        );
+    #[test]
+    fn test_real_v2_issues_token_savings() {
+        let raw = include_str!("../../../tests/fixtures/golangci_v2_issues_raw.json");
+        // v2 puts the JSON on the first line and may print text after it; measure
+        // against the slice the filter is actually handed, not the whole file.
+        let json = raw.lines().next().unwrap_or("");
+        let filtered = filter_golangci_json(json, 2);
+        // golangci-lint emits its JSON on a single line, so whitespace-word counting
+        // measures indentation rather than content. Use the estimator RTK bills with.
+        let raw_tokens = estimate_tokens(json) as f64;
+        let filtered_tokens = estimate_tokens(&filtered) as f64;
+        let savings = 100.0 - (filtered_tokens / raw_tokens * 100.0);
+
+        assert!(savings >= 60.0, "expected >=60% savings, got {:.1}%", savings);
+    }
+
+    /// The filter always has something to say about its input. Whether that is worth
+    /// printing is the guard's call, not an empty return here.
+    #[test]
+    fn test_filter_never_silent_on_go127_load_error() {
+        let stderr = include_str!("../../../tests/fixtures/golangci_v1_go127_error_stderr.txt");
+
+        for (label, input) in [
+            ("empty stdout", ""),
+            ("whitespace", "   \n  "),
+            ("error text on stdout", stderr),
+            ("truncated json", "{\"Issues\": ["),
+        ] {
+            for version in [1, 2] {
+                let filtered = filter_golangci_json(input, version);
+                assert!(
+                    !filtered.trim().is_empty(),
+                    "filter went silent on {label} (v{version})"
+                );
+            }
+        }
     }
 }

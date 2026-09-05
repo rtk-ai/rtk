@@ -2,8 +2,9 @@ use super::constants::{
     CLAUDE_DIR, CURSOR_DIR, DROID_DIR, DROID_HOME_ENV, DROID_SETTINGS_FILE, GEMINI_DIR,
     SETTINGS_JSON, SETTINGS_LOCAL_JSON,
 };
+use super::init::resolve_claude_dir;
 use crate::core::stream::exec_capture;
-use crate::discover::lexer::split_for_permissions;
+use crate::discover::lexer::{is_word_boundary_whitespace, split_for_permissions};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -40,14 +41,24 @@ pub enum Host {
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
-    let (deny_rules, ask_rules, allow_rules) = match host {
+    let (deny_rules, ask_rules, allow_rules) = load_rules_for(host);
+    check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
+}
+
+/// Load `host`'s deny/ask/allow Bash rules from disk, doing the settings-file I/O
+/// exactly once. Exposed so a caller that checks many commands against the same
+/// host in a loop (e.g. `rtk discover` scanning thousands of transcript commands)
+/// can load once up front and reuse `check_command_with_rules` per command instead
+/// of going through `check_command_for` and re-reading every settings file from
+/// disk on every single call.
+pub(crate) fn load_rules_for(host: Host) -> (Vec<String>, Vec<String>, Vec<String>) {
+    match host {
         Host::Claude => load_permission_rules(),
         Host::Cursor => load_cursor_rules(),
         Host::Gemini => load_gemini_rules(),
         Host::Droid => load_droid_rules(),
         Host::Vibe => (Vec::new(), Vec::new(), Vec::new()),
-    };
-    check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
+    }
 }
 
 /// Internal implementation allowing tests to inject rules without file I/O.
@@ -176,15 +187,25 @@ fn append_bash_rules(rules_value: Option<&Value>, target: &mut Vec<String>) {
 
 /// Return the ordered list of Claude Code settings file paths to check.
 fn get_settings_paths() -> Vec<PathBuf> {
+    get_settings_paths_from(find_project_root(), resolve_claude_dir().ok())
+}
+
+/// Assemble the settings paths for a project root and a resolved Claude config dir.
+///
+/// `claude_dir` is already resolved, so it honors `CLAUDE_CONFIG_DIR` when set.
+fn get_settings_paths_from(
+    project_root: Option<PathBuf>,
+    claude_dir: Option<PathBuf>,
+) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    if let Some(root) = find_project_root() {
+    if let Some(root) = project_root {
         paths.push(root.join(CLAUDE_DIR).join(SETTINGS_JSON));
         paths.push(root.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON));
     }
-    if let Some(home) = dirs::home_dir() {
-        paths.push(home.join(CLAUDE_DIR).join(SETTINGS_JSON));
-        paths.push(home.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON));
+    if let Some(claude_dir) = claude_dir {
+        paths.push(claude_dir.join(SETTINGS_JSON));
+        paths.push(claude_dir.join(SETTINGS_LOCAL_JSON));
     }
 
     paths
@@ -393,8 +414,16 @@ pub(crate) fn extract_bash_pattern(rule: &str) -> &str {
 /// - `* suffix`, `pre * suf` → glob matching where `*` matches any sequence of characters
 /// - `pattern` → exact match or prefix match (cmd must equal pattern or start with `{pattern} `)
 pub(crate) fn command_matches_pattern(cmd: &str, pattern: &str) -> bool {
-    let cmd_norm = cmd.split_whitespace().collect::<Vec<_>>().join(" ");
-    let pattern_norm = pattern.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Shares the lexer's word-boundary definition rather than
+    // str::split_whitespace(), so a bare `\r` in `cmd` never collapses into a space.
+    let normalize = |s: &str| {
+        s.split(is_word_boundary_whitespace)
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let cmd_norm = normalize(cmd);
+    let pattern_norm = normalize(pattern);
     let cmd = cmd_norm.as_str();
     let pattern = pattern_norm.as_str();
 
@@ -488,6 +517,39 @@ fn split_compound_command(cmd: &str) -> Vec<&str> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_get_settings_paths_uses_the_resolved_claude_dir() {
+        let project = PathBuf::from("/workspace/project");
+        let profile = PathBuf::from("/profiles/work/.claude");
+
+        let paths = get_settings_paths_from(Some(project.clone()), Some(profile.clone()));
+
+        assert_eq!(
+            paths,
+            vec![
+                project.join(CLAUDE_DIR).join(SETTINGS_JSON),
+                project.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON),
+                profile.join(SETTINGS_JSON),
+                profile.join(SETTINGS_LOCAL_JSON),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_get_settings_paths_without_a_claude_dir() {
+        let project = PathBuf::from("/workspace/project");
+
+        let paths = get_settings_paths_from(Some(project.clone()), None);
+
+        assert_eq!(
+            paths,
+            vec![
+                project.join(CLAUDE_DIR).join(SETTINGS_JSON),
+                project.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON),
+            ]
+        );
+    }
 
     #[test]
     fn test_parse_bash_pattern() {
@@ -954,6 +1016,32 @@ mod tests {
         assert_eq!(
             check_command_with_rules("git status\nrm -rf ~", &[], &[], &allow),
             PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_lone_cr_hidden_command_not_auto_allowed() {
+        let allow = vec!["git status".to_string()];
+        assert_eq!(
+            check_command_with_rules("git status\rrm -rf ~", &[], &[], &allow),
+            PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_lone_cr_does_not_collapse_to_space_in_pattern_match() {
+        assert!(!command_matches_pattern(
+            "git status\rrm -rf ~",
+            "git status"
+        ));
+    }
+
+    #[test]
+    fn test_lone_cr_segment_still_denied() {
+        let deny = vec!["rm:*".to_string()];
+        assert_eq!(
+            check_command_with_rules("git status\rrm -rf ~", &deny, &[], &[]),
+            PermissionVerdict::Deny
         );
     }
 

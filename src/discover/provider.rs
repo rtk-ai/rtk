@@ -16,6 +16,10 @@ pub struct ExtractedCommand {
     pub output_len: Option<usize>,
     #[allow(dead_code)]
     pub session_id: String,
+    /// The Claude Code `tool_use_id` for this Bash call — the same id the
+    /// PreToolUse hook receives, letting hook-decision logs join back to this
+    /// exact transcript entry.
+    pub tool_use_id: String,
     /// Actual output content (first ~1000 chars for error detection)
     pub output_content: Option<String>,
     /// Whether the tool_result indicated an error
@@ -60,9 +64,18 @@ impl ClaudeProvider {
             return Ok(Vec::new());
         }
 
+        // `days * 86400` can overflow u64 for a large user-supplied `--since` (same
+        // overflow class `core::utils::days_ago_cutoff` fixes for the hook_decisions
+        // query) — use checked_mul and fall back to the epoch, which for "days ago"
+        // naturally means "no lower bound", instead of panicking. Kept as its own
+        // SystemTime-based implementation rather than reusing days_ago_cutoff
+        // directly: this filters on file mtimes (SystemTime), not chrono
+        // DateTime<Utc>, and days_ago_cutoff's MIN_UTC fallback wouldn't convert to
+        // a valid SystemTime anyway. If this overflow-clamping logic needs a fix,
+        // check whether the same fix applies to days_ago_cutoff too.
         let cutoff = since_days.map(|days| {
-            SystemTime::now()
-                .checked_sub(Duration::from_secs(days * 86400))
+            days.checked_mul(86400)
+                .and_then(|secs| SystemTime::now().checked_sub(Duration::from_secs(secs)))
                 .unwrap_or(SystemTime::UNIX_EPOCH)
         });
 
@@ -261,6 +274,7 @@ impl SessionProvider for ClaudeProvider {
                 command,
                 output_len,
                 session_id: session_id.clone(),
+                tool_use_id: tool_id,
                 output_content,
                 is_error,
                 sequence_index,

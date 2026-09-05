@@ -39,7 +39,16 @@ pub const PI_DIR: &str = ".pi/agent";
 pub const PI_LOCAL_DIR: &str = ".pi";
 pub const PI_EXTENSIONS_SUBDIR: &str = "extensions";
 pub const PI_PLUGIN_FILE: &str = "rtk.ts";
+/// Hidden ownership state stored beside the shared Pi/OMP extension.
+pub const PI_AGENT_STATE_FILE: &str = ".rtk-agents";
 pub const PI_CODING_AGENT_DIR_ENV: &str = "PI_CODING_AGENT_DIR";
+
+/// Oh My Pi (OMP) home subdirectory (`$HOME/.omp/agent`) and project
+/// subdirectory (`.omp`). OMP loads the same extension file as Pi through
+/// its `legacy-pi-compat` layer, so both agents share `PI_EXTENSIONS_SUBDIR`
+/// and `PI_PLUGIN_FILE`.
+pub const OMP_DIR: &str = ".omp/agent";
+pub const OMP_LOCAL_DIR: &str = ".omp";
 
 /// Factory Droid config directory, joined onto the resolved home directory.
 pub const DROID_DIR: &str = ".factory";
