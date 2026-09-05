@@ -209,3 +209,15 @@ fn dash_m_max_count_is_per_file_like_grep_n() {
     let f2 = write(d.path(), "b.txt", "hit\nhit\nhit\n");
     assert_eq_grep_with_and_without_n(&["-m", "2", "hit", &f1, &f2]); // 2 per file, both files
 }
+
+// Regression (#3882): GNU grep's `-T`/`--initial-tab` is boolean, unlike
+// ripgrep's value-taking `-T`/`--type-not`. Before the fix, RTK treated `-T`
+// as value-taking for both engines, so `rtk grep -T apple f.txt` consumed
+// "apple" as `-T`'s value, shifted the real pattern/path, and grep errored on
+// a nonexistent path instead of searching.
+#[test]
+fn dash_capital_t_initial_tab_matches_grep_n() {
+    let d = tempfile::tempdir().unwrap();
+    let f = write(d.path(), "t.txt", "apple pie\napple\nzebra apple juice\n");
+    assert_eq_grep_with_and_without_n(&["-T", "apple", &f]);
+}
