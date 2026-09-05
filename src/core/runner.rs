@@ -297,9 +297,9 @@ const MAX_RUNNER_LINES: usize = CAP_LIST;
 static ERROR_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
         // Generic errors
-        Regex::new(r"(?i)^.*error[\s:\[].*$").unwrap(),
+        Regex::new(r"(?i)^.*error[\s:\[\]].*$").unwrap(),
         Regex::new(r"(?i)^.*\berr\b.*$").unwrap(),
-        Regex::new(r"(?i)^.*warning[\s:\[].*$").unwrap(),
+        Regex::new(r"(?i)^.*warning[\s:\[\]].*$").unwrap(),
         Regex::new(r"(?i)^.*\bwarn\b.*$").unwrap(),
         Regex::new(r"(?i)^.*failed.*$").unwrap(),
         Regex::new(r"(?i)^.*failure.*$").unwrap(),
@@ -898,6 +898,43 @@ mod err_test_runner_tests {
         let filtered = filter_errors(output);
         assert!(filtered.contains("error"));
         assert!(!filtered.contains("info"));
+    }
+
+    #[test]
+    fn test_filter_bracketed_error_lines() {
+        // Bracketed "[ERROR] ..." lines (Maven, Gradle, sbt, deno diagnostics)
+        // must survive even when they contain no other error keyword (#3844).
+        // "[error] Compilation failed" previously matched only via "failed".
+        let output = "TS2322 [ERROR]: Type 'string' is not assignable to type 'number'.\n\
+                      [ERROR] Cannot resolve symbol 'foo'\n\
+                      [ERROR] /src/Main.java:[12,9] cannot find symbol\n\
+                      [error] Compilation failed\n\
+                      error: plain form for contrast\n\
+                      info: all good";
+        let filtered = filter_errors(output);
+        assert!(filtered.contains("TS2322 [ERROR]"), "{filtered}");
+        assert!(
+            filtered.contains("[ERROR] Cannot resolve symbol"),
+            "{filtered}"
+        );
+        assert!(filtered.contains("[ERROR] /src/Main.java"), "{filtered}");
+        assert!(
+            filtered.contains("[error] Compilation failed"),
+            "{filtered}"
+        );
+        assert!(
+            filtered.contains("error: plain form for contrast"),
+            "{filtered}"
+        );
+        assert!(!filtered.contains("info: all good"), "{filtered}");
+    }
+
+    #[test]
+    fn test_filter_bracketed_warning_lines() {
+        let output = "[WARNING] Using incubator modules: jdk.compiler\ninfo: done";
+        let filtered = filter_errors(output);
+        assert!(filtered.contains("[WARNING]"), "{filtered}");
+        assert!(!filtered.contains("info: done"), "{filtered}");
     }
 
     #[test]
