@@ -88,7 +88,9 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
     let install_method = detect_install_method();
 
     // Get stats from tracking DB (single connection for both basic + enriched)
-    let tracker = tracking::Tracker::new().ok();
+    let tracker = tracking::tracking_enabled()
+        .then(|| tracking::Tracker::new().ok())
+        .flatten();
     let (commands_24h, top_commands, savings_pct, tokens_saved_24h, tokens_saved_total) =
         match &tracker {
             Some(t) => get_stats(t),
