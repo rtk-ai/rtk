@@ -268,12 +268,14 @@ pub fn run(
                         "•"
                     };
                     println!(
-                        "{} {} {:<25} -{:.0}% ({})",
-                        time,
-                        sign,
-                        cmd_short,
-                        rec.savings_pct,
-                        format_tokens(rec.saved_tokens)
+                        "{}",
+                        format_recent_command_line(
+                            &time.to_string(),
+                            sign,
+                            &cmd_short,
+                            rec.savings_pct,
+                            rec.saved_tokens
+                        )
                     );
                 }
                 println!();
@@ -643,6 +645,23 @@ fn export_csv(
     Ok(())
 }
 
+fn format_recent_command_line(
+    time: &str,
+    sign: &str,
+    cmd_short: &str,
+    savings_pct: f64,
+    saved_tokens: usize,
+) -> String {
+    format!(
+        "{} {} {:<25} {:.0}% ({})",
+        time,
+        sign,
+        cmd_short,
+        savings_pct,
+        format_tokens(saved_tokens)
+    )
+}
+
 /// Lightweight scan of recent Claude Code sessions for RTK_DISABLED= overuse.
 /// Returns a warning string if bypass rate exceeds 10%, None otherwise.
 /// Silently returns None on any error (missing dirs, permission issues, etc.).
@@ -759,4 +778,25 @@ fn confirm_reset() -> Result<bool> {
         .context("Failed to read confirmation")?;
 
     Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_recent_command_line;
+
+    #[test]
+    fn recent_command_line_shows_positive_savings_percentage() {
+        let line = format_recent_command_line("07-04 12:00", "▲", "cargo test", 94.0, 1_500);
+
+        assert!(line.contains("94%"));
+        assert!(!line.contains("-94%"));
+    }
+
+    #[test]
+    fn recent_command_line_does_not_show_negative_zero_savings() {
+        let line = format_recent_command_line("07-04 12:00", "•", "cargo test", 0.0, 0);
+
+        assert!(line.contains("0%"));
+        assert!(!line.contains("-0%"));
+    }
 }
