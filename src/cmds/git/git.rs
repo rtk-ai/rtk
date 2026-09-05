@@ -14,6 +14,7 @@ use crate::core::utils::{
 };
 use anyhow::{Context, Result};
 use std::ffi::OsString;
+use std::io::IsTerminal;
 use std::process::Command;
 
 #[derive(Debug, Clone)]
@@ -270,12 +271,33 @@ fn run_show(
         // Latin-1 losslessly and passes true binary / ambiguous encodings through.
         let result =
             crate::core::stream::exec_capture_bytes(&mut cmd).context("Failed to run git show")?;
-        if !result.success() {
-            eprint!("{}", String::from_utf8_lossy(&result.stderr));
-            return Ok(result.exit_code);
-        }
         let label = format!("git show {}", args.join(" "));
         let rtk_label = format!("rtk git show {}", args.join(" "));
+        if !result.success() {
+            eprint!("{}", crate::core::utils::decode_process_output(&result.stderr));
+            return Ok(result.exit_code);
+        }
+        // git can warn on stderr (e.g. CRLF / autocrlf notices) while still exiting 0;
+        // surface it instead of swallowing it just because the command succeeded.
+        if !result.stderr.is_empty() {
+            eprint!("{}", crate::core::utils::decode_process_output(&result.stderr));
+        }
+        // Emit git's raw bytes verbatim — no decode, no window — when either:
+        //  - stdout is not a terminal: truncating would change the bytes a downstream
+        //    consumer receives (`git show HEAD:big.py | grep foo`, `> file`), not just
+        //    the on-screen presentation, so a pipe must get exactly what git wrote; or
+        //  - the blob already fits the byte budget: it would never be windowed anyway,
+        //    and decoding would needlessly strip a BOM / rewrite bytes.
+        // Either way the passthrough stays byte-identical to a plain `git show`.
+        if !std::io::stdout().is_terminal() || result.stdout.len() <= MAX_BLOB_BYTES.0 {
+            return emit_raw_bytes_passthrough(
+                &result.stdout,
+                &label,
+                &rtk_label,
+                &timer,
+                result.exit_code,
+            );
+        }
         let text = match crate::core::stream::decode_output(&result.stdout) {
             crate::core::stream::Decoded::Utf8(s) | crate::core::stream::Decoded::Latin1(s) => s,
             // Binary or ambiguous single-byte encoding: never window or transcode —
@@ -306,7 +328,10 @@ fn run_show(
         };
         print!("{}", shown);
 
-        timer.track(&label, &rtk_label, raw, &shown);
+        // Track savings against the bytes git actually wrote (`result.stdout`), not the
+        // decoded text: a Latin-1 transcode inflates the byte count and would overstate
+        // the reduction.
+        timer.track_bytes(&label, &rtk_label, result.stdout.len(), &shown);
 
         return Ok(0);
     }
@@ -507,32 +532,19 @@ fn show_route(args: &[String]) -> ShowRoute {
 /// Byte budget for a blob preview before truncation kicks in (~2k tokens).
 const MAX_BLOB_BYTES: Budget = Budget(8192);
 
-/// Byte budget after which a blob preview is truncated. A distinct newtype from
-/// [`MaxRecoverable`] so the two `usize` limits `blob_truncation` takes cannot be
-/// silently transposed at a call site (they are NOT interchangeable, and a smaller
-/// recovery cap than budget is a valid config, so no ordering assertion can guard it).
+/// Byte budget after which a blob preview is truncated. A newtype rather than a bare
+/// `usize` so a call site can't silently pass some other length in its place.
 #[derive(Clone, Copy)]
 struct Budget(usize);
-
-/// Largest blob the recovery tee file can store intact; a bigger blob is passed
-/// through so the tail hint never promises content the recovery file can't hold.
-#[derive(Clone, Copy)]
-struct MaxRecoverable(usize);
 
 /// Decide how to window a `git show <rev>:<path>` blob. Returns
 /// `Some((head, remaining_lines, tail_offset))` when the blob should be truncated,
 /// or `None` to pass it through unchanged: a small blob, a binary blob, a tree
-/// listing, a blob too large for the recovery file to store intact, or a single line
-/// too long to cut at a line boundary.
+/// listing, or a single line too long to cut at a line boundary.
 ///
 /// Pure and side-effect free so it can be unit-tested against real blob fixtures.
-fn blob_truncation(
-    raw: &str,
-    budget: Budget,
-    max_recoverable: MaxRecoverable,
-) -> Option<(&str, usize, usize)> {
+fn blob_truncation(raw: &str, budget: Budget) -> Option<(&str, usize, usize)> {
     let Budget(budget) = budget;
-    let MaxRecoverable(max_recoverable) = max_recoverable;
     // `git show <rev>:<dir>` prints a tree listing (`tree <rev>:<dir>\n\n...`), not
     // file content. This is a content prefix, not a git-provided type signal, so a
     // text blob that genuinely begins with "tree " (e.g. a Newick/NEXUS phylogenetic
@@ -546,16 +558,11 @@ fn blob_truncation(
     if raw.contains('\0') || raw.contains('\u{FFFD}') {
         return None;
     }
-    // The recovery tee file is capped: a blob larger than it can store intact could
-    // not be recovered in full via the tail hint, so keep it whole.
-    if raw.len() > max_recoverable {
-        return None;
-    }
     if raw.len() <= budget {
         return None;
     }
-    // Walk back to a valid UTF-8 char boundary at or below the budget before slicing
-    // (slicing mid-codepoint panics — see core::tee::write_tee_file for the same fix).
+    // Slicing a `&str` at a byte index that is not a UTF-8 char boundary panics, so
+    // walk the budget back to the nearest boundary at or below it before cutting.
     let mut end = budget;
     while end > 0 && !raw.is_char_boundary(end) {
         end -= 1;
@@ -571,28 +578,37 @@ fn blob_truncation(
     Some((head, remaining, head_lines + 1))
 }
 
-/// Window a single blob dump: cap large text blobs with a tail-recovery hint, but
-/// only when the full content was successfully tee'd — never drop data without a way
-/// to recover it.
-fn compact_blob_show(raw: &str, blob_arg: &str) -> String {
-    let max_recoverable = MaxRecoverable(crate::core::tee::max_recoverable_bytes());
-    let Some((head, remaining, offset)) = blob_truncation(raw, MAX_BLOB_BYTES, max_recoverable)
-    else {
-        return raw.to_string();
-    };
-    let slug = format!("git-show-{}", blob_arg.rsplit(':').next().unwrap_or(blob_arg));
-    match crate::core::tee::force_tee_tail_hint(raw, &slug, offset) {
-        Some(hint) => {
-            let out = format!("{}... (+{} lines) {}\n", head, remaining, hint);
-            never_worse(raw, &out).to_string()
-        }
-        // Tee unavailable (disabled / RTK_TEE=0): without recovery, keep the blob whole.
-        None => raw.to_string(),
-    }
+/// POSIX single-quote a blob arg so a hint with a space or shell metachar in the path
+/// stays copy-paste safe.
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Write raw (binary or non-transcodable) bytes straight to stdout, tracked as a
-/// passthrough. Mirrors the binary path in `cloud/curl_cmd.rs`.
+/// Window a single blob dump: cap a large text blob and point at the rest with a hint
+/// re-derived from the blob arg itself — `git show <rev>:<path> | tail -n +N`.
+///
+/// The hint deliberately does not lean on a tee file. The tee is capped at
+/// `max_file_size` (1 MB by default), so it would refuse to store exactly the giant
+/// lockfiles this filter most wants to trim, leaving the biggest blobs un-windowed;
+/// re-running `git show` reproduces the tail at any size, with no cap and no I/O.
+fn compact_blob_show(raw: &str, blob_arg: &str) -> String {
+    let Some((head, remaining, offset)) = blob_truncation(raw, MAX_BLOB_BYTES) else {
+        return raw.to_string();
+    };
+    let hint = format!(
+        "[see remaining: git show {} | tail -n +{}]",
+        shell_single_quote(blob_arg),
+        offset
+    );
+    let out = format!("{}... (+{} lines) {}\n", head, remaining, hint);
+    never_worse(raw, &out).to_string()
+}
+
+/// Write raw bytes straight to stdout, tracked as a passthrough. Used when the blob
+/// must reach the caller byte-for-byte — binary or ambiguously-encoded content that
+/// decoding would corrupt, or a passthrough where any rewrite (BOM strip, transcode)
+/// would diverge from what plain `git show` emits — so it goes through the locked
+/// stdout handle as bytes rather than a `String`.
 fn emit_raw_bytes_passthrough(
     bytes: &[u8],
     label: &str,
@@ -3753,20 +3769,19 @@ mod tests {
     #[test]
     fn test_blob_windowing_token_savings() {
         // Per `.claude/rules/cli-testing.md`, a filter must verify its 60–90% savings
-        // claim with a real fixture. The shipped 10.7 KB `blob_large.txt` only reaches
-        // ~25% (an 8 KiB head is a big fraction of it), so use a real, larger committed
-        // blob — the repo's own `src/main.rs` (~120 KB), the exact `git show HEAD:<src>`
-        // case this feature targets and stably far above the 24 KiB the assert needs —
-        // where windowing to the 8 KiB head genuinely clears the floor. The recovery
-        // hint is a handful of tokens, so head-vs-raw is the savings floor.
+        // claim with a real fixture. Use a committed, deterministic ~107 KB blob
+        // (numbered filler lines) rather than `src/main.rs`: the fixture is stable and
+        // stays comfortably above the 24 KiB the assert needs, so the test can't break
+        // if a source file happens to shrink. Windowing to the 8 KiB head clears the
+        // 60% floor; the recovery hint is a handful of tokens, so head-vs-raw is the
+        // savings floor.
         fn count_tokens(text: &str) -> usize {
             text.split_whitespace().count()
         }
-        let raw = include_str!("../../main.rs");
+        let raw = include_str!("../../../tests/fixtures/git/blob_windowing_large.txt");
         assert!(raw.len() > 3 * MAX_BLOB_BYTES.0);
         let (head, _remaining, _offset) =
-            blob_truncation(raw, MAX_BLOB_BYTES, MaxRecoverable(1_000_000))
-                .expect("large blob should window");
+            blob_truncation(raw, MAX_BLOB_BYTES).expect("large blob should window");
         let savings = 100.0 - (count_tokens(head) as f64 / count_tokens(raw) as f64 * 100.0);
         assert!(
             savings >= 60.0,
@@ -3779,7 +3794,7 @@ mod tests {
     fn test_blob_truncation_small_passthrough() {
         // Real committed file, ~1.7KB < budget: passed through unchanged.
         let small = include_str!("../../../Cargo.toml");
-        assert!(blob_truncation(small, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX)).is_none());
+        assert!(blob_truncation(small, MAX_BLOB_BYTES).is_none());
     }
 
     #[test]
@@ -3787,7 +3802,7 @@ mod tests {
         // Real blob fixture (`git show HEAD:src/main.rs | head -350`), ~10.7KB.
         let large = include_str!("../../../tests/fixtures/git/blob_large.txt");
         let (head, remaining, offset) =
-            blob_truncation(large, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX)).expect("large blob should window");
+            blob_truncation(large, MAX_BLOB_BYTES).expect("large blob should window");
         assert!(head.len() <= MAX_BLOB_BYTES.0);
         assert!(head.ends_with('\n'), "head must end at a line boundary");
         let head_lines = head.lines().count();
@@ -3798,39 +3813,28 @@ mod tests {
     }
 
     #[test]
-    fn test_blob_truncation_exceeds_recoverable_passthrough() {
-        // ~10.7KB real blob. If the recovery tee can only store 5KB, truncating would
-        // promise a tail the tee file cannot hold → pass the blob through whole.
-        let large = include_str!("../../../tests/fixtures/git/blob_large.txt");
-        assert!(large.len() > 5_000);
-        assert!(blob_truncation(large, MAX_BLOB_BYTES, MaxRecoverable(5_000)).is_none());
-        // With ample recovery capacity it windows normally.
-        assert!(blob_truncation(large, MAX_BLOB_BYTES, MaxRecoverable(1_000_000)).is_some());
-    }
-
-    #[test]
     fn test_blob_truncation_tree_passthrough() {
         // Real tree listing (`git show HEAD:src`): `tree <rev>:<dir>\n\n...`.
         let tree = include_str!("../../../tests/fixtures/git/tree_listing.txt");
         assert!(tree.starts_with("tree "));
-        assert!(blob_truncation(tree, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX)).is_none());
+        assert!(blob_truncation(tree, MAX_BLOB_BYTES).is_none());
     }
 
     #[test]
     fn test_blob_truncation_binary_passthrough() {
         let mut binary = "x".repeat(9000);
         binary.push('\0');
-        assert!(blob_truncation(&binary, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX)).is_none());
+        assert!(blob_truncation(&binary, MAX_BLOB_BYTES).is_none());
         // Replacement char from lossy UTF-8 decoding of a binary blob.
         let lossy = format!("{}\u{FFFD}", "y".repeat(9000));
-        assert!(blob_truncation(&lossy, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX)).is_none());
+        assert!(blob_truncation(&lossy, MAX_BLOB_BYTES).is_none());
     }
 
     #[test]
     fn test_blob_truncation_giant_single_line_passthrough() {
         // A single line longer than the budget has no line boundary to cut at.
         let giant = "a".repeat(20_000);
-        assert!(blob_truncation(&giant, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX)).is_none());
+        assert!(blob_truncation(&giant, MAX_BLOB_BYTES).is_none());
     }
 
     #[test]
@@ -3842,11 +3846,11 @@ mod tests {
             s.push('\n');
         }
         // Exercise budgets straddling a multibyte char around the window edge.
-        let _ = blob_truncation(&s, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX));
-        let _ = blob_truncation(&s, Budget(8191), MaxRecoverable(usize::MAX));
-        let _ = blob_truncation(&s, Budget(8193), MaxRecoverable(usize::MAX));
+        let _ = blob_truncation(&s, MAX_BLOB_BYTES);
+        let _ = blob_truncation(&s, Budget(8191));
+        let _ = blob_truncation(&s, Budget(8193));
         // Should still window (multi-line, over budget) without crashing.
-        assert!(blob_truncation(&s, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX)).is_some());
+        assert!(blob_truncation(&s, MAX_BLOB_BYTES).is_some());
     }
 
     #[test]
@@ -3857,9 +3861,34 @@ mod tests {
         }
         s.pop(); // drop the final newline
         let (head, remaining, offset) =
-            blob_truncation(&s, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX)).expect("should window");
+            blob_truncation(&s, MAX_BLOB_BYTES).expect("should window");
         assert_eq!(offset, head.lines().count() + 1);
         assert_eq!(remaining, s.lines().count() - head.lines().count());
+    }
+
+    #[test]
+    fn test_compact_blob_show_hint_is_tee_independent() {
+        // The recovery hint re-derives the tail from the blob arg itself — no tee file,
+        // so it works at any size (N2) and quotes a path with a space for safe paste.
+        let mut s = String::new();
+        for i in 0..2000 {
+            s.push_str(&format!("line {i} with enough content to exceed the byte budget\n"));
+        }
+        let offset = blob_truncation(&s, MAX_BLOB_BYTES).expect("should window").2;
+        let out = compact_blob_show(&s, "HEAD:my dir/big.lock");
+        assert!(out.len() < s.len(), "windowing must shrink the output");
+        let expected = format!(
+            "[see remaining: git show 'HEAD:my dir/big.lock' | tail -n +{offset}]"
+        );
+        assert!(out.contains(&expected), "hint missing/unquoted: {out:?}");
+        assert!(!out.contains("tail -n +0"));
+    }
+
+    #[test]
+    fn test_compact_blob_show_small_passes_through() {
+        // Below the byte budget: returned unchanged, no hint.
+        let small = "a few\nshort\nlines\n";
+        assert_eq!(compact_blob_show(small, "HEAD:x.txt"), small);
     }
 
     #[test]
@@ -3876,7 +3905,7 @@ mod tests {
         assert!(!text.contains('\u{FFFD}'), "transcode must not corrupt");
         assert!(text.contains("MÉTODO"));
         assert!(text.len() > MAX_BLOB_BYTES.0);
-        assert!(blob_truncation(&text, MAX_BLOB_BYTES, MaxRecoverable(usize::MAX)).is_some());
+        assert!(blob_truncation(&text, MAX_BLOB_BYTES).is_some());
     }
 
     #[test]

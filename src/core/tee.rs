@@ -305,16 +305,6 @@ pub fn force_tee_hint(raw: &str, command_slug: &str) -> Option<String> {
     Some(format_hint(&path))
 }
 
-/// Maximum content size (bytes) the tee file can store intact. `write_tee_file`
-/// truncates anything larger, so a tail-recovery hint over a bigger blob would point
-/// at incomplete content. Callers that promise full recovery must not truncate beyond
-/// this. Falls back to the built-in default if config can't be loaded.
-pub fn max_recoverable_bytes() -> usize {
-    Config::load()
-        .map(|c| c.tee.max_file_size)
-        .unwrap_or(DEFAULT_MAX_FILE_SIZE)
-}
-
 /// Returns `[see remaining: tail -n +{line_offset} ~/path]`, or None if tee is disabled/skipped.
 pub fn force_tee_tail_hint(
     content: &str,

@@ -1655,8 +1655,14 @@ pub fn record_parse_failure_silent(raw_command: &str, error_message: &str, succe
 /// assert_eq!(estimate_tokens("hello world"), 3); // 11 chars = ceil(2.75) = 3
 /// ```
 pub fn estimate_tokens(text: &str) -> usize {
-    // ~4 chars per token on average
-    (text.len() as f64 / 4.0).ceil() as usize
+    estimate_tokens_from_len(text.len())
+}
+
+/// Token estimate from a raw byte length, for callers that hold a byte count rather
+/// than a `&str` (e.g. non-UTF-8 captured output). Same ~4-chars-per-token model as
+/// [`estimate_tokens`].
+pub fn estimate_tokens_from_len(len: usize) -> usize {
+    (len as f64 / 4.0).ceil() as usize
 }
 
 /// Helper struct for timing command execution
@@ -1729,6 +1735,27 @@ impl TimedExecution {
     pub fn track(&self, original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
         let input_tokens = estimate_tokens(input);
+        let output_tokens = estimate_tokens(output);
+
+        if let Ok(tracker) = Tracker::new() {
+            let _ = tracker.record(
+                original_cmd,
+                rtk_cmd,
+                input_tokens,
+                output_tokens,
+                elapsed_ms,
+            );
+        }
+    }
+
+    /// Like [`track`](Self::track), but the input size is supplied as a raw byte
+    /// count instead of a `&str`. For callers whose captured input is non-UTF-8
+    /// bytes (e.g. a Latin-1 blob): measuring the decoded string would count the
+    /// transcoded (inflated) length rather than what the wrapped command emitted,
+    /// overstating the reduction.
+    pub fn track_bytes(&self, original_cmd: &str, rtk_cmd: &str, input_len: usize, output: &str) {
+        let elapsed_ms = self.start.elapsed().as_millis() as u64;
+        let input_tokens = estimate_tokens_from_len(input_len);
         let output_tokens = estimate_tokens(output);
 
         if let Ok(tracker) = Tracker::new() {
