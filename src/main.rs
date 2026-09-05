@@ -897,11 +897,13 @@ enum Commands {
 
     /// Rewrite a raw command to its RTK equivalent (single source of truth for hooks)
     ///
-    /// Exits 0 and prints the rewritten command if supported.
-    /// Exits 1 with no output if the command has no RTK equivalent.
+    /// Exit 0: prints a rewrite that an explicit allow rule matched.
+    /// Exit 1: no RTK equivalent; prints nothing.
+    /// Exit 2: a deny rule matched; prints nothing.
+    /// Exit 3: prints a rewrite that still requires user approval (ask or default).
     ///
-    /// Used by Claude Code, Gemini CLI, and other LLM hooks:
-    ///   REWRITTEN=$(rtk rewrite "$CMD") || exit 0
+    /// Integrators should consume stdout for exits 0 and 3, while preserving the
+    /// approval requirement for exit 3. Other exits should pass through unchanged.
     Rewrite {
         /// Raw command to rewrite (e.g. "git status", "cargo test && git push")
         /// Accepts multiple args: `rtk rewrite ls -al` is equivalent to `rtk rewrite "ls -al"`
@@ -3713,6 +3715,27 @@ mod tests {
                 _ => panic!("expected Rewrite command"),
             }
         }
+    }
+
+    #[test]
+    fn test_rewrite_help_documents_exit_code_contract() {
+        use clap::CommandFactory;
+
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("rewrite")
+            .expect("rewrite subcommand should exist")
+            .render_long_help()
+            .to_string();
+
+        for exit_code in 0..=3 {
+            assert!(
+                help.contains(&format!("Exit {exit_code}:")),
+                "rewrite help should document exit {exit_code}:\n{help}"
+            );
+        }
+        assert!(help.contains("consume stdout for exits 0 and 3"));
+        assert!(!help.contains("|| exit 0"));
     }
 
     #[test]
