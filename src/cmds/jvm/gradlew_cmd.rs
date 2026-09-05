@@ -189,7 +189,7 @@ fn filter_build_line(line: &str) -> bool {
     });
     static ERROR_LINE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(
-            r"(?i)(^FAILURE:|^\* What went wrong:|^\* Where:|> Could not|e: |error:|^Execution failed|Lint found \d+ error)"
+            r"(?i)(^FAILURE:|^\* What went wrong:|^\* Where:|> Could not|^e: |error:|^Execution failed|Lint found \d+ error)"
         )
         .unwrap()
     });
@@ -746,6 +746,37 @@ Publishing build scan...
 https://gradle.com/s/abc123"#;
         let filtered: Vec<&str> = input.lines().filter(|l| filter_build_line(l)).collect();
         assert!(filtered.iter().any(|l| l.contains("gradle.com/s/")));
+    }
+
+    #[test]
+    fn test_build_error_line_anchored_avoids_mid_line_false_positives() {
+        // ERROR_LINE's `e: ` alternation is intended to match kotlinc errors
+        // (e: file:///...), parallel to WARN_LINE's anchored `^w: `. Without
+        // a `^` anchor, the unanchored `e: ` would match any substring
+        // containing "e: " — e.g. "Received message: 1" or "Source: REDACTED".
+        let input = r#"> Task :app:compileDebugKotlin
+e: /src/Main.kt:12:5 Unresolved reference: foo
+Received message: 1 from worker
+Source: REDACTED config value
+BUILD FAILED in 3s"#;
+
+        let filtered: Vec<&str> = input.lines().filter(|l| filter_build_line(l)).collect();
+
+        // Real kotlinc error at line start is still kept
+        assert!(
+            filtered.iter().any(|l| l.contains("Unresolved reference")),
+            "kotlinc errors starting with `e: ` must still be matched"
+        );
+
+        // Mid-line `e: ` substrings no longer trigger a false match
+        assert!(
+            !filtered.iter().any(|l| l.contains("Received message")),
+            "log line with mid-string `e: ` must not be matched as an error"
+        );
+        assert!(
+            !filtered.iter().any(|l| l.contains("Source: REDACTED")),
+            "log line with mid-string `e: ` must not be matched as an error"
+        );
     }
 
     // ── TEST FILTER ───────────────────────────────────────────────────────────
