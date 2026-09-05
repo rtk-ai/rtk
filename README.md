@@ -87,8 +87,11 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 ### Cargo
 
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk
+cargo install --git https://github.com/rtk-ai/rtk --branch master rtk
 ```
+
+The `master` branch tracks released versions. Omit `--branch master` only when
+you intentionally want the latest development build.
 
 ### Pre-built Binaries
 
@@ -102,8 +105,8 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 ### Verify Installation
 
 ```bash
-rtk --version   # Should show "rtk 0.28.2"
-rtk gain        # Should show the savings dashboard
+rtk --version
+rtk gain        # Rust Token Killer savings dashboard
 ```
 
 > **Name collision warning**: Another project named "rtk" (Rust Type Kit) exists on crates.io. If `rtk gain` fails, you have the wrong package. Use `cargo install --git` above instead.
