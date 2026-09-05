@@ -50,6 +50,11 @@ enabled = true              # anonymous daily ping — see Telemetry & Privacy f
 
 [hooks]
 exclude_commands = []       # commands to never auto-rewrite
+
+# Per-tool rules (optional, repeatable). See "Per-tool rules" below.
+[[tools]]
+match = { command = "npm", subcommand = "run", args_contains = ["build"] }
+env = { CI = "1" }          # inject env before the command runs
 ```
 
 For full details on what is collected, opt-out options, and GDPR rights, see [Telemetry & Privacy](../resources/telemetry.md).
@@ -151,6 +156,48 @@ export RTK_TELEMETRY_DISABLED=1
 [telemetry]
 enabled = false
 ```
+
+## Per-tool rules
+
+Some commands need adjusted handling — for example, interactive builders that hang when
+their output is captured through a pipe instead of a terminal. The `[[tools]]` array lets
+you attach behavior to a matched command without recompiling.
+
+```toml
+[[tools]]
+match = { command = "npm", subcommand = "run", args_contains = ["build"] }
+env = { CI = "1" }            # run the builder one-shot so it exits cleanly
+
+[[tools]]
+match = { command = "vite" }
+capture = "pty"               # run under a pseudo-terminal
+strip_ansi = true             # strip color/cursor codes from captured output (default for pty)
+```
+
+### Matching
+
+| Field | Meaning |
+|-------|---------|
+| `command` | Required. The command basename, e.g. `"npm"`, `"ng"`. |
+| `subcommand` | Optional. The first non-flag argument, e.g. `"run"` or `"build"`. |
+| `args_contains` | Optional. Every listed token must appear in the args. Use it to target one script, e.g. `["build"]` matches `npm run build` but not `npm run test`. |
+
+Rules are evaluated top to bottom; the first matching rule applies.
+
+### Actions
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `env` | `{}` | Environment variables set on the child before it runs. The lightest fix for builders that hang on a pipe but run one-shot under `CI=1` (Angular, Vite, many JS toolchains). Applies in all capture modes. |
+| `capture` | `"pipe"` | `"pipe"` (normal) or `"pty"`. A pseudo-terminal makes the child behave as in a real terminal — it runs one-shot and exits — which avoids hangs caused by a long-lived helper process (e.g. esbuild) holding the captured pipe open. PTY support is built unless RTK is compiled with `--no-default-features`. |
+| `strip_ansi` | `true` when `capture = "pty"`, else `false` | Remove ANSI color/cursor/spinner sequences from captured output so the filtered result stays clean. |
+
+### When to use which
+
+- **Prefer `env = { CI = "1" }`** for npm/Angular/Vite-style builders — it's free (no extra
+  capture machinery) and makes the tool exit cleanly on its own.
+- **Use `capture = "pty"`** for tools that have no such non-interactive switch and only
+  terminate when attached to a terminal.
 
 ## Custom filters
 
