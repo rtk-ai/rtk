@@ -427,6 +427,7 @@ For per-agent setup details, override controls, and graceful degradation, see th
 ```toml
 [hooks]
 exclude_commands = ["curl", "playwright"]  # skip rewrite for these (matches `npx playwright` too)
+suppress_hook_warning = false                # suppress missing/outdated hook warnings
 
 [tee]
 enabled = true          # save raw output on failure (default: true)

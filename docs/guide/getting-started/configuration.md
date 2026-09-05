@@ -50,6 +50,7 @@ enabled = true              # anonymous daily ping — see Telemetry & Privacy f
 
 [hooks]
 exclude_commands = []       # commands to never auto-rewrite
+suppress_hook_warning = false # suppress missing/outdated hook warnings
 ```
 
 For full details on what is collected, opt-out options, and GDPR rights, see [Telemetry & Privacy](../resources/telemetry.md).
@@ -62,6 +63,7 @@ For full details on what is collected, opt-out options, and GDPR rights, see [Te
 | `RTK_TEE_DIR` | Override the tee directory |
 | `RTK_TELEMETRY_DISABLED=1` | Disable telemetry |
 | `RTK_HOOK_AUDIT=1` | Enable hook audit logging |
+| `RTK_SUPPRESS_HOOK_WARNING=1` | Suppress missing/outdated hook warnings |
 | `SKIP_ENV_VALIDATION=1` | Skip env validation (useful with Next.js) |
 
 ## Tee system

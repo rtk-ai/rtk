@@ -51,6 +51,11 @@ pub struct HooksConfig {
     /// not anything else.
     #[serde(default)]
     pub transparent_prefixes: Vec<String>,
+    /// Suppress "No hook installed" and "Hook outdated" warnings.
+    /// Useful when running rtk via CLAUDE.md instructions instead of hooks,
+    /// or with tools like OpenCode that don't use Claude Code hooks.
+    #[serde(default)]
+    pub suppress_hook_warning: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -184,6 +189,17 @@ pub(crate) fn cached_config() -> &'static Config {
     CACHE.get_or_init(|| Config::load().unwrap_or_default())
 }
 
+/// Check if hook warnings are suppressed via config or env var.
+pub fn hook_warning_suppressed() -> bool {
+    match std::env::var("RTK_SUPPRESS_HOOK_WARNING").as_deref() {
+        Ok("1") => true,
+        Ok(_) => false,
+        Err(_) => Config::load()
+            .map(|c| c.hooks.suppress_hook_warning)
+            .unwrap_or(false),
+    }
+}
+
 impl Config {
     pub fn load() -> Result<Self> {
         let path = get_config_path()?;
@@ -257,6 +273,7 @@ exclude_commands = ["curl", "gh"]
     fn test_hooks_config_default_empty() {
         let config = Config::default();
         assert!(config.hooks.exclude_commands.is_empty());
+        assert!(!config.hooks.suppress_hook_warning);
         assert!(config.hooks.transparent_prefixes.is_empty());
     }
 
@@ -294,6 +311,27 @@ history_days = 90
 "#;
         let config: Config = toml::from_str(toml).expect("valid toml");
         assert!(config.hooks.exclude_commands.is_empty());
+        assert!(!config.hooks.suppress_hook_warning);
+    }
+
+    #[test]
+    fn test_suppress_hook_warning_deserialize() {
+        let toml = r#"
+[hooks]
+suppress_hook_warning = true
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(config.hooks.suppress_hook_warning);
+    }
+
+    #[test]
+    fn test_suppress_hook_warning_default_false() {
+        let toml = r#"
+[hooks]
+exclude_commands = ["curl"]
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(!config.hooks.suppress_hook_warning);
     }
 
     #[test]

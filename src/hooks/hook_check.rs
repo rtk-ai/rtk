@@ -93,6 +93,11 @@ pub fn maybe_warn() {
 
 /// Single source of truth: delegates to `status()` then rate-limits the warning.
 fn check_and_warn() -> Option<()> {
+    // Suppress before probing the hook installation to keep this path cheap.
+    if crate::core::config::hook_warning_suppressed() {
+        return Some(());
+    }
+
     let warning = match status() {
         HookStatus::Ok => return Some(()),
         HookStatus::Missing => {
