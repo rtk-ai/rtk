@@ -79,7 +79,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script)",
+        pattern: r"^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script|lint)(\s|$)",
         rtk_cmd: "rtk pnpm",
         rewrite_prefixes: &["pnpm"],
         category: "PackageManager",
@@ -168,7 +168,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?(biome|eslint|lint)(\s|$)",
+        pattern: r"^((npx|pnpx|p?npm\s+exec|npm\s+x|pnpm\s+dlx)\s+)?(biome|eslint|lint)(\s|$)|^(?:npm|pnpm)\s+(?:biome|eslint)(\s|$)|^npm\s+lint(\s|$)|^p?npm\s+(?:run|run-script|rum|urn)\s+(?:biome|eslint)(\s|$)",
         rtk_cmd: "rtk lint",
         rewrite_prefixes: &[
             "biome",
@@ -181,16 +181,12 @@ pub const RULES: &[RtkRule] = &[
             "npm lint",
             "npm rum biome",
             "npm rum eslint",
-            "npm rum lint",
             "npm run biome",
             "npm run eslint",
-            "npm run lint",
             "npm run-script biome",
             "npm run-script eslint",
-            "npm run-script lint",
             "npm urn biome",
             "npm urn eslint",
-            "npm urn lint",
             "npm x biome",
             "npm x eslint",
             "npx biome",
@@ -202,13 +198,10 @@ pub const RULES: &[RtkRule] = &[
             "pnpm eslint",
             "pnpm exec biome",
             "pnpm exec eslint",
-            "pnpm lint",
             "pnpm run biome",
             "pnpm run eslint",
-            "pnpm run lint",
             "pnpm run-script biome",
             "pnpm run-script eslint",
-            "pnpm run-script lint",
             "pnpx biome",
             "pnpx eslint",
             "pnpx lint",
