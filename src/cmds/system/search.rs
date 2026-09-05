@@ -296,6 +296,13 @@ impl Engine {
 
 /// Runs the agent's exact engine + flags for the grouping path, appending only the
 /// parse aids (see `Engine::parse_flags`).
+///
+/// Retention is capped at `RAW_CAP` rather than `.output()`-buffered: a search
+/// over a large tree can emit gigabytes, and holding that twice (the byte buffer
+/// plus its lossy `String` copy) has OOM-killed the calling agent. The grouped
+/// form only ever renders `grep_max_results` matches, so the cap costs nothing
+/// but an under-count in the "N matches in M files" header, which is warned
+/// about on stderr by `run_streaming`.
 fn engine_capture<T: AsRef<str>>(
     engine: Engine,
     extra_args: &[T],
@@ -303,7 +310,13 @@ fn engine_capture<T: AsRef<str>>(
     paths: &[String],
 ) -> Result<CaptureResult> {
     let mut cmd = engine_command(engine, extra_args, patterns, paths, false);
-    exec_capture_stdin(&mut cmd).context("search failed")
+    let result = stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::CaptureOnly)
+        .context("search failed")?;
+    Ok(CaptureResult {
+        stdout: result.raw_stdout,
+        stderr: result.raw_stderr,
+        exit_code: result.exit_code,
+    })
 }
 
 fn engine_command<T: AsRef<str>>(
