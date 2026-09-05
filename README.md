@@ -365,7 +365,8 @@ RTK works fully on native Windows. Since **v0.37.2** the auto-rewrite hook runs 
 
 ```powershell
 # 1. Download and extract rtk-x86_64-pc-windows-msvc.zip from releases
-# 2. Add rtk.exe to your PATH (e.g. C:\Users\<you>\.local\bin)
+#    — or: choco install rtk
+# 2. Add rtk.exe to your PATH (e.g. C:\Users\<you>\.local\bin) — skip if installed via Chocolatey
 # 3. Initialize — installs the native binary hook
 rtk init -g
 ```
