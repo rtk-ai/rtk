@@ -551,6 +551,177 @@ fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> {
     LINE_CONTINUATION_RE.replace_all(s, " ")
 }
 
+/// A command with complete shell command substitutions replaced by unique,
+/// inert markers. The original slices are borrowed and restored after the
+/// surrounding command has gone through the normal rewrite pipeline.
+struct ProtectedSubstitutions<'a> {
+    command: String,
+    originals: Vec<&'a str>,
+    marker_prefix: String,
+}
+
+impl ProtectedSubstitutions<'_> {
+    fn restore(self, mut rewritten: String) -> String {
+        for (index, original) in self.originals.into_iter().enumerate() {
+            let marker = format!("{}{index}__", self.marker_prefix);
+            if let Some(start) = rewritten.find(&marker) {
+                rewritten.replace_range(start..start + marker.len(), original);
+            }
+        }
+        rewritten
+    }
+}
+
+#[derive(Default)]
+struct SubstitutionFrame {
+    in_single: bool,
+    in_double: bool,
+    grouping_depth: usize,
+}
+
+/// Return the exclusive end of a balanced `$(...)` substitution.
+///
+/// Each nested substitution owns its quote state, while ordinary parentheses
+/// belong to the current frame. This keeps nested substitutions inside double
+/// quotes balanced without interpreting their contents as top-level commands.
+fn dollar_substitution_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut frames = vec![SubstitutionFrame::default()];
+    let mut i = start + 2;
+
+    while i < bytes.len() {
+        let frame = frames.last_mut()?;
+        match bytes[i] {
+            b'\\' if !frame.in_single => {
+                i = (i + 2).min(bytes.len());
+                continue;
+            }
+            b'\'' if !frame.in_double => frame.in_single = !frame.in_single,
+            b'"' if !frame.in_single => frame.in_double = !frame.in_double,
+            b'`' if !frame.in_single => {
+                i = backtick_substitution_end(bytes, i)?;
+                continue;
+            }
+            b'#' if !frame.in_single
+                && !frame.in_double
+                && (i == 0
+                    || bytes[i - 1].is_ascii_whitespace()
+                    || matches!(bytes[i - 1], b'|' | b'&' | b';' | b'(' | b')')) =>
+            {
+                i += 1;
+                while i < bytes.len() && !matches!(bytes[i], b'\n' | b'\r') {
+                    i += 1;
+                }
+                continue;
+            }
+            b'$' if !frame.in_single
+                && bytes.get(i + 1) == Some(&b'(')
+                && bytes.get(i + 2) != Some(&b'(') =>
+            {
+                frames.push(SubstitutionFrame::default());
+                i += 2;
+                continue;
+            }
+            b'(' if !frame.in_single && !frame.in_double => frame.grouping_depth += 1,
+            b')' if !frame.in_single && !frame.in_double => {
+                if frame.grouping_depth > 0 {
+                    frame.grouping_depth -= 1;
+                } else {
+                    frames.pop();
+                    if frames.is_empty() {
+                        return Some(i + 1);
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    None
+}
+
+/// Return the exclusive end of a paired legacy backtick substitution.
+fn backtick_substitution_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i = (i + 2).min(bytes.len()),
+            b'`' => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Mask complete command substitutions outside single quotes in one pass.
+///
+/// The common path stays allocation-free. Arithmetic expansion (`$((...))`)
+/// remains visible to the existing guard and unmatched constructs retain the
+/// previous passthrough behavior.
+fn protect_command_substitutions(cmd: &str) -> Option<ProtectedSubstitutions<'_>> {
+    let bytes = cmd.as_bytes();
+    let mut spans = Vec::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if !in_single => {
+                i = (i + 2).min(bytes.len());
+                continue;
+            }
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'`' if !in_single => {
+                let end = backtick_substitution_end(bytes, i)?;
+                spans.push((i, end));
+                i = end;
+                continue;
+            }
+            b'$' if !in_single
+                && bytes.get(i + 1) == Some(&b'(')
+                && bytes.get(i + 2) != Some(&b'(') =>
+            {
+                let end = dollar_substitution_end(bytes, i)?;
+                spans.push((i, end));
+                i = end;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    if spans.is_empty() {
+        return None;
+    }
+
+    let mut marker_prefix = "__RTK_COMMAND_SUBSTITUTION_".to_string();
+    while cmd.contains(&marker_prefix) {
+        marker_prefix.push('_');
+    }
+
+    let mut command = String::with_capacity(cmd.len());
+    let mut originals = Vec::with_capacity(spans.len());
+    let mut copied_through = 0;
+    for (index, (start, end)) in spans.into_iter().enumerate() {
+        command.push_str(&cmd[copied_through..start]);
+        command.push_str(&marker_prefix);
+        command.push_str(&index.to_string());
+        command.push_str("__");
+        originals.push(&cmd[start..end]);
+        copied_through = end;
+    }
+    command.push_str(&cmd[copied_through..]);
+
+    Some(ProtectedSubstitutions {
+        command,
+        originals,
+        marker_prefix,
+    })
+}
+
 /// Returns `None` if the command is unsupported or ignored (hook should pass through).
 ///
 /// Handles compound commands (`&&`, `||`, `;`) by rewriting each segment independently.
@@ -595,7 +766,8 @@ pub(crate) fn rewrite_command_precompiled(
     normalized_prefixes: &[String],
 ) -> Option<String> {
     // Bash joins `\<NL>` with nothing, so `<<` or `$((` can arrive split across
-    // a continuation; the space-join below would erase them (#3188 review).
+    // a continuation. Preserve the existing whole-command guard before masking
+    // substitutions, which would intentionally make their contents opaque.
     if cmd.contains('\\') {
         let joined = BASH_JOIN_RE.replace_all(cmd, "");
         if has_heredoc(&joined) || joined.contains("$((") {
@@ -603,6 +775,24 @@ pub(crate) fn rewrite_command_precompiled(
         }
     }
 
+    let protected = protect_command_substitutions(cmd);
+    let rewrite_input = protected
+        .as_ref()
+        .map_or(cmd, |protected| protected.command.as_str());
+    let rewritten =
+        rewrite_command_without_substitutions(rewrite_input, compiled, normalized_prefixes)?;
+
+    Some(match protected {
+        Some(protected) => protected.restore(rewritten),
+        None => rewritten,
+    })
+}
+
+fn rewrite_command_without_substitutions(
+    cmd: &str,
+    compiled: &[ExcludePattern],
+    normalized_prefixes: &[String],
+) -> Option<String> {
     // Bash line continuations (`\<NL>`, `\<CRLF>`) and the leading whitespace that
     // follows are syntactically equivalent to a single space, but `cmd.trim()` does
     // not unwrap them so a leading backslash-newline used to defeat the whole matcher.
@@ -5651,6 +5841,78 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("git log $(git rev-parse HEAD~1)", &[]),
             Some("rtk git log $(git rev-parse HEAD~1)".into())
+        );
+    }
+
+    #[test]
+    fn test_curl_rewrite_keeps_json_command_substitution_unchanged() {
+        let cmd = r#"curl -sS -u "$AUTH" -H 'content-type: application/json' -X POST "$URL" \
+  --data-binary "$(jq -cn --arg payload "$PAYLOAD" '{properties:{},routing_key:"ioa-cal-in",payload:$payload,payload_encoding:"string"}')""#;
+
+        assert_eq!(
+            rewrite_command_no_prefixes(cmd, &[]),
+            Some(
+                r#"rtk curl -sS -u "$AUTH" -H 'content-type: application/json' -X POST "$URL" --data-binary "$(jq -cn --arg payload "$PAYLOAD" '{properties:{},routing_key:"ioa-cal-in",payload:$payload,payload_encoding:"string"}')""#
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn test_unsupported_outer_command_with_substitution_returns_none() {
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"echo "$(git status)""#, &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrites_only_outer_command_around_dollar_substitution() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git log $(git rev-parse HEAD)", &[]),
+            Some("rtk git log $(git rev-parse HEAD)".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrites_only_outer_command_around_backtick_substitution() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git log `git rev-parse HEAD`", &[]),
+            Some("rtk git log `git rev-parse HEAD`".into())
+        );
+    }
+
+    #[test]
+    fn test_single_quoted_substitution_syntax_remains_literal() {
+        assert!(protect_command_substitutions("'$(git status)'").is_none());
+        assert_eq!(
+            rewrite_command_no_prefixes("git log '$(git status)'", &[]),
+            Some("rtk git log '$(git status)'".into())
+        );
+    }
+
+    #[test]
+    fn test_nested_command_substitutions_remain_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git log $(echo $(git rev-parse HEAD))", &[]),
+            Some("rtk git log $(echo $(git rev-parse HEAD))".into())
+        );
+    }
+
+    #[test]
+    fn test_operators_inside_command_substitution_remain_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git log $(git status && jq .)", &[]),
+            Some("rtk git log $(git status && jq .)".into())
+        );
+    }
+
+    #[test]
+    fn test_closing_parenthesis_in_substitution_comment_is_ignored() {
+        let cmd = "git log $(printf foo # )\ngit status && jq .\n)";
+        assert_eq!(
+            rewrite_command_no_prefixes(cmd, &[]),
+            Some(format!("rtk {cmd}"))
         );
     }
 

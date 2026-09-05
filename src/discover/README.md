@@ -35,6 +35,7 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 - `gh` with `--json`/`--jq`/`--template` → skip (structured output, rtk would corrupt it)
 - `cat` with flags other than `-n` → skip (different semantics than `rtk read`)
 - `cat`/`head`/`tail` with `>` or `>>` → skip (write operation, not a read)
+- Commands inside `$(...)` and paired backtick substitutions stay byte-for-byte unchanged; only the surrounding top-level command is eligible for rewriting
 - Command in `hooks.exclude_commands` config → skip
 
 **Result**: `rtk cargo fmt --all && rtk cargo test 2>&1 | tail -20`. Bash handles the `&&` and `|` at execution time — each `rtk` invocation is a separate process.
