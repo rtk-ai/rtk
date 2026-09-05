@@ -1308,10 +1308,15 @@ fn rewrite_segment(
 }
 
 fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
-    excluded.iter().any(|pat| match pat {
-        ExcludePattern::Regex(re) => re.is_match(cmd),
-        ExcludePattern::Prefix(prefix) => cmd.starts_with(prefix.as_str()),
-    })
+    let matches = |cmd: &str| {
+        excluded.iter().any(|pat| match pat {
+            ExcludePattern::Regex(re) => re.is_match(cmd),
+            ExcludePattern::Prefix(prefix) => cmd.starts_with(prefix.as_str()),
+        })
+    };
+    // Keep option-specific patterns while matching the same Git form as routing.
+    matches(cmd)
+        || (!excluded.is_empty() && cmd.starts_with("git ") && matches(&strip_git_global_opts(cmd)))
 }
 
 fn rewrite_segment_inner(
@@ -5166,6 +5171,90 @@ mod tests {
         let excluded = vec!["git push".to_string()];
         assert_eq!(
             rewrite_command_no_prefixes("git push origin main", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_exclude_git_global_options() {
+        let excluded = vec!["git worktree".to_string()];
+        for cmd in [
+            "git worktree prune --dry-run --verbose",
+            "git -C /path/to/repo worktree prune --dry-run --verbose",
+            "git -C /path -C repo worktree list",
+            "git -c color.ui=always worktree list",
+            "git --git-dir=/path/.git --work-tree /path worktree list",
+            "git --no-pager --no-optional-locks worktree list",
+            "git --bare --literal-pathspecs worktree list",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &excluded), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_exclude_git_global_options_preserves_raw_patterns() {
+        for (pattern, cmd) in [
+            ("git -C", "git -C /path status"),
+            ("^git -C /path ", "git -C /path status"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[pattern.to_string()]),
+                None,
+                "{pattern}: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_exclude_git_global_options_stays_narrow() {
+        for (pattern, cmd) in [
+            ("git worktree", "git -C /path status"),
+            ("git worktree", "git -C /path worktree-helper"),
+            ("worktree", "git -C /path worktree list"),
+            ("git worktree", "git -C /path log -- worktree"),
+            ("git worktree", "git -C worktree status"),
+            ("^git worktree$", "git -C /path worktree list"),
+            ("git -C", "git --no-pager status"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[pattern.to_string()]),
+                Some(format!("rtk {cmd}")),
+                "{pattern}: {cmd}"
+            );
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("git -C /path worktree", &["^git worktree$".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_exclude_git_global_options_in_wrapped_commands() {
+        let excluded = vec!["git worktree".to_string()];
+        for cmd in [
+            "FOO=bar git -C /path worktree list 2>&1",
+            "env FOO=bar git -C /path worktree list",
+            "uv run git -C /path worktree list",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &excluded), None, "{cmd}");
+        }
+        assert_eq!(
+            super::rewrite_command(
+                "shadowenv exec -- git -C /path worktree list",
+                &excluded,
+                &["shadowenv exec --".to_string()],
+            ),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "git -C /path worktree list && git -C /path status",
+                &excluded,
+            ),
+            Some("git -C /path worktree list && rtk git -C /path status".to_string())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("printf data | git -C /path worktree list", &excluded),
             None
         );
     }
