@@ -2,7 +2,8 @@
 name: pr-triage
 description: >
   PR triage: audit open PRs, deep review selected ones, draft and post review comments.
-  Args: "all" to review all, PR numbers to focus (e.g. "42 57"), "en"/"fr" for language, no arg = audit only in French.
+  Args: "all" to review all, PR numbers to focus (e.g. "42 57"), "en"/"fr" for language,
+  "--focus recent" (default, last 60d), "--focus critical" (bugs/security), "--all" (everything).
 allowed-tools:
   - Bash
   - Read
@@ -36,6 +37,19 @@ tags: [triage, pr, github, review, code-review, rtk]
 
 ---
 
+## Modes de filtrage (argument `--focus`)
+
+| Mode | Comportement | Quand utiliser |
+|------|-------------|----------------|
+| `--focus recent` | PRs updatedAt < 60j (défaut si >200 PRs) | Triage hebdomadaire normal |
+| `--focus critical` | CI dirty + CONFLICTING + overlaps détectés | Sprint urgent, avant merge |
+| `--focus stale` | Aucune activité >14j | Nettoyage backlog |
+| `--all` | Toutes les PRs ouvertes, paginé | Audit exhaustif mensuel |
+
+**Seuil automatique** : si le repo a >200 PRs ouvertes, appliquer `--focus recent` par défaut et prévenir l'utilisateur : "400+ PRs détectées — mode `--focus recent` activé (60 derniers jours). Passer `--all` pour tout voir."
+
+---
+
 Workflow en 3 phases : audit automatique → deep review opt-in → commentaires avec validation obligatoire.
 
 ## Préconditions
@@ -51,15 +65,17 @@ Si l'un échoue, stop et expliquer ce qui manque.
 
 ## Phase 1 — Audit (toujours exécutée)
 
-### Data Gathering (commandes en parallèle)
+### Data Gathering — deux passes
+
+**Passe 1 : métadonnées uniquement (rapide, sans body)**
 
 ```bash
 # Identité du repo
 gh repo view --json nameWithOwner -q .nameWithOwner
 
-# PRs ouvertes avec métadonnées complètes (ajouter body pour cross-référence issues)
-gh pr list --state open --limit 50 \
-  --json number,title,author,createdAt,updatedAt,additions,deletions,changedFiles,isDraft,mergeable,reviewDecision,statusCheckRollup,body
+# PRs ouvertes — métadonnées sans body (léger)
+gh pr list --state open --limit 500 \
+  --json number,title,author,createdAt,updatedAt,additions,deletions,changedFiles,isDraft,mergeable,reviewDecision,statusCheckRollup
 
 # Collaborateurs (pour distinguer "nos PRs" des externes)
 gh api "repos/{owner}/{repo}/collaborators" --jq '.[].login'
@@ -67,22 +83,35 @@ gh api "repos/{owner}/{repo}/collaborators" --jq '.[].login'
 
 **Fallback collaborateurs** : si `gh api .../collaborators` échoue (403/404) :
 ```bash
-# Extraire les auteurs des 10 derniers PRs mergés
 gh pr list --state merged --limit 10 --json author --jq '.[].author.login' | sort -u
 ```
 Si toujours ambigu, demander à l'utilisateur via `AskUserQuestion`.
 
-Pour chaque PR, récupérer reviews existantes ET fichiers modifiés :
+**Passe 2 : bodies + reviews (seulement pour les PRs dans le scope)**
+
+Après application du filtre `--focus`, fetcher uniquement les PRs retenues :
 
 ```bash
+# Body (pour cross-ref issues fixes #N)
+gh pr view {num} --json body --jq '.body'
+
+# Reviews existantes
 gh api "repos/{owner}/{repo}/pulls/{num}/reviews" \
   --jq '[.[] | .user.login + ":" + .state] | join(", ")'
+```
 
-# Fichiers modifiés (nécessaire pour overlap detection)
+**Fichiers modifiés (overlap detection — échantillon ciblé)**
+
+Ne fetcher les fichiers QUE pour les PRs répondant à TOUS ces critères :
+- `updatedAt` < 30 jours
+- additions < 1000 (skip les XL stales)
+- Pas en draft depuis >14j
+
+```bash
 gh pr view {num} --json files --jq '[.files[].path] | join(",")'
 ```
 
-**Note rate-limiting** : la récupération des fichiers est N appels API (1 par PR). Pour repos avec 20+ PRs, prioriser les PRs candidates à l'overlap (même domaine fonctionnel, même auteur).
+**Limite API** : si les PRs dans le scope dépassent 50 après filtrage, désactiver l'overlap detection et signaler : "Overlap detection désactivée (>50 PRs dans le scope). Passer des numéros explicites pour l'activer."
 
 **Note** : `author` est un objet `{login: "..."}` — toujours extraire `.author.login`.
 
@@ -100,7 +129,7 @@ gh pr view {num} --json files --jq '[.files[].path] | join(",")'
 Format taille : `+{additions}/-{deletions}, {files} files ({label})`
 
 **Détections** :
-- **Overlaps** : comparer les listes de fichiers entre PRs — si >50% de fichiers en commun → cross-reference
+- **Overlaps** : comparer les listes de fichiers entre PRs — si >50% de fichiers en commun → cross-reference (seulement sur l'échantillon ciblé, voir ci-dessus)
 - **Clusters** : auteur avec 3+ PRs ouvertes → suggérer ordre de review (plus petite en premier)
 - **Staleness** : aucune activité depuis >14j → flag "stale"
 - **CI status** : via `statusCheckRollup` → `clean` / `unstable` / `dirty`
@@ -124,8 +153,10 @@ _Externes — Problématiques_ : un des critères suivants :
 
 ### Output — Tableau de triage
 
+Si le scope dépasse 100 PRs après filtrage, afficher les 50 les plus récentes par catégorie et indiquer "... et N autres (passer `--all` pour voir toutes)".
+
 ```
-## PRs ouvertes ({count})
+## PRs ouvertes ({total} total, {scope} dans le scope {mode})
 
 ### Nos PRs
 | PR | Titre | Taille | CI | Status |
@@ -145,6 +176,7 @@ _Externes — Problématiques_ : un des critères suivants :
 - Clusters : {auteurs avec 3+ PRs}
 - Stale : {PRs sans activité >14j}
 - Overlaps : {PRs qui touchent les mêmes fichiers}
+- Hors scope (filtre actif) : {N PRs non affichées}
 ```
 
 0 PRs → afficher `Aucune PR ouverte.` et terminer.
@@ -153,7 +185,6 @@ _Externes — Problématiques_ : un des critères suivants :
 
 Après affichage du tableau de triage, copier dans le presse-papier :
 ```bash
-# Cross-platform clipboard
 clip() {
   if command -v pbcopy &>/dev/null; then pbcopy
   elif command -v xclip &>/dev/null; then xclip -selection clipboard
@@ -175,7 +206,7 @@ Confirmer : `Tableau copié dans le presse-papier.` (FR) / `Triage table copied 
 ### Sélection des PRs
 
 **Si argument passé** :
-- `"all"` → toutes les PRs externes
+- `"all"` → toutes les PRs externes du scope actif (pas les 400 brutes)
 - Numéros (`"42 57"`) → uniquement ces PRs
 - Pas d'argument → proposer via `AskUserQuestion`
 
@@ -186,8 +217,8 @@ question: "Quelles PRs voulez-vous reviewer en profondeur ?"
 header: "Deep Review"
 multiSelect: true
 options:
-  - label: "Toutes les externes"
-    description: "Review {N} PRs externes avec agents code-reviewer en parallèle"
+  - label: "Toutes les externes ({N} dans le scope)"
+    description: "Review avec agents code-reviewer en parallèle — max 15 agents simultanés"
   - label: "Problématiques uniquement"
     description: "Focus sur les {M} PRs à risque (CI dirty, trop large, overlaps)"
   - label: "Prêtes uniquement"
@@ -198,14 +229,16 @@ options:
 
 **Note sur les drafts** :
 - Les PRs en draft sont EXCLUES des options "Toutes les externes" et "Prêtes uniquement"
-- Les PRs en draft sont INCLUSES dans "Problématiques uniquement" (car elles nécessitent attention)
+- Les PRs en draft sont INCLUSES dans "Problématiques uniquement"
 - Pour reviewer un draft : taper son numéro explicitement (ex: `42`)
+
+**Plafond agents** : lancer au maximum 15 agents en parallèle. Si la sélection dépasse 15 PRs, traiter en batches de 15 et afficher la progression entre chaque batch.
 
 Si "Passer" → fin du workflow.
 
 ### Exécution des Reviews
 
-Pour chaque PR sélectionnée, lancer un agent `code-reviewer` via **Task tool en parallèle** :
+Pour chaque PR sélectionnée, lancer un agent `code-reviewer` via **Task tool en parallèle** (max 15 simultanés) :
 
 ```
 subagent_type: code-reviewer
@@ -302,7 +335,7 @@ gh pr comment {num} --body-file - <<'REVIEW_EOF'
 REVIEW_EOF
 ```
 
-Confirmer chaque post : `✅ Commentaire posté sur PR #{num}: {title}`
+Confirmer chaque post : `Commentaire posté sur PR #{num}: {title}`
 
 Si "Aucun" → `Aucun commentaire posté. Workflow terminé.`
 
@@ -313,12 +346,15 @@ Si "Aucun" → `Aucun commentaire posté. Workflow terminé.`
 | Situation | Comportement |
 |-----------|--------------|
 | 0 PRs ouvertes | `Aucune PR ouverte.` + terminer |
+| >200 PRs ouvertes | Activer `--focus recent` auto, prévenir l'utilisateur |
 | PR en draft | Indiquer dans tableau, skip pour review sauf si sélectionnée explicitement |
 | CI inconnu | Afficher `?` dans colonne CI |
 | Review agent timeout | Afficher erreur partielle, continuer avec les autres |
 | `gh pr diff` vide | Skip cette PR, notifier l'utilisateur |
 | PR très large (>5000 additions) | Avertir : "Review partielle, diff tronqué" |
 | Collaborateurs API 403/404 | Fallback sur auteurs des 10 derniers PRs mergés |
+| >50 PRs dans scope pour overlap | Désactiver overlap detection, signaler |
+| Sélection deep review >15 PRs | Traiter en batches de 15, afficher progression |
 
 ---
 
@@ -330,3 +366,4 @@ Si "Aucun" → `Aucun commentaire posté. Workflow terminé.`
 - `mergeable` peut être `MERGEABLE`, `CONFLICTING`, ou `UNKNOWN` → traiter `UNKNOWN` comme `?`
 - Ne jamais poster sans validation explicite de l'utilisateur dans le chat
 - Les commentaires draftés doivent être visibles AVANT tout `gh pr comment`
+- `--limit 500` couvre les backlogs jusqu'à 500 PRs ; au-delà utiliser `gh api` avec pagination curseur

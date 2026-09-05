@@ -2,7 +2,8 @@
 name: issue-triage
 description: >
   Issue triage: audit open issues, categorize, detect duplicates, cross-ref PRs, risk assessment, post comments.
-  Args: "all" for deep analysis of all, issue numbers to focus (e.g. "42 57"), "en"/"fr" for language, no arg = audit only in French.
+  Args: "all" for deep analysis of all, issue numbers to focus (e.g. "42 57"), "en"/"fr" for language,
+  "--focus recent" (default, last 60d), "--focus critical", "--focus stale", "--all" (everything).
 allowed-tools:
   - Bash
   - Read
@@ -35,6 +36,19 @@ tags: [triage, issues, github, categorize, duplicates, risk]
 
 ---
 
+## Modes de filtrage (argument `--focus`)
+
+| Mode | Comportement | Quand utiliser |
+|------|-------------|----------------|
+| `--focus recent` | Issues updatedAt < 60j (défaut si >200 issues) | Triage hebdomadaire normal |
+| `--focus critical` | Risque rouge + jaune uniquement | Avant sprint, incidents |
+| `--focus stale` | Aucune activité >30j | Nettoyage backlog |
+| `--all` | Toutes les issues ouvertes, paginé | Audit exhaustif mensuel |
+
+**Seuil automatique** : si le repo a >200 issues ouvertes, appliquer `--focus recent` par défaut et prévenir l'utilisateur : "400+ issues détectées — mode `--focus recent` activé (60 derniers jours). Passer `--all` pour tout voir."
+
+---
+
 Workflow en 3 phases : audit automatique → deep analysis opt-in → commentaires avec validation obligatoire.
 
 ## Préconditions
@@ -50,18 +64,20 @@ Si l'un échoue, stop et expliquer ce qui manque.
 
 ## Phase 1 — Audit (toujours exécutée)
 
-### Data Gathering (commandes en parallèle)
+### Data Gathering — deux passes
+
+**Passe 1 : métadonnées uniquement (rapide, sans body/comments)**
 
 ```bash
 # Identité du repo
 gh repo view --json nameWithOwner -q .nameWithOwner
 
-# Issues ouvertes avec métadonnées complètes
-gh issue list --state open --limit 100 \
-  --json number,title,author,createdAt,updatedAt,labels,assignees,body,comments
+# Issues ouvertes — métadonnées sans body ni comments (léger)
+gh issue list --state open --limit 500 \
+  --json number,title,author,createdAt,updatedAt,labels,assignees
 
-# PRs ouvertes (pour cross-référence)
-gh pr list --state open --limit 50 --json number,title,body
+# PRs ouvertes pour cross-référence (body nécessaire pour fixes #N)
+gh pr list --state open --limit 500 --json number,title,body
 
 # Issues fermées récemment (pour détection doublons)
 gh issue list --state closed --limit 20 \
@@ -76,6 +92,17 @@ gh api "repos/{owner}/{repo}/collaborators" --jq '.[].login'
 gh pr list --state merged --limit 10 --json author --jq '.[].author.login' | sort -u
 ```
 Si toujours ambigu, demander à l'utilisateur via `AskUserQuestion`.
+
+**Passe 2 : bodies (seulement pour les issues dans le scope)**
+
+Après application du filtre `--focus`, fetcher les bodies uniquement pour les issues retenues :
+
+```bash
+gh issue view {num} --json body,comments \
+  --jq '{body: .body, comments: (.comments[-5:] | map(.body))}'
+```
+
+Si issue a >50 commentaires, fetcher uniquement les 5 derniers.
 
 **Note** : `author` est un objet `{login: "..."}` — toujours extraire `.author.login`.
 
@@ -93,12 +120,21 @@ Si toujours ambigu, demander à l'utilisateur via `AskUserQuestion`.
 - Construire un map : `issue_number -> [PR numbers]`
 - Une issue liée à une PR mergée → recommander fermeture
 
-**3. Détection doublons** :
-- Normaliser les titres : lowercase, strip préfixes (`bug:`, `feat:`, `[bug]`, `[feature]`, etc.)
-- **Jaccard sur mots des titres** : si score > 60% entre deux issues → candidat doublon
-- **Keywords body overlap** > 50% → renforcement du signal
-- Comparer aussi avec issues fermées récentes (20 dernières)
-- Un faux positif peut être confirmé/écarté en Phase 2
+**3. Détection doublons — pré-filtrage obligatoire**
+
+Ne pas faire Jaccard brut sur toutes les paires (O(N²) = 160K comparaisons à 400 issues). Utiliser cette séquence :
+
+**Étape 3a — pré-filtre par n-grams** :
+- Extraire les mots-clés de chaque titre (lowercase, strip préfixes `bug:`, `feat:`, `[bug]`, etc., exclure stop words : a, the, is, in, of, for, to, with, on, at, by, and, or, not, it, this)
+- Grouper les issues qui partagent au moins 2 mots-clés communs → candidats Jaccard
+- Comparer aussi contre les 20 dernières issues fermées
+
+**Étape 3b — Jaccard sur candidats seulement** :
+- Jaccard = |intersection mots| / |union mots|
+- Score > 60% → candidat doublon confirmé
+- Score 40–60% + body overlap > 50% → candidat doublon faible (signaler mais ne pas clore sans Phase 2)
+
+Cette approche ramène les comparaisons de ~160K à ~2–5K.
 
 **4. Classification risque** :
 - **Rouge** : mots-clés `CVE`, `vulnerability`, `injection`, `auth bypass`, `security`, `exploit`, `unsafe`, `credentials`, `leak`, `RCE`, `XSS`
@@ -121,8 +157,10 @@ Si toujours ambigu, demander à l'utilisateur via `AskUserQuestion`.
 
 ### Output — 5 tableaux
 
+Si le scope dépasse 100 issues après filtrage, afficher les 50 les plus récentes par catégorie et indiquer "... et N autres (passer `--all` pour voir toutes)".
+
 ```
-## Issues ouvertes ({count})
+## Issues ouvertes ({total} total, {scope} dans le scope {mode})
 
 ### Critiques (risque rouge)
 | # | Titre | Auteur | Âge | Labels | Action |
@@ -145,7 +183,7 @@ Si toujours ambigu, demander à l'utilisateur via `AskUserQuestion`.
 | - | ----- | ------ | ----------------- | ------ |
 
 ### Résumé
-- Total : {N} issues ouvertes
+- Total : {N} issues ouvertes ({scope} dans le scope)
 - Critiques : {N} (risque sécurité ou breaking)
 - Liées à PR : {N}
 - Doublons candidats : {N}
@@ -162,7 +200,6 @@ Si toujours ambigu, demander à l'utilisateur via `AskUserQuestion`.
 
 Après affichage du tableau de triage, copier dans le presse-papier :
 ```bash
-# Cross-platform clipboard
 clip() {
   if command -v pbcopy &>/dev/null; then pbcopy
   elif command -v xclip &>/dev/null; then xclip -selection clipboard
@@ -184,7 +221,7 @@ Confirmer : `Tableau copié dans le presse-papier.` (FR) / `Triage table copied 
 ### Sélection des issues
 
 **Si argument passé** :
-- `"all"` → toutes les issues ouvertes
+- `"all"` → toutes les issues du scope actif (pas les 400 brutes)
 - Numéros (`"42 57"`) → uniquement ces issues
 - Pas d'argument → proposer via `AskUserQuestion`
 
@@ -195,8 +232,8 @@ question: "Quelles issues voulez-vous analyser en profondeur ?"
 header: "Deep Analysis"
 multiSelect: true
 options:
-  - label: "Toutes ({N} issues)"
-    description: "Analyse approfondie de toutes les issues avec agents en parallèle"
+  - label: "Toutes ({N} dans le scope)"
+    description: "Analyse approfondie — max 20 agents simultanés, batches si nécessaire"
   - label: "Critiques uniquement"
     description: "Focus sur les {M} issues à risque rouge/jaune"
   - label: "Doublons candidats"
@@ -209,9 +246,11 @@ options:
 
 Si "Passer" → fin du workflow.
 
+**Plafond agents** : lancer au maximum 20 agents en parallèle. Si la sélection dépasse 20 issues, traiter en batches de 20 et afficher la progression entre chaque batch.
+
 ### Exécution de l'analyse
 
-Pour chaque issue sélectionnée, lancer un agent via **Task tool en parallèle** :
+Pour chaque issue sélectionnée, lancer un agent via **Task tool en parallèle** (max 20 simultanés) :
 
 ```
 subagent_type: general-purpose
@@ -255,8 +294,6 @@ prompt: |
   Draft a GitHub comment in English using the appropriate template from templates/issue-comment.md.
   Be specific, helpful, and constructive.
 ```
-
-Si issue a >50 commentaires, résumer les 5 derniers uniquement.
 
 Agréger tous les rapports. Afficher un résumé après toutes les analyses.
 
@@ -342,15 +379,18 @@ Si "Aucune" → `Aucune action exécutée. Workflow terminé.`
 | Situation | Comportement |
 |-----------|--------------|
 | 0 issues ouvertes | `Aucune issue ouverte.` + terminer |
+| >200 issues ouvertes | Activer `--focus recent` auto, prévenir l'utilisateur |
 | Issue sans body | Catégoriser par titre, recommander `Comment needed` |
-| >50 commentaires | Résumer les 5 derniers uniquement |
+| >50 commentaires | Fetcher uniquement les 5 derniers |
+| Jaccard candidats >500 paires | Limiter à top 50 paires par score, signaler |
 | Faux positif doublon | Phase 2 confirme/écarte — ne pas agir sur suspicion seule |
 | Labels déjà présents | Ne pas re-labeler, signaler "label déjà appliqué" |
 | Issue d'un collaborateur | Jamais `close candidate` automatique |
-| Rate limit GitHub API | Réduire `--limit`, notifier l'utilisateur |
+| Rate limit GitHub API | Ralentir fetch bodies (pause 1s entre appels), notifier |
 | PR mergée liée à issue ouverte | Recommander fermeture de l'issue |
 | Issue sans activité >90j | Very Stale — proposer fermeture avec message bienveillant |
 | Duplicate confirmed in Phase 2 | Poster commentaire + fermer en faveur de l'issue originale |
+| Sélection deep analysis >20 issues | Traiter en batches de 20, afficher progression |
 
 ---
 
@@ -361,4 +401,5 @@ Si "Aucune" → `Aucune action exécutée. Workflow terminé.`
 - `updatedAt` peut être null sur certaines issues → traiter comme `createdAt`
 - Ne jamais poster ou fermer sans validation explicite de l'utilisateur dans le chat
 - Les commentaires draftés doivent être visibles AVANT tout `gh issue comment`
-- Similarité Jaccard = |intersection mots| / |union mots| (exclure stop words : a, the, is, in, of, for, to, with, on, at, by)
+- Jaccard = |intersection mots| / |union mots| (exclure stop words : a, the, is, in, of, for, to, with, on, at, by, and, or, not, it, this)
+- `--limit 500` couvre les backlogs jusqu'à 500 items ; au-delà utiliser `gh api` avec pagination curseur
