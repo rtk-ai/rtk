@@ -64,7 +64,7 @@ pub fn run(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
+    filtered = apply_line_window(&filtered, max_lines, tail_lines);
 
     let (raw, rtk_output) = if line_numbers {
         (
@@ -132,7 +132,7 @@ pub fn run_stdin(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
+    filtered = apply_line_window(&filtered, max_lines, tail_lines);
 
     let (raw, rtk_output) = if line_numbers {
         (
@@ -163,7 +163,6 @@ fn apply_line_window(
     content: &str,
     max_lines: Option<usize>,
     tail_lines: Option<usize>,
-    lang: &Language,
 ) -> String {
     if let Some(tail) = tail_lines {
         if tail == 0 {
@@ -179,10 +178,30 @@ fn apply_line_window(
     }
 
     if let Some(max) = max_lines {
-        return filter::smart_truncate(content, max, lang);
+        // Honor --max-lines exactly (head -N parity). Do not use smart_truncate:
+        // it keeps only max/2 plain-text lines, which silently under-delivers when
+        // hooks rewrite `head -N file` → `rtk read file --max-lines N` (#3370).
+        return head_truncate(content, max);
     }
 
     content.to_string()
+}
+
+/// Keep the first `max` content lines. When truncated, append a recoverable
+/// `[K more lines]` marker (does not count toward `max`).
+fn head_truncate(content: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() <= max {
+        return content.to_string();
+    }
+    let omitted = lines.len() - max;
+    let mut result = lines[..max].join("\n");
+    result.push('\n');
+    result.push_str(&format!("[{} more lines]", omitted));
+    result
 }
 
 #[cfg(test)]
@@ -217,23 +236,64 @@ fn main() {{
     #[test]
     fn test_apply_line_window_tail_lines() {
         let input = "a\nb\nc\nd\n";
-        let output = apply_line_window(input, None, Some(2), &Language::Unknown);
+        let output = apply_line_window(input, None, Some(2));
         assert_eq!(output, "c\nd\n");
     }
 
     #[test]
     fn test_apply_line_window_tail_lines_no_trailing_newline() {
         let input = "a\nb\nc\nd";
-        let output = apply_line_window(input, None, Some(2), &Language::Unknown);
+        let output = apply_line_window(input, None, Some(2));
         assert_eq!(output, "c\nd");
     }
 
     #[test]
-    fn test_apply_line_window_max_lines_still_works() {
-        let input = "a\nb\nc\nd\n";
-        let output = apply_line_window(input, Some(2), None, &Language::Unknown);
-        assert!(output.starts_with("a\n"));
-        assert!(output.contains("more lines"));
+    fn test_apply_line_window_max_lines_honors_count() {
+        // #3370: --max-lines N must emit N content lines, not N/2 via smart_truncate.
+        let input = "a\nb\nc\nd\ne\nf\n";
+        let output = apply_line_window(input, Some(4), None);
+        let content_lines: Vec<&str> = output
+            .lines()
+            .filter(|l| !l.contains("more lines"))
+            .collect();
+        assert_eq!(content_lines, ["a", "b", "c", "d"]);
+        assert!(output.contains("[2 more lines]"));
+    }
+
+    #[test]
+    fn test_apply_line_window_max_lines_under_limit() {
+        let input = "a\nb\nc\n";
+        let output = apply_line_window(input, Some(10), None);
+        assert_eq!(output, input);
+        assert!(!output.contains("more lines"));
+    }
+
+    #[test]
+    fn test_apply_line_window_max_lines_zero() {
+        let input = "a\nb\nc\n";
+        let output = apply_line_window(input, Some(0), None);
+        assert_eq!(output, "");
+    }
+
+    #[test]
+    fn test_head_truncate_plain_text_exact_count() {
+        // Repro from #3370: plain lines must not be halved.
+        let content: String = (0..3000)
+            .map(|i| format!("line {i}: some content here"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for n in [5usize, 10, 20, 50, 100, 200] {
+            let output = head_truncate(&content, n);
+            let kept = output
+                .lines()
+                .filter(|l| l.starts_with("line "))
+                .count();
+            assert_eq!(kept, n, "max-lines {n} should keep {n} content lines, got {kept}");
+            assert!(
+                output.contains(&format!("[{} more lines]", 3000 - n)),
+                "missing recovery marker for n={n}: {output}"
+            );
+        }
     }
 
     fn rtk_bin() -> std::path::PathBuf {
