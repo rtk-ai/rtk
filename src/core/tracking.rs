@@ -182,6 +182,38 @@ pub struct HookDecisionRecord {
     pub decision: HookOutcome,
 }
 
+/// Above this, raw output is unlikely to have reached the model at all: agent CLIs
+/// truncate tool output first (~30k chars at roughly 4 chars per token).
+pub const CONTEXT_CEILING_TOKENS: usize = 7500;
+
+const CONCENTRATION_TOP_N: usize = 8;
+
+/// Median of a set of ratios. Empty input means nothing was measurable, which is
+/// reported as 1.0 (unchanged) rather than 0.0 (perfect compression).
+fn median(values: &mut [f64]) -> f64 {
+    if values.is_empty() {
+        return 1.0;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = values.len() / 2;
+    if values.len().is_multiple_of(2) {
+        (values[mid - 1] + values[mid]) / 2.0
+    } else {
+        values[mid]
+    }
+}
+
+/// Share of total savings held by the largest few commands, with the count actually used.
+fn concentration(saved: &mut [usize], total_saved: usize) -> (f64, usize) {
+    if saved.is_empty() || total_saved == 0 {
+        return (0.0, 0);
+    }
+    saved.sort_unstable_by(|a, b| b.cmp(a));
+    let n = saved.len().min(CONCENTRATION_TOP_N);
+    let top: usize = saved[..n].iter().sum();
+    ((top as f64 / total_saved as f64) * 100.0, n)
+}
+
 /// Aggregated statistics across all recorded commands.
 ///
 /// Provides overall metrics and breakdowns by command and by day.
@@ -206,6 +238,16 @@ pub struct GainSummary {
     pub by_command: Vec<(String, usize, usize, f64, u64)>,
     /// Last 30 days of activity: (date, saved_tokens)
     pub by_day: Vec<(String, usize)>,
+    /// Median of output/input across commands; 1.0 means the typical command is unchanged
+    pub median_ratio: f64,
+    /// Percentage of commands whose output was returned byte-for-byte
+    pub pct_unchanged: f64,
+    /// Share of total savings held by the largest `concentration_top_n` commands
+    pub concentration_pct: f64,
+    /// How many commands that share covers (at most 8, fewer if less data exists)
+    pub concentration_top_n: usize,
+    /// Commands whose raw output exceeded CONTEXT_CEILING_TOKENS
+    pub above_ceiling: usize,
 }
 
 /// Daily statistics for token savings and execution metrics.
@@ -826,6 +868,10 @@ impl Tracker {
         let mut total_output = 0usize;
         let mut total_saved = 0usize;
         let mut total_time_ms = 0u64;
+        let mut ratios: Vec<f64> = Vec::new();
+        let mut saved_each: Vec<usize> = Vec::new();
+        let mut unchanged = 0usize;
+        let mut above_ceiling = 0usize;
 
         let mut stmt = self.conn.prepare(
             "SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms
@@ -850,7 +896,25 @@ impl Tracker {
             total_output += output;
             total_saved += saved;
             total_time_ms += time_ms;
+            saved_each.push(saved);
+            if input > 0 {
+                ratios.push(output as f64 / input as f64);
+            }
+            if input == output {
+                unchanged += 1;
+            }
+            if input > CONTEXT_CEILING_TOKENS {
+                above_ceiling += 1;
+            }
         }
+
+        let median_ratio = median(&mut ratios);
+        let pct_unchanged = if total_commands > 0 {
+            (unchanged as f64 / total_commands as f64) * 100.0
+        } else {
+            0.0
+        };
+        let (concentration_pct, concentration_top_n) = concentration(&mut saved_each, total_saved);
 
         let avg_savings_pct = if total_input > 0 {
             (total_saved as f64 / total_input as f64) * 100.0
@@ -877,6 +941,11 @@ impl Tracker {
             avg_time_ms,
             by_command,
             by_day,
+            median_ratio,
+            pct_unchanged,
+            concentration_pct,
+            concentration_top_n,
+            above_ceiling,
         })
     }
 
@@ -1794,6 +1863,59 @@ pub fn args_display(args: &[OsString]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn median_empty_reports_unchanged() {
+        assert_eq!(median(&mut []), 1.0);
+    }
+
+    #[test]
+    fn median_single_value() {
+        assert_eq!(median(&mut [0.25]), 0.25);
+    }
+
+    #[test]
+    fn median_even_count_averages_middle_pair() {
+        assert_eq!(median(&mut [0.2, 0.4, 0.6, 0.8]), 0.5);
+    }
+
+    #[test]
+    fn median_odd_count_takes_centre() {
+        assert_eq!(median(&mut [0.9, 0.1, 0.5]), 0.5);
+    }
+
+    #[test]
+    fn concentration_empty_is_zero() {
+        assert_eq!(concentration(&mut [], 0), (0.0, 0));
+    }
+
+    #[test]
+    fn concentration_with_no_savings_is_zero() {
+        assert_eq!(concentration(&mut [0, 0, 0], 0), (0.0, 0));
+    }
+
+    #[test]
+    fn concentration_fewer_than_top_n_uses_what_exists() {
+        let (pct, n) = concentration(&mut [30, 70], 100);
+        assert_eq!(n, 2);
+        assert!((pct - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn concentration_caps_at_top_n_and_takes_largest() {
+        // ten commands, 100 saved each; the top 8 hold 80% of the 1000 total
+        let (pct, n) = concentration(&mut [100; 10], 1000);
+        assert_eq!(n, 8);
+        assert!((pct - 80.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn concentration_is_dominated_by_one_outlier() {
+        // the shape this metric exists to expose
+        let (pct, n) = concentration(&mut [900, 10, 10, 10, 10, 10, 10, 10, 10, 10], 990);
+        assert_eq!(n, 8);
+        assert!(pct > 97.0, "one command should dominate, got {pct}");
+    }
     use super::*;
     use std::sync::Mutex;
 

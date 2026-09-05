@@ -118,6 +118,33 @@ pub fn run(
                 format_duration(summary.avg_time_ms)
             ),
         );
+        print_kpi(
+            "Median ratio",
+            format!(
+                "{:.2}x ({:.0}% unchanged)",
+                summary.median_ratio, summary.pct_unchanged
+            ),
+        );
+        print_kpi(
+            "Concentration",
+            format!(
+                "top {} {} = {:.1}% of total savings",
+                summary.concentration_top_n,
+                if summary.concentration_top_n == 1 {
+                    "command"
+                } else {
+                    "commands"
+                },
+                summary.concentration_pct
+            ),
+        );
+        print_kpi(
+            "Above ceiling",
+            format!(
+                "{} / {} commands",
+                summary.above_ceiling, summary.total_commands
+            ),
+        );
         print_efficiency_meter(summary.avg_savings_pct);
         println!();
 
