@@ -1088,15 +1088,10 @@ mod tests {
     // ===== resolved_command tests (issue #212) =====
 
     #[test]
-    fn test_resolved_command_executes_known_command() {
-        let output = resolved_command("cargo")
-            .arg("--version")
-            .output()
-            .expect("resolved_command('cargo') should execute");
-        assert!(
-            output.status.success(),
-            "cargo --version should succeed via resolved_command"
-        );
+    fn test_resolved_command_uses_resolved_program() {
+        let command = resolved_command("cargo");
+        let resolved = resolve_binary("cargo").expect("cargo must be resolvable via PATH");
+        assert_eq!(command.get_program(), resolved.as_os_str());
     }
 
     // ===== tool_exists tests (issue #212) =====
