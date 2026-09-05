@@ -1439,6 +1439,34 @@ max_lines = 999
     }
 
     #[test]
+    fn test_terraform_plan_preserves_long_useful_output() {
+        let filters = make_filters(BUILTIN_TOML);
+        let filter = find_filter_in("terraform plan", &filters).expect("terraform-plan built-in");
+
+        let mut input = String::from(
+            "Acquiring state lock. This may take a few moments...\n\
+             Refreshing state... [id=vpc-0a1b2c3d]\n\
+             Terraform will perform the following actions:\n",
+        );
+        for i in 0..90 {
+            input.push_str(&format!("      + attribute_{i:02} = \"value_{i:02}\"\n"));
+        }
+        input.push_str(
+            "Plan: 1 to add, 0 to change, 0 to destroy.\n\
+             Releasing state lock. This may take a few moments...\n",
+        );
+
+        let out = apply_filter(filter, &input);
+
+        assert!(
+            !out.contains("lines truncated"),
+            "terraform plan should not truncate useful plan content:\n{out}"
+        );
+        assert!(out.contains("attribute_89"));
+        assert!(out.contains("Plan: 1 to add, 0 to change, 0 to destroy."));
+    }
+
+    #[test]
     fn test_make_savings_above_60pct() {
         let filters = make_filters(BUILTIN_TOML);
         let filter = find_filter_in("make all", &filters).expect("make built-in");
