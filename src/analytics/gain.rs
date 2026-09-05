@@ -121,24 +121,31 @@ pub fn run(
         print_efficiency_meter(summary.avg_savings_pct);
         println!();
 
-        // Warn about hook issues that silently kill savings (stderr, not stdout)
-        match hook_check::status() {
-            hook_check::HookStatus::Missing => {
-                eprintln!(
-                    "{}",
-                    "[warn] No hook installed — run `rtk init -g` for automatic token savings"
-                        .yellow()
-                );
-                eprintln!();
+        // Warn about hook issues that silently kill savings (stderr, not stdout).
+        // Skip when user has opted in to hook-free usage via config.
+        if !crate::core::config::Config::load()
+            .ok()
+            .map(|c| c.hooks.quiet_hook_warnings)
+            .unwrap_or(false)
+        {
+            match hook_check::status() {
+                hook_check::HookStatus::Missing => {
+                    eprintln!(
+                        "{}",
+                        "[warn] No hook installed — run `rtk init -g` for automatic token savings"
+                            .yellow()
+                    );
+                    eprintln!();
+                }
+                hook_check::HookStatus::Outdated => {
+                    eprintln!(
+                        "{}",
+                        "[warn] Hook outdated — run `rtk init -g` to update".yellow()
+                    );
+                    eprintln!();
+                }
+                hook_check::HookStatus::Ok => {}
             }
-            hook_check::HookStatus::Outdated => {
-                eprintln!(
-                    "{}",
-                    "[warn] Hook outdated — run `rtk init -g` to update".yellow()
-                );
-                eprintln!();
-            }
-            hook_check::HookStatus::Ok => {}
         }
 
         // Lightweight RTK_DISABLED bypass check (best-effort, silent on failure)

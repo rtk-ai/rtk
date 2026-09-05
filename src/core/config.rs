@@ -51,6 +51,13 @@ pub struct HooksConfig {
     /// not anything else.
     #[serde(default)]
     pub transparent_prefixes: Vec<String>,
+
+    /// Suppress the "No hook installed / Hook outdated" warnings emitted by
+    /// `rtk gain`. Useful when the user intentionally opts out of hook-based
+    /// interception (e.g. via an AI agent's `CLAUDE.md` or `settings.json`)
+    /// and relies on explicit `rtk <cmd>` invocations instead.
+    #[serde(default)]
+    pub quiet_hook_warnings: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -258,6 +265,17 @@ exclude_commands = ["curl", "gh"]
         let config = Config::default();
         assert!(config.hooks.exclude_commands.is_empty());
         assert!(config.hooks.transparent_prefixes.is_empty());
+        assert!(!config.hooks.quiet_hook_warnings);
+    }
+
+    #[test]
+    fn test_hooks_config_quiet_hook_warnings_deserialize() {
+        let toml = r#"
+[hooks]
+quiet_hook_warnings = true
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(config.hooks.quiet_hook_warnings);
     }
 
     #[test]
