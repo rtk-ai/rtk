@@ -1593,6 +1593,7 @@ fn parse_commit_output(line: &str) -> String {
 
 fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+	let args = &args_utils::restore_double_dash(args);
 
     let original_cmd = format!("git commit {}", args.join(" "));
 
