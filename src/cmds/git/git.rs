@@ -1127,12 +1127,21 @@ pub(crate) fn filter_log_output(
     if user_format {
         let lines: Vec<&str> = output.lines().collect();
         let max_lines = if user_set_limit { lines.len() } else { limit };
-        return lines
+        let omitted = lines.len().saturating_sub(max_lines);
+        let mut out = lines
             .iter()
             .take(max_lines)
             .map(|l| truncate_line(l, truncate_width))
             .collect::<Vec<_>>()
             .join("\n");
+        if omitted > 0 {
+            out.push_str(&format!(
+                "\n[RTK: truncated — {} of {} lines shown]",
+                max_lines,
+                lines.len()
+            ));
+        }
+        return out;
     }
 
     // RTK injected format: split output into commit blocks separated by ---END---
@@ -1177,7 +1186,16 @@ pub(crate) fn filter_log_output(
         }
     }
 
-    result.join("\n").trim().to_string()
+    let omitted_commits = commits.len().saturating_sub(max_commits);
+    let mut out = result.join("\n").trim().to_string();
+    if omitted_commits > 0 {
+        out.push_str(&format!(
+            "\n[RTK: truncated — {} of {} commits shown]",
+            max_commits,
+            commits.len(),
+        ));
+    }
+    out
 }
 
 /// Truncate a single line to `width` characters, appending "..." if needed

@@ -47,14 +47,16 @@ pub fn days_ago_cutoff(days: u64) -> DateTime<Utc> {
 /// assert_eq!(truncate("hi", 10), "hi");
 /// ```
 pub fn truncate(s: &str, max_len: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max_len {
-        s.to_string()
-    } else if max_len < 3 {
+    if max_len < 3 {
         // If max_len is too small, just return "..."
         "...".to_string()
     } else {
-        format!("{}...", s.chars().take(max_len - 3).collect::<String>())
+        let char_count = s.chars().count();
+        if char_count <= max_len {
+            s.to_string()
+        } else {
+            format!("{}...", s.chars().take(max_len - 3).collect::<String>())
+        }
     }
 }
 
