@@ -381,11 +381,14 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
         return Ok(result.exit_code);
     }
 
+    let combined = result.combined();
+
     let is_filtered = args
         .iter()
         .any(|a| matches!(a.as_str(), "--prod" | "-P" | "--dev" | "-D"));
 
     let parse_result = PnpmListParser::parse(&result.stdout);
+    let tier = parse_result.tier();
 
     let filtered = match parse_result {
         ParseResult::Full(data) => {
@@ -400,21 +403,44 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
             }
             format_dependency_listing(&data, !is_filtered)
         }
-        ParseResult::Passthrough(raw) => {
+        ParseResult::Passthrough(_) => {
             emit_passthrough_warning("pnpm list", "All parsing tiers failed");
-            raw
+            // Build from the combined stdout+stderr, not the parser's
+            // stdout-only truncated output — otherwise a stderr-only warning
+            // (e.g. a registry notice) on an otherwise-empty stdout produces
+            // no visible output at all.
+            truncate_passthrough(&combined)
         }
     };
 
-    let shown = never_worse(&result.stdout, &filtered);
-    println!("{}", shown);
-
-    timer.track(
-        &format!("pnpm list --depth={}", depth),
-        &format!("rtk pnpm list --depth={}", depth),
-        &result.stdout,
-        shown,
-    );
+    let cmd_label = format!("pnpm list --depth={}", depth);
+    if tier == 3 {
+        // Tier 3 is a genuine parse failure: guard/display against the
+        // combined stdout+stderr this arm recovered from, and record it as
+        // a failure — not token savings — instead of feeding it into the
+        // savings timer.
+        let shown = never_worse(&combined, &filtered);
+        println!("{}", shown);
+        tracking::record_parse_failure_silent(
+            &cmd_label,
+            "All parsing tiers failed",
+            !shown.trim().is_empty(),
+        );
+        timer.track_passthrough(&cmd_label, &format!("rtk {} (passthrough)", cmd_label));
+    } else {
+        // Tiers 1/2 are unaffected by the passthrough fix: keep guarding
+        // and tracking against stdout alone, as before, so a stderr-only
+        // warning alongside a successful parse doesn't inflate the
+        // reported savings ratio.
+        let shown = never_worse(&result.stdout, &filtered);
+        println!("{}", shown);
+        timer.track(
+            &cmd_label,
+            &format!("rtk pnpm list --depth={}", depth),
+            &result.stdout,
+            shown,
+        );
+    }
 
     Ok(0)
 }
@@ -436,6 +462,7 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
 
     // Parse output using PnpmOutdatedParser
     let parse_result = PnpmOutdatedParser::parse(&result.stdout);
+    let tier = parse_result.tier();
     let mode = FormatMode::from_verbosity(verbose);
 
     let filtered = match parse_result {
@@ -451,9 +478,12 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
             }
             data.format(mode)
         }
-        ParseResult::Passthrough(raw) => {
+        ParseResult::Passthrough(_) => {
             emit_passthrough_warning("pnpm outdated", "All parsing tiers failed");
-            raw
+            // Build from the combined stdout+stderr, not the parser's
+            // stdout-only truncated output — otherwise a real error reported
+            // only on stderr (with malformed/empty JSON on stdout) is lost.
+            truncate_passthrough(&combined)
         }
     };
 
@@ -465,7 +495,18 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
     let shown = never_worse(&combined, &display);
     println!("{}", shown);
 
-    timer.track("pnpm outdated", "rtk pnpm outdated", &combined, shown);
+    if tier == 3 {
+        // Tier 3 is a genuine parse failure, not token savings — record it
+        // as such instead of feeding it into the savings timer.
+        tracking::record_parse_failure_silent(
+            "pnpm outdated",
+            "All parsing tiers failed",
+            !shown.trim().is_empty(),
+        );
+        timer.track_passthrough("pnpm outdated", "rtk pnpm outdated (passthrough)");
+    } else {
+        timer.track("pnpm outdated", "rtk pnpm outdated", &combined, shown);
+    }
 
     Ok(0)
 }
@@ -673,5 +714,90 @@ mod tests {
         let eslint = state.dependencies.iter().find(|d| d.name == "eslint").unwrap();
         assert!(!react.dev_dependency, "react should be prod");
         assert!(eslint.dev_dependency, "eslint should be dev");
+    }
+
+    // --- Tier 3 (Passthrough) content-loss regression tests ---
+    //
+    // `run_list`/`run_outdated` shell out to a real `pnpm` binary and write
+    // to a real SQLite tracking DB, so they aren't practically unit-testable
+    // here. Instead these tests exercise `truncate_passthrough` directly
+    // against the combined stdout+stderr, mirroring exactly what each
+    // `run_*`'s `ParseResult::Passthrough` arm does — so the content-loss
+    // fix is verified without needing a process or a database.
+
+    #[test]
+    fn test_pnpm_list_passthrough_includes_stderr_when_stdout_empty() {
+        // Regression: the old code passed the parser's stdout-only
+        // truncated output straight through, so a registry warning reported
+        // only on stderr (with empty/near-empty stdout) produced no visible
+        // output at all.
+        let stdout = "";
+        let stderr = "WARN  registry lookup failed, using cached metadata";
+        let combined = format!("{}{}", stdout, stderr);
+
+        assert_eq!(PnpmListParser::parse(stdout).tier(), 3);
+
+        let filtered = truncate_passthrough(&combined);
+        let shown = never_worse(&combined, &filtered);
+        assert!(
+            shown.contains("registry lookup failed"),
+            "stderr content must survive passthrough: got {shown}"
+        );
+    }
+
+    #[test]
+    fn test_pnpm_outdated_passthrough_includes_both_streams() {
+        // Malformed JSON on stdout plus a real error on stderr: the shown
+        // output must include both, not just stdout.
+        let stdout = "{not valid json";
+        let stderr = "Error: ENOENT: no such file or directory, open 'package.json'";
+        let combined = format!("{}{}", stdout, stderr);
+
+        assert_eq!(PnpmOutdatedParser::parse(stdout).tier(), 3);
+
+        let filtered = truncate_passthrough(&combined);
+        let display = if filtered.trim().is_empty() {
+            "All packages up-to-date".to_string()
+        } else {
+            filtered.clone()
+        };
+        let shown = never_worse(&combined, &display);
+
+        assert!(shown.contains("not valid json"), "stdout content lost: got {shown}");
+        assert!(
+            shown.contains("ENOENT: no such file or directory"),
+            "stderr content lost: got {shown}"
+        );
+    }
+
+    #[test]
+    fn test_pnpm_outdated_empty_both_streams_shows_up_to_date() {
+        // Regression: genuinely empty output on both streams (no outdated
+        // packages, e.g. real `pnpm outdated --format json` prints "{}")
+        // must still fall back to "All packages up-to-date" via the
+        // `filtered.trim().is_empty()` check — this fix must not touch
+        // that empty-display fallback. (The final `never_worse` guard
+        // clamp against the raw combined output is exercised separately by
+        // `guard.rs`'s own tests and is out of scope here.)
+        let stdout = "{}";
+        let stderr = "";
+        let combined = format!("{}{}", stdout, stderr);
+
+        let parse_result = PnpmOutdatedParser::parse(stdout);
+        assert_eq!(parse_result.tier(), 1, "\"{{}}\" is valid empty JSON, not Passthrough");
+
+        let filtered = match parse_result {
+            ParseResult::Full(data) => data.format(FormatMode::from_verbosity(0)),
+            ParseResult::Degraded(data, _) => data.format(FormatMode::from_verbosity(0)),
+            ParseResult::Passthrough(_) => truncate_passthrough(&combined),
+        };
+
+        let display = if filtered.trim().is_empty() {
+            "All packages up-to-date".to_string()
+        } else {
+            filtered.clone()
+        };
+
+        assert_eq!(display, "All packages up-to-date");
     }
 }

@@ -199,10 +199,67 @@ pub fn tee_raw(raw: &str, command_slug: &str, exit_code: i32) -> Option<PathBuf>
     )
 }
 
+/// Convert an MSYS/Git-Bash-style home path (e.g. `/c/Users/name`) to a
+/// native Windows path (`C:\Users\name`) so it can be compared against
+/// native paths via `strip_prefix`. Git Bash sets `HOME` in this POSIX-like
+/// form by default; passed through unconverted, it would never match a
+/// native path and would silently defeat the `~/` shorthand entirely.
+/// Returns `None` for anything that isn't in this exact shape (already-native
+/// paths, e.g. a corporate `HOME` override, are left to the caller as-is).
+#[cfg(windows)]
+fn msys_home_to_native(raw: &str) -> Option<PathBuf> {
+    let rest = raw.strip_prefix('/')?;
+    let mut chars = rest.chars();
+    let drive = chars.next()?;
+    if !drive.is_ascii_alphabetic() {
+        return None;
+    }
+    match chars.next() {
+        None => Some(PathBuf::from(format!("{}:\\", drive.to_ascii_uppercase()))),
+        Some('/') => {
+            let tail: String = chars.collect();
+            Some(PathBuf::from(format!(
+                "{}:\\{}",
+                drive.to_ascii_uppercase(),
+                tail.replace('/', "\\")
+            )))
+        }
+        _ => None,
+    }
+}
+
+fn home_from_env() -> Option<PathBuf> {
+    // An empty (but set) HOME would otherwise become an empty PathBuf, and
+    // `Path::strip_prefix("")` trivially succeeds for any path — every teed
+    // file would then read as "home-relative" and get a bogus `~/` prefix.
+    let raw = std::env::var("HOME").ok().filter(|s| !s.is_empty())?;
+    #[cfg(windows)]
+    {
+        msys_home_to_native(&raw).or(Some(PathBuf::from(raw)))
+    }
+    #[cfg(not(windows))]
+    {
+        Some(PathBuf::from(raw))
+    }
+}
+
 fn display_path(path: &std::path::Path) -> String {
-    if let Some(home) = dirs::home_dir() {
+    // Prefer $HOME over the OS home-directory API: Git Bash/MSYS and other
+    // POSIX-like shells set HOME themselves, and that is the root their own
+    // `~` expansion resolves against -- which can differ from the OS API on
+    // redirected/roaming Windows profiles. $HOME may be MSYS-style
+    // (`/c/Users/name`) and needs converting before it's usable as a native
+    // path prefix -- see `msys_home_to_native`.
+    let home = home_from_env().or_else(dirs::home_dir);
+    if let Some(home) = home {
         if let Ok(relative) = path.strip_prefix(&home) {
-            return format!("~/{}", relative.display());
+            // Normalize to forward slashes unconditionally so the hint never
+            // mixes `~/` with native (backslash) separators on Windows.
+            let relative = relative
+                .display()
+                .to_string()
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            return format!("~/{}", relative);
         }
     }
     path.display().to_string()
@@ -649,6 +706,59 @@ mod tests {
         assert!(
             !hint.contains("\\ "),
             "hint should not encourage backslash-escaped whitespace"
+        );
+    }
+
+    #[test]
+    fn test_msys_home_to_native_converts_drive_letter_path() {
+        assert_eq!(
+            msys_home_to_native("/c/Users/name"),
+            Some(PathBuf::from(r"C:\Users\name"))
+        );
+    }
+
+    #[test]
+    fn test_msys_home_to_native_converts_bare_drive_root() {
+        assert_eq!(msys_home_to_native("/c"), Some(PathBuf::from(r"C:\")));
+    }
+
+    #[test]
+    fn test_msys_home_to_native_rejects_non_msys_paths() {
+        // A corporate/explicit HOME override already in native-ish form
+        // (drive letter, not MSYS's bare "/c/..." shape) isn't MSYS-style;
+        // the caller falls back to using it as-is rather than mangling it.
+        assert_eq!(msys_home_to_native("C:/SPB_Data/Users/name"), None);
+        // Not Windows-shaped at all (e.g. a plain Linux/macOS HOME).
+        assert_eq!(msys_home_to_native("/home/name"), None);
+    }
+
+    #[test]
+    fn test_display_path_never_mixes_separators_for_home_relative_paths() {
+        // Platform-neutral regression test for the Windows separator-mixing
+        // bug: whatever "home" this process resolves to (via $HOME or the
+        // OS API), a home-relative hint must render with forward slashes
+        // only, never a mix of "/" and native backslashes. Reads whatever
+        // home is actually available rather than mutating $HOME, so this
+        // test is safe to run concurrently with the rest of the suite.
+        let Some(home) = home_from_env().or_else(dirs::home_dir) else {
+            return;
+        };
+        let path = home
+            .join("AppData")
+            .join("Local")
+            .join("rtk")
+            .join("tee")
+            .join("123_test.log");
+
+        let displayed = display_path(&path);
+
+        assert!(
+            displayed.starts_with("~/"),
+            "expected a home-relative hint, got {displayed}"
+        );
+        assert!(
+            !displayed.contains('\\'),
+            "display_path must not mix separators: {displayed}"
         );
     }
 
