@@ -27,16 +27,19 @@ test_rewrite() {
   output=$(echo "$input_json" | bash "$HOOK" 2>/dev/null) || true
 
   if [ -z "$expected_cmd" ]; then
-    # Expect no rewrite (hook exits 0 with no output)
-    if [ -z "$output" ]; then
-      printf "  ${GREEN}PASS${RESET} %s ${DIM}→ (no rewrite)${RESET}\n" "$description"
+    # Expect passthrough: permissionDecision=allow, no updatedInput.command.
+    # The hook must emit an explicit allow so Claude Code respects
+    # --dangerously-skip-permissions even when no rewrite is applied.
+    local perm_decision updated_cmd
+    perm_decision=$(echo "$output" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)
+    updated_cmd=$(echo "$output" | jq -r '.hookSpecificOutput.updatedInput.command // empty' 2>/dev/null)
+    if [ "$perm_decision" = "allow" ] && [ -z "$updated_cmd" ]; then
+      printf "  ${GREEN}PASS${RESET} %s ${DIM}→ (allow, no rewrite)${RESET}\n" "$description"
       PASS=$((PASS + 1))
     else
-      local actual
-      actual=$(echo "$output" | jq -r '.hookSpecificOutput.updatedInput.command // empty')
       printf "  ${RED}FAIL${RESET} %s\n" "$description"
-      printf "       expected: (no rewrite)\n"
-      printf "       actual:   %s\n" "$actual"
+      printf "       expected: permissionDecision=allow, no rewrite\n"
+      printf "       got:      permissionDecision=%s, updated_cmd=%s\n" "$perm_decision" "$updated_cmd"
       FAIL=$((FAIL + 1))
     fi
   else
@@ -324,6 +327,41 @@ test_rewrite "python3 (no pattern)" \
 test_rewrite "node (no pattern)" \
   "node -e 'console.log(1)'" \
   ""
+
+echo ""
+
+# ---- SECTION 5b: --dangerously-skip-permissions bypass (issue #1033) ----
+# When RTK has no rewrite to apply, the hook must output permissionDecision=allow
+# so that --dangerously-skip-permissions is respected.  A bare exit 0 with no
+# output causes Claude Code to fall back to its default prompt behaviour.
+echo "--- Passthrough must emit allow (issue #1033) ---"
+
+test_passthrough_allows() {
+  local description="$1"
+  local input_cmd="$2"
+  TOTAL=$((TOTAL + 1))
+
+  local input_json output perm_decision
+  input_json=$(jq -n --arg cmd "$input_cmd" '{"tool_name":"Bash","tool_input":{"command":$cmd}}')
+  output=$(echo "$input_json" | bash "$HOOK" 2>/dev/null) || true
+  perm_decision=$(echo "$output" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)
+
+  if [ "$perm_decision" = "allow" ]; then
+    printf "  ${GREEN}PASS${RESET} %s ${DIM}→ permissionDecision=allow${RESET}\n" "$description"
+    PASS=$((PASS + 1))
+  else
+    printf "  ${RED}FAIL${RESET} %s\n" "$description"
+    printf "       expected permissionDecision=allow, got: '%s'\n" "$perm_decision"
+    printf "       full output: %s\n" "$output"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+test_passthrough_allows "which rtk (no rewrite)" "which rtk"
+test_passthrough_allows "rtk --version (already rtk, no change)" "rtk --version"
+test_passthrough_allows "claude mcp list (no rewrite)" "claude mcp list"
+test_passthrough_allows "echo hello (no rewrite)" "echo hello"
+test_passthrough_allows "cd /tmp (no rewrite)" "cd /tmp"
 
 echo ""
 
