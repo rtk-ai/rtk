@@ -36,7 +36,7 @@ pub(crate) fn emit_ai_document_with_baseline(
         emission.raw,
         emission.fallback_baseline,
         emission.command_slug,
-        render(&document, emission.budget),
+        render_with_max_tokens(&document, emission.budget, requested_max_tokens()),
         emission.trailing_newline,
     );
     let shown = prepared.as_str().to_string();
@@ -1306,6 +1306,41 @@ mod err_test_runner_tests {
         render, AiDocument, AiRecord, BudgetClass, ExactReason, Severity,
     };
     use std::io::Write;
+    use std::sync::Mutex;
+
+    static REQUEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn direct_semantic_emission_honors_requested_token_limit() {
+        let _guard = REQUEST_LOCK.lock().unwrap();
+        std::env::set_var("RTK_MAX_OUTPUT_TOKENS", "64");
+        let raw = "unfiltered source line\n".repeat(500);
+        let mut document = AiDocument::new(Some("source"));
+        for index in 0..300 {
+            document.push(AiRecord::new(
+                Severity::Info,
+                format!("src/generated/{index:03}.rs match=value"),
+            ));
+        }
+
+        let timer = tracking::TimedExecution::start();
+        let shown = emit_ai_document_with_baseline(
+            AiEmission {
+                timer: &timer,
+                original_cmd: "cat source",
+                rtk_cmd: "rtk read source",
+                raw: &raw,
+                fallback_baseline: &raw,
+                command_slug: "read",
+                budget: BudgetClass::Source,
+                trailing_newline: true,
+            },
+            document,
+        );
+
+        assert!(!shown.contains("src/generated/100.rs"));
+        std::env::remove_var("RTK_MAX_OUTPUT_TOKENS");
+    }
 
     const SEMANTIC_WRAPPER_HELPER: &str =
         "core::runner::err_test_runner_tests::semantic_wrapper_subprocess_helper";

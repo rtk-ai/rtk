@@ -31,7 +31,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -832,32 +832,53 @@ impl Tracker {
     /// Return the actual output report emitted by one execution, if it was
     /// recorded before the integration boundary closed.
     pub fn execution_by_id(&self, execution_id: &str) -> Result<Option<ExecutionRecord>> {
-        self.conn
-            .query_row(
-                "SELECT execution_id, input_tokens, output_tokens, saved_tokens,
-                        output_contract, exact_reason, omitted_items, omitted_groups,
-                        recovery_created, filter_failed, runtime_error
-                 FROM commands WHERE execution_id = ?1
-                 ORDER BY id DESC LIMIT 1",
-                params![execution_id],
-                |row| {
-                    Ok(ExecutionRecord {
-                        execution_id: row.get(0)?,
-                        input_tokens: row.get::<_, i64>(1)? as usize,
-                        output_tokens: row.get::<_, i64>(2)? as usize,
-                        saved_tokens: row.get::<_, i64>(3)? as usize,
-                        output_contract: row.get(4)?,
-                        exact_reason: row.get(5)?,
-                        omitted_items: row.get::<_, i64>(6)? as usize,
-                        omitted_groups: row.get::<_, i64>(7)? as usize,
-                        recovery_created: row.get(8)?,
-                        filter_failed: row.get(9)?,
-                        runtime_error: row.get(10)?,
-                    })
-                },
-            )
-            .optional()
-            .context("Failed to read execution report")
+        let mut statement = self.conn.prepare(
+            "SELECT execution_id, input_tokens, output_tokens, saved_tokens,
+             output_contract, exact_reason, omitted_items, omitted_groups,
+             recovery_created, filter_failed, runtime_error
+             FROM commands WHERE execution_id = ?1 ORDER BY id ASC",
+        )?;
+        let mut rows = statement.query(params![execution_id])?;
+        let mut aggregate: Option<ExecutionRecord> = None;
+
+        while let Some(row) = rows.next()? {
+            let record = ExecutionRecord {
+                execution_id: row.get(0)?,
+                input_tokens: row.get::<_, i64>(1)? as usize,
+                output_tokens: row.get::<_, i64>(2)? as usize,
+                saved_tokens: row.get::<_, i64>(3)? as usize,
+                output_contract: row.get(4)?,
+                exact_reason: row.get(5)?,
+                omitted_items: row.get::<_, i64>(6)? as usize,
+                omitted_groups: row.get::<_, i64>(7)? as usize,
+                recovery_created: row.get(8)?,
+                filter_failed: row.get(9)?,
+                runtime_error: row.get(10)?,
+            };
+
+            if let Some(total) = aggregate.as_mut() {
+                total.input_tokens = total.input_tokens.saturating_add(record.input_tokens);
+                total.output_tokens = total.output_tokens.saturating_add(record.output_tokens);
+                total.saved_tokens = total.saved_tokens.saturating_add(record.saved_tokens);
+                total.omitted_items = total.omitted_items.saturating_add(record.omitted_items);
+                total.omitted_groups = total.omitted_groups.saturating_add(record.omitted_groups);
+                if total.output_contract != record.output_contract {
+                    total.output_contract = "mixed".to_string();
+                }
+                if total.exact_reason.is_none() {
+                    total.exact_reason = record.exact_reason;
+                }
+                total.recovery_created |= record.recovery_created;
+                total.filter_failed |= record.filter_failed;
+                if total.runtime_error.is_none() {
+                    total.runtime_error = record.runtime_error;
+                }
+            } else {
+                aggregate = Some(record);
+            }
+        }
+
+        Ok(aggregate)
     }
 
     /// Append an idempotent lifecycle event. Event identity is supplied by the
@@ -2858,6 +2879,64 @@ mod tests {
         drop(tracker);
         env::remove_var("RTK_DB_PATH");
         // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn execution_by_id_aggregates_multiple_mcp_components() {
+        use std::env;
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        let db_path = env::temp_dir().join(format!(
+            "rtk_test_execution_aggregate_{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&db_path);
+        env::set_var("RTK_DB_PATH", &db_path);
+
+        let tracker = Tracker::new().unwrap();
+        let context = ExecutionContext {
+            execution_id: format!("mcp-components-{}", std::process::id()),
+            host: None,
+            session_id: None,
+            agent_id: None,
+            parent_agent_id: None,
+            task_id: None,
+            tool_call_id: None,
+        };
+        tracker
+            .record_with_output_context(
+                "read a.txt",
+                "rtk read a.txt",
+                100,
+                60,
+                10,
+                OutputTracking::default(),
+                Some(&context),
+            )
+            .unwrap();
+        tracker
+            .record_with_output_context(
+                "read b.txt",
+                "rtk read b.txt",
+                200,
+                120,
+                20,
+                OutputTracking::default(),
+                Some(&context),
+            )
+            .unwrap();
+
+        let record = tracker
+            .execution_by_id(&context.execution_id)
+            .unwrap()
+            .expect("aggregated execution");
+        assert_eq!(record.input_tokens, 300);
+        assert_eq!(record.output_tokens, 180);
+        assert_eq!(record.saved_tokens, 120);
+
+        drop(tracker);
+        env::remove_var("RTK_DB_PATH");
         let _ = std::fs::remove_file(&db_path);
     }
 

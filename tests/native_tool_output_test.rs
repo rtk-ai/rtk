@@ -34,11 +34,9 @@ fn native_read_is_filtered_as_supplemental_context_without_reexecution() {
         )
     });
     let context = &response["hookSpecificOutput"]["additionalContext"];
-    assert_eq!(context["replacement_supported"], false);
-    assert!(context["output"]
-        .as_str()
-        .unwrap()
-        .contains("2: fn main() {}"));
+    let context = context.as_str().expect("Claude additionalContext string");
+    assert!(context.contains("replacement_supported=false"));
+    assert!(context.contains("2: fn main() {}"));
     assert!(
         output.stderr.is_empty(),
         "adapter stderr: {:?}",

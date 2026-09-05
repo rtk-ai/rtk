@@ -24,6 +24,7 @@ use regex::Regex;
 /// read, so the streamed path decodes them the same way the captured path
 /// does rather than going straight to U+FFFD.
 pub(crate) const TRUNCATED_LINE_MARKER: &str = " [rtk: line truncated]";
+const STREAM_CHANNEL_CAP: usize = 32;
 
 struct DecodedLine {
     text: String,
@@ -678,7 +679,7 @@ pub fn run_streaming_with_line_cap(
             Stderr(DecodedLine),
         }
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(STREAM_CHANNEL_CAP);
         let tx_out = tx.clone();
         let stdout_thread = std::thread::spawn(move || {
             for line in read_decoded_lines(stdout, max_line_bytes) {

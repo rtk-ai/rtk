@@ -20,6 +20,8 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 const DEFAULT_LIST_LIMIT: usize = 50;
 const MIN_SEMANTIC_OUTPUT_TOKENS: usize = 64;
 const MAX_SEMANTIC_OUTPUT_TOKENS: usize = 65_536;
+const MAX_RECOVERY_PAGE_BYTES: usize = 1_048_576;
+const MAX_RECOVERY_LINE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResponseMode {
@@ -578,6 +580,101 @@ fn read_tee_file(path: &Path, max_bytes: usize) -> Result<String> {
     Ok(String::from_utf8_lossy(&bytes[..bytes.len().min(max_bytes)]).into_owned())
 }
 
+struct BoundedRecoveryLine {
+    prefix: Vec<u8>,
+    total_bytes: usize,
+    truncated: bool,
+    literal_match: bool,
+}
+
+/// Consume exactly one line while retaining only a bounded prefix. This keeps
+/// a single pathological producer line from turning recovery navigation into
+/// an unbounded allocation.
+fn read_bounded_recovery_line<R: BufRead>(
+    reader: &mut R,
+    retain_limit: usize,
+    literal_pattern: Option<&[u8]>,
+) -> io::Result<Option<BoundedRecoveryLine>> {
+    let mut prefix = Vec::with_capacity(retain_limit.min(8192));
+    let mut total_bytes = 0usize;
+    let mut literal_match = false;
+    let mut search_tail = Vec::new();
+
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            break;
+        }
+        let consumed = buffer
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(buffer.len(), |position| position + 1);
+        let buffer_len = buffer.len();
+        let chunk = buffer[..consumed].to_vec();
+
+        if let Some(pattern) = literal_pattern.filter(|pattern| !pattern.is_empty()) {
+            let mut searchable = Vec::with_capacity(search_tail.len() + chunk.len());
+            searchable.extend_from_slice(&search_tail);
+            searchable.extend_from_slice(&chunk);
+            if searchable
+                .windows(pattern.len())
+                .any(|window| window == pattern)
+            {
+                literal_match = true;
+            }
+            let tail_len = pattern.len().saturating_sub(1);
+            search_tail = searchable
+                .get(searchable.len().saturating_sub(tail_len)..)
+                .unwrap_or_default()
+                .to_vec();
+        }
+
+        let remaining = retain_limit.saturating_sub(prefix.len());
+        prefix.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        total_bytes = total_bytes.saturating_add(chunk.len());
+        reader.consume(consumed);
+
+        if consumed < buffer_len {
+            break;
+        }
+    }
+
+    if total_bytes == 0 {
+        return Ok(None);
+    }
+    Ok(Some(BoundedRecoveryLine {
+        truncated: total_bytes > prefix.len(),
+        prefix,
+        total_bytes,
+        literal_match,
+    }))
+}
+
+fn render_bounded_recovery_line(line: &BoundedRecoveryLine, max_bytes: usize) -> Vec<u8> {
+    if !line.truncated {
+        return line.prefix[..line.prefix.len().min(max_bytes)].to_vec();
+    }
+    let marker = format!("\n[rtk: line truncated after {} bytes]\n", line.total_bytes);
+    let keep = max_bytes.saturating_sub(marker.len());
+    let mut rendered = line.prefix[..line.prefix.len().min(keep)].to_vec();
+    while rendered
+        .last()
+        .is_some_and(|byte| *byte == b'\n' || *byte == b'\r')
+    {
+        rendered.pop();
+    }
+    rendered.extend_from_slice(marker.as_bytes());
+    rendered.truncate(max_bytes);
+    rendered
+}
+
+fn recovery_line_text(line: &BoundedRecoveryLine) -> String {
+    let rendered = render_bounded_recovery_line(line, MAX_RECOVERY_LINE_BYTES);
+    String::from_utf8_lossy(&rendered)
+        .trim_end_matches(['\r', '\n'])
+        .to_string()
+}
+
 fn read_recovery_page(
     recovery_id: &str,
     path: &Path,
@@ -585,7 +682,6 @@ fn read_recovery_page(
     cursor: Option<usize>,
     max_lines: usize,
 ) -> Result<Value> {
-    const MAX_PAGE_BYTES: usize = 1_048_576;
     let (start, end) = match line_range {
         Some(range) => {
             if cursor.is_some_and(|value| value < range.start.saturating_sub(1)) {
@@ -605,18 +701,17 @@ fn read_recovery_page(
     let file = fs::File::open(path)
         .with_context(|| format!("Failed to open recovery artifact: {}", path.display()))?;
     let mut reader = BufReader::new(file);
-    let mut line = Vec::new();
     let mut line_number = 0usize;
     let mut first_line = None;
     let mut last_line = None;
     let mut output = Vec::new();
     let mut has_more = false;
 
-    loop {
-        line.clear();
-        if reader.read_until(b'\n', &mut line)? == 0 {
-            break;
-        }
+    while let Some(line) = read_bounded_recovery_line(
+        &mut reader,
+        MAX_RECOVERY_PAGE_BYTES.saturating_sub(output.len()),
+        None,
+    )? {
         line_number = line_number.saturating_add(1);
         if line_number < start {
             continue;
@@ -624,26 +719,26 @@ fn read_recovery_page(
         if line_number > end {
             break;
         }
-        if last_line.is_some_and(|_| output.len() >= MAX_PAGE_BYTES) {
+        if last_line.is_some_and(|_| output.len() >= MAX_RECOVERY_PAGE_BYTES) {
             has_more = true;
             break;
         }
-        if output.len().saturating_add(line.len()) > MAX_PAGE_BYTES {
-            has_more = true;
-            break;
-        }
+        let remaining = MAX_RECOVERY_PAGE_BYTES.saturating_sub(output.len());
+        let rendered = render_bounded_recovery_line(&line, remaining);
         first_line.get_or_insert(line_number);
         last_line = Some(line_number);
-        output.extend_from_slice(&line);
+        output.extend_from_slice(&rendered);
+        has_more |= line.truncated;
+        if last_line
+            .is_some_and(|last| last.saturating_sub(first_line.unwrap_or(last)) + 1 >= max_lines)
+            && line_number < end
+            && read_bounded_recovery_line(&mut reader, 0, None)?.is_some()
+        {
+            has_more = true;
+        }
         if last_line
             .is_some_and(|last| last.saturating_sub(first_line.unwrap_or(last)) + 1 >= max_lines)
         {
-            if line_number < end {
-                let mut next_line = Vec::new();
-                if reader.read_until(b'\n', &mut next_line)? > 0 {
-                    has_more = true;
-                }
-            }
             break;
         }
     }
@@ -656,7 +751,7 @@ fn read_recovery_page(
         "recovery_id": recovery_id,
         "start_line": first_line,
         "end_line": last_line,
-        "content": String::from_utf8_lossy(&output),
+        "content": redact_sensitive(&String::from_utf8_lossy(&output)),
         "has_more": has_more
     });
     if has_more {
@@ -687,22 +782,20 @@ fn search_recovery_file(
     let file = fs::File::open(path)
         .with_context(|| format!("Failed to open recovery artifact: {}", path.display()))?;
     let mut reader = BufReader::new(file);
-    let mut line = Vec::new();
     let mut line_number = 0usize;
     let mut history = VecDeque::with_capacity(context.saturating_add(1));
     let mut pending: Vec<PendingRecoveryMatch> = Vec::new();
     let mut matches: Vec<Value> = Vec::new();
     let mut truncated = false;
 
-    loop {
-        line.clear();
-        if reader.read_until(b'\n', &mut line)? == 0 {
-            break;
-        }
+    while let Some(line) = read_bounded_recovery_line(
+        &mut reader,
+        MAX_RECOVERY_LINE_BYTES,
+        (!use_regex).then_some(pattern.as_bytes()),
+    )? {
         line_number = line_number.saturating_add(1);
-        let text = String::from_utf8_lossy(&line)
-            .trim_end_matches(['\r', '\n'])
-            .to_string();
+        let text = recovery_line_text(&line);
+        truncated |= line.truncated;
 
         let mut remaining = Vec::with_capacity(pending.len());
         for mut found in pending {
@@ -712,10 +805,10 @@ fn search_recovery_file(
             if line_number >= found.until {
                 matches.push(json!({
                     "line": found.line,
-                    "text": found.text,
+                    "text": redact_sensitive(&found.text),
                     "context": found.context.into_iter().map(|(line, text)| json!({
                         "line": line,
-                        "text": text
+                        "text": redact_sensitive(&text)
                     })).collect::<Vec<_>>()
                 }));
             } else {
@@ -724,9 +817,10 @@ fn search_recovery_file(
         }
         pending = remaining;
 
-        let is_match = regex
-            .as_ref()
-            .map_or_else(|| text.contains(pattern), |matcher| matcher.is_match(&text));
+        let is_match = regex.as_ref().map_or_else(
+            || line.literal_match || text.contains(pattern),
+            |matcher| matcher.is_match(&text),
+        );
         if is_match {
             if matches.len() + pending.len() >= max_matches {
                 truncated = true;
@@ -741,10 +835,10 @@ fn search_recovery_file(
             if context == 0 {
                 matches.push(json!({
                     "line": line_number,
-                    "text": text,
+                    "text": redact_sensitive(&text),
                     "context": match_context.into_iter().map(|(line, text)| json!({
                         "line": line,
-                        "text": text
+                        "text": redact_sensitive(&text)
                     })).collect::<Vec<_>>()
                 }));
             } else {
@@ -766,17 +860,17 @@ fn search_recovery_file(
     for found in pending {
         matches.push(json!({
             "line": found.line,
-            "text": found.text,
+            "text": redact_sensitive(&found.text),
             "context": found.context.into_iter().map(|(line, text)| json!({
                 "line": line,
-                "text": text
+                "text": redact_sensitive(&text)
             })).collect::<Vec<_>>()
         }));
     }
 
     Ok(json!({
         "recovery_id": recovery_id,
-        "pattern": pattern,
+        "pattern": redact_sensitive(pattern),
         "regex": use_regex,
         "match_count": matches.len(),
         "truncated": truncated,

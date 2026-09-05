@@ -25,7 +25,7 @@ pub fn run_tool(program: &str, args: &[String], verbose: u8) -> Result<i32> {
         &args.join(" "),
         BudgetClass::Diagnostic,
         build_document,
-        RunOptions::with_tee(program),
+        RunOptions::with_tee(program).inherit_stdin(),
     )
 }
 

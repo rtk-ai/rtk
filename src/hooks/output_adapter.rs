@@ -85,17 +85,17 @@ pub fn post_tool_use_response(input: &Value) -> Option<Value> {
     if !adapted.changed {
         return None;
     }
+    let additional_context = format!(
+        "RTK output-only adapter; replacement_supported=false; original_bytes={}; shown_bytes={}; omitted_lines={}; output:\n{}",
+        adapted.original_bytes,
+        adapted.shown_bytes,
+        adapted.omitted_lines,
+        adapted.output.as_str().unwrap_or_default()
+    );
     Some(json!({
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse",
-            "additionalContext": {
-                "adapter": "rtk-output-only",
-                "replacement_supported": false,
-                "original_bytes": adapted.original_bytes,
-                "shown_bytes": adapted.shown_bytes,
-                "omitted_lines": adapted.omitted_lines,
-                "output": adapted.output
-            }
+            "additionalContext": additional_context
         }
     }))
 }
@@ -139,16 +139,11 @@ mod tests {
             "tool_response": "// comment\nfn main() {}\n"
         });
         let response = post_tool_use_response(&input).expect("supplemental response");
-        assert!(
-            response["hookSpecificOutput"]["additionalContext"]["output"]
-                .as_str()
-                .unwrap()
-                .contains("2: fn main() {}")
-        );
-        assert_eq!(
-            response["hookSpecificOutput"]["additionalContext"]["replacement_supported"],
-            false
-        );
+        let context = response["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("Claude additionalContext string");
+        assert!(context.contains("replacement_supported=false"));
+        assert!(context.contains("2: fn main() {}"));
     }
 
     #[test]

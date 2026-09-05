@@ -288,6 +288,7 @@ fn write_tee_file(
 pub struct LosslessTeeReservation {
     pending_path: PathBuf,
     committed_path: PathBuf,
+    max_file_size: usize,
     max_files: usize,
     committed: bool,
 }
@@ -347,6 +348,9 @@ impl LosslessTeeReservation {
 
     /// Keep the complete artifact once the caller has selected compact output.
     fn commit_path_locked(&mut self) -> Option<PathBuf> {
+        if std::fs::metadata(&self.pending_path).ok()?.len() > self.max_file_size as u64 {
+            return None;
+        }
         std::fs::rename(&self.pending_path, &self.committed_path).ok()?;
         cleanup_lossless_files_except(
             self.committed_path.parent().expect("tee path has parent"),
@@ -482,6 +486,7 @@ fn reserve_lossless_tee_file_with_limit(
                     return Some(LosslessTeeReservation {
                         pending_path,
                         committed_path,
+                        max_file_size,
                         max_files,
                         committed: false,
                     });
@@ -1074,6 +1079,17 @@ mod tests {
             .commit_output_if_better(raw, "a much larger rendered candidate".to_string())
             .is_none());
         assert!(std::fs::read_dir(temp.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn lossless_commit_rechecks_the_configured_file_size_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let reservation = reserve_lossless_tee_file("small", "test", temp.path(), 1_024, 20)
+            .expect("reservation");
+        std::fs::write(&reservation.pending_path, "x".repeat(2_048)).unwrap();
+
+        assert!(reservation.commit_hint().is_none());
+        assert!(!temp.path().join("test.lossless.log").exists());
     }
 
     #[test]

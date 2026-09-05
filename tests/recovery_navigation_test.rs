@@ -11,6 +11,7 @@ fn artifact() -> (tempfile::TempDir, String) {
     for line in 1..=200 {
         content.push_str(&format!("L{line:03}\n"));
     }
+    content.push_str("token=super-secret\n");
     content.replace_range(
         content.find("L180").expect("line 180")..content.find("L180").unwrap() + 4,
         "ERROR",
@@ -122,6 +123,90 @@ fn mcp_search_returns_original_location_and_context() {
     assert_eq!(found["context"][0]["line"], 179);
     assert_eq!(found["context"][1]["line"], 180);
     assert_eq!(found["context"][2]["line"], 181);
+}
+
+#[test]
+fn mcp_recovery_navigation_redacts_sensitive_content() {
+    let (temp, id) = artifact();
+    let page = call_mcp(
+        temp.path(),
+        "read_recovery",
+        serde_json::json!({
+            "recovery_id": id,
+            "lines": "201:201"
+        }),
+    );
+    let page_content = page["result"]["structuredContent"]["content"]
+        .as_str()
+        .expect("recovery page content");
+    assert!(page_content.contains("[REDACTED]"));
+    assert!(!page_content.contains("super-secret"));
+
+    let search = call_mcp(
+        temp.path(),
+        "search_recovery",
+        serde_json::json!({
+            "recovery_id": id,
+            "pattern": "super-secret",
+            "context": 1
+        }),
+    );
+    let result = &search["result"]["structuredContent"];
+    let found = &result["matches"][0];
+    assert_eq!(found["text"], "[REDACTED]");
+    assert!(!found.to_string().contains("super-secret"));
+}
+
+#[test]
+fn mcp_recovery_page_bounds_oversized_lines_and_advances() {
+    let temp = tempfile::tempdir().expect("recovery directory");
+    let id = "1234567890_oversized.lossless.log";
+    let content = format!("before\n{}\nafter\n", "x".repeat(1_200_000));
+    std::fs::write(temp.path().join(id), content).expect("write oversized recovery fixture");
+
+    let page = call_mcp(
+        temp.path(),
+        "read_recovery",
+        serde_json::json!({
+            "recovery_id": id,
+            "lines": "2:2",
+            "max_lines": 1
+        }),
+    );
+    let result = &page["result"]["structuredContent"];
+    let content = result["content"].as_str().expect("page content");
+    assert!(content.contains("[rtk: line truncated"));
+    assert!(content.len() <= 1_048_576);
+    assert_eq!(result["next_cursor"], 2);
+
+    let next = call_mcp(
+        temp.path(),
+        "read_recovery",
+        serde_json::json!({
+            "recovery_id": id,
+            "lines": "2:3",
+            "cursor": 2,
+            "max_lines": 1
+        }),
+    );
+    assert_eq!(next["result"]["structuredContent"]["content"], "after\n");
+
+    let search = call_mcp(
+        temp.path(),
+        "search_recovery",
+        serde_json::json!({
+            "recovery_id": id,
+            "pattern": "xxx",
+            "context": 0
+        }),
+    );
+    let search_result = &search["result"]["structuredContent"];
+    assert_eq!(search_result["match_count"], 1);
+    assert_eq!(search_result["truncated"], true);
+    assert!(search_result["matches"][0]["text"]
+        .as_str()
+        .expect("bounded match text")
+        .contains("[rtk: line truncated"));
 }
 
 #[test]

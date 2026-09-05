@@ -929,6 +929,8 @@ fn run_rg_ai_streaming(
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
     let stats = Arc::new(Mutex::new(EmissionMeta::default()));
+    let tracking_paths = paths.clone();
+    let tracking_extra_args = extra_args.clone();
     let filter = RgAiStreamFilter::new(
         route,
         patterns,
@@ -949,14 +951,38 @@ fn run_rg_ai_streaming(
         "{}{}",
         result.raw_stderr, result.filtered
     ));
+    let input_tokens = rg_tracking_input_tokens(
+        &result.raw_stdout,
+        &result.raw_stderr,
+        result.observed_output_bytes(),
+        result.capture_complete,
+        &tracking_paths,
+        &tracking_extra_args,
+    );
     timer.track_output_tokens(
         &format!("rg {}", args.join(" ")),
         &format!("rtk rg {}", args.join(" ")),
-        tracking::estimate_tokens_from_bytes(result.observed_output_bytes()),
+        input_tokens,
         output_tokens,
         runner::output_tracking_from_emission(OutputContract::AiOwned(BudgetClass::Source), meta),
     );
     Ok(result.exit_code)
+}
+
+fn rg_tracking_input_tokens(
+    raw_stdout: &str,
+    raw_stderr: &str,
+    observed_output_bytes: usize,
+    capture_complete: bool,
+    paths: &[String],
+    extra_args: &[String],
+) -> usize {
+    if capture_complete {
+        if let Ok(native) = rg_faithful_match_baseline(raw_stdout, paths, extra_args) {
+            return tracking::estimate_tokens(&format!("{}{}", native, raw_stderr));
+        }
+    }
+    tracking::estimate_tokens_from_bytes(observed_output_bytes)
 }
 
 fn rg_semantic_command(route: RgRoute, args: &[String]) -> Command {
@@ -1727,6 +1753,16 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rg_tracking_uses_native_output_without_parse_aids() {
+        let augmented = "src/main.rs\0:1:needle\n";
+        let native = "src/main.rs:1:needle\n";
+        assert_eq!(
+            rg_tracking_input_tokens(augmented, "", augmented.len(), true, &[".".into()], &[]),
+            tracking::estimate_tokens(native)
+        );
+    }
     use crate::core::ai_output::Omission;
 
     #[test]
