@@ -24,8 +24,8 @@ use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
-    ctest_cmd, deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
-    read, search, summary, tree, wc_cmd,
+    ctest_cmd, deps, env_cmd, find_cmd, format_cmd, gci, json_cmd, local_llm, log_cmd, ls,
+    pipe_cmd, read, search, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -89,6 +89,27 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Compact RTK-native filesystem listing (not PowerShell Get-ChildItem)
+    Gci {
+        /// Files or directories to list (defaults to current directory)
+        paths: Vec<PathBuf>,
+        /// Include dot-prefixed and Windows hidden entries
+        #[arg(short = 'a', long)]
+        all: bool,
+        /// Recursively enumerate directories
+        #[arg(short = 'R', long)]
+        recursive: bool,
+        /// Maximum recursive depth (root children are depth 1)
+        #[arg(long, requires = "recursive", value_parser = gci::parse_depth)]
+        max_depth: Option<usize>,
+        /// Match basenames using only * and ? wildcards
+        #[arg(long)]
+        filter: Option<String>,
+        /// Maximum displayed entries (enumeration still counts all matches)
+        #[arg(long, default_value_t = gci::DEFAULT_LIMIT, value_parser = gci::parse_limit)]
+        limit: usize,
+    },
+
     /// List directory contents with token-optimized output (proxy to native ls)
     Ls {
         /// Arguments passed to ls (supports all native ls flags like -l, -a, -h, -R)
@@ -1468,7 +1489,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
 
     // RTK meta-commands should never fall back to raw execution.
     // e.g. `rtk gain --badtypo` should show Clap's error, not try to run `gain` from $PATH.
-    if core::constants::RTK_META_COMMANDS.contains(&args[0].as_str()) {
+    if args[0] == "gci" || core::constants::RTK_META_COMMANDS.contains(&args[0].as_str()) {
         parse_error.exit();
     }
 
@@ -1793,6 +1814,23 @@ fn run_cli() -> Result<i32> {
     }
 
     let code = match cli.command {
+        Commands::Gci {
+            paths,
+            all,
+            recursive,
+            max_depth,
+            filter,
+            limit,
+        } => gci::run(
+            &paths,
+            all,
+            recursive,
+            max_depth,
+            filter.as_deref(),
+            limit,
+            cli.verbose,
+        ),
+
         Commands::Ls { args } => ls::run(&args, cli.verbose)?,
 
         Commands::Tree { args } => tree::run(&args, cli.verbose)?,
@@ -2960,7 +2998,8 @@ fn run_cli() -> Result<i32> {
 fn is_operational_command(cmd: &Commands) -> bool {
     matches!(
         cmd,
-        Commands::Ls { .. }
+        Commands::Gci { .. }
+            | Commands::Ls { .. }
             | Commands::Tree { .. }
             | Commands::Read { .. }
             | Commands::Smart { .. }
@@ -3026,6 +3065,76 @@ mod tests {
     use super::*;
     use clap::Parser;
     use std::cell::Cell;
+
+    #[test]
+    fn test_gci_cli_defaults_and_explicit_roots() {
+        let cli = Cli::try_parse_from(["rtk", "gci"]).unwrap();
+        match cli.command {
+            Commands::Gci {
+                paths,
+                all,
+                recursive,
+                max_depth,
+                filter,
+                limit,
+            } => {
+                assert!(paths.is_empty());
+                assert!(!all);
+                assert!(!recursive);
+                assert_eq!(max_depth, None);
+                assert_eq!(filter, None);
+                assert_eq!(limit, gci::DEFAULT_LIMIT);
+            }
+            _ => panic!("Expected Gci command"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "gci",
+            "one",
+            "two words",
+            "-a",
+            "-R",
+            "--max-depth",
+            "2",
+            "--filter",
+            "*.rs",
+            "--limit",
+            "7",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Gci {
+                paths,
+                all,
+                recursive,
+                max_depth,
+                filter,
+                limit,
+            } => {
+                assert_eq!(paths, [PathBuf::from("one"), PathBuf::from("two words")]);
+                assert!(all);
+                assert!(recursive);
+                assert_eq!(max_depth, Some(2));
+                assert_eq!(filter.as_deref(), Some("*.rs"));
+                assert_eq!(limit, 7);
+            }
+            _ => panic!("Expected Gci command"),
+        }
+    }
+
+    #[test]
+    fn test_gci_cli_rejects_invalid_combinations_and_values() {
+        for args in [
+            vec!["rtk", "gci", "--max-depth", "2"],
+            vec!["rtk", "gci", "-R", "--max-depth", "0"],
+            vec!["rtk", "gci", "--limit", "0"],
+            vec!["rtk", "gci", "--limit", "100001"],
+            vec!["rtk", "gci", "--unknown"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
 
     #[test]
     fn test_git_commit_single_message() {
@@ -3425,6 +3534,7 @@ mod tests {
     fn test_every_subcommand_is_classified() {
         use clap::CommandFactory;
 
+        const NATIVE: &[&str] = &["gci"];
         const PASSTHROUGH: &[&str] = &[
             "ls",
             "tree",
@@ -3497,6 +3607,7 @@ mod tests {
             .map(|c| c.get_name().to_string())
             .filter(|name| {
                 !core::constants::RTK_META_COMMANDS.contains(&name.as_str())
+                    && !NATIVE.contains(&name.as_str())
                     && !PASSTHROUGH.contains(&name.as_str())
             })
             .collect();
