@@ -225,14 +225,14 @@ fn run_show(
 
     // Re-insert `--` when clap's trailing_var_arg consumed it (issue #1215), same as
     // run_diff/run_checkout. Without this the pathspec separator never reaches
-    // `blob_show_targets`, so `git show <rev> -- <path:with:colon>` would misread the
+    // `show_positionals`, so `git show <rev> -- <path:with:colon>` would misread the
     // colon'd pathspec as a `<rev>:<path>` blob and dump it instead of a commit-diff.
     let args = &args_utils::restore_double_dash(args);
 
     // Pick one of three handlers for `git show`. `show_route` decides the blob case
     // FIRST (see its docs): the two branches below are mutually exclusive on `route`,
     // so their source order does not affect which one runs.
-    let blob_args = blob_show_targets(args);
+    let positionals = show_positionals(args);
     let route = show_route(args);
 
     if route == ShowRoute::StatOrFormat {
@@ -296,11 +296,12 @@ fn run_show(
         // is bounded by bytes, not lines. (Recovery for a transcoded Latin-1 blob is
         // UTF-8-normalized text, not byte-identical to the on-disk ISO-8859 file.)
         let raw = &text;
-        let shown = if blob_args.len() == 1 {
-            compact_blob_show(raw, blob_args[0])
+        // `route == Blob` guarantees the first positional is the blob object. Window it
+        // only when it is the sole object: git concatenates multiple objects with no
+        // separator, so cutting the first would silently drop the rest.
+        let shown = if positionals.len() == 1 {
+            compact_blob_show(raw, positionals[0])
         } else {
-            // Multiple blob args are concatenated by git; don't risk cutting the
-            // second blob mid-stream — pass the composite through unchanged.
             raw.clone()
         };
         print!("{}", shown);
@@ -415,30 +416,54 @@ fn is_blob_show_arg(arg: &str) -> bool {
     // `:N:path` (index / merge-stage blobs) start with `:` but ARE blobs, so only the
     // `:/` prefix is filtered out there.
     //
-    // Magic pathspecs (`:(exclude)…`, `:(top)…`, `:!…`) also start with `:` but are
-    // NOT blobs — they only ever appear as pathspecs, so exclude them too. A colon
-    // buried in a preceding option value (`git show -S 'a:b' HEAD`) still trips this
-    // heuristic; disambiguating that needs git's per-flag argument grammar, so it is
-    // left as a known (pre-existing) false positive rather than guessed at here.
+    // Magic pathspecs (`:(exclude)…`, `:(top)…`, `:!…`, and `:^…` — an exact synonym
+    // of `:!…` for exclude magic) also start with `:` but are NOT blobs: they only
+    // ever appear as pathspecs, so exclude them too. An option value with a colon
+    // (`git show -S 'a:b' HEAD`) is handled by `show_positionals`, which skips a
+    // flag's operand via git's argument grammar, so it never reaches here as a blob.
     !arg.starts_with('-')
         && !arg.starts_with(":/")
         && !arg.starts_with(":(")
         && !arg.starts_with(":!")
+        && !arg.starts_with(":^")
         && arg.contains(':')
 }
 
-/// The `<rev>:<path>` blob arguments of a `git show`. Args after a `--` are
-/// pathspecs, never revs/blobs, so a colon in a filename there (`-- weird:name`) is
-/// excluded by scanning only the args before the first `--`. Conversely a trailing
-/// `-- <path>` beside a real blob arg is ignored by git (still a blob dump), so its
-/// presence must not empty this list — hence the split rather than a blanket
-/// "contains `--` → not a blob" test.
-fn blob_show_targets(args: &[String]) -> Vec<&String> {
+/// The positional (non-option) arguments of a `git show` — its objects. Options and
+/// the value tokens they consume (`-S 'url:1'`, `-L 1,2:file`) are dropped via git's
+/// own flag/value grammar ([`consumes_next_token_as_value`], shared with run_log), so
+/// an option operand that happens to contain a colon is never mistaken for a blob and
+/// truncated. Args after a `--` are pathspecs, never objects, so a colon in a filename
+/// there (`-- weird:name`) is excluded by scanning only the args before the first `--`;
+/// a trailing `-- <path>` beside a real object arg is thus ignored (git still dumps the
+/// blob) rather than emptying the list.
+fn show_positionals(args: &[String]) -> Vec<&String> {
     let rev_args = match args.iter().position(|a| a == "--") {
         Some(sep) => &args[..sep],
         None => args,
     };
-    rev_args.iter().filter(|a| is_blob_show_arg(a)).collect()
+    let mut positionals = Vec::new();
+    let mut iter = rev_args.iter();
+    while let Some(arg) = iter.next() {
+        if arg.starts_with('-') {
+            if consumes_next_token_as_value(arg) {
+                iter.next(); // skip this flag's value token
+            }
+            continue;
+        }
+        positionals.push(arg);
+    }
+    positionals
+}
+
+/// git show's object argument, when its first positional is a `<rev>:<path>` blob.
+/// Only the first positional is git show's primary object; a later positional is an
+/// extra object git concatenates, not a windowing target.
+fn blob_show_target(args: &[String]) -> Option<&String> {
+    show_positionals(args)
+        .into_iter()
+        .next()
+        .filter(|a| is_blob_show_arg(a))
 }
 
 /// Which `git show` handler an invocation routes to.
@@ -460,7 +485,7 @@ enum ShowRoute {
 /// would send it through lossy UTF-8 decoding and reintroduce the blob corruption the
 /// byte-safe path fixes, so the blob case is checked first.
 fn show_route(args: &[String]) -> ShowRoute {
-    if !blob_show_targets(args).is_empty() {
+    if blob_show_target(args).is_some() {
         return ShowRoute::Blob;
     }
     let wants_stat = args
@@ -3643,6 +3668,8 @@ mod tests {
         assert!(!is_blob_show_arg(":(exclude)b.txt"));
         assert!(!is_blob_show_arg(":(top,glob)*.rs"));
         assert!(!is_blob_show_arg(":!b.txt"));
+        // `:^` is an exact synonym of `:!` (exclude magic), also a pathspec.
+        assert!(!is_blob_show_arg(":^b.txt"));
     }
 
     /// Helper: build an args slice from string literals.
@@ -3679,7 +3706,23 @@ mod tests {
         // (still a blob dump), so it must not disable blob handling.
         let args = show_args(&["HEAD:Cargo.toml", "--", "Cargo.toml"]);
         assert_eq!(show_route(&args), ShowRoute::Blob);
-        assert_eq!(blob_show_targets(&args).len(), 1);
+        assert_eq!(blob_show_target(&args), Some(&"HEAD:Cargo.toml".to_string()));
+    }
+
+    #[test]
+    fn test_blob_show_target_skips_flag_operand_with_colon() {
+        // Blocking bug #2: `-S 'url:1'`'s operand contains a colon but is the value of
+        // a pickaxe flag, not an object — it must not be read as a blob and truncated.
+        // The commit is the real (colon-free) object, so this is a commit-diff.
+        let args = show_args(&["-S", "url:1", "HEAD"]);
+        assert!(blob_show_target(&args).is_none());
+        assert_eq!(show_route(&args), ShowRoute::CommitDiff);
+        // `-L <start,end>:<file>` operand likewise carries a colon.
+        let args = show_args(&["-L", "1,2:file.rs", "HEAD"]);
+        assert!(blob_show_target(&args).is_none());
+        // A real blob still routes as a blob even with a preceding value flag.
+        let args = show_args(&["-S", "needle", "HEAD:src/main.rs"]);
+        assert_eq!(blob_show_target(&args), Some(&"HEAD:src/main.rs".to_string()));
     }
 
     #[test]
@@ -3687,11 +3730,11 @@ mod tests {
         // A filename containing a colon AFTER `--` is a pathspec, not a blob target.
         // This `--` is representative of the real CLI path: clap strips the separator,
         // but `run_show` restores it via `restore_double_dash` before calling
-        // `show_route`/`blob_show_targets` (verified live: `git show HEAD -- a:b.txt`
+        // `show_route`/`show_positionals` (verified live: `git show HEAD -- a:b.txt`
         // renders a commit-diff, not a blob dump).
         let args = show_args(&["HEAD", "--", "weird:name.txt"]);
         assert_eq!(show_route(&args), ShowRoute::CommitDiff);
-        assert!(blob_show_targets(&args).is_empty());
+        assert!(blob_show_target(&args).is_none());
     }
 
     #[test]
