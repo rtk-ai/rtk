@@ -1006,6 +1006,13 @@ pub fn uninstall_with_patch_mode(
     let cursor_removed = remove_cursor_hooks(ctx)?;
     removed.extend(cursor_removed);
 
+    // 7. Remove Codex global artifacts as part of the default global cleanup.
+    if let Ok(codex_dir) = resolve_codex_dir() {
+        append_codex_uninstall_items(&mut removed, &codex_dir, ctx)?;
+    } else if verbose > 0 {
+        eprintln!("Skipped Codex cleanup because the Codex config directory could not be resolved");
+    }
+
     // Report results
     if removed.is_empty() {
         println!("RTK was not installed (nothing to remove)");
@@ -1024,7 +1031,9 @@ pub fn uninstall_with_patch_mode(
             println!("  - {}", item);
         }
         if !dry_run {
-            println!("\nRestart Claude Code, OpenCode, and Cursor (if used) to apply changes.");
+            println!(
+                "\nRestart Claude Code, OpenCode, Cursor, and Codex (if used) to apply changes."
+            );
         }
     }
 
@@ -1032,6 +1041,17 @@ pub fn uninstall_with_patch_mode(
         print_dry_run_footer();
     }
 
+    Ok(())
+}
+
+fn append_codex_uninstall_items(
+    removed: &mut Vec<String>,
+    codex_dir: &Path,
+    ctx: InitContext,
+) -> Result<()> {
+    for item in uninstall_codex_at(codex_dir, ctx)? {
+        removed.push(format!("Codex {}", item));
+    }
     Ok(())
 }
 
@@ -8348,6 +8368,31 @@ mod tests {
                 "hook entry must be removed from settings.json"
             );
         });
+    }
+
+    #[test]
+    fn test_append_codex_uninstall_items_prefixes_and_removes_artifacts() {
+        let tmp = TempDir::new().unwrap();
+        let codex_dir = tmp.path();
+        let agents_md = codex_dir.join(AGENTS_MD);
+        let rtk_md = codex_dir.join(RTK_MD);
+        fs::write(&agents_md, "# Team rules\n\n@RTK.md\n").unwrap();
+        fs::write(&rtk_md, "codex config").unwrap();
+
+        let mut removed = Vec::new();
+        append_codex_uninstall_items(&mut removed, codex_dir, InitContext::default()).unwrap();
+
+        assert!(!rtk_md.exists(), "Codex RTK.md must be removed");
+        let agents_content = fs::read_to_string(&agents_md).unwrap();
+        assert!(
+            !agents_content.contains("@RTK.md"),
+            "Codex AGENTS.md RTK reference must be removed"
+        );
+        assert!(agents_content.contains("# Team rules"));
+        assert!(removed.iter().any(|item| item.starts_with("Codex RTK.md:")));
+        assert!(removed
+            .iter()
+            .any(|item| item == "Codex AGENTS.md: removed @RTK.md reference"));
     }
 
     #[test]
