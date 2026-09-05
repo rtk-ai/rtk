@@ -18,10 +18,10 @@ use super::constants::{
     DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR,
     DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
     HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
-    HOOKS_SUBDIR, OMP_DIR, OMP_LOCAL_DIR, PI_AGENT_STATE_FILE, PI_CODING_AGENT_DIR_ENV, PI_DIR,
-    PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
-    SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOKS_FILE, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME,
-    VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
+    HOOKS_SUBDIR, OMP_DIR, OMP_LOCAL_DIR, PI_AGENT_STATE_FILE, PI_AGENT_STATE_UNKNOWN_PRIOR,
+    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOKS_FILE,
+    VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
 };
 use super::integrity;
 use super::is_claude_hook_command;
@@ -37,16 +37,29 @@ const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
 // both the current `pi.exec` call and older stock revisions that imported
 // `exec` locally before invoking it.
 const PI_PLUGIN_REWRITE_MARKER: &str = "exec(\"rtk\", [\"rewrite\"";
+/// Hop limit when following a symlink chain by hand. Well above any legitimate
+/// extension layout, and low enough that a cyclic link is rejected cheaply.
+const MAX_SYMLINK_HOPS: usize = 16;
+/// How many numbered extension backups to keep before refusing to make another.
+const MAX_BACKUP_ATTEMPTS: usize = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PiCompatibleAgent {
+pub enum PiCompatibleAgent {
     Pi,
     Omp,
 }
 
 enum ManagedAgentState {
     Absent,
-    Known(Vec<PiCompatibleAgent>),
+    /// Ownership was recorded. `prior_unknown` marks a record that cannot be
+    /// assumed exhaustive — started over an extension RTK did not install, or
+    /// carrying `unparsed` entries written by a version that knows more agents
+    /// than this one. Unparsed entries are preserved on every rewrite.
+    Known {
+        agents: Vec<PiCompatibleAgent>,
+        prior_unknown: bool,
+        unparsed: Vec<String>,
+    },
     Unknown,
 }
 
@@ -535,7 +548,20 @@ fn write_if_changed_internal(
 /// Resolve the final write target: if `path` is a symlink, follow it so
 /// the atomic rename lands on the real file and the symlink is preserved.
 fn resolve_atomic_target(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical;
+    }
+
+    // Follow a not-yet-resolvable symlink so the write lands on its target
+    // instead of replacing the link. Every `atomic_write` caller reaches this,
+    // so redirect only when the target directory exists: callers that have not
+    // prepared one keep the previous behaviour rather than failing.
+    match resolve_symlink_target(path) {
+        Some(target) if target.parent().is_some_and(Path::is_dir) => {
+            fs::canonicalize(&target).unwrap_or(target)
+        }
+        _ => path.to_path_buf(),
+    }
 }
 
 /// Atomic write using tempfile + rename
@@ -3577,7 +3603,16 @@ fn validate_stock_pi_plugin_path(
     patch_mode: PatchMode,
     ctx: InitContext,
 ) -> Result<bool> {
-    if path.exists() {
+    // `exists()` follows the link, so a symlink whose chain cannot be resolved
+    // — a cycle, or one longer than MAX_SYMLINK_HOPS — reads as absent and
+    // would be replaced with no prompt and no backup, unlike every other path
+    // that overwrites something the user put there. A *dangling* link is not in
+    // that category: it resolves to a target the install is meant to create, so
+    // it stays on the ordinary path and is written through.
+    let unresolvable_link = fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        && resolve_symlink_target(path).is_none();
+    if path.exists() || unresolvable_link {
         let is_known_stock = match fs::read_to_string(path) {
             Ok(existing) => is_known_stock_pi_plugin(&existing),
             Err(error) => {
@@ -3594,6 +3629,9 @@ fn validate_stock_pi_plugin_path(
             if ctx.dry_run {
                 return match patch_mode {
                     PatchMode::Ask => {
+                        if let Some(backup) = plan_backup(path, name)? {
+                            println!("[dry-run] would back up {} to {}", name, backup.display());
+                        }
                         println!(
                             "[dry-run] would prompt before overwriting {}: {}",
                             name,
@@ -3602,6 +3640,9 @@ fn validate_stock_pi_plugin_path(
                         Ok(false)
                     }
                     PatchMode::Auto => {
+                        if let Some(backup) = plan_backup(path, name)? {
+                            println!("[dry-run] would back up {} to {}", name, backup.display());
+                        }
                         println!(
                             "[dry-run] would overwrite non-stock {}: {}",
                             name,
@@ -3624,10 +3665,29 @@ fn validate_stock_pi_plugin_path(
                 PatchMode::Auto => true,
                 PatchMode::Skip => false,
                 PatchMode::Ask => {
-                    let prompt = format!("Overwrite the non-stock {} at {}?", name, path.display());
+                    // Disclose the backup, as the uninstall prompt does: a user
+                    // protecting local edits would otherwise decline a question
+                    // whose answer preserves them.
+                    let fate = match plan_backup(path, name)? {
+                        Some(backup) => format!("back it up to {} and overwrite", backup.display()),
+                        None => "overwrite".to_owned(),
+                    };
+                    let prompt = format!(
+                        "{} at {} is not stock content; {} it?",
+                        name,
+                        path.display(),
+                        fate
+                    );
                     prompt_user_confirmation(&prompt)?
                 }
             };
+
+            if should_overwrite {
+                // The overwrite is about to discard whatever the user had here,
+                // and unlike the stock content replacing it, that is not
+                // reproducible from anywhere else.
+                back_up_modified_extension(path, name)?;
+            }
 
             return Ok(should_overwrite);
         }
@@ -3665,6 +3725,11 @@ fn is_known_stock_pi_plugin(content: &str) -> bool {
 /// the directory does not yet exist (avoids reporting no-op changes).
 fn ensure_pi_extensions_dir(parent: &Path, name: &str, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
+    // `create_dir_all` fails with EEXIST on a symlinked directory whose target
+    // is missing: the link exists, its target does not. Create the target.
+    let resolved = resolve_symlink_components(parent);
+    let parent = resolved.as_path();
+
     if dry_run {
         if !parent.exists() {
             println!("[dry-run] would create {}: {}", name, parent.display());
@@ -3695,6 +3760,12 @@ fn canonicalize_path_for_comparison(path: &Path) -> PathBuf {
         return canonical;
     }
 
+    // A symlink whose target does not exist yet fails `canonicalize`, and the
+    // ancestor walk below would resolve it to its own location rather than the
+    // file it points at.
+    let resolved = resolve_symlink_target(path);
+    let path = resolved.as_deref().unwrap_or(path);
+
     let mut missing_components = Vec::new();
     let mut candidate = path;
     loop {
@@ -3720,11 +3791,84 @@ fn canonicalize_path_for_comparison(path: &Path) -> PathBuf {
     }
 }
 
+/// Read one symlink hop, resolving a relative link against the link's own
+/// directory. `None` for a non-symlink, which leaves the caller's literal-path
+/// fallback in charge of every other unresolved case.
+fn dangling_symlink_target(path: &Path) -> Option<PathBuf> {
+    if !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return None;
+    }
+
+    let target = fs::read_link(path).ok()?;
+    if target.is_absolute() {
+        return Some(target);
+    }
+    Some(path.parent()?.join(target))
+}
+
+/// Rebuild a path with every symlinked component replaced by its target, so a
+/// directory alias anywhere along the path — not just its last component — is
+/// followed.
+fn resolve_symlink_components(path: &Path) -> PathBuf {
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        resolved.push(component);
+        if let Some(target) = resolve_symlink_target(&resolved) {
+            resolved = target;
+        }
+    }
+    resolved
+}
+
+/// Follow a chain of symlinks whose final target does not exist yet, stopping at
+/// the first entry that is not a symlink. Returns `None` for a non-symlink and
+/// for a chain longer than [`MAX_SYMLINK_HOPS`], which is what breaks cycles:
+/// `canonicalize` reports `ELOOP` for those, so there is no other terminator.
+fn resolve_symlink_target(path: &Path) -> Option<PathBuf> {
+    let mut current = dangling_symlink_target(path)?;
+    for _ in 1..MAX_SYMLINK_HOPS {
+        match dangling_symlink_target(&current) {
+            Some(next) => current = next,
+            None => return Some(current),
+        }
+    }
+    None
+}
+
 fn shared_agent_state_path(path: &Path) -> PathBuf {
     canonicalize_path_for_comparison(path).with_file_name(PI_AGENT_STATE_FILE)
 }
 
 fn read_managed_agents(path: &Path) -> Result<ManagedAgentState> {
+    read_managed_agents_reporting(path, true)
+}
+
+/// Reads the sidecar only when both agents resolve to this path. Elsewhere the
+/// record plays no part in the command, so reporting on its contents would
+/// announce an ownership decision that is never made.
+fn read_ownership_if_aliased(
+    global: bool,
+    path: &Path,
+    agent: PiCompatibleAgent,
+) -> Result<ManagedAgentState> {
+    if extension_paths_alias(global, path, agent)? {
+        read_managed_agents(path)
+    } else {
+        Ok(ManagedAgentState::Absent)
+    }
+}
+
+/// Reads the ownership sidecar. `warn` is false for the pre-write re-read,
+/// where any problem has already been reported by the earlier read and a second
+/// identical warning would only be noise.
+fn read_managed_agents_reporting(path: &Path, warn: bool) -> Result<ManagedAgentState> {
+    macro_rules! report {
+        ($($arg:tt)*) => {
+            if warn {
+                eprintln!($($arg)*);
+            }
+        };
+    }
     let state_path = shared_agent_state_path(path);
     let content = match fs::read_to_string(&state_path) {
         Ok(content) => content,
@@ -3732,7 +3876,7 @@ fn read_managed_agents(path: &Path) -> Result<ManagedAgentState> {
             return Ok(ManagedAgentState::Absent);
         }
         Err(error) => {
-            eprintln!(
+            report!(
                 "[warn] RTK extension ownership state at {} could not be read; treating ownership as unknown: {}",
                 state_path.display(),
                 error
@@ -3741,10 +3885,15 @@ fn read_managed_agents(path: &Path) -> Result<ManagedAgentState> {
         }
     };
     let mut agents = Vec::new();
-    let mut has_invalid_entry = false;
+    let mut prior_unknown = false;
+    let mut unparsed = Vec::new();
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() {
+            continue;
+        }
+        if line == PI_AGENT_STATE_UNKNOWN_PRIOR {
+            prior_unknown = true;
             continue;
         }
         match PiCompatibleAgent::from_state_name(line) {
@@ -3753,27 +3902,47 @@ fn read_managed_agents(path: &Path) -> Result<ManagedAgentState> {
                     agents.push(agent);
                 }
             }
-            None => has_invalid_entry = true,
+            None => unparsed.push(line.to_owned()),
         }
     }
 
-    if has_invalid_entry {
-        eprintln!(
-            "[warn] RTK extension ownership state at {} contains unknown entries; treating ownership as unknown",
-            state_path.display()
-        );
-        return Ok(ManagedAgentState::Unknown);
+    if !unparsed.is_empty() {
+        // An entry RTK cannot parse says nothing about the ones it can. Keep the
+        // recognised owners so they still protect the file, and mark the record
+        // partial so a missing agent is not read as proof of sole ownership.
+        prior_unknown = true;
     }
 
     if agents.is_empty() {
-        eprintln!(
-            "[warn] RTK extension ownership state at {} is empty; treating ownership as unknown",
+        // A record carrying only the marker, or only entries written by a newer
+        // RTK, still states a usable fact — ownership is partial — and must stay
+        // writable, or the next install can never repair it.
+        if prior_unknown || !unparsed.is_empty() {
+            return Ok(ManagedAgentState::Known {
+                agents,
+                prior_unknown,
+                unparsed,
+            });
+        }
+        report!(
+            "[warn] RTK extension ownership state at {} records no agent; treating ownership as unknown",
             state_path.display()
         );
         return Ok(ManagedAgentState::Unknown);
     }
 
-    Ok(ManagedAgentState::Known(agents))
+    if !unparsed.is_empty() {
+        report!(
+            "[warn] RTK extension ownership state at {} contains unrecognised entries; treating the recorded agents as a partial record",
+            state_path.display()
+        );
+    }
+
+    Ok(ManagedAgentState::Known {
+        agents,
+        prior_unknown,
+        unparsed,
+    })
 }
 
 fn record_managed_agent(
@@ -3788,49 +3957,102 @@ fn record_managed_agent(
     }
 
     let state_path = shared_agent_state_path(path);
-    let mut agents = if !extension_was_present {
-        // If the extension was absent before this install, any remaining
-        // sidecar describes a file that no longer exists and must not be
-        // carried into the new installation.
-        Vec::new()
-    } else {
-        match read_managed_agents(path)? {
-            ManagedAgentState::Absent => {
-                eprintln!(
-                    "[warn] RTK extension ownership state at {} could not be established because this pre-existing extension has no ownership record; preserving the absent state and proceeding without recording {}",
-                    state_path.display(),
-                    agent.state_name()
-                );
-                return Ok(());
-            }
-            ManagedAgentState::Known(agents) => agents,
-            ManagedAgentState::Unknown => {
-                // Do not turn unknown ownership into a current-agent-only
-                // record. The extension was installed successfully, but the
-                // existing state must remain intact for the fallback path.
-                eprintln!(
-                    "[warn] RTK extension ownership state at {} could not be updated because ownership is unknown; preserving it and proceeding without recording {}",
-                    state_path.display(),
-                    agent.state_name()
-                );
-                return Ok(());
-            }
+    // Re-read rather than merging into the caller's snapshot: an `Ask` prompt
+    // sits between that read and this write, so another process may have
+    // recorded itself in the meantime and must not be dropped. Quietly, since
+    // the caller's read already reported anything wrong with the file.
+    let state = &read_managed_agents_reporting(path, false)?;
+    // Recorded agents are those known to use this path. Deleting the extension
+    // does not unconfigure an agent that points here, so an existing record is
+    // always merged into rather than replaced.
+    let (mut agents, mut prior_unknown, unparsed) = match state {
+        // No record yet. If the extension already existed, somebody installed
+        // it and RTK cannot know who, so the new record is explicitly partial.
+        ManagedAgentState::Absent => (Vec::new(), extension_was_present, Vec::new()),
+        ManagedAgentState::Known {
+            agents,
+            prior_unknown,
+            unparsed,
+        } => (agents.clone(), *prior_unknown, unparsed.clone()),
+        ManagedAgentState::Unknown => {
+            // Do not overwrite state RTK failed to parse: that would turn an
+            // unreadable record into a confident one.
+            eprintln!(
+                "[warn] RTK extension ownership state at {} could not be updated because ownership is unknown; preserving it and proceeding without recording {}",
+                state_path.display(),
+                agent.state_name()
+            );
+            return Ok(());
         }
     };
     if !agents.contains(&agent) {
         agents.push(agent);
     }
     agents.sort_by_key(|agent| agent.state_name());
-    let content = format!(
-        "{}\n",
-        agents
-            .iter()
-            .map(|agent| agent.state_name())
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
+    // A record listing both agents is exhaustive on its own, unless it also
+    // carries entries this version cannot account for.
+    if agents.len() == 2 && unparsed.is_empty() {
+        prior_unknown = false;
+    }
+    let content = serialize_managed_agents(&agents, prior_unknown, &unparsed);
     write_if_changed_allow_read_error(&state_path, &content, "RTK extension ownership state", ctx)?;
     Ok(())
+}
+
+/// Give up this agent's claim after an uninstall. When only a symlink to the
+/// extension was removed the file itself survives and the other agent still
+/// owns it, so the record is pruned rather than deleted — deleting it would
+/// silently drop the surviving owner's shared-file protection.
+fn release_managed_agent(
+    state_path: &Path,
+    canonical_extension: &Path,
+    agent: PiCompatibleAgent,
+    extension_survives_removal: bool,
+    ctx: InitContext,
+) -> Result<()> {
+    if !state_path.exists() {
+        return Ok(());
+    }
+
+    // Decided from what the removal will do, not from what is on disk right
+    // now: under `--dry-run` nothing has been removed yet, so probing the file
+    // would preview the pruning branch and then really take the deleting one.
+    if !extension_survives_removal {
+        return remove_managed_agent_state(state_path, ctx);
+    }
+
+    let ManagedAgentState::Known {
+        mut agents,
+        prior_unknown,
+        unparsed,
+    } = read_managed_agents_reporting(canonical_extension, false)?
+    else {
+        return Ok(());
+    };
+
+    agents.retain(|recorded| *recorded != agent);
+    if agents.is_empty() && !prior_unknown && unparsed.is_empty() {
+        return remove_managed_agent_state(state_path, ctx);
+    }
+
+    let content = serialize_managed_agents(&agents, prior_unknown, &unparsed);
+    write_if_changed_allow_read_error(state_path, &content, "RTK extension ownership state", ctx)?;
+    Ok(())
+}
+
+fn serialize_managed_agents(
+    agents: &[PiCompatibleAgent],
+    prior_unknown: bool,
+    unparsed: &[String],
+) -> String {
+    let mut entries: Vec<&str> = agents.iter().map(|agent| agent.state_name()).collect();
+    // Entries written by a version that knows more agents than this one are
+    // carried through untouched rather than dropped.
+    entries.extend(unparsed.iter().map(String::as_str));
+    if prior_unknown {
+        entries.push(PI_AGENT_STATE_UNKNOWN_PRIOR);
+    }
+    format!("{}\n", entries.join("\n"))
 }
 
 fn remove_managed_agent_state(state_path: &Path, ctx: InitContext) -> Result<()> {
@@ -3861,24 +4083,39 @@ fn remove_managed_agent_state(state_path: &Path, ctx: InitContext) -> Result<()>
 /// The ownership sidecar records which agents RTK installed for a relocated
 /// shared path. A missing sidecar is treated as uncertain because the
 /// extension may predate RTK's ownership tracking.
+/// Takes the ownership state rather than reading it, so one command reads the
+/// sidecar once: reading it twice also warns twice about the same bad file.
 fn extension_share_status(
     global: bool,
     path: &Path,
     agent: PiCompatibleAgent,
+    state: &ManagedAgentState,
 ) -> Result<ExtensionShareStatus> {
     if !extension_paths_alias(global, path, agent)? {
         return Ok(ExtensionShareStatus::NotShared);
     }
 
     let other_agent = agent.other();
-    match read_managed_agents(path)? {
-        ManagedAgentState::Known(agents) => {
+    match state {
+        ManagedAgentState::Known {
+            agents,
+            prior_unknown,
+            ..
+        } => {
             if agents.contains(&other_agent) {
                 Ok(ExtensionShareStatus::Shared)
+            } else if *prior_unknown {
+                // The record was started over an extension RTK did not
+                // install, so the absence of the other agent proves nothing.
+                Ok(ExtensionShareStatus::Unknown)
             } else {
                 Ok(ExtensionShareStatus::NotShared)
             }
         }
+        // No probe of `~/.pi`/`~/.omp` here: the alias arises when
+        // `PI_CODING_AGENT_DIR` relocates both agents away from those defaults,
+        // so their absence is not evidence the other agent is uninstalled, and
+        // treating it as such would claim sole ownership over a shared file.
         ManagedAgentState::Absent | ManagedAgentState::Unknown => Ok(ExtensionShareStatus::Unknown),
     }
 }
@@ -3895,9 +4132,11 @@ fn warn_if_extension_shared_on_install(
     global: bool,
     path: &Path,
     agent: PiCompatibleAgent,
+    extension_was_present: bool,
+    state: &ManagedAgentState,
 ) -> Result<()> {
     let scope = extension_scope_name(global);
-    match extension_share_status(global, path, agent)? {
+    match extension_share_status(global, path, agent, state)? {
         ExtensionShareStatus::NotShared => {}
         ExtensionShareStatus::Shared => eprintln!(
             "[warn] Pi and OMP share the {} extension path at {}; installing {} here enables the shared integration for both agents.",
@@ -3905,6 +4144,9 @@ fn warn_if_extension_shared_on_install(
             path.display(),
             agent.name()
         ),
+        // Nothing was there to have an owner, and this install records one, so
+        // an uncertainty warning would only be noise on a first-ever install.
+        ExtensionShareStatus::Unknown if !extension_was_present => {}
         ExtensionShareStatus::Unknown => eprintln!(
             "[warn] Pi and OMP resolve to the same {} extension path at {}, but RTK could not confirm both agents' ownership; installing {} without a definitive ownership record.",
             scope,
@@ -3924,7 +4166,8 @@ fn confirm_shared_extension_uninstall(
     ctx: InitContext,
 ) -> Result<bool> {
     let scope = extension_scope_name(global);
-    match extension_share_status(global, path, agent)? {
+    let state = read_ownership_if_aliased(global, path, agent)?;
+    match extension_share_status(global, path, agent, &state)? {
         ExtensionShareStatus::NotShared => return Ok(true),
         ExtensionShareStatus::Unknown => {
             eprintln!(
@@ -3964,12 +4207,121 @@ fn confirm_shared_extension_uninstall(
             }
 
             let prompt = format!("Remove the shared Pi/OMP extension at {}?", path.display());
-            if prompt_user_confirmation(&prompt)? {
-                Ok(true)
-            } else {
-                println!("Skipped removal of shared Pi/OMP extension.");
-                Ok(false)
+            // The caller reports the declined removal on stderr and exits
+            // non-zero; announcing it here too would state the outcome twice,
+            // once on a stream that reads as success.
+            prompt_user_confirmation(&prompt)
+        }
+    }
+}
+
+/// Copy a non-stock extension aside before it is replaced or removed, never
+/// overwriting an earlier backup. Stock content is reproducible from the
+/// embedded copy, but a user's edits are not.
+/// Where a backup of `path` would go: `None` when identical content is already
+/// preserved. Shared with the prompt and the dry-run preview so they cannot
+/// name a destination the copy will not use.
+fn plan_backup(path: &Path, name: &str) -> Result<Option<PathBuf>> {
+    // A file RTK cannot read cannot be copied either. Blocking here would make
+    // an unreadable extension unrecoverable, which is the situation
+    // `--auto-patch` is documented to resolve, so report and carry on.
+    let Ok(content) = fs::read(path) else {
+        eprintln!(
+            "[warn] {} at {} could not be read; proceeding without a backup",
+            name,
+            path.display()
+        );
+        return Ok(None);
+    };
+
+    // Candidate 0 is `rtk.ts.bak`; the rest are `rtk.ts.bak.N`. Each candidate
+    // is probed in the iteration that names it, so the final slot is reachable.
+    for attempt in 0..=MAX_BACKUP_ATTEMPTS {
+        let backup_path = match attempt {
+            0 => path.with_extension("ts.bak"),
+            n => path.with_extension(format!("ts.bak.{n}")),
+        };
+        match fs::read(&backup_path) {
+            // Already preserved. A provisioning loop that reapplies the same
+            // local patch would otherwise consume a slot on every run.
+            Ok(existing) if existing == content => return Ok(None),
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Some(backup_path))
             }
+            // Occupied by something unreadable — a directory, or a file this
+            // user cannot read. Its content cannot be compared, so treat the
+            // slot as taken rather than overwriting it.
+            Err(_) => continue,
+        }
+    }
+
+    anyhow::bail!(
+        "Cannot back up {} at {}: {} existing backups are already present. Remove or archive them first.",
+        name,
+        path.display(),
+        MAX_BACKUP_ATTEMPTS + 1
+    )
+}
+
+fn back_up_modified_extension(path: &Path, name: &str) -> Result<()> {
+    let Some(backup_path) = plan_backup(path, name)? else {
+        return Ok(());
+    };
+
+    fs::copy(path, &backup_path)
+        .with_context(|| format!("Failed to back up {} to {}", name, backup_path.display()))?;
+    println!("Backed up {} to {}", name, backup_path.display());
+    Ok(())
+}
+
+/// Decide whether RTK content that no longer matches a known stock revision may
+/// be removed. Mirrors the install side's Ask/Auto/Skip policy so `--auto-patch`
+/// approves a removal the same way it approves an overwrite, instead of leaving
+/// a hand-edited or fork-built extension permanently un-uninstallable.
+fn confirm_modified_extension_removal(
+    path: &Path,
+    name: &str,
+    patch_mode: PatchMode,
+    ctx: InitContext,
+) -> Result<bool> {
+    if ctx.dry_run {
+        match patch_mode {
+            PatchMode::Ask => println!(
+                "[dry-run] would prompt before removing modified {}: {}",
+                name,
+                path.display()
+            ),
+            PatchMode::Auto => println!(
+                "[dry-run] would remove modified {}: {}",
+                name,
+                path.display()
+            ),
+            PatchMode::Skip => println!(
+                "[dry-run] would refuse to remove {}: {}",
+                name,
+                path.display()
+            ),
+        }
+        return Ok(matches!(patch_mode, PatchMode::Auto));
+    }
+
+    match patch_mode {
+        PatchMode::Auto => Ok(true),
+        PatchMode::Skip => Ok(false),
+        // Names the backup so this reads distinctly from the shared-path
+        // question that may follow it for the very same file.
+        PatchMode::Ask => {
+            let destination = match plan_backup(path, name)? {
+                Some(backup) => format!("back them up to {} and", backup.display()),
+                None => "they are already backed up;".to_owned(),
+            };
+            prompt_user_confirmation(&format!(
+                "{} at {} has local changes; {} remove it?",
+                name,
+                path.display(),
+                destination
+            ))
         }
     }
 }
@@ -4028,33 +4380,44 @@ fn uninstall_pi_with_patch_mode(
     }
 
     let ownership_state_path = shared_agent_state_path(&plugin_path);
+    let canonical_extension = canonicalize_path_for_comparison(&plugin_path);
+    // Removing a symlink leaves its target — and the target's other owner —
+    // in place; removing the file itself does not.
+    let extension_survives_removal =
+        fs::symlink_metadata(&plugin_path).is_ok_and(|metadata| metadata.file_type().is_symlink());
     let Some(content) = read_extension_for_uninstall(&plugin_path, "Pi extension", ctx)? else {
         return Ok(());
     };
 
+    let mut removal_needs_backup = false;
     if !is_known_stock_pi_plugin(&content) {
-        if looks_like_rtk_pi_plugin(&content) {
+        if !looks_like_rtk_pi_plugin(&content) {
+            println!(
+                "Pi extension at {} is not RTK content; leaving it alone.",
+                plugin_path.display()
+            );
+            // The ownership record is deliberately left in place: "not RTK
+            // content" rests on a substring match, so a merely reformatted
+            // extension lands here, and discarding the record would silently
+            // remove the shared-file protection for both agents.
             if dry_run {
-                println!(
-                    "[dry-run] would refuse to remove Pi extension: {}",
-                    plugin_path.display()
-                );
+                print_dry_run_footer();
+            }
+            return Ok(());
+        }
+
+        if !confirm_modified_extension_removal(&plugin_path, "Pi extension", patch_mode, ctx)? {
+            if dry_run {
                 print_dry_run_footer();
                 return Ok(());
             }
             anyhow::bail!(
-                "Pi extension at {} contains RTK content that does not match the stock extension. Remove the file manually.",
+                "Pi extension at {} contains RTK content that does not match the stock extension. Remove the file manually, or rerun with --auto-patch to remove it.",
                 plugin_path.display()
             );
         }
-        println!(
-            "Pi extension at {} is not RTK content; leaving it alone.",
-            plugin_path.display()
-        );
-        if dry_run {
-            print_dry_run_footer();
-        }
-        return Ok(());
+
+        removal_needs_backup = true;
     }
 
     if !confirm_shared_extension_uninstall(
@@ -4075,17 +4438,40 @@ fn uninstall_pi_with_patch_mode(
     }
 
     if dry_run {
+        if removal_needs_backup {
+            if let Some(backup) = plan_backup(&plugin_path, "Pi extension")? {
+                println!(
+                    "[dry-run] would back up Pi extension to {}",
+                    backup.display()
+                );
+            }
+        }
         println!(
             "[dry-run] would remove Pi extension: {}",
             plugin_path.display()
         );
-        remove_managed_agent_state(&ownership_state_path, ctx)?;
+        release_managed_agent(
+            &ownership_state_path,
+            &canonical_extension,
+            PiCompatibleAgent::Pi,
+            extension_survives_removal,
+            ctx,
+        )?;
         print_dry_run_footer();
     } else {
+        if removal_needs_backup {
+            back_up_modified_extension(&plugin_path, "Pi extension")?;
+        }
         // nosemgrep: filesystem-deletion -- Pi uninstall removes only a known RTK stock extension.
         fs::remove_file(&plugin_path)
             .with_context(|| format!("Failed to remove Pi extension: {}", plugin_path.display()))?;
-        remove_managed_agent_state(&ownership_state_path, ctx)?;
+        release_managed_agent(
+            &ownership_state_path,
+            &canonical_extension,
+            PiCompatibleAgent::Pi,
+            extension_survives_removal,
+            ctx,
+        )?;
         if verbose > 0 {
             eprintln!("Removed Pi extension: {}", plugin_path.display());
         }
@@ -4116,7 +4502,7 @@ pub fn run_pi_mode_with_patch_mode(
     let plugin_path = pi_plugin_path_for_scope(global)?;
     let extension_was_present = plugin_path.exists();
 
-    warn_if_extension_shared_on_install(global, &plugin_path, PiCompatibleAgent::Pi)?;
+    let ownership_state = read_ownership_if_aliased(global, &plugin_path, PiCompatibleAgent::Pi)?;
 
     if !validate_stock_pi_plugin_path(&plugin_path, "Pi extension", patch_mode, ctx)? {
         if dry_run {
@@ -4129,7 +4515,21 @@ pub fn run_pi_mode_with_patch_mode(
         );
     }
 
-    if let Some(parent) = plugin_path.parent() {
+    // Only once the write is going ahead: announcing a shared install before the
+    // overwrite is approved would assert something that may never happen.
+    warn_if_extension_shared_on_install(
+        global,
+        &plugin_path,
+        PiCompatibleAgent::Pi,
+        extension_was_present,
+        &ownership_state,
+    )?;
+
+    // Through a symlink alias the write lands in the link's target directory,
+    // not the link's own parent.
+    let pi_write_target =
+        resolve_symlink_target(&plugin_path).unwrap_or_else(|| plugin_path.clone());
+    if let Some(parent) = pi_write_target.parent() {
         ensure_pi_extensions_dir(
             parent,
             if global {
@@ -4233,7 +4633,8 @@ fn remove_opencode_plugin(ctx: InitContext) -> Result<Vec<PathBuf>> {
 // (`hooks/pi/rtk.ts`, embedded as `PI_PLUGIN`). Only the install paths
 // differ:
 //
-//   global=true  -> `$HOME/.omp/agent/extensions/rtk.ts`
+//   global=true  -> `$PI_CODING_AGENT_DIR/extensions/rtk.ts`, else
+//                   `$HOME/.omp/agent/extensions/rtk.ts`
 //   global=false -> `.omp/extensions/rtk.ts`
 
 /// Return the OMP extension install path for the given scope.
@@ -4264,7 +4665,8 @@ fn resolve_omp_dir() -> Result<PathBuf> {
 /// Install the shared Pi extension file for OMP (hook-only; no AGENTS.md
 /// injection). OMP loads the file through its `legacy-pi-compat` layer.
 ///
-/// global=true  -> `$HOME/.omp/agent/extensions/rtk.ts`
+/// global=true  -> `$PI_CODING_AGENT_DIR/extensions/rtk.ts`, else
+///                 `$HOME/.omp/agent/extensions/rtk.ts`
 /// global=false -> `.omp/extensions/rtk.ts`
 #[allow(dead_code)] // Kept as the default-policy API for in-crate callers and tests.
 pub fn run_omp_mode(global: bool, ctx: InitContext) -> Result<()> {
@@ -4282,7 +4684,7 @@ pub fn run_omp_mode_with_patch_mode(
     let path = omp_extension_path_for_scope(global)?;
     let extension_was_present = path.exists();
 
-    warn_if_extension_shared_on_install(global, &path, PiCompatibleAgent::Omp)?;
+    let ownership_state = read_ownership_if_aliased(global, &path, PiCompatibleAgent::Omp)?;
 
     if !validate_stock_pi_plugin_path(&path, "OMP extension", patch_mode, ctx)? {
         if dry_run {
@@ -4295,7 +4697,20 @@ pub fn run_omp_mode_with_patch_mode(
         );
     }
 
-    if let Some(parent) = path.parent() {
+    // Only once the write is going ahead: announcing a shared install before the
+    // overwrite is approved would assert something that may never happen.
+    warn_if_extension_shared_on_install(
+        global,
+        &path,
+        PiCompatibleAgent::Omp,
+        extension_was_present,
+        &ownership_state,
+    )?;
+
+    // Through a symlink alias the write lands in the link's target directory,
+    // not the link's own parent.
+    let omp_write_target = resolve_symlink_target(&path).unwrap_or_else(|| path.clone());
+    if let Some(parent) = omp_write_target.parent() {
         ensure_pi_extensions_dir(
             parent,
             if global {
@@ -4344,7 +4759,9 @@ fn print_omp_result(extension_path: &Path, installed: bool) {
 /// historical stock content is removed; RTK content that no longer matches a
 /// known stock revision is left in place with a manual-removal notice.
 /// Unrelated content is never touched.
-#[allow(dead_code)] // Kept as the default-policy API for in-crate callers and tests.
+// The CLI always passes an explicit policy; this default-policy wrapper exists
+// for in-crate callers and is exercised by the tests below.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn uninstall_omp(global: bool, ctx: InitContext) -> Result<()> {
     uninstall_omp_with_patch_mode(global, PatchMode::Ask, ctx)
 }
@@ -4369,65 +4786,96 @@ pub fn uninstall_omp_with_patch_mode(
     }
 
     let ownership_state_path = shared_agent_state_path(&path);
+    let canonical_extension = canonicalize_path_for_comparison(&path);
+    // Removing a symlink leaves its target — and the target's other owner —
+    // in place; removing the file itself does not.
+    let extension_survives_removal =
+        fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink());
     let Some(content) = read_extension_for_uninstall(&path, "OMP extension", ctx)? else {
         return Ok(());
     };
 
-    if is_known_stock_pi_plugin(&content) {
-        if !confirm_shared_extension_uninstall(
-            global,
-            &path,
-            PiCompatibleAgent::Omp,
-            patch_mode,
-            ctx,
-        )? {
+    let mut removal_needs_backup = false;
+    if !is_known_stock_pi_plugin(&content) {
+        if !looks_like_rtk_pi_plugin(&content) {
+            println!(
+                "OMP extension at {} is not RTK content; leaving it alone.",
+                path.display()
+            );
+            // The ownership record is deliberately left in place: "not RTK
+            // content" rests on a substring match, so a merely reformatted
+            // extension lands here, and discarding the record would silently
+            // remove the shared-file protection for both agents.
+            if dry_run {
+                print_dry_run_footer();
+            }
+            return Ok(());
+        }
+
+        if !confirm_modified_extension_removal(&path, "OMP extension", patch_mode, ctx)? {
             if dry_run {
                 print_dry_run_footer();
                 return Ok(());
             }
             anyhow::bail!(
-                "Shared Pi/OMP extension at {} was not removed; rerun with --auto-patch to approve the removal.",
+                "OMP extension at {} contains RTK content that does not match the stock extension. Remove the file manually, or rerun with --auto-patch to remove it.",
                 path.display()
             );
         }
 
+        removal_needs_backup = true;
+    }
+
+    if !confirm_shared_extension_uninstall(global, &path, PiCompatibleAgent::Omp, patch_mode, ctx)?
+    {
         if dry_run {
-            println!("[dry-run] would remove OMP extension: {}", path.display());
-            remove_managed_agent_state(&ownership_state_path, ctx)?;
-            print_dry_run_footer();
-        } else {
-            // nosemgrep: filesystem-deletion -- OMP uninstall removes only the RTK-managed extension file.
-            fs::remove_file(&path)
-                .with_context(|| format!("Failed to remove OMP extension: {}", path.display()))?;
-            remove_managed_agent_state(&ownership_state_path, ctx)?;
-            if verbose > 0 {
-                eprintln!("Removed OMP extension: {}", path.display());
-            }
-            println!("RTK uninstalled (OMP):");
-            println!("  - Extension: {}", path.display());
-            println!("\nRestart OMP to apply changes.");
-        }
-    } else if looks_like_rtk_pi_plugin(&content) {
-        if dry_run {
-            println!(
-                "[dry-run] would refuse to remove OMP extension: {}",
-                path.display()
-            );
             print_dry_run_footer();
             return Ok(());
         }
         anyhow::bail!(
-            "OMP extension at {} contains RTK content that does not match the stock extension. Remove the file manually.",
+            "Shared Pi/OMP extension at {} was not removed; rerun with --auto-patch to approve the removal.",
             path.display()
         );
-    } else {
-        println!(
-            "OMP extension at {} is not RTK content; leaving it alone.",
-            path.display()
-        );
-        if dry_run {
-            print_dry_run_footer();
+    }
+
+    if dry_run {
+        if removal_needs_backup {
+            if let Some(backup) = plan_backup(&path, "OMP extension")? {
+                println!(
+                    "[dry-run] would back up OMP extension to {}",
+                    backup.display()
+                );
+            }
         }
+        println!("[dry-run] would remove OMP extension: {}", path.display());
+        release_managed_agent(
+            &ownership_state_path,
+            &canonical_extension,
+            PiCompatibleAgent::Omp,
+            extension_survives_removal,
+            ctx,
+        )?;
+        print_dry_run_footer();
+    } else {
+        if removal_needs_backup {
+            back_up_modified_extension(&path, "OMP extension")?;
+        }
+        // nosemgrep: filesystem-deletion -- OMP uninstall removes only the RTK-managed extension file.
+        fs::remove_file(&path)
+            .with_context(|| format!("Failed to remove OMP extension: {}", path.display()))?;
+        release_managed_agent(
+            &ownership_state_path,
+            &canonical_extension,
+            PiCompatibleAgent::Omp,
+            extension_survives_removal,
+            ctx,
+        )?;
+        if verbose > 0 {
+            eprintln!("Removed OMP extension: {}", path.display());
+        }
+        println!("RTK uninstalled (OMP):");
+        println!("  - Extension: {}", path.display());
+        println!("\nRestart OMP to apply changes.");
     }
 
     Ok(())
@@ -4749,9 +5197,9 @@ fn remove_cursor_hook_from_json(root: &mut serde_json::Value) -> bool {
 }
 
 /// Show current rtk configuration
-pub fn show_config(codex: bool, omp: bool) -> Result<()> {
-    if omp {
-        return show_omp_config();
+pub fn show_config(codex: bool, pi_compatible: Option<PiCompatibleAgent>) -> Result<()> {
+    if let Some(agent) = pi_compatible {
+        return show_pi_compatible_config(agent);
     }
     if codex {
         return show_codex_config();
@@ -4760,23 +5208,39 @@ pub fn show_config(codex: bool, omp: bool) -> Result<()> {
     show_claude_config()
 }
 
-/// Show OMP configuration status.
-fn show_omp_config() -> Result<()> {
-    let global_extension = omp_extension_path_for_scope(true)?;
-    let project_extension = omp_extension_path_for_scope(false)?;
+/// Show the extension status for a Pi-compatible agent. Pi and OMP install the
+/// same file, so they share every state the report distinguishes.
+fn show_pi_compatible_config(agent: PiCompatibleAgent) -> Result<()> {
+    let (global_extension, project_extension, flag, title) = match agent {
+        PiCompatibleAgent::Pi => (
+            pi_plugin_path_for_scope(true)?,
+            pi_plugin_path_for_scope(false)?,
+            "pi",
+            "Pi",
+        ),
+        PiCompatibleAgent::Omp => (
+            omp_extension_path_for_scope(true)?,
+            omp_extension_path_for_scope(false)?,
+            "omp",
+            "Oh My Pi",
+        ),
+    };
 
-    println!("rtk Configuration (Oh My Pi):\n");
+    println!("rtk Configuration ({title}):\n");
     print_omp_extension_status("Global extension", &global_extension)?;
     print_omp_extension_status("Project extension", &project_extension)?;
 
     println!("\nUsage:");
-    println!("  rtk init --agent omp                 # Configure ./.omp/extensions/rtk.ts");
     println!(
-        "  rtk init -g --agent omp              # Configure {}",
+        "  rtk init --agent {flag}                 # Configure {}",
+        project_extension.display()
+    );
+    println!(
+        "  rtk init -g --agent {flag}              # Configure {}",
         global_extension.display()
     );
-    println!("  rtk init --agent omp --uninstall     # Remove project OMP RTK extension");
-    println!("  rtk init -g --agent omp --uninstall  # Remove global OMP RTK extension");
+    println!("  rtk init --agent {flag} --uninstall     # Remove project {title} RTK extension");
+    println!("  rtk init -g --agent {flag} --uninstall  # Remove global {title} RTK extension");
 
     Ok(())
 }
@@ -4790,7 +5254,10 @@ fn print_omp_extension_status(label: &str, path: &Path) -> Result<()> {
                 return Ok(());
             }
         };
-        if is_current_pi_plugin(&content) {
+        // "Up to date" has to mean the next install writes nothing, so it takes
+        // the byte comparison `write_if_changed` uses. A file that only matches
+        // after CRLF normalisation is still stock, but it will be rewritten.
+        if content == PI_PLUGIN {
             println!("  {}: {} (up to date)", label, path.display());
         } else if is_known_stock_pi_plugin(&content) {
             println!(
@@ -8145,47 +8612,114 @@ mod tests {
     /// Serialises all tests that mutate the process-wide working directory.
     static CWD_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Enters a directory for the duration of a test and restores the previous
+    /// one on drop, so a failing assertion cannot leave the process inside a
+    /// `TempDir` that is about to be deleted — which would make every later
+    /// test resolving a relative path fail instead of the one that broke.
+    struct CwdGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        original: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn enter(dir: &Path) -> Self {
+            let _lock = CWD_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            let original = std::env::current_dir().expect("read the current directory");
+            std::env::set_current_dir(dir).expect("enter the test directory");
+            Self { _lock, original }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
+    /// Overrides an environment variable for the duration of a test, restoring
+    /// the previous value on drop. Same reasoning as [`CwdGuard`]: the variable
+    /// is process-wide, so a panicking test would otherwise leave later tests
+    /// pointed at a deleted `TempDir`.
+    struct EnvVarGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(lock: &'static Mutex<()>, key: &'static str, value: &Path) -> Self {
+            let _lock = lock.lock().unwrap_or_else(|error| error.into_inner());
+            let original = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self {
+                _lock,
+                key,
+                original,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.original.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn test_env_var_guard_restores_after_a_panic() {
+        let tmp = TempDir::new().unwrap();
+        let key = "RTK_ENV_GUARD_PROBE";
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = EnvVarGuard::set(&PI_DIR_LOCK, key, tmp.path());
+            panic!("a failing assertion inside an env-mutating test");
+        }));
+
+        assert!(panicked.is_err());
+        assert!(
+            std::env::var_os(key).is_none(),
+            "the override must not outlive the test that set it"
+        );
+    }
+
+    #[test]
+    fn test_cwd_guard_restores_after_a_panic() {
+        let tmp = TempDir::new().unwrap();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = CwdGuard::enter(tmp.path());
+            panic!("a failing assertion inside a cwd-mutating test");
+        }));
+
+        assert!(panicked.is_err());
+        let after = std::env::current_dir().expect("read the current directory");
+        assert!(
+            !after.starts_with(tmp.path()),
+            "the working directory must not be left inside a deleted TempDir"
+        );
+    }
+
     fn with_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
-        let _guard = CLAUDE_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let claude_dir = tmp.path().join(CLAUDE_DIR);
         fs::create_dir_all(&claude_dir).unwrap();
-
-        let orig = std::env::var_os("CLAUDE_CONFIG_DIR");
-        std::env::set_var("CLAUDE_CONFIG_DIR", &claude_dir);
+        let _guard = EnvVarGuard::set(&CLAUDE_DIR_LOCK, "CLAUDE_CONFIG_DIR", &claude_dir);
         f(&claude_dir);
-        match orig {
-            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
-            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
-        }
     }
 
     fn with_pi_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
-        let _guard = PI_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let pi_dir = tmp.path().join("pi_agent");
         fs::create_dir_all(&pi_dir).unwrap();
-
-        let orig = std::env::var_os(PI_CODING_AGENT_DIR_ENV);
-        std::env::set_var(PI_CODING_AGENT_DIR_ENV, &pi_dir);
+        let _guard = EnvVarGuard::set(&PI_DIR_LOCK, PI_CODING_AGENT_DIR_ENV, &pi_dir);
         f(&pi_dir);
-        match orig {
-            Some(v) => std::env::set_var(PI_CODING_AGENT_DIR_ENV, v),
-            None => std::env::remove_var(PI_CODING_AGENT_DIR_ENV),
-        }
     }
 
     fn with_omp_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
-        // OMP reuses PI_CODING_AGENT_DIR, so share the Pi environment lock.
-        let _guard = PI_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let omp_dir = tmp.path().join("omp_agent");
         fs::create_dir_all(&omp_dir).unwrap();
-
-        let orig = std::env::var_os(PI_CODING_AGENT_DIR_ENV);
-        std::env::set_var(PI_CODING_AGENT_DIR_ENV, &omp_dir);
+        // OMP reuses PI_CODING_AGENT_DIR, so share the Pi environment lock.
+        let _guard = EnvVarGuard::set(&PI_DIR_LOCK, PI_CODING_AGENT_DIR_ENV, &omp_dir);
         f(&omp_dir);
-        match orig {
-            Some(v) => std::env::set_var(PI_CODING_AGENT_DIR_ENV, v),
-            None => std::env::remove_var(PI_CODING_AGENT_DIR_ENV),
-        }
     }
 
     #[test]
@@ -8388,12 +8922,9 @@ mod tests {
     #[test]
     fn test_local_init_no_hook() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         let result = run_default_mode(false, PatchMode::Auto, false, InitContext::default());
-        std::env::set_current_dir(&cwd).unwrap();
 
         result.unwrap();
         assert!(
@@ -8636,12 +9167,9 @@ mod tests {
     #[test]
     fn test_run_pi_mode_local_installs_plugin() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         let result = run_pi_mode(false, InitContext::default());
-        std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
         let plugin = tmp
@@ -8655,9 +9183,7 @@ mod tests {
     #[test]
     fn test_pi_install_refuses_modified_extension() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         let dir = tmp.path().join(PI_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -8666,7 +9192,6 @@ mod tests {
         fs::write(&path, modified).unwrap();
 
         let result = run_pi_mode_with_patch_mode(false, PatchMode::Skip, InitContext::default());
-        std::env::set_current_dir(&cwd).unwrap();
 
         let err = result.unwrap_err();
         assert!(
@@ -8680,9 +9205,7 @@ mod tests {
     #[test]
     fn test_pi_install_dry_run_reports_refusal_without_error() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         let dir = tmp.path().join(PI_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -8697,7 +9220,6 @@ mod tests {
                 ..InitContext::default()
             },
         );
-        std::env::set_current_dir(&cwd).unwrap();
 
         result.unwrap();
         assert_eq!(fs::read_to_string(path).unwrap(), modified);
@@ -8769,9 +9291,7 @@ mod tests {
     #[test]
     fn test_pi_local_uninstall_removes_plugin() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         run_pi_mode(false, InitContext::default()).unwrap();
         let result = uninstall(
@@ -8783,7 +9303,6 @@ mod tests {
             false,
             InitContext::default(),
         );
-        std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
         let plugin = tmp
@@ -8844,9 +9363,7 @@ mod tests {
     #[test]
     fn test_run_pi_mode_local_dry_run_writes_nothing() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         let result = run_pi_mode(
             false,
@@ -8855,7 +9372,6 @@ mod tests {
                 dry_run: true,
             },
         );
-        std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
         assert!(
@@ -8899,9 +9415,7 @@ mod tests {
     #[test]
     fn test_pi_local_uninstall_dry_run_keeps_plugin() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         run_pi_mode(false, InitContext::default()).unwrap();
         let plugin = tmp
@@ -8926,7 +9440,6 @@ mod tests {
                 dry_run: true,
             },
         );
-        std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
         assert!(
@@ -8938,25 +9451,26 @@ mod tests {
     #[test]
     fn test_pi_uninstall_modified_extension_bails() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         let dir = tmp.path().join(PI_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join(PI_PLUGIN_FILE);
         fs::write(&path, format!("{}\n// user modification\n", PI_PLUGIN)).unwrap();
 
-        let result = uninstall(
+        // Pin the patch mode rather than relying on the `Ask` default: under
+        // `cargo test` stdin is the developer's terminal, so `Ask` would block
+        // on the confirmation prompt instead of taking the refusal path.
+        let result = uninstall_with_patch_mode(
             false,
             false,
             false,
             false,
             true,
             false,
+            PatchMode::Skip,
             InitContext::default(),
         );
-        std::env::set_current_dir(&cwd).unwrap();
 
         let err = result.unwrap_err();
         assert!(
@@ -8971,9 +9485,7 @@ mod tests {
     #[test]
     fn test_pi_uninstall_modified_extension_dry_run_is_preview() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         let dir = tmp.path().join(PI_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -8992,7 +9504,6 @@ mod tests {
                 ..InitContext::default()
             },
         );
-        std::env::set_current_dir(&cwd).unwrap();
 
         result.unwrap();
         assert!(path.exists(), "dry-run must preserve modified extension");
@@ -9001,9 +9512,7 @@ mod tests {
     #[test]
     fn test_pi_uninstall_unreadable_extension_is_left_alone() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         let dir = tmp.path().join(PI_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -9019,7 +9528,6 @@ mod tests {
             false,
             InitContext::default(),
         );
-        std::env::set_current_dir(&cwd).unwrap();
 
         let err = result.unwrap_err();
         assert!(
@@ -9033,9 +9541,7 @@ mod tests {
     #[test]
     fn test_pi_uninstall_unrelated_content_left_alone() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         let dir = tmp.path().join(PI_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -9056,7 +9562,6 @@ mod tests {
             InitContext::default(),
         )
         .unwrap();
-        std::env::set_current_dir(&cwd).unwrap();
 
         assert!(path.exists(), "non-RTK extension must be left in place");
     }
@@ -9082,6 +9587,7 @@ mod tests {
         );
         assert!(is_known_stock_pi_plugin(PI_PLUGIN));
 
+        // Normalise first: a CRLF checkout would otherwise yield \r\r\n.
         let crlf = PI_PLUGIN.replace("\r\n", "\n").replace('\n', "\r\n");
         assert!(is_current_pi_plugin(&crlf));
         assert!(is_known_stock_pi_plugin(&crlf));
@@ -9090,12 +9596,71 @@ mod tests {
         assert!(!is_known_stock_pi_plugin(&modified));
     }
 
+    /// CI runners set `CI=true`, while `CI=` and `CI=0` are the conventional
+    /// ways to force non-CI behaviour — so mere presence of the variable is not
+    /// enough to decide.
+    fn ci_value_is_truthy(value: Option<&str>) -> bool {
+        value.is_some_and(|value| {
+            let value = value.trim();
+            !value.is_empty()
+                && !value.eq_ignore_ascii_case("0")
+                && !value.eq_ignore_ascii_case("false")
+        })
+    }
+
+    fn running_in_ci() -> bool {
+        ci_value_is_truthy(std::env::var("CI").ok().as_deref())
+    }
+
+    #[test]
+    fn test_ci_value_is_truthy_reads_conventional_values() {
+        for value in ["true", "1", "yes"] {
+            assert!(ci_value_is_truthy(Some(value)), "CI={value:?}");
+        }
+        for value in ["", "  ", "0", "false", "FALSE"] {
+            assert!(!ci_value_is_truthy(Some(value)), "CI={value:?}");
+        }
+        assert!(!ci_value_is_truthy(None));
+    }
+
     #[test]
     fn test_all_git_pi_plugin_revisions_are_allowlisted() {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         if !manifest_dir.join(".git").exists() {
             // Source archives do not contain Git history. CI checks out the
             // repository with full history so this guard remains active there.
+            return;
+        }
+
+        // A shallow clone still has `.git`, but `rev-list` reaches only the tip
+        // and the guard would pass having verified nothing. Fatal in CI, which
+        // must never lose its full-history checkout silently; a skip elsewhere,
+        // so a `--depth 1` clone can still run the suite.
+        let in_ci = running_in_ci();
+        let Ok(shallow) = Command::new("git")
+            .current_dir(manifest_dir)
+            .args(["rev-parse", "--is-shallow-repository"])
+            .output()
+        else {
+            assert!(
+                !in_ci,
+                "git must be available to verify Pi extension history"
+            );
+            eprintln!("[skip] git is unavailable; Pi extension history is unverified");
+            return;
+        };
+        assert!(
+            shallow.status.success(),
+            "git rev-parse --is-shallow-repository failed: {}",
+            String::from_utf8_lossy(&shallow.stderr)
+        );
+        if String::from_utf8_lossy(&shallow.stdout).trim() != "false" {
+            assert!(
+                !in_ci,
+                "Pi extension history guard requires full history, but this clone \
+                 is shallow; ensure the checkout uses fetch-depth: 0"
+            );
+            eprintln!("[skip] shallow clone; Pi extension history is unverified");
             return;
         }
 
@@ -9225,9 +9790,7 @@ mod tests {
     #[test]
     fn test_global_uninstall_detects_shared_pi_omp_extension() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
         with_omp_dir_override(&tmp, |omp_dir| {
             let omp_path = omp_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
             let pi_path = pi_plugin_path_for_scope(true).unwrap();
@@ -9243,13 +9806,19 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                extension_share_status(true, &omp_path, PiCompatibleAgent::Omp).unwrap(),
+                extension_share_status(
+                    true,
+                    &omp_path,
+                    PiCompatibleAgent::Omp,
+                    &read_managed_agents(&omp_path).unwrap()
+                )
+                .unwrap(),
                 ExtensionShareStatus::Shared
             );
 
             fs::create_dir_all(OMP_LOCAL_DIR).unwrap();
             assert!(
-                extension_share_status(true, &pi_path, PiCompatibleAgent::Pi).unwrap()
+                extension_share_status(true, &pi_path, PiCompatibleAgent::Pi, &read_managed_agents(&pi_path).unwrap()).unwrap()
                     == ExtensionShareStatus::NotShared,
                 "a definitive Pi-only sidecar must override an unrelated project-local OMP directory"
             );
@@ -9263,22 +9832,24 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                extension_share_status(true, &pi_path, PiCompatibleAgent::Pi).unwrap(),
+                extension_share_status(
+                    true,
+                    &pi_path,
+                    PiCompatibleAgent::Pi,
+                    &read_managed_agents(&pi_path).unwrap()
+                )
+                .unwrap(),
                 ExtensionShareStatus::Shared
             );
         });
-        std::env::set_current_dir(&cwd).unwrap();
     }
 
     #[test]
     fn test_omp_local_install_writes_shared_pi_extension() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         run_omp_mode(false, InitContext::default()).unwrap();
-        std::env::set_current_dir(&cwd).unwrap();
 
         let path = tmp
             .path()
@@ -9290,11 +9861,26 @@ mod tests {
     }
 
     #[test]
+    fn test_omp_default_policy_uninstall_removes_stock_extension() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
+
+        run_omp_mode(false, InitContext::default()).unwrap();
+        let path = tmp
+            .path()
+            .join(OMP_LOCAL_DIR)
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE);
+        assert!(path.exists());
+
+        uninstall_omp(false, InitContext::default()).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn test_omp_install_refuses_modified_extension() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         let dir = tmp.path().join(OMP_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -9303,7 +9889,6 @@ mod tests {
         fs::write(&path, modified).unwrap();
 
         let result = run_omp_mode_with_patch_mode(false, PatchMode::Skip, InitContext::default());
-        std::env::set_current_dir(&cwd).unwrap();
 
         let err = result.unwrap_err();
         assert!(
@@ -9317,9 +9902,7 @@ mod tests {
     #[test]
     fn test_omp_install_dry_run_reports_refusal_without_error() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         let dir = tmp.path().join(OMP_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -9334,7 +9917,6 @@ mod tests {
                 ..InitContext::default()
             },
         );
-        std::env::set_current_dir(&cwd).unwrap();
 
         result.unwrap();
         assert_eq!(fs::read_to_string(path).unwrap(), modified);
@@ -9343,9 +9925,7 @@ mod tests {
     #[test]
     fn test_omp_local_install_dry_run_writes_nothing() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         run_omp_mode(
             false,
@@ -9355,7 +9935,6 @@ mod tests {
             },
         )
         .unwrap();
-        std::env::set_current_dir(&cwd).unwrap();
 
         let path = tmp
             .path()
@@ -9369,9 +9948,7 @@ mod tests {
     #[test]
     fn test_omp_local_uninstall_removes_plugin() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         run_omp_mode(false, InitContext::default()).unwrap();
         let result = uninstall(
@@ -9383,7 +9960,6 @@ mod tests {
             true,
             InitContext::default(),
         );
-        std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
         let path = tmp
@@ -9397,9 +9973,7 @@ mod tests {
     #[test]
     fn test_omp_local_uninstall_dry_run_keeps_plugin() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         run_omp_mode(false, InitContext::default()).unwrap();
         let plugin = tmp
@@ -9424,7 +9998,6 @@ mod tests {
                 dry_run: true,
             },
         );
-        std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
         assert!(
@@ -9436,9 +10009,7 @@ mod tests {
     #[test]
     fn test_omp_uninstall_modified_extension_bails() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         let dir = tmp.path().join(OMP_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -9449,16 +10020,19 @@ mod tests {
         )
         .unwrap();
 
-        let result = uninstall(
+        // Pin the patch mode rather than relying on the `Ask` default: under
+        // `cargo test` stdin is the developer's terminal, so `Ask` would block
+        // on the confirmation prompt instead of taking the refusal path.
+        let result = uninstall_with_patch_mode(
             false,
             false,
             false,
             false,
             false,
             true,
+            PatchMode::Skip,
             InitContext::default(),
         );
-        std::env::set_current_dir(&cwd).unwrap();
 
         let err = result.unwrap_err();
         assert!(
@@ -9473,9 +10047,7 @@ mod tests {
     #[test]
     fn test_omp_uninstall_modified_extension_dry_run_is_preview() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         let dir = tmp.path().join(OMP_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -9498,7 +10070,6 @@ mod tests {
                 ..InitContext::default()
             },
         );
-        std::env::set_current_dir(&cwd).unwrap();
 
         result.unwrap();
         assert!(path.exists(), "dry-run must preserve modified extension");
@@ -9507,9 +10078,7 @@ mod tests {
     #[test]
     fn test_omp_uninstall_unreadable_extension_is_left_alone() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         let dir = tmp.path().join(OMP_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -9525,7 +10094,6 @@ mod tests {
             true,
             InitContext::default(),
         );
-        std::env::set_current_dir(&cwd).unwrap();
 
         let err = result.unwrap_err();
         assert!(
@@ -9539,9 +10107,7 @@ mod tests {
     #[test]
     fn test_omp_uninstall_unrelated_content_dry_run_left_alone() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         let dir = tmp.path().join(OMP_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
@@ -9564,7 +10130,6 @@ mod tests {
                 ..InitContext::default()
             },
         );
-        std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
         assert!(path.exists(), "non-RTK extension must be left in place");
@@ -9573,9 +10138,7 @@ mod tests {
     #[test]
     fn test_omp_uninstall_missing_dry_run_is_noop() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         let result = uninstall(
             false,
@@ -9589,7 +10152,6 @@ mod tests {
                 ..InitContext::default()
             },
         );
-        std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
     }
 

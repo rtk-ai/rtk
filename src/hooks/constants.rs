@@ -38,6 +38,9 @@ pub const PI_EXTENSIONS_SUBDIR: &str = "extensions";
 pub const PI_PLUGIN_FILE: &str = "rtk.ts";
 /// Hidden ownership state stored beside the shared Pi/OMP extension.
 pub const PI_AGENT_STATE_FILE: &str = ".rtk-agents";
+/// Marker line recording that the extension existed before RTK began tracking
+/// ownership, so the agents listed alongside it are known but not exhaustive.
+pub const PI_AGENT_STATE_UNKNOWN_PRIOR: &str = "unknown-prior";
 pub const PI_CODING_AGENT_DIR_ENV: &str = "PI_CODING_AGENT_DIR";
 
 /// Oh My Pi (OMP) home subdirectory (`$HOME/.omp/agent`) and project

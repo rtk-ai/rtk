@@ -2208,7 +2208,14 @@ fn run_cli() -> Result<i32> {
                 hooks::init::PatchMode::Ask
             };
             if show {
-                hooks::init::show_config(codex, agent == Some(AgentTarget::Omp))?;
+                hooks::init::show_config(
+                    codex,
+                    match agent {
+                        Some(AgentTarget::Pi) => Some(hooks::init::PiCompatibleAgent::Pi),
+                        Some(AgentTarget::Omp) => Some(hooks::init::PiCompatibleAgent::Omp),
+                        _ => None,
+                    },
+                )?;
             } else if uninstall && copilot {
                 if global {
                     hooks::init::uninstall_copilot_global(ctx)?;

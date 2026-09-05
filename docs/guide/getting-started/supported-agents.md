@@ -123,7 +123,7 @@ rtk init --uninstall --agent pi
 rtk init --uninstall --agent pi --global
 ```
 
-Removes only the current or known historical stock Pi extension. If the file contains modified RTK content, a normal uninstall aborts without deleting it, while `--dry-run` previews that refusal; unreadable content is left in place and causes a normal uninstall to exit nonzero, while `--dry-run` reports it and succeeds. Unrelated content is left in place. LF and CRLF stock files are both recognized.
+Removes only the current or known historical stock Pi extension. If the file contains modified RTK content, uninstall asks before removing it; `--auto-patch` approves and copies the file to `rtk.ts.bak` first, `--no-patch` aborts with a manual-removal message, and `--dry-run` previews the prompt; unreadable content is left in place and causes a normal uninstall to exit nonzero, while `--dry-run` reports it and succeeds. Unrelated content is left in place. LF and CRLF stock files are both recognized.
 
 ### Oh My Pi (OMP)
 
@@ -148,7 +148,7 @@ rtk init --uninstall --agent omp
 rtk init --uninstall --agent omp --global
 ```
 
-Removes only the current or known historical stock OMP extension. If the file has been modified after install, a normal uninstall aborts with a message instead of removing it, while `--dry-run` previews that refusal; unreadable content is left in place and causes a normal uninstall to exit nonzero, while `--dry-run` reports it and succeeds. Unrelated content is left in place. When Pi and OMP paths in either scope resolve to the same file and a valid sidecar records both agents, uninstall asks before removing the shared file; use `--auto-patch` to approve or `--no-patch` to keep it. Missing or unreadable ownership state warns and proceeds without definitive shared-file protection. A declined definitive shared uninstall exits nonzero so scripts can detect that the file remains.
+Removes only the current or known historical stock OMP extension. If the file has been modified after install, uninstall asks before removing it; `--auto-patch` approves and copies the file to `rtk.ts.bak` first, `--no-patch` aborts with a message, and `--dry-run` previews the prompt; unreadable content is left in place and causes a normal uninstall to exit nonzero, while `--dry-run` reports it and succeeds. Unrelated content is left in place. When Pi and OMP paths in either scope resolve to the same file and a valid sidecar records both agents, uninstall asks before removing the shared file; use `--auto-patch` to approve or `--no-patch` to keep it. Missing or unreadable ownership state warns and proceeds without definitive shared-file protection. A declined definitive shared uninstall exits nonzero so scripts can detect that the file remains.
 
 ### OpenClaw
 
