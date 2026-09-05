@@ -5,6 +5,7 @@
 ## Specifics
 
 - **git.rs** uses `trailing_var_arg = true` + `allow_hyphen_values = true` so native git flags (`--oneline`, `--cached`, etc.) pass through correctly
+- `git remote -v` collapses the (fetch)/(push) pair into one line per remote (`name<TAB>url (fetch/push)`); a remote with a distinct push URL keeps both lines so no URL is dropped. Plain `git remote` lists names unchanged, mutating verbs (`add`, `set-url`, ...) summarize as "ok remotename"
 - Default `git status` uses `--porcelain -b` so the compact output never exceeds raw `git status` (an untracked directory collapses to a single line, matching git's default); branch/short-only flags reuse the compact path, other explicit args still pass through unchanged
 - Global git options (`-C`, `--git-dir`, `--work-tree`, `--no-pager`) are prepended before the subcommand
 - Exit code propagation is critical for CI/CD pipelines
