@@ -22,7 +22,7 @@ use cmds::php::{
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
-use cmds::scala::sbt_cmd;
+use cmds::scala::{bloop_cmd, sbt_cmd};
 use cmds::system::{
     ctest_cmd, deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
     read, search, summary, tree, wc_cmd,
@@ -848,6 +848,11 @@ enum Commands {
         #[command(subcommand)]
         command: SbtCommands,
     },
+    /// Bloop (Scala build server) commands with compact output
+    Bloop {
+        #[command(subcommand)]
+        command: BloopCommands,
+    },
 
     /// Graphite (gt) stacked PR commands with compact output
     Gt {
@@ -1340,6 +1345,31 @@ enum SbtCommands {
         args: Vec<String>,
     },
     /// Passthrough: runs any unsupported sbt subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Debug, Subcommand)]
+enum BloopCommands {
+    /// Run tests with compact output (per-suite tallies summarized, failures only)
+    Test {
+        /// Bloop project name plus any additional `bloop test` arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compile with compact output (errors only)
+    Compile {
+        /// Bloop project name plus any additional `bloop compile` arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Run application with noise-stripped output
+    Run {
+        /// Bloop project name plus any additional `bloop run` arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported bloop subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
 }
@@ -2637,6 +2667,12 @@ fn run_cli() -> Result<i32> {
             SbtCommands::Run { args } => sbt_cmd::run_run(&args, cli.verbose)?,
             SbtCommands::Other(args) => sbt_cmd::run_other(&args, cli.verbose)?,
         },
+        Commands::Bloop { command } => match command {
+            BloopCommands::Test { args } => bloop_cmd::run_test(&args, cli.verbose)?,
+            BloopCommands::Compile { args } => bloop_cmd::run_compile(&args, cli.verbose)?,
+            BloopCommands::Run { args } => bloop_cmd::run_run(&args, cli.verbose)?,
+            BloopCommands::Other(args) => bloop_cmd::run_other(&args, cli.verbose)?,
+        },
 
         Commands::Gt { command } => match command {
             GtCommands::Log { args } => gt_cmd::run_log(&args, cli.verbose)?,
@@ -3013,6 +3049,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Uv { .. }
             | Commands::Go { .. }
             | Commands::Sbt { .. }
+            | Commands::Bloop { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
             | Commands::Bun { .. }
@@ -3478,6 +3515,7 @@ mod tests {
             "mvn",
             "mvnd",
             "sbt",
+            "bloop",
             "php",
             "phpunit",
             "phpstan",

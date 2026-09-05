@@ -1,0 +1,25 @@
+Compiling root (1 Scala source)
+Compiled root (1448ms)
+Compiling root-test (1 Scala source)
+Compiled root-test (1057ms)
+CalculatorSuite:
+Calculator
+- should add returns the sum
+- should sub returns the difference *** FAILED ***
+  6 did not equal 7 (CalculatorSuite.scala:11)
+- should mul returns the product
+- should div returns the quotient *** FAILED ***
+  5 did not equal 4 (CalculatorSuite.scala:17)
+Execution took 20ms
+4 tests, 2 passed, 2 failed
+
+The test execution was successfully closed.
+===========================================================================================================================================================================
+Total duration: 20ms
+1 failed
+
+Failed:
+- example.CalculatorSuite:
+  * Calculator should sub returns the difference - 6 did not equal 7
+  * Calculator should div returns the quotient - 5 did not equal 4
+===========================================================================================================================================================================

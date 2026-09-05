@@ -1,0 +1,22 @@
+Compiling root (1 Scala source)
+Compiled root (1484ms)
+Compiling root-test (1 Scala source)
+Compiled root-test (684ms)
+Test run example.CalculatorSuite started
+==> X example.CalculatorSuite.div returns the quotient 0.003s java.lang.ArithmeticException: / by zero
+    at example.Calculator$.div(Calculator.scala:8)
+    at example.CalculatorSuite.$init$$$anonfun$4(CalculatorSuite.scala:18)
+example.CalculatorSuite: finished 0.041s
+Test run example.CalculatorSuite finished: 1 failed, 0 ignored, 4 total 0.056s
+Execution took 15ms
+4 tests, 3 passed, 1 failed
+
+The test execution was successfully closed.
+===========================================================================================================================================================================
+Total duration: 15ms
+1 failed
+
+Failed:
+- example.CalculatorSuite:
+  * example.CalculatorSuite.div returns the quotient - java.lang.ArithmeticException: / by zero
+===========================================================================================================================================================================
