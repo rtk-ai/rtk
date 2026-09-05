@@ -1032,6 +1032,59 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 65.0,
         ..RtkRule::DEFAULT
     },
+    // PowerShell cmdlet rules.
+    //
+    // `classify_command` resolves with `matches.last()`, so these run
+    // general-first: each more specific pattern must sit *after* the broader
+    // one it refines, or the broader rule wins and the specific one is dead.
+    RtkRule {
+        pattern: r"^(?:Get-ChildItem|gci)\b",
+        rtk_cmd: "rtk ls",
+        rewrite_prefixes: &["Get-ChildItem", "gci"],
+        category: "Files",
+        savings_pct: 75.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^(?:Get-ChildItem|gci)\s+(?:-Recurse|-r)\b",
+        rtk_cmd: "rtk tree",
+        rewrite_prefixes: &["Get-ChildItem", "gci"],
+        category: "Files",
+        savings_pct: 85.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^(?:Get-ChildItem|gci)\s+Env:",
+        rtk_cmd: "rtk env",
+        rewrite_prefixes: &["Get-ChildItem", "gci"],
+        category: "System",
+        savings_pct: 88.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^(?:Get-Content|gc)\s+\S+",
+        rtk_cmd: "rtk read",
+        rewrite_prefixes: &["Get-Content", "gc"],
+        category: "Files",
+        savings_pct: 50.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^(?:Get-Content|gc)\s+(?:-Head|-Tail|-TotalCount)\s+\d+\s+\S+",
+        rtk_cmd: "rtk read",
+        rewrite_prefixes: &["Get-Content", "gc"],
+        category: "Files",
+        savings_pct: 60.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^(?:Select-String|sls)\s+(?:-Pattern|-SimpleMatch)?\s+\S+",
+        rtk_cmd: "rtk grep",
+        rewrite_prefixes: &["Select-String", "sls"],
+        category: "Search",
+        savings_pct: 80.0,
+        ..RtkRule::DEFAULT
+    },
 ];
 
 pub const IGNORED_PREFIXES: &[&str] = &[
@@ -1072,6 +1125,9 @@ pub const IGNORED_PREFIXES: &[&str] = &[
     "pwd",
     "bash ",
     "sh ",
+    "powershell ",
+    "pwsh ",
+    "cmd ",
     "then\n",
     "then ",
     "else\n",
@@ -1085,5 +1141,17 @@ pub const IGNORED_PREFIXES: &[&str] = &[
 ];
 
 pub const IGNORED_EXACT: &[&str] = &[
-    "cd", "echo", "true", "false", "wait", "pwd", "bash", "sh", "fi", "done",
+    "cd",
+    "echo",
+    "true",
+    "false",
+    "wait",
+    "pwd",
+    "bash",
+    "sh",
+    "fi",
+    "done",
+    "powershell",
+    "pwsh",
+    "cmd",
 ];

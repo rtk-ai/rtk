@@ -2132,6 +2132,95 @@ mod tests {
         assert!(!search_uses_pattern_file("grep -F pattern"));
     }
 
+    // PowerShell cmdlet rules. `classify_command` resolves with
+    // `matches.last()`, so a specific pattern placed before the broader one it
+    // refines is dead code -- these pin the resolution, not just the patterns.
+    #[test]
+    fn test_classify_powershell_gci() {
+        assert_eq!(
+            classify_command("Get-ChildItem src"),
+            Classification::Supported {
+                rtk_equivalent: "rtk ls",
+                category: "Files",
+                estimated_savings_pct: 75.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_powershell_gci_recurse_beats_plain_gci() {
+        assert_eq!(
+            classify_command("Get-ChildItem -Recurse src"),
+            Classification::Supported {
+                rtk_equivalent: "rtk tree",
+                category: "Files",
+                estimated_savings_pct: 85.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_powershell_gci_env_beats_plain_gci() {
+        assert_eq!(
+            classify_command("Get-ChildItem Env:"),
+            Classification::Supported {
+                rtk_equivalent: "rtk env",
+                category: "System",
+                estimated_savings_pct: 88.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_powershell_alias_gci_matches_full_cmdlet() {
+        assert_eq!(
+            classify_command("gci src"),
+            classify_command("Get-ChildItem src")
+        );
+    }
+
+    #[test]
+    fn test_classify_powershell_get_content() {
+        assert_eq!(
+            classify_command("Get-Content notes.txt"),
+            Classification::Supported {
+                rtk_equivalent: "rtk read",
+                category: "Files",
+                estimated_savings_pct: 50.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_powershell_get_content_head_beats_plain() {
+        assert_eq!(
+            classify_command("Get-Content -Head 50 notes.txt"),
+            Classification::Supported {
+                rtk_equivalent: "rtk read",
+                category: "Files",
+                estimated_savings_pct: 60.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_powershell_select_string() {
+        assert_eq!(
+            classify_command("Select-String -Pattern foo src"),
+            Classification::Supported {
+                rtk_equivalent: "rtk grep",
+                category: "Search",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
     #[test]
     fn test_classify_git_status() {
         assert_eq!(
