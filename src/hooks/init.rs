@@ -5125,7 +5125,26 @@ exec rtk hook gemini
 "#;
 
 fn resolve_gemini_dir() -> Result<PathBuf> {
-    resolve_home_subdir(GEMINI_DIR)
+    resolve_gemini_dir_from(
+        std::env::var_os("GEMINI_CLI_HOME").map(PathBuf::from),
+        dirs::home_dir(),
+    )
+}
+
+fn resolve_gemini_dir_from(
+    gemini_home: Option<PathBuf>,
+    home_dir: Option<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(path) = gemini_home
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| path.join(GEMINI_DIR))
+    {
+        return Ok(path);
+    }
+
+    home_dir
+        .map(|home| home.join(GEMINI_DIR))
+        .context("Cannot determine Gemini config directory. Set $GEMINI_CLI_HOME or $HOME.")
 }
 
 /// Entry point for `rtk init --gemini`
@@ -7308,6 +7327,28 @@ mod tests {
             "stale settings.json entry must be removed"
         );
         assert_eq!(settings["model"], "custom", "user settings must survive");
+    }
+
+    #[test]
+    fn test_resolve_gemini_dir_from() {
+        let home = Some(PathBuf::from("/home/user"));
+        let gemini_dir = GEMINI_DIR;
+
+        // 1. Env set (non-empty) -> join
+        let res = resolve_gemini_dir_from(Some(PathBuf::from("/custom")), home.clone()).unwrap();
+        assert_eq!(res, PathBuf::from("/custom").join(gemini_dir));
+
+        // 2. Env set but not legal -> fallback to home
+        let res = resolve_gemini_dir_from(Some(PathBuf::from("")), home.clone()).unwrap();
+        assert_eq!(res, PathBuf::from("/home/user").join(gemini_dir));
+
+        // 3. Env unset -> fallback to home
+        let res = resolve_gemini_dir_from(None, home.clone()).unwrap();
+        assert_eq!(res, PathBuf::from("/home/user").join(gemini_dir));
+
+        // 4. Both unset -> error
+        let res = resolve_gemini_dir_from(None, None);
+        assert!(res.is_err());
     }
 
     #[test]
