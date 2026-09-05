@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+* **hooks:** leave `git` unrewritten inside Claude Code managed worktrees (`.claude/worktrees/<name>`), whose isolation guard refuses any `rtk git …` as unverifiable (#3864)
+
 ### Changed
 
 * **hooks:** add shared Oh My Pi support and protect Pi/OMP extensions from accidental overwrite or removal, including untouched historical stock revisions

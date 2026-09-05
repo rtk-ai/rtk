@@ -233,12 +233,33 @@ fn heal_legacy_hook_file(path: &std::path::Path) -> bool {
         .is_ok()
 }
 
-fn get_rewritten(cmd: &str) -> Option<String> {
+/// Claude Code's worktree-isolation guard only accepts git spelled plainly (or
+/// under the few launchers it models); a rewritten `rtk git …` is refused
+/// outright as "cannot be shown not to be git" (#3864). Its managed worktrees
+/// always live at `<repo>/.claude/worktrees/<name>`, so that path shape is the
+/// signal — the PreToolUse payload carries no isolation flag.
+fn in_claude_worktree(cwd: &str) -> bool {
+    let parts: Vec<&str> = std::path::Path::new(cwd)
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    parts
+        .windows(3)
+        .any(|w| w[0] == ".claude" && w[1] == "worktrees")
+}
+
+/// `cwd` is the hook payload's working directory when the host reports one;
+/// inside a Claude Code managed worktree, git is left unrewritten (see
+/// [`in_claude_worktree`]).
+fn get_rewritten(cmd: &str, cwd: Option<&str>) -> Option<String> {
     if has_heredoc(cmd) {
         return None;
     }
 
-    let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
+    let (mut excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
+    if cwd.is_some_and(in_claude_worktree) {
+        excluded.push("git".to_string());
+    }
 
     let rewritten = rewrite_command(cmd, &excluded, &transparent_prefixes)?;
 
@@ -256,22 +277,22 @@ enum HookDecision {
     Deny,
 }
 
-fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
+fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict, cwd: Option<&str>) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
     }
     if crate::discover::lexer::contains_unattestable_construct(cmd) {
         return HookDecision::Defer;
     }
-    match get_rewritten(cmd) {
+    match get_rewritten(cmd, cwd) {
         Some(r) if verdict == PermissionVerdict::Allow => HookDecision::AllowRewrite(r),
         Some(r) => HookDecision::AskRewrite(r),
         None => HookDecision::Defer,
     }
 }
 
-fn decide_hook_action(cmd: &str, host: permissions::Host) -> HookDecision {
-    decide_from_verdict(cmd, permissions::check_command_for(cmd, host))
+fn decide_hook_action(cmd: &str, host: permissions::Host, cwd: Option<&str>) -> HookDecision {
+    decide_from_verdict(cmd, permissions::check_command_for(cmd, host), cwd)
 }
 
 fn handle_vscode(cmd: &str) -> Result<()> {
@@ -282,7 +303,10 @@ fn handle_vscode(cmd: &str) -> Result<()> {
 }
 
 fn vscode_response(cmd: &str) -> Option<Value> {
-    vscode_response_from_decision(decide_hook_action(cmd, permissions::Host::Claude), cmd)
+    vscode_response_from_decision(
+        decide_hook_action(cmd, permissions::Host::Claude, None),
+        cmd,
+    )
 }
 
 /// Build the VS Code Copilot Chat / Copilot CLI (PascalCase compat) hook response.
@@ -325,9 +349,10 @@ fn handle_copilot_cli(cmd: &str, args: &Value) -> Result<()> {
 }
 
 fn handle_copilot_ide(cmd: &str) -> Result<()> {
-    if let Some(response) =
-        copilot_ide_response_from_decision(decide_hook_action(cmd, permissions::Host::Claude), cmd)
-    {
+    if let Some(response) = copilot_ide_response_from_decision(
+        decide_hook_action(cmd, permissions::Host::Claude, None),
+        cmd,
+    ) {
         let _ = writeln!(io::stdout(), "{response}");
     }
     Ok(())
@@ -355,7 +380,7 @@ fn copilot_ide_response_from_decision(decision: HookDecision, cmd: &str) -> Opti
 fn copilot_cli_response(cmd: &str, args: &Value) -> Option<Value> {
     copilot_cli_response_from_decision(
         args,
-        decide_hook_action(cmd, permissions::Host::Claude),
+        decide_hook_action(cmd, permissions::Host::Claude, None),
         cmd,
     )
 }
@@ -409,7 +434,7 @@ pub fn run_gemini() -> Result<()> {
 /// duplicate test copy.
 fn run_gemini_inner(input: &str) -> serde_json::Result<String> {
     run_gemini_inner_impl(input, |cmd| {
-        decide_hook_action(cmd, permissions::Host::Gemini)
+        decide_hook_action(cmd, permissions::Host::Gemini, None)
     })
 }
 
@@ -428,6 +453,7 @@ fn run_gemini_inner_with_rules(
         decide_from_verdict(
             cmd,
             permissions::check_command_with_rules(cmd, deny, ask, allow),
+            None,
         )
     })
 }
@@ -508,7 +534,7 @@ fn run_vibe_inner(input: &str) -> Option<String> {
         return None;
     }
 
-    match decide_hook_action(cmd, permissions::Host::Vibe) {
+    match decide_hook_action(cmd, permissions::Host::Vibe, None) {
         HookDecision::Deny => {
             audit_log("deny", cmd, "");
             Some(r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string())
@@ -606,7 +632,12 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         None => return PayloadAction::Ignore,
     };
 
-    process_claude_payload_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::Claude))
+    let cwd = v.get("cwd").and_then(Value::as_str);
+    process_claude_payload_from_decision(
+        v,
+        cmd,
+        decide_hook_action(cmd, permissions::Host::Claude, cwd),
+    )
 }
 
 /// Pure core of `process_claude_payload`, taking the hook decision directly so the
@@ -814,7 +845,7 @@ pub fn run_cursor() -> Result<()> {
         }
     };
 
-    let output = match decide_hook_action(&cmd, permissions::Host::Cursor) {
+    let output = match decide_hook_action(&cmd, permissions::Host::Cursor, None) {
         HookDecision::AllowRewrite(rewritten) => {
             audit_log("rewrite", &cmd, &rewritten);
             cursor_allow(&rewritten)
@@ -880,7 +911,7 @@ fn run_cursor_inner_with_rules(
     };
 
     let verdict = permissions::check_command_with_rules(&cmd, deny_rules, ask_rules, allow_rules);
-    match decide_from_verdict(&cmd, verdict) {
+    match decide_from_verdict(&cmd, verdict, None) {
         HookDecision::AllowRewrite(rewritten) => cursor_allow(&rewritten),
         HookDecision::AskRewrite(rewritten) => cursor_ask(&rewritten),
         _ => "{}".to_string(),
@@ -896,7 +927,11 @@ fn run_cursor_inner_with_rules(
 
 fn process_droid_payload(v: &Value) -> Option<Value> {
     let cmd = droid_execute_command(v)?;
-    droid_response_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::Droid))
+    droid_response_from_decision(
+        v,
+        cmd,
+        decide_hook_action(cmd, permissions::Host::Droid, None),
+    )
 }
 
 /// Extract the shell command when the payload targets Droid's Execute tool.
@@ -999,7 +1034,8 @@ fn run_droid_inner_with_rules(
     let v: Value = droid_payload(input).ok().flatten()?;
     let cmd = droid_execute_command(&v)?;
     let verdict = permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
-    droid_response_from_decision(&v, cmd, decide_from_verdict(cmd, verdict)).map(|o| o.to_string())
+    droid_response_from_decision(&v, cmd, decide_from_verdict(cmd, verdict, None))
+        .map(|o| o.to_string())
 }
 
 #[cfg(test)]
@@ -1120,22 +1156,22 @@ mod tests {
 
     #[test]
     fn test_get_rewritten_supported() {
-        assert!(get_rewritten("git status").is_some());
+        assert!(get_rewritten("git status", None).is_some());
     }
 
     #[test]
     fn test_get_rewritten_unsupported() {
-        assert!(get_rewritten("htop").is_none());
+        assert!(get_rewritten("htop", None).is_none());
     }
 
     #[test]
     fn test_get_rewritten_already_rtk() {
-        assert!(get_rewritten("rtk git status").is_none());
+        assert!(get_rewritten("rtk git status", None).is_none());
     }
 
     #[test]
     fn test_get_rewritten_heredoc() {
-        assert!(get_rewritten("cat <<'EOF'\nhello\nEOF").is_none());
+        assert!(get_rewritten("cat <<'EOF'\nhello\nEOF", None).is_none());
     }
 
     // --- VS Code Copilot Chat / Copilot CLI (PascalCase) handler ---
@@ -1357,7 +1393,11 @@ mod tests {
             &[],
             &["Bash(git:*)".to_string()],
         );
-        copilot_cli_response_from_decision(&cli_args(cmd), decide_from_verdict(cmd, verdict), cmd)
+        copilot_cli_response_from_decision(
+            &cli_args(cmd),
+            decide_from_verdict(cmd, verdict, None),
+            cmd,
+        )
     }
 
     #[test]
@@ -1467,6 +1507,52 @@ mod tests {
             Some("rtk git status".into())
         );
         assert_eq!(rewrite_command_no_prefixes("cat <<EOF", &[]), None);
+    }
+
+    // --- #3864: Claude Code worktree isolation ---
+
+    #[test]
+    fn test_in_claude_worktree_path_shapes() {
+        assert!(in_claude_worktree("/repo/.claude/worktrees/feat-x"));
+        assert!(in_claude_worktree("/repo/.claude/worktrees/feat-x/src"));
+        assert!(!in_claude_worktree("/repo"));
+        assert!(!in_claude_worktree("/repo/.claude/worktrees"));
+        assert!(!in_claude_worktree("/repo/worktrees/feat-x"));
+    }
+
+    #[test]
+    fn test_claude_worktree_leaves_git_plain_but_rewrites_others() {
+        let wt = Some("/repo/.claude/worktrees/feat-x");
+        assert_eq!(get_rewritten("git status", wt), None);
+        assert_eq!(
+            get_rewritten("cargo test", wt),
+            Some("rtk cargo test".into())
+        );
+        assert_eq!(
+            get_rewritten("git status && cargo build", wt),
+            Some("git status && rtk cargo build".into())
+        );
+        assert_eq!(
+            get_rewritten("git status", Some("/repo")),
+            Some("rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_claude_payload_cwd_in_worktree_skips_git_rewrite() {
+        let v = claude_payload_with_ids(
+            "git status",
+            "sess-1",
+            "toolu_01ABC",
+            "/repo/.claude/worktrees/feat-x",
+        );
+        assert!(matches!(
+            process_claude_payload(&v),
+            PayloadAction::Skip {
+                decision: HookOutcome::Defer,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2016,7 +2102,7 @@ mod tests {
         );
         // Denied commands must not be rewritten — Gemini handler checks deny before rewrite
         assert!(
-            get_rewritten("cargo test").is_some(),
+            get_rewritten("cargo test", None).is_some(),
             "cargo test should be rewritable when not denied"
         );
     }
@@ -2030,7 +2116,7 @@ mod tests {
         allow: &[String],
     ) -> HookDecision {
         let verdict = permissions::check_command_with_rules(cmd, deny, ask, allow);
-        decide_from_verdict(cmd, verdict)
+        decide_from_verdict(cmd, verdict, None)
     }
 
     fn all_allowed() -> Vec<String> {
