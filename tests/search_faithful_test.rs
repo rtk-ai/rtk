@@ -410,3 +410,32 @@ fn rg_surfaces_regex_error_not_silent_zero() {
         "an rg regex parse error must surface as exit 2, not a silent 0/1"
     );
 }
+
+// Regression (#3882): `-T`/`--type-not` is ripgrep's own value-taking flag
+// (unlike GNU grep's boolean `-T`/`--initial-tab`), and must keep consuming
+// its value for the rg engine — the fix for grep's boolean `-T` must not
+// regress this.
+#[test]
+fn rg_dash_capital_t_type_not_excludes_the_type() {
+    if !rg_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("a.rs"), "NEEDLE in rust\n").expect("write");
+    std::fs::write(dir.path().join("b.txt"), "NEEDLE in text\n").expect("write");
+    let path = dir.path().to_str().unwrap();
+
+    let out = rtk()
+        .args(["rg", "-T", "rust", "NEEDLE", path])
+        .output()
+        .expect("rtk rg -T rust");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("a.rs"),
+        "-T rust must exclude the rust file, not treat 'rust' as the pattern:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("b.txt"),
+        "-T rust must still match the non-excluded file:\n{stdout}"
+    );
+}
