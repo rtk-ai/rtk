@@ -2263,10 +2263,15 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
             } else {
                 let install_opencode = opencode;
-                let install_claude = !opencode;
                 let install_cursor = agent == Some(AgentTarget::Cursor);
                 let install_windsurf = agent == Some(AgentTarget::Windsurf);
                 let install_cline = agent == Some(AgentTarget::Cline);
+                // Sibling agents (Cursor, Windsurf, Cline) fall through to this
+                // shared init path; only the default (no --agent) or an explicit
+                // Claude target should install Claude Code files. Without this
+                // guard, `rtk init -g --agent cursor` writes into ~/.claude (#2097).
+                let install_claude =
+                    !opencode && !install_cursor && !install_windsurf && !install_cline;
 
                 hooks::init::run(
                     global,

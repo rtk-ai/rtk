@@ -4444,6 +4444,14 @@ fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
     let cursor_dir = resolve_cursor_dir()?;
 
+    // Ensure ~/.cursor exists before any write: atomic_write creates its temp
+    // file in the target's parent, which fails on a fresh machine where the
+    // directory does not yet exist (part of #2097).
+    if !dry_run {
+        fs::create_dir_all(&cursor_dir)
+            .with_context(|| format!("Failed to create {}", cursor_dir.display()))?;
+    }
+
     // Migrate old hook script if present
     let old_hook = cursor_dir.join("hooks").join(REWRITE_HOOK_FILE);
     if old_hook.exists() {
