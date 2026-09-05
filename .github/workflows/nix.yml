@@ -1,0 +1,40 @@
+name: Nix Build
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "**.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "flake.nix"
+      - "flake.lock"
+  pull_request:
+    paths:
+      - "**.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "flake.nix"
+      - "flake.lock"
+
+jobs:
+  nix-build:
+    name: Nix Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check flake
+        run: nix flake check
+
+      - name: Build package
+        run: nix build
+
+      - name: Verify binary
+        run: ./result/bin/rtk --version

@@ -49,5 +49,9 @@ claudedocs
 .vitals/
 .worktrees/
 
-# icm 
+# icm
 .fastembed_cache/
+
+# Nix build output symlink
+/result
+/result-*
