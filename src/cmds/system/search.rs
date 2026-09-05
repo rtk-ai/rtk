@@ -22,9 +22,12 @@ use std::sync::LazyLock;
 /// Short single-char flags that consume one following token (or inline remainder)
 /// as their value. `-e` is handled separately — its value goes to `patterns`.
 /// Includes all rg short flags that take a value argument except `-e` and `-r`
-/// (stripped) and `-E` (dialect, left to #2138). Failure mode for a missing
-/// entry: the value becomes a positional (visible wrong result, not silent).
-const VALUE_FLAGS_SHORT: &[u8] = b"ABCMTdfgjmt";
+/// (stripped) and `-E` (dialect, left to #2138). Also includes grep's own
+/// `-D` (`--devices=ACTION`, #3881) alongside its lowercase `-d`
+/// (`--directories`/rg `--max-depth`) twin — `D` isn't an rg flag. Failure
+/// mode for a missing entry: the value becomes a positional (visible wrong
+/// result, not silent).
+const VALUE_FLAGS_SHORT: &[u8] = b"ABCDMTdfgjmt";
 
 /// Long flags that consume the NEXT token as their value (space-separated form).
 /// Inline `=` form (`--flag=value`) is one token and passes through unchanged.
@@ -37,6 +40,7 @@ const VALUE_FLAGS_LONG: &[&str] = &[
     "--colors",
     "--context",
     "--context-separator",
+    "--devices",
     "--encoding",
     "--engine",
     "--field-context-separator",
@@ -1243,6 +1247,43 @@ mod tests {
         assert_eq!(patterns, vec!["foo"]);
         assert_eq!(paths, vec!["src"]);
         assert_eq!(flags, vec!["-M", "120"]);
+    }
+
+    // --- #3881: grep's -D/--devices=ACTION ---
+
+    #[test]
+    fn test_extract_short_devices() {
+        // -D skip: device-file action, value must not become pattern
+        let (patterns, paths, flags) = extract_pattern_path(&["-D", "skip", "foo", "src"]);
+        assert_eq!(patterns, vec!["foo"]);
+        assert_eq!(paths, vec!["src"]);
+        assert_eq!(flags, vec!["-D", "skip"]);
+    }
+
+    #[test]
+    fn test_extract_short_devices_inline() {
+        // -Dskip: inline value, same as -D skip
+        let (patterns, paths, flags) = extract_pattern_path(&["-Dskip", "foo", "src"]);
+        assert_eq!(patterns, vec!["foo"]);
+        assert_eq!(paths, vec!["src"]);
+        assert_eq!(flags, vec!["-D", "skip"]);
+    }
+
+    #[test]
+    fn test_extract_long_devices() {
+        let (patterns, paths, flags) = extract_pattern_path(&["--devices", "skip", "foo", "src"]);
+        assert_eq!(patterns, vec!["foo"]);
+        assert_eq!(paths, vec!["src"]);
+        assert_eq!(flags, vec!["--devices", "skip"]);
+    }
+
+    #[test]
+    fn test_extract_long_devices_inline_eq() {
+        // --devices=skip is one token (inline =): passes through as-is
+        let (patterns, paths, flags) = extract_pattern_path(&["foo", "src", "--devices=skip"]);
+        assert_eq!(patterns, vec!["foo"]);
+        assert_eq!(paths, vec!["src"]);
+        assert_eq!(flags, vec!["--devices=skip"]);
     }
 
     #[test]

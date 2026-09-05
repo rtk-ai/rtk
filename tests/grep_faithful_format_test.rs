@@ -209,3 +209,18 @@ fn dash_m_max_count_is_per_file_like_grep_n() {
     let f2 = write(d.path(), "b.txt", "hit\nhit\nhit\n");
     assert_eq_grep_with_and_without_n(&["-m", "2", "hit", &f1, &f2]); // 2 per file, both files
 }
+
+// Regression (#3881): `-D`/`--devices=ACTION` (grep's device-file handling,
+// e.g. `-D skip`) is value-taking, like `-d`/`--directories`. Before the fix,
+// uppercase `-D` and the space-separated `--devices` form were not recognized
+// as consuming a value, so the action word ("skip") was misparsed as the
+// pattern and the real pattern/path positionals shifted — grep then errored
+// on a nonexistent path instead of searching.
+#[test]
+fn dash_capital_d_devices_matches_grep_n() {
+    let d = tempfile::tempdir().unwrap();
+    let f = write(d.path(), "d.txt", "apple pie\napple\nzebra apple juice\n");
+    assert_eq_grep_with_and_without_n(&["-D", "skip", "apple", &f]);
+    assert_eq_grep_with_and_without_n(&["--devices", "skip", "apple", &f]);
+    assert_eq_grep_with_and_without_n(&["--devices=skip", "apple", &f]); // inline form was already fine
+}
