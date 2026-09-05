@@ -114,6 +114,32 @@ Trigger: push to master (only) | Concurrency: never cancelled
                     notify    tap update  tag
 ```
 
+## Windows code signing (release.yml → sign-windows)
+
+The Windows `rtk.exe` is signed via [SignPath](https://signpath.io) between build
+and release (fixes Smart App Control blocking and Defender false positives —
+#3226, #2989):
+
+- `build` (windows leg) uploads the bare `rtk.exe` as artifact `rtk-windows-exe-unsigned`
+- `sign-windows` submits it to SignPath, waits for completion, re-zips the signed
+  exe and overwrites the `rtk-x86_64-pc-windows-msvc` artifact
+- `release` publishes the (now signed) zip; checksums are computed after signing
+
+Configuration (repo Settings → Secrets and variables → Actions):
+
+| Name | Kind | Value |
+|------|------|-------|
+| `SIGNPATH_API_TOKEN` | secret | SignPath API token (CI user) |
+| `SIGNPATH_ORGANIZATION_ID` | variable | SignPath organization UUID |
+
+SignPath-side setup: project slug `rtk`, signing policy slug `release-signing`,
+artifact configuration = single `pe-file` named `rtk.exe`, and the GitHub Actions
+trusted build system connected to the project.
+
+If `SIGNPATH_ORGANIZATION_ID` is unset, `sign-windows` is skipped and the release
+ships unsigned (previous behaviour). If signing is attempted and fails, the
+release job does not run.
+
 ## Manual release (release.yml)
 
 Trigger: workflow_dispatch

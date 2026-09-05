@@ -533,6 +533,12 @@ Contributions welcome! Please open an issue or PR on [GitHub](https://github.com
 
 Join the community on [Discord](https://discord.gg/RySmvNF5kF).
 
+## Code Signing
+
+Free code signing on Windows provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+
+Windows release binaries (`rtk.exe`) are signed in CI via SignPath's GitHub Actions integration — builds are submitted from this repository's release workflow only, and signed with the SignPath Foundation certificate.
+
 ## License
 
 Apache License 2.0 - see [LICENSE](LICENSE) for details.
