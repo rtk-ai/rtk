@@ -59,17 +59,17 @@ fn uses_compact_status_path(args: &[String]) -> bool {
         return true;
     }
 
-    let mut saw_branch = false;
+    let mut saw_compact_flag = false;
     for arg in args {
         match arg.as_str() {
-            "-b" | "--branch" => saw_branch = true,
-            "-sb" | "-bs" => return true,
-            "-s" | "--short" => {}
+            "-b" | "--branch" | "-sb" | "-bs" | "-s" | "--short" => {
+                saw_compact_flag = true;
+            }
             _ => return false,
         }
     }
 
-    saw_branch
+    saw_compact_flag
 }
 
 fn build_status_command(args: &[String], global_args: &[String]) -> Command {
@@ -81,6 +81,81 @@ fn build_status_command(args: &[String], global_args: &[String]) -> Command {
         cmd.args(args);
     }
     cmd
+}
+
+fn diff_passthrough_requested(args: &[String]) -> bool {
+    diff_requires_native_passthrough(args)
+        || args.iter().any(|arg| diff_human_summary_flag(arg))
+}
+
+fn diff_summary_requested(args: &[String]) -> bool {
+    let has_summary = args.iter().any(|arg| diff_human_summary_flag(arg));
+
+    has_summary && !diff_requires_native_passthrough(args)
+}
+
+fn diff_human_summary_flag(arg: &str) -> bool {
+    matches!(arg, "--stat" | "--shortstat") || arg.starts_with("--stat=")
+}
+
+fn diff_requires_native_passthrough(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--check"
+                | "--no-compact"
+                | "--quiet"
+                | "--exit-code"
+                | "--no-index"
+                | "--no-patch"
+                | "-s"
+                | "--name-only"
+                | "--name-status"
+                | "--raw"
+                | "--numstat"
+                | "-z"
+                | "--output"
+        ) || arg.starts_with("--output=")
+    })
+}
+
+fn compact_diff_empty_message_requested(args: &[String]) -> bool {
+    if diff_requires_native_passthrough(args) {
+        return false;
+    }
+
+    let mut after_path_separator = false;
+
+    for arg in args {
+        if after_path_separator {
+            continue;
+        }
+        match arg.as_str() {
+            "--" => after_path_separator = true,
+            "--cached" | "--staged" => {}
+            value if !value.starts_with('-') => {}
+            _ => return false,
+        }
+    }
+
+    true
+}
+
+fn human_readable_success<'a>(raw: &'a str, formatted: &'a str) -> &'a str {
+    if raw.trim().is_empty() {
+        formatted
+    } else {
+        never_worse(raw, formatted)
+    }
+}
+
+fn print_capture_preserving_streams(result: &CaptureResult) {
+    if !result.stdout.is_empty() {
+        print!("{}", result.stdout);
+    }
+    if !result.stderr.is_empty() {
+        eprint!("{}", result.stderr);
+    }
 }
 
 pub fn run(
@@ -120,16 +195,9 @@ fn run_diff(
     // Re-insert `--` when clap's trailing_var_arg consumed it (issue #1215)
     let args = &args_utils::restore_double_dash(args);
 
-    // Check if user wants stat output
-    let wants_stat = args
-        .iter()
-        .any(|arg| arg == "--stat" || arg == "--numstat" || arg == "--shortstat");
-
-    // Check if user wants compact diff (default RTK behavior)
-    let wants_compact = !args.iter().any(|arg| arg == "--no-compact") && !emits_word_diff(args);
-
-    if wants_stat || !wants_compact {
-        // User wants stat or explicitly no compacting - pass through directly
+    if diff_passthrough_requested(args) || emits_word_diff(args) {
+        // Preserve native output and exit semantics for summary, validation,
+        // machine-readable, no-index, and explicit output-file modes.
         let mut cmd = git_cmd(global_args);
         cmd.arg("diff");
         for arg in args {
@@ -140,22 +208,29 @@ fn run_diff(
         }
 
         let result = exec_capture(&mut cmd).context("Failed to run git diff")?;
+        let raw = result.combined();
+        let show_empty_summary =
+            result.success() && raw.trim().is_empty() && diff_summary_requested(args);
+        let shown = if show_empty_summary {
+            "No changes"
+        } else {
+            &raw
+        };
 
-        if !result.success() {
-            eprintln!("{}", result.stderr);
-            return Ok(result.exit_code);
+        if show_empty_summary {
+            println!("{shown}");
+        } else {
+            print_capture_preserving_streams(&result);
         }
-
-        println!("{}", result.stdout.trim());
 
         timer.track(
             &format!("git diff {}", args.join(" ")),
             &format!("rtk git diff {} (passthrough)", args.join(" ")),
-            &result.stdout,
-            &result.stdout,
+            &raw,
+            shown,
         );
 
-        return Ok(0);
+        return Ok(result.exit_code);
     }
 
     // Default RTK behavior: stat first, then compacted diff
@@ -193,17 +268,53 @@ fn run_diff(
     }
 
     let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git diff")?;
+    if !diff_result.success() {
+        print_capture_preserving_streams(&diff_result);
+        let raw = format!("{}{}", result.combined(), diff_result.combined());
+        timer.track(
+            &format!("git diff {}", args.join(" ")),
+            &format!("rtk git diff {}", args.join(" ")),
+            &raw,
+            &raw,
+        );
+        return Ok(diff_result.exit_code);
+    }
 
-    let printed = if !diff_result.stdout.is_empty() {
+    let mut printed = result.stdout.trim().to_string();
+    if !result.stderr.trim().is_empty() {
+        if !printed.is_empty() {
+            printed.push('\n');
+        }
+        printed.push_str(result.stderr.trim());
+    }
+    if !diff_result.stdout.is_empty() {
         let compacted = compact_diff(&diff_result.stdout, max_lines.unwrap_or(500));
-        format!("{}\n\nChanges:\n{}", result.stdout.trim(), compacted)
-    } else {
-        result.stdout.trim().to_string()
-    };
+        if !printed.is_empty() {
+            printed.push_str("\n\n");
+        }
+        printed.push_str("Changes:\n");
+        printed.push_str(&compacted);
+    }
+    if !diff_result.stderr.trim().is_empty() {
+        if !printed.is_empty() {
+            printed.push('\n');
+        }
+        printed.push_str(diff_result.stderr.trim());
+    }
 
-    let raw = format!("{}\n{}", result.stdout, diff_result.stdout);
-    let shown = never_worse(&raw, &printed);
-    println!("{}", shown);
+    let raw = format!(
+        "{}{}{}{}",
+        result.stdout, result.stderr, diff_result.stdout, diff_result.stderr
+    );
+    let formatted = if printed.is_empty() && compact_diff_empty_message_requested(args) {
+        "No changes"
+    } else {
+        &printed
+    };
+    let shown = human_readable_success(&raw, formatted);
+    if !shown.is_empty() {
+        println!("{}", shown);
+    }
 
     timer.track(
         &format!("git diff {}", args.join(" ")),
@@ -1120,7 +1231,13 @@ pub(crate) fn filter_log_output(
     user_set_limit: bool,
     user_format: bool,
 ) -> String {
-    let truncate_width = if user_set_limit { 120 } else { 80 };
+    let large_explicit_limit = user_set_limit && limit > 50;
+    let truncate_width = if user_set_limit && !large_explicit_limit {
+        120
+    } else {
+        80
+    };
+    let body_limit = if large_explicit_limit { 1 } else { 3 };
 
     // When user specified their own format (--oneline, --pretty, --format),
     // RTK did not inject ---END--- markers. Use simple line-based truncation.
@@ -1151,7 +1268,8 @@ pub(crate) fn filter_log_output(
             Some(h) => truncate_line(h.trim(), truncate_width),
             None => continue,
         };
-        // Remaining lines are the body — keep up to 3 non-empty, non-trailer lines
+        // Remaining lines are the body/stat payload. Large explicit logs often
+        // include --stat; keep a single representative line so they still compress.
         let all_body_lines: Vec<&str> = lines
             .map(|l| l.trim())
             .filter(|l| {
@@ -1160,8 +1278,8 @@ pub(crate) fn filter_log_output(
                     && !l.starts_with("Co-authored-by:")
             })
             .collect();
-        let body_omitted = all_body_lines.len().saturating_sub(3);
-        let body_lines = &all_body_lines[..all_body_lines.len().min(3)];
+        let body_omitted = all_body_lines.len().saturating_sub(body_limit);
+        let body_lines = &all_body_lines[..all_body_lines.len().min(body_limit)];
 
         if body_lines.is_empty() {
             result.push(header);
@@ -1199,6 +1317,9 @@ pub(crate) fn format_status_output_detached(porcelain: &str, detached_ref: &str)
 }
 
 fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
+    const STATUS_FULL_LIMIT: usize = 20;
+    const STATUS_SAMPLE_LIMIT: usize = 12;
+
     let lines: Vec<&str> = porcelain
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -1220,8 +1341,14 @@ fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
         }
     }
 
-    for line in lines.iter().skip(1) {
-        output.push((*line).to_string());
+    let changes: Vec<&str> = lines.iter().skip(1).copied().collect();
+    if changes.len() > STATUS_FULL_LIMIT {
+        output.extend(format_status_summary(&changes, STATUS_SAMPLE_LIMIT));
+        return output.join("\n");
+    }
+
+    for line in changes {
+        output.push(line.to_string());
     }
 
     if lines.len() == 1 && lines[0].starts_with("##") {
@@ -1229,6 +1356,42 @@ fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
     }
 
     output.join("\n")
+}
+
+fn format_status_summary(changes: &[&str], sample_limit: usize) -> Vec<String> {
+    use std::collections::BTreeMap;
+
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for line in changes {
+        let status = if line.len() >= 2 {
+            line[..2].to_string()
+        } else {
+            line.trim().to_string()
+        };
+        *counts.entry(status).or_insert(0) += 1;
+    }
+
+    let mut out = Vec::new();
+    out.push(format!("changes: {}", changes.len()));
+    let groups = counts
+        .iter()
+        .map(|(status, count)| format!("{} {}", status, count))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !groups.is_empty() {
+        out.push(format!("by status: {}", groups));
+    }
+
+    out.push("samples:".to_string());
+    for line in changes.iter().take(sample_limit) {
+        out.push(format!("  {}", line));
+    }
+    let omitted = changes.len().saturating_sub(sample_limit);
+    if omitted > 0 {
+        out.push(format!("  ... {} more", omitted));
+    }
+
+    out
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1410,6 +1573,9 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         let filtered = filter_status_with_args(&result.stdout);
         let filtered = never_worse(&result.stdout, &filtered).to_string();
         print!("{}", filtered);
+        if !filtered.is_empty() && !filtered.ends_with('\n') {
+            println!();
+        }
 
         timer.track(
             &format!("git status {}", args.join(" ")),
@@ -1432,14 +1598,13 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     let result = exec_capture(&mut cmd).context("Failed to run git status")?;
 
     if !result.success() {
-        let message = if result.stderr.contains("not a git repository") {
-            "Not a git repository".to_string()
-        } else {
-            result.stderr.trim().to_string()
-        };
-        if !message.is_empty() {
-            eprintln!("{}", message);
+        if !result.stdout.is_empty() {
+            print!("{}", result.stdout);
         }
+        if !result.stderr.is_empty() {
+            eprint!("{}", result.stderr);
+        }
+        let raw_failure = format!("{}{}", result.stdout, result.stderr);
         let original_cmd = if args.is_empty() {
             "git status".to_string()
         } else {
@@ -1450,8 +1615,13 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         } else {
             format!("rtk git status {}", args.join(" "))
         };
-        let shown = never_worse(&raw_output, &message);
-        timer.track(&original_cmd, &rtk_cmd, &raw_output, shown);
+        let shown = if result.stderr.contains("not a git repository") {
+            let message = "Not a git repository";
+            never_worse(&raw_failure, message)
+        } else {
+            &raw_failure
+        };
+        timer.track(&original_cmd, &rtk_cmd, &raw_failure, shown);
         return Ok(result.exit_code);
     }
 
@@ -1468,8 +1638,11 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         None => formatted,
     };
 
-    let shown = never_worse(&raw_output, &final_output);
-    println!("{}", shown);
+    let shown = human_readable_success(&raw_output, &final_output);
+    print!("{}", shown);
+    if !shown.ends_with('\n') {
+        println!();
+    }
 
     let original_cmd = if args.is_empty() {
         "git status".to_string()
@@ -1535,12 +1708,21 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
             println!("{}", compact);
         }
 
-        timer.track(
-            &format!("git add {}", args.join(" ")),
-            &format!("rtk git add {}", args.join(" ")),
-            &raw_output,
-            &compact,
-        );
+        // Only track when there's actual output — avoids inflated 100% savings
+        // when git add is a no-op (raw has warnings but compact is empty).
+        if compact.is_empty() {
+            timer.track_passthrough(
+                &format!("git add {}", args.join(" ")),
+                &format!("rtk git add {}", args.join(" ")),
+            );
+        } else {
+            timer.track(
+                &format!("git add {}", args.join(" ")),
+                &format!("rtk git add {}", args.join(" ")),
+                &raw_output,
+                &compact,
+            );
+        }
     } else {
         eprintln!("FAILED: git add");
         if !result.stderr.trim().is_empty() {
@@ -1665,6 +1847,16 @@ fn run_checkout(args: &[String], verbose: u8, global_args: &[String]) -> Result<
     }
 
     let args_display = args.join(" ");
+    if checkout_passthrough_requested(&args) {
+        return runner::run(
+            cmd,
+            "git checkout",
+            &args_display,
+            runner::RunMode::Passthrough,
+            RunOptions::default(),
+        );
+    }
+
     let args_for_filter = args.clone();
     runner::run_filtered_with_exit(
         cmd,
@@ -1673,6 +1865,12 @@ fn run_checkout(args: &[String], verbose: u8, global_args: &[String]) -> Result<
         move |raw, exit_code| format_checkout_output(&args_for_filter, raw, exit_code),
         RunOptions::with_tee("git_checkout"),
     )
+}
+
+fn checkout_passthrough_requested(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| matches!(arg.as_str(), "-p" | "--patch"))
 }
 
 fn format_checkout_output(args: &[String], raw: &str, exit_code: i32) -> String {
@@ -2748,15 +2946,15 @@ mod tests {
             "--short".to_string(),
             "--branch".to_string()
         ]));
-        assert!(!uses_compact_status_path(&["-s".to_string()]));
-        assert!(!uses_compact_status_path(&["--short".to_string()]));
+        assert!(uses_compact_status_path(&["-s".to_string()]));
+        assert!(uses_compact_status_path(&["--short".to_string()]));
         assert!(!uses_compact_status_path(&["--porcelain".to_string()]));
         assert!(!uses_compact_status_path(&["-uno".to_string()]));
     }
 
     #[test]
     fn test_build_status_command_with_user_args_passthrough() {
-        let args = vec!["--short".to_string(), "--branch".to_string()];
+        let args = vec!["--short".to_string()];
         let cmd = build_status_command(&args, &[]);
         let cmd_args: Vec<_> = cmd.get_args().collect();
         assert_eq!(cmd_args, vec!["status", "--porcelain", "-b"]);
@@ -3756,6 +3954,24 @@ A  added.rs
     }
 
     #[test]
+    fn test_checkout_patch_modes_require_interactive_passthrough() {
+        assert!(checkout_passthrough_requested(&["-p".to_string()]));
+        assert!(checkout_passthrough_requested(&["--patch".to_string()]));
+        assert!(checkout_passthrough_requested(&[
+            "--patch".to_string(),
+            "src/main.rs".to_string()
+        ]));
+        assert!(!checkout_passthrough_requested(&[
+            "-b".to_string(),
+            "feature".to_string()
+        ]));
+        assert!(!checkout_passthrough_requested(&[
+            "--".to_string(),
+            "-p".to_string()
+        ]));
+    }
+
+    #[test]
     fn test_filter_log_output() {
         let output = "abc1234 This is a commit message (2 days ago) <author>\n\n---END---\ndef5678 Another commit (1 week ago) <other>\n\n---END---\n";
         let result = filter_log_output(output, 10, false, false);
@@ -3842,6 +4058,35 @@ A  added.rs
         assert!(
             !result_user.contains("..."),
             "User limit should not truncate 90-char line"
+        );
+    }
+
+    #[test]
+    fn test_filter_log_output_large_user_limit_compacts_stat_payload() {
+        let mut output = String::new();
+        for i in 0..60 {
+            output.push_str(&format!(
+                "abc{i:03} commit subject {i} with enough words to be useful (2024-01-01) <dev@example.com>\n"
+            ));
+            output.push_str(
+                " src/main.rs | 100 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n",
+            );
+            output.push_str(
+                " package-lock.json | 200 +++++++++++++++++++++++++++++++++++++++++++++++++++++\n",
+            );
+            output.push_str(" 2 files changed, 300 insertions(+)\n");
+            output.push_str("---END---\n");
+        }
+
+        let result = filter_log_output(&output, 120, true, false);
+
+        assert!(result.contains("abc000 commit subject"));
+        assert!(result.contains("abc059 commit subject"));
+        assert!(result.contains("[+2 lines omitted]"));
+        assert!(
+            result.lines().count() <= 180,
+            "large explicit logs should be compacted, got {} lines",
+            result.lines().count()
         );
     }
 
@@ -4490,27 +4735,62 @@ no changes added to commit (use "git add" and/or "git commit -a")
     // --- truncation accuracy ---
 
     #[test]
-    fn test_format_status_output_shows_every_file_when_many_are_dirty() {
+    fn test_format_status_output_summarizes_many_dirty_files() {
         let mut porcelain = String::from("## main...origin/main\n");
         for i in 0..25 {
             porcelain.push_str(&format!("M  staged_file_{}.rs\n", i));
         }
         let result = format_status_output(&porcelain);
         assert!(
-            result.contains("staged_file_24.rs"),
-            "Expected the last staged file to remain visible, got:\n{}",
+            result.contains("changes: 25"),
+            "Expected dirty file count, got:\n{}",
             result
         );
         assert!(
-            result.lines().count() == 26,
-            "Expected branch + all 25 staged files, got:\n{}",
+            result.contains("M  25"),
+            "Expected staged modified count, got:\n{}",
             result
         );
         assert!(
-            !result.contains("... +"),
-            "Status output must not hide dirty paths behind overflow markers:\n{}",
+            result.contains("staged_file_0.rs"),
+            "Expected samples to retain representative paths, got:\n{}",
             result
         );
+        assert!(
+            !result.contains("staged_file_24.rs"),
+            "Expected long tail to be summarized, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("... 13 more"),
+            "Expected omitted count, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_status_missing_git_c_dir_preserves_failure_exit_code() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing = temp.path().join("missing-repo");
+        let global_args = vec!["-C".to_string(), missing.to_string_lossy().to_string()];
+
+        let exit_code = run_status(&[], 0, &global_args).expect("run status");
+
+        assert_ne!(
+            exit_code, 0,
+            "missing git -C directory must not be reported as a clean working tree"
+        );
+    }
+
+    #[test]
+    fn test_diff_check_uses_passthrough_mode() {
+        assert!(diff_passthrough_requested(&["--check".to_string()]));
+    }
+
+    #[test]
+    fn test_diff_plain_uses_compact_mode() {
+        assert!(!diff_passthrough_requested(&[]));
+        assert!(!diff_passthrough_requested(&["--cached".to_string()]));
     }
 
     #[test]

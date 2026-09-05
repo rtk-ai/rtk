@@ -160,9 +160,11 @@ fn run_filtered(original_args: &[String], invocation: &RunInvocation, verbose: u
         crate::core::runner::RunOptions::stdout_only(),
     )?;
 
-    // golangci-lint: exit 0 = clean, exit 1 = lint issues found (not an error),
-    // exit 2+ = config/build error, None = killed by signal (OOM, SIGKILL)
-    Ok(if exit_code == 1 { 0 } else { exit_code })
+    Ok(golangci_exit_code(exit_code))
+}
+
+pub(crate) fn golangci_exit_code(exit_code: i32) -> i32 {
+    exit_code
 }
 
 fn run_passthrough(args: &[String], verbose: u8) -> Result<i32> {
@@ -404,6 +406,13 @@ mod tests {
         let result = filter_golangci_json(output, 1);
         assert!(result.contains("golangci-lint"));
         assert!(result.contains("No issues found"));
+    }
+
+    #[test]
+    fn test_golangci_exit_code_one_is_preserved() {
+        assert_eq!(golangci_exit_code(0), 0);
+        assert_eq!(golangci_exit_code(1), 1);
+        assert_eq!(golangci_exit_code(2), 2);
     }
 
     #[test]

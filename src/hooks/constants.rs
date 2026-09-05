@@ -25,6 +25,9 @@ pub const OPENCODE_PLUGIN_FILE: &str = "rtk.ts";
 pub const CURSOR_DIR: &str = ".cursor";
 pub const CODEX_DIR: &str = ".codex";
 pub const GEMINI_DIR: &str = ".gemini";
+/// Codex hooks configuration file (analogous to Claude Code's settings.json).
+pub const CODEX_HOOKS_JSON: &str = "hooks.json";
+pub const CODEX_HOOK_COMMAND: &str = "rtk hook codex";
 
 pub const GITHUB_DIR: &str = ".github";
 pub const COPILOT_HOOK_FILE: &str = "rtk-rewrite.json";

@@ -223,8 +223,48 @@ impl FilterStrategy for MinimalFilter {
 
         // Normalize multiple blank lines to max 2
         let result = MULTIPLE_BLANK_LINES.replace_all(&result, "\n\n");
-        result.trim().to_string()
+
+        // For data formats (JSON, YAML, XML), compactify leading whitespace.
+        // Each 2-space indent level becomes 1 space. Preserves all content.
+        if *lang == Language::Data || *lang == Language::Unknown {
+            compactify_indent(result.trim().to_string())
+        } else {
+            result.trim().to_string()
+        }
     }
+}
+
+/// Reduce indentation in data formats (JSON, YAML, XML) to save tokens.
+/// Normalizes each 2-space indent level to 1 space. Content is never removed.
+pub fn compactify_indent(content: String) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let indented_lines: usize = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty() && l.chars().next().is_some_and(|c| c.is_whitespace()))
+        .count();
+
+    // Only compactify if there are indented lines (structured data)
+    if indented_lines == 0 {
+        return content;
+    }
+
+    let mut out = String::with_capacity(content.len());
+    for line in &lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            out.push('\n');
+            continue;
+        }
+        let indent = line.chars().take_while(|c| c.is_whitespace()).count();
+        // Each 2-space indent level → 1 space
+        let new_indent = indent / 2;
+        for _ in 0..new_indent {
+            out.push(' ');
+        }
+        out.push_str(trimmed);
+        out.push('\n');
+    }
+    out.trim().to_string()
 }
 
 pub struct AggressiveFilter;
@@ -353,7 +393,10 @@ pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> Stri
 
     // Single end-of-output marker: not code syntax, unambiguous to AI agents.
     // Invariant: kept_lines + N == lines.len() (N = lines not shown)
-    result.push(format!("[{} more lines]", lines.len() - kept_lines));
+    result.push(format!(
+        "[rtk: {} more lines omitted; use --max-lines/--tail-lines or rtk grep for more context]",
+        lines.len() - kept_lines
+    ));
 
     result.join("\n")
 }
@@ -454,6 +497,53 @@ mod tests {
     }
 
     #[test]
+    fn test_json_compactify_indent() {
+        // Deeply indented JSON (4-space nested) should be compactified
+        let json = r#"{
+    "name": "my-app",
+    "scripts": {
+        "build": "next build",
+        "dev": "next dev"
+    },
+    "dependencies": {
+        "react": "^18.0.0",
+        "react-dom": "^18.0.0"
+    }
+}"#;
+        let filter = MinimalFilter;
+        let result = filter.filter(json, &Language::Data);
+        // All content preserved
+        assert!(result.contains("my-app"), "content must be preserved");
+        assert!(result.contains("next build"), "content must be preserved");
+        assert!(result.contains("react-dom"), "content must be preserved");
+        // Indentation reduced (original had 4-space indent, compactified should be less)
+        assert!(
+            result.len() < json.len(),
+            "compactified ({}) should be shorter than original ({})",
+            result.len(),
+            json.len()
+        );
+    }
+
+    #[test]
+    fn test_json_shallow_indent_compactified() {
+        // Shallow JSON (2-space indent) should be compactified to 1-space
+        let json = r#"{
+  "name": "my-app",
+  "version": "1.0.0"
+}"#;
+        let filter = MinimalFilter;
+        let result = filter.filter(json, &Language::Data);
+        assert!(result.contains("my-app"), "content must be preserved");
+        assert!(
+            result.len() < json.len(),
+            "compactified ({}) should be shorter than original ({})",
+            result.len(),
+            json.len()
+        );
+    }
+
+    #[test]
     fn test_minimal_filter_removes_comments() {
         let code = r#"
 // This is a comment
@@ -473,7 +563,7 @@ fn main() {
     fn test_smart_truncate_overflow_count_exact() {
         // 200 plain-text lines (no function signatures/imports) with max_lines=20.
         // Smart selection keeps up to max_lines/2=10 non-important lines then stops.
-        // The overflow message "[N more lines]" must satisfy:
+        // The overflow message must satisfy:
         //   kept_count + N == total_lines
         let total_lines = 200usize;
         let max_lines = 20usize;
@@ -490,10 +580,10 @@ fn main() {
             .find(|l| l.contains("more lines"))
             .unwrap_or_else(|| panic!("No overflow message found in:\n{}", output));
 
-        // Parse "[N more lines]"
+        // Parse "[rtk: N more lines omitted; ...]"
         let reported_more: usize = overflow_line
             .trim()
-            .strip_prefix('[')
+            .strip_prefix("[rtk: ")
             .and_then(|s| s.split_whitespace().next())
             .and_then(|n| n.parse().ok())
             .unwrap_or_else(|| panic!("Could not parse overflow count from: {}", overflow_line));
@@ -525,7 +615,8 @@ fn main() {
             "smart_truncate must not insert synthetic comment annotations"
         );
         // Must contain clean end-of-output marker (1 kept + 9 omitted = 10 total)
-        assert!(output.contains("[9 more lines]"));
+        assert!(output.contains("[rtk: 9 more lines omitted;"));
+        assert!(output.contains("rtk grep for more context"));
         // Only the first line is kept (plain-text, no important signatures)
         assert!(output.starts_with("line1\n"));
     }

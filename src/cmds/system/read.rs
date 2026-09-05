@@ -1,11 +1,13 @@
 //! Reads source files with optional language-aware filtering to strip boilerplate.
 
-use crate::core::filter::{self, FilterLevel, Language};
+use crate::core::filter::{self, FilterLevel, FilterStrategy, Language};
 use crate::core::guard::never_worse;
 use crate::core::tracking;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
+
+const DEFAULT_AUTO_MAX_LINES: usize = 240;
 
 pub fn run(
     file: &Path,
@@ -40,6 +42,26 @@ pub fn run(
     let filter = filter::get_filter(level);
     let mut filtered = filter.filter(&content, &lang);
 
+    // For code files with no explicit filter, apply comment stripping.
+    // Comments are not functional code — this is lossless compression.
+    // Only activates when user didn't specify a filter level (default "none").
+    if level == filter::FilterLevel::None
+        && !matches!(lang, Language::Data | Language::Unknown)
+    {
+        let minimal = filter::MinimalFilter;
+        let stripped = minimal.filter(&content, &lang);
+        // Only use stripped version if it's actually smaller (safeguard)
+        if stripped.len() < filtered.len() {
+            filtered = stripped;
+        }
+    }
+
+    // Always compactify indentation for data formats (JSON, YAML, XML, TOML)
+    // regardless of filter level. This is lossless — only whitespace reduced.
+    if matches!(lang, Language::Data | Language::Unknown) {
+        filtered = filter::compactify_indent(filtered);
+    }
+
     // Safety: if filter emptied a non-empty file, fall back to raw content
     if filtered.trim().is_empty() && !content.trim().is_empty() {
         eprintln!(
@@ -64,7 +86,13 @@ pub fn run(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
+    filtered = apply_line_window_with_original_count(
+        &filtered,
+        max_lines,
+        tail_lines,
+        &lang,
+        content.lines().count(),
+    );
 
     let (raw, rtk_output) = if line_numbers {
         (
@@ -132,7 +160,13 @@ pub fn run_stdin(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
+    filtered = apply_line_window_with_original_count(
+        &filtered,
+        max_lines,
+        tail_lines,
+        &lang,
+        content.lines().count(),
+    );
 
     let (raw, rtk_output) = if line_numbers {
         (
@@ -165,6 +199,24 @@ fn apply_line_window(
     tail_lines: Option<usize>,
     lang: &Language,
 ) -> String {
+    apply_line_window_with_original_count(content, max_lines, tail_lines, lang, content.lines().count())
+}
+
+fn apply_line_window_with_original_count(
+    content: &str,
+    max_lines: Option<usize>,
+    tail_lines: Option<usize>,
+    lang: &Language,
+    original_line_count: usize,
+) -> String {
+    let auto_window = max_lines.is_none() && tail_lines.is_none();
+    let filtered_line_count = content.lines().count();
+    let content = if auto_window && content.lines().count() > DEFAULT_AUTO_MAX_LINES {
+        compact_large_read_noise(content)
+    } else {
+        content.to_string()
+    };
+
     if let Some(tail) = tail_lines {
         if tail == 0 {
             return String::new();
@@ -179,10 +231,108 @@ fn apply_line_window(
     }
 
     if let Some(max) = max_lines {
-        return filter::smart_truncate(content, max, lang);
+        return filter::smart_truncate(content.as_str(), max, lang);
+    }
+
+    let line_count = content.lines().count();
+    if line_count > DEFAULT_AUTO_MAX_LINES {
+        let truncated = filter::smart_truncate(content.as_str(), DEFAULT_AUTO_MAX_LINES, lang);
+        return prepend_auto_read_header(
+            &truncated,
+            original_line_count,
+            filtered_line_count,
+            line_count,
+        );
     }
 
     content.to_string()
+}
+
+fn prepend_auto_read_header(
+    excerpt: &str,
+    original_line_count: usize,
+    filtered_line_count: usize,
+    compacted_line_count: usize,
+) -> String {
+    format!(
+        "[rtk read: auto-compressed large file; showing {} agent-selected lines from {} original lines ({} after filtering, {} after blank/repeat compaction); excerpt may be non-contiguous]\n{}",
+        excerpt.lines().count(),
+        original_line_count,
+        filtered_line_count,
+        compacted_line_count,
+        excerpt
+    )
+}
+
+fn compact_large_read_noise(content: &str) -> String {
+    let without_blank_lines = content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !is_large_read_noise_line(trimmed)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    compact_consecutive_repeated_lines(&without_blank_lines)
+}
+
+fn is_large_read_noise_line(trimmed: &str) -> bool {
+    is_visual_separator_line(trimmed) || is_progress_noise_line(trimmed)
+}
+
+fn is_visual_separator_line(trimmed: &str) -> bool {
+    let chars: Vec<char> = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
+    chars.len() >= 8 && chars.iter().all(|c| "-_=*#~.|+".contains(*c))
+}
+
+fn is_progress_noise_line(trimmed: &str) -> bool {
+    if !trimmed.contains('%') || trimmed.chars().count() > 160 {
+        return false;
+    }
+
+    let alpha_count = trimmed.chars().filter(|c| c.is_alphabetic()).count();
+    let digit_count = trimmed.chars().filter(|c| c.is_ascii_digit()).count();
+    let bar_count = trimmed
+        .chars()
+        .filter(|c| "[]()<>#=->._|/\\ ".contains(*c))
+        .count();
+
+    digit_count > 0 && bar_count >= 4 && alpha_count <= 12
+}
+
+fn compact_consecutive_repeated_lines(content: &str) -> String {
+    let mut out = Vec::new();
+    let mut current: Option<&str> = None;
+    let mut repeat_count = 0usize;
+
+    for line in content.lines() {
+        if current == Some(line) {
+            repeat_count += 1;
+            continue;
+        }
+        flush_repeated_line(&mut out, current, repeat_count);
+        current = Some(line);
+        repeat_count = 1;
+    }
+    flush_repeated_line(&mut out, current, repeat_count);
+    out.join("\n")
+}
+
+fn flush_repeated_line(out: &mut Vec<String>, line: Option<&str>, repeat_count: usize) {
+    let Some(line) = line else {
+        return;
+    };
+    if repeat_count >= 4 && !line.trim().is_empty() {
+        out.push(line.to_string());
+        out.push(format!(
+            "[rtk read: previous line repeated {} more times]",
+            repeat_count - 1
+        ));
+    } else {
+        for _ in 0..repeat_count {
+            out.push(line.to_string());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -234,6 +384,88 @@ fn main() {{
         let output = apply_line_window(input, Some(2), None, &Language::Unknown);
         assert!(output.starts_with("a\n"));
         assert!(output.contains("more lines"));
+    }
+
+    #[test]
+    fn test_apply_line_window_small_default_preserves_full_content() {
+        let input = "a\nb\nc\n";
+        let output = apply_line_window(input, None, None, &Language::JavaScript);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_apply_line_window_large_default_auto_truncates() {
+        let input = (0..400)
+            .map(|i| format!("const value{} = {};", i, i))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let output = apply_line_window(&input, None, None, &Language::JavaScript);
+
+        assert!(output.lines().count() <= DEFAULT_AUTO_MAX_LINES + 1);
+        assert!(output.contains("auto-compressed large file"));
+        assert!(output.contains("agent-selected lines"));
+        assert!(output.contains("more lines"));
+        assert!(output.len() < input.len() / 2);
+    }
+
+    #[test]
+    fn test_apply_line_window_large_default_removes_blank_noise() {
+        let input = (0..300)
+            .map(|i| format!("line {}\n", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let output = apply_line_window(&input, None, None, &Language::JavaScript);
+
+        assert!(!output.contains("\n\n"));
+        assert!(output.contains("blank/repeat compaction"));
+        assert!(output.contains("more lines"));
+    }
+
+    #[test]
+    fn test_compact_consecutive_repeated_lines_counts_noise() {
+        let input = "same\nsame\nsame\nsame\nsame\nnext";
+        let output = compact_consecutive_repeated_lines(input);
+
+        assert_eq!(
+            output,
+            "same\n[rtk read: previous line repeated 4 more times]\nnext"
+        );
+    }
+
+    #[test]
+    fn test_compact_large_read_noise_removes_visual_progress_but_keeps_signals() {
+        let input = "==========\n\
+                     [=====>     ] 45%\n\
+                     warning: retrying request\n\
+                     warning: retrying request\n\
+                     warning: retrying request\n\
+                     warning: retrying request\n\
+                     error: failed to open config\n\
+                     ---\n\
+                     done\n";
+        let output = compact_large_read_noise(input);
+
+        assert!(!output.contains("=========="));
+        assert!(!output.contains("[=====>     ] 45%"));
+        assert!(output.contains("warning: retrying request"));
+        assert!(output.contains("[rtk read: previous line repeated 3 more times]"));
+        assert!(output.contains("error: failed to open config"));
+        assert!(output.contains("---"));
+        assert!(output.contains("done"));
+    }
+
+    #[test]
+    fn test_apply_line_window_explicit_tail_overrides_default_auto_truncate() {
+        let input = (0..400)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let output = apply_line_window(&input, None, Some(2), &Language::Unknown);
+
+        assert_eq!(output, "line 398\nline 399");
     }
 
     fn rtk_bin() -> std::path::PathBuf {

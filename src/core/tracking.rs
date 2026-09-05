@@ -295,7 +295,7 @@ pub struct MonthStats {
     pub avg_time_ms: u64,
 }
 
-/// Type alias for command statistics tuple: (command, count, saved_tokens, avg_savings_pct, avg_time_ms)
+/// Type alias for command statistics tuple: (command, count, saved_tokens, weighted_savings_pct, avg_time_ms)
 type CommandStats = (String, usize, usize, f64, u64);
 
 /// Current tracking-DB schema version, stored in the SQLite `user_version` pragma.
@@ -886,7 +886,7 @@ impl Tracker {
     ) -> Result<Vec<CommandStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut stmt = self.conn.prepare(
-            "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)
+            "SELECT rtk_cmd, COUNT(*), SUM(input_tokens), SUM(saved_tokens), AVG(exec_time_ms)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY rtk_cmd
@@ -896,11 +896,18 @@ impl Tracker {
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
+            let input = row.get::<_, i64>(2)? as usize;
+            let saved = row.get::<_, i64>(3)? as usize;
+            let weighted_pct = if input > 0 {
+                (saved as f64 / input as f64) * 100.0
+            } else {
+                0.0
+            };
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)? as usize,
-                row.get::<_, i64>(2)? as usize,
-                row.get::<_, f64>(3)?,
+                saved,
+                weighted_pct,
                 row.get::<_, f64>(4)? as u64,
             ))
         })?;
@@ -1495,6 +1502,13 @@ pub(crate) fn get_db_path() -> Result<PathBuf> {
         return Ok(PathBuf::from(custom_path));
     }
 
+    #[cfg(test)]
+    if std::env::var("RTK_TEST_USE_REAL_DB").as_deref() != Ok("1") {
+        return Ok(std::env::temp_dir()
+            .join("rtk")
+            .join(format!("test-history-{}.db", std::process::id())));
+    }
+
     // Priority 2: Configuration file. Reads the process-wide cached config (see
     // `config::cached_config`), not a fresh `Config::load()`: this runs inside
     // `Tracker::new()`, which `log_hook_decision` now calls on every single
@@ -1795,14 +1809,49 @@ pub fn args_display(args: &[OsString]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard};
 
-    /// Serializes tests that mutate the process-global `RTK_DB_PATH` env var.
-    /// Must be a single shared static: a `static` declared inside each test
-    /// function body is a distinct static per function, not a shared lock, so
-    /// tests using separate locals don't actually serialize against each other
-    /// and can race on the same global env var under parallel `cargo test`.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct TestDbGuard {
+        _guard: MutexGuard<'static, ()>,
+        old_db_path: Option<OsString>,
+        path: PathBuf,
+    }
+
+    impl TestDbGuard {
+        fn new(name: &str) -> Self {
+            let guard = ENV_LOCK.lock().unwrap();
+            let old_db_path = std::env::var_os("RTK_DB_PATH");
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir()
+                .join(format!("rtk-test-{name}-{}-{nonce}.db", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            std::env::set_var("RTK_DB_PATH", &path);
+            Self {
+                _guard: guard,
+                old_db_path,
+                path,
+            }
+        }
+    }
+
+    impl Drop for TestDbGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.old_db_path.take() {
+                std::env::set_var("RTK_DB_PATH", value);
+            } else {
+                std::env::remove_var("RTK_DB_PATH");
+            }
+            let _ = std::fs::remove_file(&self.path);
+            let _ = std::fs::remove_file(self.path.with_extension("db-wal"));
+            let _ = std::fs::remove_file(self.path.with_extension("db-shm"));
+        }
+    }
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
@@ -1904,16 +1953,7 @@ mod tests {
     // record once 5+ other rows land first.
     #[test]
     fn test_timed_execution_records_time() {
-        use std::env;
-        let _guard = ENV_LOCK.lock().unwrap();
-        let db_path = env::temp_dir().join(format!(
-            "rtk_test_timed_exec_records_{}.db",
-            std::process::id()
-        ));
-        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
-        let _ = std::fs::remove_file(&db_path);
-        env::set_var("RTK_DB_PATH", &db_path);
-
+        let _db = TestDbGuard::new("timed-execution-records-time");
         let timer = TimedExecution::start();
         std::thread::sleep(std::time::Duration::from_millis(10));
         timer.track("test cmd", "rtk test", "raw input data", "filtered");
@@ -1924,25 +1964,13 @@ mod tests {
         assert!(recent.iter().any(|r| r.rtk_cmd == "rtk test"));
 
         drop(tracker);
-        env::remove_var("RTK_DB_PATH");
-        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
-        let _ = std::fs::remove_file(&db_path);
     }
 
     // 6. TimedExecution::track_passthrough records with 0 tokens
     // Same isolation rationale as test_timed_execution_records_time above.
     #[test]
     fn test_timed_execution_passthrough() {
-        use std::env;
-        let _guard = ENV_LOCK.lock().unwrap();
-        let db_path = env::temp_dir().join(format!(
-            "rtk_test_timed_exec_passthrough_{}.db",
-            std::process::id()
-        ));
-        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
-        let _ = std::fs::remove_file(&db_path);
-        env::set_var("RTK_DB_PATH", &db_path);
-
+        let _db = TestDbGuard::new("timed-execution-passthrough");
         let timer = TimedExecution::start();
         timer.track_passthrough("git tag", "rtk git tag (passthrough)");
 
@@ -1959,9 +1987,6 @@ mod tests {
         assert_eq!(pt.saved_tokens, 0);
 
         drop(tracker);
-        env::remove_var("RTK_DB_PATH");
-        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
-        let _ = std::fs::remove_file(&db_path);
     }
 
     // 7. get_db_path respects environment variable RTK_DB_PATH
@@ -1971,6 +1996,8 @@ mod tests {
     fn test_db_path_env_and_default() {
         use std::env;
         let _guard = ENV_LOCK.lock().unwrap();
+        let old_db_path = env::var_os("RTK_DB_PATH");
+        let old_real_db = env::var_os("RTK_TEST_USE_REAL_DB");
 
         let custom_path = env::temp_dir().join("rtk_test_custom.db");
         env::set_var("RTK_DB_PATH", &custom_path);
@@ -1978,12 +2005,54 @@ mod tests {
         assert_eq!(db_path, custom_path);
 
         env::remove_var("RTK_DB_PATH");
+        env::set_var("RTK_TEST_USE_REAL_DB", "1");
         let db_path = get_db_path().expect("Failed to get db path");
         assert!(
             db_path.ends_with("rtk/history.db"),
             "expected default path ending with rtk/history.db, got: {}",
             db_path.display()
         );
+        if let Some(value) = old_db_path {
+            env::set_var("RTK_DB_PATH", value);
+        } else {
+            env::remove_var("RTK_DB_PATH");
+        }
+        if let Some(value) = old_real_db {
+            env::set_var("RTK_TEST_USE_REAL_DB", value);
+        } else {
+            env::remove_var("RTK_TEST_USE_REAL_DB");
+        }
+    }
+
+    #[test]
+    fn test_db_path_test_build_defaults_to_temp() {
+        use std::env;
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_db_path = env::var_os("RTK_DB_PATH");
+        let old_real_db = env::var_os("RTK_TEST_USE_REAL_DB");
+
+        env::remove_var("RTK_DB_PATH");
+        env::remove_var("RTK_TEST_USE_REAL_DB");
+        let db_path = get_db_path().expect("Failed to get db path");
+        assert!(
+            db_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("test-history-")),
+            "test builds must not default to the user gain DB: {}",
+            db_path.display()
+        );
+
+        if let Some(value) = old_db_path {
+            env::set_var("RTK_DB_PATH", value);
+        } else {
+            env::remove_var("RTK_DB_PATH");
+        }
+        if let Some(value) = old_real_db {
+            env::set_var("RTK_TEST_USE_REAL_DB", value);
+        } else {
+            env::remove_var("RTK_TEST_USE_REAL_DB");
+        }
     }
 
     // 8b. Tracker::new() gates schema migration behind PRAGMA user_version, so a
@@ -2185,6 +2254,35 @@ mod tests {
         assert_eq!(
             failures.total, 0,
             "parse_failures table should be empty after reset"
+        );
+    }
+
+    #[test]
+    fn test_by_command_savings_pct_is_weighted_by_tokens() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+
+        tracker
+            .record("rg huge", "rtk grep", 1000, 600, 1)
+            .expect("Failed to record large grep");
+        tracker
+            .record("rg tiny", "rtk grep", 10, 0, 1)
+            .expect("Failed to record tiny grep");
+
+        let summary = tracker.get_summary().expect("Failed to get summary");
+        let grep = summary
+            .by_command
+            .iter()
+            .find(|(cmd, _, _, _, _)| cmd == "rtk grep")
+            .expect("rtk grep summary missing");
+
+        assert_eq!(grep.1, 2);
+        assert_eq!(grep.2, 410);
+        let expected = 410.0 / 1010.0 * 100.0;
+        assert!(
+            (grep.3 - expected).abs() < 0.01,
+            "by-command pct must be weighted by input tokens; got {:.3}, expected {:.3}",
+            grep.3,
+            expected
         );
     }
 

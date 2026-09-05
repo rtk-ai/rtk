@@ -8,6 +8,8 @@ use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 const MAX_PIPE_MATCHES: usize = CAP_WARNINGS;
 const MAX_PIPE_FILES: usize = CAP_WARNINGS;
 const MAX_PIPE_DIRS: usize = CAP_LIST;
+/// Max characters per matched line before truncation in grep_wrapper
+const MAX_MATCH_CONTENT: usize = 120;
 
 pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
     match name {
@@ -111,7 +113,13 @@ fn grep_wrapper(input: &str) -> String {
     for (file, matches) in files {
         out.push_str(&format!("[file] {} ({}):\n", file, matches.len()));
         for (line_num, content) in matches.iter().take(MAX_PIPE_MATCHES) {
-            out.push_str(&format!("  {:>4}: {}\n", line_num, content.trim()));
+            let trimmed = content.trim();
+            let truncated = if trimmed.len() > MAX_MATCH_CONTENT {
+                format!("{}…", &trimmed[..MAX_MATCH_CONTENT])
+            } else {
+                trimmed.to_string()
+            };
+            out.push_str(&format!("  {:>4}: {}\n", line_num, truncated));
         }
         if matches.len() > MAX_PIPE_MATCHES {
             out.push_str(&format!("  +{}\n", matches.len() - MAX_PIPE_MATCHES));
@@ -628,6 +636,29 @@ Total Test time (real) =   0.01 sec\n";
             savings >= 40.0, // TODO: grep pipe filter below 60% target — improve grouping
             "grep filter: expected ≥40% savings, got {:.1}% (in={}, out={})",
             savings, count_tokens(&input), count_tokens(&output)
+        );
+    }
+
+    #[test]
+    fn test_grep_wrapper_truncates_long_lines() {
+        // Long content line (300+ chars) should be truncated to MAX_MATCH_CONTENT
+        let long_content = "x".repeat(300);
+        let input = format!("src/main.rs:42:{}\n", long_content);
+        let output = grep_wrapper(&input);
+        assert!(
+            output.len() < input.len(),
+            "truncated output ({}) should be shorter than input ({})",
+            output.len(),
+            input.len()
+        );
+        assert!(
+            output.contains('…'),
+            "truncated line should end with …"
+        );
+        assert!(
+            output.len() < 200,
+            "truncated output should be under 200 chars, got {}",
+            output.len()
         );
     }
 

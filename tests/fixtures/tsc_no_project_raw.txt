@@ -141,4 +141,3 @@ type: boolean
 default: true
 
 You can learn about all of the compiler options at https://aka.ms/tsc
-

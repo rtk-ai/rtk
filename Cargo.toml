@@ -35,7 +35,7 @@ toml = "0.8"
 chrono = "0.4"
 tempfile = "3"
 sha2 = "0.10"
-ureq = "2"
+ureq = { version = "2", optional = true }
 getrandom = "0.4"
 flate2 = "1.0"
 quick-xml = "0.37"
@@ -53,6 +53,10 @@ windows-sys = { version = "0.59", features = [
 
 [build-dependencies]
 toml = "0.8"
+
+[features]
+default = []
+telemetry = ["ureq"]
 
 [profile.release]
 opt-level = 3

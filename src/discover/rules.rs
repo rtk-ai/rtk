@@ -87,7 +87,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^npm\s+(exec|run|run-script|rum|urn|x)(\s|$)",
+        pattern: r"^npm\s+(exec|run|run-script|rum|urn|test|t|x)(\s|$)",
         rtk_cmd: "rtk npm",
         rewrite_prefixes: &["npm"],
         category: "PackageManager",
@@ -123,6 +123,31 @@ pub const RULES: &[RtkRule] = &[
         rtk_cmd: "rtk rg",
         pipeline_final_safe: true,
         rewrite_prefixes: &["rg"],
+        category: "Files",
+        savings_pct: 75.0,
+        ..RtkRule::DEFAULT
+    },
+    // PowerShell cmdlets — models other than Claude may send native cmdlets
+    RtkRule {
+        pattern: r"^(Get-ChildItem|gci)(\s|$)",
+        rtk_cmd: "rtk ls",
+        rewrite_prefixes: &["Get-ChildItem", "gci"],
+        category: "Files",
+        savings_pct: 65.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^(Get-Content|gc)\s+",
+        rtk_cmd: "rtk read",
+        rewrite_prefixes: &["Get-Content", "gc"],
+        category: "Files",
+        savings_pct: 60.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^(Select-String|sls)\s+",
+        rtk_cmd: "rtk grep",
+        rewrite_prefixes: &["Select-String", "sls"],
         category: "Files",
         savings_pct: 75.0,
         ..RtkRule::DEFAULT

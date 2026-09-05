@@ -279,7 +279,7 @@ fn gemini_settings() -> Option<Value> {
             })
             .unwrap_or(false);
     if trusted {
-        if let Some(root) = find_project_root() {
+        if let Some(root) = find_project_root_for(GEMINI_DIR) {
             if let Some(v) = read_json(&root.join(GEMINI_DIR).join(SETTINGS_JSON)) {
                 return Some(v);
             }
@@ -311,7 +311,7 @@ fn droid_settings_scopes() -> Vec<Value> {
     {
         dirs_to_read.push(home.join(DROID_DIR));
     }
-    if let Some(root) = find_project_root() {
+    if let Some(root) = find_project_root_for(DROID_DIR) {
         dirs_to_read.push(root.join(DROID_DIR));
     }
 
@@ -357,19 +357,18 @@ pub(crate) fn droid_rules_from_settings(
     (deny, Vec::new(), Vec::new())
 }
 
-/// Locate the project root by walking up from CWD looking for `.claude/`.
-///
-/// Falls back to `git rev-parse --show-toplevel` if not found via directory walk.
+/// Locate the Claude project root, falling back to the Git worktree root.
 fn find_project_root() -> Option<PathBuf> {
-    // Fast path: walk up CWD looking for .claude/ — no subprocess needed.
-    let mut dir = std::env::current_dir().ok()?;
-    loop {
-        if dir.join(CLAUDE_DIR).exists() {
-            return Some(dir);
-        }
-        if !dir.pop() {
-            break;
-        }
+    find_project_root_for(CLAUDE_DIR)
+}
+
+/// Locate an agent-specific project root by its config directory marker.
+/// Falls back to `git rev-parse --show-toplevel` for repositories that have not
+/// created the marker yet.
+fn find_project_root_for(marker: &str) -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    if let Some(root) = find_project_root_from(&cwd, marker) {
+        return Some(root);
     }
 
     // Fallback: git (spawns a subprocess, slower but handles monorepo layouts).
@@ -377,10 +376,21 @@ fn find_project_root() -> Option<PathBuf> {
     cmd.args(["rev-parse", "--show-toplevel"]);
     let result = exec_capture(&mut cmd).ok()?;
 
-    if result.success() {
-        return Some(PathBuf::from(result.stdout.trim()));
-    }
+    result
+        .success()
+        .then(|| PathBuf::from(result.stdout.trim()))
+}
 
+fn find_project_root_from(start: &std::path::Path, marker: &str) -> Option<PathBuf> {
+    let mut dir = start.to_path_buf();
+    loop {
+        if dir.join(marker).exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
     None
 }
 
@@ -506,6 +516,7 @@ fn split_compound_command(cmd: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_get_settings_paths_uses_the_resolved_claude_dir() {
@@ -1166,6 +1177,21 @@ mod tests {
         assert_eq!(deny, vec!["git push", "curl:*", "docker *"]);
         assert!(ask.is_empty());
         assert!(allow.is_empty());
+    }
+
+    #[test]
+    fn test_find_project_root_from_finds_droid_marker_in_non_git_tree() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("project");
+        let nested = root.join("src").join("nested");
+        std::fs::create_dir_all(root.join(DROID_DIR)).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(
+            find_project_root_from(&nested, DROID_DIR),
+            Some(root),
+            "Droid project settings must not depend on a .claude marker or Git repository"
+        );
     }
 
     #[test]

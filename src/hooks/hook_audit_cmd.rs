@@ -6,14 +6,8 @@ use std::path::PathBuf;
 
 /// Default log file location (aligned with hook's $HOME/.local/share/rtk/).
 fn default_log_path() -> PathBuf {
-    if let Ok(dir) = std::env::var("RTK_AUDIT_DIR") {
-        PathBuf::from(dir).join("hook-audit.log")
-    } else {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        PathBuf::from(home)
-            .join(".local/share/rtk")
-            .join("hook-audit.log")
-    }
+    crate::hooks::hook_cmd::hook_audit_log_path()
+        .unwrap_or_else(|| std::env::temp_dir().join("rtk").join("hook-audit.log"))
 }
 
 /// A single parsed audit log entry.
@@ -51,6 +45,10 @@ fn base_command(cmd: &str) -> String {
         1 => stripped[0].to_string(),
         _ => format!("{} {}", stripped[0], stripped[1]),
     }
+}
+
+fn is_rewrite_action(action: &str) -> bool {
+    action == "rewrite" || action.starts_with("rewrite:")
 }
 
 /// Filter entries to those within the last N days.
@@ -104,7 +102,7 @@ pub fn run(since_days: u64, verbose: u8) -> Result<()> {
 
     for entry in &filtered {
         *action_counts.entry(&entry.action).or_insert(0) += 1;
-        if entry.action == "rewrite" {
+        if is_rewrite_action(&entry.action) {
             *cmd_counts
                 .entry(base_command(&entry.original_cmd))
                 .or_insert(0) += 1;
@@ -112,7 +110,10 @@ pub fn run(since_days: u64, verbose: u8) -> Result<()> {
     }
 
     let total = filtered.len();
-    let rewrites = action_counts.get("rewrite").copied().unwrap_or(0);
+    let rewrites = filtered
+        .iter()
+        .filter(|entry| is_rewrite_action(&entry.action))
+        .count();
     let skips = total - rewrites;
     let rewrite_pct = if total > 0 {
         rewrites as f64 / total as f64 * 100.0
@@ -223,6 +224,50 @@ mod tests {
         assert_eq!(base_command("pytest"), "pytest");
     }
 
+    #[test]
+    fn test_rewrite_action_includes_codex_variant() {
+        assert!(is_rewrite_action("rewrite"));
+        assert!(is_rewrite_action("rewrite:codex"));
+        assert!(!is_rewrite_action("skip:no_match"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_default_log_path_prefers_userprofile_when_home_missing() {
+        let old_home = std::env::var_os("HOME");
+        let old_userprofile = std::env::var_os("USERPROFILE");
+        let old_audit_dir = std::env::var_os("RTK_AUDIT_DIR");
+        let home = std::env::temp_dir().join(format!("rtk-test-audit-home-{}", std::process::id()));
+
+        std::env::remove_var("HOME");
+        std::env::remove_var("RTK_AUDIT_DIR");
+        std::env::set_var("USERPROFILE", &home);
+
+        assert_eq!(
+            default_log_path(),
+            home.join(".local")
+                .join("share")
+                .join("rtk")
+                .join("hook-audit.log")
+        );
+
+        if let Some(value) = old_home {
+            std::env::set_var("HOME", value);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(value) = old_userprofile {
+            std::env::set_var("USERPROFILE", value);
+        } else {
+            std::env::remove_var("USERPROFILE");
+        }
+        if let Some(value) = old_audit_dir {
+            std::env::set_var("RTK_AUDIT_DIR", value);
+        } else {
+            std::env::remove_var("RTK_AUDIT_DIR");
+        }
+    }
+
     fn make_entry(action: &str, cmd: &str) -> AuditEntry {
         AuditEntry {
             timestamp: "2026-02-16T14:30:00Z".to_string(),
@@ -266,12 +311,15 @@ mod tests {
 2026-02-16T14:30:05Z | rewrite | git log --oneline -10 | rtk git log --oneline -10
 2026-02-16T14:30:06Z | rewrite | gh pr view 42 | rtk gh pr view 42
 2026-02-16T14:30:07Z | skip:no_match | mkdir -p foo | -
-2026-02-16T14:30:08Z | rewrite | cargo clippy --all-targets | rtk cargo clippy --all-targets"#;
+2026-02-16T14:30:08Z | rewrite:codex | cargo clippy --all-targets | rtk cargo clippy --all-targets"#;
 
         let entries: Vec<AuditEntry> = raw_log.lines().filter_map(parse_line).collect();
         assert_eq!(entries.len(), 8);
 
-        let rewrites = entries.iter().filter(|e| e.action == "rewrite").count();
+        let rewrites = entries
+            .iter()
+            .filter(|e| is_rewrite_action(&e.action))
+            .count();
         assert_eq!(rewrites, 5);
 
         let skips = entries

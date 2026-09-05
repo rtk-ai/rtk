@@ -38,7 +38,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`cursor/`](cursor/README.md)** — Shell hook, Cursor JSON format, empty `{}` response requirement
 - **[`cline/`](cline/README.md)** — Rules file (prompt-level), `.clinerules` project-local installation
 - **[`windsurf/`](windsurf/README.md)** — Rules file (prompt-level), `.windsurfrules` workspace-scoped
-- **[`codex/`](codex/README.md)** — Awareness document, `AGENTS.md` integration, `$CODEX_HOME` or `~/.codex/` location
+- **[`codex/`](codex/README.md)** — Native `PreToolUse` hook, `rtk hook codex`, `AGENTS.md` / `RTK.md` integration, `$CODEX_HOME` or `~/.codex/` location
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
 - **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, local `isBashToolCallEvent` guard, in-place mutation, `~/.pi/agent/extensions/`; **shared with Oh My Pi (OMP)** — OMP installs the same file at `.omp/extensions/` via its `legacy-pi-compat` layer
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
@@ -55,7 +55,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | Gemini CLI | Rust binary (`rtk hook gemini`) | Transparent rewrite | Yes (`hookSpecificOutput`) |
 | Cline / Roo Code | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |
-| Codex CLI | AGENTS.md / instructions | Prompt-level guidance | N/A |
+| Codex CLI | Rust binary (`rtk hook codex`) + AGENTS.md / RTK.md | Transparent rewrite | Yes (`updatedInput`) |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | In-place mutation | Yes |
 | Pi | TypeScript extension (`tool_call` event) | In-place mutation | Yes |
 | Oh My Pi (OMP) | TypeScript extension (`tool_call` event, shared with Pi) | In-place mutation | Yes |
@@ -270,9 +270,9 @@ New integrations must follow the [Exit Code Contract](#exit-code-contract) and [
 
 | Tier | Mechanism | Maintenance | Examples |
 |------|-----------|-------------|----------|
-| **Full hook** | Shell script or Rust binary, intercepts commands via agent's hook API | High — must track agent API changes | Claude Code, Cursor, Copilot, Gemini |
+| **Full hook** | Shell script or Rust binary, intercepts commands via agent's hook API | High — must track agent API changes | Claude Code, Codex, Cursor, Copilot, Gemini |
 | **Plugin** | TypeScript/JS/Python plugin in agent's plugin system | Medium — agent manages loading | OpenCode, Hermes, Pi, Oh My Pi |
-| **Rules file** | Prompt-level instructions the agent reads | Low — no code to break | Cline, Windsurf, Codex |
+| **Rules file** | Prompt-level instructions the agent reads | Low — no code to break | Cline, Windsurf |
 
 ### Eligibility
 

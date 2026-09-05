@@ -2,21 +2,12 @@
 
 **Usage**: Token-optimized CLI proxy for shell commands.
 
-## Codex CLI Hook and Codex App Fallback
+## Hook-Based Auto-Rewrite (Active)
 
-Codex CLI shell commands are automatically rewritten by the Codex PreToolUse hook.
+Bash commands are automatically rewritten by the Codex PreToolUse hook.
 Example: `git status` → `rtk git status` (transparent, no model awareness required).
 
-Codex App internal or programmatic tool calls may bypass CLI `hooks.json`. In Codex App,
-prefix eligible external CLI commands with `rtk` inside the shell invocation:
-
-```bash
-rtk git status
-rtk cargo test
-rtk npm run build
-```
-
-Keep unsupported commands and PowerShell cmdlets native so their semantics are unchanged.
+You don't need to manually prefix commands — the hook handles it silently.
 
 ## Meta Commands (manually prefixed)
 

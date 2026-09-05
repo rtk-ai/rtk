@@ -164,8 +164,54 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         failures.push(current_failure.join("\n"));
     }
 
+    // Collection/import failures do not produce a passed/failed test summary.
+    // Surface their root-cause lines before falling back to the true no-tests case.
+    if summary_line.is_empty() {
+        if let Some(collection_failure) = summarize_collection_failure(output) {
+            return collection_failure;
+        }
+    }
+
     // Build compact output
     build_pytest_summary(&summary_line, &test_files, &failures, &xfail_lines)
+}
+
+fn summarize_collection_failure(output: &str) -> Option<String> {
+    let lower = output.to_ascii_lowercase();
+    if !lower.contains("error collecting")
+        && !lower.contains("error during collection")
+        && !lower.contains("errors during collection")
+    {
+        return None;
+    }
+
+    let mut details: Vec<String> = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        let is_signal = lower.contains("error collecting")
+            || lower.starts_with("importerror while importing test module")
+            || lower.starts_with("e   modulenotfounderror:")
+            || lower.starts_with("e   importerror:")
+            || lower.contains("error during collection")
+            || lower.contains("errors during collection");
+        if is_signal && details.last().is_none_or(|previous| previous != trimmed) {
+            details.push(trimmed.to_string());
+        }
+    }
+
+    let mut result = String::from("Pytest: collection failed");
+    for line in details.iter().take(MAX_PYTEST_FAILURES) {
+        result.push('\n');
+        result.push_str(line);
+    }
+    if details.len() > MAX_PYTEST_FAILURES {
+        result.push_str(&format!(
+            "\n… +{} more collection errors",
+            details.len() - MAX_PYTEST_FAILURES
+        ));
+    }
+    Some(result)
 }
 
 #[derive(Default)]
@@ -409,6 +455,29 @@ collected 0 items
 
         let result = filter_pytest_output(output);
         assert!(result.contains("No tests collected"));
+    }
+
+    #[test]
+    fn test_filter_pytest_collection_error_is_not_no_tests() {
+        let output = r#"============================= test session starts =============================
+collecting ... collected 0 items / 1 error
+
+==================================== ERRORS ====================================
+____________ ERROR collecting tests/test_customer_agent.py ______________
+ImportError while importing test module 'tests/test_customer_agent.py'.
+E   ModuleNotFoundError: No module named 'playwright'
+=========================== short test summary info ============================
+ERROR tests/test_customer_agent.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+============================== 1 error in 0.24s ==============================="#;
+
+        let filtered = filter_pytest_output(output);
+
+        assert!(filtered.starts_with("Pytest: collection failed"));
+        assert!(filtered.contains("ERROR collecting tests/test_customer_agent.py"));
+        assert!(filtered.contains("ModuleNotFoundError: No module named 'playwright'"));
+        assert!(filtered.contains("1 error during collection"));
+        assert!(!filtered.contains("No tests collected"));
     }
 
     #[test]
