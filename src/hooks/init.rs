@@ -1278,7 +1278,8 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result
         "matcher": "Bash",
         "hooks": [{
             "type": "command",
-            "command": hook_command
+            "command": hook_command,
+            "timeout": 10
         }]
     }));
     Ok(())
@@ -5302,7 +5303,8 @@ fn patch_gemini_settings(
         "matcher": "run_shell_command",
         "hooks": [{
             "type": "command",
-            "command": hook_cmd
+            "command": hook_cmd,
+            "timeout": 10
         }]
     });
 
@@ -7589,6 +7591,9 @@ mod tests {
 
         let command = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(command, hook_command);
+
+        let timeout = pre_tool_use[0]["hooks"][0]["timeout"].as_u64().unwrap();
+        assert_eq!(timeout, 10);
     }
 
     #[test]
@@ -7638,6 +7643,29 @@ mod tests {
 
         // And add hooks
         assert!(json_content.get("hooks").is_some());
+    }
+
+    #[test]
+    fn test_patch_gemini_settings_sets_timeout() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = temp.path().join("rtk-gemini.sh");
+        fs::write(&hook_path, "#!/bin/sh\nrtk hook gemini").unwrap();
+
+        patch_gemini_settings(temp.path(), &hook_path, PatchMode::Auto, 0).unwrap();
+
+        let settings_path = temp.path().join(SETTINGS_JSON);
+        let content = fs::read_to_string(&settings_path).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        let before_tool = json["hooks"][BEFORE_TOOL_KEY].as_array().unwrap();
+        assert_eq!(before_tool.len(), 1);
+
+        let hook = &before_tool[0]["hooks"][0];
+        assert_eq!(hook["timeout"].as_u64().unwrap(), 10);
+        assert_eq!(
+            hook["command"].as_str().unwrap(),
+            hook_path.to_str().unwrap()
+        );
     }
 
     // Tests for atomic_write()
