@@ -23,20 +23,81 @@ use regex::Regex;
 /// [`decode_process_output`](super::utils::decode_process_output) exists to
 /// read, so the streamed path decodes them the same way the captured path
 /// does rather than going straight to U+FFFD.
-fn read_lines_lossy(reader: impl Read) -> impl Iterator<Item = String> {
-    BufReader::new(reader).split(b'\n').filter_map(|res| {
-        let mut buf = match res {
-            Ok(buf) => buf,
-            Err(e) => {
-                eprintln!("rtk: stream read error: {}", e);
-                return None;
-            }
-        };
-        if buf.last() == Some(&b'\r') {
-            buf.pop();
+struct BoundedLines<R> {
+    reader: BufReader<R>,
+    line: Vec<u8>,
+    truncated: bool,
+    warned: bool,
+    finished: bool,
+}
+
+impl<R: Read> BoundedLines<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader: BufReader::new(reader),
+            line: Vec::new(),
+            truncated: false,
+            warned: false,
+            finished: false,
         }
-        Some(super::utils::decode_process_output(&buf))
-    })
+    }
+
+    fn finish_line(&mut self) -> String {
+        if self.line.last() == Some(&b'\r') {
+            self.line.pop();
+        }
+        let text = super::utils::decode_process_output(&self.line);
+        if self.truncated && !self.warned {
+            self.warned = true;
+            eprintln!("[rtk] warning: input line exceeds 10 MiB — line truncated");
+        }
+        self.line.clear();
+        text
+    }
+}
+
+impl<R: Read> Iterator for BoundedLines<R> {
+    type Item = String;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        self.line.clear();
+        self.truncated = false;
+
+        loop {
+            let buf = match self.reader.fill_buf() {
+                Ok(buf) => buf,
+                Err(e) => {
+                    eprintln!("rtk: stream read error: {}", e);
+                    self.finished = true;
+                    return None;
+                }
+            };
+            if buf.is_empty() {
+                self.finished = true;
+                return (!self.line.is_empty()).then(|| self.finish_line());
+            }
+
+            let newline = buf.iter().position(|byte| *byte == b'\n');
+            let content_len = newline.unwrap_or(buf.len());
+            let remaining = RAW_CAP.saturating_sub(self.line.len());
+            let take = content_len.min(remaining);
+            let truncated = content_len > remaining;
+            let consumed = newline.map_or(buf.len(), |index| index + 1);
+            self.line.extend_from_slice(&buf[..take]);
+            self.reader.consume(consumed);
+            self.truncated |= truncated;
+            if newline.is_some() {
+                return Some(self.finish_line());
+            }
+        }
+    }
+}
+
+fn read_lines_lossy(reader: impl Read) -> impl Iterator<Item = String> {
+    BoundedLines::new(reader)
 }
 
 pub trait StreamFilter {
@@ -285,6 +346,47 @@ pub fn status_to_exit_code(status: std::process::ExitStatus) -> i32 {
 // ISSUE #897: ChildGuard RAII prevents zombie processes that caused kernel panic
 pub const RAW_CAP: usize = 10_485_760; // 10 MiB
 
+fn read_bounded_output(mut reader: impl Read) -> std::io::Result<(String, bool)> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut truncated = false;
+    loop {
+        let count = reader.read(&mut chunk)?;
+        if count == 0 {
+            break;
+        }
+        if bytes.len() < RAW_CAP {
+            let take = (RAW_CAP - bytes.len()).min(count);
+            bytes.extend_from_slice(&chunk[..take]);
+            truncated |= take < count;
+        } else {
+            truncated = true;
+        }
+    }
+    Ok((super::utils::decode_process_output(&bytes), truncated))
+}
+
+fn retain_filtered(filtered: &mut String, capped: &mut bool, output: &str) {
+    if *capped {
+        return;
+    }
+    let remaining = RAW_CAP.saturating_sub(filtered.len());
+    if output.len() <= remaining {
+        filtered.push_str(output);
+        return;
+    }
+
+    let end = output
+        .char_indices()
+        .map(|(index, ch)| index + ch.len_utf8())
+        .take_while(|end| *end <= remaining)
+        .last()
+        .unwrap_or(0);
+    filtered.push_str(&output[..end]);
+    *capped = true;
+    eprintln!("[rtk] warning: filtered output exceeds 10 MiB — retention truncated");
+}
+
 pub fn run_streaming(
     cmd: &mut Command,
     stdin_mode: StdinMode,
@@ -364,6 +466,7 @@ pub fn run_streaming(
     let mut raw_stdout = String::new();
     let mut raw_stderr = String::new();
     let mut filtered = String::new();
+    let mut filtered_capped = false;
     let mut capped_out = false;
     let mut capped_err = false;
     let mut saved_filter: Option<Box<dyn StreamFilter + '_>> = None;
@@ -375,7 +478,7 @@ pub fn run_streaming(
             Stderr(String),
         }
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(1);
         let tx_out = tx.clone();
         let stdout_thread = std::thread::spawn(move || {
             for line in read_lines_lossy(stdout) {
@@ -399,7 +502,9 @@ pub fn run_streaming(
             let stderr_handle = io::stderr();
             let mut err_out = stderr_handle.lock();
 
-            for msg in rx {
+            let receiver = rx;
+            let mut broken_pipe = false;
+            while let Ok(msg) = receiver.recv() {
                 let (line, is_stderr) = match msg {
                     StreamLine::Stderr(l) => (l, true),
                     StreamLine::Stdout(l) => (l, false),
@@ -424,29 +529,42 @@ pub fn run_streaming(
                     }
                 }
                 filter_fd_is_stderr = is_stderr;
-                if let Some(output) = filter.feed_line(&line) {
-                    filtered.push_str(&output);
+                let output = filter.feed_line(&line);
+                if let Some(output) = output {
+                    retain_filtered(&mut filtered, &mut filtered_capped, &output);
                     let dest: &mut dyn Write = if is_stderr { &mut err_out } else { &mut out };
                     match write!(dest, "{}", output) {
-                        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => break,
+                        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+                            child.0.kill().ok();
+                            broken_pipe = true;
+                            drop(receiver);
+                            break;
+                        }
                         Err(e) => return Err(e.into()),
                         Ok(_) => {}
                     }
                 }
             }
-            let tail = filter.flush();
-            filtered.push_str(&tail);
-            let flush_dest: &mut dyn Write = if filter_fd_is_stderr {
-                &mut err_out
-            } else {
-                &mut out
-            };
-            match write!(flush_dest, "{}", tail) {
-                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
-                Err(e) => return Err(e.into()),
-                Ok(_) => {}
+            if !broken_pipe {
+                let tail = filter.flush();
+                retain_filtered(&mut filtered, &mut filtered_capped, &tail);
+                let flush_dest: &mut dyn Write = if filter_fd_is_stderr {
+                    &mut err_out
+                } else {
+                    &mut out
+                };
+                match write!(flush_dest, "{}", tail) {
+                    Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+                        child.0.kill().ok();
+                        broken_pipe = true;
+                    }
+                    Err(e) => return Err(e.into()),
+                    Ok(_) => {}
+                }
             }
-            saved_filter = Some(filter);
+            if !broken_pipe {
+                saved_filter = Some(filter);
+            }
         }
 
         stdout_thread.join().ok();
@@ -578,6 +696,47 @@ pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
 pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
     cmd.stdin(Stdio::inherit());
     capture(cmd)
+}
+
+/// Like exec_capture_stdin, but drains both pipes while retaining at most
+/// RAW_CAP bytes per stream. Returns the output and whether either stream was capped.
+pub fn exec_capture_stdin_bounded(cmd: &mut Command) -> Result<(CaptureResult, bool)> {
+    let program = cmd.get_program().to_string_lossy().into_owned();
+    cmd.stdin(Stdio::inherit());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let mut child = cmd.spawn().context("Failed to execute command")?;
+    let stdout = child.stdout.take().context("No child stdout handle")?;
+    let stderr = child.stderr.take().context("No child stderr handle")?;
+    let stdout_thread = std::thread::spawn(move || read_bounded_output(stdout));
+    let stderr_thread = std::thread::spawn(move || read_bounded_output(stderr));
+    let stdout_result = stdout_thread
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("stdout reader thread panicked")));
+    if stdout_result.is_err() {
+        child.kill().ok();
+    }
+    let stderr_result = stderr_thread
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("stderr reader thread panicked")));
+    if stderr_result.is_err() {
+        child.kill().ok();
+    }
+    let status = child.wait().context("Failed to wait for child")?;
+    let (stdout, stdout_capped) = stdout_result?;
+    let (stderr, stderr_capped) = stderr_result?;
+    let truncated = stdout_capped || stderr_capped;
+    if truncated {
+        eprintln!("[rtk] warning: captured output exceeds 10 MiB — capture truncated");
+    }
+    Ok((
+        CaptureResult {
+            stdout,
+            stderr,
+            exit_code: super::utils::exit_code_from_status(&status, &program),
+        },
+        truncated,
+    ))
 }
 
 /// Run `cmd` to completion, decode what it wrote, and report the exit code.
@@ -908,6 +1067,22 @@ pub(crate) mod tests {
             "stderr in raw should be capped at ~10 MiB, got {} bytes",
             result.raw.len()
         );
+    }
+
+    #[test]
+    fn test_retain_filtered_cap_at_10mb() {
+        let mut filtered = String::new();
+        let mut capped = false;
+        let output = "x".repeat(RAW_CAP + 1);
+        retain_filtered(&mut filtered, &mut capped, &output);
+        assert!(
+            filtered.len() <= RAW_CAP,
+            "retained filtered output should be capped at 10 MiB, got {} bytes",
+            filtered.len()
+        );
+        assert!(capped);
+        retain_filtered(&mut filtered, &mut capped, "more");
+        assert_eq!(filtered.len(), RAW_CAP);
     }
 
     #[test]

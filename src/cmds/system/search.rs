@@ -7,10 +7,10 @@
 //! `file:line:content` shape.
 
 use crate::core::stream::{
-    self, exec_capture, exec_capture_stdin, CaptureResult, FilterMode, StdinMode, StreamFilter,
+    self, exec_capture, CaptureResult, FilterMode, StdinMode, StreamFilter,
 };
 use crate::core::tracking;
-use crate::core::utils::{resolved_command, strip_ansi};
+use crate::core::utils::resolved_command;
 use crate::core::{args_utils, config};
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -301,9 +301,9 @@ fn engine_capture<T: AsRef<str>>(
     extra_args: &[T],
     patterns: &[String],
     paths: &[String],
-) -> Result<CaptureResult> {
+) -> Result<(CaptureResult, bool)> {
     let mut cmd = engine_command(engine, extra_args, patterns, paths, false);
-    exec_capture_stdin(&mut cmd).context("search failed")
+    stream::exec_capture_stdin_bounded(&mut cmd).context("search failed")
 }
 
 fn engine_command<T: AsRef<str>>(
@@ -345,6 +345,13 @@ fn format_match_line(line: &str, show_file: bool, show_line: bool) -> Option<Str
     output.push_str(content);
     output.push('\n');
     Some(output)
+}
+
+fn recovery_hint(engine: Engine) -> String {
+    format!(
+        "[rtk] output capped; rerun the same command with rtk proxy {} ... for full output",
+        engine.label()
+    )
 }
 
 /// Emits each piped match as it arrives. Buffered search waits for EOF, so
@@ -460,12 +467,9 @@ fn passthrough<T: AsRef<str>>(
             .context("search failed")?
             .exit_code
     } else {
-        let result = exec_capture_stdin(&mut cmd).context("search failed")?;
-        print!("{}", strip_ansi(&result.stdout));
-        if !result.stderr.is_empty() {
-            eprint!("{}", result.stderr);
-        }
-        result.exit_code
+        stream::run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough)
+            .context("search failed")?
+            .exit_code
     };
 
     timer.track_passthrough(real_cmd, &format!("rtk {} (passthrough)", real_cmd));
@@ -562,14 +566,13 @@ pub fn run(
         );
     }
 
-    let result = engine_capture(engine, &extra_args, &patterns, &paths)?;
-
+    let (result, capture_capped) = engine_capture(engine, &extra_args, &patterns, &paths)?;
     let exit_code = result.exit_code;
     let raw_output = result.stdout.clone();
 
     // Unparseable shape re-runs verbatim below (with its own stderr), so handle it
     // before surfacing this run's stderr (#2333).
-    if unparsed_signal(&raw_output) > 0 {
+    if !capture_capped && unparsed_signal(&raw_output) > 0 {
         return passthrough(&timer, engine, &args, &real_cmd, false);
     }
 
@@ -577,7 +580,10 @@ pub fn run(
         eprint!("{}", result.stderr);
     }
 
-    if result.stdout.trim().is_empty() {
+    if raw_output.trim().is_empty() {
+        if capture_capped {
+            println!("{}", recovery_hint(engine));
+        }
         timer.track(&real_cmd, &rtk_label, &raw_output, "");
         return Ok(exit_code);
     }
@@ -709,7 +715,16 @@ pub fn run(
         body
     };
 
-    let output = if capped && rtk_output.len() < plain.len() {
+    let output = if capture_capped {
+        let mut output = if capped && rtk_output.len() < plain.len() {
+            rtk_output
+        } else {
+            plain
+        };
+        output.push_str(&recovery_hint(engine));
+        output.push('\n');
+        output
+    } else if capped && rtk_output.len() < plain.len() {
         rtk_output
     } else {
         plain

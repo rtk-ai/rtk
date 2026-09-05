@@ -80,6 +80,62 @@ fn rg_available() -> bool {
         .unwrap_or(false)
 }
 
+#[test]
+fn rg_file_search_signals_truncated_long_line() {
+    if !rg_available() {
+        return;
+    }
+    let input_dir = tempfile::tempdir().expect("input dir");
+    let input = input_dir.path().join("input.txt");
+    let content = format!("MATCH {}\n", "x".repeat(10_485_760 + 1024));
+    std::fs::write(&input, content).expect("write input");
+
+    let out = rtk()
+        .args(["rg", "MATCH", input.to_str().unwrap()])
+        .output()
+        .expect("run rtk rg");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("rtk proxy"),
+        "capped long search output must include a recovery hint"
+    );
+}
+
+#[test]
+fn grep_exits_promptly_after_stdout_broken_pipe() {
+    let mut source = Command::new("yes")
+        .arg("foo")
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn yes");
+    let source_stdout = source.stdout.take().expect("yes stdout");
+    let mut child = rtk()
+        .args(["grep", "foo"])
+        .stdin(source_stdout)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rtk grep");
+    let stdout = child.stdout.take().expect("rtk stdout");
+    let mut reader = BufReader::new(stdout);
+    let mut first = String::new();
+    reader.read_line(&mut first).expect("read first match");
+    drop(reader);
+
+    let pid = child.id().to_string();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || tx.send(child.wait()).ok());
+    let status = rx.recv_timeout(Duration::from_secs(2));
+    if status.is_err() {
+        Command::new("kill").args(["-KILL", &pid]).status().ok();
+        source.kill().ok();
+        source.wait().ok();
+        panic!("rtk grep did not exit promptly after stdout closed");
+    }
+    source.kill().ok();
+    source.wait().ok();
+}
+
 fn write_temp(content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("test.txt");
