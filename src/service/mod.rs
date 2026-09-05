@@ -392,6 +392,43 @@ pub fn redact_sensitive(value: &str) -> String {
     SECRET_RE.replace_all(value, "[REDACTED]").into_owned()
 }
 
+/// Redact secrets across line boundaries while preserving one output string
+/// for each input line. This keeps recovery search line numbers intact while
+/// preventing a credential split over adjacent lines from leaking.
+pub(crate) fn redact_sensitive_lines(lines: &[String]) -> Vec<String> {
+    let joined = lines.join("\n");
+    let matches = SECRET_RE
+        .find_iter(&joined)
+        .map(|matched| (matched.start(), matched.end()))
+        .collect::<Vec<_>>();
+    let mut offset = 0usize;
+
+    lines
+        .iter()
+        .map(|line| {
+            let line_start = offset;
+            let line_end = line_start.saturating_add(line.len());
+            offset = line_end.saturating_add(1);
+            let mut redacted = line.clone();
+            let ranges = matches
+                .iter()
+                .filter_map(|(start, end)| {
+                    let local_start = (*start).max(line_start);
+                    let local_end = (*end).min(line_end);
+                    (local_start < local_end).then_some((
+                        local_start.saturating_sub(line_start),
+                        local_end.saturating_sub(line_start),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            for (start, end) in ranges.into_iter().rev() {
+                redacted.replace_range(start..end, "[REDACTED]");
+            }
+            redacted
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,6 +501,17 @@ mod tests {
         assert!(!value.contains("xyz"));
         assert!(!value.contains("secret"));
         assert!(value.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redacts_multiline_secret_without_losing_line_boundaries() {
+        let lines = vec![
+            "Authorization: Bearer".to_string(),
+            "FAKE_TEST_TOKEN".to_string(),
+        ];
+        let redacted = redact_sensitive_lines(&lines);
+        assert_eq!(redacted.len(), 2);
+        assert!(!redacted.join("\n").contains("FAKE_TEST_TOKEN"));
     }
 
     #[test]

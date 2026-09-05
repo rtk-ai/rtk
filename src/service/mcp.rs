@@ -1,8 +1,8 @@
 //! Synchronous stdio MCP adapter for RTK.
 
 use super::{
-    debug_enabled, redact_sensitive, rewrite, run_filtered_with_request, OutputRequest,
-    DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_MS,
+    debug_enabled, redact_sensitive, redact_sensitive_lines, rewrite, run_filtered_with_request,
+    OutputRequest, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_MS,
 };
 use crate::core::config::Config;
 use crate::core::tracking::Tracker;
@@ -609,7 +609,7 @@ fn read_bounded_recovery_line<R: BufRead>(
             .iter()
             .position(|byte| *byte == b'\n')
             .map_or(buffer.len(), |position| position + 1);
-        let buffer_len = buffer.len();
+        let line_terminated = buffer[..consumed].last() == Some(&b'\n');
         let chunk = buffer[..consumed].to_vec();
 
         if let Some(pattern) = literal_pattern.filter(|pattern| !pattern.is_empty()) {
@@ -634,7 +634,7 @@ fn read_bounded_recovery_line<R: BufRead>(
         total_bytes = total_bytes.saturating_add(chunk.len());
         reader.consume(consumed);
 
-        if consumed < buffer_len {
+        if line_terminated {
             break;
         }
     }
@@ -671,6 +671,12 @@ fn render_bounded_recovery_line(line: &BoundedRecoveryLine, max_bytes: usize) ->
 fn recovery_line_text(line: &BoundedRecoveryLine) -> String {
     let rendered = render_bounded_recovery_line(line, MAX_RECOVERY_LINE_BYTES);
     String::from_utf8_lossy(&rendered)
+        .trim_end_matches(['\r', '\n'])
+        .to_string()
+}
+
+fn recovery_line_original_text(line: &BoundedRecoveryLine) -> String {
+    String::from_utf8_lossy(&line.prefix)
         .trim_end_matches(['\r', '\n'])
         .to_string()
 }
@@ -767,6 +773,20 @@ struct PendingRecoveryMatch {
     until: usize,
 }
 
+fn recovery_match_value(line: usize, text: String, context: Vec<(usize, String)>) -> Value {
+    let mut texts = Vec::with_capacity(context.len().saturating_add(1));
+    texts.push(text);
+    texts.extend(context.iter().map(|(_, text)| text.clone()));
+    let redacted = redact_sensitive_lines(&texts);
+    let match_text = redacted.first().cloned().unwrap_or_default();
+    let context = context
+        .into_iter()
+        .zip(redacted.into_iter().skip(1))
+        .map(|((line, _), text)| json!({ "line": line, "text": text }))
+        .collect::<Vec<_>>();
+    json!({ "line": line, "text": match_text, "context": context })
+}
+
 fn search_recovery_file(
     recovery_id: &str,
     path: &Path,
@@ -794,6 +814,7 @@ fn search_recovery_file(
         (!use_regex).then_some(pattern.as_bytes()),
     )? {
         line_number = line_number.saturating_add(1);
+        let original_text = recovery_line_original_text(&line);
         let text = recovery_line_text(&line);
         truncated |= line.truncated;
 
@@ -803,14 +824,7 @@ fn search_recovery_file(
                 found.context.push((line_number, text.clone()));
             }
             if line_number >= found.until {
-                matches.push(json!({
-                    "line": found.line,
-                    "text": redact_sensitive(&found.text),
-                    "context": found.context.into_iter().map(|(line, text)| json!({
-                        "line": line,
-                        "text": redact_sensitive(&text)
-                    })).collect::<Vec<_>>()
-                }));
+                matches.push(recovery_match_value(found.line, found.text, found.context));
             } else {
                 remaining.push(found);
             }
@@ -818,8 +832,8 @@ fn search_recovery_file(
         pending = remaining;
 
         let is_match = regex.as_ref().map_or_else(
-            || line.literal_match || text.contains(pattern),
-            |matcher| matcher.is_match(&text),
+            || line.literal_match,
+            |matcher| matcher.is_match(&original_text),
         );
         if is_match {
             if matches.len() + pending.len() >= max_matches {
@@ -833,14 +847,11 @@ fn search_recovery_file(
                 .collect::<Vec<_>>();
             match_context.push((line_number, text.clone()));
             if context == 0 {
-                matches.push(json!({
-                    "line": line_number,
-                    "text": redact_sensitive(&text),
-                    "context": match_context.into_iter().map(|(line, text)| json!({
-                        "line": line,
-                        "text": redact_sensitive(&text)
-                    })).collect::<Vec<_>>()
-                }));
+                matches.push(recovery_match_value(
+                    line_number,
+                    text.clone(),
+                    match_context,
+                ));
             } else {
                 pending.push(PendingRecoveryMatch {
                     line: line_number,
@@ -858,14 +869,7 @@ fn search_recovery_file(
     }
 
     for found in pending {
-        matches.push(json!({
-            "line": found.line,
-            "text": redact_sensitive(&found.text),
-            "context": found.context.into_iter().map(|(line, text)| json!({
-                "line": line,
-                "text": redact_sensitive(&text)
-            })).collect::<Vec<_>>()
-        }));
+        matches.push(recovery_match_value(found.line, found.text, found.context));
     }
 
     Ok(json!({

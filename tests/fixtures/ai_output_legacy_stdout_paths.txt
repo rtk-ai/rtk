@@ -20,7 +20,7 @@ src/cmds/system/log_cmd.rs	prints=2	stdout_handles=0	fingerprint=77f4b957ab2f737
 src/cmds/system/ls.rs	prints=1	stdout_handles=0	fingerprint=9aa9e1d4579f9b83
 src/cmds/system/pipe_cmd.rs	prints=1	stdout_handles=1	fingerprint=819f69ecd9863fd9
 src/cmds/system/read.rs	prints=2	stdout_handles=0	fingerprint=fe8445f258ea9a18
-src/cmds/system/search.rs	prints=3	stdout_handles=0	fingerprint=11edca54a08f1ff5
+src/cmds/system/search.rs	prints=3	stdout_handles=0	fingerprint=5ca6e79291846bc2
 src/cmds/system/summary.rs	prints=1	stdout_handles=0	fingerprint=de7a84cd3e84d9a4
 src/cmds/system/wc_cmd.rs	prints=1	stdout_handles=0	fingerprint=7280b80d2827dfda
 src/cmds/windows/orchestrator.rs	prints=0	stdout_handles=1	fingerprint=5a8722d8634288d6

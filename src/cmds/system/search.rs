@@ -955,7 +955,7 @@ fn run_rg_ai_streaming(
         &result.raw_stdout,
         &result.raw_stderr,
         result.observed_output_bytes(),
-        result.capture_complete,
+        rg_capture_is_complete(result.capture_complete, meta),
         &tracking_paths,
         &tracking_extra_args,
     );
@@ -967,6 +967,10 @@ fn run_rg_ai_streaming(
         runner::output_tracking_from_emission(OutputContract::AiOwned(BudgetClass::Source), meta),
     );
     Ok(result.exit_code)
+}
+
+fn rg_capture_is_complete(stream_capture_complete: bool, meta: EmissionMeta) -> bool {
+    stream_capture_complete && meta.runtime_error != Some("capture_incomplete")
 }
 
 fn rg_tracking_input_tokens(
@@ -1762,6 +1766,15 @@ mod tests {
             rg_tracking_input_tokens(augmented, "", augmented.len(), true, &[".".into()], &[]),
             tracking::estimate_tokens(native)
         );
+    }
+
+    #[test]
+    fn rg_tracking_treats_truncated_preview_as_incomplete_capture() {
+        let meta = EmissionMeta {
+            runtime_error: Some("capture_incomplete"),
+            ..Default::default()
+        };
+        assert!(!rg_capture_is_complete(true, meta));
     }
     use crate::core::ai_output::Omission;
 

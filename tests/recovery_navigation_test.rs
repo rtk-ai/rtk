@@ -12,6 +12,7 @@ fn artifact() -> (tempfile::TempDir, String) {
         content.push_str(&format!("L{line:03}\n"));
     }
     content.push_str("token=super-secret\n");
+    content.push_str("Authorization: Bearer\nFAKE_TEST_TOKEN\n");
     content.replace_range(
         content.find("L180").expect("line 180")..content.find("L180").unwrap() + 4,
         "ERROR",
@@ -155,6 +156,19 @@ fn mcp_recovery_navigation_redacts_sensitive_content() {
     let found = &result["matches"][0];
     assert_eq!(found["text"], "[REDACTED]");
     assert!(!found.to_string().contains("super-secret"));
+
+    let multiline = call_mcp(
+        temp.path(),
+        "search_recovery",
+        serde_json::json!({
+            "recovery_id": id,
+            "pattern": "Authorization",
+            "context": 1
+        }),
+    );
+    assert!(!multiline["result"]["structuredContent"]["matches"]
+        .to_string()
+        .contains("FAKE_TEST_TOKEN"));
 }
 
 #[test]
@@ -207,6 +221,52 @@ fn mcp_recovery_page_bounds_oversized_lines_and_advances() {
         .as_str()
         .expect("bounded match text")
         .contains("[rtk: line truncated"));
+
+    let marker_search = call_mcp(
+        temp.path(),
+        "search_recovery",
+        serde_json::json!({
+            "recovery_id": id,
+            "pattern": "rtk: line truncated",
+            "context": 0
+        }),
+    );
+    assert_eq!(
+        marker_search["result"]["structuredContent"]["match_count"],
+        0
+    );
+}
+
+#[test]
+fn mcp_recovery_reader_keeps_buffer_boundary_newlines() {
+    let temp = tempfile::tempdir().expect("recovery directory");
+    let id = "1234567890_boundary.lossless.log";
+    let content = format!("{}\nsecond\nthird\n", "x".repeat(8_191));
+    std::fs::write(temp.path().join(id), content).expect("write boundary fixture");
+
+    let page = call_mcp(
+        temp.path(),
+        "read_recovery",
+        serde_json::json!({
+            "recovery_id": id,
+            "lines": "2:2"
+        }),
+    );
+    assert_eq!(page["result"]["structuredContent"]["content"], "second\n");
+
+    let search = call_mcp(
+        temp.path(),
+        "search_recovery",
+        serde_json::json!({
+            "recovery_id": id,
+            "pattern": "second",
+            "context": 0
+        }),
+    );
+    assert_eq!(
+        search["result"]["structuredContent"]["matches"][0]["line"],
+        2
+    );
 }
 
 #[test]
