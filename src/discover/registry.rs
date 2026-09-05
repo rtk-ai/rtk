@@ -63,8 +63,11 @@ static COMPILED: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 static ENV_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
     let double_quoted = r#""(?:[^"\\]|\\.)*""#;
     let single_quoted = r#"'(?:[^'\\]|\\.)*'"#;
-    let unquoted = r#"[^\s]*"#;
-    let env_value = format!("(?:{}|{}|{})", double_quoted, single_quoted, unquoted);
+    // Quotes must be handled by the complete quoted alternatives above.
+    // Otherwise regex backtracking can reinterpret a quoted assignment as a
+    // partial unquoted value and expose literal data as a command (#3262).
+    let unquoted = r#"[^\s'"]+"#;
+    let env_value = format!("(?:{}|{}|{})*", double_quoted, single_quoted, unquoted);
     let env_assign = format!(r#"[A-Z_][A-Z0-9_]*={}"#, env_value);
     // NOTE: `sudo` is intentionally NOT stripped here. Rewriting `sudo docker ps`
     // to `sudo rtk docker ps` breaks at runtime because `rtk` is not on root's
@@ -3069,6 +3072,14 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_env_concatenated_quoted_and_unquoted_value() {
+        assert_eq!(
+            rewrite_command_no_prefixes("FOO='bar baz'qux git status", &[]),
+            Some("FOO='bar baz'qux rtk git status".into())
+        );
+    }
+
+    #[test]
     fn test_classify_env_quoted_value_stripped() {
         assert_eq!(
             classify_command(r#"GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no" git push"#),
@@ -4998,6 +5009,96 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("git status; cargo test", &[]),
             Some("rtk git status; rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_quoted_assignment_data() {
+        let command = r#"D='# shellcheck disable=SC2034  # comment'; for f in hooks/*.sh; do sed -i '' -e "s|^TS_BACKUP=|${D}\nTS_BACKUP=|" "$f"; done"#;
+
+        assert_eq!(rewrite_command_no_prefixes(command, &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_compound_only_rewrites_commands_outside_assignment_quotes() {
+        let command = "D='# shellcheck | git status; $(whoami)' ; cargo test";
+
+        assert_eq!(
+            rewrite_command_no_prefixes(command, &[]),
+            Some("D='# shellcheck | git status; $(whoami)'; rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_double_quoted_assignment_data() {
+        let command = r#"D="run shellcheck later"; git status"#;
+
+        assert_eq!(
+            rewrite_command_no_prefixes(command, &[]),
+            Some(r#"D="run shellcheck later"; rtk git status"#.into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_double_quoted_prose_assignment() {
+        let command =
+            r#"T="chore(skills): make every Pocock skill model-invocable"; echo "len=${#T}""#;
+
+        assert_eq!(rewrite_command_no_prefixes(command, &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_single_quoted_prose_assignment() {
+        let command = r#"T='please make a cake'; printf '%s' "$T""#;
+
+        assert_eq!(rewrite_command_no_prefixes(command, &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_quoted_git_diff_with_argument() {
+        let command = "X='git diff --stat'; cargo test";
+
+        assert_eq!(
+            rewrite_command_no_prefixes(command, &[]),
+            Some("X='git diff --stat'; rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_embedded_quoted_git_diff() {
+        let command = "X='a git diff --stat b'; echo hi";
+
+        assert_eq!(rewrite_command_no_prefixes(command, &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_bare_quoted_git_diff() {
+        let command = "X='git diff'; echo hi";
+
+        assert_eq!(rewrite_command_no_prefixes(command, &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_single_preserves_inline_title_prose() {
+        let command =
+            r#"gh pr edit 1476 --title "chore(skills): make every Pocock skill model-invocable""#;
+
+        assert_eq!(
+            rewrite_command_no_prefixes(command, &[]),
+            Some(
+                r#"rtk gh pr edit 1476 --title "chore(skills): make every Pocock skill model-invocable""#
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_title_before_gh_edit() {
+        let command = r#"T="chore(skills): make every Pocock skill model-invocable"; echo "len=${#T}"; [ ${#T} -le 100 ] && gh pr edit 1476 --title "$T""#;
+
+        assert_eq!(
+            rewrite_command_no_prefixes(command, &[]),
+            Some(r#"T="chore(skills): make every Pocock skill model-invocable"; echo "len=${#T}"; [ ${#T} -le 100 ] && rtk gh pr edit 1476 --title "$T""#.into())
         );
     }
 
