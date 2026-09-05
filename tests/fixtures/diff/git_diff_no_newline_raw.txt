@@ -1,0 +1,19 @@
+diff --git a/f.txt b/f.txt
+index 1c943a9..63c4c65 100644
+--- a/f.txt
++++ b/f.txt
+@@ -1,3 +1,3 @@
+-a
++A
+ b
+ c
+\ No newline at end of file
+diff --git a/g.txt b/g.txt
+index 1b32298..b77b4eb 100644
+--- a/g.txt
++++ b/g.txt
+@@ -1,2 +1,2 @@
+ x
+-y
+\ No newline at end of file
++y

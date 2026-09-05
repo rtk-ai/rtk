@@ -1,0 +1,16 @@
+diff --git a/blob.bin b/blob.bin
+index 03a10de..198c845 100644
+Binary files a/blob.bin and b/blob.bin differ
+diff --git a/doomed.txt b/doomed.txt
+deleted file mode 100644
+index cbec1ee..0000000
+--- a/doomed.txt
++++ /dev/null
+@@ -1,3 +0,0 @@
+-line a
+-line b
+-line c
+diff --git a/renamed_src.txt b/renamed_dst.txt
+similarity index 100%
+rename from renamed_src.txt
+rename to renamed_dst.txt
