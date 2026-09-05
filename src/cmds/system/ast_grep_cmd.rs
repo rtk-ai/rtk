@@ -91,13 +91,15 @@ pub fn run(args: &[String]) -> Result<i32> {
     cmd.args(args);
     let result = exec_capture(&mut cmd).context("Failed to execute ast-grep")?;
 
-    let filtered = if is_json {
-        result.stdout.clone()
+    let filtered_owned;
+    let filtered: &str = if is_json {
+        &result.stdout
     } else {
-        filter_ast_grep(&result.stdout, DEFAULT_MAX_PER_FILE, DEFAULT_MAX_TOTAL)
+        filtered_owned = filter_ast_grep(&result.stdout, DEFAULT_MAX_PER_FILE, DEFAULT_MAX_TOTAL);
+        &filtered_owned
     };
 
-    let shown = crate::core::guard::never_worse(&result.stdout, &filtered);
+    let shown = crate::core::guard::never_worse(&result.stdout, filtered);
     timer.track(&real_cmd, "rtk ast-grep", &result.stdout, shown);
     print!("{}", shown);
 
