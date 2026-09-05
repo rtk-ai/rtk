@@ -164,17 +164,24 @@ fn run_filtered(
 /// Filter npm run output - strip boilerplate, progress bars, npm WARN
 fn filter_npm_output(output: &str) -> String {
     let mut result = Vec::new();
+    let mut seen_substantive_output = false;
+    let mut leading_gt_lines = Vec::new();
 
     for line in output.lines() {
-        // Skip npm boilerplate
-        if line.starts_with('>') && line.contains('@') {
+        let trimmed = line.trim_start();
+
+        // npm 7+ emits script name and command as leading `> ` lines without
+        // package@version. Treat 2+ leading lines as lifecycle echo so silent
+        // scripts can fall back to `ok`, but preserve one as possible output.
+        if !seen_substantive_output && trimmed.starts_with("> ") {
+            leading_gt_lines.push(line.to_string());
             continue;
         }
         // Skip npm lifecycle scripts
-        if line.trim_start().starts_with("npm WARN") {
+        if trimmed.starts_with("npm WARN") {
             continue;
         }
-        if line.trim_start().starts_with("npm notice") {
+        if trimmed.starts_with("npm notice") {
             continue;
         }
         // Skip progress indicators
@@ -186,7 +193,19 @@ fn filter_npm_output(output: &str) -> String {
             continue;
         }
 
+        if !seen_substantive_output {
+            if leading_gt_lines.len() == 1 {
+                result.extend(leading_gt_lines.drain(..));
+            } else {
+                leading_gt_lines.clear();
+            }
+        }
+        seen_substantive_output = true;
         result.push(line.to_string());
+    }
+
+    if !seen_substantive_output && leading_gt_lines.len() == 1 {
+        result.extend(leading_gt_lines);
     }
 
     if result.is_empty() {
@@ -262,5 +281,47 @@ npm notice
         let output = "\n\n\n";
         let result = filter_npm_output(output);
         assert_eq!(result, "ok");
+    }
+
+    #[test]
+    fn test_filter_npm_output_lifecycle_only_success() {
+        let output = r#"
+> typecheck
+> tsc --noEmit
+"#;
+        let result = filter_npm_output(output);
+        assert_eq!(result, "ok");
+    }
+
+    #[test]
+    fn test_filter_npm_output_preserves_substantive_output() {
+        let output = r#"
+> test
+> node test.js
+TEST_PASS
+"#;
+        let result = filter_npm_output(output);
+        assert_eq!(result, "TEST_PASS");
+    }
+
+    #[test]
+    fn test_filter_npm_output_preserves_gt_after_substantive_output() {
+        let output = r#"
+> test
+> node test.js
+error:
+> pointer context
+"#;
+        let result = filter_npm_output(output);
+        assert_eq!(result, "error:\n> pointer context");
+    }
+
+    #[test]
+    fn test_filter_npm_output_preserves_single_leading_gt_output() {
+        let output = r#"
+> user output
+"#;
+        let result = filter_npm_output(output);
+        assert_eq!(result, "> user output");
     }
 }
