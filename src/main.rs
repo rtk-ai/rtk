@@ -1781,7 +1781,9 @@ fn run_cli() -> Result<i32> {
 
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
     // Skip for Gain — it shows its own inline hook warning.
-    if !matches!(cli.command, Commands::Gain { .. }) {
+    // Skip for Hook — its stdout/stderr is a protocol surface parsed by the
+    // calling agent, and hooks must stay silent on stderr (protocol safety).
+    if !matches!(cli.command, Commands::Gain { .. } | Commands::Hook { .. }) {
         hooks::hook_check::maybe_warn();
     }
 

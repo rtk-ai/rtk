@@ -694,15 +694,34 @@ pub(crate) mod tests {
         }
     }
 
+    /// Build a Command that runs `script` through the platform shell
+    /// (`sh -c` on unix, `cmd /C` on Windows) so these tests don't depend
+    /// on unix coreutils being on PATH (they aren't on stock Windows).
+    /// Scripts must be valid in both shells (`echo`, `exit N`, `&&`, `1>&2`).
+    fn shell(script: &str) -> Command {
+        // nosemgrep: interpreter-execution
+        let mut cmd = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.arg("/C");
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.arg("-c");
+            c
+        };
+        cmd.arg(script);
+        cmd
+    }
+
     #[test]
     fn test_exit_code_zero() {
-        let status = Command::new("true").status().unwrap();
+        let status = shell("exit 0").status().unwrap();
         assert_eq!(status_to_exit_code(status), 0);
     }
 
     #[test]
     fn test_exit_code_nonzero() {
-        let status = Command::new("false").status().unwrap();
+        let status = shell("exit 1").status().unwrap();
         assert_eq!(status_to_exit_code(status), 1);
     }
 
@@ -798,8 +817,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_run_streaming_passthrough_echo() {
-        let mut cmd = Command::new("echo");
-        cmd.arg("hello");
+        let mut cmd = shell("echo hello");
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough).unwrap();
         assert_eq!(result.exit_code, 0);
         // Passthrough inherits TTY — raw/filtered are empty
@@ -808,16 +826,14 @@ pub(crate) mod tests {
 
     #[test]
     fn test_run_streaming_exit_code_preserved() {
-        // nosemgrep: interpreter-execution
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "exit 42"]);
+        let mut cmd = shell("exit 42");
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough).unwrap();
         assert_eq!(result.exit_code, 42);
     }
 
     #[test]
     fn test_run_streaming_exit_code_zero() {
-        let mut cmd = Command::new("true");
+        let mut cmd = shell("exit 0");
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough).unwrap();
         assert_eq!(result.exit_code, 0);
         assert!(result.success());
@@ -825,17 +841,17 @@ pub(crate) mod tests {
 
     #[test]
     fn test_run_streaming_exit_code_one() {
-        let mut cmd = Command::new("false");
+        let mut cmd = shell("exit 1");
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough).unwrap();
         assert_eq!(result.exit_code, 1);
         assert!(!result.success());
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn test_run_streaming_streaming_filter_drops_lines() {
-        let mut cmd = Command::new("printf");
-        cmd.arg("a\nb\nc\n");
+        // No spaces around `&&`: cmd.exe would include a trailing space in
+        // the echoed line, breaking the exact-match filter below.
+        let mut cmd = shell("echo a&&echo b&&echo c");
         let filter = LineFilter::new(|l| {
             if l == "b" {
                 None
@@ -855,11 +871,9 @@ pub(crate) mod tests {
         assert_eq!(result.exit_code, 0);
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn test_run_streaming_buffered_filter() {
-        let mut cmd = Command::new("printf");
-        cmd.arg("line1\nline2\nline3\n");
+        let mut cmd = shell("echo line1&&echo line2&&echo line3");
         let result = run_streaming(
             &mut cmd,
             StdinMode::Null,
@@ -871,15 +885,34 @@ pub(crate) mod tests {
         assert_eq!(result.exit_code, 0);
     }
 
+    /// Write ~11 MiB of 80-char lines to `big.txt` inside a fresh temp dir.
+    /// Streamed back with `cat`/`type` by the cap tests below — a portable
+    /// replacement for the old `dd | tr | fold` pipeline.
+    fn write_big_file() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let chunk = format!("{}\n", "a".repeat(80)).repeat(2048); // ~162 KiB
+        let mut f = std::fs::File::create(dir.path().join("big.txt")).expect("create big.txt");
+        for _ in 0..70 {
+            f.write_all(chunk.as_bytes()).expect("write big.txt");
+        }
+        dir
+    }
+
+    /// Shell script that streams `big.txt` from the current dir to stdout.
+    fn stream_big_file_script() -> &'static str {
+        if cfg!(windows) {
+            "type big.txt"
+        } else {
+            "cat big.txt"
+        }
+    }
+
     #[test]
     fn test_run_streaming_raw_cap_at_10mb() {
-        // nosemgrep: interpreter-execution
-        let mut cmd = Command::new("sh");
-        // ~11 MiB of 80-char lines (fast: fewer lines than `yes | head -6M`)
-        cmd.args([
-            "-c",
-            "dd if=/dev/zero bs=1024 count=11264 2>/dev/null | tr '\\0' 'a' | fold -w 80",
-        ]);
+        // ~11 MiB of 80-char lines
+        let dir = write_big_file();
+        let mut cmd = shell(stream_big_file_script());
+        cmd.current_dir(dir.path());
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly).unwrap();
         assert!(
             result.raw.len() <= 10_485_760 + 100,
@@ -894,13 +927,10 @@ pub(crate) mod tests {
 
     #[test]
     fn test_run_streaming_stderr_cap_at_10mb() {
-        // nosemgrep: interpreter-execution
-        let mut cmd = Command::new("sh");
         // ~11 MiB on stderr, nothing on stdout
-        cmd.args([
-            "-c",
-            "dd if=/dev/zero bs=1024 count=11264 2>/dev/null | tr '\\0' 'a' | fold -w 80 1>&2",
-        ]);
+        let dir = write_big_file();
+        let mut cmd = shell(&format!("{} 1>&2", stream_big_file_script()));
+        cmd.current_dir(dir.path());
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly).unwrap();
         // raw = raw_stdout + raw_stderr; stdout is empty so raw ≈ stderr size
         assert!(
@@ -912,7 +942,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_child_guard_prevents_zombie() {
-        let mut cmd = Command::new("true");
+        let mut cmd = shell("exit 0");
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().exit_code, 0);
@@ -920,31 +950,30 @@ pub(crate) mod tests {
 
     #[test]
     fn test_run_streaming_null_stdin_cat() {
-        let mut cmd = Command::new("cat");
+        // `sort` reads stdin to EOF and exits 0 on both platforms
+        // (`cat` doesn't exist on stock Windows).
+        let mut cmd = shell("sort");
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough).unwrap();
         assert_eq!(result.exit_code, 0);
     }
 
     #[test]
     fn test_run_streaming_raw_contains_stdout() {
-        let mut cmd = Command::new("echo");
-        cmd.arg("test_output_xyz");
+        let mut cmd = shell("echo test_output_xyz");
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly).unwrap();
         assert!(result.raw.contains("test_output_xyz"));
     }
 
     #[test]
     fn test_run_streaming_capture_only_filtered_equals_raw() {
-        let mut cmd = Command::new("echo");
-        cmd.arg("check_equality");
+        let mut cmd = shell("echo check_equality");
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly).unwrap();
         assert_eq!(result.filtered.trim(), result.raw_stdout.trim());
     }
 
     #[test]
     fn test_exec_capture_success() {
-        let mut cmd = Command::new("echo");
-        cmd.arg("hello_capture");
+        let mut cmd = shell("echo hello_capture");
         let result = exec_capture(&mut cmd).unwrap();
         assert!(result.success());
         assert_eq!(result.exit_code, 0);
@@ -953,7 +982,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_exec_capture_failure() {
-        let mut cmd = Command::new("false");
+        let mut cmd = shell("exit 1");
         let result = exec_capture(&mut cmd).unwrap();
         assert!(!result.success());
         assert_eq!(result.exit_code, 1);
@@ -961,18 +990,14 @@ pub(crate) mod tests {
 
     #[test]
     fn test_exec_capture_stderr() {
-        // nosemgrep: interpreter-execution
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "echo err_msg >&2"]);
+        let mut cmd = shell("echo err_msg 1>&2");
         let result = exec_capture(&mut cmd).unwrap();
         assert!(result.stderr.contains("err_msg"));
     }
 
     #[test]
     fn test_exec_capture_combined() {
-        // nosemgrep: interpreter-execution
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "echo out_msg; echo err_msg >&2"]);
+        let mut cmd = shell("echo out_msg&&echo err_msg 1>&2");
         let result = exec_capture(&mut cmd).unwrap();
         let combined = result.combined();
         assert!(combined.contains("out_msg"));
