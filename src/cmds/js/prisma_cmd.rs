@@ -316,7 +316,7 @@ fn filter_migrate_status(output: &str) -> String {
             applied_count += 1;
             if latest_migration.is_empty() && line.contains("202") {
                 if let Some(pos) = line.find("202") {
-                    let end = line[pos..].find(|c: char| c.is_whitespace()).unwrap_or(20);
+                    let end = line[pos..].find(|c: char| c.is_whitespace()).unwrap_or(line.len() - pos);
                     latest_migration = line[pos..pos + end].to_string();
                 }
             }
