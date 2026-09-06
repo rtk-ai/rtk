@@ -70,6 +70,23 @@ assert_output() {
     fi
 }
 
+# Assert command output does NOT contain needle (regression guard, e.g. warnings)
+assert_not_contains() {
+    local name="$1"; local needle="$2"; shift 2
+    local output
+    output=$("$@" 2>&1) || true
+    if echo "$output" | grep -qi "$needle"; then
+        FAIL=$((FAIL + 1))
+        FAILURES+=("$name")
+        printf "  ${RED}FAIL${NC}  %s\n" "$name"
+        printf "        unexpected: '%s'\n" "$needle"
+        printf "        got: %s\n" "$(echo "$output" | head -3)"
+    else
+        PASS=$((PASS + 1))
+        printf "  ${GREEN}PASS${NC}  %s\n" "$name"
+    fi
+}
+
 skip_test() {
     local name="$1"; local reason="$2"
     SKIP=$((SKIP + 1))
@@ -292,6 +309,29 @@ assert_output "rtk rubocop (with offenses)" \
 assert_output "rtk rubocop app/ (with offenses)" \
     "rubocop_bait\|offense" \
     rtk rubocop app/
+
+# ── Version queries (#1946) ──────────────────────────
+# `--version` short-circuits before any formatter runs, so it prints plain text
+# (never the JSON report). It must pass through clean, with no JSON-parse warning.
+
+section "Version queries (#1946)"
+
+assert_output "rtk rspec --version (clean)" \
+    "RSpec" \
+    rtk rspec --version
+assert_not_contains "rtk rspec --version (no JSON warning)" \
+    "JSON parse failed\|format not recognized" \
+    rtk rspec --version
+
+assert_output "rtk rubocop --version (clean)" \
+    "[0-9]\.[0-9]" \
+    rtk rubocop --version
+assert_not_contains "rtk rubocop --version (no JSON warning)" \
+    "JSON parse failed\|format not recognized" \
+    rtk rubocop --version
+assert_not_contains "rtk rubocop -V (no JSON warning)" \
+    "JSON parse failed\|format not recognized" \
+    rtk rubocop -V
 
 # ── 3. Minitest (rake test) ──────────────────────────
 
