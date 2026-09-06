@@ -909,6 +909,13 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Passthrough an unrecognised command to the OS (not an RTK subcommand).
+    /// Silently proxies the command to the native binary without recording a
+    /// parse failure — the parse_failures table remains actionable (only real
+    /// errors).
+    #[command(external_subcommand)]
+    Passthrough(Vec<OsString>),
+
     /// Hook processors for LLM CLI tools (Gemini CLI, Copilot, etc.)
     Hook {
         #[command(subcommand)]
@@ -2923,6 +2930,33 @@ fn run_cli() -> Result<i32> {
             0
         }
 
+        Commands::Passthrough(args) => {
+            let raw = args
+                .iter()
+                .map(|s| s.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let cmd_name = args[0].to_string_lossy();
+            let status = core::utils::resolved_command(&cmd_name)
+                .args(&args[1..])
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .status();
+
+            match status {
+                Ok(s) => {
+                    let timer = core::tracking::TimedExecution::start();
+                    timer.track_passthrough(&raw, &format!("rtk passthrough: {}", raw));
+                    core::utils::exit_code_from_status(&s, &raw)
+                }
+                Err(e) => {
+                    eprintln!("[rtk: {}]", e);
+                    127
+                }
+            }
+        }
+
         Commands::Untrust => {
             hooks::trust::run_untrust()?;
             0
@@ -3351,13 +3385,12 @@ mod tests {
 
     #[test]
     fn test_try_parse_unknown_subcommand_is_error() {
-        match Cli::try_parse_from(["rtk", "nonexistent-command"]) {
-            Err(e) => assert!(!matches!(
-                e.kind(),
-                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
-            )),
-            Ok(_) => panic!("Expected parse error for unknown subcommand"),
-        }
+        let cli = Cli::try_parse_from(["rtk", "nonexistent-command"]);
+        assert!(cli.is_ok(), "unknown subcommand should parse as Passthrough");
+        assert!(
+            matches!(cli.unwrap().command, Commands::Passthrough(ref args) if args == &[OsString::from("nonexistent-command")]),
+            "unknown subcommand should be captured as Passthrough"
+        );
     }
 
     #[test]
