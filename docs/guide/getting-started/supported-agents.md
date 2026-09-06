@@ -36,6 +36,7 @@ Agent runs "cargo test"
 | OpenCode | TypeScript plugin (`tool.execute.before`) | Yes |
 | OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
 | Pi | TypeScript extension (`tool_call` event) | Yes |
+| Oh My Pi (OMP) | TypeScript extension (`tool_call` event, shared with Pi) | Yes |
 | Hermes | Python plugin (`terminal` command mutation) | Yes |
 | Factory Droid | Shell hook (`PreToolUse`, matcher `Execute`) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
@@ -111,7 +112,9 @@ rtk init --agent pi
 rtk init --agent pi --global
 ```
 
-Creates `.pi/extensions/rtk.ts` (local) or `~/.pi/agent/extensions/rtk.ts` (global). Pi auto-discovers extensions from both paths on startup.
+Creates `.pi/extensions/rtk.ts` (local) or `~/.pi/agent/extensions/rtk.ts` (global). Pi auto-discovers extensions from both paths on startup. The global path follows `PI_CODING_AGENT_DIR` when set; OMP uses that same variable. When the paths alias, RTK records the agent(s) it installed in an adjacent hidden `.rtk-agents` state file so shared-file warnings are based on ownership rather than path equality alone.
+
+Installation updates only the current or a known historical RTK extension. If the managed path contains modified or unrelated content, RTK asks before overwriting it; use `--auto-patch` to approve without prompting or `--no-patch` to leave it unchanged. A declined protected update, including `--no-patch`, exits nonzero so automation can detect that no install occurred. `--dry-run` reports the prompt without changing files. LF and CRLF line endings are treated as the same stock extension.
 
 Uninstall:
 
@@ -120,7 +123,32 @@ rtk init --uninstall --agent pi
 rtk init --uninstall --agent pi --global
 ```
 
-Removes only the installed Pi extension file.
+Removes only the current or known historical stock Pi extension. If the file contains modified RTK content, a normal uninstall aborts without deleting it, while `--dry-run` previews that refusal; unreadable content is left in place and causes a normal uninstall to exit nonzero, while `--dry-run` reports it and succeeds. Unrelated content is left in place. LF and CRLF stock files are both recognized.
+
+### Oh My Pi (OMP)
+
+```bash
+# Project-local (default)
+rtk init --agent omp
+
+# Global — all projects
+rtk init --agent omp --global
+```
+
+Creates `.omp/extensions/rtk.ts` (local) or `~/.omp/agent/extensions/rtk.ts` (global). OMP loads the same extension file as Pi through its `legacy-pi-compat` layer, so both agents share `rtk.ts`. The global path follows `PI_CODING_AGENT_DIR`, which OMP also honors for its agent directory.
+
+When the Pi and OMP targets in either project or global scope resolve to one file, RTK records whether Pi, OMP, or both agents were installed for that alias in an adjacent hidden `.rtk-agents` state file. A valid sidecar is authoritative. Missing or unreadable state is treated as uncertain: RTK warns and proceeds without using a heuristic to claim sole ownership. Uninstalling a definitively shared project or global file asks before removing it, so confirm that neither agent should use it first (or pass `--auto-patch` to approve). An uncertain legacy or corrupt-state uninstall warns and proceeds; a declined definitive shared uninstall, including `--no-patch`, exits nonzero. `--dry-run` remains a successful preview. RTK currently targets OMP's default profile and `.omp` project directory; named OMP profiles and custom `PI_CONFIG_DIR` locations are not auto-detected.
+
+Installation updates only the current or a known historical RTK extension. If the managed path contains modified or unrelated content, RTK asks before overwriting it; use `--auto-patch` to approve without prompting or `--no-patch` to leave it unchanged. A declined protected update, including `--no-patch`, exits nonzero so automation can detect that no install occurred. `--dry-run` reports the prompt without changing files. LF and CRLF line endings are treated as the same stock extension.
+
+Uninstall:
+
+```bash
+rtk init --uninstall --agent omp
+rtk init --uninstall --agent omp --global
+```
+
+Removes only the current or known historical stock OMP extension. If the file has been modified after install, a normal uninstall aborts with a message instead of removing it, while `--dry-run` previews that refusal; unreadable content is left in place and causes a normal uninstall to exit nonzero, while `--dry-run` reports it and succeeds. Unrelated content is left in place. When Pi and OMP paths in either scope resolve to the same file and a valid sidecar records both agents, uninstall asks before removing the shared file; use `--auto-patch` to approve or `--no-patch` to keep it. Missing or unreadable ownership state warns and proceeds without definitive shared-file protection. A declined definitive shared uninstall exits nonzero so scripts can detect that the file remains.
 
 ### OpenClaw
 

@@ -59,6 +59,8 @@ pub enum AgentTarget {
     Droid,
     /// Mistral Vibe CLI
     Vibe,
+    /// Oh My Pi (OMP)
+    Omp,
 }
 
 #[derive(Parser)]
@@ -383,11 +385,11 @@ enum Commands {
         #[arg(long = "hook-only", group = "mode")]
         hook_only: bool,
 
-        /// Auto-patch settings.json without prompting
+        /// Apply supported init changes without prompting
         #[arg(long = "auto-patch", group = "patch")]
         auto_patch: bool,
 
-        /// Skip settings.json patching (print manual instructions)
+        /// Skip optional init prompts and leave protected content unchanged
         #[arg(long = "no-patch", group = "patch")]
         no_patch: bool,
 
@@ -1725,18 +1727,29 @@ fn main() {
     std::process::exit(code);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
     agent: Option<AgentTarget>,
     global: bool,
     gemini: bool,
     codex: bool,
+    patch_mode: hooks::init::PatchMode,
     ctx: hooks::init::InitContext,
     uninstall_hermes: UninstallHermes,
     uninstall_standard: UninstallStandard,
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
-    UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
+    UninstallStandard: FnOnce(
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        hooks::init::PatchMode,
+        hooks::init::InitContext,
+    ) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
@@ -1747,7 +1760,8 @@ where
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
-        uninstall_standard(global, gemini, codex, cursor, pi, ctx)
+        let omp = agent == Some(AgentTarget::Omp);
+        uninstall_standard(global, gemini, codex, cursor, pi, omp, patch_mode, ctx)
     }
 }
 
@@ -2186,8 +2200,15 @@ fn run_cli() -> Result<i32> {
                 verbose: cli.verbose,
                 dry_run,
             };
+            let patch_mode = if auto_patch {
+                hooks::init::PatchMode::Auto
+            } else if no_patch {
+                hooks::init::PatchMode::Skip
+            } else {
+                hooks::init::PatchMode::Ask
+            };
             if show {
-                hooks::init::show_config(codex)?;
+                hooks::init::show_config(codex, agent == Some(AgentTarget::Omp))?;
             } else if uninstall && copilot {
                 if global {
                     hooks::init::uninstall_copilot_global(ctx)?;
@@ -2200,18 +2221,12 @@ fn run_cli() -> Result<i32> {
                     global,
                     gemini,
                     codex,
+                    patch_mode,
                     ctx,
                     hooks::init::uninstall_hermes,
-                    hooks::init::uninstall,
+                    hooks::init::uninstall_with_patch_mode,
                 )?;
             } else if gemini {
-                let patch_mode = if auto_patch {
-                    hooks::init::PatchMode::Auto
-                } else if no_patch {
-                    hooks::init::PatchMode::Skip
-                } else {
-                    hooks::init::PatchMode::Ask
-                };
                 hooks::init::run_gemini(global, hook_only, patch_mode, ctx)?;
             } else if copilot {
                 if global {
@@ -2220,7 +2235,9 @@ fn run_cli() -> Result<i32> {
                     hooks::init::run_copilot(ctx)?;
                 }
             } else if agent == Some(AgentTarget::Pi) {
-                hooks::init::run_pi_mode(global, ctx)?
+                hooks::init::run_pi_mode_with_patch_mode(global, patch_mode, ctx)?
+            } else if agent == Some(AgentTarget::Omp) {
+                hooks::init::run_omp_mode_with_patch_mode(global, patch_mode, ctx)?
             } else if agent == Some(AgentTarget::Kilocode) {
                 if global {
                     anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");
@@ -2243,13 +2260,6 @@ fn run_cli() -> Result<i32> {
             } else if agent == Some(AgentTarget::Droid) {
                 hooks::init::run_droid_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Vibe) {
-                let patch_mode = if auto_patch {
-                    hooks::init::PatchMode::Auto
-                } else if no_patch {
-                    hooks::init::PatchMode::Skip
-                } else {
-                    hooks::init::PatchMode::Ask
-                };
                 hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
             } else {
                 let install_opencode = opencode;
@@ -2258,13 +2268,6 @@ fn run_cli() -> Result<i32> {
                 let install_windsurf = agent == Some(AgentTarget::Windsurf);
                 let install_cline = agent == Some(AgentTarget::Cline);
 
-                let patch_mode = if auto_patch {
-                    hooks::init::PatchMode::Auto
-                } else if no_patch {
-                    hooks::init::PatchMode::Skip
-                } else {
-                    hooks::init::PatchMode::Ask
-                };
                 hooks::init::run(
                     global,
                     install_claude,
@@ -3250,6 +3253,7 @@ mod tests {
             true,
             false,
             false,
+            hooks::init::PatchMode::Ask,
             ctx,
             |ctx| {
                 hermes_called.set(true);
@@ -3257,7 +3261,7 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
-            |_, _, _, _, _, _| {
+            |_, _, _, _, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
             },
@@ -3266,6 +3270,67 @@ mod tests {
         assert!(result.is_ok());
         assert!(hermes_called.get());
         assert!(!standard_called.get());
+    }
+
+    #[test]
+    fn test_try_parse_init_agent_omp() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "omp"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Omp));
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_init_agent_omp_uninstall() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--uninstall", "--agent", "omp", "--global"])
+            .unwrap();
+        match cli.command {
+            Commands::Init {
+                uninstall,
+                agent,
+                global,
+                ..
+            } => {
+                assert!(uninstall);
+                assert_eq!(agent, Some(AgentTarget::Omp));
+                assert!(global);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_init_uninstall_dispatch_routes_omp_to_standard_cleanup() {
+        let hermes_called = Cell::new(false);
+        let standard_called = Cell::new(false);
+        let ctx = hooks::init::InitContext::default();
+
+        let result = uninstall_init_dispatch(
+            Some(AgentTarget::Omp),
+            true,
+            false,
+            false,
+            hooks::init::PatchMode::Auto,
+            ctx,
+            |_c| {
+                hermes_called.set(true);
+                Ok(())
+            },
+            |global, _, _, _, _, omp, patch_mode, _| {
+                standard_called.set(true);
+                assert!(global);
+                assert!(omp);
+                assert_eq!(patch_mode, hooks::init::PatchMode::Auto);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(!hermes_called.get());
+        assert!(standard_called.get());
     }
 
     #[test]
