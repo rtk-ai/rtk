@@ -1,732 +1,496 @@
-//! Raw output recovery -- saves unfiltered output to disk on command failure.
+//! Recovery-hint dispatch — routes to the sqlite store or legacy tee per `[retriever] mode`.
 
-use super::constants::RTK_DATA_DIR;
-use crate::core::config::Config;
-use std::path::PathBuf;
+// These modules opt into clippy's complexity lints; the rest of the crate
+// predates them and is not held to the same ceilings. The thresholds come
+// from whatever clippy.toml is in scope and resolve at clippy's defaults when
+// there is none, so this costs a tree without one nothing.
+#![deny(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    clippy::cognitive_complexity,
+    clippy::excessive_nesting,
+    clippy::fn_params_excessive_bools,
+    clippy::struct_excessive_bools,
+    clippy::type_complexity
+)]
 
-/// Minimum output size to tee (smaller outputs don't need recovery)
-pub(crate) const MIN_TEE_SIZE: usize = 500;
+pub(crate) use crate::core::retriever::MIN_FAILURE_BYTES as MIN_TEE_SIZE;
+use crate::core::retriever::{
+    self, Capture, RecoveryMode, RetrieverConfig, Stored, MIN_FAILURE_BYTES,
+};
 
-/// Default max files to keep in tee directory
-const DEFAULT_MAX_FILES: usize = 20;
+/// What a recovery hint is filed under.
+///
+/// Two different things used to share one `&str` parameter: the name of a
+/// *kind* of command, which is what `recall_stats` counts, and the name of one
+/// *invocation*, which is what a tee filename needs to stay unique. Passing a
+/// runtime string satisfied both, so per-invocation data reached the stats
+/// table — `cargo_{subcommand}`, `bun_{subcmd}`, `deno_{subcmd}` and a grep
+/// slug carrying 32 characters of file path, each opening a row that nothing
+/// closed. The table has a cap now, but a cap is a limit on the damage, not a
+/// bound on what enters.
+///
+/// The variants are the admissible ways to name something, and each carries
+/// its own evidence that the set of stats keys it can produce is finite:
+///
+/// - `Static` — one literal. The finite set is the literals in this tree.
+/// - `Composed` — a family plus parts that are themselves `&'static str`, so
+///   the joined name still comes from the literals in this tree. This is what
+///   keeps `cargo_clippy` and `aws_ec2_describe-instances` distinct in the
+///   stats rather than folding them to their family.
+/// - `Detailed` — a runtime value that is *not* bounded, and so never reaches
+///   the stats key at all. It reaches the tee filename, which needs it.
+/// - `Configured` — a name from the user's own config. Bounded by how many
+///   filters they have defined, which is the one case where the bound lives
+///   outside this tree.
+///
+/// There is deliberately no conversion from `String` or `&str`: a caller
+/// holding a runtime string has to say which of the last two it means.
+#[derive(Clone, Copy)]
+pub enum Slug<'a> {
+    Static(&'static str),
+    Composed {
+        family: &'static str,
+        parts: &'a [&'static str],
+    },
+    Detailed {
+        family: &'static str,
+        detail: &'a str,
+    },
+    Configured(&'a str),
+}
 
-/// Default max file size (1MB)
-const DEFAULT_MAX_FILE_SIZE: usize = 1_048_576;
+impl From<&'static str> for Slug<'static> {
+    fn from(name: &'static str) -> Self {
+        Slug::Static(name)
+    }
+}
 
-/// Sanitize a command slug for use in filenames.
-/// Replaces non-alphanumeric chars (except underscore/hyphen) with underscore.
-/// Long slugs (usually an embedded file path that duplicates the command the LLM
-/// already issued) collapse to a short readable prefix plus a short disambiguating
-/// hash, keeping recovery filenames unique but compact — fewer tokens per tee hint.
-fn sanitize_slug(slug: &str) -> String {
-    let sanitized: String = slug
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
+/// `family` and its parts as one underscore-joined name, skipping empty parts
+/// so a caller need not special-case a subcommand it does not have.
+fn compose(family: &str, parts: &[&str]) -> String {
+    std::iter::once(family)
+        .chain(parts.iter().copied())
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+impl Slug<'_> {
+    /// The key `recall_stats` counts under. Every variant answers from a
+    /// finite set; this is the whole of the bound.
+    pub(crate) fn stats_key(&self) -> String {
+        match self {
+            Slug::Static(name) | Slug::Configured(name) => (*name).to_string(),
+            Slug::Composed { family, parts } => compose(family, parts),
+            Slug::Detailed { family, .. } => (*family).to_string(),
+        }
+    }
+
+    /// The unbounded half, when there is one. Only `Detailed` has it, and it is
+    /// the half a tee filename needs and the stats table must not see.
+    pub(crate) fn detail(&self) -> Option<&str> {
+        match self {
+            Slug::Detailed { detail, .. } => Some(detail),
+            _ => None,
+        }
+    }
+
+    /// The name a tee file is written under, and the `command` column of a
+    /// recall row. Unlike the stats key this keeps the detail, because two
+    /// files written in the same second need to differ and a reader of
+    /// `recall --list` wants to know which grep it was.
+    pub(crate) fn full(&self) -> String {
+        match self {
+            Slug::Static(name) | Slug::Configured(name) => (*name).to_string(),
+            Slug::Composed { family, parts } => compose(family, parts),
+            Slug::Detailed { family, detail } => format!("{family}_{detail}"),
+        }
+    }
+}
+
+fn active() -> Option<(RecoveryMode, RetrieverConfig)> {
+    if matches!(std::env::var("RTK_RECALL").ok().as_deref(), Some("0"))
+        || matches!(std::env::var("RTK_TEE").ok().as_deref(), Some("0"))
+    {
+        return None;
+    }
+    let cfg = recall_cfg();
+    match cfg.mode {
+        RecoveryMode::Disabled => None,
+        mode => Some((mode, cfg)),
+    }
+}
+
+/// Cached, not a fresh load: the hint paths in search.rs call this once per
+/// file, and a disk read plus TOML parse per file is the other half of the
+/// per-file overhead that breaches the <10ms startup target. This is a
+/// read-only caller that never writes config, which is what cached_config
+/// requires.
+#[cfg(not(test))]
+fn recall_cfg() -> RetrieverConfig {
+    crate::core::config::cached_config().retriever.clone()
+}
+
+/// Under test the ambient user config is never consulted. Filter unit tests
+/// across 20+ modules call `force_tee_*` with whatever config the developer
+/// happens to have, which wrote their fixture output into the real
+/// `recall.db` and leaked fixture slugs into the daily telemetry ping via
+/// `stats_snapshot()`. Recall is therefore off by default in tests;
+/// a test that needs the real path installs its own tempdir config with
+/// [`with_test_recall`].
+#[cfg(test)]
+fn recall_cfg() -> RetrieverConfig {
+    TEST_RECALL_CFG
+        .with(|c| c.borrow().clone())
+        .unwrap_or_else(|| RetrieverConfig {
+            mode: RecoveryMode::Disabled,
+            ..RetrieverConfig::default()
         })
-        .collect();
-    const MAX_READABLE: usize = 24;
-    if sanitized.len() <= MAX_READABLE {
-        return sanitized;
-    }
-    let prefix: String = sanitized.chars().take(8).collect();
-    format!("{}_{}", prefix, short_hash(&sanitized))
 }
 
-/// First 6 hex chars (24 bits) of the SHA-256 of `s` — a compact tag to keep
-/// shortened slugs distinct. Not collision-resistant on its own: 24 bits hits a
-/// birthday collision after only a few thousand distinct slugs. It's safe here
-/// because a clash also requires the identical readable prefix *and* the same
-/// epoch second, which together scope tee writes exactly as before.
-fn short_hash(s: &str) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(s.as_bytes()))[..6].to_string()
+#[cfg(test)]
+thread_local! {
+    static TEST_RECALL_CFG: std::cell::RefCell<Option<RetrieverConfig>> =
+        const { std::cell::RefCell::new(None) };
 }
 
-/// Get the tee directory, respecting config and env overrides.
-fn get_tee_dir(config: &Config) -> Option<PathBuf> {
-    // Env var override
-    if let Ok(dir) = std::env::var("RTK_TEE_DIR") {
-        return Some(PathBuf::from(dir));
-    }
+/// Serializes every test that installs a recall config against the one test
+/// that sets `RTK_RECALL`, which is process-wide and would otherwise switch
+/// recall off underneath a concurrently running test .
+#[cfg(test)]
+pub(crate) static RECALL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    // Config override
-    if let Some(ref dir) = config.tee.directory {
-        return Some(dir.clone());
-    }
-
-    // Default: ~/.local/share/rtk/tee/
-    dirs::data_local_dir().map(|d| d.join(RTK_DATA_DIR).join("tee"))
+/// Point recall at `cfg` for the duration of `f`. The config itself is
+/// thread-local; the lock guards against the process-wide env kill switch.
+#[cfg(test)]
+pub(crate) fn with_test_recall<T>(cfg: RetrieverConfig, f: impl FnOnce() -> T) -> T {
+    let _guard = RECALL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    TEST_RECALL_CFG.with(|c| *c.borrow_mut() = Some(cfg));
+    let out = f();
+    TEST_RECALL_CFG.with(|c| *c.borrow_mut() = None);
+    out
 }
 
-/// Rotate old tee files: keep only the last `max_files`, delete oldest.
-fn cleanup_old_files(dir: &std::path::Path, max_files: usize) {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
-        .collect();
-
-    if entries.len() <= max_files {
-        return;
-    }
-
-    // Sort by filename (which starts with epoch timestamp = chronological)
-    entries.sort_by_key(|e| e.file_name());
-
-    let to_remove = entries.len() - max_files;
-    for entry in entries.iter().take(to_remove) {
-        let _ = std::fs::remove_file(entry.path());
-    }
-}
-
-/// Check if tee should be skipped based on config, mode, exit code, and size.
-/// Returns None if should skip, Some(tee_dir) if should proceed.
-fn should_tee(
-    config: &TeeConfig,
-    raw_len: usize,
-    exit_code: i32,
-    tee_dir: Option<PathBuf>,
-) -> Option<PathBuf> {
-    if !config.enabled {
-        return None;
-    }
-
-    match config.mode {
-        TeeMode::Never => return None,
-        TeeMode::Failures => {
-            if exit_code == 0 {
-                return None;
-            }
-        }
-        TeeMode::Always => {}
-    }
-
-    if raw_len < MIN_TEE_SIZE {
-        return None;
-    }
-
-    tee_dir
-}
-
-/// Creates the parent as its own step, otherwise `create_dir_all` leaves the
-/// data root at the umask as an intermediate.
-fn create_tee_dir(tee_dir: &std::path::Path) -> Option<()> {
-    if let Some(parent) = tee_dir.parent() {
-        let _ = crate::core::utils::create_private_dir(parent);
-    }
-    crate::core::utils::create_private_dir(tee_dir).ok()
-}
-
-/// Write raw output to a tee file in the given directory.
-/// Returns file path on success.
-fn write_tee_file(
-    raw: &str,
-    command_slug: &str,
-    tee_dir: &std::path::Path,
-    max_file_size: usize,
-    max_files: usize,
-) -> Option<PathBuf> {
-    create_tee_dir(tee_dir)?;
-
-    let slug = sanitize_slug(command_slug);
-    let epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    let filename = format!("{}_{}.log", epoch, slug);
-    let filepath = tee_dir.join(filename);
-
-    // Truncate at max_file_size (find a safe UTF-8 char boundary)
-    let content = if raw.len() > max_file_size {
-        let boundary = raw
-            .char_indices()
-            .take_while(|(i, _)| *i < max_file_size)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
-        format!(
-            "{}\n\n--- truncated at {} bytes ---",
-            &raw[..boundary],
-            max_file_size
-        )
-    } else {
-        raw.to_string()
-    };
-
-    let mut file = crate::core::utils::open_private(
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true),
-        &filepath,
-    )
-    .ok()?;
-    use std::io::Write;
-    file.write_all(content.as_bytes()).ok()?;
-
-    // Rotate old files
-    cleanup_old_files(tee_dir, max_files);
-
-    Some(filepath)
-}
-
-/// Write raw output to tee file if conditions are met.
-/// Returns file path on success, None if skipped/failed.
-pub fn tee_raw(raw: &str, command_slug: &str, exit_code: i32) -> Option<PathBuf> {
-    // Check RTK_TEE=0 env override (disable)
-    if std::env::var("RTK_TEE").ok().as_deref() == Some("0") {
-        return None;
-    }
-
-    let config = Config::load().ok()?;
-    let tee_dir = get_tee_dir(&config)?;
-
-    let tee_dir = should_tee(&config.tee, raw.len(), exit_code, Some(tee_dir))?;
-
-    write_tee_file(
-        raw,
-        command_slug,
-        &tee_dir,
-        config.tee.max_file_size,
-        config.tee.max_files,
+/// Run `f` with recall backed by a throwaway store. For filter tests that
+/// assert on a truncation/recovery hint: without this the hint paths are inert
+/// under test and the filter correctly falls back to passthrough .
+#[cfg(test)]
+pub(crate) fn with_temp_recall<T>(f: impl FnOnce() -> T) -> T {
+    let dir = tempfile::tempdir().expect("tempdir");
+    with_test_recall(
+        RetrieverConfig {
+            mode: RecoveryMode::Sqlite,
+            database_path: Some(dir.path().join("recall_test.db")),
+            ..RetrieverConfig::default()
+        },
+        f,
     )
 }
 
-fn display_path(path: &std::path::Path) -> String {
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(relative) = path.strip_prefix(&home) {
-            return format!("~/{}", relative.display());
-        }
+fn store_hint(
+    cfg: &RetrieverConfig,
+    content: &str,
+    slug: &Slug<'_>,
+    exit_code: Option<i32>,
+) -> Option<String> {
+    let (command, key) = (slug.full(), slug.stats_key());
+    let capture = Capture::full(&command, exit_code).keyed(&key);
+    match retriever::store(cfg, content.as_bytes(), capture) {
+        Stored::Saved(s) => Some(format!("[full output: rtk recall {}]", s.hash)),
+        Stored::Unavailable | Stored::Empty => None,
     }
-    path.display().to_string()
 }
 
-fn needs_shell_quoting(path: &str) -> bool {
-    path.chars().any(|c| {
-        c.is_whitespace()
-            || matches!(
-                c,
-                '\'' | '"'
-                    | '\\'
-                    | '$'
-                    | '`'
-                    | '!'
-                    | '#'
-                    | '&'
-                    | '('
-                    | ')'
-                    | ';'
-                    | '<'
-                    | '>'
-                    | '?'
-                    | '['
-                    | ']'
-                    | '{'
-                    | '}'
-                    | '|'
-                    | '*'
-            )
-    })
-}
-
-fn escape_double_quoted_path(path: &str) -> String {
-    let mut escaped = String::with_capacity(path.len());
-    for c in path.chars() {
-        if matches!(c, '\\' | '"' | '$' | '`') {
-            escaped.push('\\');
-        }
-        escaped.push(c);
-    }
-    escaped
-}
-
-fn display_shell_path(path: &std::path::Path) -> String {
-    let display = display_path(path);
-    if !needs_shell_quoting(&display) {
-        return display;
-    }
-
-    if let Some(relative) = display.strip_prefix("~/") {
-        let relative = relative.replace(std::path::MAIN_SEPARATOR, "/");
-        return format!("\"$HOME/{}\"", escape_double_quoted_path(&relative));
-    }
-
-    format!("\"{}\"", escape_double_quoted_path(&display))
-}
-
-fn format_hint(path: &std::path::Path) -> String {
-    format!("[full output: {}]", display_shell_path(path))
-}
-
-/// Convenience: tee + format hint in one call.
-/// Returns hint string if file was written, None if skipped.
-pub fn tee_and_hint(raw: &str, command_slug: &str, exit_code: i32) -> Option<String> {
-    let path = tee_raw(raw, command_slug, exit_code)?;
-    Some(format_hint(&path))
-}
-
-fn force_tee_path(content: &str, command_slug: &str) -> Option<PathBuf> {
-    if std::env::var("RTK_TEE").ok().as_deref() == Some("0") {
+pub fn tee_and_hint<'a>(raw: &str, slug: impl Into<Slug<'a>>, exit_code: i32) -> Option<String> {
+    if exit_code == 0 || raw.len() < MIN_FAILURE_BYTES {
         return None;
     }
+    let (mode, cfg) = active()?;
+    let slug = slug.into();
+    match mode {
+        RecoveryMode::Disabled => None,
+        RecoveryMode::Tee => super::tee_file::tee_and_hint(&cfg, raw, &slug)
+            .inspect(|_| retriever::record_tee_elision(&cfg, &slug.stats_key())),
+        RecoveryMode::Sqlite => store_hint(&cfg, raw, &slug, Some(exit_code)),
+    }
+}
 
+pub fn force_tee_hint<'a>(content: &str, slug: impl Into<Slug<'a>>) -> Option<String> {
     if content.is_empty() {
         return None;
     }
-
-    let config = Config::load().ok()?;
-
-    if !config.tee.enabled {
-        return None;
+    let (mode, cfg) = active()?;
+    let slug = slug.into();
+    match mode {
+        RecoveryMode::Disabled => None,
+        RecoveryMode::Tee => super::tee_file::force_tee_hint(&cfg, content, &slug)
+            .inspect(|_| retriever::record_tee_elision(&cfg, &slug.stats_key())),
+        RecoveryMode::Sqlite => store_hint(&cfg, content, &slug, None),
     }
-
-    let tee_dir = get_tee_dir(&config)?;
-    let tee_dir = create_tee_dir(&tee_dir).and(Some(tee_dir))?;
-
-    write_tee_file(
-        content,
-        command_slug,
-        &tee_dir,
-        config.tee.max_file_size,
-        config.tee.max_files,
-    )
 }
 
-/// Returns `[full output: ~/path]`, or None if tee is disabled/skipped.
-pub fn force_tee_hint(raw: &str, command_slug: &str) -> Option<String> {
-    let path = force_tee_path(raw, command_slug)?;
-    Some(format_hint(&path))
-}
-
-/// Returns `[see remaining: tail -n +{line_offset} ~/path]`, or None if tee is disabled/skipped.
-pub fn force_tee_tail_hint(
+pub fn force_tee_tail_hint<'a>(
     content: &str,
-    command_slug: &str,
+    slug: impl Into<Slug<'a>>,
     line_offset: usize,
 ) -> Option<String> {
-    let path = force_tee_path(content, command_slug)?;
-    Some(format!(
-        "[see remaining: tail -n +{} {}]",
-        line_offset,
-        display_shell_path(&path)
-    ))
-}
-
-/// TeeMode controls when tee writes files.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum TeeMode {
-    #[default]
-    Failures,
-    Always,
-    Never,
-}
-
-/// Configuration for the tee feature.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TeeConfig {
-    pub enabled: bool,
-    pub mode: TeeMode,
-    pub max_files: usize,
-    pub max_file_size: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub directory: Option<PathBuf>,
-}
-
-impl Default for TeeConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            mode: TeeMode::default(),
-            max_files: DEFAULT_MAX_FILES,
-            max_file_size: DEFAULT_MAX_FILE_SIZE,
-            directory: None,
+    if content.is_empty() {
+        return None;
+    }
+    let (mode, cfg) = active()?;
+    let slug = slug.into();
+    match mode {
+        RecoveryMode::Disabled => None,
+        RecoveryMode::Tee => {
+            super::tee_file::force_tee_tail_hint(&cfg, content, &slug, line_offset)
+                .inspect(|_| retriever::record_tee_elision(&cfg, &slug.stats_key()))
         }
+        RecoveryMode::Sqlite => tail_hint(&cfg, content, &slug, line_offset),
+    }
+}
+
+/// The `[+N hidden: …]` counterpart to [`store_hint`]: same store call, but the
+/// hint names how much was withheld rather than offering the whole entry.
+fn tail_hint(
+    cfg: &RetrieverConfig,
+    content: &str,
+    slug: &Slug<'_>,
+    line_offset: usize,
+) -> Option<String> {
+    let (command, key) = (slug.full(), slug.stats_key());
+    let capture = Capture::tail(&command, line_offset).keyed(&key);
+    match retriever::store(cfg, content.as_bytes(), capture) {
+        Stored::Saved(s) => Some(format!(
+            "[+{} hidden: rtk recall {}]",
+            s.hidden_lines, s.hash
+        )),
+        Stored::Unavailable | Stored::Empty => None,
     }
 }
 
 #[cfg(test)]
+// Test bodies are linear setup-act-assert scripts; splitting them to satisfy
+// the ratchet makes them harder to read. See clippy.toml.
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    clippy::cognitive_complexity,
+    clippy::excessive_nesting
+)]
 mod tests {
     use super::*;
-    use std::fs;
 
+    fn temp_recall_cfg(dir: &std::path::Path) -> RetrieverConfig {
+        RetrieverConfig {
+            mode: RecoveryMode::Sqlite,
+            database_path: Some(dir.join("recall_test.db")),
+            ..RetrieverConfig::default()
+        }
+    }
+
+    /// With no test config installed — the state every filter unit
+    /// test runs in — the hint paths must stay inert. This is what stops
+    /// fixture output reaching the developer's real recall.db.
     #[test]
-    fn test_sanitize_slug() {
-        assert_eq!(sanitize_slug("cargo_test"), "cargo_test");
-        assert_eq!(sanitize_slug("cargo test"), "cargo_test");
-        assert_eq!(sanitize_slug("cargo-test"), "cargo-test");
-        assert_eq!(sanitize_slug("go/test/./pkg"), "go_test___pkg");
-        // Long slugs (embedded paths) collapse to a readable prefix + hash, staying short.
-        let long = format!("grep_0_{}", "a".repeat(50));
-        let short = sanitize_slug(&long);
-        assert!(
-            short.len() < 24,
-            "long slug should shorten, got '{}'",
-            short
-        );
-        assert!(
-            short.starts_with("grep_0_a"),
-            "keeps a readable prefix, got '{}'",
-            short
-        );
-        // Deterministic, and different slugs never collide onto the same filename.
-        assert_eq!(sanitize_slug(&long), short);
-        let other = sanitize_slug(&format!("grep_1_{}", "a".repeat(50)));
-        assert_ne!(other, short, "distinct slugs must not collide");
+    fn test_recall_inert_in_tests_by_default() {
+        let big = "x".repeat(1000);
+        assert!(tee_and_hint(&big, "cmd", 1).is_none());
+        assert!(force_tee_hint(&big, "cmd").is_none());
+        assert!(force_tee_tail_hint(&big, "cmd", 5).is_none());
+    }
+
+    /// The default must be inertness, not a broken store: with a config
+    /// installed the same calls do produce hints.
+    #[test]
+    fn test_with_test_recall_enables_hints() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("recall_test.db");
+        let big = "x".repeat(1000);
+        let hint = with_test_recall(temp_recall_cfg(dir.path()), || force_tee_hint(&big, "cmd"));
+        assert!(hint.is_some_and(|h| h.contains("rtk recall")));
+        assert!(db.exists(), "writes go to the tempdir, not the real store");
+    }
+
+    /// The override is scoped: recall is inert again once `f` returns.
+    #[test]
+    fn test_with_test_recall_restores_inertness() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = "x".repeat(1000);
+        with_test_recall(temp_recall_cfg(dir.path()), || {
+            assert!(force_tee_hint(&big, "cmd").is_some());
+        });
+        assert!(force_tee_hint(&big, "cmd").is_none());
+    }
+
+    /// The env kill switch still wins over an installed config.
+    #[test]
+    fn test_disabled_env_emits_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = "x".repeat(1000);
+        with_test_recall(temp_recall_cfg(dir.path()), || {
+            let _guard = EnvKill::set();
+            assert!(tee_and_hint(&big, "cmd", 1).is_none());
+            assert!(force_tee_hint(&big, "cmd").is_none());
+            assert!(force_tee_tail_hint(&big, "cmd", 5).is_none());
+        });
+    }
+
+    /// Sets `RTK_RECALL=0` and restores it on drop. Only ever constructed
+    /// inside a `with_test_recall` closure, which already holds
+    /// [`RECALL_TEST_LOCK`], so no other config-installing test observes it.
+    struct EnvKill;
+
+    impl EnvKill {
+        fn set() -> Self {
+            std::env::set_var("RTK_RECALL", "0");
+            EnvKill
+        }
+    }
+
+    impl Drop for EnvKill {
+        fn drop(&mut self) {
+            std::env::remove_var("RTK_RECALL");
+        }
     }
 
     #[test]
-    fn test_should_tee_disabled() {
-        let config = TeeConfig {
-            enabled: false,
-            ..TeeConfig::default()
+    fn test_tee_and_hint_skips_success() {
+        let big = "x".repeat(1000);
+        assert!(tee_and_hint(&big, "cmd", 0).is_none());
+    }
+
+    #[test]
+    fn test_tee_and_hint_skips_tiny_failure() {
+        assert!(tee_and_hint("tiny", "cmd", 1).is_none());
+    }
+
+    #[test]
+    fn test_force_tee_hint_skips_empty() {
+        assert!(force_tee_hint("", "cmd").is_none());
+    }
+
+    #[test]
+    fn test_force_tee_tail_hint_skips_empty() {
+        assert!(force_tee_tail_hint("", "cmd", 5).is_none());
+    }
+
+    /// The whole point of the type: a per-invocation value reaches the tee
+    /// filename and the `command` column, and never the stats key.
+    #[test]
+    fn test_detailed_keeps_detail_out_of_the_stats_key() {
+        let slug = Slug::Detailed {
+            family: "grep",
+            detail: "3_src_core_retriever_rs",
         };
-        let dir = PathBuf::from("/tmp/tee");
-        assert!(should_tee(&config, 1000, 1, Some(dir)).is_none());
+        assert_eq!(slug.stats_key(), "grep");
+        assert_eq!(slug.full(), "grep_3_src_core_retriever_rs");
     }
 
+    /// Composed parts are `&'static str`, so the joined name is still drawn
+    /// from the literals in this tree — which is why it may reach the stats
+    /// key without bounding it to the family.
     #[test]
-    fn test_should_tee_never_mode() {
-        let config = TeeConfig {
-            mode: TeeMode::Never,
-            ..TeeConfig::default()
+    fn test_composed_keeps_its_parts_in_both_names() {
+        let slug = Slug::Composed {
+            family: "aws",
+            parts: &["ec2", "describe-instances"],
         };
-        let dir = PathBuf::from("/tmp/tee");
-        assert!(should_tee(&config, 1000, 1, Some(dir)).is_none());
+        assert_eq!(slug.stats_key(), "aws_ec2_describe-instances");
+        assert_eq!(slug.full(), "aws_ec2_describe-instances");
     }
 
+    /// A subcommand-less caller composes with an empty part rather than
+    /// special-casing, and must not get a trailing underscore for it.
     #[test]
-    fn test_should_tee_skip_small_output() {
-        let config = TeeConfig::default();
-        let dir = PathBuf::from("/tmp/tee");
-        // Below MIN_TEE_SIZE (500)
-        assert!(should_tee(&config, 100, 1, Some(dir)).is_none());
-    }
-
-    #[test]
-    fn test_should_tee_skip_success_in_failures_mode() {
-        let config = TeeConfig::default(); // mode = Failures
-        let dir = PathBuf::from("/tmp/tee");
-        assert!(should_tee(&config, 1000, 0, Some(dir)).is_none());
-    }
-
-    #[test]
-    fn test_should_tee_proceed_on_failure() {
-        let config = TeeConfig::default(); // mode = Failures
-        let dir = PathBuf::from("/tmp/tee");
-        assert!(should_tee(&config, 1000, 1, Some(dir)).is_some());
-    }
-
-    #[test]
-    fn test_should_tee_always_mode_success() {
-        let config = TeeConfig {
-            mode: TeeMode::Always,
-            ..TeeConfig::default()
+    fn test_composed_skips_empty_parts() {
+        let slug = Slug::Composed {
+            family: "cargo",
+            parts: &[""],
         };
-        let dir = PathBuf::from("/tmp/tee");
-        assert!(should_tee(&config, 1000, 0, Some(dir)).is_some());
+        assert_eq!(slug.stats_key(), "cargo");
     }
 
+    /// A name from the user's own config is bounded by how many filters they
+    /// have, not by this tree, and is carried as itself.
     #[test]
-    fn test_write_tee_file_creates_file() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let content = "error: test failed\n".repeat(50);
-        let result = write_tee_file(
-            &content,
-            "cargo_test",
-            tmpdir.path(),
-            DEFAULT_MAX_FILE_SIZE,
-            20,
-        );
-        assert!(result.is_some());
-
-        let path = result.unwrap();
-        assert!(path.exists());
-        let written = fs::read_to_string(&path).unwrap();
-        assert!(written.contains("error: test failed"));
+    fn test_configured_is_carried_verbatim() {
+        let name = String::from("my-custom-filter");
+        let slug = Slug::Configured(&name);
+        assert_eq!(slug.stats_key(), "my-custom-filter");
+        assert_eq!(slug.full(), "my-custom-filter");
     }
 
+    /// The recall side counts the family too, not the path the filename
+    /// carries. Both halves of the count are bounded or neither is.
     #[test]
-    #[cfg(unix)]
-    fn test_write_tee_file_is_owner_only() {
-        use std::os::unix::fs::PermissionsExt;
+    fn test_tee_filename_hides_its_detail_from_the_recall_side() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tee_dir = dir.path().join("tee");
+        let cfg = RetrieverConfig {
+            mode: RecoveryMode::Tee,
+            tee_directory: Some(tee_dir.clone()),
+            ..RetrieverConfig::default()
+        };
+        let slug = Slug::Detailed {
+            family: "grep",
+            detail: "7_src_core_retriever_rs",
+        };
 
-        let tmpdir = tempfile::tempdir().unwrap();
-        let tee_dir = tmpdir.path().join("tee");
-        let path = write_tee_file(
-            "secret output\n",
-            "grep",
-            &tee_dir,
-            DEFAULT_MAX_FILE_SIZE,
-            20,
+        let path = super::super::tee_file::force_tee_hint(&cfg, "matches\n", &slug)
+            .expect("tee file written");
+
+        // The filename keeps the detail — two overflows in one second must not
+        // collide — but marks where the countable half ends.
+        assert!(path.contains("grep__7_src_core_retriever_rs"), "{path}");
+
+        let stem = std::path::Path::new(
+            path.trim_start_matches("[full output: ")
+                .trim_end_matches("]"),
         )
-        .expect("tee file written");
-
-        let mode = |p: &std::path::Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode(&path), 0o600, "tee file must be owner-only");
-        assert_eq!(mode(&tee_dir), 0o700, "tee dir must be owner-only");
-    }
-
-    // umask is process-global, so this must not run alongside another test that
-    // depends on it. Restored before the assertion can unwind.
-    #[test]
-    #[cfg(unix)]
-    #[allow(unsafe_code)]
-    fn test_write_tee_file_owner_only_under_permissive_umask() {
-        use std::os::unix::fs::PermissionsExt;
-
-        // nosemgrep: unsafe-block
-        let previous = unsafe { libc::umask(0o000) };
-        let tmpdir = tempfile::tempdir().unwrap();
-        let tee_dir = tmpdir.path().join("tee");
-        let written = write_tee_file("secret\n", "grep", &tee_dir, DEFAULT_MAX_FILE_SIZE, 20);
-        // nosemgrep: unsafe-block
-        unsafe { libc::umask(previous) };
-
-        let path = written.expect("tee file written");
-        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "umask 000 must not widen the tee file");
-    }
-
-    #[test]
-    fn test_write_tee_file_truncation() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let big_output = "x".repeat(2000);
-        // Set max_file_size to 1000 bytes
-        let result = write_tee_file(&big_output, "test", tmpdir.path(), 1000, 20);
-        assert!(result.is_some());
-
-        let path = result.unwrap();
-        let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("--- truncated at 1000 bytes ---"));
-        assert!(content.len() < 2000);
-    }
-
-    #[test]
-    fn test_write_tee_file_truncation_utf8_boundary() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        // Create a string where the truncation point falls inside a multi-byte char.
-        // Japanese chars are 3 bytes each in UTF-8.
-        // 332 chars * 3 bytes = 996 bytes, then one more = 999 bytes.
-        // With max_file_size=998, the cut falls mid-character.
-        let japanese = "\u{6F22}".repeat(333); // 999 bytes of 3-byte chars
-        assert_eq!(japanese.len(), 999);
-
-        // Truncate at 998 — falls in the middle of the 333rd character
-        let result = write_tee_file(&japanese, "test_utf8", tmpdir.path(), 998, 20);
-        assert!(result.is_some());
-
-        let path = result.unwrap();
-        let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("--- truncated at 998 bytes ---"));
-        // Should contain 332 full characters (996 bytes), not panic
-        assert!(content.starts_with(&"\u{6F22}".repeat(332)));
-    }
-
-    #[test]
-    fn test_write_tee_file_truncation_emoji() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        // Emoji are 4 bytes each in UTF-8
-        let emojis = "\u{1F600}".repeat(100); // 400 bytes
-        assert_eq!(emojis.len(), 400);
-
-        // Truncate at 201 — falls mid-emoji (4-byte boundary is at 200, 204)
-        let result = write_tee_file(&emojis, "test_emoji", tmpdir.path(), 201, 20);
-        assert!(result.is_some());
-
-        let path = result.unwrap();
-        let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("--- truncated at 201 bytes ---"));
-        // The emoji portion should be exactly 200 bytes (50 emojis),
-        // rounded down from 201 to the nearest char boundary
-        let target = "\u{1F600}".repeat(50);
-        assert!(content.starts_with(&target));
-    }
-
-    #[test]
-    fn test_cleanup_old_files() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let dir = tmpdir.path();
-
-        // Create 25 .log files
-        for i in 0..25 {
-            let filename = format!("{:010}_{}.log", 1000000 + i, "test");
-            fs::write(dir.join(&filename), "content").unwrap();
-        }
-
-        cleanup_old_files(dir, 20);
-
-        let remaining: Vec<_> = fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).collect();
-        assert_eq!(remaining.len(), 20);
-
-        // Oldest 5 should be removed
-        for i in 0..5 {
-            let filename = format!("{:010}_{}.log", 1000000 + i, "test");
-            assert!(!dir.join(&filename).exists());
-        }
-        // Newest 20 should remain
-        for i in 5..25 {
-            let filename = format!("{:010}_{}.log", 1000000 + i, "test");
-            assert!(dir.join(&filename).exists());
-        }
-    }
-
-    #[test]
-    fn test_format_hint() {
-        let path = PathBuf::from("/tmp/rtk/tee/123_cargo_test.log");
-        let hint = format_hint(&path);
-        assert!(hint.starts_with("[full output: "));
-        assert!(hint.ends_with(']'));
-        assert!(hint.contains("123_cargo_test.log"));
-    }
-
-    #[test]
-    fn test_display_shell_path_preserves_simple_paths() {
-        let path = PathBuf::from("/tmp/rtk/tee/123_cargo_test.log");
-        assert_eq!(display_shell_path(&path), "/tmp/rtk/tee/123_cargo_test.log");
-    }
-
-    #[test]
-    fn test_display_shell_path_quotes_paths_with_spaces() {
-        let path = PathBuf::from("/tmp/rtk/Application Support/123_go_test.log");
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_string)
+        .expect("stem");
+        let after_epoch = stem.split_once('_').expect("epoch").1;
         assert_eq!(
-            display_shell_path(&path),
-            "\"/tmp/rtk/Application Support/123_go_test.log\""
+            crate::hooks::rewrite_cmd::bounded_half(after_epoch),
+            "grep",
+            "the recall side must count the family, not the path"
         );
     }
 
+    /// The store files the counts under the bounded name while the row keeps
+    /// the detailed one. Asserted through `store` rather than on the type, so
+    /// it covers the wiring and not just the rendering.
     #[test]
-    fn test_display_shell_path_quotes_backslashes() {
-        let path = PathBuf::from(r"/tmp/rtk/tee/path\segment.log");
-        assert_eq!(
-            display_shell_path(&path),
-            r#""/tmp/rtk/tee/path\\segment.log""#
-        );
-    }
+    fn test_store_counts_the_family_and_records_the_detail() {
+        use crate::core::retriever::{stats_snapshot_with, RecoveryMode, RetrieverConfig};
 
-    #[test]
-    fn test_display_shell_path_uses_home_var_for_home_paths_with_spaces() {
-        let Some(home) = dirs::home_dir() else {
-            return;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = RetrieverConfig {
+            mode: RecoveryMode::Sqlite,
+            database_path: Some(dir.path().join("recall.db")),
+            ..RetrieverConfig::default()
         };
-        let path = home
-            .join("Library")
-            .join("Application Support")
-            .join("rtk")
-            .join("tee")
-            .join("123_go_test.log");
 
-        assert_eq!(
-            display_shell_path(&path),
-            "\"$HOME/Library/Application Support/rtk/tee/123_go_test.log\""
-        );
-    }
+        for path in ["src_one_rs", "src_two_rs", "src_three_rs"] {
+            let slug = Slug::Detailed {
+                family: "grep",
+                detail: path,
+            };
+            let content = format!("matches in {path}\n");
+            assert!(store_hint(&cfg, &content, &slug, None).is_some());
+        }
 
-    #[test]
-    fn test_format_hint_avoids_backslash_escaped_whitespace() {
-        let Some(home) = dirs::home_dir() else {
-            return;
-        };
-        let path = home
-            .join("Library")
-            .join("Application Support")
-            .join("rtk")
-            .join("tee")
-            .join("123_go_test.log");
-        let hint = format_hint(&path);
-
-        assert_eq!(
-            hint,
-            "[full output: \"$HOME/Library/Application Support/rtk/tee/123_go_test.log\"]"
-        );
+        let stats = stats_snapshot_with(&cfg).expect("stats");
+        let grep: Vec<_> = stats.iter().filter(|s| s.slug == "grep").collect();
+        assert_eq!(grep.len(), 1, "three greps must share one stats row");
+        assert_eq!(grep[0].elisions, 3);
         assert!(
-            !hint.contains("\\ "),
-            "hint should not encourage backslash-escaped whitespace"
+            !stats.iter().any(|s| s.slug.contains("src_one_rs")),
+            "no path may appear in a stats key: {:?}",
+            stats.iter().map(|s| &s.slug).collect::<Vec<_>>()
         );
-    }
-
-    #[test]
-    fn test_tee_config_default() {
-        let config = TeeConfig::default();
-        assert!(config.enabled);
-        assert_eq!(config.mode, TeeMode::Failures);
-        assert_eq!(config.max_files, 20);
-        assert_eq!(config.max_file_size, 1_048_576);
-        assert!(config.directory.is_none());
-    }
-
-    #[test]
-    fn test_tee_config_deserialize() {
-        let toml_str = r#"
-enabled = true
-mode = "always"
-max_files = 10
-max_file_size = 524288
-directory = "/tmp/rtk-tee"
-"#;
-        let config: TeeConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.enabled);
-        assert_eq!(config.mode, TeeMode::Always);
-        assert_eq!(config.max_files, 10);
-        assert_eq!(config.max_file_size, 524288);
-        assert_eq!(config.directory, Some(PathBuf::from("/tmp/rtk-tee")));
-
-        // Round-trip
-        let serialized = toml::to_string_pretty(&config).unwrap();
-        let deserialized: TeeConfig = toml::from_str(&serialized).unwrap();
-        assert_eq!(deserialized.mode, TeeMode::Always);
-        assert_eq!(deserialized.max_files, 10);
-    }
-
-    #[test]
-    fn test_tee_mode_serde() {
-        // Test all modes via JSON
-        let mode: TeeMode = serde_json::from_str(r#""always""#).unwrap();
-        assert_eq!(mode, TeeMode::Always);
-
-        let mode: TeeMode = serde_json::from_str(r#""failures""#).unwrap();
-        assert_eq!(mode, TeeMode::Failures);
-
-        let mode: TeeMode = serde_json::from_str(r#""never""#).unwrap();
-        assert_eq!(mode, TeeMode::Never);
-    }
-
-    #[test]
-    fn test_force_tee_hint_skip_empty() {
-        let hint = force_tee_hint("", "test_cmd");
-        assert!(hint.is_none(), "Should skip empty content");
-    }
-
-    #[test]
-    fn test_force_tee_hint_respects_env_disable() {
-        // When RTK_TEE=0, force_tee_hint should return None
-        std::env::set_var("RTK_TEE", "0");
-        let large_output = "x".repeat(1000);
-        let hint = force_tee_hint(&large_output, "test_cmd");
-        std::env::remove_var("RTK_TEE");
-        assert!(hint.is_none(), "Should respect RTK_TEE=0");
-    }
-
-    #[test]
-    fn test_force_tee_tail_hint_skip_empty() {
-        let hint = force_tee_tail_hint("", "test_cmd", 22);
-        assert!(hint.is_none(), "Should skip empty content");
-    }
-
-    #[test]
-    fn test_force_tee_tail_hint_format() {
-        let path = std::path::PathBuf::from("/tmp/rtk/tee/123_docker_images.log");
-        let display = display_path(&path);
-        let hint = format!("[see remaining: tail -n +{} {}]", 22, display);
-        assert!(hint.starts_with("[see remaining: tail -n +22 "));
-        assert!(hint.ends_with(']'));
-        assert!(hint.contains("123_docker_images.log"));
     }
 }

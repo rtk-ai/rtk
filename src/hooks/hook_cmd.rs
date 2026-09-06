@@ -264,7 +264,10 @@ fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
         return HookDecision::Defer;
     }
     match get_rewritten(cmd) {
-        Some(r) if verdict == PermissionVerdict::Allow => HookDecision::AllowRewrite(r),
+        Some(r) if verdict == PermissionVerdict::Allow => {
+            crate::hooks::rewrite_cmd::track_tee_read(cmd);
+            HookDecision::AllowRewrite(r)
+        }
         Some(r) => HookDecision::AskRewrite(r),
         None => HookDecision::Defer,
     }
@@ -2502,5 +2505,58 @@ mod tests {
     fn test_vibe_substitution_defers() {
         let input = vibe_input("bash", "echo $(rm -rf /)");
         assert!(run_vibe_inner(&input).is_none());
+    }
+
+    /// Tee-read tracking must fire after the permission verdict, never
+    /// before. `decide_from_verdict` reaches `track_tee_read` only on the
+    /// `AllowRewrite` arm; every other arm returns before it.
+    mod v17_track_after_verdict {
+        use super::super::{decide_from_verdict, HookDecision};
+        use crate::hooks::permissions::PermissionVerdict;
+
+        const TEE_READ: &str = "tail -n +52 /home/u/.local/share/rtk/tee/1755590000_git_log.log";
+
+        #[test]
+        fn test_deny_returns_before_tracking() {
+            assert!(matches!(
+                decide_from_verdict(TEE_READ, PermissionVerdict::Deny),
+                HookDecision::Deny
+            ));
+        }
+
+        #[test]
+        fn test_unattestable_construct_returns_before_tracking() {
+            assert!(matches!(
+                decide_from_verdict("cat $(ls /tmp).log", PermissionVerdict::Allow),
+                HookDecision::Defer
+            ));
+        }
+
+        #[test]
+        fn test_ask_verdict_does_not_track() {
+            assert!(matches!(
+                decide_from_verdict("git status", PermissionVerdict::Default),
+                HookDecision::AskRewrite(_)
+            ));
+        }
+
+        #[test]
+        fn test_unrewritable_command_defers_without_tracking() {
+            assert!(matches!(
+                decide_from_verdict(
+                    "definitely-not-a-real-binary --foo",
+                    PermissionVerdict::Allow
+                ),
+                HookDecision::Defer
+            ));
+        }
+
+        #[test]
+        fn test_allow_verdict_reaches_tracking_arm() {
+            assert!(matches!(
+                decide_from_verdict("git status", PermissionVerdict::Allow),
+                HookDecision::AllowRewrite(_)
+            ));
+        }
     }
 }

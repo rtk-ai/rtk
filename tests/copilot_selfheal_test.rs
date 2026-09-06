@@ -8,6 +8,8 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+mod common;
 use tempfile::TempDir;
 
 const LEGACY_STOCK: &str = r#"{
@@ -87,6 +89,7 @@ impl Sandbox {
     }
 
     fn run_hook(&self, payload: &str) -> (String, String, Option<i32>) {
+        common::isolate_recall();
         let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
             .args(["hook", "copilot"])
             .current_dir(&self.project)

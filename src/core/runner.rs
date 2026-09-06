@@ -22,11 +22,11 @@ pub fn emit_guarded(filtered: &str, hint: Option<&str>, raw: &str) -> String {
     shown
 }
 
-pub fn print_with_hint(
+pub fn print_with_hint<'a>(
     filtered: &str,
     tee_raw: &str,
     guard_raw: &str,
-    tee_label: &str,
+    tee_label: impl Into<crate::core::tee::Slug<'a>>,
     exit_code: i32,
 ) -> String {
     let hint = crate::core::tee::tee_and_hint(tee_raw, tee_label, exit_code);
@@ -35,7 +35,7 @@ pub fn print_with_hint(
 
 #[derive(Default)]
 pub struct RunOptions<'a> {
-    pub tee_label: Option<&'a str>,
+    pub tee_label: Option<crate::core::tee::Slug<'a>>,
     pub filter_stdout_only: bool,
     pub skip_filter_on_failure: bool,
     pub no_trailing_newline: bool,
@@ -46,9 +46,9 @@ pub struct RunOptions<'a> {
 }
 
 impl<'a> RunOptions<'a> {
-    pub fn with_tee(label: &'a str) -> Self {
+    pub fn with_tee(label: impl Into<crate::core::tee::Slug<'a>>) -> Self {
         Self {
-            tee_label: Some(label),
+            tee_label: Some(label.into()),
             ..Default::default()
         }
     }
@@ -60,8 +60,8 @@ impl<'a> RunOptions<'a> {
         }
     }
 
-    pub fn tee(mut self, label: &'a str) -> Self {
-        self.tee_label = Some(label);
+    pub fn tee(mut self, label: impl Into<crate::core::tee::Slug<'a>>) -> Self {
+        self.tee_label = Some(label.into());
         self
     }
 
@@ -396,7 +396,7 @@ pub fn run_err_cmd(
     cmd: Command,
     tool: &str,
     display: &str,
-    tee_label: &str,
+    tee_label: &'static str,
     verbose: u8,
 ) -> Result<i32> {
     if verbose > 0 {
@@ -465,7 +465,7 @@ pub fn run_test_cmd(
     cmd: Command,
     tool: &str,
     display: &str,
-    tee_label: &str,
+    tee_label: &'static str,
     eco: TestEcosystem,
     verbose: u8,
 ) -> Result<i32> {

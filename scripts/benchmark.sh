@@ -214,7 +214,13 @@ count_find_names() {
     /^\+[0-9]+ more$/    { next }   # "+256 more" truncation marker
     /^ext: /             { next }   # extension histogram footer
     /^\.\.\. \(/          { next }   # "... (8 filtered)" disclosure note
-    /^\[see remaining: / { next }   # tee pointer for the disclosed entries
+    # Recovery hints, not filenames. All three forms must be listed: the hint
+    # has no single constructor, so each new shape has to be added
+    # here. The sqlite forms are five fields apiece and were being counted as
+    # five names, overshooting every assertion below by five.
+    /^\[see remaining: /     { next }
+    /^\[full output: /       { next }
+    /^\[\+[0-9]+ hidden: / { next }
     NF == 0              { next }
     { n += NF - ($1 ~ /\/$/ ? 1 : 0) }   # grouped lines lead with "dir/"
     END { print n + 0 }
@@ -229,7 +235,9 @@ count_find_total() {
     /^\+[0-9]+ more$/    { more = substr($1, 2) + 0; next }
     /^ext: /             { next }
     /^\.\.\. \(/          { next }
-    /^\[see remaining: / { next }
+    /^\[see remaining: /     { next }
+    /^\[full output: /       { next }
+    /^\[\+[0-9]+ hidden: / { next }
     NF == 0              { next }
     { shown += NF - ($1 ~ /\/$/ ? 1 : 0) }
     END { print (total ? total : shown + more) + 0 }

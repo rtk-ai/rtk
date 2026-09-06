@@ -14,13 +14,32 @@ pub struct Config {
     #[serde(default)]
     pub filters: FilterConfig,
     #[serde(default)]
-    pub tee: crate::core::tee::TeeConfig,
+    pub retriever: crate::core::retriever::RetrieverConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tee: Option<LegacyTeeConfig>,
+    #[serde(skip)]
+    pub migrated_from_legacy_tee: bool,
+    /// Legacy `[tee] mode = "always"` teed on success too. The new model has no
+    /// equivalent — `tee_and_hint` returns `None` on exit 0 — so the migration
+    /// is a downgrade and must be surfaced rather than applied silently.
+    #[serde(skip)]
+    pub migrated_from_legacy_tee_always: bool,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
     #[serde(default)]
     pub hooks: HooksConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct LegacyTeeConfig {
+    enabled: Option<bool>,
+    mode: Option<String>,
+    max_files: Option<usize>,
+    max_file_size: Option<usize>,
+    directory: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -190,11 +209,64 @@ impl Config {
 
         if path.exists() {
             let content = std::fs::read_to_string(&path)?;
-            let config: Config = toml::from_str(&content)?;
-            Ok(config)
+            Self::from_toml(&content)
         } else {
             Ok(Config::default())
         }
+    }
+
+    fn from_toml(content: &str) -> Result<Self> {
+        let value: toml::Value = toml::from_str(content)?;
+        let explicit: Vec<String> = value
+            .get("retriever")
+            .and_then(|r| r.as_table())
+            .map(|t| t.keys().cloned().collect())
+            .unwrap_or_default();
+        let has_retriever = value.get("retriever").is_some();
+        let mut config = Config::deserialize(value)?;
+        config.migrate_legacy_tee(has_retriever, &explicit);
+        Ok(config)
+    }
+
+    fn migrate_legacy_tee(&mut self, has_retriever: bool, explicit_retriever_keys: &[String]) {
+        let Some(tee) = self.tee.take() else {
+            return;
+        };
+        use crate::core::retriever::RecoveryMode;
+        let explicit = |key: &str| explicit_retriever_keys.iter().any(|k| k == key);
+        let r = &mut self.retriever;
+        if !has_retriever {
+            self.migrated_from_legacy_tee = true;
+            if tee.enabled == Some(false) || tee.mode.as_deref() == Some("never") {
+                r.mode = RecoveryMode::Disabled;
+            } else {
+                r.mode = RecoveryMode::Tee;
+                self.migrated_from_legacy_tee_always = tee.mode.as_deref() == Some("always");
+            }
+        }
+        // A coexisting [retriever] section leaves the mode alone, but legacy
+        // field values still get merged. That merge is itself a migration and
+        // must raise the flag, or the notice never fires for these users .
+        let mut merged_field = false;
+        if let Some(v) = tee.max_files {
+            if !explicit("tee_max_files") {
+                r.tee_max_files = v;
+                merged_field = true;
+            }
+        }
+        if let Some(v) = tee.max_file_size {
+            if !explicit("tee_max_file_size") {
+                r.tee_max_file_size = v;
+                merged_field = true;
+            }
+        }
+        if let Some(d) = tee.directory {
+            if !explicit("tee_directory") {
+                r.tee_directory = Some(d);
+                merged_field = true;
+            }
+        }
+        self.migrated_from_legacy_tee |= merged_field;
     }
 
     pub fn save(&self) -> Result<()> {
@@ -214,6 +286,100 @@ impl Config {
         config.save()?;
         get_config_path()
     }
+}
+
+fn apply_recall_mode(content: &str, mode: crate::core::retriever::RecoveryMode) -> Result<String> {
+    use crate::core::retriever::RecoveryMode;
+    let mut doc: toml_edit::DocumentMut = content
+        .parse()
+        .map_err(|e| anyhow::anyhow!("config.toml is not valid TOML: {e}"))?;
+
+    let legacy = doc.remove("tee");
+    let retriever_is_table = doc
+        .get("retriever")
+        .is_some_and(|item| item.as_table_like().is_some());
+    if !retriever_is_table {
+        doc["retriever"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let mode_str = match mode {
+        RecoveryMode::Sqlite => "sqlite",
+        RecoveryMode::Tee => "tee",
+        RecoveryMode::Disabled => "disabled",
+    };
+    doc["retriever"]["mode"] = toml_edit::value(mode_str);
+
+    if let Some(legacy) = legacy.as_ref().and_then(|i| i.as_table_like()) {
+        for (old_key, new_key) in [
+            ("max_files", "tee_max_files"),
+            ("max_file_size", "tee_max_file_size"),
+            ("directory", "tee_directory"),
+        ] {
+            if let Some(v) = legacy.get(old_key).and_then(|i| i.as_value()) {
+                if doc["retriever"].get(new_key).is_none() {
+                    doc["retriever"][new_key] = toml_edit::Item::Value(v.clone());
+                }
+            }
+        }
+    }
+    Ok(doc.to_string())
+}
+
+/// True when `content` carries a legacy `[tee] mode = "always"`. `apply_recall_mode`
+/// drops the `[tee]` section, so this must be read before the rewrite .
+fn legacy_tee_mode_is_always(content: &str) -> bool {
+    content
+        .parse::<toml_edit::DocumentMut>()
+        .ok()
+        .and_then(|doc| {
+            doc.get("tee")?
+                .as_table_like()?
+                .get("mode")?
+                .as_str()
+                .map(|m| m == "always")
+        })
+        .unwrap_or(false)
+}
+
+pub fn set_recall_mode(mode: crate::core::retriever::RecoveryMode) -> Result<PathBuf> {
+    let path = get_config_path()?;
+    let content = if path.exists() {
+        std::fs::read_to_string(&path)?
+    } else {
+        String::new()
+    };
+    if legacy_tee_mode_is_always(&content) {
+        eprintln!("{}", crate::core::tee_file::LEGACY_TEE_ALWAYS_NOTICE);
+    }
+    let updated = apply_recall_mode(&content, mode)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, updated)?;
+    Ok(path)
+}
+
+pub fn show_recall_mode() -> Result<()> {
+    use crate::core::retriever::RecoveryMode;
+    let config = Config::load().unwrap_or_default();
+    let mode = match config.retriever.mode {
+        RecoveryMode::Sqlite => "sqlite",
+        RecoveryMode::Tee => "tee",
+        RecoveryMode::Disabled => "disabled",
+    };
+    println!("recall mode: {mode}");
+    if config.migrated_from_legacy_tee {
+        println!("source: legacy [tee] section (auto-migrated at load)");
+    }
+    if config.migrated_from_legacy_tee_always {
+        println!("{}", crate::core::tee_file::LEGACY_TEE_ALWAYS_NOTICE);
+    }
+    if std::env::var("RTK_RECALL").ok().as_deref() == Some("0")
+        || std::env::var("RTK_TEE").ok().as_deref() == Some("0")
+    {
+        println!("note: RTK_RECALL=0/RTK_TEE=0 is set — recovery disabled for this environment");
+    }
+    println!("change with: rtk config recall <sqlite|tee|disabled>");
+    Ok(())
 }
 
 fn get_config_path() -> Result<PathBuf> {
@@ -329,5 +495,412 @@ consent_date = "2026-04-10T12:00:00Z"
             config.telemetry.consent_date.as_deref(),
             Some("2026-04-10T12:00:00Z")
         );
+    }
+
+    #[test]
+    fn test_legacy_tee_disabled_maps_to_disabled_mode() {
+        use crate::core::retriever::RecoveryMode;
+        let toml = r#"
+[tee]
+enabled = false
+"#;
+        let config = Config::from_toml(toml).expect("valid toml");
+        assert_eq!(config.retriever.mode, RecoveryMode::Disabled);
+    }
+
+    #[test]
+    fn test_legacy_tee_never_mode_maps_to_disabled_mode() {
+        use crate::core::retriever::RecoveryMode;
+        let toml = r#"
+[tee]
+mode = "never"
+"#;
+        let config = Config::from_toml(toml).expect("valid toml");
+        assert_eq!(config.retriever.mode, RecoveryMode::Disabled);
+    }
+
+    #[test]
+    fn test_legacy_tee_section_maps_to_tee_mode_with_fields() {
+        use crate::core::retriever::RecoveryMode;
+        let toml = r#"
+[tee]
+enabled = true
+mode = "failures"
+max_files = 7
+max_file_size = 4096
+directory = "/custom/tee"
+"#;
+        let config = Config::from_toml(toml).expect("valid toml");
+        assert_eq!(config.retriever.mode, RecoveryMode::Tee);
+        assert_eq!(config.retriever.tee_max_files, 7);
+        assert_eq!(config.retriever.tee_max_file_size, 4096);
+        assert_eq!(
+            config.retriever.tee_directory,
+            Some(PathBuf::from("/custom/tee"))
+        );
+    }
+
+    #[test]
+    fn test_retriever_section_wins_over_legacy_tee() {
+        use crate::core::retriever::RecoveryMode;
+        let toml = r#"
+[retriever]
+mode = "sqlite"
+
+[tee]
+enabled = false
+"#;
+        let config = Config::from_toml(toml).expect("valid toml");
+        assert_eq!(config.retriever.mode, RecoveryMode::Sqlite);
+    }
+
+    #[test]
+    fn test_migrated_flag_set_only_on_legacy_migration() {
+        let migrated = Config::from_toml("[tee]\nenabled = true\n").expect("valid");
+        assert!(migrated.migrated_from_legacy_tee);
+        let explicit = Config::from_toml("[retriever]\nmode = \"tee\"\n\n[tee]\nenabled = true\n")
+            .expect("valid");
+        assert!(!explicit.migrated_from_legacy_tee);
+        let fresh = Config::from_toml("").expect("valid");
+        assert!(!fresh.migrated_from_legacy_tee);
+    }
+
+    #[test]
+    fn test_coexisting_tee_fields_merge_as_fallback() {
+        use crate::core::retriever::RecoveryMode;
+        let toml = "[retriever]\nretention_days = 90\nmode = \"tee\"\n\n[tee]\nmax_files = 100\ndirectory = \"/mnt/big-disk/tee\"\n";
+        let config = Config::from_toml(toml).expect("valid");
+        assert_eq!(config.retriever.mode, RecoveryMode::Tee);
+        assert_eq!(config.retriever.retention_days, 90);
+        assert_eq!(config.retriever.tee_max_files, 100);
+        assert_eq!(
+            config.retriever.tee_directory,
+            Some(PathBuf::from("/mnt/big-disk/tee"))
+        );
+        assert!(
+            config.migrated_from_legacy_tee,
+            "legacy values are in effect here, so the migration is flagged"
+        );
+    }
+
+    #[test]
+    fn test_explicit_retriever_field_beats_legacy_tee_field() {
+        let toml = "[retriever]\ntee_max_files = 5\n\n[tee]\nmax_files = 100\n";
+        let config = Config::from_toml(toml).expect("valid");
+        assert_eq!(config.retriever.tee_max_files, 5);
+    }
+
+    #[test]
+    fn test_no_tee_section_defaults_to_sqlite() {
+        use crate::core::retriever::RecoveryMode;
+        let config = Config::from_toml("").expect("valid toml");
+        assert_eq!(config.retriever.mode, RecoveryMode::Sqlite);
+    }
+
+    #[test]
+    fn test_apply_recall_mode_preserves_other_content() {
+        use crate::core::retriever::RecoveryMode;
+        let input = "# my personal notes\n[hooks]\nexclude_commands = [\"curl\"]\n\n[tee]\nenabled = true\nmode = \"failures\"\n";
+        let out = apply_recall_mode(input, RecoveryMode::Sqlite).expect("valid");
+        assert!(out.contains("# my personal notes"));
+        assert!(out.contains("exclude_commands = [\"curl\"]"));
+        assert!(!out.contains("[tee]"), "legacy section must be removed");
+        assert!(out.contains("[retriever]"));
+        assert!(out.contains("mode = \"sqlite\""));
+        let reparsed = Config::from_toml(&out).expect("output must stay valid");
+        assert_eq!(reparsed.retriever.mode, RecoveryMode::Sqlite);
+    }
+
+    #[test]
+    fn test_apply_recall_mode_updates_existing_retriever() {
+        use crate::core::retriever::RecoveryMode;
+        let input = "[retriever]\nmode = \"sqlite\"\nmax_entries = 50\n";
+        let out = apply_recall_mode(input, RecoveryMode::Tee).expect("valid");
+        assert!(out.contains("mode = \"tee\""));
+        assert!(out.contains("max_entries = 50"), "sibling keys preserved");
+    }
+
+    #[test]
+    fn test_apply_recall_mode_replaces_scalar_retriever_key() {
+        use crate::core::retriever::RecoveryMode;
+        let out = apply_recall_mode("retriever = \"sqlite\"\n", RecoveryMode::Tee)
+            .expect("must not panic on a scalar retriever key");
+        let reparsed = Config::from_toml(&out).expect("valid output");
+        assert_eq!(reparsed.retriever.mode, RecoveryMode::Tee);
+    }
+
+    #[test]
+    fn test_apply_recall_mode_from_empty_file() {
+        use crate::core::retriever::RecoveryMode;
+        let out = apply_recall_mode("", RecoveryMode::Disabled).expect("valid");
+        let reparsed = Config::from_toml(&out).expect("valid output");
+        assert_eq!(reparsed.retriever.mode, RecoveryMode::Disabled);
+    }
+
+    #[test]
+    fn test_apply_recall_mode_carries_legacy_tee_fields() {
+        use crate::core::retriever::RecoveryMode;
+        let input = "[tee]\nmax_files = 7\ndirectory = \"/custom/tee\"\n";
+        let out = apply_recall_mode(input, RecoveryMode::Tee).expect("valid");
+        let reparsed = Config::from_toml(&out).expect("valid output");
+        assert_eq!(reparsed.retriever.mode, RecoveryMode::Tee);
+        assert_eq!(reparsed.retriever.tee_max_files, 7);
+        assert_eq!(
+            reparsed.retriever.tee_directory,
+            Some(PathBuf::from("/custom/tee"))
+        );
+    }
+
+    // --- additional legacy [tee] migration coverage ---
+
+    #[test]
+    fn test_legacy_tee_enabled_true_only_maps_to_tee() {
+        use crate::core::retriever::RecoveryMode;
+        let config = Config::from_toml("[tee]\nenabled = true\n").expect("valid");
+        assert_eq!(config.retriever.mode, RecoveryMode::Tee);
+        assert!(config.migrated_from_legacy_tee);
+    }
+
+    #[test]
+    fn test_legacy_tee_mode_always_maps_to_tee() {
+        use crate::core::retriever::RecoveryMode;
+        let config = Config::from_toml("[tee]\nmode = \"always\"\n").expect("valid");
+        assert_eq!(
+            config.retriever.mode,
+            RecoveryMode::Tee,
+            "mode=always has no equivalent; it maps to Tee (failures-only)"
+        );
+        assert!(config.migrated_from_legacy_tee);
+        assert!(
+            config.migrated_from_legacy_tee_always,
+            "the downgrade must be flagged, not applied silently"
+        );
+    }
+
+    /// only `always` is a downgrade — the other legacy modes map without
+    /// loss and must not raise the flag, or every legacy user gets the notice.
+    #[test]
+    fn test_legacy_tee_non_always_modes_do_not_flag_downgrade() {
+        for toml in [
+            "[tee]\nmode = \"failures\"\n",
+            "[tee]\nenabled = true\n",
+            "[tee]\n",
+            "[tee]\nmax_files = 5\n",
+        ] {
+            let config = Config::from_toml(toml).expect("valid");
+            assert!(
+                !config.migrated_from_legacy_tee_always,
+                "no downgrade flag for: {toml:?}"
+            );
+        }
+    }
+
+    /// `enabled = false` wins over `mode`, so an explicitly disabled user
+    /// is not told their capture semantics changed.
+    #[test]
+    fn test_legacy_tee_disabled_always_does_not_flag_downgrade() {
+        use crate::core::retriever::RecoveryMode;
+        let config =
+            Config::from_toml("[tee]\nenabled = false\nmode = \"always\"\n").expect("valid");
+        assert_eq!(config.retriever.mode, RecoveryMode::Disabled);
+        assert!(!config.migrated_from_legacy_tee_always);
+    }
+
+    /// an explicit `[retriever]` section means the user already migrated —
+    /// the legacy `mode` is not consulted, so no downgrade notice is due.
+    #[test]
+    fn test_explicit_retriever_suppresses_always_downgrade_flag() {
+        let config =
+            Config::from_toml("[retriever]\nmode = \"sqlite\"\n[tee]\nmode = \"always\"\n")
+                .expect("valid");
+        assert!(!config.migrated_from_legacy_tee_always);
+    }
+
+    /// `set_recall_mode` drops the `[tee]` section, so the `always` intent
+    /// must be readable from the pre-write content.
+    #[test]
+    fn test_legacy_tee_mode_is_always_detects_intent_before_rewrite() {
+        assert!(legacy_tee_mode_is_always("[tee]\nmode = \"always\"\n"));
+        assert!(legacy_tee_mode_is_always(
+            "[retriever]\nmode = \"tee\"\n[tee]\nmode = \"always\"\nmax_files = 3\n"
+        ));
+    }
+
+    #[test]
+    fn test_legacy_tee_mode_is_always_rejects_other_shapes() {
+        for content in [
+            "",
+            "[tee]\n",
+            "[tee]\nmode = \"failures\"\n",
+            "[tee]\nmode = \"never\"\n",
+            "[tee]\nenabled = true\n",
+            "[retriever]\nmode = \"sqlite\"\n",
+            "not valid toml {{{",
+        ] {
+            assert!(
+                !legacy_tee_mode_is_always(content),
+                "must not fire for: {content:?}"
+            );
+        }
+    }
+
+    /// false negative: with a coexisting `[retriever]` the mode is left
+    /// alone, but legacy field values are still merged. That merge is a
+    /// migration and must raise the flag, or the notice never fires for
+    /// exactly the users whose legacy values are in effect.
+    #[test]
+    fn test_coexisting_sections_flag_migration_when_field_merged() {
+        let config = Config::from_toml("[retriever]\nmode = \"tee\"\n[tee]\nmax_files = 7\n")
+            .expect("valid");
+        assert_eq!(config.retriever.tee_max_files, 7, "legacy value applied");
+        assert!(
+            config.migrated_from_legacy_tee,
+            "merged legacy field must flag the migration"
+        );
+    }
+
+    #[test]
+    fn test_coexisting_sections_flag_migration_for_each_legacy_field() {
+        for (toml, label) in [
+            (
+                "[retriever]\nmode = \"tee\"\n[tee]\nmax_file_size = 4096\n",
+                "max_file_size",
+            ),
+            (
+                "[retriever]\nmode = \"tee\"\n[tee]\ndirectory = \"/tmp/t\"\n",
+                "directory",
+            ),
+        ] {
+            let config = Config::from_toml(toml).expect("valid");
+            assert!(config.migrated_from_legacy_tee, "not flagged for {label}");
+        }
+    }
+
+    /// an explicit `[retriever]` key wins, so nothing is merged and there
+    /// is no migration to announce.
+    #[test]
+    fn test_coexisting_sections_no_flag_when_retriever_key_wins() {
+        let config = Config::from_toml(
+            "[retriever]\nmode = \"tee\"\ntee_max_files = 3\n[tee]\nmax_files = 7\n",
+        )
+        .expect("valid");
+        assert_eq!(config.retriever.tee_max_files, 3, "explicit key wins");
+        assert!(
+            !config.migrated_from_legacy_tee,
+            "nothing merged, so nothing to announce"
+        );
+    }
+
+    /// an empty `[tee]` alongside `[retriever]` merges nothing.
+    #[test]
+    fn test_coexisting_empty_tee_section_does_not_flag_migration() {
+        let config = Config::from_toml("[retriever]\nmode = \"tee\"\n[tee]\n").expect("valid");
+        assert!(!config.migrated_from_legacy_tee);
+    }
+
+    /// the notice must name the behavior change and the recovery route,
+    /// otherwise the user cannot act on it.
+    #[test]
+    fn test_always_notice_states_change_and_remedy() {
+        let notice = crate::core::tee_file::LEGACY_TEE_ALWAYS_NOTICE;
+        assert!(notice.contains("always"));
+        assert!(notice.contains("failures only"));
+        assert!(notice.contains("rtk config recall sqlite"));
+    }
+
+    #[test]
+    fn test_legacy_tee_mode_failures_only_maps_to_tee() {
+        use crate::core::retriever::RecoveryMode;
+        let config = Config::from_toml("[tee]\nmode = \"failures\"\n").expect("valid");
+        assert_eq!(config.retriever.mode, RecoveryMode::Tee);
+        assert!(config.migrated_from_legacy_tee);
+    }
+
+    #[test]
+    fn test_legacy_tee_empty_section_maps_to_tee() {
+        use crate::core::retriever::RecoveryMode;
+        let config = Config::from_toml("[tee]\n").expect("valid");
+        assert_eq!(
+            config.retriever.mode,
+            RecoveryMode::Tee,
+            "empty [tee] section: enabled defaults to None, not Some(false), so maps to Tee"
+        );
+        assert!(config.migrated_from_legacy_tee);
+    }
+
+    #[test]
+    fn test_legacy_tee_field_keys_only_maps_to_tee() {
+        use crate::core::retriever::RecoveryMode;
+        let toml = "[tee]\nmax_files = 10\ndirectory = \"/tmp/tee\"\n";
+        let config = Config::from_toml(toml).expect("valid");
+        assert_eq!(config.retriever.mode, RecoveryMode::Tee);
+        assert_eq!(config.retriever.tee_max_files, 10);
+        assert_eq!(
+            config.retriever.tee_directory,
+            Some(PathBuf::from("/tmp/tee"))
+        );
+        assert!(config.migrated_from_legacy_tee);
+    }
+
+    #[test]
+    fn test_legacy_tee_max_file_size_carried_over() {
+        let toml = "[tee]\nmax_file_size = 2048\n";
+        let config = Config::from_toml(toml).expect("valid");
+        assert_eq!(config.retriever.tee_max_file_size, 2048);
+    }
+
+    #[test]
+    fn test_apply_recall_mode_carries_max_file_size() {
+        use crate::core::retriever::RecoveryMode;
+        let input = "[tee]\nmax_file_size = 8192\n";
+        let out = apply_recall_mode(input, RecoveryMode::Tee).expect("valid");
+        let reparsed = Config::from_toml(&out).expect("valid output");
+        assert_eq!(reparsed.retriever.tee_max_file_size, 8192);
+    }
+
+    #[test]
+    fn test_legacy_tee_disabled_false_with_mode_maps_to_disabled() {
+        use crate::core::retriever::RecoveryMode;
+        let toml = "[tee]\nenabled = false\nmode = \"failures\"\n";
+        let config = Config::from_toml(toml).expect("valid");
+        assert_eq!(
+            config.retriever.mode,
+            RecoveryMode::Disabled,
+            "enabled=false takes precedence over mode=failures"
+        );
+    }
+
+    #[test]
+    fn test_legacy_tee_unknown_mode_maps_to_tee() {
+        use crate::core::retriever::RecoveryMode;
+        let config = Config::from_toml("[tee]\nmode = \"custom\"\n").expect("valid");
+        assert_eq!(
+            config.retriever.mode,
+            RecoveryMode::Tee,
+            "unknown mode string is not 'never' and enabled is not Some(false), so maps to Tee"
+        );
+    }
+
+    #[test]
+    fn test_apply_recall_mode_removes_legacy_tee_section() {
+        use crate::core::retriever::RecoveryMode;
+        let input = "[tee]\nenabled = true\nmode = \"failures\"\nmax_files = 5\n";
+        let out = apply_recall_mode(input, RecoveryMode::Sqlite).expect("valid");
+        assert!(
+            !out.contains("[tee]"),
+            "legacy [tee] section must be removed after apply"
+        );
+        assert!(out.contains("[retriever]"));
+        assert!(out.contains("mode = \"sqlite\""));
+        assert!(out.contains("tee_max_files = 5"));
+    }
+
+    #[test]
+    fn test_apply_recall_mode_idempotent() {
+        use crate::core::retriever::RecoveryMode;
+        let input = "[retriever]\nmode = \"tee\"\n";
+        let out1 = apply_recall_mode(input, RecoveryMode::Tee).expect("valid");
+        let out2 = apply_recall_mode(&out1, RecoveryMode::Tee).expect("valid");
+        assert_eq!(out1, out2, "applying same mode twice must be idempotent");
     }
 }

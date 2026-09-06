@@ -150,6 +150,11 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
         "projects_count": enriched.projects_count,
         // Meta-commands: feature adoption
         "meta_usage": enriched.meta_usage,
+        // Recall efficiency: which filter caps to tune (counters per filter family only)
+        "recall_mode": recall_mode_label(),
+        "recall_stats": build_recall_stats(
+            &crate::core::retriever::stats_snapshot().unwrap_or_default()
+        ),
     });
 
     let mut req = ureq::post(url).set("Content-Type", "application/json");
@@ -331,6 +336,108 @@ fn get_enriched_stats(tracker: &tracking::Tracker) -> EnrichedStats {
 }
 
 /// Build meta-command usage counts (gain, discover, proxy, verify, learn, init).
+fn recall_mode_label() -> &'static str {
+    use crate::core::retriever::RecoveryMode;
+    match crate::core::config::Config::load()
+        .unwrap_or_default()
+        .retriever
+        .mode
+    {
+        RecoveryMode::Sqlite => "sqlite",
+        RecoveryMode::Tee => "tee",
+        RecoveryMode::Disabled => "disabled",
+    }
+}
+
+const RECALL_FAMILIES: &[&str] = &[
+    "artisan",
+    "aws",
+    "cargo",
+    "compose",
+    "curl",
+    "docker",
+    "dotnet",
+    "ecs",
+    "err",
+    "eslint",
+    "gh",
+    "git",
+    "glab",
+    "go",
+    "gradlew",
+    "grep",
+    "gt",
+    "jest",
+    "kubectl",
+    "lint",
+    "mvn",
+    "mypy",
+    "next",
+    "npm",
+    "npx",
+    "paratest",
+    "pest",
+    "php",
+    "phpstan",
+    "phpunit",
+    "pint",
+    "pip",
+    "playwright",
+    "pnpm",
+    "prettier",
+    "prisma",
+    "pylint",
+    "pytest",
+    "rake",
+    "rspec",
+    "rubocop",
+    "ruff",
+    "run",
+    "sbt",
+    "test",
+    "tsc",
+    "uv",
+    "vitest",
+    "wget",
+];
+
+fn recall_slug_is_public(slug: &str) -> bool {
+    slug.len() <= 32
+        && slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+        && !slug.contains("___")
+        && slug.split(['_', '-']).count() <= 4
+        && RECALL_FAMILIES.contains(&slug.split(['_', '-']).next().unwrap_or(""))
+}
+
+fn build_recall_stats(stats: &[crate::core::retriever::RecallStat]) -> serde_json::Value {
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let mut other = (0i64, 0i64);
+    for s in stats {
+        if recall_slug_is_public(&s.slug) {
+            rows.push(serde_json::json!({
+                "filter": s.slug,
+                "mode": s.mode,
+                "elisions": s.elisions,
+                "recalls": s.recalls,
+            }));
+        } else {
+            other.0 += s.elisions;
+            other.1 += s.recalls;
+        }
+    }
+    if other != (0, 0) {
+        rows.push(serde_json::json!({
+            "filter": "other",
+            "mode": "mixed",
+            "elisions": other.0,
+            "recalls": other.1,
+        }));
+    }
+    serde_json::Value::Array(rows)
+}
+
 fn build_meta_usage(tracker: &tracking::Tracker) -> serde_json::Value {
     let meta_cmds = ["gain", "discover", "proxy", "verify", "learn", "init"];
     let mut usage = serde_json::Map::new();
@@ -463,6 +570,61 @@ fn touch_marker(path: &PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stat(
+        slug: &str,
+        mode: &str,
+        elisions: i64,
+        recalls: i64,
+    ) -> crate::core::retriever::RecallStat {
+        crate::core::retriever::RecallStat {
+            slug: slug.to_string(),
+            mode: mode.to_string(),
+            elisions,
+            recalls,
+        }
+    }
+
+    #[test]
+    fn test_recall_stats_known_families_pass_named() {
+        let stats = vec![
+            stat("grep", "sqlite", 142, 9),
+            stat("cargo_test", "sqlite", 12, 4),
+            stat("docker-images", "tee", 6, 1),
+        ];
+        let v = build_recall_stats(&stats);
+        let arr = v.as_array().expect("array");
+        let names: Vec<&str> = arr.iter().map(|e| e["filter"].as_str().unwrap()).collect();
+        assert!(names.contains(&"grep"));
+        assert!(names.contains(&"cargo_test"));
+        assert!(names.contains(&"docker-images"));
+    }
+
+    #[test]
+    fn test_recall_stats_unknown_or_suspicious_slugs_fold_into_other() {
+        let stats = vec![
+            stat("mysecretproject", "sqlite", 3, 1),
+            stat("grep__tmpEz7w0", "sqlite", 2, 0),
+            stat("a/b/path", "sqlite", 1, 0),
+            stat(&"x".repeat(40), "sqlite", 1, 1),
+        ];
+        let v = build_recall_stats(&stats);
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "everything folds into one row: {v}");
+        assert_eq!(arr[0]["filter"], "other");
+        assert_eq!(arr[0]["elisions"], 7);
+        assert_eq!(arr[0]["recalls"], 2);
+    }
+
+    #[test]
+    fn test_recall_stats_payload_has_only_expected_keys() {
+        let stats = vec![stat("grep", "sqlite", 1, 1)];
+        let v = build_recall_stats(&stats);
+        let obj = v.as_array().unwrap()[0].as_object().unwrap();
+        let mut keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["elisions", "filter", "mode", "recalls"]);
+    }
 
     #[test]
     fn test_device_hash_is_stable() {
@@ -612,5 +774,155 @@ mod tests {
         // Should not panic even if directories don't exist
         let count = count_custom_toml_filters();
         assert!(count < 10000); // sanity check
+    }
+
+    // --- telemetry allowlist coverage ---
+
+    #[test]
+    fn test_v11_b7_fixed_argument_bearing_slug_rejected() {
+        assert!(
+            !recall_slug_is_public("go_build___cmd_acmepay"),
+            "triple underscore (encoded path) must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_v11_b7_fixed_too_many_segments_rejected() {
+        assert!(
+            !recall_slug_is_public("go_test_-v_-count_1"),
+            ">4 segments (argument leak) must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_v11_b7_fixed_family_with_subcommand_accepted() {
+        assert!(recall_slug_is_public("go_test"));
+        assert!(recall_slug_is_public("cargo_test"));
+        assert!(recall_slug_is_public("docker-images"));
+    }
+
+    #[test]
+    fn test_v11_slug_with_path_separators_rejected() {
+        assert!(!recall_slug_is_public("grep_/home/user/secret"));
+        assert!(!recall_slug_is_public("cargo_./src/main.rs"));
+    }
+
+    #[test]
+    fn test_v11_slug_with_uppercase_rejected() {
+        assert!(!recall_slug_is_public("Docker_build"));
+        assert!(!recall_slug_is_public("GIT_status"));
+    }
+
+    #[test]
+    fn test_v11_slug_over_32_chars_rejected() {
+        let long = "cargo_test_very_long_module_name_";
+        assert!(long.len() > 32);
+        assert!(!recall_slug_is_public(long));
+    }
+
+    #[test]
+    fn test_v11_slug_at_length_boundary_accepted() {
+        let slug = "cargo_test_verylongmodname";
+        assert!(slug.len() <= 32);
+        assert!(
+            slug.split(['_', '-']).count() <= 4,
+            "test slug must have <=4 segments"
+        );
+        assert!(recall_slug_is_public(slug));
+    }
+
+    #[test]
+    fn test_v11_every_recall_family_accepted_standalone() {
+        for family in RECALL_FAMILIES {
+            assert!(
+                recall_slug_is_public(family),
+                "family '{}' must pass allowlist standalone",
+                family
+            );
+        }
+    }
+
+    #[test]
+    fn test_v11_every_recall_family_accepted_with_suffix() {
+        for family in RECALL_FAMILIES {
+            let slug = format!("{}_test", family);
+            if slug.len() <= 32 {
+                assert!(
+                    recall_slug_is_public(&slug),
+                    "family '{}' with suffix must pass",
+                    family
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_v11_empty_slug_rejected() {
+        assert!(!recall_slug_is_public(""));
+    }
+
+    #[test]
+    fn test_v11_non_family_head_rejected() {
+        assert!(!recall_slug_is_public("mysecret"));
+        assert!(!recall_slug_is_public("unknown_cmd"));
+        assert!(!recall_slug_is_public("password_grep"));
+    }
+
+    #[test]
+    fn test_v11_slug_with_special_chars_rejected() {
+        assert!(!recall_slug_is_public("grep@host"));
+        assert!(!recall_slug_is_public("cargo+test"));
+        assert!(!recall_slug_is_public("git status"));
+    }
+
+    #[test]
+    fn test_v11_payload_keys_contain_no_content_fields() {
+        let stats = vec![stat("grep", "sqlite", 1, 1)];
+        let v = build_recall_stats(&stats);
+        let arr = v.as_array().unwrap();
+        for entry in arr {
+            let obj = entry.as_object().unwrap();
+            for key in obj.keys() {
+                assert!(
+                    !["blob", "content", "command", "cwd", "hash", "path"].contains(&key.as_str()),
+                    "payload must not contain content field '{}': {:?}",
+                    key,
+                    obj
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_v11_other_bucket_hides_slug_identity() {
+        let stats = vec![stat("mysecret_project", "sqlite", 5, 2)];
+        let v = build_recall_stats(&stats);
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(
+            arr[0]["filter"], "other",
+            "non-public slug must be anonymized"
+        );
+        let serialized = v.to_string();
+        assert!(
+            !serialized.contains("mysecret"),
+            "slug identity must not appear in payload"
+        );
+    }
+
+    #[test]
+    fn test_v11_mixed_public_private_slugs() {
+        let stats = vec![
+            stat("grep", "sqlite", 10, 3),
+            stat("private_tool", "sqlite", 2, 1),
+            stat("cargo_test", "sqlite", 5, 0),
+        ];
+        let v = build_recall_stats(&stats);
+        let arr = v.as_array().unwrap();
+        let names: Vec<&str> = arr.iter().map(|e| e["filter"].as_str().unwrap()).collect();
+        assert!(names.contains(&"grep"));
+        assert!(names.contains(&"cargo_test"));
+        assert!(names.contains(&"other"));
+        assert!(!names.contains(&"private_tool"));
     }
 }

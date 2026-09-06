@@ -185,7 +185,7 @@ mod tests {
     #[test]
     fn test_filter_curl_long_output_truncated() {
         let long: String = "x".repeat(1000);
-        let result = filter_curl_output(&long, true);
+        let result = crate::core::tee::with_temp_recall(|| filter_curl_output(&long, true));
         assert!(result.content.starts_with('x'));
         assert!(result.content.contains("bytes total"));
         assert!(result.content.contains("1000"));
@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn test_filter_curl_multibyte_boundary() {
         let content = "a".repeat(499) + "é";
-        let result = filter_curl_output(&content, true);
+        let result = crate::core::tee::with_temp_recall(|| filter_curl_output(&content, true));
         assert!(result.content.contains("bytes total"));
         assert!(result.content.len() < 600);
     }
@@ -204,8 +204,19 @@ mod tests {
     #[test]
     fn test_filter_curl_exact_500_bytes() {
         let content = "a".repeat(500);
-        let result = filter_curl_output(&content, true);
+        let result = crate::core::tee::with_temp_recall(|| filter_curl_output(&content, true));
         assert!(result.content.contains("bytes total"));
+    }
+
+    /// Companion to the three above: with recall unavailable the filter must
+    /// pass the body through rather than emit a truncation marker nothing can
+    /// recover from. This is the default state under test.
+    #[test]
+    fn test_filter_curl_passthrough_when_recall_unavailable() {
+        let long: String = "x".repeat(1000);
+        let result = filter_curl_output(&long, true);
+        assert_eq!(result.content, long, "no recall, no truncation");
+        assert!(result.tee_hint.is_none());
     }
 
     // --- #1536: large JSON must remain parseable for downstream tools ---

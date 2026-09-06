@@ -5,10 +5,13 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
+
+mod common;
 use std::sync::mpsc;
 use std::time::Duration;
 
 fn rtk() -> Command {
+    common::isolate_recall();
     Command::new(env!("CARGO_BIN_EXE_rtk"))
 }
 

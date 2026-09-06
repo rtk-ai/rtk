@@ -32,12 +32,14 @@ colored = "3"
 dirs = "5"
 rusqlite = { version = "0.31", features = ["bundled"] }
 toml = "0.8"
+toml_edit = "0.22"
 chrono = "0.4"
 tempfile = "3"
 sha2 = "0.10"
 ureq = "2"
 getrandom = "0.4"
 flate2 = "1.0"
+lz4_flex = "0.11"
 quick-xml = "0.37"
 which = "8"
 automod = "1"
@@ -49,6 +51,12 @@ libc = "0.2"
 windows-sys = { version = "0.59", features = [
     "Win32_System_Console",
     "Win32_Globalization",
+    # Owner-only ACLs for the recall store, its directory and the tee files.
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
 ] }
 
 [build-dependencies]

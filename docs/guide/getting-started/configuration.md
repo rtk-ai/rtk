@@ -38,12 +38,15 @@ max_width = 120             # maximum output width
 ignore_dirs = [".git", "node_modules", "target", "__pycache__", ".venv", "vendor"]
 ignore_files = ["*.lock", "*.min.js", "*.min.css"]
 
-[tee]
-enabled = true              # save raw output on failure
-mode = "failures"           # "failures" (default), "always", "never"
-max_files = 20              # rotation: keep last N files
-max_file_size = 1048576     # 1 MB in bytes
-# directory = "/custom/tee/path"  # optional override
+[retriever]
+mode = "sqlite"             # sqlite (default) | tee (legacy files) | disabled
+max_entry_bytes = 10485760  # sqlite: 10 MiB per entry
+max_entries = 200           # sqlite: FIFO cap
+retention_days = 30         # sqlite: 0 disables age eviction
+# database_path = "/custom/recall.db"
+tee_max_files = 20          # tee mode: rotation
+tee_max_file_size = 1048576 # tee mode: per-file cap
+# tee_directory = "/custom/tee/dir"
 
 [telemetry]
 enabled = true              # anonymous daily ping — see Telemetry & Privacy for full details
@@ -59,28 +62,51 @@ For full details on what is collected, opt-out options, and GDPR rights, see [Te
 | Variable | Description |
 |----------|-------------|
 | `RTK_DISABLED=1` | Disable RTK for a single command (`RTK_DISABLED=1 git status`) |
-| `RTK_TEE_DIR` | Override the tee directory |
+| `RTK_RECALL=0` | Disable recall *writes* for a single command; `rtk recall` still reads an existing store |
+| `RTK_RECALL_DB` | Override the recall database path |
+| `RTK_TEE=0` | Legacy alias of `RTK_RECALL=0` (still honored) |
+| `RTK_TEE_DIR` | Override the tee directory (tee mode) |
 | `RTK_TELEMETRY_DISABLED=1` | Disable telemetry |
 | `RTK_HOOK_AUDIT=1` | Enable hook audit logging |
 | `SKIP_ENV_VALIDATION=1` | Skip env validation (useful with Next.js) |
 
-## Tee system
+## Recall system
 
-When a command fails, RTK saves the full raw output to a local file and prints the path:
+When a command fails — or a filter trims a long list — RTK persists the full output to an embedded database and prints a recall hint:
 
 ```
 FAILED: 2/15 tests
-[full output: ~/.local/share/rtk/tee/1707753600_cargo_test.log]
+[full output: rtk recall 36365b69eda6]
 ```
 
-Your AI assistant can then read the file if it needs more detail, without re-running the command.
+Your AI assistant runs `rtk recall <hash>` exactly as printed in the hint — that is the whole agent interface. For humans inspecting the store: `rtk recall <hash> --full | --from N | --lines N | --grep PAT` and `rtk recall --list`. Storage is byte-faithful (`BLOB` + lossless lz4) up to `max_entry_bytes`; the stored input is the captured command text, as with the previous tee files.
+
+Two caveats worth knowing before relying on it:
+
+- **Output larger than `max_entry_bytes` is stored truncated**, cut back to a line boundary. `rtk recall` says so on stderr when it returns such an entry. Legacy `tee` mode truncates differently — it appends a `--- truncated at N bytes ---` marker into the file, so a truncated tee payload is annotated rather than raw.
+- **`RTK_RECALL=0` disables *writing*, not reading.** `rtk recall <hash>` and `rtk gain --recalls` still read an existing store with the variable set. The switch is aimed at the hook path that captures output, not at the command you run deliberately.
+
+### Choosing the recovery mode
+
+The simplest way is the CLI — no file editing needed:
+
+```bash
+rtk config recall           # show the active mode and its source
+rtk config recall sqlite    # hash-addressed sqlite store (default)
+rtk config recall tee       # legacy .log files in ~/.local/share/rtk/tee/
+rtk config recall disabled  # no recovery storage
+```
+
+Setting a mode rewrites only the relevant keys in `config.toml` (comments and other sections are preserved), and migrates a legacy `[tee]` section — its `max_files`/`max_file_size`/`directory` values are carried over. The equivalent config field, if you prefer editing the file directly, is `[retriever] mode = "sqlite" | "tee" | "disabled"` (see the full structure above).
+
+To see how often your assistant actually goes back for elided output — and which filter caps deserve tuning — see [`rtk gain --recalls`](../analytics/gain.md#recall-efficiency).
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `tee.enabled` | `true` | Enable/disable |
-| `tee.mode` | `"failures"` | `"failures"`, `"always"`, `"never"` |
-| `tee.max_files` | `20` | Rotation: keep last N files |
-| Min size | 500 bytes | Outputs shorter than this are not saved |
+| `retriever.mode` | `"sqlite"` | `sqlite` (default), `tee` (legacy files), `disabled` |
+| `retriever.max_entry_bytes` | `10485760` | Per-entry storage cap (10 MiB) |
+| `retriever.max_entries` | `200` | FIFO cap on retained entries |
+| `retriever.retention_days` | `30` | Age eviction in days (0 = off) |
 | Max file size | 1 MB | Truncated above this |
 
 ## Excluding commands from auto-rewrite

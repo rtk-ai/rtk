@@ -283,21 +283,30 @@ pub fn fallback_tail(output: &str, label: &str, n: usize) -> String {
     lines[start..].join("\n")
 }
 
-/// Create a directory owner-only (0700 on Unix), tightening one that already exists.
+/// Create a directory owner-only, tightening one that already exists.
+///
+/// `0700` on Unix; on Windows a DACL with one entry for the current user,
+/// inheriting so what is created inside starts protected too.
 pub fn create_private_dir(path: &std::path::Path) -> std::io::Result<()> {
     fs::create_dir_all(path)?;
     set_owner_only(path, 0o700);
     Ok(())
 }
 
-/// Restrict an existing file to owner-only access (0600 on Unix).
+/// Restrict an existing file to owner-only access: `0600` on Unix, a
+/// single-entry DACL detached from inheritance on Windows.
 pub fn restrict_file(path: &std::path::Path) {
     set_owner_only(path, 0o600);
 }
 
-/// Open a file owner-only (0600 on Unix), applied at creation so content is
-/// never briefly readable under a permissive umask. `mode` is ignored for a
-/// file that already exists, so an older one is still tightened afterwards.
+/// Open a file owner-only, applied at creation on Unix so content is never
+/// briefly readable under a permissive umask. `mode` is ignored for a file
+/// that already exists, so an older one is still tightened afterwards.
+///
+/// Windows cannot do the same: `OpenOptions` has no way to pass
+/// `SECURITY_ATTRIBUTES`, so the file is created with the inherited DACL and
+/// tightened immediately after. The window is real and is bounded by the
+/// parent directory's own DACL, which `create_private_dir` protects.
 pub fn open_private(
     opts: &mut fs::OpenOptions,
     path: &std::path::Path,
@@ -350,7 +359,147 @@ fn set_owner_only(path: &std::path::Path, mode: u32) {
     let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
 }
 
-#[cfg(not(unix))]
+/// Windows has no mode bits, so the Unix `mode` is read for its intent only:
+/// `0o700` means a directory whose children should inherit the restriction,
+/// anything else means a single object. Both end up with the same DACL — one
+/// allow-all entry for the current user and nothing else — applied with
+/// `PROTECTED_DACL_SECURITY_INFORMATION`, which detaches the object from the
+/// ACEs it would otherwise inherit from its parent.
+///
+/// Best-effort, like the Unix path: a failure is silent. Nothing here may write
+/// to stderr, because this runs underneath the hook path where any extra byte
+/// lands in the agent's session, and a permissions warning is not worth a token
+/// on every command. The consequence is that a caller cannot tell a protected
+/// file from an unprotected one, which is why `recall.db` also lives inside a
+/// directory this same function protects: a file whose parent denies traversal
+/// to everyone else is unreachable even if its own DACL never landed.
+///
+/// Unlike Unix, the restriction cannot be applied at creation. `OpenOptions`
+/// has no way to pass `SECURITY_ATTRIBUTES`, so `open_private` creates the file
+/// with the inherited DACL and tightens it immediately afterwards. The window
+/// is real and is bounded by the parent directory's own DACL.
+#[cfg(windows)]
+fn set_owner_only(path: &std::path::Path, mode: u32) {
+    let inherit = if mode == 0o700 {
+        windows_sys::Win32::Security::SUB_CONTAINERS_AND_OBJECTS_INHERIT
+    } else {
+        windows_sys::Win32::Security::NO_INHERITANCE
+    };
+    let _ = apply_owner_only_dacl(path, inherit);
+}
+
+/// The path as a NUL-terminated UTF-16 buffer, which every `*W` entry point
+/// wants. Returns `None` for a path containing an interior NUL — Win32 would
+/// silently act on the truncated prefix, which for a permissions call means
+/// protecting the wrong object.
+#[cfg(windows)]
+fn wide_path(path: &std::path::Path) -> Option<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return None;
+    }
+    wide.push(0);
+    Some(wide)
+}
+
+/// The current process user's SID, as the opaque buffer Win32 hands back.
+///
+/// The SID is a pointer *into* that buffer, so the buffer has to outlive every
+/// use of the pointer — hence returning both rather than just the SID.
+#[cfg(windows)]
+fn current_user_sid() -> Option<(Vec<u8>, windows_sys::Win32::Security::PSID)> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    #[allow(unsafe_code)]
+    // nosemgrep: unsafe-block — reads this process's own token; no memory shared
+    // across threads and every buffer is sized by the call that fills it.
+    unsafe {
+        let mut token = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return None;
+        }
+        // Ask for the size first: TOKEN_USER is a header plus a variable-length
+        // SID, so a fixed buffer would be a guess.
+        let mut needed = 0u32;
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+        let mut buf = vec![0u8; needed as usize];
+        let ok = GetTokenInformation(
+            token,
+            TokenUser,
+            buf.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        );
+        CloseHandle(token);
+        if ok == 0 || buf.len() < std::mem::size_of::<TOKEN_USER>() {
+            return None;
+        }
+        let sid = (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid;
+        Some((buf, sid))
+    }
+}
+
+/// Replace the object's DACL with a single full-access entry for the current
+/// user, and mark it protected so no inherited ACE is merged back in.
+#[cfg(windows)]
+fn apply_owner_only_dacl(
+    path: &std::path::Path,
+    inherit: windows_sys::Win32::Security::ACE_FLAGS,
+) -> Option<()> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::Security::Authorization::{
+        SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, SET_ACCESS, SE_FILE_OBJECT,
+        TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    };
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+
+    let mut wide = wide_path(path)?;
+    let (_sid_buf, sid) = current_user_sid()?;
+
+    #[allow(unsafe_code)]
+    // nosemgrep: unsafe-block — the ACL is built and freed in this scope, and the
+    // SID buffer outlives every pointer taken into it.
+    unsafe {
+        let mut access: EXPLICIT_ACCESS_W = std::mem::zeroed();
+        access.grfAccessPermissions = FILE_ALL_ACCESS;
+        access.grfAccessMode = SET_ACCESS;
+        access.grfInheritance = inherit;
+        access.Trustee = TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: 0,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_USER,
+            ptstrName: sid.cast(),
+        };
+
+        let mut acl = std::ptr::null_mut();
+        if SetEntriesInAclW(1, &access, std::ptr::null_mut(), &mut acl) != ERROR_SUCCESS {
+            return None;
+        }
+
+        let result = SetNamedSecurityInfoW(
+            wide.as_mut_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            acl,
+            std::ptr::null_mut(),
+        );
+        LocalFree(acl.cast());
+
+        (result == ERROR_SUCCESS).then_some(())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn set_owner_only(_path: &std::path::Path, _mode: u32) {}
 
 /// Build a Command for Ruby tools, auto-detecting bundle exec.
@@ -1676,5 +1825,166 @@ mod tests {
 
         // Nothing named and rtk may fetch: npx is the only runner that can.
         assert_eq!(exec_runner(None, MissingTool::Fetch), "npx");
+    }
+}
+
+/// What `set_owner_only` actually did, read back from the object itself.
+///
+/// The Unix side is covered by reading the mode bits; this is the equivalent,
+/// and it exists because the Windows path shipped for a long time as an empty
+/// function whose "guarantee" no test could have contradicted.
+#[cfg(windows)]
+#[cfg(test)]
+mod windows_permission_tests {
+    use super::*;
+    use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
+    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        AclSizeInformation, GetAclInformation, GetSecurityDescriptorControl, ACL_SIZE_INFORMATION,
+        DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+    };
+
+    /// Wine answers `SetNamedSecurityInfoW` with ERROR_SUCCESS and then hands
+    /// back a descriptor it synthesises from the underlying Unix mode bits —
+    /// measured here as three entries and no protected flag, whatever was
+    /// written. So a read-back assertion cannot run there, and a test that
+    /// simply failed under wine would be noise on a harness that exists to run
+    /// this code. Detected the canonical way, by asking ntdll for an export
+    /// only wine has, rather than by an environment variable that a real
+    /// Windows machine could also happen to carry.
+    fn running_under_wine() -> bool {
+        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+
+        #[allow(unsafe_code)]
+        // nosemgrep: unsafe-block — two read-only lookups against a module that
+        // is always loaded; no handle is freed and no memory is written.
+        unsafe {
+            let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
+            !ntdll.is_null() && GetProcAddress(ntdll, c"wine_get_version".as_ptr().cast()).is_some()
+        }
+    }
+
+    /// The half of each guarantee that survives on a host without real ACLs:
+    /// the call itself succeeded. Returns true when the caller should stop
+    /// there.
+    fn checked_write_path_only(path: &std::path::Path, inherit: u32) -> bool {
+        if !running_under_wine() {
+            return false;
+        }
+        assert!(
+            super::apply_owner_only_dacl(path, inherit).is_some(),
+            "the ACL write path must still succeed under wine"
+        );
+        true
+    }
+
+    /// (protected-from-inheritance, number of entries) for the object's DACL.
+    fn dacl_facts(path: &std::path::Path) -> Option<(bool, u32)> {
+        let mut wide = super::wide_path(path)?;
+
+        #[allow(unsafe_code)]
+        // nosemgrep: unsafe-block — read-only security query, freed in scope.
+        unsafe {
+            let mut dacl = std::ptr::null_mut();
+            let mut descriptor = std::ptr::null_mut();
+            let status = GetNamedSecurityInfoW(
+                wide.as_mut_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut descriptor,
+            );
+            if status != ERROR_SUCCESS {
+                return None;
+            }
+
+            let mut control = 0u16;
+            let mut revision = 0u32;
+            let got_control =
+                GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) != 0;
+
+            let mut size: ACL_SIZE_INFORMATION = std::mem::zeroed();
+            let got_size = GetAclInformation(
+                dacl,
+                std::ptr::addr_of_mut!(size).cast(),
+                u32::try_from(std::mem::size_of::<ACL_SIZE_INFORMATION>()).unwrap_or(0),
+                AclSizeInformation,
+            ) != 0;
+
+            LocalFree(descriptor.cast());
+
+            (got_control && got_size).then_some((control & SE_DACL_PROTECTED != 0, size.AceCount))
+        }
+    }
+
+    #[test]
+    fn test_restrict_file_detaches_from_inheritance() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recall.db");
+        std::fs::write(&path, b"x").unwrap();
+
+        // A freshly created file inherits its parent's ACEs, so it starts
+        // unprotected. If that ever stops being true the test below would pass
+        // for the wrong reason, which is what this half is here to catch.
+        let (protected_before, _) = dacl_facts(&path).expect("DACL readable before");
+        assert!(
+            !protected_before,
+            "a new file is expected to inherit, or this test proves nothing"
+        );
+
+        if checked_write_path_only(&path, windows_sys::Win32::Security::NO_INHERITANCE) {
+            return;
+        }
+        restrict_file(&path);
+
+        let (protected_after, aces) = dacl_facts(&path).expect("DACL readable after");
+        assert!(protected_after, "DACL must be detached from inheritance");
+        assert_eq!(aces, 1, "exactly one entry, for the current user");
+    }
+
+    #[test]
+    fn test_create_private_dir_detaches_from_inheritance() {
+        let parent = tempfile::tempdir().unwrap();
+        let path = parent.path().join("rtk");
+        create_private_dir(&path).unwrap();
+        if checked_write_path_only(
+            &path,
+            windows_sys::Win32::Security::SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+        ) {
+            return;
+        }
+
+        let (protected, aces) = dacl_facts(&path).expect("DACL readable");
+        assert!(
+            protected,
+            "directory DACL must be detached from inheritance"
+        );
+        assert_eq!(aces, 1, "exactly one entry, for the current user");
+    }
+
+    #[test]
+    fn test_open_private_restricts_the_file_it_creates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tracking.db");
+        let file =
+            open_private(std::fs::OpenOptions::new().write(true).create(true), &path).unwrap();
+        drop(file);
+        if checked_write_path_only(&path, windows_sys::Win32::Security::NO_INHERITANCE) {
+            return;
+        }
+
+        let (protected, aces) = dacl_facts(&path).expect("DACL readable");
+        assert!(protected, "open_private must restrict what it creates");
+        assert_eq!(aces, 1, "exactly one entry, for the current user");
+    }
+
+    #[test]
+    fn test_wide_path_refuses_an_interior_nul() {
+        use std::os::windows::ffi::OsStringExt;
+        let bad = std::ffi::OsString::from_wide(&[0x0041, 0x0000, 0x0042]);
+        assert!(super::wide_path(std::path::Path::new(&bad)).is_none());
     }
 }

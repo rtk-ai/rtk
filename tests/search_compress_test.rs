@@ -5,7 +5,10 @@
 
 use std::process::Command;
 
+mod common;
+
 fn rtk() -> Command {
+    common::isolate_recall();
     Command::new(env!("CARGO_BIN_EXE_rtk"))
 }
 

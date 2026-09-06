@@ -149,7 +149,7 @@ pub fn filter_bun_pm_ls_text(raw: &str) -> String {
 /// in the order bun wrote them (bun puts progress on stderr), and so tracking
 /// records the output that was actually shown rather than the pre-guard filter
 /// result.
-pub fn run_pkg(subcmd: &str, args: &[String], verbose: u8) -> Result<i32> {
+pub fn run_pkg(subcmd: &'static str, args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("bun");
     cmd.args(pkg_argv(subcmd, args));
 
@@ -158,13 +158,16 @@ pub fn run_pkg(subcmd: &str, args: &[String], verbose: u8) -> Result<i32> {
     }
 
     let display = format!("{} {}", subcmd, args.join(" "));
-    let tee_label = format!("bun_{}", subcmd);
+
     crate::core::runner::run_filtered(
         cmd,
         "bun",
         display.trim_end(),
         filter_bun_pkg,
-        crate::core::runner::RunOptions::with_tee(&tee_label),
+        crate::core::runner::RunOptions::with_tee(crate::core::tee::Slug::Composed {
+            family: "bun",
+            parts: &[subcmd],
+        }),
     )
 }
 

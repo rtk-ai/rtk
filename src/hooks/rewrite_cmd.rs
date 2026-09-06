@@ -15,11 +15,86 @@ use std::io::Write;
 /// | 1    | (none)   | No RTK equivalent — hook passes through unchanged.           |
 /// | 2    | (none)   | Deny rule matched — hook defers to Claude Code native deny.  |
 /// | 3    | rewritten| Ask rule matched — hook rewrites but lets Claude Code prompt.|
+const TEE_READERS: &[&str] = &[
+    "cat", "tail", "head", "less", "more", "bat", "grep", "rg", "sed", "awk",
+];
+
+fn expand_home(token: &str) -> String {
+    if let Some(rest) = token.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).to_string_lossy().into_owned();
+        }
+    }
+    if let Some(rest) = token.strip_prefix("$HOME/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).to_string_lossy().into_owned();
+        }
+    }
+    token.to_string()
+}
+
+/// The part of a tee filename that may be counted.
+///
+/// A filename carries the family and, for a slug that had one, an unbounded
+/// detail after the marker — a file path, in the only case that produces one.
+/// Counting the whole name here would put that path in `recall_stats`, which
+/// is the leak the slug type closes on the elision side: the detail would have
+/// come back in through the filename on the recall side, and the count would
+/// have been bounded on one side only.
+///
+/// Files written before the marker existed have no `__` and are returned
+/// whole, which is what they were counted as when they were written.
+pub(crate) fn bounded_half(slug: &str) -> &str {
+    match slug.split_once(crate::core::tee_file::DETAIL_MARKER) {
+        Some((family, _)) if !family.is_empty() => family,
+        _ => slug,
+    }
+}
+
+fn tee_read_slug(cmd: &str, tee_dir: &std::path::Path) -> Option<(String, String)> {
+    let first = cmd.split_whitespace().next()?;
+    let reader = first.rsplit('/').next().unwrap_or(first);
+    if !TEE_READERS.contains(&reader) {
+        return None;
+    }
+    for token in cmd.split_whitespace() {
+        let t = token.trim_matches(|c| c == '"' || c == '\'');
+        if !t.ends_with(".log") {
+            continue;
+        }
+        let expanded = expand_home(t);
+        let path = std::path::Path::new(&expanded);
+        if !path.starts_with(tee_dir) {
+            continue;
+        }
+        let stem = path.file_stem()?.to_str()?;
+        if let Some((epoch, slug)) = stem.split_once('_') {
+            if !epoch.is_empty() && epoch.chars().all(|c| c.is_ascii_digit()) && !slug.is_empty() {
+                return Some((bounded_half(slug).to_string(), expanded));
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn track_tee_read(cmd: &str) {
+    if !cmd.contains(".log") {
+        return;
+    }
+    let Some(tee_dir) = crate::core::tee_file::resolved_tee_dir() else {
+        return;
+    };
+    if let Some((slug, path)) = tee_read_slug(cmd, &tee_dir) {
+        crate::core::retriever::record_tee_recall(&slug, &path);
+    }
+}
+
 pub fn run(cmd: &str) -> anyhow::Result<()> {
     let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
 
     match evaluate(cmd, &excluded, &transparent_prefixes) {
         RewriteOutcome::Allow(rewritten) => {
+            track_tee_read(cmd);
             print!("{}", rewritten);
             let _ = std::io::stdout().flush();
             Ok(())
@@ -79,6 +154,67 @@ fn evaluate_with_verdict(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_tee_read_slug_detects_tail_hint_command() {
+        let dir = std::path::Path::new("/home/u/.local/share/rtk/tee");
+        let cmd = "tail -n +52 /home/u/.local/share/rtk/tee/1755590000_docker-images.log";
+        assert_eq!(
+            tee_read_slug(cmd, dir),
+            Some((
+                "docker-images".to_string(),
+                "/home/u/.local/share/rtk/tee/1755590000_docker-images.log".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_tee_read_slug_detects_quoted_and_grep() {
+        let dir = std::path::Path::new("/home/u/.local/share/rtk/tee");
+        let cmd = r#"grep error "/home/u/.local/share/rtk/tee/1755590000_cargo_test.log""#;
+        assert_eq!(
+            tee_read_slug(cmd, dir).map(|(s, _)| s),
+            Some("cargo_test".to_string())
+        );
+    }
+
+    #[test]
+    fn test_tee_read_slug_ignores_non_readers() {
+        let dir = std::path::Path::new("/home/u/.local/share/rtk/tee");
+        for cmd in [
+            "rm /home/u/.local/share/rtk/tee/1755590000_x.log",
+            "ls /home/u/.local/share/rtk/tee",
+            "mv /home/u/.local/share/rtk/tee/1755590000_x.log /tmp/",
+        ] {
+            assert_eq!(tee_read_slug(cmd, dir), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_tee_read_slug_ignores_logs_outside_tee_dir() {
+        let dir = std::path::Path::new("/home/u/.local/share/rtk/tee");
+        assert_eq!(tee_read_slug("cat /var/log/app_server.log", dir), None);
+        assert_eq!(tee_read_slug("tail -f ./build_1234_out.log", dir), None);
+    }
+
+    #[test]
+    fn test_tee_read_slug_requires_epoch_prefix() {
+        let dir = std::path::Path::new("/home/u/.local/share/rtk/tee");
+        assert_eq!(
+            tee_read_slug("cat /home/u/.local/share/rtk/tee/notes_perso.log", dir),
+            None
+        );
+    }
+
+    #[test]
+    fn test_tee_read_slug_reader_with_absolute_path() {
+        let dir = std::path::Path::new("/home/u/.local/share/rtk/tee");
+        let cmd = "/usr/bin/tail -n +5 /home/u/.local/share/rtk/tee/17_gh-prs.log";
+        assert_eq!(
+            tee_read_slug(cmd, dir).map(|(s, _)| s),
+            Some("gh-prs".to_string())
+        );
+    }
 
     fn rewrite_command_no_prefixes(cmd: &str) -> Option<String> {
         registry::rewrite_command(cmd, &[], &[])
@@ -288,6 +424,30 @@ mod tests {
             // Sentinel: ensure Default and Allow are distinct enum variants.
             // If this ever fails, the entire permission model is broken.
             assert_ne!(PermissionVerdict::Default, PermissionVerdict::Allow);
+        }
+    }
+
+    mod v17_track_after_verdict {
+        use super::super::{evaluate_with_verdict, RewriteOutcome};
+        use crate::hooks::permissions::PermissionVerdict;
+
+        #[test]
+        fn test_denied_command_never_reaches_allow_branch() {
+            let outcome = evaluate_with_verdict("git status", PermissionVerdict::Deny, &[], &[]);
+            assert_eq!(outcome, RewriteOutcome::Deny);
+        }
+
+        #[test]
+        fn test_passthrough_command_never_reaches_allow_branch() {
+            let outcome =
+                evaluate_with_verdict("git log > /tmp/out.txt", PermissionVerdict::Allow, &[], &[]);
+            assert_eq!(outcome, RewriteOutcome::Passthrough);
+        }
+
+        #[test]
+        fn test_ask_verdict_does_not_reach_allow_branch() {
+            let outcome = evaluate_with_verdict("git status", PermissionVerdict::Default, &[], &[]);
+            assert!(matches!(outcome, RewriteOutcome::Ask(_)));
         }
     }
 }

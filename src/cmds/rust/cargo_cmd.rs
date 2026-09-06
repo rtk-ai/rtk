@@ -3,6 +3,7 @@
 use crate::core::args_utils;
 use crate::core::runner;
 use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
+use crate::core::tee::Slug;
 use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{join_with_overflow, resolved_command, truncate};
 use anyhow::Result;
@@ -267,7 +268,7 @@ impl BlockHandler for CargoTestHandler {
 /// Generic cargo command runner with filtering.
 /// Builds the Command with restored `--` separator, then delegates to shared runner.
 fn run_cargo_filtered<F>(
-    subcommand: &str,
+    subcommand: &'static str,
     args: &[String],
     verbose: u8,
     filter_fn: F,
@@ -292,14 +293,17 @@ where
         &format!("cargo {}", subcommand),
         &restored_args.join(" "),
         filter_fn,
-        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
+        runner::RunOptions::with_tee(Slug::Composed {
+            family: "cargo",
+            parts: &[subcommand],
+        }),
     )
 }
 
 /// Same as `run_cargo_filtered` but the filter also receives the child exit code,
 /// so it can tell a genuine failure from a clean run when no diagnostics parse.
 fn run_cargo_filtered_with_exit<F>(
-    subcommand: &str,
+    subcommand: &'static str,
     args: &[String],
     verbose: u8,
     filter_fn: F,
@@ -324,12 +328,15 @@ where
         &format!("cargo {}", subcommand),
         &restored_args.join(" "),
         filter_fn,
-        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
+        runner::RunOptions::with_tee(Slug::Composed {
+            family: "cargo",
+            parts: &[subcommand],
+        }),
     )
 }
 
 fn run_cargo_streamed(
-    subcommand: &str,
+    subcommand: &'static str,
     args: &[String],
     verbose: u8,
     filter: Box<dyn StreamFilter>,
@@ -351,7 +358,10 @@ fn run_cargo_streamed(
         &format!("cargo {}", subcommand),
         &restored_args.join(" "),
         filter,
-        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
+        runner::RunOptions::with_tee(Slug::Composed {
+            family: "cargo",
+            parts: &[subcommand],
+        }),
     )
 }
 

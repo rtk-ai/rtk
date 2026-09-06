@@ -1451,7 +1451,7 @@ failed:
     fn caps_noisy_failure_output_head_and_tail() {
         let input =
             include_str!("../../../tests/fixtures/ctest_noisy_fail_output_on_failure_raw.txt");
-        let filtered = filter_ctest_output(input);
+        let filtered = crate::core::tee::with_temp_recall(|| filter_ctest_output(input));
 
         assert_eq!(
             without_tee_hints(&filtered),
@@ -1707,7 +1707,7 @@ some unrelated tail
             "\n0% tests passed, 25 tests failed out of 25\n\nTotal Test time (real) =   0.01 sec\n",
         );
 
-        let filtered = filter_ctest_output(&input);
+        let filtered = crate::core::tee::with_temp_recall(|| filter_ctest_output(&input));
         let (rendered_section, full_section, truncated) = failed_section_parts(&input);
         assert!(truncated);
 
@@ -1756,7 +1756,7 @@ some unrelated tail
             input.push_str(&format!("\t  {number} - broken_{number} (Failed)\n"));
         }
 
-        let filtered = filter_ctest_output(&input);
+        let filtered = crate::core::tee::with_temp_recall(|| filter_ctest_output(&input));
 
         assert_eq!(
             filtered
@@ -1773,7 +1773,10 @@ some unrelated tail
         assert_eq!(
             filtered
                 .lines()
-                .filter(|line| line.trim_start().starts_with("[see remaining:"))
+                .filter(|line| {
+                    let t = line.trim_start();
+                    t.starts_with("[see remaining:") || t.starts_with("[+")
+                })
                 .count(),
             1
         );
@@ -1791,7 +1794,7 @@ some unrelated tail
             "\n100% tests passed, 0 tests failed out of 25\n\nTotal Test time (real) =   0.01 sec\n",
         );
 
-        let filtered = filter_ctest_output(&input);
+        let filtered = crate::core::tee::with_temp_recall(|| filter_ctest_output(&input));
 
         assert_eq!(
             filtered
@@ -1801,7 +1804,7 @@ some unrelated tail
             MAX_FAILED_LIST_LINES
         );
         assert!(filtered.contains("  ... +5 more skipped"));
-        assert!(filtered.contains("  [see remaining:"));
+        assert!(filtered.contains("  [see remaining:") || filtered.contains("  [+"));
     }
 
     #[test]

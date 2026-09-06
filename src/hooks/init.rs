@@ -441,6 +441,19 @@ pub fn run(
         println!();
     }
 
+    if crate::core::tee_file::legacy_tee_migration_pending() {
+        println!("{}", crate::core::tee_file::LEGACY_TEE_NOTICE);
+        println!();
+    } else if crate::core::tee_file::legacy_tee_config_in_use() {
+        println!("{}", crate::core::tee_file::LEGACY_TEE_CONFIG_NOTICE);
+        println!();
+    }
+
+    if crate::core::tee_file::legacy_tee_always_downgraded() {
+        println!("{}", crate::core::tee_file::LEGACY_TEE_ALWAYS_NOTICE);
+        println!();
+    }
+
     Ok(())
 }
 

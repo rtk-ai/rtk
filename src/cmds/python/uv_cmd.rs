@@ -167,7 +167,7 @@ fn filter_successful_run(stdout: &str, stderr: &str) -> String {
     }
 }
 
-fn program_output(text: &str, tee_slug: &str) -> String {
+fn program_output(text: &str, tee_slug: &'static str) -> String {
     let clean = strip_ansi(text);
     let lines: Vec<&str> = clean.lines().collect();
     let last_content = lines.iter().rposition(|line| !line.trim().is_empty());
