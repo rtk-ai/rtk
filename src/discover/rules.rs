@@ -639,6 +639,23 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 70.0,
         ..RtkRule::DEFAULT
     },
+    // Elixir tooling
+    RtkRule {
+        pattern: r"^mix\s+(test|compile|credo|phx\.routes|ash\.codegen|ash_postgres\.generate_migrations)",
+        rtk_cmd: "rtk mix",
+        rewrite_prefixes: &["mix"],
+        category: "Elixir",
+        savings_pct: 85.0,
+        subcmd_savings: &[
+            ("test", 90.0),
+            ("compile", 85.0),
+            ("credo", 80.0),
+            ("phx.routes", 70.0),
+            ("ash.codegen", 88.0),
+            ("ash_postgres.generate_migrations", 88.0),
+        ],
+        subcmd_status: &[],
+    },
     RtkRule {
         pattern: r"^aws\s+",
         rtk_cmd: "rtk aws",

@@ -4,6 +4,7 @@ mod core;
 mod discover;
 mod hooks;
 mod learn;
+mod mix_cmd;
 mod parser;
 
 // Re-export command modules for routing
@@ -729,6 +730,13 @@ enum Commands {
     /// Pytest test runner with compact output
     Pytest {
         /// Pytest arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Elixir Mix commands with compact output (compile, credo, phx.routes, ash.codegen)
+    Mix {
+        /// Mix arguments (e.g., compile, credo, phx.routes)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2596,6 +2604,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Pytest { args } => pytest_cmd::run(&args, cli.verbose)?,
 
+        Commands::Mix { args } => mix_cmd::run(&args, cli.verbose)?,
+
         Commands::Mypy { args } => mypy_cmd::run(&args, cli.verbose)?,
 
         Commands::Php { args } => php_cmd::run(&args, cli.verbose)?,
@@ -2996,6 +3006,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Npm { .. }
             | Commands::Npx { .. }
             | Commands::Curl { .. }
+            | Commands::Mix { .. }
             | Commands::Ruff { .. }
             | Commands::Pytest { .. }
             | Commands::Php { .. }
