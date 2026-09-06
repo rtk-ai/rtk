@@ -1779,9 +1779,10 @@ fn run_cli() -> Result<i32> {
         }
     };
 
-    // Warn if installed hook is outdated/missing (1/day, non-blocking).
-    // Skip for Gain — it shows its own inline hook warning.
-    if !matches!(cli.command, Commands::Gain { .. }) {
+    // Warn for normal operational commands only. Hook entrypoints and rewrite
+    // probes may be invoked by a project-local hook even when no global hook is
+    // registered, so warning there pollutes every intercepted command.
+    if should_warn_about_hook_status(&cli.command) {
         hooks::hook_check::maybe_warn();
     }
 
@@ -3018,6 +3019,13 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Bun { .. }
             | Commands::Bunx { .. }
             | Commands::Deno { .. }
+    )
+}
+
+fn should_warn_about_hook_status(cmd: &Commands) -> bool {
+    !matches!(
+        cmd,
+        Commands::Gain { .. } | Commands::Hook { .. } | Commands::Rewrite { .. }
     )
 }
 
