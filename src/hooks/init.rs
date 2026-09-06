@@ -449,6 +449,11 @@ pub fn run(
         println!();
     }
 
+    if crate::core::tee_file::legacy_tee_always_downgraded() {
+        println!("{}", crate::core::tee_file::LEGACY_TEE_ALWAYS_NOTICE);
+        println!();
+    }
+
     Ok(())
 }
 

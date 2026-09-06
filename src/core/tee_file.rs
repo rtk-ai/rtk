@@ -76,9 +76,30 @@ pub const LEGACY_TEE_NOTICE: &str = "Recovery hints moved to a sqlite store: rea
 
 pub const LEGACY_TEE_CONFIG_NOTICE: &str = "Legacy [tee] config detected — file mode kept. A sqlite recall store is now\navailable: run `rtk config recall sqlite` to adopt it (hints become\n`rtk recall <hash>`, see `rtk gain --recalls`).";
 
+pub const LEGACY_TEE_ALWAYS_NOTICE: &str = "Legacy [tee] mode = \"always\" has no equivalent: recovery now captures\nfailures only, so successful commands no longer leave a .log file. Nothing\nelse changed. If you relied on capturing successful output, run\n`rtk config recall sqlite` — the sqlite store keeps elided output from\nsuccessful commands too, readable with `rtk recall <hash>`.";
+
+/// True when legacy `[tee]` config is what keeps the user on file mode.
+///
+/// `LEGACY_TEE_CONFIG_NOTICE` claims "file mode kept", so the mode check is
+/// part of the claim: a user whose `[tee]` section resolved to `Disabled`
+/// (`enabled = false` / `mode = "never"`) is not on file mode and must not be
+/// told otherwise (B10).
 pub fn legacy_tee_config_in_use() -> bool {
     Config::load()
-        .map(|c| c.migrated_from_legacy_tee)
+        .map(|c| is_legacy_tee_in_use(&c))
+        .unwrap_or(false)
+}
+
+fn is_legacy_tee_in_use(config: &Config) -> bool {
+    config.migrated_from_legacy_tee
+        && config.retriever.mode == crate::core::retriever::RecoveryMode::Tee
+}
+
+/// True when the loaded config carried `[tee] mode = "always"`, which the
+/// migration silently downgrades to failures-only (B9/V20).
+pub fn legacy_tee_always_downgraded() -> bool {
+    Config::load()
+        .map(|c| c.migrated_from_legacy_tee_always)
         .unwrap_or(false)
 }
 
@@ -266,6 +287,51 @@ mod tests {
     use std::fs;
 
     const MAX_FILE_SIZE: usize = 1_048_576;
+
+    /// B10: `LEGACY_TEE_CONFIG_NOTICE` claims "file mode kept", so the gate must
+    /// require Tee mode. Firing it for a migrated-to-Disabled user tells someone
+    /// who explicitly turned recovery off that their files are still being kept.
+    mod b10_legacy_config_gate {
+        use super::super::is_legacy_tee_in_use;
+        use crate::core::config::Config;
+        use crate::core::retriever::RecoveryMode;
+
+        fn config(migrated: bool, mode: RecoveryMode) -> Config {
+            let mut c = Config::default();
+            c.migrated_from_legacy_tee = migrated;
+            c.retriever.mode = mode;
+            c
+        }
+
+        #[test]
+        fn test_fires_for_migrated_tee_mode() {
+            assert!(is_legacy_tee_in_use(&config(true, RecoveryMode::Tee)));
+        }
+
+        #[test]
+        fn test_silent_for_migrated_disabled_mode() {
+            assert!(
+                !is_legacy_tee_in_use(&config(true, RecoveryMode::Disabled)),
+                "a user who set enabled=false is not on file mode"
+            );
+        }
+
+        #[test]
+        fn test_silent_for_migrated_sqlite_mode() {
+            assert!(!is_legacy_tee_in_use(&config(true, RecoveryMode::Sqlite)));
+        }
+
+        #[test]
+        fn test_silent_when_nothing_migrated() {
+            for mode in [
+                RecoveryMode::Tee,
+                RecoveryMode::Sqlite,
+                RecoveryMode::Disabled,
+            ] {
+                assert!(!is_legacy_tee_in_use(&config(false, mode)));
+            }
+        }
+    }
 
     #[test]
     fn test_sanitize_slug() {
