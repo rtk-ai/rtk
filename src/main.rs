@@ -1644,6 +1644,79 @@ fn shell_split(input: &str) -> Vec<String> {
     discover::lexer::shell_split(input)
 }
 
+/// What `rtk proxy` will spawn: `cmd` with `args`, after exporting `envs`.
+#[derive(Debug, PartialEq, Eq)]
+struct ProxyPlan {
+    envs: Vec<(String, String)>,
+    cmd: String,
+    args: Vec<String>,
+}
+
+/// Turns the proxy arguments into something spawnable.
+///
+/// A single quoted argument is split respecting quotes (#388), e.g.
+/// `rtk proxy 'git log --format="%H %s"'` → git ["log", "--format=%H %s"].
+/// When that string carries shell syntax — a pipe, redirect, `;`, `&&`,
+/// `$(...)` — no amount of splitting reproduces it, so it runs through the
+/// shell exactly as written: `rtk proxy "go test ./... 2>&1 | tail -20"`.
+/// Leading `NAME=value` words are environment assignments, as in a shell,
+/// not a binary to look up on PATH: `rtk proxy "KUBEBUILDER_ASSETS=/x go test"`.
+fn plan_proxy(args: &[OsString]) -> ProxyPlan {
+    use discover::lexer::{tokenize, TokenKind};
+
+    let mut words: Vec<String> = if args.len() == 1 {
+        let full = args[0].to_string_lossy().into_owned();
+        if tokenize(&full).iter().any(|t| t.kind != TokenKind::Arg) {
+            let (shell, flag) = if cfg!(windows) {
+                ("cmd", "/C")
+            } else {
+                ("sh", "-c")
+            };
+            return ProxyPlan {
+                envs: Vec::new(),
+                cmd: shell.to_string(),
+                args: vec![flag.to_string(), full],
+            };
+        }
+        let parts = shell_split(&full);
+        if parts.len() > 1 {
+            parts
+        } else {
+            vec![full]
+        }
+    } else {
+        args.iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect()
+    };
+
+    let mut envs = Vec::new();
+    while words.len() > 1 && is_env_assignment(&words[0]) {
+        let word = words.remove(0);
+        let (name, value) = word.split_once('=').expect("checked by is_env_assignment");
+        envs.push((name.to_string(), value.to_string()));
+    }
+
+    let cmd = words.remove(0);
+    ProxyPlan {
+        envs,
+        cmd,
+        args: words,
+    }
+}
+
+/// `NAME=value` where NAME is a valid shell variable name.
+fn is_env_assignment(word: &str) -> bool {
+    match word.split_once('=') {
+        Some((name, _)) => {
+            let mut chars = name.chars();
+            matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
+                && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+        }
+        None => false,
+    }
+}
+
 fn build_k8s_namespace_args(namespace: Option<String>, all: bool) -> Vec<String> {
     let mut args = Vec::new();
     if all {
@@ -2752,26 +2825,11 @@ fn run_cli() -> Result<i32> {
 
             let timer = core::tracking::TimedExecution::start();
 
-            // If a single quoted arg contains spaces, split it respecting quotes (#388).
-            // e.g. rtk proxy 'head -50 file.php' → cmd=head, args=["-50", "file.php"]
-            // e.g. rtk proxy 'git log --format="%H %s"' → cmd=git, args=["log", "--format=%H %s"]
-            let (cmd_name, cmd_args): (String, Vec<String>) = if args.len() == 1 {
-                let full = args[0].to_string_lossy();
-                let parts = shell_split(&full);
-                if parts.len() > 1 {
-                    (parts[0].clone(), parts[1..].to_vec())
-                } else {
-                    (full.into_owned(), vec![])
-                }
-            } else {
-                (
-                    args[0].to_string_lossy().into_owned(),
-                    args[1..]
-                        .iter()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .collect(),
-                )
-            };
+            let ProxyPlan {
+                envs: cmd_envs,
+                cmd: cmd_name,
+                args: cmd_args,
+            } = plan_proxy(&args);
 
             if cli.verbose > 0 {
                 eprintln!("Proxy mode: {} {}", cmd_name, cmd_args.join(" "));
@@ -2822,6 +2880,7 @@ fn run_cli() -> Result<i32> {
             let mut child = ChildGuard(Some(
                 core::utils::resolved_command(cmd_name.as_ref())
                     .args(&cmd_args)
+                    .envs(cmd_envs)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .spawn()
@@ -3026,6 +3085,88 @@ mod tests {
     use super::*;
     use clap::Parser;
     use std::cell::Cell;
+
+    fn os(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    fn strs(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn proxy_plan_splits_single_quoted_argument() {
+        let plan = plan_proxy(&os(&["git log --format=\"%H %s\""]));
+        assert_eq!(plan.cmd, "git");
+        assert_eq!(plan.args, strs(&["log", "--format=%H %s"]));
+        assert!(plan.envs.is_empty());
+    }
+
+    #[test]
+    fn proxy_plan_keeps_separate_arguments_verbatim() {
+        let plan = plan_proxy(&os(&["head", "-50", "file with space.txt"]));
+        assert_eq!(plan.cmd, "head");
+        assert_eq!(plan.args, strs(&["-50", "file with space.txt"]));
+    }
+
+    #[test]
+    fn proxy_plan_exports_leading_env_assignments() {
+        for form in [
+            os(&["KUBEBUILDER_ASSETS=/x/bin GOFLAGS=-mod=mod go test ./..."]),
+            os(&[
+                "KUBEBUILDER_ASSETS=/x/bin",
+                "GOFLAGS=-mod=mod",
+                "go",
+                "test",
+                "./...",
+            ]),
+        ] {
+            let plan = plan_proxy(&form);
+            assert_eq!(
+                plan.envs,
+                vec![
+                    ("KUBEBUILDER_ASSETS".to_string(), "/x/bin".to_string()),
+                    ("GOFLAGS".to_string(), "-mod=mod".to_string()),
+                ]
+            );
+            assert_eq!(plan.cmd, "go");
+            assert_eq!(plan.args, strs(&["test", "./..."]));
+        }
+    }
+
+    #[test]
+    fn proxy_plan_does_not_mistake_arguments_for_env() {
+        // `=` inside a later argument is data, and a lone `FOO=1` is the command.
+        let plan = plan_proxy(&os(&["make", "TARGET=all"]));
+        assert_eq!(plan.cmd, "make");
+        assert_eq!(plan.args, strs(&["TARGET=all"]));
+        assert!(plan.envs.is_empty());
+        let plan = plan_proxy(&os(&["FOO=1"]));
+        assert_eq!(plan.cmd, "FOO=1");
+        assert!(!is_env_assignment("./x=1"));
+        assert!(!is_env_assignment("1A=2"));
+        assert!(is_env_assignment("_A1=2"));
+    }
+
+    #[test]
+    fn proxy_plan_runs_shell_syntax_through_the_shell() {
+        for cmd in [
+            "go test ./... 2>&1 | tail -20",
+            "cargo build && cargo test",
+            "echo a; echo b",
+            "echo $(date)",
+            "cat > out.txt",
+        ] {
+            let plan = plan_proxy(&os(&[cmd]));
+            assert_eq!(plan.cmd, if cfg!(windows) { "cmd" } else { "sh" }, "{cmd}");
+            assert_eq!(plan.args[1], cmd);
+            assert!(plan.envs.is_empty());
+        }
+        // Operators inside quotes are plain data, not shell syntax.
+        let plan = plan_proxy(&os(&["grep 'a | b' file"]));
+        assert_eq!(plan.cmd, "grep");
+        assert_eq!(plan.args, strs(&["a | b", "file"]));
+    }
 
     #[test]
     fn test_git_commit_single_message() {
