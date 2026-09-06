@@ -156,6 +156,46 @@ impl FilterStrategy for NoFilter {
 pub struct MinimalFilter;
 
 static MULTIPLE_BLANK_LINES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
+static TRAILING_WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t]+$").unwrap());
+
+fn strip_block_comments(
+    line: &str,
+    start: &str,
+    end: &str,
+    in_block_comment: &mut bool,
+) -> Option<String> {
+    let mut remaining = line;
+    let mut output = String::with_capacity(line.len());
+    let mut removed_comment = *in_block_comment;
+
+    loop {
+        if *in_block_comment {
+            let Some(end_index) = remaining.find(end) else {
+                break;
+            };
+            remaining = &remaining[end_index + end.len()..];
+            *in_block_comment = false;
+            continue;
+        }
+
+        let Some(start_index) = remaining.find(start) else {
+            output.push_str(remaining);
+            break;
+        };
+
+        removed_comment = true;
+        output.push_str(&remaining[..start_index]);
+        remaining = &remaining[start_index + start.len()..];
+        *in_block_comment = true;
+    }
+
+    let output = TRAILING_WHITESPACE.replace(&output, "").into_owned();
+    if removed_comment && output.trim().is_empty() {
+        None
+    } else {
+        Some(output)
+    }
+}
 
 impl FilterStrategy for MinimalFilter {
     fn filter(&self, content: &str, lang: &Language) -> String {
@@ -164,35 +204,37 @@ impl FilterStrategy for MinimalFilter {
         let mut in_block_comment = false;
         let mut in_docstring = false;
 
-        for line in content.lines() {
-            let trimmed = line.trim();
+        for original_line in content.lines() {
+            let mut line = original_line.to_string();
+            let initial_trimmed = line.trim();
 
             // Handle block comments
             if let (Some(start), Some(end)) = (patterns.block_start, patterns.block_end) {
-                if !in_docstring
-                    && trimmed.contains(start)
-                    && !trimmed.starts_with(patterns.doc_block_start.unwrap_or("###"))
-                {
-                    in_block_comment = true;
-                }
-                if in_block_comment {
-                    if trimmed.contains(end) {
-                        in_block_comment = false;
-                    }
-                    continue;
+                let is_doc_block = patterns
+                    .doc_block_start
+                    .is_some_and(|doc| initial_trimmed.starts_with(doc));
+                if !in_docstring && !is_doc_block {
+                    let Some(stripped) =
+                        strip_block_comments(&line, start, end, &mut in_block_comment)
+                    else {
+                        continue;
+                    };
+                    line = stripped;
                 }
             }
+
+            let trimmed = line.trim();
 
             // Handle Python docstrings (keep them in minimal mode)
             if *lang == Language::Python && trimmed.starts_with("\"\"\"") {
                 in_docstring = !in_docstring;
-                result.push_str(line);
+                result.push_str(&line);
                 result.push('\n');
                 continue;
             }
 
             if in_docstring {
-                result.push_str(line);
+                result.push_str(&line);
                 result.push('\n');
                 continue;
             }
@@ -203,7 +245,7 @@ impl FilterStrategy for MinimalFilter {
                     // Keep doc comments
                     if let Some(doc) = patterns.doc_line {
                         if trimmed.starts_with(doc) {
-                            result.push_str(line);
+                            result.push_str(&line);
                             result.push('\n');
                         }
                     }
@@ -217,7 +259,7 @@ impl FilterStrategy for MinimalFilter {
                 continue;
             }
 
-            result.push_str(line);
+            result.push_str(&line);
             result.push('\n');
         }
 
@@ -465,6 +507,30 @@ fn main() {
         let result = filter.filter(code, &Language::Rust);
         assert!(!result.contains("// This is a comment"));
         assert!(result.contains("fn main()"));
+    }
+
+    #[test]
+    fn test_minimal_filter_preserves_code_around_inline_block_comments() {
+        let code = "int x = 5; /* inline comment */\n/* prefix */ int y = 10;\nint z = 15; /* middle */ z++;\n";
+        let result = MinimalFilter.filter(code, &Language::C);
+
+        assert_eq!(result, "int x = 5;\n int y = 10;\nint z = 15;  z++;");
+    }
+
+    #[test]
+    fn test_minimal_filter_preserves_code_after_multiline_comment() {
+        let code = "int x = 1; /* multi-line\n   comment */ int y = 2;\nint z = 3;\n";
+        let result = MinimalFilter.filter(code, &Language::C);
+
+        assert_eq!(result, "int x = 1;\n int y = 2;\nint z = 3;");
+    }
+
+    #[test]
+    fn test_minimal_filter_keeps_rust_doc_blocks() {
+        let code = "/** Important docs. */\nfn documented() {}\n";
+        let result = MinimalFilter.filter(code, &Language::Rust);
+
+        assert_eq!(result, code.trim());
     }
 
     // --- truncation accuracy ---
