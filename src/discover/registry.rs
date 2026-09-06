@@ -4243,45 +4243,30 @@ mod tests {
     #[test]
     fn test_classify_lint() {
         let commands = vec![
-            "npm exec biome",
             "npm exec eslint",
-            "npm rum biome",
             "npm rum eslint",
             "npm rum lint",
-            "npm run biome",
             "npm run eslint",
             "npm run lint",
-            "npm run-script biome",
             "npm run-script eslint",
             "npm run-script lint",
-            "npm urn biome",
             "npm urn eslint",
             "npm urn lint",
-            "npm x biome",
             "npm x eslint",
-            "pnpm dlx biome",
             "pnpm dlx eslint",
-            "pnpm exec biome",
             "pnpm exec eslint",
-            "pnpm run biome",
             "pnpm run eslint",
             "pnpm run lint",
-            "pnpm run-script biome",
             "pnpm run-script eslint",
             "pnpm run-script lint",
-            "npm biome",
             "npm eslint",
             "npm lint",
-            "npx biome",
             "npx eslint",
             "npx lint",
-            "pnpm biome",
             "pnpm eslint",
             "pnpm lint",
-            "pnpx biome",
             "pnpx eslint",
             "pnpx lint",
-            "biome",
             "eslint",
             "lint",
         ];
@@ -4303,45 +4288,30 @@ mod tests {
     #[test]
     fn test_rewrite_lint() {
         let commands = vec![
-            "npm exec biome",
             "npm exec eslint",
-            "npm rum biome",
             "npm rum eslint",
             "npm rum lint",
-            "npm run biome",
             "npm run eslint",
             "npm run lint",
-            "npm run-script biome",
             "npm run-script eslint",
             "npm run-script lint",
-            "npm urn biome",
             "npm urn eslint",
             "npm urn lint",
-            "npm x biome",
             "npm x eslint",
-            "pnpm dlx biome",
             "pnpm dlx eslint",
-            "pnpm exec biome",
             "pnpm exec eslint",
-            "pnpm run biome",
             "pnpm run eslint",
             "pnpm run lint",
-            "pnpm run-script biome",
             "pnpm run-script eslint",
             "pnpm run-script lint",
-            "npm biome",
             "npm eslint",
             "npm lint",
-            "npx biome",
             "npx eslint",
             "npx lint",
-            "pnpm biome",
             "pnpm eslint",
             "pnpm lint",
-            "pnpx biome",
             "pnpx eslint",
             "pnpx lint",
-            "biome",
             "eslint",
             "lint",
         ];
@@ -4353,6 +4323,87 @@ mod tests {
                 command
             );
         }
+    }
+
+    // --- Biome routes to `rtk biome`, never `rtk lint` (ESLint adapter) ---
+
+    #[test]
+    fn test_classify_biome() {
+        let commands = vec![
+            "biome",
+            "npm exec biome",
+            "npm x biome",
+            "npx biome",
+            "pnpm dlx biome",
+            "pnpm exec biome",
+            "pnpx biome",
+        ];
+        for command in commands {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk biome",
+                        ..
+                    }
+                ),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_biome() {
+        let commands = vec![
+            "biome",
+            "npm exec biome",
+            "npm x biome",
+            "npx biome",
+            "pnpm dlx biome",
+            "pnpm exec biome",
+            "pnpx biome",
+            "bunx biome"
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some("rtk biome".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_biome_check_keeps_args() {
+        assert_eq!(
+            rewrite_command_no_prefixes("npx biome check src/index.ts", &[]),
+            Some("rtk biome check src/index.ts".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("biome check --write .", &[]),
+            Some("rtk biome check --write .".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm exec biome format src/", &[]),
+            Some("rtk biome format src/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_biome_script_runner_goes_to_package_manager() {
+        // `npm run biome` executes a package.json script, possibly with baked-in
+        // args — rewriting it to a bare `rtk biome` would drop them. The generic
+        // npm/pnpm rules preserve script semantics instead.
+        assert_eq!(
+            rewrite_command_no_prefixes("npm run biome", &[]),
+            Some("rtk npm run biome".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm run biome", &[]),
+            Some("rtk pnpm run biome".into())
+        );
     }
 
     #[test]
