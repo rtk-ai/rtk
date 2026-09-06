@@ -54,6 +54,7 @@ pub struct HooksConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TrackingConfig {
     pub enabled: bool,
     pub history_days: u32,
@@ -72,6 +73,7 @@ impl Default for TrackingConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DisplayConfig {
     pub colors: bool,
     pub emoji: bool,
@@ -89,6 +91,7 @@ impl Default for DisplayConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FilterConfig {
     pub ignore_dirs: Vec<String>,
     pub ignore_files: Vec<String>,
@@ -111,6 +114,7 @@ impl Default for FilterConfig {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TelemetryConfig {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -120,6 +124,7 @@ pub struct TelemetryConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LimitsConfig {
     /// Max total grep results to show (default: 200)
     pub grep_max_results: usize,
@@ -329,5 +334,87 @@ consent_date = "2026-04-10T12:00:00Z"
             config.telemetry.consent_date.as_deref(),
             Some("2026-04-10T12:00:00Z")
         );
+    }
+
+    #[test]
+    fn test_partial_tracking_section_uses_defaults() {
+        // Only `enabled` is set; history_days and database_path fall
+        // back to TrackingConfig::default().
+        let toml = r#"
+[tracking]
+enabled = false
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(!config.tracking.enabled);
+        assert_eq!(config.tracking.history_days, DEFAULT_HISTORY_DAYS as u32);
+        assert!(config.tracking.database_path.is_none());
+    }
+
+    #[test]
+    fn test_partial_display_section_uses_defaults() {
+        let toml = r#"
+[display]
+max_width = 200
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.display.max_width, 200);
+        assert!(config.display.colors);
+        assert!(config.display.emoji);
+    }
+
+    #[test]
+    fn test_partial_filters_section_uses_defaults() {
+        let toml = r#"
+[filters]
+ignore_dirs = ["dist"]
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.filters.ignore_dirs, vec!["dist"]);
+        // Missing ignore_files falls back to the full default list.
+        assert!(config.filters.ignore_files.contains(&"*.lock".to_string()));
+    }
+
+    #[test]
+    fn test_partial_telemetry_section_uses_defaults() {
+        // Previously, omitting `enabled` made the whole section fail to parse.
+        let toml = r#"
+[telemetry]
+consent_given = false
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(!config.telemetry.enabled);
+        assert_eq!(config.telemetry.consent_given, Some(false));
+    }
+
+    #[test]
+    fn test_partial_limits_section_uses_defaults() {
+        let toml = r#"
+[limits]
+grep_max_results = 500
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.limits.grep_max_results, 500);
+        assert_eq!(config.limits.grep_max_per_file, 25);
+        assert_eq!(config.limits.status_max_files, 15);
+        assert_eq!(config.limits.status_max_untracked, 10);
+        assert_eq!(config.limits.passthrough_max_chars, 2000);
+    }
+
+    #[test]
+    fn test_full_limits_section_roundtrip() {
+        let toml = r#"
+[limits]
+grep_max_results = 500
+grep_max_per_file = 50
+status_max_files = 25
+status_max_untracked = 15
+passthrough_max_chars = 4000
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.limits.grep_max_results, 500);
+        assert_eq!(config.limits.grep_max_per_file, 50);
+        assert_eq!(config.limits.status_max_files, 25);
+        assert_eq!(config.limits.status_max_untracked, 15);
+        assert_eq!(config.limits.passthrough_max_chars, 4000);
     }
 }
