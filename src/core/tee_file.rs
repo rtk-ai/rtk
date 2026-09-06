@@ -256,6 +256,9 @@ fn needs_shell_quoting(path: &str) -> bool {
         .any(|c| c.is_whitespace() || SHELL_METACHARS.contains(&c))
 }
 
+/// POSIX double-quote escaping: backslash, quote, dollar and backtick keep
+/// their meaning inside `"…"` and must be escaped.
+#[cfg(not(windows))]
 fn escape_double_quoted_path(path: &str) -> String {
     let mut escaped = String::with_capacity(path.len());
     for c in path.chars() {
@@ -267,12 +270,35 @@ fn escape_double_quoted_path(path: &str) -> String {
     escaped
 }
 
+/// Windows quoting: only the quote character needs escaping.
+///
+/// Backslash must NOT be, because it is the path separator — the POSIX rule
+/// turned every `C:\Users\me` into `C:\\Users\\me`, mangling the path in a hint
+/// whose whole purpose is to be pasted and run. `$` and backtick are likewise
+/// literal in cmd, and `` ` `` is PowerShell's escape rather than a shell
+/// metacharacter to neutralise here.
+#[cfg(windows)]
+fn escape_double_quoted_path(path: &str) -> String {
+    path.replace('"', "\\\"")
+}
+
 fn display_shell_path(path: &Path) -> String {
+    // `~` is expanded by POSIX shells, not by cmd or PowerShell, so on Windows
+    // the hint carries the absolute path rather than a tilde that would be
+    // taken literally.
+    #[cfg(windows)]
+    let display = path.display().to_string();
+    #[cfg(not(windows))]
     let display = display_path(path);
+
     if !needs_shell_quoting(&display) {
         return display;
     }
 
+    // `$HOME` is POSIX shell syntax. On Windows the hint is pasted into cmd or
+    // PowerShell, where it expands to nothing and the path silently breaks, so
+    // there the home directory stays spelled out.
+    #[cfg(not(windows))]
     if let Some(relative) = display.strip_prefix("~/") {
         let relative = relative.replace(std::path::MAIN_SEPARATOR, "/");
         return format!("\"$HOME/{}\"", escape_double_quoted_path(&relative));
@@ -562,6 +588,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn test_display_shell_path_quotes_backslashes() {
         let path = PathBuf::from(r"/tmp/rtk/tee/path\segment.log");
@@ -569,6 +596,32 @@ mod tests {
             display_shell_path(&path),
             r#""/tmp/rtk/tee/path\\segment.log""#
         );
+    }
+
+    /// A Windows path must survive the hint intact.
+    ///
+    /// Runs on every platform by testing the escaper directly, because the bug
+    /// it guards was found by reading rather than by CI — there is no Windows
+    /// runner here, and `escape_double_quoted_path` is where the damage was
+    /// done: the POSIX rule escapes `\`, which is Windows' path separator, so
+    /// `C:\Users\me` became `C:\\Users\\me` in a string meant to be pasted and
+    /// run.
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_paths_keep_their_separators() {
+        assert_eq!(
+            escape_double_quoted_path(r"C:\Users\me\file.log"),
+            r"C:\Users\me\file.log"
+        );
+        assert_eq!(escape_double_quoted_path(r#"C:\a"b"#), r#"C:\a\"b"#);
+    }
+
+    /// The POSIX escaper's contract, pinned so the cfg split cannot drift.
+    #[cfg(not(windows))]
+    #[test]
+    fn test_posix_escaper_escapes_shell_specials() {
+        assert_eq!(escape_double_quoted_path(r"a\b"), r"a\\b");
+        assert_eq!(escape_double_quoted_path("a$b`c\"d"), "a\\$b\\`c\\\"d");
     }
 
     #[test]
