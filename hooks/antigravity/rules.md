@@ -4,7 +4,7 @@
 
 ## Rule
 
-Always prefix shell commands with `rtk` to minimize token consumption.
+Always prefix shell commands with `rtk` to minimize token consumption, except when using `env`: use `env X=Y rtk <command>` instead of `rtk env X=Y <command>`.
 
 Examples:
 
