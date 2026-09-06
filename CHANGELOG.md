@@ -348,6 +348,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Bug Fixes
 
 * **git:** remove `-u` short alias from `--ultra-compact` to fix `git push -u` upstream tracking ([#1086](https://github.com/rtk-ai/rtk/issues/1086))
+* **wget:** fix `-O -` flag parsed as URL when preceded by other flags (e.g. `--no-check-certificate -O -`) ([#716](https://github.com/rtk-ai/rtk/issues/716))
 
 ## [0.35.0](https://github.com/rtk-ai/rtk/compare/v0.34.3...v0.35.0) (2026-04-06)
 

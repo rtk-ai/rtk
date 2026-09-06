@@ -4,6 +4,56 @@ use crate::core::tracking;
 use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
 
+/// Check whether trailing args contain `-O -` / `-O-` / `--output-document -`
+/// (stdout redirect that Clap's trailing_var_arg may have absorbed).
+pub fn has_stdout_output_flag(args: &[String]) -> bool {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        // -O- (combined short form)
+        if a == "-O-" {
+            return true;
+        }
+        // -O - or -O <value> — only stdout when value is "-"
+        if a == "-O" || a == "--output-document" {
+            if args.get(i + 1).map(|v| v.as_str()) == Some("-") {
+                return true;
+            }
+            i += 2;
+            continue;
+        }
+        // --output-document=- (long form with =)
+        if a == "--output-document=-" {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Remove the `-O -` / `-O-` / `--output-document -` tokens from args,
+/// returning the remaining arguments to pass through to wget.
+pub fn strip_output_flag(args: &[String]) -> Vec<String> {
+    let mut result = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "-O-" || a == "--output-document=-" {
+            i += 1;
+            continue;
+        }
+        if a == "-O" || a == "--output-document" {
+            if args.get(i + 1).map(|v| v.as_str()) == Some("-") {
+                i += 2;
+                continue;
+            }
+        }
+        result.push(args[i].clone());
+        i += 1;
+    }
+    result
+}
+
 /// Compact wget - strips progress bars, shows only result
 pub fn run(url: &str, args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
@@ -264,6 +314,99 @@ fn truncate_line(line: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    // --- has_stdout_output_flag ---
+
+    #[test]
+    fn detect_dash_o_dash_separated() {
+        assert!(has_stdout_output_flag(&s(&["-O", "-"])));
+    }
+
+    #[test]
+    fn detect_dash_o_dash_combined() {
+        assert!(has_stdout_output_flag(&s(&["-O-"])));
+    }
+
+    #[test]
+    fn detect_long_form_separated() {
+        assert!(has_stdout_output_flag(&s(&["--output-document", "-"])));
+    }
+
+    #[test]
+    fn detect_long_form_equals() {
+        assert!(has_stdout_output_flag(&s(&["--output-document=-"])));
+    }
+
+    #[test]
+    fn detect_stdout_after_other_flags() {
+        assert!(has_stdout_output_flag(&s(&[
+            "--no-check-certificate",
+            "-q",
+            "-O",
+            "-"
+        ])));
+    }
+
+    #[test]
+    fn no_detect_output_to_file() {
+        assert!(!has_stdout_output_flag(&s(&["-O", "file.html"])));
+    }
+
+    #[test]
+    fn no_detect_no_output_flag() {
+        assert!(!has_stdout_output_flag(&s(&["-q", "--no-check-certificate"])));
+    }
+
+    #[test]
+    fn no_detect_empty_args() {
+        assert!(!has_stdout_output_flag(&s(&[])));
+    }
+
+    #[test]
+    fn no_detect_dash_o_at_end_without_value() {
+        assert!(!has_stdout_output_flag(&s(&["-O"])));
+    }
+
+    // --- strip_output_flag ---
+
+    #[test]
+    fn strip_dash_o_dash_separated() {
+        assert_eq!(strip_output_flag(&s(&["-q", "-O", "-"])), s(&["-q"]));
+    }
+
+    #[test]
+    fn strip_dash_o_dash_combined() {
+        assert_eq!(
+            strip_output_flag(&s(&["--no-check-certificate", "-O-"])),
+            s(&["--no-check-certificate"])
+        );
+    }
+
+    #[test]
+    fn strip_long_form_equals() {
+        assert_eq!(
+            strip_output_flag(&s(&["-q", "--output-document=-"])),
+            s(&["-q"])
+        );
+    }
+
+    #[test]
+    fn strip_preserves_output_to_file() {
+        let args = s(&["-O", "file.html", "-q"]);
+        assert_eq!(strip_output_flag(&args), args);
+    }
+
+    #[test]
+    fn strip_preserves_no_output_flag() {
+        let args = s(&["-q", "--no-check-certificate"]);
+        assert_eq!(strip_output_flag(&args), args);
+    }
+
+    // --- compact_url ---
+
     #[test]
     fn test_compact_url_strips_protocol() {
         assert_eq!(compact_url("https://example.com/file.zip"), "example.com/file.zip");
@@ -283,6 +426,8 @@ mod tests {
         let short = "https://x.com/f";
         assert_eq!(compact_url(short), "x.com/f");
     }
+
+    // --- format_size ---
 
     #[test]
     fn test_format_size_zero() {
@@ -305,6 +450,8 @@ mod tests {
         let result = format_size(2 * 1024 * 1024);
         assert!(result.ends_with("MB"), "Expected MB, got {}", result);
     }
+
+    // --- parse_error ---
 
     #[test]
     fn test_parse_error_404() {
@@ -332,6 +479,8 @@ mod tests {
         assert_eq!(parse_error("", ""), "Unknown error");
     }
 
+    // --- truncate_line ---
+
     #[test]
     fn test_truncate_line_short() {
         assert_eq!(truncate_line("hello", 10), "hello");
@@ -348,6 +497,8 @@ mod tests {
         assert!(result.ends_with("..."));
         assert!(result.len() <= 10);
     }
+
+    // --- extract_filename_from_output ---
 
     #[test]
     fn test_extract_filename_from_output_flag() {

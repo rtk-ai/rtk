@@ -2294,8 +2294,12 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Wget { url, output, args } => {
-            if output.as_deref() == Some("-") {
-                wget_cmd::run_stdout(&url, &args, cli.verbose)?
+            // Detect -O - in trailing args (Clap's trailing_var_arg may absorb
+            // -O - when other unknown flags precede it, e.g. --no-check-certificate -O -)
+            let stdout_in_args = wget_cmd::has_stdout_output_flag(&args);
+            if output.as_deref() == Some("-") || stdout_in_args {
+                let filtered: Vec<String> = wget_cmd::strip_output_flag(&args);
+                wget_cmd::run_stdout(&url, &filtered, cli.verbose)?
             } else {
                 // Pass -O <file> through to wget via args
                 let mut all_args = Vec::new();
