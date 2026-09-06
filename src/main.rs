@@ -316,6 +316,7 @@ enum Commands {
     },
 
     /// Compact grep - strips whitespace, truncates, groups by file
+    #[command(disable_help_flag = true)]
     Grep {
         // rtk's own options here are long-only: a short form shadows the native
         // grep/rg flag of the same letter and captures it before it can reach
