@@ -2218,6 +2218,119 @@ mod tests {
         );
     }
 
+    /// Regression: the `npm` rewriter rule should cover ALL npm subcommands,
+    /// not just `exec|run|run-script|rum|urn|x`. The handler in
+    /// `cmds/js/npm_cmd.rs` already dispatches every subcommand internally
+    /// via its NPM_SUBCOMMANDS list — the regex previously prevented the
+    /// hook from triggering for the most common ones (`npm test`, `npm
+    /// install`, `npm ci`).
+    #[test]
+    fn test_classify_npm_subcommands() {
+        let supported_npm_invocations = [
+            "npm test",
+            "npm t",
+            "npm start",
+            "npm install",
+            "npm i",
+            "npm i react@18",
+            "npm ci",
+            "npm audit",
+            "npm audit fix",
+            "npm run build",
+            "npm run-script build",
+            "npm exec eslint",
+            "npm publish",
+            "npm pack",
+            "npm outdated",
+            "npm ls --depth=0",
+            "npm view react",
+            "npm --version",
+        ];
+        for cmd in &supported_npm_invocations {
+            match classify_command(cmd) {
+                Classification::Supported {
+                    rtk_equivalent: "rtk npm",
+                    ..
+                } => {}
+                other => panic!(
+                    "'{}' should classify as Supported(rtk npm), got {:?}",
+                    cmd, other
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn test_classify_bare_npm_is_supported() {
+        match classify_command("npm") {
+            Classification::Supported {
+                rtk_equivalent: "rtk npm",
+                ..
+            } => {}
+            other => panic!("bare 'npm' should classify as Supported, got {:?}", other),
+        }
+    }
+
+    /// Same regression as `npm`, but for `pnpm`: the rewriter rule was
+    /// `^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script)` which
+    /// missed `pnpm test`, `pnpm add`, `pnpm update`, `pnpm dlx`, etc.
+    /// In monorepo / Next.js workflows this is reportedly the dominant
+    /// missed volume (issue #1950 comment: 1296 `pnpm test` vs 180
+    /// `npm test` over 30d).
+    #[test]
+    fn test_classify_pnpm_subcommands() {
+        let supported_pnpm_invocations = [
+            "pnpm test",
+            "pnpm t",
+            "pnpm start",
+            "pnpm dev",
+            "pnpm build",
+            "pnpm install",
+            "pnpm i",
+            "pnpm i react@18",
+            "pnpm add lodash",
+            "pnpm add -D vitest",
+            "pnpm update",
+            "pnpm up",
+            "pnpm remove react",
+            "pnpm rm react",
+            "pnpm audit",
+            "pnpm publish",
+            "pnpm pack",
+            "pnpm outdated",
+            "pnpm list",
+            "pnpm ls --depth=0",
+            "pnpm exec eslint",
+            "pnpm run build",
+            "pnpm run-script build",
+            "pnpm dlx create-next-app",
+            "pnpm --version",
+        ];
+        for cmd in &supported_pnpm_invocations {
+            match classify_command(cmd) {
+                Classification::Supported {
+                    rtk_equivalent: "rtk pnpm",
+                    ..
+                } => {}
+                other => panic!(
+                    "'{}' should classify as Supported(rtk pnpm), got {:?}",
+                    cmd, other
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn test_classify_bare_pnpm_is_supported() {
+        match classify_command("pnpm") {
+            Classification::Supported {
+                rtk_equivalent: "rtk pnpm",
+                ..
+            } => {}
+            other => panic!("bare 'pnpm' should classify as Supported, got {:?}", other),
+        }
+    }
+
     #[test]
     fn test_classify_cat_file() {
         assert_eq!(

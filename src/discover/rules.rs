@@ -79,7 +79,16 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script)",
+        // Match any `pnpm <subcommand>`. The `PnpmCommands::Other(args)` arm in
+        // `main.rs` dispatches every non-specialised subcommand to
+        // `pnpm_cmd::run_passthrough`, so the regex doesn't need to enumerate
+        // them. Previously this rule only matched `exec|i|install|list|ls|
+        // outdated|run|run-script`, leaving `pnpm test`, `pnpm add`,
+        // `pnpm update`, `pnpm dlx`, etc. unrouted by the hook. In monorepo
+        // / Next.js workflows `pnpm test` alone can dominate the unhandled
+        // volume — see issue #1950 (comment by @iwaki-syogo with 1296
+        // `pnpm test` invocations vs 180 `npm test` over 30d).
+        pattern: r"^pnpm(\s+|$)",
         rtk_cmd: "rtk pnpm",
         rewrite_prefixes: &["pnpm"],
         category: "PackageManager",
@@ -87,7 +96,12 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^npm\s+(exec|run|run-script|rum|urn|x)(\s|$)",
+        // Match any `npm <subcommand>`. The `npm_cmd::run` handler dispatches
+        // internally based on its NPM_SUBCOMMANDS list, so the regex doesn't
+        // need to enumerate them. Previously this rule only matched `exec|
+        // run|run-script|rum|urn|x`, leaving `npm test`, `npm install`,
+        // `npm ci`, `npm i`, `npm audit`, etc. as unrouted by the hook.
+        pattern: r"^npm(\s+|$)",
         rtk_cmd: "rtk npm",
         rewrite_prefixes: &["npm"],
         category: "PackageManager",
