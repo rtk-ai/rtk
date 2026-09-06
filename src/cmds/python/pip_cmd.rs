@@ -4,7 +4,7 @@ use crate::core::guard::never_worse;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_INVENTORY, CAP_LIST};
-use crate::core::utils::{resolved_command, tool_exists};
+use crate::core::utils::{resolved_command, strip_ansi, tool_exists};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
@@ -37,8 +37,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let (cmd_str, filtered, exit_code) = match subcommand {
         "list" => run_list(base_cmd, &args[1..], verbose)?,
         "outdated" => run_outdated(base_cmd, &args[1..], verbose)?,
+        "install" if !has_install_verbose_flag(&args[1..]) => {
+            run_install(base_cmd, &args[1..], verbose)?
+        }
         "install" | "uninstall" | "show" => {
-            // Passthrough for write operations
             run_passthrough(base_cmd, args, verbose)?
         }
         _ => {
@@ -55,6 +57,62 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     );
 
     Ok(exit_code)
+}
+
+pub(crate) fn has_install_verbose_flag(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| arg == "--verbose" || arg == "-v" || arg.starts_with("-vv"))
+}
+
+fn run_install(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
+    let mut cmd = resolved_command(base_cmd);
+    if base_cmd == "uv" {
+        cmd.arg("pip");
+    }
+    cmd.arg("install").args(args);
+
+    if verbose > 0 {
+        eprintln!("Running: {} pip install {}", base_cmd, args.join(" "));
+    }
+
+    let result = exec_capture(&mut cmd)
+        .with_context(|| format!("Failed to run {} pip install", base_cmd))?;
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
+
+    if !result.success() {
+        print!("{}", result.stdout);
+        eprint!("{}", result.stderr);
+        return Ok((raw.clone(), raw, result.exit_code));
+    }
+
+    let filtered = filter_pip_install_success(&raw);
+    println!("{}", filtered);
+    Ok((raw, filtered, result.exit_code))
+}
+
+pub(crate) fn filter_pip_install_success(output: &str) -> String {
+    let clean = strip_ansi(output);
+    let selected = clean
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            line.starts_with("Successfully installed ")
+                || line.starts_with("Resolved ")
+                || line.starts_with("Prepared ")
+                || line.starts_with("Downloaded ")
+                || line.starts_with("Installed ")
+                || line.starts_with("Uninstalled ")
+                || line.starts_with("WARNING:")
+                || line.starts_with("+ ")
+                || line.starts_with("- ")
+        })
+        .collect::<Vec<_>>();
+
+    if selected.is_empty() {
+        return clean.trim().to_string();
+    }
+
+    never_worse(&clean, &selected.join("\n")).to_string()
 }
 
 fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
@@ -274,5 +332,31 @@ mod tests {
         assert!(result.contains("2.31.0 → 2.32.0"));
         assert!(result.contains("pytest"));
         assert!(result.contains("7.4.0 → 8.0.0"));
+    }
+
+    #[test]
+    fn test_filter_pip_install_success_keeps_summary() {
+        let output = "Collecting pytest\nDownloading pytest.whl (1.2 MB)\nInstalling collected packages: pytest\nSuccessfully installed pytest-8.0.0\n";
+        assert_eq!(
+            filter_pip_install_success(output),
+            "Successfully installed pytest-8.0.0"
+        );
+    }
+
+    #[test]
+    fn test_filter_uv_pip_install_success_keeps_phases_and_packages() {
+        let output = "Resolved 3 packages in 10ms\nPrepared 2 packages in 20ms\nInstalled 2 packages in 5ms\n + pytest==8.0.0\n + pluggy==1.5.0\n";
+        let filtered = filter_pip_install_success(output);
+        assert!(filtered.contains("Resolved 3 packages"));
+        assert!(filtered.contains("Installed 2 packages"));
+        assert!(filtered.contains("+ pytest==8.0.0"));
+    }
+
+    #[test]
+    fn test_install_verbose_flags_request_passthrough() {
+        assert!(has_install_verbose_flag(&["-v".to_string()]));
+        assert!(has_install_verbose_flag(&["-vvv".to_string()]));
+        assert!(has_install_verbose_flag(&["--verbose".to_string()]));
+        assert!(!has_install_verbose_flag(&["pytest".to_string()]));
     }
 }

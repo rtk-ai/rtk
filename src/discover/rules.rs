@@ -480,16 +480,16 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^(pip3?|uv\s+pip)\s+(list|outdated|install|show)",
+        pattern: r"^pip3?\s+(list|outdated|install|show)",
         rtk_cmd: "rtk pip",
-        rewrite_prefixes: &["pip3", "pip", "uv pip"],
+        rewrite_prefixes: &["pip3", "pip"],
         category: "Python",
         savings_pct: 75.0,
         subcmd_savings: &[("list", 75.0), ("outdated", 80.0)],
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^uv\s+run(?:\s|$)",
+        pattern: r"^uv\s+(?:run(?:\s|$)|pip\s+(?:list|outdated|install|show))",
         rtk_cmd: "rtk uv",
         rewrite_prefixes: &["uv"],
         category: "Python",

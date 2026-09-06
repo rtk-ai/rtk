@@ -60,6 +60,22 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: {}", original_cmd);
     }
 
+    if args.first().map(String::as_str) == Some("pip")
+        && args.get(1).map(String::as_str) == Some("install")
+        && !super::pip_cmd::has_install_verbose_flag(&args[2..])
+    {
+        let result = stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::CaptureOnly)
+            .context("Failed to run uv pip install")?;
+        let filtered = if result.exit_code == 0 {
+            super::pip_cmd::filter_pip_install_success(&result.raw)
+        } else {
+            result.raw.clone()
+        };
+        runner::print_with_hint(&filtered, &result.raw, &result.raw, "uv-pip", result.exit_code);
+        timer.track(&original_cmd, &rtk_cmd, &result.raw, &filtered);
+        return Ok(result.exit_code);
+    }
+
     if args.first().map(String::as_str) != Some("run") {
         let status = cmd.status().context("Failed to run uv")?;
         timer.track_passthrough(&original_cmd, &format!("{rtk_cmd} (passthrough)"));
