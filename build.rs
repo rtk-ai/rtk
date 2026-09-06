@@ -9,7 +9,16 @@ fn main() {
         // main-thread stack during process startup. Reserve a larger stack for
         // the CLI binary so `rtk.exe --version`, `--help`, and hook entry
         // points start reliably without requiring ad-hoc RUSTFLAGS.
-        println!("cargo:rustc-link-arg=/STACK:8388608");
+        //
+        // NOTE: build.rs `cfg(target_env)` reflects the *host* target, not the
+        // *target* being compiled. Read CARGO's TARGET env var to pick the
+        // correct linker syntax (MSVC vs GNU).
+        let target = std::env::var("TARGET").unwrap_or_default();
+        if target.contains("msvc") {
+            println!("cargo:rustc-link-arg=/STACK:8388608");
+        } else if target.contains("gnu") {
+            println!("cargo:rustc-link-arg=-Wl,--stack,8388608");
+        }
     }
 
     let filters_dir = Path::new("src/filters");
