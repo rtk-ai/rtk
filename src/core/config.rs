@@ -21,6 +21,97 @@ pub struct Config {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    /// Per-tool behavior rules, evaluated top-to-bottom (first match wins per field).
+    /// See docs/pr_briefs/005-per-tool-config-design. Empty by default → no behavior change.
+    #[serde(default)]
+    pub tools: Vec<ToolRule>,
+}
+
+/// How rtk captures a child's stdout/stderr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptureMode {
+    /// Ordinary pipe (the historical default). Child sees a non-tty.
+    #[default]
+    Pipe,
+    /// Pseudo-terminal: child behaves as in a real terminal (one-shot, clean exit).
+    /// Fixes hangs where a detached descendant holds a captured pipe open
+    /// (see docs/pr_briefs/001-pipe-eof-grandchild-hang).
+    Pty,
+}
+
+/// A per-tool rule: when `match` applies, adjust capture/sanitization for that command.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ToolRule {
+    #[serde(rename = "match")]
+    pub match_: ToolMatch,
+    /// Pipe (default) or Pty.
+    #[serde(default)]
+    pub capture: CaptureMode,
+    /// Strip ANSI escapes at the capture boundary. Defaults to true when capture = pty
+    /// (a pty makes children emit color/cursor/spinner sequences), false otherwise.
+    #[serde(default)]
+    pub strip_ansi: Option<bool>,
+    /// Environment variables to set on the child before spawning. The preferred fix for
+    /// builders that hang on a pipe but honor a non-interactive signal — e.g.
+    /// `env = { CI = "1" }` makes `ng build`/vite run one-shot and exit, no PTY needed.
+    /// Applied for any capture mode.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+impl ToolRule {
+    /// Effective strip_ansi: explicit value, else default (true iff capturing via pty).
+    // Consumed by the pty capture path; without that feature it is still part of the
+    // public config surface (rules parse regardless of which capture backends are built).
+    #[allow(dead_code)]
+    pub fn strip_ansi_effective(&self) -> bool {
+        self.strip_ansi.unwrap_or(self.capture == CaptureMode::Pty)
+    }
+}
+
+/// Predicate matched against the resolved command invocation.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ToolMatch {
+    /// Required: the command basename, e.g. "ng" or "npm".
+    pub command: String,
+    /// Optional: first non-flag argument, e.g. "build" (for `ng build`) or "run"
+    /// (for `npm run …`).
+    #[serde(default)]
+    pub subcommand: Option<String>,
+    /// Optional: every listed token must appear somewhere in the args. Use this to
+    /// target a specific npm script — `command="npm", subcommand="run",
+    /// args_contains=["build"]` matches `npm run build` but not `npm run test`.
+    #[serde(default)]
+    pub args_contains: Vec<String>,
+}
+
+impl ToolMatch {
+    /// True if this predicate matches the given command + argument list.
+    pub fn matches(&self, command: &str, args: &[String]) -> bool {
+        if command != self.command {
+            return false;
+        }
+        if let Some(sub) = &self.subcommand {
+            let first_positional = args
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .map(|a| a.as_str());
+            if first_positional != Some(sub.as_str()) {
+                return false;
+            }
+        }
+        self.args_contains
+            .iter()
+            .all(|needle| args.iter().any(|a| a == needle))
+    }
+}
+
+impl Config {
+    /// First `[[tools]]` rule whose `match` applies to this invocation, if any.
+    pub fn tool_rule_for(&self, command: &str, args: &[String]) -> Option<&ToolRule> {
+        self.tools.iter().find(|r| r.match_.matches(command, args))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -313,6 +404,122 @@ enabled = true
         let config = Config::default();
         assert!(!config.telemetry.enabled);
         assert!(config.telemetry.consent_given.is_none());
+    }
+
+    #[test]
+    fn test_tools_empty_by_default() {
+        let config = Config::default();
+        assert!(config.tools.is_empty());
+        assert!(config.tool_rule_for("ng", &["build".into()]).is_none());
+    }
+
+    #[test]
+    fn test_tools_rule_parses_and_matches() {
+        let toml = r#"
+[[tools]]
+match = { command = "ng", subcommand = "build" }
+capture = "pty"
+strip_ansi = true
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        let rule = config
+            .tool_rule_for("ng", &["build".into(), "--prod".into()])
+            .expect("rule matches ng build");
+        assert_eq!(rule.capture, CaptureMode::Pty);
+        assert!(rule.strip_ansi_effective());
+        // subcommand mismatch → no match
+        assert!(config.tool_rule_for("ng", &["serve".into()]).is_none());
+        // command mismatch → no match
+        assert!(config.tool_rule_for("vite", &["build".into()]).is_none());
+    }
+
+    #[test]
+    fn test_tools_match_without_subcommand_matches_any_args() {
+        let toml = r#"
+[[tools]]
+match = { command = "vite" }
+capture = "pty"
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(config.tool_rule_for("vite", &[]).is_some());
+        assert!(config.tool_rule_for("vite", &["build".into()]).is_some());
+    }
+
+    #[test]
+    fn test_tools_strip_ansi_defaults_to_pty() {
+        // capture = pty, strip_ansi unset → effective true
+        let pty: ToolRule = toml::from_str(
+            r#"
+match = { command = "ng" }
+capture = "pty"
+"#,
+        )
+        .unwrap();
+        assert!(pty.strip_ansi_effective());
+        // capture = pipe (default), strip_ansi unset → effective false
+        let pipe: ToolRule = toml::from_str(r#"match = { command = "git" }"#).unwrap();
+        assert_eq!(pipe.capture, CaptureMode::Pipe);
+        assert!(!pipe.strip_ansi_effective());
+        // explicit override wins
+        let forced: ToolRule = toml::from_str(
+            r#"
+match = { command = "ng" }
+capture = "pty"
+strip_ansi = false
+"#,
+        )
+        .unwrap();
+        assert!(!forced.strip_ansi_effective());
+    }
+
+    #[test]
+    fn test_args_contains_targets_specific_npm_script() {
+        let toml = r#"
+[[tools]]
+match = { command = "npm", subcommand = "run", args_contains = ["build"] }
+capture = "pty"
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        // npm run build → match
+        assert!(config
+            .tool_rule_for("npm", &["run".into(), "build".into()])
+            .is_some());
+        // npm run test → no match (different script)
+        assert!(config
+            .tool_rule_for("npm", &["run".into(), "test".into()])
+            .is_none());
+        // npm install → no match (subcommand differs)
+        assert!(config.tool_rule_for("npm", &["install".into()]).is_none());
+    }
+
+    #[test]
+    fn test_first_matching_rule_wins() {
+        let toml = r#"
+[[tools]]
+match = { command = "ng", subcommand = "build" }
+capture = "pty"
+
+[[tools]]
+match = { command = "ng" }
+capture = "pipe"
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        // "ng build" matches the first (pty) rule, not the broader second.
+        assert_eq!(
+            config
+                .tool_rule_for("ng", &["build".into()])
+                .unwrap()
+                .capture,
+            CaptureMode::Pty
+        );
+        // "ng serve" falls through to the second (pipe) rule.
+        assert_eq!(
+            config
+                .tool_rule_for("ng", &["serve".into()])
+                .unwrap()
+                .capture,
+            CaptureMode::Pipe
+        );
     }
 
     #[test]

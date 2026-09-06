@@ -33,6 +33,39 @@ pub fn print_with_hint(
     emit_guarded(filtered, hint.as_deref(), guard_raw)
 }
 
+/// Apply the first matching `[[tools]]` rule to `cmd` by injecting its `env` vars
+/// before spawn. This is the preferred fix for builders that hang when their output
+/// is captured over a pipe but honor a non-interactive signal — e.g.
+/// `env = { CI = "1" }` makes `ng build`/vite run one-shot and exit cleanly instead
+/// of holding the pipe open with a watch/progress loop.
+fn apply_tool_rule(cmd: &mut Command) {
+    let Ok(config) = crate::core::config::Config::load() else {
+        return;
+    };
+    if config.tools.is_empty() {
+        return;
+    }
+    let Some(program) = std::path::Path::new(cmd.get_program())
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+    else {
+        return;
+    };
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+
+    let Some(rule) = config.tool_rule_for(&program, &args) else {
+        return;
+    };
+
+    for (k, v) in &rule.env {
+        cmd.env(k, v);
+    }
+}
+
 #[derive(Default)]
 pub struct RunOptions<'a> {
     pub tee_label: Option<&'a str>,
@@ -107,6 +140,8 @@ where
     } else {
         StdinMode::Null
     };
+    // Consult [[tools]] config: inject env (e.g. CI=1) before spawn.
+    apply_tool_rule(&mut cmd);
     let result = stream::run_streaming(&mut cmd, stdin_mode, FilterMode::CaptureOnly)
         .with_context(|| format!("Failed to run {}", tool_name))?;
 
