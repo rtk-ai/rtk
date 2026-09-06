@@ -1135,49 +1135,127 @@ pub(crate) fn filter_log_output(
             .join("\n");
     }
 
-    // RTK injected format: split output into commit blocks separated by ---END---
-    let commits: Vec<&str> = output.split("---END---").collect();
-    let max_commits = if user_set_limit { commits.len() } else { limit };
+    let blocks: Vec<&str> = output.split("---END---").collect();
+    let max_commits = if user_set_limit { blocks.len() } else { limit };
 
-    let mut result = Vec::new();
-    for block in commits.iter().take(max_commits) {
-        let block = block.trim();
-        if block.is_empty() {
+    let mut result: Vec<String> = Vec::new();
+    for (idx, raw_block) in blocks.iter().enumerate() {
+        if idx > max_commits {
+            break;
+        }
+
+        let block = raw_block.trim_matches(|c| matches!(c, '\n' | '\r'));
+        if block.trim().is_empty() {
             continue;
         }
-        let mut lines = block.lines();
-        // First line is the header: hash subject (date) <author>
-        let header = match lines.next() {
-            Some(h) => truncate_line(h.trim(), truncate_width),
-            None => continue,
-        };
-        // Remaining lines are the body — keep up to 3 non-empty, non-trailer lines
-        let all_body_lines: Vec<&str> = lines
-            .map(|l| l.trim())
-            .filter(|l| {
-                !l.is_empty()
-                    && !l.starts_with("Signed-off-by:")
-                    && !l.starts_with("Co-authored-by:")
-            })
-            .collect();
-        let body_omitted = all_body_lines.len().saturating_sub(3);
-        let body_lines = &all_body_lines[..all_body_lines.len().min(3)];
 
-        if body_lines.is_empty() {
-            result.push(header);
+        let lines: Vec<&str> = block.lines().collect();
+        let (stat_lines, commit_lines) = if result.is_empty() {
+            (&[][..], lines.as_slice())
         } else {
-            let mut entry = header;
-            for body in body_lines {
-                entry.push_str(&format!("\n  {}", truncate_line(body, truncate_width)));
+            split_leading_git_stat_lines(&lines)
+        };
+
+        if let Some(stat_output) = format_git_stat_lines(stat_lines) {
+            if let Some(previous) = result.last_mut() {
+                previous.push('\n');
+                previous.push_str(&stat_output);
             }
-            if body_omitted > 0 {
-                entry.push_str(&format!("\n  [+{} lines omitted]", body_omitted));
+        }
+
+        if result.len() < max_commits {
+            if let Some(entry) = format_log_commit_lines(commit_lines, truncate_width) {
+                result.push(entry);
             }
-            result.push(entry);
         }
     }
 
     result.join("\n").trim().to_string()
+}
+
+fn format_log_commit_lines(lines: &[&str], truncate_width: usize) -> Option<String> {
+    let mut lines = lines.iter().copied().skip_while(|l| l.trim().is_empty());
+    let header = truncate_line(lines.next()?.trim(), truncate_width);
+    let all_body_lines: Vec<&str> = lines
+        .map(|l| l.trim())
+        .filter(|l| {
+            !l.is_empty()
+                && !l.starts_with("Signed-off-by:")
+                && !l.starts_with("Co-authored-by:")
+        })
+        .collect();
+    let body_omitted = all_body_lines.len().saturating_sub(3);
+    let body_lines = &all_body_lines[..all_body_lines.len().min(3)];
+
+    if body_lines.is_empty() {
+        return Some(header);
+    }
+
+    let mut entry = header;
+    for body in body_lines {
+        entry.push_str(&format!("\n  {}", truncate_line(body, truncate_width)));
+    }
+    if body_omitted > 0 {
+        entry.push_str(&format!("\n  [+{} lines omitted]", body_omitted));
+    }
+    Some(entry)
+}
+
+fn split_leading_git_stat_lines<'a>(lines: &'a [&'a str]) -> (&'a [&'a str], &'a [&'a str]) {
+    let split_at = lines
+        .iter()
+        .position(|line| !is_git_stat_line(line))
+        .unwrap_or(lines.len());
+    lines.split_at(split_at)
+}
+
+fn format_git_stat_lines(lines: &[&str]) -> Option<String> {
+    if lines.is_empty() {
+        return None;
+    }
+
+    let mut file_rows = Vec::new();
+    let mut summary_rows = Vec::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if is_git_stat_summary_line(trimmed) {
+            summary_rows.push(trimmed);
+        } else {
+            file_rows.push(trimmed);
+        }
+    }
+
+    let mut output = Vec::new();
+    for row in file_rows.iter().take(4) {
+        output.push(format!("  {}", row));
+    }
+    let omitted = file_rows.len().saturating_sub(4);
+    if omitted > 0 {
+        output.push(format!("  [+{} file rows omitted]", omitted));
+    }
+    for row in summary_rows {
+        output.push(format!("  {}", row));
+    }
+
+    if output.is_empty() {
+        None
+    } else {
+        Some(output.join("\n"))
+    }
+}
+
+fn is_git_stat_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty()
+        && (is_git_stat_summary_line(trimmed)
+            || ((line.starts_with(' ') || line.starts_with('\t')) && line.contains('|')))
+}
+
+fn is_git_stat_summary_line(line: &str) -> bool {
+    line.contains(" file changed") || line.contains(" files changed")
 }
 
 /// Truncate a single line to `width` characters, appending "..." if needed
@@ -4595,6 +4673,74 @@ no changes added to commit (use "git add" and/or "git commit -a")
         assert!(
             result.contains("+3 lines omitted"),
             "Expected '+3 lines omitted' when 6 body lines truncated to 3, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_log_output_stat_preserves_summary_line() {
+        let output = "\
+abc1234 feat: four files (1 day ago) <author>
+---END---
+ w1.txt | 1 +
+ w2.txt | 1 +
+ w3.txt | 1 +
+ w4.txt | 1 +
+ 4 files changed, 4 insertions(+)
+";
+        let result = filter_log_output(output, 10, false, false);
+        assert!(
+            result.contains("4 files changed, 4 insertions(+)"),
+            "git log --stat summary must remain visible, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_log_output_stat_keeps_commit_boundaries() {
+        let output = "\
+aaa1111 feat: first commit (2 days ago) <author>
+---END---
+ a1.txt | 1 +
+ a2.txt | 1 +
+ 2 files changed, 2 insertions(+)
+
+bbb2222 feat: second commit (1 day ago) <author>
+---END---
+ b1.txt | 1 +
+ b2.txt | 1 +
+ b3.txt | 1 +
+ b4.txt | 1 +
+ b5.txt | 1 +
+ b6.txt | 1 +
+ 6 files changed, 6 insertions(+)
+";
+        let result = filter_log_output(output, 10, false, false);
+        let first_commit = result.find("aaa1111").expect("first commit should remain");
+        let first_stat = result.find("a1.txt").expect("first stat should remain");
+        let second_commit = result
+            .find("bbb2222")
+            .expect("second commit should remain");
+        let second_stat = result.find("b1.txt").expect("second stat should remain");
+
+        assert!(
+            first_commit < first_stat && first_stat < second_commit && second_commit < second_stat,
+            "stat blocks must stay attached to their commits, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("\nbbb2222 feat: second commit"),
+            "commit headers after stat blocks must not be indented as body lines, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("[+2 file rows omitted]"),
+            "omission marker should count file rows only, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("6 files changed, 6 insertions(+)"),
+            "summary must stay visible after omitted file rows, got:\n{}",
             result
         );
     }
