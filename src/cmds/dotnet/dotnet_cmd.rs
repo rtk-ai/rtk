@@ -153,7 +153,8 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
             let raw_summary =
                 normalize_build_summary(binlog::parse_build_from_text(&raw), command_success);
             let summary = merge_build_summaries(binlog_summary, raw_summary);
-            (format_build_output(&summary, &binlog_path), true)
+            let needs_raw = build_needs_raw_fallback(&summary);
+            (format_build_output(&summary, &binlog_path), needs_raw)
         }
         "test" => {
             // First try to parse from binlog/console output
@@ -1102,6 +1103,19 @@ fn test_needs_raw_fallback(summary: &binlog::TestSummary) -> bool {
         || summary.failed_tests.iter().any(|t| t.details.is_empty())
 }
 
+/// Keeps raw MSBuild output only when the structured error section cannot
+/// independently explain why a build failed.
+fn build_needs_raw_fallback(summary: &binlog::BuildSummary) -> bool {
+    summary.errors.is_empty()
+        || summary.errors.iter().any(|error| {
+            let message = error.message.trim();
+            let has_message = !message.is_empty() && !message.contains("details omitted");
+            let has_location = !error.file.trim().is_empty() && error.line > 0;
+            let has_diagnostic_code = !error.code.trim().is_empty();
+            !has_message || (!has_location && !has_diagnostic_code)
+        })
+}
+
 /// Composes the final output for a (possibly failing) run: the filtered summary,
 /// optionally prefixed with raw stdout/stderr as a fallback.
 ///
@@ -1541,6 +1555,71 @@ mod tests {
             ..Default::default()
         };
         assert!(test_needs_raw_fallback(&summary));
+    }
+
+    #[test]
+    fn build_needs_raw_fallback_false_for_detailed_file_error() {
+        let summary = binlog::BuildSummary {
+            errors: vec![binlog::BinlogIssue {
+                code: "CS0234".to_string(),
+                file: "src/Factory.cs".to_string(),
+                line: 6,
+                column: 12,
+                message: "The namespace name does not exist".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        assert!(!build_needs_raw_fallback(&summary));
+    }
+
+    #[test]
+    fn build_needs_raw_fallback_false_for_global_diagnostic() {
+        let summary = binlog::BuildSummary {
+            errors: vec![binlog::BinlogIssue {
+                code: "MSB1009".to_string(),
+                file: "MSBUILD".to_string(),
+                line: 0,
+                column: 0,
+                message: "Project file does not exist".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        assert!(!build_needs_raw_fallback(&summary));
+    }
+
+    #[test]
+    fn build_needs_raw_fallback_true_for_empty_or_placeholder_errors() {
+        assert!(build_needs_raw_fallback(&binlog::BuildSummary::default()));
+
+        let placeholder = binlog::BuildSummary {
+            errors: vec![binlog::BinlogIssue {
+                code: String::new(),
+                file: String::new(),
+                line: 0,
+                column: 0,
+                message: "Build error #1 (details omitted)".to_string(),
+            }],
+            ..Default::default()
+        };
+        assert!(build_needs_raw_fallback(&placeholder));
+    }
+
+    #[test]
+    fn build_needs_raw_fallback_true_for_context_free_error() {
+        let summary = binlog::BuildSummary {
+            errors: vec![binlog::BinlogIssue {
+                code: String::new(),
+                file: "build".to_string(),
+                line: 0,
+                column: 0,
+                message: "Build failed".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        assert!(build_needs_raw_fallback(&summary));
     }
 
     #[test]
