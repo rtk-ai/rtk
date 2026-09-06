@@ -574,10 +574,29 @@ pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
     capture(cmd)
 }
 
-/// Like [`exec_capture`] but inherits stdin so a wrapped engine can read a piped stdin.
+/// Like [`exec_capture`] but inherits stdin so a wrapped engine can read a
+/// piped stdin. Unbounded (buffers the full child output via [`capture`]) —
+/// fine for small, known-bounded output like `git commit`'s summary line.
+/// For anything that can produce large output, use
+/// [`exec_capture_stdin_bounded`] instead.
 pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
     cmd.stdin(Stdio::inherit());
     capture(cmd)
+}
+
+/// Like [`exec_capture`] but inherits stdin so a wrapped engine can read a
+/// piped stdin, and bounded: reads the child's stdout/stderr line-by-line
+/// through [`run_streaming`]'s existing [`RAW_CAP`] (10 MiB) instead of
+/// `Command::output()`, which buffers the entire child output in memory with
+/// no limit — the cause of unbounded memory growth on commands with very
+/// large output (rtk-ai/rtk#3106).
+pub fn exec_capture_stdin_bounded(cmd: &mut Command) -> Result<CaptureResult> {
+    let result = run_streaming(cmd, StdinMode::Inherit, FilterMode::CaptureOnly)?;
+    Ok(CaptureResult {
+        stdout: result.raw_stdout,
+        stderr: result.raw_stderr,
+        exit_code: result.exit_code,
+    })
 }
 
 /// Run `cmd` to completion, decode what it wrote, and report the exit code.
