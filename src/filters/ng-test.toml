@@ -1,0 +1,90 @@
+schema_version = 1
+
+[filters.ng-test]
+description = "Angular Karma (ng test) — failures, stack traces, summary"
+match_command = "\\bng test\\b"
+strip_ansi = true
+filter_stderr = true
+strip_lines_matching = [
+  "^yarn run v",
+  "^\\$ ng ",
+  "Tailwind CSS configuration",
+  "^- Generating browser",
+  "^✔ Browser application bundle",
+  "^DEBUG:",
+  "^WARN:",
+  ":INFO \\[",
+  "Executed [0-9]+ of [0-9]+",
+  "^Done in [0-9]",
+  "^\\s*$",
+]
+max_lines = 80
+on_empty = "ng test: ok"
+
+[[tests.ng-test]]
+name = "all passed — summary only"
+input = """
+yarn run v1.22.22
+$ ng test auth --no-watch --browsers=ChromeHeadless
+✔ Browser application bundle generation complete.
+22 06 2026 22:09:14.380:INFO [karma-server]: Karma v6.4.4 server started at http://localhost:9877/
+22 06 2026 22:09:15.245:INFO [Chrome Headless 134.0.0.0 (Mac OS 10.15.7)]: Connected on socket q3EZc_BXbPE9KZu5AAAB with id 3020021
+Chrome Headless 134.0.0.0 (Mac OS 10.15.7): Executed 1 of 57 SUCCESS (0 secs / 0.007 secs)
+Chrome Headless 134.0.0.0 (Mac OS 10.15.7): Executed 2 of 57 SUCCESS (0 secs / 0.009 secs)
+Chrome Headless 134.0.0.0 (Mac OS 10.15.7): Executed 57 of 57 SUCCESS (5.078 secs / 5.056 secs)
+TOTAL: 57 SUCCESS
+Done in 12.34s.
+"""
+expected = """
+TOTAL: 57 SUCCESS
+"""
+
+[[tests.ng-test]]
+name = "mixed failures with stack traces"
+input = """
+yarn run v1.22.22
+$ ng test auth --no-watch --browsers=ChromeHeadless
+✔ Browser application bundle generation complete.
+22 06 2026 22:09:15.245:INFO [Chrome Headless 134.0.0.0 (Mac OS 10.15.7)]: Connected on socket q3EZc_BXbPE9KZu5AAAB with id 3020021
+Chrome Headless 134.0.0.0 (Mac OS 10.15.7): Executed 1 of 57 SUCCESS (0 secs / 0.007 secs)
+Chrome Headless 134.0.0.0 (Mac OS 10.15.7): Executed 47 of 57 SUCCESS (0 secs / 0.036 secs)
+Chrome Headless 134.0.0.0 (Mac OS 10.15.7) AuthService initiateExternalLogin$ should initiate external login and return URL FAILED
+	Failed: Authorization URL not found in response
+	    at call (libs/auth/src/auth.service.ts:570:19)
+	    at onNext (node_modules/rxjs/dist/esm/internal/operators/map.js:7:37)
+Chrome Headless 134.0.0.0 (Mac OS 10.15.7): Executed 48 of 57 (1 FAILED) (0 secs / 0.037 secs)
+Chrome Headless 134.0.0.0 (Mac OS 10.15.7) AuthService verifyCode$ should verify code successfully and set session FAILED
+	Expected spy Router.navigate to have been called.
+	    at <Jasmine>
+	Error: Timeout - Async function did not complete within 5000ms (set by jasmine.DEFAULT_TIMEOUT_INTERVAL)
+Chrome Headless 134.0.0.0 (Mac OS 10.15.7): Executed 57 of 57 (2 FAILED) (5.078 secs / 5.056 secs)
+TOTAL: 2 FAILED, 55 SUCCESS
+error Command failed with exit code 1.
+"""
+expected = """
+Chrome Headless 134.0.0.0 (Mac OS 10.15.7) AuthService initiateExternalLogin$ should initiate external login and return URL FAILED
+	Failed: Authorization URL not found in response
+	    at call (libs/auth/src/auth.service.ts:570:19)
+	    at onNext (node_modules/rxjs/dist/esm/internal/operators/map.js:7:37)
+Chrome Headless 134.0.0.0 (Mac OS 10.15.7) AuthService verifyCode$ should verify code successfully and set session FAILED
+	Expected spy Router.navigate to have been called.
+	    at <Jasmine>
+	Error: Timeout - Async function did not complete within 5000ms (set by jasmine.DEFAULT_TIMEOUT_INTERVAL)
+TOTAL: 2 FAILED, 55 SUCCESS
+error Command failed with exit code 1.
+"""
+
+[[tests.ng-test]]
+name = "strips repeated bundle complete and tailwind stderr noise"
+input = """
+Tailwind CSS configuration file found (tailwind.config.js) but the 'tailwindcss' package is not installed.
+- Generating browser application bundles (phase: setup)...
+✔ Browser application bundle generation complete.
+✔ Browser application bundle generation complete.
+✔ Browser application bundle generation complete.
+Chrome Headless 134.0.0.0 (Mac OS 10.15.7): Executed 57 of 57 SUCCESS (0.065 secs / 0.049 secs)
+TOTAL: 57 SUCCESS
+"""
+expected = """
+TOTAL: 57 SUCCESS
+"""
