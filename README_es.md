@@ -3,21 +3,21 @@
 </p>
 
 <p align="center">
-  <strong>Proxy CLI de alto rendimiento que elimina hasta el 90% de la salida bash que lee tu agente</strong>
+  <strong>Proxy CLI de alto rendimiento que recorta hasta el 90% de la salida bash que lee tu agente</strong>
 </p>
 
 <p align="center">
   <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://github.com/rtk-ai/rtk/workflows/Security%20Check/badge.svg" alt="CI"></a>
   <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk" alt="Release"></a>
   <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
-  <a href="https://discord.gg/RySmvNF5kF"><img src="https://img.shields.io/discord/1478373640461488159?label=Discord&logo=discord" alt="Discord"></a>
+  <a href="https://discord.gg/RySmvNF5kF"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord" alt="Discord"></a>
   <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk" alt="Homebrew"></a>
 </p>
 
 <p align="center">
   <a href="https://www.rtk-ai.app">Sitio web</a> &bull;
   <a href="#instalacion">Instalar</a> &bull;
-  <a href="docs/TROUBLESHOOTING.md">Solucion de problemas</a> &bull;
+  <a href="https://www.rtk-ai.app/guide/troubleshooting">Solucion de problemas</a> &bull;
   <a href="docs/contributing/ARCHITECTURE.md">Arquitectura</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
@@ -28,12 +28,13 @@
   <a href="README_zh.md">中文</a> &bull;
   <a href="README_ja.md">日本語</a> &bull;
   <a href="README_ko.md">한국어</a> &bull;
-  <a href="README_es.md">Espanol</a>
+  <a href="README_es.md">Espanol</a> &bull;
+  <a href="README_pt.md">Português</a>
 </p>
 
 ---
 
-rtk filtra y comprime las salidas de comandos antes de que lleguen al contexto de tu LLM. Binario Rust unico, cero dependencias, <10ms de overhead.
+rtk filtra y comprime las salidas de comandos antes de que lleguen al contexto de tu LLM. Binario Rust unico, cero dependencias, menos de 10 ms de overhead.
 
 ## Que hace RTK
 
@@ -56,7 +57,7 @@ RTK intercepta comandos de shell y comprime su salida antes de que tu agente la 
 
 ## Como funciona el ahorro
 
-RTK elimina **hasta el 90% de la salida bash** que lee tu agente. Eso es lo que RTK mide, y no es lo mismo que reducir tu factura en un 90%.
+RTK recorta **hasta el 90% de la salida bash** que lee tu agente. Eso es lo que RTK mide, y no es lo mismo que reducir tu factura en un 90%.
 
 La salida bash es **uno de los factores que alimentan los tokens de entrada**, junto con tu prompt, el prompt del sistema y el historial de conversacion. Los tokens de entrada son a su vez **solo una parte de la factura**, que tambien cuenta los tokens de salida. La reduccion se diluye en cada paso.
 
@@ -87,24 +88,30 @@ cargo install --git https://github.com/rtk-ai/rtk
 ### Verificacion
 
 ```bash
-rtk --version   # Debe mostrar "rtk 0.27.x"
+rtk --version   # Debe mostrar "rtk 0.28.x"
 rtk gain        # Debe mostrar estadisticas de ahorro
 ```
 
 ## Inicio rapido
 
 ```bash
-# 1. Instalar hook para Claude Code (recomendado)
-rtk init --global
+# 1. Instalar el hook para Claude Code (recomendado)
+rtk init -g
 
-# 2. Reiniciar Claude Code, luego probar
-git status  # Automaticamente reescrito a rtk git status
+# 2. Reiniciar Claude Code y luego probar
+git status  # Se reescribe automaticamente a rtk git status
 ```
+
+El hook solo actua sobre las llamadas a la herramienta Bash. Las herramientas
+integradas de Claude Code como `Read`, `Grep` y `Glob` no pasan por el hook de
+Bash, asi que no se reescriben automaticamente. Para obtener la salida compacta
+de RTK en esos flujos, usa comandos de shell (`cat`/`head`/`tail`, `rg`/`grep`,
+`find`) o llama directamente a `rtk read`, `rtk grep` o `rtk find`.
 
 ## Como funciona
 
 ```
-  Sin rtk:                                         Con rtk:
+  Sin rtk:                                          Con rtk:
 
   Claude  --git status-->  shell  -->  git          Claude  --git status-->  RTK  -->  git
     ^                                   |             ^                      |          |
@@ -164,11 +171,35 @@ rtk gain --graph                # Grafico ASCII (30 dias)
 rtk discover                    # Descubrir ahorros perdidos
 ```
 
+## Windows
+
+RTK funciona de forma nativa en Windows. Desde la **v0.37.2** el hook de
+reescritura automatica se ejecuta como **comando de binario nativo**
+(`rtk hook claude`) — sin shell de Unix, bash ni jq — asi que los comandos se
+reescriben de forma transparente en Simbolo del sistema, PowerShell y Windows
+Terminal, igual que en Linux y macOS.
+
+```powershell
+# 1. Descarga y extrae rtk-x86_64-pc-windows-msvc.zip desde releases
+# 2. Anade rtk.exe a tu PATH (p. ej. C:\Users\<tu-usuario>\.local\bin)
+# 3. Inicializa: instala el hook de binario nativo
+rtk init -g
+```
+
+**Requisitos previos**: algunos filtros delegan en [ripgrep](https://github.com/BurntSushi/ripgrep)
+(`rg`). Instalalo y mantenlo en tu PATH (p. ej.
+`winget install BurntSushi.ripgrep.MSVC`) para evitar avisos de
+`Binary 'rg' not found on PATH`.
+
+**Importante**: no hagas doble clic en `rtk.exe` — es una herramienta CLI que
+imprime la ayuda y termina de inmediato. Ejecutala siempre desde una terminal.
+
 ## Documentacion
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Resolver problemas comunes
+- **[rtk-ai.app/guide](https://www.rtk-ai.app/guide)** - Guia de usuario completa (instalacion, agentes soportados, que se optimiza, analiticas, configuracion, solucion de problemas)
 - **[INSTALL.md](INSTALL.md)** - Guia de instalacion detallada
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - Arquitectura tecnica
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** - Guia de contribucion
 
 ## Contribuir
 
