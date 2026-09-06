@@ -5176,8 +5176,19 @@ pub fn run_gemini(
     // 2. Install GEMINI.md (RTK awareness for Gemini)
     if !hook_only {
         let gemini_md_path = gemini_dir.join(GEMINI_MD);
-        // Reuse the same slim RTK awareness content
-        write_if_changed(&gemini_md_path, RTK_SLIM, GEMINI_MD, ctx)?;
+        // Upsert an RTK-owned marker block instead of overwriting the file, so a
+        // user's existing GEMINI.md is preserved (#834).
+        let block = format!(
+            "{RTK_BLOCK_START} v2 -->\n{}\n{RTK_BLOCK_END}",
+            RTK_SLIM.trim()
+        );
+        write_rtk_block(
+            &gemini_md_path,
+            &block,
+            GEMINI_MD,
+            "rtk init -g --gemini",
+            ctx,
+        )?;
     }
 
     // 3. Patch ~/.gemini/settings.json
@@ -5374,16 +5385,30 @@ fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
         removed.push(format!("Gemini hook: {}", hook_path.display()));
     }
 
-    // Remove GEMINI.md
+    // Remove only the RTK marker block from GEMINI.md, preserving user content (#834).
+    // Delete the file only if nothing but the block was in it.
     let gemini_md = gemini_dir.join(GEMINI_MD);
     if gemini_md.exists() {
-        if dry_run {
-            println!("[dry-run] would remove GEMINI.md: {}", gemini_md.display());
-        } else {
-            fs::remove_file(&gemini_md)
-                .with_context(|| format!("Failed to remove {}", gemini_md.display()))?;
+        let content = fs::read_to_string(&gemini_md)
+            .with_context(|| format!("Failed to read {}", gemini_md.display()))?;
+        if content.contains(RTK_BLOCK_START) {
+            let (cleaned, did_remove) = remove_rtk_block(&content);
+            if did_remove {
+                if dry_run {
+                    println!(
+                        "[dry-run] would remove rtk-instructions block from {}",
+                        gemini_md.display()
+                    );
+                } else if cleaned.trim().is_empty() {
+                    fs::remove_file(&gemini_md)
+                        .with_context(|| format!("Failed to remove {}", gemini_md.display()))?;
+                } else {
+                    atomic_write(&gemini_md, &cleaned)
+                        .with_context(|| format!("Failed to write {}", gemini_md.display()))?;
+                }
+                removed.push(format!("{}: removed rtk-instructions block", GEMINI_MD));
+            }
         }
-        removed.push(format!("GEMINI.md: {}", gemini_md.display()));
     }
 
     // Remove hook from settings.json
@@ -6241,6 +6266,34 @@ mod tests {
         let (content, action) = upsert_rtk_block(&input, RTK_INSTRUCTIONS);
         assert_eq!(action, RtkBlockUpsert::Malformed);
         assert_eq!(content, input);
+    }
+
+    // GEMINI.md install/uninstall must never clobber a user's existing file (#834).
+    #[test]
+    fn test_gemini_md_upsert_and_remove_preserve_user_content() {
+        let user = "# My Gemini notes\n\nDo the thing.";
+        let block = format!(
+            "{RTK_BLOCK_START} v2 -->\n{}\n{RTK_BLOCK_END}",
+            RTK_SLIM.trim()
+        );
+
+        // Install: block appended, user content preserved.
+        let (installed, action) = upsert_rtk_block(user, &block);
+        assert_eq!(action, RtkBlockUpsert::Added);
+        assert!(installed.contains("My Gemini notes"));
+        assert!(installed.contains(RTK_BLOCK_START));
+        assert!(installed.contains("Rust Token Killer"));
+
+        // Re-install is idempotent.
+        let (again, action2) = upsert_rtk_block(&installed, &block);
+        assert_eq!(action2, RtkBlockUpsert::Unchanged);
+        assert_eq!(again, installed);
+
+        // Uninstall: only the block is removed, user content stays.
+        let (removed, did_remove) = remove_rtk_block(&installed);
+        assert!(did_remove);
+        assert!(removed.contains("My Gemini notes"));
+        assert!(!removed.contains(RTK_BLOCK_START));
     }
 
     #[test]
