@@ -3667,11 +3667,22 @@ mod tests {
         );
     }
 
+    // `up` gained a filter (compact summary when detached, passthrough
+    // otherwise — see container::run_compose_up) so it is rewritten either way;
+    // the flag-aware choice between filtering and passthrough happens downstream.
     #[test]
-    fn test_rewrite_docker_compose_up_skipped() {
+    fn test_rewrite_docker_compose_up_detached() {
         assert_eq!(
             rewrite_command_no_prefixes("docker compose up -d", &[]),
-            None
+            Some("rtk docker compose up -d".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_docker_compose_up_foreground() {
+        assert_eq!(
+            rewrite_command_no_prefixes("docker compose up", &[]),
+            Some("rtk docker compose up".into())
         );
     }
 

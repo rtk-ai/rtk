@@ -1103,6 +1103,11 @@ enum ComposeCommands {
         /// Optional service name
         service: Option<String>,
     },
+    /// Start compose services (compact summary in detached mode)
+    Up {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported compose subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -2116,6 +2121,7 @@ fn run_cli() -> Result<i32> {
                 ComposeCommands::Build { service } => {
                     container::run_compose_build(service.as_deref(), cli.verbose)?
                 }
+                ComposeCommands::Up { args } => container::run_compose_up(&args, cli.verbose)?,
                 ComposeCommands::Other(args) => {
                     container::run_compose_passthrough(&args, cli.verbose)?
                 }

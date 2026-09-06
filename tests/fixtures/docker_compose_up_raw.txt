@@ -1,0 +1,7 @@
+time="2026-07-14T15:52:47+02:00" level=warning msg="Found orphan containers ([datalake-garage-init-1 datalake-garage-1]) for this project. If you removed or renamed this service in your compose file, you can run this command with the --remove-orphans flag to clean it up."
+ Container datalake-postgres-1 Running
+ Container datalake-rustfs-1 Running
+ Container datalake-backend-1 Running
+ Container datalake-frontend-1 Running
+ Container datalake-postgres-1 Waiting
+ Container datalake-postgres-1 Healthy

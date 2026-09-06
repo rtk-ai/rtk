@@ -258,6 +258,7 @@ rtk docker ps                   # Compact container list
 rtk docker images               # Compact image list
 rtk docker logs <container>     # Deduplicated logs
 rtk docker compose ps           # Compose services
+rtk docker compose up -d        # Compact status summary (foreground passes through)
 rtk kubectl pods                # Compact pod list
 rtk kubectl logs <pod>          # Deduplicated logs
 rtk kubectl services            # Compact service list
