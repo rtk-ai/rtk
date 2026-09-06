@@ -31,7 +31,7 @@ fn active() -> Option<(RecoveryMode, RetrieverConfig)> {
 
 /// Cached, not a fresh load: the hint paths in search.rs call this once per
 /// file, and a disk read plus TOML parse per file is the other half of the
-/// per-file overhead that breaches the <10ms target (B11/V18). This is a
+/// per-file overhead that breaches the <10ms startup target. This is a
 /// read-only caller that never writes config, which is what cached_config
 /// requires.
 #[cfg(not(test))]
@@ -43,7 +43,7 @@ fn recall_cfg() -> RetrieverConfig {
 /// across 20+ modules call `force_tee_*` with whatever config the developer
 /// happens to have, which wrote their fixture output into the real
 /// `recall.db` and leaked fixture slugs into the daily telemetry ping via
-/// `stats_snapshot()` (B13/V19). Recall is therefore off by default in tests;
+/// `stats_snapshot()`. Recall is therefore off by default in tests;
 /// a test that needs the real path installs its own tempdir config with
 /// [`with_test_recall`].
 #[cfg(test)]
@@ -64,7 +64,7 @@ thread_local! {
 
 /// Serializes every test that installs a recall config against the one test
 /// that sets `RTK_RECALL`, which is process-wide and would otherwise switch
-/// recall off underneath a concurrently running test (B12/V19).
+/// recall off underneath a concurrently running test .
 #[cfg(test)]
 pub(crate) static RECALL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -81,7 +81,7 @@ pub(crate) fn with_test_recall<T>(cfg: RetrieverConfig, f: impl FnOnce() -> T) -
 
 /// Run `f` with recall backed by a throwaway store. For filter tests that
 /// assert on a truncation/recovery hint: without this the hint paths are inert
-/// under test and the filter correctly falls back to passthrough (B13/V19).
+/// under test and the filter correctly falls back to passthrough .
 #[cfg(test)]
 pub(crate) fn with_temp_recall<T>(f: impl FnOnce() -> T) -> T {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -189,7 +189,7 @@ mod tests {
         }
     }
 
-    /// B13/V19: with no test config installed — the state every filter unit
+    /// With no test config installed — the state every filter unit
     /// test runs in — the hint paths must stay inert. This is what stops
     /// fixture output reaching the developer's real recall.db.
     #[test]

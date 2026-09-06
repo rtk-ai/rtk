@@ -164,7 +164,7 @@ fn compile_grep_pattern(pattern: &str) -> Option<regex::bytes::Regex> {
 ///
 /// The flag is the whole point. `split` yields a trailing empty slice for input
 /// ending in `\n`, and treating that as a line is what made `--grep '^'` return
-/// the stored bytes plus one newline — the §B.B4 byte-fidelity defect. Dropping
+/// the stored bytes plus one newline — the byte-fidelity defect this function was fixed for. Dropping
 /// it here, and carrying the terminator separately, keeps the rejoin honest.
 fn split_keeping_terminator(input: &[u8]) -> (Vec<&[u8]>, bool) {
     let trailing_newline = input.last() == Some(&b'\n');
@@ -228,7 +228,7 @@ thread_local! {
     /// opened against. `store()` runs once per elided command, but the hint
     /// paths in `search.rs` fire once *per file*, and each `open()` re-runs the
     /// pragmas plus six DDL statements — enough to breach the <10ms startup
-    /// target (B11/V18). rtk is single-threaded and short-lived, so one cached
+    /// target. rtk is single-threaded and short-lived, so one cached
     /// handle per thread needs no pooling.
     ///
     /// Keyed by path, not unconditional: `RTK_RECALL_DB` and `cfg.database_path`
@@ -483,7 +483,7 @@ pub fn record_tee_recall(slug: &str, path: &str) {
 /// Kill-switch state is a parameter so tests can exercise it against their own
 /// config without setting `RTK_RECALL_DB` process-wide. `db_path()` gives that
 /// env var precedence over `cfg.database_path`, so a test that sets it
-/// redirects every concurrently running test's store to its tempdir (B12/V19).
+/// redirects every concurrently running test's store to its tempdir.
 fn record_tee_recall_with(cfg: &RetrieverConfig, slug: &str, path: &str, disabled: bool) {
     if disabled {
         return;
@@ -500,7 +500,7 @@ fn record_tee_recall_with(cfg: &RetrieverConfig, slug: &str, path: &str, disable
 /// upsert refreshes. Retention drops what is older than the cutoff; the count
 /// cap drops the oldest surplus. An entry re-stored daily is fresh to both.
 ///
-/// They disagreed until §B.B2 was fixed — the count cap ordered by `rowid`,
+/// They used to disagree: the count cap ordered by `rowid`,
 /// which the upsert never touches, so the most recently refreshed entry was the
 /// first evicted while retention still considered it new.
 fn evict(conn: &Connection, cfg: &RetrieverConfig) {
@@ -517,8 +517,9 @@ fn evict_by_age(conn: &Connection, retention_days: u32) {
     let _ = conn.execute("DELETE FROM recall WHERE created_at < ?1", params![cutoff]);
 }
 
-/// Trims the store back to `max_entries`, dropping lowest `rowid` first —
-/// insertion order, which `ON CONFLICT DO UPDATE` never bumps.
+/// Trims the store back to `max_entries`, dropping oldest `created_at` first —
+/// the same ordering the retention rule uses, so a refreshed entry is fresh to
+/// both. `rowid` breaks ties only.
 fn evict_by_count(conn: &Connection, max_entries: usize) {
     if max_entries == 0 {
         return;
@@ -538,7 +539,7 @@ fn evict_by_count(conn: &Connection, max_entries: usize) {
 /// `rowid` would be insertion order, and `ON CONFLICT DO UPDATE` refreshes
 /// `created_at` but never the rowid. Ordering by rowid therefore evicted the
 /// entry that had been re-stored most recently, while retention still counted
-/// it as fresh (§B.B2). `rowid` remains only as a tie-break, so entries stored
+/// it as fresh. `rowid` remains only as a tie-break, so entries stored
 /// within the same second still evict deterministically.
 const EVICT_BY_COUNT_SQL: &str = "DELETE FROM recall WHERE rowid IN (
         SELECT rowid FROM recall ORDER BY created_at ASC, rowid ASC LIMIT ?1
@@ -690,7 +691,7 @@ struct EncodedEntry {
 
 /// Address and compress the content. Split out because this is the whole of the
 /// store's content-addressing contract in one place: the hash covers the *full*
-/// input while the blob holds the possibly-truncated payload (§B.B16), and
+/// input while the blob holds the possibly-truncated payload, and
 /// `total_lines` likewise counts what arrived, not what was kept.
 fn encode_entry(content: &[u8], command: &str, max_entry_bytes: usize) -> EncodedEntry {
     let (payload, truncated) = truncate_at_line_boundary(content, max_entry_bytes);
@@ -841,7 +842,7 @@ fn emit_selected(
 /// Empty output is otherwise indistinguishable from "the entry really has
 /// nothing after line N", which breaks the resume loop the flag exists for: an
 /// agent paging through a long entry gets silence and no way to tell whether it
-/// finished or overshot (§B.B17). Goes to stderr, like the truncation note, so
+/// finished or overshot. Goes to stderr, like the truncation note, so
 /// the recalled bytes on stdout stay exactly what was stored.
 fn warn_if_from_past_end(full: &[u8], args: &RecallArgs, emitted: usize) {
     let Some(from) = args.from else { return };
@@ -1355,7 +1356,7 @@ mod tests {
         );
     }
 
-    /// B12/V19: asserts the kill switch through the injected flag rather than
+    /// Asserts the kill switch through the injected flag rather than
     /// by setting `RTK_RECALL_DB`, which would redirect every test running
     /// concurrently to this tempdir.
     #[test]
@@ -1396,7 +1397,7 @@ mod tests {
         assert_eq!(s.recalls, 2, "one count per distinct tee file");
     }
 
-    /// V17/B6: `tee_reads` dedup is non-upgradable — the first record of a path
+    /// `tee_reads` dedup is non-upgradable — the first record of a path
     /// is permanent. A read counted before the permission verdict therefore
     /// blocks the later legitimate read of the same file from ever counting,
     /// which is why tracking must fire only after an Allow verdict.
@@ -1420,7 +1421,7 @@ mod tests {
         );
     }
 
-    /// V17/B6: distinct files each count once — the fix must not suppress
+    /// Distinct files each count once — the fix must not suppress
     /// legitimate reads of different tee files.
     #[test]
     fn test_tee_recall_counts_each_distinct_file_once() {
@@ -1596,7 +1597,7 @@ mod tests {
         assert!(a.starts_with("helm"), "key stays readable: {a}");
     }
 
-    /// B8 mechanism: raw command lines short enough to skip the 24-char hash
+    /// Raw command lines short enough to skip the 24-char hash
     /// fold reach `recall_stats` verbatim, so every distinct invocation opens
     /// its own row. This is why the TOML path must pass the filter family name.
     #[test]
@@ -1609,7 +1610,7 @@ mod tests {
         );
     }
 
-    /// B8 fix: the filter family name is one stable key regardless of arguments.
+    /// The filter family name is one stable key regardless of arguments.
     #[test]
     fn test_stat_key_filter_family_name_aggregates() {
         let key = stat_key("jq");
@@ -1619,7 +1620,7 @@ mod tests {
         assert_eq!(key, "jq");
     }
 
-    /// B8/Y6: the family name must not carry arguments into the ledger.
+    /// The family name must not carry arguments into the ledger.
     #[test]
     fn test_stat_key_family_name_carries_no_arguments() {
         for name in ["helm", "jq", "brew-install", "dotnet-build", "gcloud"] {
@@ -1629,7 +1630,7 @@ mod tests {
         }
     }
 
-    /// B8: a family name must never trip the 24-char hash fold, which would
+    /// A family name must never trip the 24-char hash fold, which would
     /// make `rtk gain --recalls` show an unreadable `prefix_hash` row.
     #[test]
     fn test_stat_key_family_names_stay_readable() {
@@ -1640,7 +1641,7 @@ mod tests {
         }
     }
 
-    /// B8 end-to-end: repeated stores under one family name collapse to a
+    /// Repeated stores under one family name collapse to a
     /// single stats row, where the raw-command slug would have opened three.
     #[test]
     fn test_toml_family_slug_aggregates_across_invocations() {
@@ -1752,7 +1753,7 @@ mod tests {
         assert!(load_by_hash(&conn, prefix).unwrap().is_some());
     }
 
-    // --- V8 byte fidelity: 1-to-1 coverage per byte class ---
+    // --- byte fidelity: 1-to-1 coverage per byte class ---
 
     fn recall_full_pipeline(cfg: &RetrieverConfig, content: &[u8], cmd: &str) -> Vec<u8> {
         let stored = store_inner(cfg, content, Capture::full(cmd, Some(0))).expect("store");
@@ -1882,7 +1883,7 @@ mod tests {
         assert_eq!(sliced, b"\x1b[31mline1\x1b[0m\n\x00line2\x00\n");
     }
 
-    // --- B4 FIXED: grep_bytes byte-faithful after fix ---
+    // --- FIXED: grep_bytes byte-faithful after fix ---
 
     #[test]
     fn test_b4_fixed_grep_match_all_preserves_input() {
@@ -1997,7 +1998,7 @@ mod tests {
         assert_ne!(a, content_hash("cmd", b"red"));
     }
 
-    // --- B2/V13: eviction order bug — rowid vs created_at inconsistency ---
+    // --- Eviction ordering: the count cap and retention must agree ---
 
     #[test]
     fn test_b2_hot_entry_survives_eviction() {
@@ -2012,7 +2013,7 @@ mod tests {
         store_inner(&cfg, b"entry-b\n", Capture::full("cmd-b", Some(0))).unwrap();
         store_inner(&cfg, b"entry-c\n", Capture::full("cmd-c", Some(0))).unwrap();
 
-        // Age everything by a day. B2 describes an entry re-stored *daily*, and
+        // Age everything by a day. The defect is about an entry re-stored *daily*, and
         // `created_at` is whole seconds — storing four entries in one test tick
         // leaves them all on the same timestamp, where the rowid tie-break
         // decides and nothing about recency is being tested.
@@ -2038,7 +2039,7 @@ mod tests {
         // created_at and must be the last thing the count cap considers.
         assert!(
             hot_exists,
-            "B2: hot entry evicted despite being the most recently refreshed"
+            "hot entry evicted despite being the most recently refreshed"
         );
     }
 
@@ -2092,20 +2093,20 @@ mod tests {
         };
         assert!(
             survives("aaa_old_rowid_"),
-            "B2: lowest rowid must survive when its created_at is the freshest"
+            "lowest rowid must survive when its created_at is the freshest"
         );
         assert!(
             !survives("bbb_new_rowid_"),
-            "B2: oldest created_at must be evicted regardless of its rowid"
+            "oldest created_at must be evicted regardless of its rowid"
         );
     }
 
-    /// The limit of the B2 fix, stated rather than left to be discovered.
+    /// The limit of the created_at ordering, stated rather than left to be discovered.
     ///
     /// `created_at` is whole seconds, so entries stored inside one second are
     /// indistinguishable by recency and the `rowid` tie-break decides — meaning
     /// a refresh that lands in the same second as its neighbours does not
-    /// protect the entry. That is acceptable because B2 is about an entry
+    /// protect the entry. That is acceptable because the defect is about an entry
     /// re-stored across days, and at second granularity there is genuinely
     /// nothing to order on. It is a limitation, not a fix in disguise.
     #[test]
@@ -2141,7 +2142,7 @@ mod tests {
         );
     }
 
-    // --- B17: --from past the end must not be silent ---
+    // --- --from past the end must not be silent ---
 
     fn from_args(n: usize) -> RecallArgs<'static> {
         RecallArgs {
@@ -2210,11 +2211,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             rowid_before, rowid_after,
-            "B2 root cause: ON CONFLICT DO UPDATE does not change rowid"
+            "root cause: ON CONFLICT DO UPDATE does not change rowid"
         );
     }
 
-    // --- V6: concurrency — N threads store simultaneously ---
+    // --- concurrency: N processes storing simultaneously ---
 
     #[test]
     fn test_v6_concurrent_stores_no_corruption() {
@@ -2344,7 +2345,7 @@ mod tests {
         );
     }
 
-    // --- V12: -wal/-shm permissions while connection is open ---
+    // --- permissions: DB, -wal and -shm are owner-only ---
 
     #[cfg(unix)]
     #[test]
@@ -2413,7 +2414,7 @@ mod tests {
         }
     }
 
-    // --- B5/V5: Disabled mode must not create DB ---
+    // --- disabled mode must not create the database ---
 
     #[test]
     fn test_b5_stats_snapshot_disabled_returns_empty() {
@@ -2428,7 +2429,7 @@ mod tests {
         // But we can verify it would create the DB:
         assert!(
             dir.path().join("should_not_exist.db").exists(),
-            "stats_snapshot_with creates DB unconditionally (B5 root cause)"
+            "stats_snapshot_with creates the DB unconditionally — the root cause"
         );
     }
 
@@ -2474,15 +2475,15 @@ mod tests {
             ..RetrieverConfig::default()
         };
         // store() itself doesn't check mode — caller (tee.rs) does
-        // But store_inner still creates DB. This is B5 scope for store path.
+        // store_inner still creates the DB; that is the store path, not this guard.
         let result = store(&cfg, b"test\n", Capture::full("cmd", Some(0)));
         // store doesn't guard on mode — caller must
         assert!(matches!(result, Stored::Saved(_)));
     }
 
-    // --- B11/V18: connection caching ---
+    // --- connection caching ---
 
-    /// V18: repeated `open()` on one path must reuse the handle rather than
+    /// repeated `open()` on one path must reuse the handle rather than
     /// re-running the pragmas and six DDL statements per call.
     #[test]
     fn test_open_reuses_cached_connection_for_same_path() {
@@ -2497,7 +2498,7 @@ mod tests {
         );
     }
 
-    /// B11: the cache is keyed by path — a different DB must never be served
+    /// the cache is keyed by path — a different DB must never be served
     /// the previous connection, or writes land in the wrong store.
     #[test]
     fn test_open_reopens_when_path_changes() {
@@ -2514,7 +2515,7 @@ mod tests {
         );
     }
 
-    /// B11: switching back after a different path was opened is a miss, not a
+    /// switching back after a different path was opened is a miss, not a
     /// silent reuse of the stale entry.
     #[test]
     fn test_open_after_path_switch_back_is_a_fresh_handle() {
@@ -2529,7 +2530,7 @@ mod tests {
         assert!(!std::rc::Rc::ptr_eq(&first, &again));
     }
 
-    /// V18: the cached handle must stay writable — reuse is worthless if the
+    /// the cached handle must stay writable — reuse is worthless if the
     /// second store fails or lands in a stale snapshot.
     #[test]
     fn test_cached_connection_still_writes_correctly() {
@@ -2551,7 +2552,7 @@ mod tests {
         assert_eq!(rows, 5, "every store through the cached handle persisted");
     }
 
-    /// V18: reads issued through the cached handle must see writes made
+    /// reads issued through the cached handle must see writes made
     /// through it — no stale snapshot across calls.
     #[test]
     fn test_cached_connection_reads_own_writes() {
@@ -2564,8 +2565,8 @@ mod tests {
         assert_eq!(decode(&row).unwrap(), b"recall me\n");
     }
 
-    /// B11: the cache must not create a DB for a path that was never opened —
-    /// the Disabled-mode guarantee (V5) still holds with caching in place.
+    /// the cache must not create a DB for a path that was never opened —
+    /// the Disabled-mode guarantee still holds with caching in place.
     #[test]
     fn test_cache_does_not_create_db_before_first_open() {
         let dir = tempfile::tempdir().unwrap();
@@ -2602,7 +2603,7 @@ mod tests {
         println!("9 uncached opens: {uncached:?}");
     }
 
-    // --- V9: corrupted/unavailable DB → silent, no extra token, no exit code change ---
+    // --- corrupted/unavailable DB → silent, no extra token, no exit code change ---
 
     #[test]
     fn test_v9_corrupted_db_store_returns_unavailable() {

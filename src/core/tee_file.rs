@@ -101,7 +101,7 @@ pub const LEGACY_TEE_ALWAYS_NOTICE: &str = "Legacy [tee] mode = \"always\" has n
 /// `LEGACY_TEE_CONFIG_NOTICE` claims "file mode kept", so the mode check is
 /// part of the claim: a user whose `[tee]` section resolved to `Disabled`
 /// (`enabled = false` / `mode = "never"`) is not on file mode and must not be
-/// told otherwise (B10).
+/// told otherwise.
 pub fn legacy_tee_config_in_use() -> bool {
     Config::load()
         .map(|c| is_legacy_tee_in_use(&c))
@@ -114,7 +114,7 @@ fn is_legacy_tee_in_use(config: &Config) -> bool {
 }
 
 /// True when the loaded config carried `[tee] mode = "always"`, which the
-/// migration silently downgrades to failures-only (B9/V20).
+/// migration silently downgrades to failures-only.
 pub fn legacy_tee_always_downgraded() -> bool {
     Config::load()
         .map(|c| c.migrated_from_legacy_tee_always)
@@ -167,7 +167,7 @@ fn create_tee_dir(tee_dir: &Path) -> Option<()> {
 /// Note what this does on the truncating path: it appends a
 /// `--- truncated at N bytes ---` marker *into* the payload. Tee mode is
 /// therefore not byte-faithful, unlike the sqlite store, which truncates at a
-/// line boundary and adds nothing (§B.B15). Keeping that in its own function
+/// line boundary and adds nothing. Keeping that in its own function
 /// is the difference between a caller who knows the payload is annotated and
 /// one who assumes it is the raw output.
 ///
@@ -333,7 +333,7 @@ mod tests {
 
     const MAX_FILE_SIZE: usize = 1_048_576;
 
-    /// B10: `LEGACY_TEE_CONFIG_NOTICE` claims "file mode kept", so the gate must
+    /// `LEGACY_TEE_CONFIG_NOTICE` claims "file mode kept", so the gate must
     /// require Tee mode. Firing it for a migrated-to-Disabled user tells someone
     /// who explicitly turned recovery off that their files are still being kept.
     mod b10_legacy_config_gate {

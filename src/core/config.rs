@@ -246,7 +246,7 @@ impl Config {
         }
         // A coexisting [retriever] section leaves the mode alone, but legacy
         // field values still get merged. That merge is itself a migration and
-        // must raise the flag, or the notice never fires for these users (B10).
+        // must raise the flag, or the notice never fires for these users .
         let mut merged_field = false;
         if let Some(v) = tee.max_files {
             if !explicit("tee_max_files") {
@@ -325,7 +325,7 @@ fn apply_recall_mode(content: &str, mode: crate::core::retriever::RecoveryMode) 
 }
 
 /// True when `content` carries a legacy `[tee] mode = "always"`. `apply_recall_mode`
-/// drops the `[tee]` section, so this must be read before the rewrite (B9/V20).
+/// drops the `[tee]` section, so this must be read before the rewrite .
 fn legacy_tee_mode_is_always(content: &str) -> bool {
     content
         .parse::<toml_edit::DocumentMut>()
@@ -579,7 +579,7 @@ enabled = false
         );
         assert!(
             config.migrated_from_legacy_tee,
-            "B10: legacy values are in effect here, so the migration is flagged"
+            "legacy values are in effect here, so the migration is flagged"
         );
     }
 
@@ -651,7 +651,7 @@ enabled = false
         );
     }
 
-    // --- V10: additional legacy [tee] migration coverage ---
+    // --- additional legacy [tee] migration coverage ---
 
     #[test]
     fn test_legacy_tee_enabled_true_only_maps_to_tee() {
@@ -673,11 +673,11 @@ enabled = false
         assert!(config.migrated_from_legacy_tee);
         assert!(
             config.migrated_from_legacy_tee_always,
-            "V20: the downgrade must be flagged, not applied silently"
+            "the downgrade must be flagged, not applied silently"
         );
     }
 
-    /// V20: only `always` is a downgrade — the other legacy modes map without
+    /// only `always` is a downgrade — the other legacy modes map without
     /// loss and must not raise the flag, or every legacy user gets the notice.
     #[test]
     fn test_legacy_tee_non_always_modes_do_not_flag_downgrade() {
@@ -695,7 +695,7 @@ enabled = false
         }
     }
 
-    /// V20: `enabled = false` wins over `mode`, so an explicitly disabled user
+    /// `enabled = false` wins over `mode`, so an explicitly disabled user
     /// is not told their capture semantics changed.
     #[test]
     fn test_legacy_tee_disabled_always_does_not_flag_downgrade() {
@@ -706,7 +706,7 @@ enabled = false
         assert!(!config.migrated_from_legacy_tee_always);
     }
 
-    /// V20: an explicit `[retriever]` section means the user already migrated —
+    /// an explicit `[retriever]` section means the user already migrated —
     /// the legacy `mode` is not consulted, so no downgrade notice is due.
     #[test]
     fn test_explicit_retriever_suppresses_always_downgrade_flag() {
@@ -716,7 +716,7 @@ enabled = false
         assert!(!config.migrated_from_legacy_tee_always);
     }
 
-    /// V20: `set_recall_mode` drops the `[tee]` section, so the `always` intent
+    /// `set_recall_mode` drops the `[tee]` section, so the `always` intent
     /// must be readable from the pre-write content.
     #[test]
     fn test_legacy_tee_mode_is_always_detects_intent_before_rewrite() {
@@ -744,7 +744,7 @@ enabled = false
         }
     }
 
-    /// B10 false negative: with a coexisting `[retriever]` the mode is left
+    /// false negative: with a coexisting `[retriever]` the mode is left
     /// alone, but legacy field values are still merged. That merge is a
     /// migration and must raise the flag, or the notice never fires for
     /// exactly the users whose legacy values are in effect.
@@ -755,7 +755,7 @@ enabled = false
         assert_eq!(config.retriever.tee_max_files, 7, "legacy value applied");
         assert!(
             config.migrated_from_legacy_tee,
-            "B10: merged legacy field must flag the migration"
+            "merged legacy field must flag the migration"
         );
     }
 
@@ -776,7 +776,7 @@ enabled = false
         }
     }
 
-    /// B10: an explicit `[retriever]` key wins, so nothing is merged and there
+    /// an explicit `[retriever]` key wins, so nothing is merged and there
     /// is no migration to announce.
     #[test]
     fn test_coexisting_sections_no_flag_when_retriever_key_wins() {
@@ -791,14 +791,14 @@ enabled = false
         );
     }
 
-    /// B10: an empty `[tee]` alongside `[retriever]` merges nothing.
+    /// an empty `[tee]` alongside `[retriever]` merges nothing.
     #[test]
     fn test_coexisting_empty_tee_section_does_not_flag_migration() {
         let config = Config::from_toml("[retriever]\nmode = \"tee\"\n[tee]\n").expect("valid");
         assert!(!config.migrated_from_legacy_tee);
     }
 
-    /// V20: the notice must name the behavior change and the recovery route,
+    /// the notice must name the behavior change and the recovery route,
     /// otherwise the user cannot act on it.
     #[test]
     fn test_always_notice_states_change_and_remedy() {

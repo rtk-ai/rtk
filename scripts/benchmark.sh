@@ -215,9 +215,9 @@ count_find_names() {
     /^ext: /             { next }   # extension histogram footer
     /^\.\.\. \(/          { next }   # "... (8 filtered)" disclosure note
     # Recovery hints, not filenames. All three forms must be listed: the hint
-    # has no single constructor (§V.V16), so each new shape has to be added
+    # has no single constructor, so each new shape has to be added
     # here. The sqlite forms are five fields apiece and were being counted as
-    # five names, overshooting every assertion below by five (§B.B1).
+    # five names, overshooting every assertion below by five.
     /^\[see remaining: /     { next }
     /^\[full output: /       { next }
     /^\[\+[0-9]+ hidden: / { next }

@@ -2034,7 +2034,7 @@ match_command = "^make\\b"
         );
     }
 
-    /// B8/§X5: the TOML runner passes `filter.name` as the recall slug, so every
+    /// The TOML runner passes `filter.name` as the recall slug, so every
     /// built-in family name must survive slug sanitization unchanged — no
     /// argument residue, no 24-char hash fold that would make
     /// `rtk gain --recalls` unreadable.

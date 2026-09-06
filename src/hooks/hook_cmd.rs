@@ -2507,7 +2507,7 @@ mod tests {
         assert!(run_vibe_inner(&input).is_none());
     }
 
-    /// V17: tee-read tracking must fire after the permission verdict, never
+    /// Tee-read tracking must fire after the permission verdict, never
     /// before. `decide_from_verdict` reaches `track_tee_read` only on the
     /// `AllowRewrite` arm; every other arm returns before it.
     mod v17_track_after_verdict {

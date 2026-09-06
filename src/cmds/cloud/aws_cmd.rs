@@ -1549,7 +1549,7 @@ mod tests {
     use super::*;
     use crate::core::utils::count_tokens;
 
-    // --- B22: the recall slug must not carry AWS arguments ---
+    // --- the recall slug must not carry AWS arguments ---
 
     #[test]
     fn test_b22_slug_is_service_only() {
@@ -1563,7 +1563,8 @@ mod tests {
 
     /// The slug the old code produced would have reached the telemetry endpoint
     /// intact: 23 chars, four segments, no digits, `aws` in the family list. It
-    /// is exactly the B7 defect at a call site B7 never covered, which is why
+    /// is the same argument-leak defect as the TOML-filter path, at a call site that
+    /// fix never covered, which is why
     /// the fix belongs at the source rather than in the allowlist.
     #[test]
     fn test_b22_old_slug_shape_would_have_leaked() {

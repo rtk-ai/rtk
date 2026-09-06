@@ -776,13 +776,13 @@ mod tests {
         assert!(count < 10000); // sanity check
     }
 
-    // --- V11: telemetry allowlist coverage ---
+    // --- telemetry allowlist coverage ---
 
     #[test]
     fn test_v11_b7_fixed_argument_bearing_slug_rejected() {
         assert!(
             !recall_slug_is_public("go_build___cmd_acmepay"),
-            "B7 FIXED: triple underscore (encoded path) must be rejected"
+            "triple underscore (encoded path) must be rejected"
         );
     }
 
@@ -790,7 +790,7 @@ mod tests {
     fn test_v11_b7_fixed_too_many_segments_rejected() {
         assert!(
             !recall_slug_is_public("go_test_-v_-count_1"),
-            "B7 FIXED: >4 segments (argument leak) must be rejected"
+            ">4 segments (argument leak) must be rejected"
         );
     }
 
