@@ -208,12 +208,26 @@ fn tokenize_inner(input: &str, newline_mode: NewlineMode) -> Vec<ParsedToken> {
             }
             ';' => {
                 flush_arg(&mut tokens, &mut current, current_start);
+                let start = byte_pos;
+                byte_pos += char_len;
+                // `;;`, `;;&` and `;&` are case-statement terminators: atomic
+                // tokens, not two `;` separators (splitting them breaks bash).
+                let mut val = String::from(";");
+                if chars.peek() == Some(&';') {
+                    chars.next();
+                    byte_pos += 1;
+                    val.push(';');
+                }
+                if chars.peek() == Some(&'&') {
+                    chars.next();
+                    byte_pos += 1;
+                    val.push('&');
+                }
                 tokens.push(ParsedToken {
                     kind: TokenKind::Operator,
-                    value: ";".into(),
-                    offset: byte_pos,
+                    value: val,
+                    offset: start,
                 });
-                byte_pos += char_len;
                 current_start = byte_pos;
             }
             '&' => {
@@ -1112,6 +1126,85 @@ mod tests {
             tokens.iter().filter(|t| t.kind == TokenKind::Arg).count(),
             4
         );
+    }
+
+    #[test]
+    fn test_case_terminators_atomic() {
+        // `;;`, `;&`, `;;&` are single Operator tokens, never split (#3197)
+        let tokens = tokenize("a;; b;& c;;& d");
+        let ops: Vec<&str> = tokens
+            .iter()
+            .filter(|t| t.kind == TokenKind::Operator)
+            .map(|t| t.value.as_str())
+            .collect();
+        assert_eq!(ops, vec![";;", ";&", ";;&"]);
+    }
+
+    #[test]
+    fn test_quoted_case_terminator_not_operator() {
+        for cmd in ["grep ';;' file", "echo \";;\"", "echo 'a;&b'"] {
+            let tokens = tokenize(cmd);
+            assert!(
+                !tokens.iter().any(|t| t.kind == TokenKind::Operator),
+                "{} must not produce an Operator token",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_spaced_semicolons_stay_separate() {
+        // `; ;` is two real separators, not a case terminator
+        let tokens = tokenize("a ; ; b");
+        let ops: Vec<&str> = tokens
+            .iter()
+            .filter(|t| t.kind == TokenKind::Operator)
+            .map(|t| t.value.as_str())
+            .collect();
+        assert_eq!(ops, vec![";", ";"]);
+    }
+
+    #[test]
+    fn test_escaped_semicolon_is_arg() {
+        // find -exec's `\;` is an escaped word, not a separator
+        let tokens = tokenize(r"find . -exec rm {} \;");
+        assert!(!tokens.iter().any(|t| t.kind == TokenKind::Operator));
+        assert!(tokens
+            .iter()
+            .any(|t| t.kind == TokenKind::Arg && t.value == r"\;"));
+    }
+
+    #[test]
+    fn test_triple_semicolon_greedy_left() {
+        let tokens = tokenize("a;;; b");
+        let ops: Vec<&str> = tokens
+            .iter()
+            .filter(|t| t.kind == TokenKind::Operator)
+            .map(|t| t.value.as_str())
+            .collect();
+        assert_eq!(ops, vec![";;", ";"]);
+    }
+
+    #[test]
+    fn test_case_terminator_offset_after_utf8() {
+        // multibyte chars before `;;` must not skew offset/segment math
+        let cmd = "echo café;; ls";
+        let tokens = tokenize(cmd);
+        let op = tokens
+            .iter()
+            .find(|t| t.kind == TokenKind::Operator)
+            .expect("operator token");
+        assert_eq!(op.value, ";;");
+        assert_eq!(&cmd[op.offset..op.offset + op.value.len()], ";;");
+        assert_eq!(split_on_operators(cmd, false), vec!["echo café", "ls"]);
+    }
+
+    #[test]
+    fn test_split_perms_checks_case_arm_bodies() {
+        // Atomic `;;` must not hide a case-arm command from permission checks
+        let segments = split_for_permissions("case x in a) rm -rf /tmp/x;; b) git push;& esac");
+        assert!(segments.contains(&"rm -rf /tmp/x"));
+        assert!(segments.contains(&"git push"));
     }
 
     #[test]
