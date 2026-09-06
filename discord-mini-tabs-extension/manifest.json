@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Discord Mini Tabs",
+  "version": "0.1.0",
+  "description": "Open saved Discord text and voice channels in one reusable mini Chrome popup window.",
+  "permissions": ["storage", "tabs", "windows", "activeTab"],
+  "host_permissions": ["https://discord.com/*"],
+  "background": {
+    "service_worker": "src/background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Discord Mini Tabs",
+    "default_popup": "src/popup/popup.html"
+  }
+}
