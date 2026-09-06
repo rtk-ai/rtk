@@ -8,6 +8,19 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+const RUFF_SUBCOMMANDS: &[&str] = &[
+    "analyze",
+    "check",
+    "clean",
+    "config",
+    "format",
+    "linter",
+    "rule",
+    "server",
+    "version",
+    "generate-shell-completion",
+];
+
 #[derive(Debug, Deserialize)]
 struct RuffLocation {
     row: usize,
@@ -32,9 +45,7 @@ struct RuffDiagnostic {
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let is_check = args.is_empty()
-        || args[0] == "check"
-        || (!args[0].starts_with('-') && args[0] != "format" && args[0] != "version");
+    let is_check = is_check_invocation(args);
 
     let is_format = args.iter().any(|a| a == "format");
 
@@ -99,6 +110,15 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         },
         runner::RunOptions::stdout_only(),
     )
+}
+
+fn is_check_invocation(args: &[String]) -> bool {
+    let Some(first_arg) = args.first() else {
+        return true;
+    };
+
+    first_arg == "check"
+        || (!first_arg.starts_with('-') && !RUFF_SUBCOMMANDS.contains(&first_arg.as_str()))
 }
 
 /// Filter ruff check JSON output - group by rule and file
@@ -350,12 +370,43 @@ fn compact_path(path: &str) -> String {
 mod tests {
     use super::*;
 
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
     #[test]
     fn test_filter_ruff_check_no_issues() {
         let output = "[]";
         let result = filter_ruff_check_json(output);
         assert!(result.contains("Ruff"));
         assert!(result.contains("No issues found"));
+    }
+
+    #[test]
+    fn test_ruff_subcommands_do_not_route_through_check() {
+        for subcommand in [
+            "rule",
+            "config",
+            "linter",
+            "clean",
+            "server",
+            "analyze",
+            "version",
+            "generate-shell-completion",
+        ] {
+            assert!(
+                !is_check_invocation(&args(&[subcommand])),
+                "ruff {subcommand} should not inject `check --output-format=json`"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ruff_paths_still_route_through_check() {
+        assert!(is_check_invocation(&args(&[])));
+        assert!(is_check_invocation(&args(&["check"])));
+        assert!(is_check_invocation(&args(&["src"])));
+        assert!(is_check_invocation(&args(&["tests/test_app.py"])));
     }
 
     #[test]
