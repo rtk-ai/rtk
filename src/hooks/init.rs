@@ -6157,6 +6157,14 @@ mod tests {
     }
 
     #[test]
+    fn test_opencode_plugin_template_exports_default() {
+        assert!(
+            OPENCODE_PLUGIN.contains("export default RtkOpenCodePlugin"),
+            "OpenCode loader requires a default plugin export"
+        );
+    }
+
+    #[test]
     fn test_opencode_plugin_remove() {
         let temp = TempDir::new().unwrap();
         let opencode_dir = temp.path().join("opencode");
