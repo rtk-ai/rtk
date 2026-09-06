@@ -4681,6 +4681,33 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_npm_and_pnpm_test_scripts() {
+        assert_eq!(
+            rewrite_command_no_prefixes("npm test -- --watch", &[]),
+            Some("rtk npm test -- --watch".to_string()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("npm t", &[]),
+            Some("rtk npm t".to_string()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm test -- --watch", &[]),
+            Some("rtk pnpm test -- --watch".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_unsupported_js_runtimes_stay_passthrough() {
+        for command in ["yarn test", "bun test", "node script.js"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "{command} should stay passthrough until RTK has a matching filter",
+            );
+        }
+    }
+
+    #[test]
     fn test_rewrite_npx() {
         assert_eq!(
             rewrite_command_no_prefixes("npx svgo", &[]),
