@@ -31,6 +31,7 @@ pub enum GitCommand {
     Fetch,
     Stash { subcommand: Option<String> },
     Worktree,
+    Grep,
 }
 
 /// Create a git Command with global options (e.g. -C, -c, --git-dir, --work-tree)
@@ -106,6 +107,7 @@ pub fn run(
             run_stash(subcommand.as_deref(), args, verbose, global_args)
         }
         GitCommand::Worktree => run_worktree(args, verbose, global_args),
+        GitCommand::Grep => run_grep(args, max_lines, verbose, global_args),
     }
 }
 
@@ -2629,6 +2631,144 @@ fn filter_worktree_list(output: &str) -> String {
     result.join("\n")
 }
 
+/// Format flags that produce already-compact output (counts, filenames-only).
+/// Match what `rtk grep` passes through, plus git-specific `--name-only`.
+fn git_grep_has_format_flag(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        // Long forms match exactly; short forms may be bundled (e.g. `-ln`), so
+        // scan each letter of a single-dash cluster — `-c -l -L -o -z` all yield
+        // output that is already compact or shape-sensitive, so we passthrough.
+        match arg.as_str() {
+            "--count" | "--files-with-matches" | "--name-only" | "--files-without-match"
+            | "--only-matching" | "--null" => true,
+            s if s.starts_with("--") => false,
+            s if s.starts_with('-') && s.len() > 1 => {
+                s[1..].chars().any(|c| matches!(c, 'c' | 'l' | 'L' | 'o' | 'z'))
+            }
+            _ => false,
+        }
+    })
+}
+
+/// Whether the user already requested the line-number / filename-prefix toggles
+/// we'd otherwise inject.
+fn git_grep_has_no_filename(args: &[String]) -> bool {
+    args.iter().any(|a| a == "-h" || a == "--no-filename")
+}
+
+fn git_grep_has_line_number(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        a == "--line-number" || (a.starts_with('-') && !a.starts_with("--") && a.contains('n'))
+    })
+}
+
+fn run_grep(
+    args: &[String],
+    _max_lines: Option<usize>,
+    verbose: u8,
+    global_args: &[String],
+) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    // Passthrough for format flags whose output is already compact (counts,
+    // filenames-only, NUL-delimited). Matches `rtk grep`'s policy.
+    if git_grep_has_format_flag(args) {
+        let mut cmd = git_cmd(global_args);
+        cmd.arg("grep");
+        for arg in args {
+            cmd.arg(arg);
+        }
+        let result = exec_capture(&mut cmd).context("Failed to run git grep")?;
+        print!("{}", result.stdout);
+        if !result.stderr.is_empty() {
+            eprint!("{}", result.stderr.trim());
+        }
+        let args_display = args.join(" ");
+        timer.track_passthrough(
+            &format!("git grep {}", args_display),
+            &format!("rtk git grep {} (passthrough)", args_display),
+        );
+        return Ok(result.exit_code);
+    }
+
+    // -h / --no-filename strips the filename prefix, breaking the per-file
+    // grouping the filter relies on. Honor the user's intent and passthrough.
+    if git_grep_has_no_filename(args) {
+        let mut cmd = git_cmd(global_args);
+        cmd.arg("grep");
+        for arg in args {
+            cmd.arg(arg);
+        }
+        let result = exec_capture(&mut cmd).context("Failed to run git grep")?;
+        print!("{}", result.stdout);
+        if !result.stderr.is_empty() {
+            eprint!("{}", result.stderr.trim());
+        }
+        let args_display = args.join(" ");
+        timer.track_passthrough(
+            &format!("git grep {}", args_display),
+            &format!("rtk git grep {} (passthrough)", args_display),
+        );
+        return Ok(result.exit_code);
+    }
+
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("grep");
+    if !git_grep_has_line_number(args) {
+        cmd.arg("-n");
+    }
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let result = exec_capture(&mut cmd).context("Failed to run git grep")?;
+
+    if verbose > 0 {
+        eprintln!("git grep executed");
+    }
+
+    let raw_output = result.stdout.clone();
+
+    if result.stdout.trim().is_empty() {
+        // Empty stdout is either a genuine no-match (exit 1) or a real error
+        // (exit >= 2: bad object, not-a-repo, ambiguous arg, transient odb read).
+        // git grep prints nothing on a no-match, so neither do we: a synthetic
+        // "0 matches" exceeds the raw command and, on an error exit, masks the
+        // failure as a false negative (cf. `rtk grep`, which surfaces exit >= 2).
+        if result.exit_code >= 2 && !result.stderr.trim().is_empty() {
+            eprintln!("{}", result.stderr.trim());
+        }
+        let args_display = args.join(" ");
+        timer.track(
+            &format!("git grep {}", args_display),
+            "rtk git grep",
+            &raw_output,
+            "",
+        );
+        return Ok(result.exit_code);
+    }
+
+    // Reuse the same grouped-by-file formatter that `rtk grep` uses; git grep
+    // emits the same `path:lineno:content` shape.
+    let formatter = crate::cmds::system::pipe_cmd::resolve_filter("grep")
+        .expect("grep filter must exist");
+    let formatted = formatter(&raw_output);
+    print!("{}", formatted);
+    if !result.stderr.is_empty() {
+        eprint!("{}", result.stderr.trim());
+    }
+
+    let args_display = args.join(" ");
+    timer.track(
+        &format!("git grep {}", args_display),
+        "rtk git grep",
+        &raw_output,
+        &formatted,
+    );
+
+    Ok(result.exit_code)
+}
+
 /// Runs an unsupported git subcommand by passing it through directly
 pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
@@ -4716,5 +4856,66 @@ To https://github.com/foo/bar.git
             input_tokens,
             output_tokens
         );
+    }
+
+    #[test]
+    fn test_git_grep_format_flag_detection() {
+        for flag in [
+            "-c",
+            "--count",
+            "-l",
+            "--files-with-matches",
+            "--name-only",
+            "-L",
+            "--files-without-match",
+            "-o",
+            "--only-matching",
+            "-z",
+            "--null",
+        ] {
+            assert!(
+                git_grep_has_format_flag(&[flag.to_string()]),
+                "{} should be detected as a format flag",
+                flag
+            );
+        }
+        assert!(!git_grep_has_format_flag(&["-i".to_string()]));
+        assert!(!git_grep_has_format_flag(&["-n".to_string()]));
+    }
+
+    #[test]
+    fn test_git_grep_no_filename_detection() {
+        assert!(git_grep_has_no_filename(&["-h".to_string()]));
+        assert!(git_grep_has_no_filename(&["--no-filename".to_string()]));
+        assert!(!git_grep_has_no_filename(&["-H".to_string()]));
+        assert!(!git_grep_has_no_filename(&["-n".to_string()]));
+    }
+
+    #[test]
+    fn test_git_grep_line_number_detection() {
+        assert!(git_grep_has_line_number(&["-n".to_string()]));
+        assert!(git_grep_has_line_number(&["--line-number".to_string()]));
+        assert!(!git_grep_has_line_number(&["-l".to_string()]));
+        assert!(!git_grep_has_line_number(&["-N".to_string()]));
+    }
+
+    #[test]
+    fn test_git_grep_bundled_short_flags() {
+        // Short flags may be bundled: `-ln` is `-l` plus `-n`. Matching whole
+        // args exactly misses these and silently drops the passthrough.
+        assert!(git_grep_has_format_flag(&["-ln".to_string()]));
+        assert!(git_grep_has_format_flag(&["-nl".to_string()]));
+        assert!(git_grep_has_format_flag(&["-inc".to_string()]));
+        assert!(git_grep_has_line_number(&["-ln".to_string()]));
+        assert!(git_grep_has_line_number(&["-in".to_string()]));
+
+        // A long flag whose name happens to contain a format letter must not
+        // match: `--ignore-case` contains both 'c' and 'n'.
+        assert!(!git_grep_has_format_flag(&["--ignore-case".to_string()]));
+        assert!(!git_grep_has_line_number(&["--ignore-case".to_string()]));
+
+        // A bare dash is not a flag cluster.
+        assert!(!git_grep_has_format_flag(&["-".to_string()]));
+        assert!(!git_grep_has_line_number(&["-".to_string()]));
     }
 }

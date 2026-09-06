@@ -37,7 +37,7 @@ impl Default for RtkRule {
 
 pub const RULES: &[RtkRule] = &[
     RtkRule {
-        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|checkout|push|pull|branch|fetch|stash|worktree)",
+        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|checkout|push|pull|branch|fetch|stash|worktree|grep)",
         rtk_cmd: "rtk git",
         rewrite_prefixes: &["git", "yadm"],
         category: "Git",
@@ -47,6 +47,7 @@ pub const RULES: &[RtkRule] = &[
             ("show", 80.0),
             ("add", 59.0),
             ("commit", 59.0),
+            ("grep", 75.0),
         ],
         ..RtkRule::DEFAULT
     },

@@ -2376,7 +2376,7 @@ mod tests {
         // Verify that every GitCommand subcommand has a matching pattern
         for subcmd in [
             "status", "log", "diff", "show", "add", "commit", "push", "pull", "branch", "fetch",
-            "stash", "worktree",
+            "stash", "worktree", "grep",
         ] {
             let cmd = format!("git {subcmd}");
             match classify_command(&cmd) {
@@ -2384,6 +2384,26 @@ mod tests {
                 other => panic!("git {subcmd} should be Supported, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn test_classify_git_grep() {
+        match classify_command("git grep -n foo src/") {
+            Classification::Supported { rtk_equivalent, .. } => {
+                assert_eq!(rtk_equivalent, "rtk git");
+            }
+            other => panic!("git grep should be Supported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_rewrite_git_grep() {
+        let rewritten = rewrite_command("git grep -n foo src/", &[], &[]);
+        assert_eq!(
+            rewritten,
+            Some("rtk git grep -n foo src/".to_string()),
+            "git grep should rewrite to rtk git grep"
+        );
     }
 
     #[test]
