@@ -112,6 +112,15 @@ fn has_json_flag(args: &[String]) -> bool {
     args.iter().any(|a| a == "--json")
 }
 
+/// Check if args contain `--help` or `-h` (passthrough so gh prints real help
+/// instead of letting filters fabricate `ok commented` etc.). Exact-match is
+/// intentional: `--body=--help` is gh's "use --help as a value" form and must
+/// not trigger passthrough; positional `--help` is what gh's own parser also
+/// treats as help, so passthrough matches gh's native behaviour.
+fn has_help_flag(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--help" || a == "-h")
+}
+
 /// Extract a positional identifier (PR/issue number) from args, returning it
 /// separately from the remaining extra flags (like -R, --repo, etc.).
 /// Handles both `view 123 -R owner/repo` and `view -R owner/repo 123`.
@@ -210,6 +219,10 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8, ultra_compact: bool) 
 
 fn run_pr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
     if args.is_empty() {
+        return run_passthrough("gh", "pr", args);
+    }
+
+    if has_help_flag(args) {
         return run_passthrough("gh", "pr", args);
     }
 
@@ -1072,6 +1085,46 @@ mod tests {
     #[test]
     fn test_has_json_flag_absent() {
         assert!(!has_json_flag(&["view".into(), "42".into()]));
+    }
+
+    #[test]
+    fn test_has_help_flag_long() {
+        assert!(has_help_flag(&["comment".into(), "--help".into()]));
+    }
+
+    #[test]
+    fn test_has_help_flag_short() {
+        assert!(has_help_flag(&["create".into(), "-h".into()]));
+    }
+
+    #[test]
+    fn test_has_help_flag_absent() {
+        assert!(!has_help_flag(&[
+            "comment".into(),
+            "42".into(),
+            "--body".into(),
+            "hi".into()
+        ]));
+    }
+
+    #[test]
+    fn test_has_help_flag_does_not_match_substrings() {
+        // `--header` (a real gh flag for `api`) and `-help` (typo) must not match.
+        assert!(!has_help_flag(&["--header".into(), "X-Foo: bar".into()]));
+        assert!(!has_help_flag(&["-help".into()]));
+    }
+
+    #[test]
+    fn test_has_help_flag_equals_form_is_value() {
+        // `--body=--help` is gh's "use --help as the body value" form; must not
+        // trigger passthrough. (Bare `--body --help` does match because gh's own
+        // parser also treats it as the help flag in that position.)
+        assert!(!has_help_flag(&[
+            "create".into(),
+            "--title".into(),
+            "t".into(),
+            "--body=--help".into()
+        ]));
     }
 
     #[test]
