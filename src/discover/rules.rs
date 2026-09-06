@@ -930,6 +930,24 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        // Versioned binaries (lua5.4) have no rewrite_prefix, so leave them to
+        // the TOML registry fallback rather than claiming them here.
+        pattern: r"^(?:luajit|lua)\s+\S",
+        rtk_cmd: "rtk lua",
+        rewrite_prefixes: &["luajit", "lua"],
+        category: "Build",
+        savings_pct: 90.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^luacheck\b",
+        rtk_cmd: "rtk luacheck",
+        rewrite_prefixes: &["luacheck"],
+        category: "Build",
+        savings_pct: 90.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^shellcheck\b",
         rtk_cmd: "rtk shellcheck",
         rewrite_prefixes: &["shellcheck"],
