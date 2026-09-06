@@ -79,7 +79,14 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script)",
+        // pnpm accepts a bare script name (`pnpm test` == `pnpm run test`), and
+        // rtk pnpm forwards args verbatim, so these route correctly.
+        // Deliberately NOT dev/start/serve/watch: those don't terminate, and rtk
+        // captures rather than streams, so the agent would see nothing and hang.
+        // `lint` is absent on purpose: `pnpm lint` already routes to the dedicated
+        // eslint/biome filter (`rtk lint`), which knows the tool's output format.
+        // The trailing (\s|$) is new -- without it `pnpm installer` matched.
+        pattern: r"^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script|test|build|typecheck|format)(\s|$)",
         rtk_cmd: "rtk pnpm",
         rewrite_prefixes: &["pnpm"],
         category: "PackageManager",
