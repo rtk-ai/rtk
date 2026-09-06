@@ -16,7 +16,7 @@ This is a fork with critical fixes for git argument parsing and modern JavaScrip
 
 **Verify correct installation:**
 ```bash
-rtk --version  # Should show "rtk 0.28.2" (or newer)
+rtk --version  # Should show "rtk 0.35.0" (or newer)
 rtk gain       # Should show token savings stats (NOT "command not found")
 ```
 
@@ -97,6 +97,12 @@ rtk proxy curl https://api.example.com/data  # Any command works
 
 All proxy commands appear in `rtk gain --history` with 0% bash output reduction (input = output).
 
+## Git Workflow
+
+- PRs target **`develop`**, not `main`
+- All commits require DCO sign-off: `git commit -s`
+- Branch naming: `fix(scope):`, `feat(scope):`, `chore(scope):` where scope is the affected component
+
 ## Coding Rules
 
 Rust patterns, error handling, and anti-patterns are defined in `.claude/rules/rust-patterns.md` (auto-loaded into context). Key points:
@@ -106,11 +112,40 @@ Rust patterns, error handling, and anti-patterns are defined in `.claude/rules/r
 - **`LazyLock` statics** for all regex (never compile on every function call)
 - **Fallback pattern**: if filter fails, execute raw command unchanged
 - **No async**: single-threaded by design (startup <10ms)
-- **Exit code propagation**: `std::process::exit(code)` on child failure
+- **Exit code propagation**: modules return `Result<i32>` — `main.rs` calls `std::process::exit(code)` at the single exit point. **Never** call `process::exit()` inside a module directly.
 
 Testing strategy and performance targets are defined in `.claude/rules/cli-testing.md` (auto-loaded). Key targets: <10ms startup, <5MB memory, 60-90% reduction in bash output bytes.
 
 For contribution workflow and design philosophy, see [CONTRIBUTING.md](CONTRIBUTING.md). For the step-by-step filter implementation checklist, see [src/cmds/README.md](src/cmds/README.md#adding-a-new-command-filter).
+
+### Adding a New Filter (Checklist)
+
+**TOML filter** (plain text, regex line filtering, no flag injection):
+1. Create `src/filters/<cmd>.toml`
+2. Add rewrite pattern in `src/discover/rules.rs` (PATTERNS + RULES arrays at same index)
+3. Write tests, update docs
+
+**Rust module** (JSON/NDJSON output, flag injection, state machine, cross-command routing):
+1. Create `src/cmds/<ecosystem>/<cmd>_cmd.rs` — `filter_<cmd>()` is pure `&str -> String`, `run()` returns `Result<i32>`
+2. Use `runner::run_filtered()` — build the `Command`, pick `RunOptions`, delegate:
+   - `RunOptions::stdout_only()` when parsing structured stdout (JSON/NDJSON)
+   - `RunOptions::default()` for combined text output
+   - `.tee("label")` when structured output needs raw recovery on failure
+3. No manual `pub mod` needed — `automod::dir!()` auto-exposes all `.rs` files in the ecosystem dir
+4. Add `Commands::Mycmd { args }` variant in `main.rs` with `#[arg(trailing_var_arg = true, allow_hyphen_values = true)]`
+5. Add routing arm: `Commands::Mycmd { args } => mycmd_cmd::run(&args, cli.verbose)?,`
+6. Add rewrite pattern in `src/discover/rules.rs`
+7. Write tests (real fixture + snapshot + ≥60% token savings assertion)
+8. Update ecosystem `README.md` and `CHANGELOG.md`
+
+**TOML vs Rust quick decision:**
+
+| Use TOML when | Use Rust when |
+|---------------|---------------|
+| Plain text, predictable line structure | Structured output (JSON, NDJSON) |
+| Regex line filtering gives ≥60% savings | Needs state machine parsing |
+| No flag injection needed | Must inject flags (`--format json`) |
+| No cross-command routing | Routes to other commands |
 
 ## Build Verification (Mandatory)
 

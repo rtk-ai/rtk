@@ -3641,6 +3641,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_rewrite_xcodebuild() {
+        assert_eq!(
+            rewrite_command_no_prefixes("xcodebuild -project App.xcodeproj build", &[]),
+            Some("rtk xcodebuild -project App.xcodeproj build".into())
+        );
+    }
+
     // --- #336: docker compose supported subcommands rewritten, unsupported skipped ---
 
     #[test]
