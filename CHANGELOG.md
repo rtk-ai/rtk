@@ -5,6 +5,16 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+* **hooks:** add shared Oh My Pi support and protect Pi/OMP extensions from accidental overwrite or removal, including untouched historical stock revisions
+* **hooks:** honor `PI_CODING_AGENT_DIR` for global OMP extension paths and keep dry-run uninstall output consistent
+* **hooks:** make shared Pi/OMP path aliasing explicit during uninstall and keep dry-run install behavior non-destructive
+* **hooks:** normalize Pi/OMP extension line endings and require explicit confirmation for protected overwrites and shared global uninstalls
+* **hooks:** track Pi/OMP ownership for relocated shared extensions, make declined or unreadable protected actions observable (including nonzero `--no-patch` results), recognize older Pi rewrite extensions, and degrade `--show` gracefully for unreadable files
+
 ## [0.42.4](https://github.com/rtk-ai/rtk/compare/v0.42.3...v0.42.4) (2026-06-12)
 
 
@@ -691,6 +701,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **find:** accept native find flags (-name, -type, etc.) ([#211](https://github.com/rtk-ai/rtk/issues/211)) ([7ac5bc4](https://github.com/rtk-ai/rtk/commit/7ac5bc4bd3942841cc1abb53399025b4fcae10c9))
 
 ## [Unreleased]
+
+### Breaking Changes
+
+* **hooks:** `rtk init --agent pi` and `rtk init --agent omp` now ask before overwriting modified or unrelated extensions; non-interactive upgrades must pass `--auto-patch` to approve the overwrite, or handle the nonzero refusal.
 
 ### ⚠️ Migration Required
 

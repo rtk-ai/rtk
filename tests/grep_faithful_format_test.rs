@@ -184,3 +184,28 @@ fn piped_stdin_matches_grep() {
         assert_eq!(rtk, grep, "piped stdin mismatch for {args:?}");
     }
 }
+
+// Regression: `-m` is GNU grep's --max-count (stop after N matches), not RTK's
+// --max display cap. RTK must forward `-m N` to grep so the scan actually stops
+// at N — i.e. `rtk grep -m N` equals `grep -m N` (checked with and without -n).
+// Covers `-m` leading and trailing. With the short bound to --max, `-m` was
+// swallowed and never reached grep, so the output diverged.
+#[test]
+fn dash_m_max_count_matches_grep_n() {
+    let d = tempfile::tempdir().unwrap();
+    let f = write(d.path(), "m.txt", "hit1\nhit2\nhit3\nhit4\nhit5\n");
+    assert_eq_grep_with_and_without_n(&["-m", "2", "hit", &f]); // -m leading
+    assert_eq_grep_with_and_without_n(&["hit", &f, "-m", "3"]); // -m trailing
+    assert_eq_grep_with_and_without_n(&["-m", "9", "hit", &f]); // N >= total: no truncation, all 5
+}
+
+// `--max-count` is per file, so the multi-file case is the one that motivates the
+// fix: each file must be independently capped and the grouped output must still
+// equal `grep -m N` (with and without -n).
+#[test]
+fn dash_m_max_count_is_per_file_like_grep_n() {
+    let d = tempfile::tempdir().unwrap();
+    let f1 = write(d.path(), "a.txt", "hit\nhit\nhit\n");
+    let f2 = write(d.path(), "b.txt", "hit\nhit\nhit\n");
+    assert_eq_grep_with_and_without_n(&["-m", "2", "hit", &f1, &f2]); // 2 per file, both files
+}

@@ -9,6 +9,8 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::{self, Read, Write};
 
+use crate::core::tracking::HookOutcome;
+use crate::core::utils::strip_leading_bom;
 use crate::discover::registry::{has_heredoc, rewrite_command};
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
@@ -236,9 +238,7 @@ fn get_rewritten(cmd: &str) -> Option<String> {
         return None;
     }
 
-    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
-        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
-        .unwrap_or_default();
+    let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
 
     let rewritten = rewrite_command(cmd, &excluded, &transparent_prefixes)?;
 
@@ -397,45 +397,75 @@ fn copilot_cli_response_from_decision(
 /// Run the Gemini CLI BeforeTool hook.
 pub fn run_gemini() -> Result<()> {
     let input = read_stdin_limited()?;
+    let output = run_gemini_inner(&input).context("Failed to parse hook input as JSON")?;
+    let _ = writeln!(io::stdout(), "{output}");
+    Ok(())
+}
 
-    let json: Value = serde_json::from_str(&input).context("Failed to parse hook input as JSON")?;
+/// Parse the Gemini BeforeTool stdin payload, decide (against the real,
+/// on-disk Gemini settings), and render the response JSON — no stdin/stdout
+/// I/O. Used by `run_gemini` itself (not just tests), so a regression here
+/// (e.g. dropping the BOM strip) fails for real rather than only in a
+/// duplicate test copy.
+fn run_gemini_inner(input: &str) -> serde_json::Result<String> {
+    run_gemini_inner_impl(input, |cmd| {
+        decide_hook_action(cmd, permissions::Host::Gemini)
+    })
+}
+
+/// Same parse/render path as `run_gemini_inner`, but with the permission
+/// decision driven by explicit rule slices instead of `~/.gemini/settings.json`
+/// — lets tests exercise the real BOM-stripping/parsing logic without
+/// depending on (or being broken by) whatever is on disk at HOME.
+#[cfg(test)]
+fn run_gemini_inner_with_rules(
+    input: &str,
+    deny: &[String],
+    ask: &[String],
+    allow: &[String],
+) -> serde_json::Result<String> {
+    run_gemini_inner_impl(input, |cmd| {
+        decide_from_verdict(
+            cmd,
+            permissions::check_command_with_rules(cmd, deny, ask, allow),
+        )
+    })
+}
+
+fn run_gemini_inner_impl(
+    input: &str,
+    decide: impl Fn(&str) -> HookDecision,
+) -> serde_json::Result<String> {
+    let input = strip_leading_bom(input);
+    let json: Value = serde_json::from_str(input)?;
 
     let tool_name = json.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
-
     if tool_name != "run_shell_command" {
-        print_allow();
-        return Ok(());
+        return Ok(gemini_json("allow", None));
     }
 
     let cmd = json
         .pointer("/tool_input/command")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-
     if cmd.is_empty() {
-        print_allow();
-        return Ok(());
+        return Ok(gemini_json("allow", None));
     }
 
-    match decide_hook_action(cmd, permissions::Host::Gemini) {
+    Ok(match decide(cmd) {
         HookDecision::Deny => {
-            let _ = writeln!(
-                io::stdout(),
-                r#"{{"decision":"deny","reason":"Blocked by RTK permission rule"}}"#
-            );
+            r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string()
         }
         HookDecision::AllowRewrite(ref rewritten) => {
             audit_log("rewrite", cmd, rewritten);
-            print_gemini("allow", Some(rewritten));
+            gemini_json("allow", Some(rewritten))
         }
         HookDecision::AskRewrite(ref rewritten) => {
             audit_log("ask", cmd, rewritten);
-            print_gemini("ask_user", Some(rewritten));
+            gemini_json("ask_user", Some(rewritten))
         }
-        HookDecision::Defer => print_gemini("ask_user", None),
-    }
-
-    Ok(())
+        HookDecision::Defer => gemini_json("ask_user", None),
+    })
 }
 
 // ── Vibe hook ─────────────────────────────────────────────────
@@ -456,6 +486,7 @@ pub fn run_vibe() -> Result<()> {
 }
 
 fn run_vibe_inner(input: &str) -> Option<String> {
+    let input = strip_leading_bom(input);
     let json: Value = match serde_json::from_str(input) {
         Ok(v) => v,
         Err(e) => {
@@ -500,20 +531,12 @@ fn vibe_rewrite_json(rewritten: &str) -> String {
     .to_string()
 }
 
-fn print_allow() {
-    let _ = writeln!(io::stdout(), r#"{{"decision":"allow"}}"#);
-}
-
 fn gemini_json(decision: &str, rewrite: Option<&str>) -> String {
     let mut output = serde_json::json!({ "decision": decision });
     if let Some(cmd) = rewrite {
         output["hookSpecificOutput"] = serde_json::json!({ "tool_input": { "command": cmd } });
     }
     output.to_string()
-}
-
-fn print_gemini(decision: &str, rewrite: Option<&str>) {
-    let _ = writeln!(io::stdout(), "{}", gemini_json(decision, rewrite));
 }
 
 // ── Audit logging ─────────────────────────────────────────────
@@ -558,14 +581,16 @@ fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> 
 
 // ── Claude Code native hook ────────────────────────────────────
 
+#[derive(Debug)]
 enum PayloadAction {
     Rewrite {
         cmd: String,
         rewritten: String,
+        decision: HookOutcome,
         output: Value,
     },
     Skip {
-        reason: &'static str,
+        decision: HookOutcome,
         cmd: String,
     },
     Ignore,
@@ -581,16 +606,28 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         None => return PayloadAction::Ignore,
     };
 
-    let (rewritten, allow) = match decide_hook_action(cmd, permissions::Host::Claude) {
+    process_claude_payload_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::Claude))
+}
+
+/// Pure core of `process_claude_payload`, taking the hook decision directly so the
+/// full Allow/Ask/Deny/Defer matrix is unit-testable without depending on real
+/// permission config files — mirrors the `copilot_cli_response_from_decision`/
+/// `droid_response_from_decision` split already used elsewhere in this file.
+fn process_claude_payload_from_decision(
+    v: &Value,
+    cmd: &str,
+    decision: HookDecision,
+) -> PayloadAction {
+    let (rewritten, allow) = match decision {
         HookDecision::Deny => {
             return PayloadAction::Skip {
-                reason: "skip:deny_rule",
+                decision: HookOutcome::Deny,
                 cmd: cmd.to_string(),
             }
         }
         HookDecision::Defer => {
             return PayloadAction::Skip {
-                reason: "skip:defer",
+                decision: HookOutcome::Defer,
                 cmd: cmd.to_string(),
             }
         }
@@ -622,7 +659,55 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
     PayloadAction::Rewrite {
         cmd: cmd.to_string(),
         rewritten,
+        decision: if allow {
+            HookOutcome::Allow
+        } else {
+            HookOutcome::Ask
+        },
         output: json!({ "hookSpecificOutput": hook_output }),
+    }
+}
+
+/// Pull the fields `log_hook_decision` needs out of the raw PreToolUse payload.
+/// `None` when `session_id`/`tool_use_id` are absent — both are required to join
+/// back to the transcript later, so there's nothing useful to log without them.
+/// Split out from `log_hook_decision` so this extraction is unit-testable without
+/// touching the tracking DB.
+fn hook_log_fields(v: &Value) -> Option<(&str, &str, &str)> {
+    let session_id = v.get("session_id").and_then(|s| s.as_str())?;
+    let tool_use_id = v.get("tool_use_id").and_then(|s| s.as_str())?;
+    let project_path = v.get("cwd").and_then(|c| c.as_str()).unwrap_or("");
+    Some((session_id, tool_use_id, project_path))
+}
+
+/// Log the real hook decision to the tracking DB, keyed by the transcript's
+/// `tool_use_id`, so `rtk discover` can later read ground truth about historical
+/// hook coverage instead of re-deriving a guess from today's hook-install state.
+///
+/// Best-effort only — a tracking failure must never affect the hook's real output
+/// (fallback pattern from `rust-patterns.md`): this is a side channel, not the
+/// hook's actual job.
+fn log_hook_decision(v: &Value, cmd: &str, decision: HookOutcome, rewritten: Option<&str>) {
+    let Some((session_id, tool_use_id, project_path)) = hook_log_fields(v) else {
+        return;
+    };
+
+    let Ok(tracker) = crate::core::tracking::Tracker::new() else {
+        return;
+    };
+    if let Err(e) = tracker.record_hook_decision(
+        session_id,
+        tool_use_id,
+        project_path,
+        cmd,
+        decision,
+        rewritten,
+        env!("CARGO_PKG_VERSION"),
+    ) {
+        let _ = writeln!(
+            io::stderr(),
+            "[rtk hook] hook_decisions logging failed: {e}"
+        );
     }
 }
 
@@ -630,7 +715,7 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
 pub fn run_claude() -> Result<()> {
     let input = read_stdin_limited()?;
 
-    let input = input.trim();
+    let input = strip_leading_bom(&input).trim();
     if input.is_empty() {
         return Ok(());
     }
@@ -647,13 +732,39 @@ pub fn run_claude() -> Result<()> {
         PayloadAction::Rewrite {
             cmd,
             rewritten,
+            decision,
             output,
         } => {
-            audit_log("rewrite", &cmd, &rewritten);
+            // Write the response Claude Code is synchronously blocked on FIRST.
+            // `log_hook_decision` is a best-effort side channel (see its own doc
+            // comment: "a tracking failure must never affect the hook's real
+            // output") that opens a SQLite connection with a 5s busy_timeout — on
+            // lock contention (concurrent hook invocations sharing the default
+            // history.db) that write can block for real seconds. Since this fires
+            // on every single Bash tool call now (not just RTK-covered ones), that
+            // latency must never sit in front of the response, or it directly
+            // stalls the tool call it's supposedly just logging.
             let _ = writeln!(io::stdout(), "{output}");
+            audit_log("rewrite", &cmd, &rewritten);
+            log_hook_decision(&v, &cmd, decision, Some(&rewritten));
         }
-        PayloadAction::Skip { reason, cmd } => {
-            audit_log(reason, &cmd, "");
+        PayloadAction::Skip { decision, cmd } => {
+            // `rtk hook audit`'s skip-breakdown groups by a "skip:<reason>" prefix
+            // (see hook_audit_cmd.rs) — Skip is only ever reached via Deny/Defer,
+            // so map those to the reasons it expects rather than the bare
+            // HookOutcome::Display used for the Rewrite/tracking-DB paths.
+            //
+            // Skip has no stdout response to write (Claude Code falls through to
+            // its own native handling), but log_hook_decision is still deferred to
+            // last for the same reason as the Rewrite arm above: it must never be
+            // what a Bash tool call is waiting on.
+            let audit_action = match decision {
+                HookOutcome::Deny => "skip:deny_rule",
+                HookOutcome::Defer => "skip:defer",
+                HookOutcome::Allow | HookOutcome::Ask => "skip",
+            };
+            audit_log(audit_action, &cmd, "");
+            log_hook_decision(&v, &cmd, decision, None);
         }
         PayloadAction::Ignore => {}
     }
@@ -663,6 +774,7 @@ pub fn run_claude() -> Result<()> {
 
 #[cfg(test)]
 fn run_claude_inner(input: &str) -> Option<String> {
+    let input = strip_leading_bom(input);
     let v: Value = serde_json::from_str(input).ok()?;
     match process_claude_payload(&v) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
@@ -671,18 +783,6 @@ fn run_claude_inner(input: &str) -> Option<String> {
 }
 
 // ── Cursor native hook ─────────────────────────────────────────
-
-/// Cursor on Windows ships hook payloads with one or more leading
-/// UTF-8 BOMs (`EF BB BF`, sometimes doubled), which serde_json
-/// refuses to parse. Strip them defensively so the rewrite path keeps
-/// working instead of silently returning `{}`.
-fn strip_leading_bom(input: &str) -> &str {
-    let mut s = input;
-    while let Some(rest) = s.strip_prefix('\u{feff}') {
-        s = rest;
-    }
-    s
-}
 
 /// Run the Cursor Agent hook natively.
 pub fn run_cursor() -> Result<()> {
@@ -853,13 +953,10 @@ fn droid_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) ->
 /// Run the Factory Droid PreToolUse hook natively.
 pub fn run_droid() -> Result<()> {
     let input = read_stdin_limited()?;
-    let input = strip_leading_bom(&input).trim();
-    if input.is_empty() {
-        return Ok(());
-    }
 
-    let v: Value = match serde_json::from_str(input) {
-        Ok(v) => v,
+    let v = match droid_payload(&input) {
+        Ok(Some(v)) => v,
+        Ok(None) => return Ok(()),
         Err(e) => {
             let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
             return Ok(());
@@ -870,6 +967,19 @@ pub fn run_droid() -> Result<()> {
         let _ = writeln!(io::stdout(), "{output}");
     }
     Ok(())
+}
+
+/// Normalize and parse a raw Droid PreToolUse payload: strip a leading BOM
+/// (Windows hosts prepend one), trim, and report an empty payload as nothing
+/// to do. Shared by `run_droid` and the test entry points so droid's own
+/// tests exercise the real BOM handling rather than a stripped-down copy of
+/// the parse.
+fn droid_payload(input: &str) -> serde_json::Result<Option<Value>> {
+    let input = strip_leading_bom(input).trim();
+    if input.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_str(input).map(Some)
 }
 
 /// Hermetic test path: no Droid settings (empty rules).
@@ -886,7 +996,7 @@ fn run_droid_inner_with_rules(
     ask_rules: &[String],
     allow_rules: &[String],
 ) -> Option<String> {
-    let v: Value = serde_json::from_str(input).ok()?;
+    let v: Value = droid_payload(input).ok().flatten()?;
     let cmd = droid_execute_command(&v)?;
     let verdict = permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
     droid_response_from_decision(&v, cmd, decide_from_verdict(cmd, verdict)).map(|o| o.to_string())
@@ -1402,6 +1512,139 @@ mod tests {
         .to_string()
     }
 
+    /// Matches the real PreToolUse payload shape captured from a live Claude Code
+    /// session (verified fields: session_id, transcript_path, cwd, tool_use_id).
+    fn claude_payload_with_ids(cmd: &str, session_id: &str, tool_use_id: &str, cwd: &str) -> Value {
+        json!({
+            "session_id": session_id,
+            "transcript_path": "/home/user/.claude/projects/-home-user-project/session.jsonl",
+            "cwd": cwd,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": { "command": cmd },
+            "tool_use_id": tool_use_id
+        })
+    }
+
+    #[test]
+    fn test_hook_log_fields_extracts_real_payload_shape() {
+        let v =
+            claude_payload_with_ids("git status", "sess-1", "toolu_01ABC", "/home/user/project");
+        let (session_id, tool_use_id, project_path) = hook_log_fields(&v).unwrap();
+        assert_eq!(session_id, "sess-1");
+        assert_eq!(tool_use_id, "toolu_01ABC");
+        assert_eq!(project_path, "/home/user/project");
+    }
+
+    #[test]
+    fn test_hook_log_fields_none_without_tool_use_id() {
+        // Older/foreign payload shapes without a tool_use_id must not be logged —
+        // there's no join key to match it back to a transcript entry. Uses the
+        // real claude_input() fixture, which also lacks session_id — see the
+        // isolated variant below for a payload that has session_id present but
+        // tool_use_id specifically absent.
+        let v: Value = serde_json::from_str(&claude_input("git status")).unwrap();
+        assert!(hook_log_fields(&v).is_none());
+    }
+
+    #[test]
+    fn test_hook_log_fields_none_with_session_id_but_no_tool_use_id() {
+        // hook_log_fields checks session_id first and short-circuits via `?`, so
+        // the fixture above (missing both fields) can't tell us whether
+        // tool_use_id extraction specifically works — it passes even if that
+        // check were completely broken. This isolates tool_use_id: session_id
+        // present, tool_use_id absent.
+        let v = json!({
+            "session_id": "sess-1",
+            "tool_name": "Bash",
+            "tool_input": { "command": "git status" }
+        });
+        assert!(hook_log_fields(&v).is_none());
+    }
+
+    #[test]
+    fn test_hook_log_fields_defaults_missing_cwd_to_empty() {
+        let v = json!({
+            "session_id": "sess-1",
+            "tool_use_id": "toolu_01ABC",
+            "tool_name": "Bash",
+            "tool_input": { "command": "git status" }
+        });
+        let (_, _, project_path) = hook_log_fields(&v).unwrap();
+        assert_eq!(project_path, "");
+    }
+
+    // The decision field on PayloadAction feeds directly into hook_decisions —
+    // exercise the full Allow/Ask/Deny/Defer matrix against the pure
+    // process_claude_payload_from_decision (no real permission config needed).
+
+    #[test]
+    fn test_process_claude_payload_decision_allow() {
+        let v = claude_input_value("git status");
+        match process_claude_payload_from_decision(
+            &v,
+            "git status",
+            HookDecision::AllowRewrite("rtk git status".to_string()),
+        ) {
+            PayloadAction::Rewrite {
+                decision,
+                rewritten,
+                ..
+            } => {
+                assert_eq!(decision, HookOutcome::Allow);
+                assert_eq!(rewritten, "rtk git status");
+            }
+            other => {
+                panic!("expected Rewrite, got a different PayloadAction variant instead: {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_process_claude_payload_decision_ask() {
+        let v = claude_input_value("git status");
+        match process_claude_payload_from_decision(
+            &v,
+            "git status",
+            HookDecision::AskRewrite("rtk git status".to_string()),
+        ) {
+            PayloadAction::Rewrite { decision, .. } => assert_eq!(decision, HookOutcome::Ask),
+            other => {
+                panic!("expected Rewrite, got a different PayloadAction variant instead: {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_process_claude_payload_decision_deny() {
+        let v = claude_input_value("rm -rf /");
+        match process_claude_payload_from_decision(&v, "rm -rf /", HookDecision::Deny) {
+            PayloadAction::Skip { decision, .. } => assert_eq!(decision, HookOutcome::Deny),
+            other => {
+                panic!("expected Skip, got a different PayloadAction variant instead: {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_process_claude_payload_decision_defer() {
+        let v = claude_input_value("git status $(rm -rf /tmp/x)");
+        match process_claude_payload_from_decision(
+            &v,
+            "git status $(rm -rf /tmp/x)",
+            HookDecision::Defer,
+        ) {
+            PayloadAction::Skip { decision, .. } => assert_eq!(decision, HookOutcome::Defer),
+            other => {
+                panic!("expected Skip, got a different PayloadAction variant instead: {other:?}")
+            }
+        }
+    }
+
+    fn claude_input_value(cmd: &str) -> Value {
+        serde_json::from_str(&claude_input(cmd)).unwrap()
+    }
+
     #[test]
     fn test_claude_rewrite_git_status() {
         let result = run_claude_inner(&claude_input("git status")).unwrap();
@@ -1525,6 +1768,22 @@ mod tests {
     fn test_claude_no_tool_input_passthrough() {
         let input = json!({ "tool_name": "Bash" }).to_string();
         assert!(run_claude_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_claude_strips_utf8_bom() {
+        // Windows hosts may prepend a UTF-8 BOM to hook stdin (confirmed for
+        // Cursor). Without stripping, str::trim leaves U+FEFF in place,
+        // serde_json::from_str fails, run_claude logs to stderr and returns
+        // Ok(()) — every command silently stops being rewritten.
+        let payload = claude_input("git status");
+        let with_bom = format!("\u{feff}{}", payload);
+        let result = run_claude_inner(&with_bom).expect("BOM-prefixed payload must parse");
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            v["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk git status"
+        );
     }
 
     // --- Cursor handler ---
@@ -1662,19 +1921,6 @@ mod tests {
         assert_eq!(v["continue"], true);
         assert_eq!(v["permission"], "allow");
         assert_eq!(v["updated_input"]["command"], "rtk git status");
-    }
-
-    #[test]
-    fn test_strip_leading_bom_helper() {
-        // Direct unit test on the helper so future refactors can't
-        // regress the loop semantics without a clear failure signal.
-        assert_eq!(strip_leading_bom(""), "");
-        assert_eq!(strip_leading_bom("hello"), "hello");
-        assert_eq!(strip_leading_bom("\u{feff}hello"), "hello");
-        assert_eq!(strip_leading_bom("\u{feff}\u{feff}hello"), "hello");
-        assert_eq!(strip_leading_bom("\u{feff}\u{feff}\u{feff}hello"), "hello");
-        // BOM in the middle is preserved (not "leading").
-        assert_eq!(strip_leading_bom("a\u{feff}b"), "a\u{feff}b");
     }
 
     // --- Audit logging ---
@@ -1867,6 +2113,49 @@ mod tests {
     }
 
     #[test]
+    fn test_gemini_strips_utf8_bom() {
+        // Windows hosts may prepend a UTF-8 BOM to hook stdin (confirmed for
+        // Cursor; run_gemini must survive it too). Without stripping,
+        // serde_json rejects the payload, `rtk hook gemini` exits non-zero,
+        // and the tool call is blocked.
+        //
+        // Uses run_gemini_inner_with_rules (explicit allow-all rules) rather
+        // than run_gemini_inner: the latter's decide_hook_action reads the
+        // REAL ~/.gemini/settings.json (and project .gemini/settings.json),
+        // making the decision assertion depend on whatever is on the
+        // machine running the test. Both share the same parse/strip/render
+        // core (run_gemini_inner_impl) that production run_gemini uses, so
+        // this still exercises the real BOM-stripping path.
+        let payload = json!({
+            "tool_name": "run_shell_command",
+            "tool_input": { "command": "git status" }
+        })
+        .to_string();
+        let with_bom = format!("\u{feff}{payload}");
+        let result = run_gemini_inner_with_rules(&with_bom, &[], &[], &all_allowed())
+            .expect("BOM-prefixed payload must parse");
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(
+            v["hookSpecificOutput"]["tool_input"]["command"],
+            "rtk git status"
+        );
+    }
+
+    #[test]
+    fn test_gemini_inner_preserves_serde_diagnostic() {
+        // run_gemini_inner must return the serde_json error itself (not
+        // discard it via `.ok()`), so run_gemini's `.context(...)` has a
+        // real source to chain instead of only the generic wrapper message.
+        let err = run_gemini_inner("not valid json {{{").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("line") && msg.contains("column"),
+            "expected serde_json's own parse diagnostic, got: {msg}"
+        );
+    }
+
+    #[test]
     fn test_gemini_allow_emits_rewrite() {
         let v: Value =
             serde_json::from_str(&gemini_render("git status", &[], &[], &all_allowed())).unwrap();
@@ -1944,6 +2233,23 @@ mod tests {
             v.pointer("/hookSpecificOutput/permissionDecision")
                 .is_none(),
             "RTK must never assert a permission decision for Droid"
+        );
+    }
+
+    #[test]
+    fn test_droid_strips_utf8_bom() {
+        // Windows hosts may prepend a UTF-8 BOM to hook stdin (confirmed for
+        // Cursor). run_droid stripped it, but the test entry point re-parsed
+        // without stripping, so the strip had no coverage at all: deleting it
+        // left every test green while BOM-prefixed droid payloads silently
+        // stopped being rewritten. Both paths now share droid_payload.
+        let input = format!("\u{feff}{}", droid_input("Execute", "git status"));
+        let out = run_droid_inner(&input).expect("BOM-prefixed payload must parse");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v.pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(|c| c.as_str()),
+            Some("rtk git status")
         );
     }
 
@@ -2148,6 +2454,23 @@ mod tests {
         assert!(
             v.get("system_message").is_some(),
             "expected system_message for UI visibility"
+        );
+    }
+
+    #[test]
+    fn test_vibe_strips_utf8_bom() {
+        // Sixth hook stdin entry point, and the last one that did not strip.
+        // Windows hosts may prepend a UTF-8 BOM (confirmed for Cursor);
+        // without stripping, serde_json rejects the payload, run_vibe_inner
+        // logs to stderr and returns None, and the command silently stops
+        // being rewritten.
+        let input = format!("\u{feff}{}", vibe_input("bash", "git status"));
+        let out = run_vibe_inner(&input).expect("BOM-prefixed payload must parse");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v.pointer("/hook_specific_output/tool_input/command")
+                .and_then(|c| c.as_str()),
+            Some("rtk git status")
         );
     }
 

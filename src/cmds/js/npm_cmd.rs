@@ -1,5 +1,6 @@
 //! Filters npm output and auto-injects the "run" subcommand when appropriate.
 
+use std::io::IsTerminal;
 use crate::core::runner;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
@@ -91,7 +92,7 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
         effective_args.extend_from_slice(args);
     }
 
-    run_filtered("npm", &effective_args, verbose, skip_env)
+    run_filtered("npm", &effective_args, verbose, skip_env, false)
 }
 
 /// Run an npx tool through the same filtered pipeline as `npm`.
@@ -100,7 +101,16 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
 /// `rtk npx cowsay hello` dispatches to `npx`, not `npm`. Honors `--skip-env`
 /// the same way `run` does.
 pub fn exec(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
-    run_filtered("npx", args, verbose, skip_env)
+    run_filtered("npx", args, verbose, skip_env, false)
+}
+
+/// Run an arbitrary package runner (`npx`, `bunx`) under the npm output filter.
+///
+/// This is the light line filter, not the errors-only one: these runners host
+/// tools whose entire value is their stdout, so dropping non-error lines would
+/// return nothing.
+pub fn exec_with(runner: &str, args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
+    run_filtered(runner, args, verbose, skip_env, true)
 }
 
 /// Shared command-execution path for `run` (npm) and `exec` (npx).
@@ -108,7 +118,21 @@ pub fn exec(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
 /// Builds the resolved command, appends args, applies `SKIP_ENV_VALIDATION`,
 /// emits the verbose log line, and routes through `runner::run_filtered` with
 /// the npm output filter.
-fn run_filtered(name: &str, args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
+/// `forward_piped_stdin` sends the caller's stdin to the child when it is a
+/// pipe rather than a terminal. The filtered path buffers output until exit, so
+/// inheriting a terminal would let an interactive tool prompt invisibly and wait
+/// forever; a pipe already holds its data and cannot do that.
+///
+/// `bunx` opts in, `npx` does not: npx's behaviour here predates this path and
+/// is tracked on its own as rtk-ai/rtk#2431, which covers every filtered entry
+/// point rather than this one.
+fn run_filtered(
+    name: &str,
+    args: &[String],
+    verbose: u8,
+    skip_env: bool,
+    forward_piped_stdin: bool,
+) -> Result<i32> {
     let mut cmd = resolved_command(name);
     for arg in args {
         cmd.arg(arg);
@@ -123,12 +147,17 @@ fn run_filtered(name: &str, args: &[String], verbose: u8, skip_env: bool) -> Res
         eprintln!("Running: {} {}", name, args_display);
     }
 
+    let mut opts = runner::RunOptions::default();
+    if forward_piped_stdin && !std::io::stdin().is_terminal() {
+        opts = opts.inherit_stdin();
+    }
+
     runner::run_filtered(
         cmd,
         name,
         &args_display,
         filter_npm_output,
-        runner::RunOptions::default(),
+        opts,
     )
 }
 

@@ -215,17 +215,19 @@ rtk grep <pattern> [chemin] [options]
 
 | Option | Court | Defaut | Description |
 |--------|-------|--------|-------------|
-| `--max-len` | `-l` | 80 | Longueur maximale de ligne |
-| `--max` | `-m` | 50 | Nombre maximum de resultats |
-| `--context-only` |  | non | Afficher uniquement le contexte du match (pas de raccourci, `-c` est reserve a `grep --count`) |
-| `--file-type` | `-t` | tous | Filtrer par type (ts, py, rust, etc.) |
-| `--line-numbers` | `-n` | oui | Numeros de ligne (toujours actif) |
+| `--max-len` |  | 80 | Longueur maximale de ligne |
+| `--max` |  | 200 | Nombre maximum de resultats |
+| `--context-only` |  | non | Afficher uniquement le contexte du match |
 
-Les arguments supplementaires sont transmis a `rg` (ripgrep). Les flags qui changent le format de sortie (`-c`, `-l`, `-L`, `-o`, `-Z`) passent directement a `rg`/`grep` sans filtrage RTK.
+Aucune de ces options n'a de raccourci : `-l`, `-m` et `-c` sont reserves aux flags natifs de meme lettre (`--files-with-matches`, `--max-count`, `--count`) et sont transmis au moteur.
+
+Les arguments supplementaires sont transmis au moteur reellement invoque -- `grep` pour `rtk grep`, `rg` pour `rtk rg`, RTK ne substituant jamais l'un a l'autre. Un flag propre a ripgrep (`--glob`, `-t`) n'est donc valide que sous `rtk rg`. Les flags qui changent le format de sortie (`-c`, `-l`, `-L`, `-o`, `-Z`) passent directement au moteur sans filtrage RTK.
+
+Il n'y a pas d'option `--file-type` : `rtk rg -t rust` filtre par type, `rtk grep -t rust` remonte l'erreur de grep (`invalid option -- 't'`).
 
 **Avant / Apres :**
 ```
-# rg "fn run" (20 lignes)                   # rtk grep "fn run" (10 lignes)
+# grep -rn "fn run" (20 lignes)             # rtk grep -rn "fn run" (10 lignes)
 src/git.rs:45:pub fn run(...)                src/git.rs
 src/git.rs:120:fn run_status(...)              45: pub fn run(...)
 src/ls.rs:12:pub fn run(...)                   120: fn run_status(...)
@@ -330,17 +332,83 @@ rtk git diff [args...]    # Supporte --stat, --cached, --staged, etc.
 ```
 
 **Avant / Apres :**
+
+`git diff` brut, 21 lignes :
 ```
-# git diff (~100 lignes)                    # rtk git diff (~25 lignes)
-diff --git a/src/main.rs b/src/main.rs      src/main.rs (+5/-2)
-index abc123..def456 100644                    +  let config = Config::load()?;
---- a/src/main.rs                              +  config.validate()?;
-+++ b/src/main.rs                              -  // old code
-@@ -10,6 +10,8 @@                              -  let x = 42;
-   fn main() {                               src/git.rs (+1/-1)
-+    let config = Config::load()?;              ~  format!("ok {}", branch)
-...30 lignes de headers et contexte...
+diff --git a/git.rs b/git.rs
+index 50f7a19..225f918 100644
+--- a/git.rs
++++ b/git.rs
+@@ -1,3 +1,3 @@
+ fn helper(branch: &str) -> String {
+-    format!("ko {}", branch)
++    format!("ok {}", branch)
+ }
+diff --git a/main.rs b/main.rs
+index 765936a..7abfb4f 100644
+--- a/main.rs
++++ b/main.rs
+@@ -1,5 +1,5 @@
+ fn main() {
+-    let x = 42;
+-    // old code
++    let config = Config::load()?;
++    config.validate()?;
+     println!("start");
+ }
 ```
+
+`rtk git diff`, 24 lignes :
+```
+git.rs  | 2 +-
+ main.rs | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+Changes:
+
+git.rs
+@@ -1,3 +1,3 @@
+ fn helper(branch: &str) -> String {
+-    format!("ko {}", branch)
++    format!("ok {}", branch)
+ }
+  +1 -1
+
+main.rs
+@@ -1,5 +1,5 @@
+ fn main() {
+-    let x = 42;
+-    // old code
++    let config = Config::load()?;
++    config.validate()?;
+     println!("start");
+ }
+  +2 -2
+```
+
+Sur un diff aussi petit, rtk economise peu : 440 octets bruts contre 392
+filtres, soit 11 %. La compression vient des diffs ou les en-tetes par fichier
+et les plafonds par hunk pesent. Sur un diff de 4 fichiers dont un hunk de 300
+lignes changees, la sortie passe de 335 a 140 lignes et de 13 262 a 4 880
+octets, soit 63 % de reduction, avec la note de troncature et le rappel
+`[full diff: rtk git diff --no-compact]`.
+
+Les lignes de hunk et les en-tetes `@@` sortent en colonne 0, dans la forme
+unifiee de git, donc `rtk git diff | grep "^-"` fonctionne. Les annotations
+propres a rtk restent indentees de deux espaces pour que ces memes greps ne
+les comptent pas : le total par fichier (`  +2 -2`) et la note de troncature
+(`  ... (30 deletions, 20 additions truncated)`).
+
+Trois limites de l'audit ancre. Au-dela de 100 lignes de changement par hunk,
+`grep -c "^-"` plafonne a ce qui est affiche ; la note de troncature indique
+le reste, par signe, mais elle est indentee et donc invisible au meme grep.
+Sur un diff combine (`diff --cc`, ce que git produit pour chaque chemin en
+conflit pendant un merge, rebase, cherry-pick ou stash pop), le marqueur peut
+occuper la deuxieme colonne : ` +ours` est compte dans le total `+N -M` mais
+reste invisible a `grep "^+"`. Et la sortie n'est pas un patch applicable :
+rtk supprime les en-tetes `diff --git` / `---` / `+++`. Utilisez
+`rtk proxy git diff` pour un patch fidele, ou `rtk gh pr diff --patch`, qui
+passe sans filtrage.
 
 ---
 
@@ -1229,6 +1297,12 @@ Pour empecher certaines commandes d'etre reecrites, ajoutez-les dans `config.tom
 [hooks]
 exclude_commands = ["curl", "playwright"]
 ```
+
+Le motif est ancre en debut de commande : `"curl"` exclut `curl https://...` mais pas `curl-config`.
+Avant la comparaison, RTK retire le wrapper, l'interpreteur ou le chemin, donc `"playwright"` couvre
+`playwright test` comme `npx playwright test` ou `pnpm exec playwright test`, et `"pytest"` couvre
+aussi `python3 -m pytest tests/`. Les arguments sont conserves : `"^ls$"` exclut `ls` seul sans
+englober `ls -la`.
 
 ---
 

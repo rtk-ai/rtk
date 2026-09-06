@@ -2,34 +2,100 @@
 
 use crate::core::runner;
 use crate::core::stream::{BlockHandler, BlockStreamFilter};
-use crate::core::utils::{resolved_command, tool_exists, truncate};
+use crate::core::truncate::{reduced, CAP_WARNINGS};
+use crate::core::utils::{MissingTool, exec_runner, strip_ansi, tool_exec, tool_exists, truncate};
 use anyhow::Result;
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::LazyLock;
+
+/// Cap on the non-empty lines kept when RTK cannot parse failure output. With
+/// tee disabled (`RTK_TEE=0`, `config.tee.enabled = false`) these lines are the
+/// only surviving copy of the failure.
+const MAX_UNPARSED_LINES: usize = CAP_WARNINGS;
+/// tsc and npx print the cause first (`Unknown compiler option`, `This is not
+/// the tsc command`) and boilerplate after it, so spending the whole cap on a
+/// tail would drop the cause.
+const MAX_UNPARSED_HEAD_LINES: usize = reduced(MAX_UNPARSED_LINES, 5);
 
 static TSC_ERROR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(.+?)\((\d+),(\d+)\):\s+(error|warning)\s+(TS\d+):\s+(.+)$").unwrap()
 });
+/// `--pretty` layout: `file:line:col - error TSxxxx: message` (ANSI already stripped).
+static TSC_PRETTY_ERROR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(.+?):(\d+):(\d+)\s+-\s+(error|warning)\s+(TS\d+):\s+(.+)$").unwrap()
+});
+static TSC_GLOBAL_ERROR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(error|warning)\s+(TS\d+):\s+(.+)$").unwrap());
 
-pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+struct Diagnostic<'a> {
+    file: Option<&'a str>,
+    line: Option<&'a str>,
+    code: &'a str,
+    message: &'a str,
+}
+
+/// Match default, `--pretty`, and file-less TypeScript diagnostics without allocating.
+fn parse_diagnostic(line: &str) -> Option<Diagnostic<'_>> {
+    if let Some(caps) = TSC_ERROR.captures(line) {
+        return Some(Diagnostic {
+            file: caps.get(1).map(|value| value.as_str()),
+            line: caps.get(2).map(|value| value.as_str()),
+            code: caps.get(5)?.as_str(),
+            message: caps.get(6)?.as_str(),
+        });
+    }
+    if let Some(caps) = TSC_PRETTY_ERROR.captures(line) {
+        return Some(Diagnostic {
+            file: caps.get(1).map(|value| value.as_str()),
+            line: caps.get(2).map(|value| value.as_str()),
+            code: caps.get(5)?.as_str(),
+            message: caps.get(6)?.as_str(),
+        });
+    }
+    let caps = TSC_GLOBAL_ERROR.captures(line)?;
+    Some(Diagnostic {
+        file: None,
+        line: None,
+        code: caps.get(2)?.as_str(),
+        message: caps.get(3)?.as_str(),
+    })
+}
+
+fn push_dump_line(summary: &mut String, line: &str) {
+    summary.push_str(&truncate(line, 120));
+    summary.push('\n');
+}
+
+fn clean_line(line: &str) -> Cow<'_, str> {
+    if line.contains('\x1b') {
+        Cow::Owned(strip_ansi(line))
+    } else {
+        Cow::Borrowed(line)
+    }
+}
+
+/// `runner` is the package runner the user named (`bunx tsc`, `npx tsc`), or
+/// None for a bare `rtk tsc` where nothing was specified and detection applies.
+pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
     let tsc_exists = tool_exists("tsc");
 
-    let mut cmd = if tsc_exists {
-        resolved_command("tsc")
-    } else {
-        let mut c = resolved_command("npx");
-        c.arg("tsc");
-        c
-    };
+    // Fetch, not Fail: `npx tsc` fetched before this routing existed, and
+    // rtk filters output rather than changing what a command does.
+    let mut cmd = tool_exec(runner, "tsc", MissingTool::Fetch);
 
     for arg in args {
         cmd.arg(arg);
     }
 
     if verbose > 0 {
-        let tool = if tsc_exists { "tsc" } else { "npx tsc" };
-        eprintln!("Running: {} {}", tool, args.join(" "));
+        let via = if tsc_exists {
+            "tsc".to_string()
+        } else {
+            format!("{} tsc", exec_runner(runner, MissingTool::Fetch))
+        };
+        eprintln!("Running: {} {}", via, args.join(" "));
     }
 
     runner::run_streamed(
@@ -58,15 +124,26 @@ impl TscHandler {
 }
 
 impl BlockHandler for TscHandler {
+    /// `--pretty` wraps every field in ANSI escapes; strip them once so
+    /// matching and the emitted block both see plain text.
+    fn normalize_line<'a>(&self, line: &'a str) -> Cow<'a, str> {
+        clean_line(line)
+    }
+
     fn should_skip(&mut self, line: &str) -> bool {
         line.starts_with("Found ")
     }
 
     fn is_block_start(&mut self, line: &str) -> bool {
-        if let Some(caps) = TSC_ERROR.captures(line) {
+        if let Some(diagnostic) = parse_diagnostic(line) {
             self.error_count += 1;
-            self.files.insert(caps[1].to_string());
-            *self.code_counts.entry(caps[5].to_string()).or_insert(0) += 1;
+            if let Some(file) = diagnostic.file {
+                self.files.insert(file.to_string());
+            }
+            *self
+                .code_counts
+                .entry(diagnostic.code.to_string())
+                .or_insert(0) += 1;
             true
         } else {
             false
@@ -77,16 +154,77 @@ impl BlockHandler for TscHandler {
         line.starts_with("  ") || line.starts_with('\t')
     }
 
-    fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+    fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String> {
         if self.error_count == 0 {
-            return Some("TypeScript: No errors found\n".to_string());
+            if exit_code == 0 {
+                return Some("TypeScript: No errors found\n".to_string());
+            }
+            // tsc failed without one diagnostic RTK understands (missing binary,
+            // no project, unparseable output). "No errors found" would be a
+            // false green, so surface the failure with both ends of the raw
+            // output.
+            let mut summary = format!(
+                "TypeScript: compiler exited with code {exit_code}, but RTK parsed no diagnostics\n"
+            );
+
+            if raw.len() < crate::core::tee::MIN_TEE_SIZE {
+                for line in raw.lines() {
+                    let line = clean_line(line);
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    push_dump_line(&mut summary, line.as_ref());
+                }
+                return Some(summary);
+            }
+
+            let head_len = MAX_UNPARSED_HEAD_LINES.min(MAX_UNPARSED_LINES);
+            let tail_len = MAX_UNPARSED_LINES.saturating_sub(head_len);
+            let mut head: Vec<Cow<'_, str>> = Vec::with_capacity(head_len);
+            let mut tail: VecDeque<Cow<'_, str>> = VecDeque::with_capacity(tail_len);
+            let mut total = 0;
+
+            for line in raw.lines() {
+                let line = clean_line(line);
+                if line.trim().is_empty() {
+                    continue;
+                }
+                total += 1;
+                if head.len() < head_len {
+                    head.push(line);
+                    continue;
+                }
+                if tail_len == 0 {
+                    continue;
+                }
+                if tail.len() == tail_len {
+                    tail.pop_front();
+                }
+                tail.push_back(line);
+            }
+
+            let hidden = total - head.len() - tail.len();
+            for line in head {
+                push_dump_line(&mut summary, line.as_ref());
+            }
+            if hidden > 0 {
+                summary.push_str(&format!("... +{hidden} more lines\n"));
+            }
+            for line in tail {
+                push_dump_line(&mut summary, line.as_ref());
+            }
+            return Some(summary);
         }
 
-        let mut result = format!(
-            "TypeScript: {} errors in {} files\n",
-            self.error_count,
-            self.files.len()
-        );
+        let mut result = if self.files.is_empty() {
+            format!("TypeScript: {} errors\n", self.error_count)
+        } else {
+            format!(
+                "TypeScript: {} errors in {} files\n",
+                self.error_count,
+                self.files.len()
+            )
+        };
 
         if self.code_counts.len() > 1 {
             let mut counts: Vec<_> = self.code_counts.iter().collect();
@@ -105,25 +243,26 @@ impl BlockHandler for TscHandler {
 
 pub(crate) fn filter_tsc_output(output: &str) -> String {
     struct TsError {
-        file: String,
-        line: usize,
+        file: Option<String>,
+        line: Option<usize>,
         code: String,
         message: String,
         context_lines: Vec<String>,
     }
 
     let mut errors: Vec<TsError> = Vec::new();
-    let lines: Vec<&str> = output.lines().collect();
+    let clean_output = clean_line(output);
+    let lines: Vec<&str> = clean_output.lines().collect();
     let mut i = 0;
 
     while i < lines.len() {
         let line = lines[i];
-        if let Some(caps) = TSC_ERROR.captures(line) {
+        if let Some(diagnostic) = parse_diagnostic(line) {
             let mut err = TsError {
-                file: caps[1].to_string(),
-                line: caps[2].parse().unwrap_or(0),
-                code: caps[5].to_string(),
-                message: caps[6].to_string(),
+                file: diagnostic.file.map(str::to_string),
+                line: diagnostic.line.and_then(|value| value.parse().ok()),
+                code: diagnostic.code.to_string(),
+                message: diagnostic.message.to_string(),
                 context_lines: Vec::new(),
             };
 
@@ -133,7 +272,7 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
                 let next = lines[i];
                 if !next.is_empty()
                     && (next.starts_with("  ") || next.starts_with('\t'))
-                    && !TSC_ERROR.is_match(next)
+                    && parse_diagnostic(next).is_none()
                 {
                     err.context_lines.push(next.trim().to_string());
                     i += 1;
@@ -149,16 +288,20 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
     }
 
     if errors.is_empty() {
-        if output.contains("Found 0 errors") {
+        if clean_output.contains("Found 0 errors") {
             return "TypeScript: No errors found".to_string();
         }
         return "TypeScript compilation completed".to_string();
     }
 
-    // Group by file
+    let global_errors: Vec<&TsError> = errors.iter().filter(|err| err.file.is_none()).collect();
+
+    // Group file-scoped diagnostics without counting the global bucket as a file.
     let mut by_file: HashMap<String, Vec<&TsError>> = HashMap::new();
     for err in &errors {
-        by_file.entry(err.file.clone()).or_default().push(err);
+        if let Some(file) = &err.file {
+            by_file.entry(file.clone()).or_default().push(err);
+        }
     }
 
     // Count by error code for summary
@@ -167,12 +310,15 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
         *by_code.entry(err.code.clone()).or_insert(0) += 1;
     }
 
-    let mut result = String::new();
-    result.push_str(&format!(
-        "TypeScript: {} errors in {} files\n",
-        errors.len(),
-        by_file.len()
-    ));
+    let mut result = if by_file.is_empty() {
+        format!("TypeScript: {} errors\n", errors.len())
+    } else {
+        format!(
+            "TypeScript: {} errors in {} files\n",
+            errors.len(),
+            by_file.len()
+        )
+    };
 
     // Top error codes summary (compact, one line)
     let mut code_counts: Vec<_> = by_code.iter().collect();
@@ -187,6 +333,21 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
         result.push_str(&format!("Top codes: {}\n\n", codes_str.join(", ")));
     }
 
+    if !global_errors.is_empty() {
+        result.push_str(&format!("global ({} errors)\n", global_errors.len()));
+        for err in global_errors {
+            result.push_str(&format!(
+                "  {} {}\n",
+                err.code,
+                truncate(&err.message, 120)
+            ));
+            for ctx in &err.context_lines {
+                result.push_str(&format!("    {}\n", truncate(ctx, 120)));
+            }
+        }
+        result.push('\n');
+    }
+
     // Files sorted by error count (most errors first)
     let mut files_sorted: Vec<_> = by_file.iter().collect();
     files_sorted.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
@@ -198,7 +359,7 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
         for err in *file_errors {
             result.push_str(&format!(
                 "  L{}: {} {}\n",
-                err.line,
+                err.line.unwrap_or(0),
                 err.code,
                 truncate(&err.message, 120)
             ));
@@ -232,6 +393,37 @@ Found 4 errors in 2 files.
         assert!(result.contains("Button.tsx (2 errors)"));
         assert!(result.contains("TS2322"));
         assert!(!result.contains("Found 4 errors")); // Summary line should be replaced
+    }
+
+    #[test]
+    fn test_filter_tsc_output_pretty_ansi_error() {
+        let output = include_str!("../../../tests/fixtures/tsc_pretty_raw.txt");
+        let result = filter_tsc_output(output);
+        assert!(result.contains("TypeScript: 3 errors in 1 files"));
+        assert!(result.contains("src/index.ts (3 errors)"));
+        assert!(result.contains("L1:"));
+        assert_eq!(result.matches("L4:").count(), 2);
+        assert!(result.contains("TS2322"));
+        assert!(!result.contains("\x1b["));
+    }
+
+    #[test]
+    fn test_filter_tsc_output_global_error() {
+        let result = filter_tsc_output(
+            "error TS5058: The specified path does not exist: 'tsconfig.json'.",
+        );
+        assert!(result.contains("TS5058"));
+        assert!(result.contains("global (1 errors)"));
+        assert!(!result.contains("completed"));
+    }
+
+    #[test]
+    fn test_filter_tsc_output_global_error_continuation() {
+        let output = include_str!("../../../tests/fixtures/tsc_global_config_error_raw.txt");
+        let result = filter_tsc_output(output);
+        assert!(result.contains("TS2688"));
+        assert!(result.contains("The file is in the program because:"));
+        assert!(result.contains("global (1 errors)"));
     }
 
     #[test]
@@ -292,6 +484,13 @@ src/app.tsx(20,5): error TS2345: Argument of type 'number' is not assignable to 
         assert!(result.contains("No errors found"));
     }
 
+    #[test]
+    fn test_filter_no_errors_with_ansi() {
+        let output = "\x1b[32mFound 0 errors.\x1b[0m Watching for file changes.";
+        let result = filter_tsc_output(output);
+        assert!(result.contains("No errors found"));
+    }
+
     // --- Streaming handler tests ---
 
     use crate::core::stream::tests::run_block_filter;
@@ -311,6 +510,176 @@ Found 3 errors in 2 files.
         assert!(result.contains("TS2345"), "got: {}", result);
         assert!(result.contains("3 errors in 2 files"), "got: {}", result);
         assert!(!result.contains("Found 3"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_tsc_stream_pretty_ansi_errors() {
+        let input = include_str!("../../../tests/fixtures/tsc_pretty_raw.txt");
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, input, 2);
+        assert!(
+            result.contains("src/index.ts:1:7 - error TS2322:"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("src/index.ts:4:8 - error TS2322:"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("src/index.ts:4:16 - error TS2322:"),
+            "got: {}",
+            result
+        );
+        assert!(result.contains("3 errors in 1 files"), "got: {}", result);
+        assert!(!result.contains("Found 3 errors"), "got: {}", result);
+        assert!(!result.contains("\x1b["), "emitted block keeps escapes: {}", result);
+        // Real pretty output separates code frames with a blank line; the compact filter drops them.
+        assert!(!result.contains("const x: number"), "got: {}", result);
+        assert!(
+            !result.contains("The expected type comes from"),
+            "got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_tsc_stream_global_error_with_continuation() {
+        let input = include_str!("../../../tests/fixtures/tsc_global_config_error_raw.txt");
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, input, 2);
+        assert!(result.contains("TS2688"), "got: {}", result);
+        assert!(
+            result.contains("The file is in the program because:"),
+            "got: {}",
+            result
+        );
+        assert_eq!(result.lines().last(), Some("TypeScript: 1 errors"));
+        assert!(!result.contains("parsed no diagnostics"), "got: {}", result);
+        assert!(!result.contains("No errors found"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_tsc_stream_mixed_global_and_file_errors() {
+        let input = "\
+error TS5023: Unknown compiler option 'foo'.
+src/app.ts(1,7): error TS2322: Type 'string' is not assignable to type 'number'.
+";
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, input, 2);
+        assert!(result.contains("TS5023"), "got: {}", result);
+        assert!(result.contains("TS2322"), "got: {}", result);
+        assert!(result.contains("2 errors in 1 files"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_tsc_stream_pretty_global_error() {
+        let input = "\x1b[91merror\x1b[0m\x1b[90m TS5058: \x1b[0mThe specified path does not exist: 'nope.json'.";
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, input, 1);
+        assert!(result.contains("error TS5058:"), "got: {}", result);
+        assert!(result.contains("1 errors"), "got: {}", result);
+        assert!(!result.contains("\x1b["), "got: {}", result);
+    }
+
+    #[test]
+    fn test_tsc_stream_failed_unparsed_output_keeps_head_and_tail() {
+        let padding = "x".repeat(30);
+        let input: String = (1..=30)
+            .map(|i| format!("junk line {i} {padding}\n"))
+            .collect();
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, &input, 2);
+        assert!(result.contains("compiler exited with code 2"), "got: {}", result);
+        for i in 1..=5 {
+            assert!(result.contains(&format!("junk line {i} {padding}\n")), "got: {}", result);
+        }
+        assert!(result.contains("... +20 more lines"), "got: {}", result);
+        for i in 26..=30 {
+            assert!(result.contains(&format!("junk line {i} {padding}\n")), "got: {}", result);
+        }
+        assert!(!result.contains(&format!("junk line 6 {padding}\n")), "got: {}", result);
+        assert!(!result.contains(&format!("junk line 25 {padding}\n")), "got: {}", result);
+        assert_eq!(result.lines().count(), 1 + 5 + 1 + 5);
+    }
+
+    #[test]
+    fn test_tsc_stream_failed_unparsed_output_ignores_escape_only_lines() {
+        let padding = "x".repeat(30);
+        let mut input = "\x1b[0m\n\x1b[32m\x1b[0m\n\x1b[0m\n".to_string();
+        for i in 1..=30 {
+            input.push_str(&format!("real line {i} {padding}\n"));
+        }
+
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, &input, 2);
+        for i in 1..=5 {
+            assert!(result.contains(&format!("real line {i} {padding}\n")), "got: {}", result);
+        }
+        assert!(result.contains("... +20 more lines"), "got: {}", result);
+        for i in 26..=30 {
+            assert!(result.contains(&format!("real line {i} {padding}\n")), "got: {}", result);
+        }
+        assert!(!result.contains("\n\n"), "got: {}", result);
+        assert_eq!(result.lines().count(), 1 + 5 + 1 + 5);
+    }
+
+    #[test]
+    fn test_tsc_stream_failed_unparsed_output_under_tee_floor_is_complete() {
+        let input: String = (1..=15).map(|i| format!("short {i}\n")).collect();
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, &input, 1);
+
+        for i in 1..=15 {
+            assert!(result.contains(&format!("short {i}\n")), "got: {}", result);
+        }
+        assert!(!result.contains("... +"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_tsc_stream_failed_unparsed_output_caps_line_width() {
+        let long_line = "z".repeat(300);
+        let padding = "x".repeat(30);
+        let mut input = format!("{long_line}\n");
+        for i in 1..=10 {
+            input.push_str(&format!("padding line {i} {padding}\n"));
+        }
+
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, &input, 1);
+        let emitted_long_line = result.lines().nth(1).expect("long line should be emitted");
+        assert!(emitted_long_line.chars().count() <= 120, "got: {}", result);
+        assert!(emitted_long_line.ends_with("..."), "got: {}", result);
+    }
+
+    #[test]
+    fn test_tsc_stream_failed_without_project_keeps_cause() {
+        let input = include_str!("../../../tests/fixtures/tsc_no_project_raw.txt");
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, input, 1);
+        assert!(result.contains("compiler exited with code 1"), "got: {}", result);
+        assert!(result.contains("Version 6.0.3"), "got: {}", result);
+        assert!(result.contains("tsc: The TypeScript Compiler"), "got: {}", result);
+        assert!(result.contains("... +"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_tsc_stream_failed_unparsed_output_not_success() {
+        let input = "\
+\x1b[31mThis is not the tsc command you are looking for\x1b[0m
+Use npm install typescript before using npx
+";
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, input, 1);
+        assert!(result.contains("compiler exited with code 1"), "got: {}", result);
+        assert!(
+            result.contains("This is not the tsc command you are looking for"),
+            "got: {}",
+            result
+        );
+        assert!(!result.contains("No errors found"), "got: {}", result);
+        assert!(!result.contains("\x1b["), "got: {}", result);
     }
 
     #[test]

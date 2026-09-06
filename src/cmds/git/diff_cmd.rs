@@ -6,6 +6,10 @@ use anyhow::Result;
 use std::fs;
 use std::path::Path;
 
+const IDENTICAL_FILES_MESSAGE: &str = "[ok] Files are identical\n";
+const WHITESPACE_ONLY_DIFF_DETAIL: &str =
+    "   files differ only in whitespace or line endings (no line-content change)\n";
+
 /// Ultra-condensed diff - only changed lines, no context.
 /// Returns the diff-convention exit code: 0 if identical, 1 if files differ.
 pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
@@ -17,39 +21,53 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
 
     let content1 = fs::read_to_string(file1)?;
     let content2 = fs::read_to_string(file2)?;
-    let raw = format!("{}\n---\n{}", content1, content2);
+    let lines1: Vec<&str> = content1.lines().collect();
+    let lines2: Vec<&str> = content2.lines().collect();
+    let diff = compute_diff(&lines1, &lines2);
+    let fallback = format_classic_diff(&diff);
+    let both_files = format!("{}\n---\n{}", content1, content2);
 
-    let (rtk, exit_code) = render_file_diff(file1, file2, &content1, &content2);
+    let (rtk, exit_code) = render_diff(file1, file2, &diff, content1 == content2);
 
-    let shown = never_worse(&raw, &rtk);
+    let shown = select_file_diff_output(&diff, &fallback, &rtk);
     print!("{}", shown);
     timer.track(
         &format!("diff {} {}", file1.display(), file2.display()),
         "rtk diff",
-        &raw,
+        tracking_baseline(&diff, &fallback, &both_files, shown),
         shown,
     );
     Ok(exit_code)
 }
 
-/// Renders the condensed file comparison and returns it with the
-/// diff-convention exit code (0 = identical, 1 = differences found).
-fn render_file_diff(file1: &Path, file2: &Path, content1: &str, content2: &str) -> (String, i32) {
-    let lines1: Vec<&str> = content1.lines().collect();
-    let lines2: Vec<&str> = content2.lines().collect();
-    let diff = compute_diff(&lines1, &lines2);
+fn render_file_header(file1: &Path, file2: &Path) -> String {
+    format!("{} → {}\n", file1.display(), file2.display())
+}
 
+fn render_diff(file1: &Path, file2: &Path, diff: &DiffResult, bytes_equal: bool) -> (String, i32) {
     if diff.changes.is_empty() {
-        return ("[ok] Files are identical\n".to_string(), 0);
+        if bytes_equal {
+            return (IDENTICAL_FILES_MESSAGE.to_string(), 0);
+        }
+        // `str::lines()` strips `\r` and drops a trailing newline, so these
+        // byte-level differences can leave no line changes to render.
+        return (
+            format!(
+                "{}{}",
+                render_file_header(file1, file2),
+                WHITESPACE_ONLY_DIFF_DETAIL
+            ),
+            1,
+        );
     }
 
     let mut rtk = String::new();
-    rtk.push_str(&format!("{} → {}\n", file1.display(), file2.display()));
+    rtk.push_str(&render_file_header(file1, file2));
     rtk.push_str(&format!(
         "   +{} added, -{} removed, ~{} modified\n\n",
         diff.added, diff.removed, diff.modified
     ));
-    rtk.push_str(&format_diff_changes(&diff));
+    rtk.push_str(&format_diff_changes(diff));
     (rtk, 1)
 }
 
@@ -97,6 +115,168 @@ fn format_diff_changes(diff: &DiffResult) -> String {
         }
     }
     out
+}
+
+fn format_classic_diff(diff: &DiffResult) -> String {
+    let mut out = String::new();
+    let mut index = 0;
+
+    while index < diff.changes.len() {
+        match &diff.changes[index] {
+            DiffChange::Modified(start, _, _) => {
+                let start = *start;
+                let mut end = start;
+                let mut old_lines = Vec::new();
+                let mut new_lines = Vec::new();
+
+                while let Some(DiffChange::Modified(line, old, new)) = diff.changes.get(index) {
+                    if *line != end {
+                        break;
+                    }
+                    old_lines.push(old);
+                    new_lines.push(new);
+                    end += 1;
+                    index += 1;
+                }
+
+                out.push_str(&format!(
+                    "{}c{}\n",
+                    format_line_range(start, end - 1),
+                    format_line_range(start, end - 1)
+                ));
+                for line in old_lines {
+                    out.push_str(&format!("< {}\n", line));
+                }
+                out.push_str("---\n");
+                for line in new_lines {
+                    out.push_str(&format!("> {}\n", line));
+                }
+            }
+            DiffChange::Removed(start, _) if matches!(
+                diff.changes.get(index + 1),
+                Some(DiffChange::Added(line, _)) if line == start
+            ) => {
+                let start = *start;
+                let mut end = start;
+                let mut old_lines = Vec::new();
+                let mut new_lines = Vec::new();
+
+                while let (
+                    Some(DiffChange::Removed(old_line, old)),
+                    Some(DiffChange::Added(new_line, new)),
+                ) = (diff.changes.get(index), diff.changes.get(index + 1))
+                {
+                    if *old_line != end || *new_line != end {
+                        break;
+                    }
+                    old_lines.push(old);
+                    new_lines.push(new);
+                    end += 1;
+                    index += 2;
+                }
+
+                out.push_str(&format!(
+                    "{}c{}\n",
+                    format_line_range(start, end - 1),
+                    format_line_range(start, end - 1)
+                ));
+                for line in old_lines {
+                    out.push_str(&format!("< {}\n", line));
+                }
+                out.push_str("---\n");
+                for line in new_lines {
+                    out.push_str(&format!("> {}\n", line));
+                }
+            }
+            DiffChange::Added(start, _) => {
+                let start = *start;
+                let mut end = start;
+                let mut new_lines = Vec::new();
+
+                while let Some(DiffChange::Added(line, new)) = diff.changes.get(index) {
+                    if *line != end {
+                        break;
+                    }
+                    new_lines.push(new);
+                    end += 1;
+                    index += 1;
+                }
+
+                out.push_str(&format!(
+                    "{}a{}\n",
+                    start - 1,
+                    format_line_range(start, end - 1)
+                ));
+                for line in new_lines {
+                    out.push_str(&format!("> {}\n", line));
+                }
+            }
+            DiffChange::Removed(start, _) => {
+                let start = *start;
+                let mut end = start;
+                let mut old_lines = Vec::new();
+
+                while let Some(DiffChange::Removed(line, old)) = diff.changes.get(index) {
+                    if *line != end {
+                        break;
+                    }
+                    old_lines.push(old);
+                    end += 1;
+                    index += 1;
+                }
+
+                out.push_str(&format!(
+                    "{}d{}\n",
+                    format_line_range(start, end - 1),
+                    start - 1
+                ));
+                for line in old_lines {
+                    out.push_str(&format!("< {}\n", line));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn format_line_range(start: usize, end: usize) -> String {
+    if start == end {
+        start.to_string()
+    } else {
+        format!("{start},{end}")
+    }
+}
+
+/// Baseline the savings are measured against: what `diff` itself would have
+/// printed, so the recorded ratio compares like with like and can never go
+/// negative -- the guard already caps the shown output at the fallback.
+fn tracking_baseline<'a>(
+    diff: &DiffResult,
+    fallback: &'a str,
+    both_files: &'a str,
+    shown: &'a str,
+) -> &'a str {
+    if !diff.changes.is_empty() {
+        return fallback;
+    }
+
+    // Identical files: `diff` prints nothing, so the dump of both files
+    // stands in as the output that would otherwise have to be read. Two
+    // near-empty files can make that dump cheaper than the verdict line,
+    // which would book a loss against the cheapest possible answer.
+    if tracking::estimate_tokens(both_files) >= tracking::estimate_tokens(shown) {
+        both_files
+    } else {
+        shown
+    }
+}
+
+fn select_file_diff_output<'a>(diff: &DiffResult, raw: &'a str, rendered: &'a str) -> &'a str {
+    if diff.changes.is_empty() {
+        rendered
+    } else {
+        never_worse(raw, rendered)
+    }
 }
 
 fn compute_diff(lines1: &[&str], lines2: &[&str]) -> DiffResult {
@@ -173,13 +353,8 @@ fn condense_unified_diff(diff: &str) -> String {
             if line.starts_with("+++ ") {
                 if !current_file.is_empty() && (added > 0 || removed > 0) {
                     result.push(format!("[file] {} (+{} -{})", current_file, added, removed));
-                    for c in &changes {
-                        result.push(format!("  {}", c));
-                    }
-                    let total = added + removed;
-                    if total > 10 {
-                        result.push(format!("  ... +{} more", total - 10));
-                    }
+                    // Column 0: anchored greps (`^[+-]`) must match these.
+                    result.append(&mut changes);
                 }
                 current_file = line
                     .trim_start_matches("+++ ")
@@ -201,13 +376,8 @@ fn condense_unified_diff(diff: &str) -> String {
     // Last file
     if !current_file.is_empty() && (added > 0 || removed > 0) {
         result.push(format!("[file] {} (+{} -{})", current_file, added, removed));
-        for c in &changes {
-            result.push(format!("  {}", c));
-        }
-        let total = added + removed;
-        if total > 10 {
-            result.push(format!("  ... +{} more", total - 10));
-        }
+        // Column 0: anchored greps (`^[+-]`) must match these.
+        result.append(&mut changes);
     }
 
     result.join("\n")
@@ -216,6 +386,18 @@ fn condense_unified_diff(diff: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn render_test_diff(file1: &str, file2: &str, content1: &str, content2: &str) -> (String, i32) {
+        let lines1: Vec<&str> = content1.lines().collect();
+        let lines2: Vec<&str> = content2.lines().collect();
+        let diff = compute_diff(&lines1, &lines2);
+        render_diff(
+            Path::new(file1),
+            Path::new(file2),
+            &diff,
+            content1 == content2,
+        )
+    }
 
     // --- similarity ---
 
@@ -309,18 +491,13 @@ mod tests {
         assert!(result.changes.is_empty());
     }
 
-    // --- render_file_diff (issue #2364 regression) ---
+    // --- render_diff (issue #2364 regression) ---
 
     #[test]
     fn test_render_modified_only_yaml_not_identical() {
         // "a: 1" vs "a: 2" is classified as modified (similarity > 0.5);
         // the identical check must not ignore modified-only diffs.
-        let (out, code) = render_file_diff(
-            Path::new("one.yaml"),
-            Path::new("two.yaml"),
-            "a: 1\n",
-            "a: 2\n",
-        );
+        let (out, code) = render_test_diff("one.yaml", "two.yaml", "a: 1\n", "a: 2\n");
         assert!(
             !out.contains("identical"),
             "modified-only diff reported as identical:\n{}",
@@ -334,12 +511,7 @@ mod tests {
 
     #[test]
     fn test_render_modified_only_json_not_identical() {
-        let (out, code) = render_file_diff(
-            Path::new("j1.json"),
-            Path::new("j2.json"),
-            "{\"a\": 1}\n",
-            "{\"a\": 2}\n",
-        );
+        let (out, code) = render_test_diff("j1.json", "j2.json", "{\"a\": 1}\n", "{\"a\": 2}\n");
         assert!(
             !out.contains("identical"),
             "modified-only diff reported as identical:\n{}",
@@ -350,21 +522,150 @@ mod tests {
 
     #[test]
     fn test_render_identical_files_exit_zero() {
-        let (out, code) = render_file_diff(
-            Path::new("a.yaml"),
-            Path::new("b.yaml"),
-            "a: 1\nb: 2\n",
-            "a: 1\nb: 2\n",
-        );
+        let (out, code) =
+            render_test_diff("a.yaml", "b.yaml", "a: 1\nb: 2\n", "a: 1\nb: 2\n");
         assert!(out.contains("[ok] Files are identical"));
         assert_eq!(code, 0);
     }
 
     #[test]
     fn test_render_added_removed_exit_one() {
-        let (out, code) = render_file_diff(Path::new("t1.txt"), Path::new("t2.txt"), "x\n", "y\n");
+        let (out, code) = render_test_diff("t1.txt", "t2.txt", "x\n", "y\n");
         assert!(out.contains("+1 added, -1 removed"));
         assert_eq!(code, 1);
+    }
+
+    // --- byte-different but line-equal files must not be "identical" (issue #3469) ---
+
+    #[test]
+    fn test_render_crlf_vs_lf_not_identical() {
+        let (out, code) = render_test_diff(
+            "a.txt",
+            "b.txt",
+            "alpha\nbeta\n",
+            "alpha\r\nbeta\r\n",
+        );
+        assert!(
+            !out.contains("identical"),
+            "CRLF-vs-LF difference reported as identical:\n{}",
+            out
+        );
+        assert!(
+            out.contains("whitespace or line endings"),
+            "expected the whitespace/line-ending message, got:\n{}",
+            out
+        );
+        assert_eq!(code, 1, "byte-different files must exit 1 (diff convention)");
+    }
+
+    #[test]
+    fn test_render_trailing_newline_not_identical() {
+        let (out, code) = render_test_diff("a.txt", "b.txt", "abc", "abc\n");
+        assert!(
+            !out.contains("identical"),
+            "trailing-newline difference reported as identical:\n{}",
+            out
+        );
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn test_render_byte_identical_exit_zero_with_crlf() {
+        let (out, code) = render_test_diff("a.txt", "b.txt", "a\r\nb\r\n", "a\r\nb\r\n");
+        assert!(out.contains("[ok] Files are identical"));
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn test_never_worse_fallback_is_a_classic_diff() {
+        let diff = compute_diff(&["alpha beta"], &["alpha zzzz"]);
+        let fallback = format_classic_diff(&diff);
+        let (rendered, code) =
+            render_diff(Path::new("before"), Path::new("after"), &diff, false);
+        let shown = select_file_diff_output(&diff, &fallback, &rendered);
+
+        assert_eq!(code, 1);
+        assert!(shown.contains("1c1"));
+        assert!(shown.contains("< alpha beta"));
+        assert!(shown.contains("\n---\n"));
+        assert!(shown.contains("> alpha zzzz"));
+    }
+
+    #[test]
+    fn test_tracking_baseline_never_books_a_loss() {
+        // Two unrelated files: the classic diff carries both of them plus the
+        // "< " / "> " markers, so it is bigger than a plain dump. Measuring
+        // against the dump used to record negative savings.
+        let old: Vec<String> = (0..40).map(|i| format!("old line {i}")).collect();
+        let new: Vec<String> = (0..40).map(|i| format!("brand new content {i}")).collect();
+        let r1: Vec<&str> = old.iter().map(|s| s.as_str()).collect();
+        let r2: Vec<&str> = new.iter().map(|s| s.as_str()).collect();
+
+        let diff = compute_diff(&r1, &r2);
+        let fallback = format_classic_diff(&diff);
+        let old_content = old.join("\n");
+        let new_content = new.join("\n");
+        let both_files = format!("{}\n---\n{}", old_content, new_content);
+        let (rendered, _) = render_diff(
+            Path::new("a"),
+            Path::new("b"),
+            &diff,
+            old_content == new_content,
+        );
+        let shown = select_file_diff_output(&diff, &fallback, &rendered);
+        let baseline = tracking_baseline(&diff, &fallback, &both_files, shown);
+
+        assert!(
+            tracking::estimate_tokens(baseline) >= tracking::estimate_tokens(shown),
+            "baseline {} < shown {} would record negative savings",
+            tracking::estimate_tokens(baseline),
+            tracking::estimate_tokens(shown)
+        );
+    }
+
+    #[test]
+    fn test_tracking_baseline_identical_files_use_both_files() {
+        let diff = compute_diff(&["a: 1", "b: 2"], &["a: 1", "b: 2"]);
+        let both_files = "a: 1\nb: 2\n\n---\na: 1\nb: 2\n";
+        let shown = "[ok] Files are identical\n";
+
+        assert_eq!(
+            tracking_baseline(&diff, "", both_files, shown),
+            both_files,
+            "identical files should still measure against the dump"
+        );
+    }
+
+    #[test]
+    fn test_tracking_baseline_empty_files_do_not_book_a_loss() {
+        // Both files empty: the dump is shorter than the verdict line.
+        let diff = compute_diff(&[], &[]);
+        let shown = "[ok] Files are identical\n";
+
+        assert_eq!(tracking_baseline(&diff, "", "\n---\n", shown), shown);
+    }
+
+    #[test]
+    fn test_identical_files_keep_the_success_message() {
+        let diff = compute_diff(&["same"], &["same"]);
+        let rendered = "[ok] Files are identical\n";
+
+        assert_eq!(select_file_diff_output(&diff, "", rendered), rendered);
+    }
+
+    #[test]
+    fn test_classic_diff_covers_modified_line_boundary_cases() {
+        for (old, new) in [
+            ("alpha beta gamma delta", "alpha beta XXXXX delta"),
+            ("alpha beta gamma", "alpha beta"),
+            ("alpha beta gamma delta", "XXXXX beta gamma delta"),
+        ] {
+            let diff = compute_diff(&[old], &[new]);
+            let fallback = format_classic_diff(&diff);
+
+            assert!(fallback.contains(&format!("< {old}")));
+            assert!(fallback.contains(&format!("> {new}")));
+        }
     }
 
     // --- condense_unified_diff ---
@@ -403,12 +704,44 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
+    fn test_condense_unified_diff_markers_at_column_0() {
+        // Indented markers make anchored greps (`^[+-]`) match nothing, so a
+        // "was anything removed?" audit answers no while the content is there.
+        //
+        // Two files on purpose. A file's changes are flushed at two separate
+        // sites: once per `+++` for the preceding file, once after the loop for
+        // the last one. A single-file fixture only ever reaches the second, so
+        // the first could be reverted with the whole suite still green.
+        let diff = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-fn old() {}\n+fn new() {}\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-let x = 1;\n+let x = 2;\n";
+        let result = condense_unified_diff(diff);
+        for want in ["-fn old() {}", "+fn new() {}", "-let x = 1;", "+let x = 2;"] {
+            assert!(
+                result.lines().any(|l| l == want),
+                "missing {want:?} at column 0 in:\n{}",
+                result
+            );
+        }
+        // Match on leading whitespace rather than a single space: the indent
+        // this guards against is two spaces, so `" +"` / `" -"` would never
+        // fire and the assertion would pass on the very code it rejects.
+        assert!(
+            !result.lines().any(|l| {
+                let trimmed = l.trim_start();
+                trimmed.len() != l.len()
+                    && (trimmed.starts_with('+') || trimmed.starts_with('-'))
+            }),
+            "change lines must not be indented:\n{}",
+            result
+        );
+    }
+
+    #[test]
     fn test_condense_unified_diff_empty() {
         let result = condense_unified_diff("");
         assert!(result.is_empty());
     }
 
-    // --- truncation accuracy ---
+    // --- overflow indicator ---
 
     fn make_large_unified_diff(added: usize, removed: usize) -> String {
         let mut lines = vec![
@@ -427,26 +760,29 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
-    fn test_condense_unified_diff_overflow_count_accuracy() {
-        // 100 added + 100 removed = 200 total changes, only 10 shown
-        // True overflow = 200 - 10 = 190
-        // Bug: changes vec capped at 15, so old code showed "+5 more" (15-10) instead of "+190 more"
+    fn test_condense_unified_diff_large_no_false_overflow_indicator() {
+        // All 200 changes are shown in full (never truncate diff content).
+        // No misleading "... +N more" should appear.
         let diff = make_large_unified_diff(100, 100);
         let result = condense_unified_diff(&diff);
         assert!(
-            result.contains("+190 more"),
-            "Expected '+190 more' but got:\n{}",
+            !result.contains("more"),
+            "No overflow indicator expected when all lines are shown, got:\n{}",
             result
         );
         assert!(
-            !result.contains("+5 more"),
-            "Bug still present: showing '+5 more' instead of true overflow"
+            result.contains("+new_value_99"),
+            "Last added line must be present (no truncation)"
+        );
+        assert!(
+            result.contains("-old_value_99"),
+            "Last removed line must be present (no truncation)"
         );
     }
 
     #[test]
     fn test_condense_unified_diff_no_false_overflow() {
-        // 8 changes total — all fit within the 10-line display cap, no overflow message
+        // Counter-case to the 200-change test above: no indicator at small sizes either.
         let diff = make_large_unified_diff(4, 4);
         let result = condense_unified_diff(&diff);
         assert!(

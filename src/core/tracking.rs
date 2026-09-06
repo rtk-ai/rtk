@@ -33,6 +33,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -105,6 +106,80 @@ pub struct CommandRecord {
     pub saved_tokens: usize,
     /// Savings percentage ((saved / input) * 100)
     pub savings_pct: f64,
+}
+
+/// The real outcome a PreToolUse hook reached for one Bash call.
+///
+/// Shared by both ends of the `hook_decisions` log: `hooks::hook_cmd` writes it at
+/// the moment the hook actually runs, and `discover` reads it back to know whether
+/// a historical command was truly covered. `Display`/`FromStr` are the only
+/// string boundary — everywhere else this stays a typed enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookOutcome {
+    /// Rewritten and auto-allowed.
+    Allow,
+    /// Rewritten, but Claude Code still prompts the user.
+    Ask,
+    /// A deny rule matched — the hook never rewrites, defers to native deny handling.
+    Deny,
+    /// An unattestable construct (substitution, etc.) — the hook defers, no rewrite.
+    Defer,
+}
+
+impl HookOutcome {
+    /// Whether this outcome means the command was actually routed through RTK.
+    pub fn is_covered(self) -> bool {
+        matches!(self, HookOutcome::Allow | HookOutcome::Ask)
+    }
+
+    /// The `'static` string this variant serializes to in the `hook_decisions`
+    /// table. Exists so `record_hook_decision` can bind it directly as a param
+    /// (rusqlite accepts `&str`) instead of heap-allocating via `.to_string()` on
+    /// every single hook invocation for what's always one of four literals.
+    fn as_str(self) -> &'static str {
+        match self {
+            HookOutcome::Allow => "allow",
+            HookOutcome::Ask => "ask",
+            HookOutcome::Deny => "deny",
+            HookOutcome::Defer => "defer",
+        }
+    }
+}
+
+impl std::fmt::Display for HookOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for HookOutcome {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "allow" => Ok(HookOutcome::Allow),
+            "ask" => Ok(HookOutcome::Ask),
+            "deny" => Ok(HookOutcome::Deny),
+            "defer" => Ok(HookOutcome::Defer),
+            _ => Err(()),
+        }
+    }
+}
+
+/// A single PreToolUse hook decision, logged at the moment the hook actually ran.
+///
+/// Keyed by `tool_use_id` so it can be joined 1:1 against the same id Claude Code
+/// stores on the transcript's `tool_use`/`tool_result` blocks — giving `rtk discover`
+/// ground truth about historical hook coverage instead of re-deriving a guess from
+/// today's hook-install state and registry.
+///
+/// Only carries what `discover` actually consumes (the decision). The
+/// `hook_decisions` table itself also stores `timestamp`/`raw_cmd`/`rewritten_cmd`/
+/// `rtk_version` for direct inspection (`sqlite3 tracking.db`), but nothing in Rust
+/// reads those back today — add fields here if/when something does.
+#[derive(Debug, Clone, Copy)]
+pub struct HookDecisionRecord {
+    pub decision: HookOutcome,
 }
 
 /// Aggregated statistics across all recorded commands.
@@ -223,6 +298,152 @@ pub struct MonthStats {
 /// Type alias for command statistics tuple: (command, count, saved_tokens, avg_savings_pct, avg_time_ms)
 type CommandStats = (String, usize, usize, f64, u64);
 
+/// Current tracking-DB schema version, stored in the SQLite `user_version` pragma.
+///
+/// `Tracker::new()` is on the hot path (every `rtk <cmd>` invocation and every
+/// PreToolUse hook call), so schema creation/migration must not re-run on every
+/// call. Bump this whenever `run_schema_migrations` gains a new statement; a stale
+/// `user_version` triggers exactly one re-run of the full migration sequence, then
+/// the pragma is updated so subsequent opens skip straight past it.
+const SCHEMA_VERSION: i64 = 1;
+
+/// Create all tables/indexes, run column migrations, and stamp `user_version` to
+/// `SCHEMA_VERSION` for the on-disk tracker DB.
+///
+/// Runs once per database, gated by `SCHEMA_VERSION` in `Tracker::new()` — not on
+/// every call, since this is otherwise on the hot path (every `rtk <cmd>` and every
+/// PreToolUse hook invocation).
+fn run_schema_migrations(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS commands (
+            id INTEGER PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            original_cmd TEXT NOT NULL,
+            rtk_cmd TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL,
+            output_tokens INTEGER NOT NULL,
+            saved_tokens INTEGER NOT NULL,
+            savings_pct REAL NOT NULL
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_timestamp ON commands(timestamp)",
+        [],
+    )?;
+
+    // Migration: add exec_time_ms column if it doesn't exist
+    let _ = conn.execute(
+        "ALTER TABLE commands ADD COLUMN exec_time_ms INTEGER DEFAULT 0",
+        [],
+    );
+    // Migration: add project_path column with DEFAULT '' for new rows // changed: added DEFAULT
+    let _ = conn.execute(
+        "ALTER TABLE commands ADD COLUMN project_path TEXT DEFAULT ''",
+        [],
+    );
+    // One-time migration: normalize NULLs from pre-default schema // changed: guarded with EXISTS
+    let has_nulls: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM commands WHERE project_path IS NULL)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if has_nulls {
+        let _ = conn.execute(
+            "UPDATE commands SET project_path = '' WHERE project_path IS NULL",
+            [],
+        );
+    }
+    // Index for fast project-scoped gain queries // added
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_project_path_timestamp ON commands(project_path, timestamp)",
+        [],
+    );
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS parse_failures (
+            id INTEGER PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            raw_command TEXT NOT NULL,
+            error_message TEXT NOT NULL,
+            fallback_succeeded INTEGER NOT NULL DEFAULT 0
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pf_timestamp ON parse_failures(timestamp)",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS hook_decisions (
+            id INTEGER PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            tool_use_id TEXT NOT NULL,
+            project_path TEXT DEFAULT '',
+            raw_cmd TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            rewritten_cmd TEXT,
+            rtk_version TEXT NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_hook_decisions_tool_use_id ON hook_decisions(tool_use_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_hook_decisions_timestamp ON hook_decisions(timestamp)",
+        [],
+    )?;
+
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+
+    Ok(())
+}
+
+/// Warn the user when a tracking-DB write fails because a table is missing.
+///
+/// Migrations only run once per database (gated by `SCHEMA_VERSION`/
+/// `user_version` in `Tracker::new()`), so if a table is dropped or corrupted
+/// out-of-band (manual `sqlite3` surgery, disk issue, partial restore) after
+/// `user_version` is already current, it silently stays missing forever —
+/// there's no automatic re-migration to fall back on the way there used to be
+/// when every open re-ran the full schema unconditionally. Point the user at
+/// the fix instead of failing silently.
+fn warn_if_missing_table(context: &str, err: &rusqlite::Error) {
+    if err.to_string().contains("no such table") {
+        eprintln!(
+            "rtk: tracking database looks corrupted ({context}: {err}). Run `rtk init` to recreate it."
+        );
+    }
+}
+
+/// Pure core of `Tracker::maybe_cleanup_hook_decisions`'s sampling decision.
+///
+/// Hashes `key` (the call's `tool_use_id`, always distinct per hook invocation)
+/// rather than reading the wall clock: a nanosecond-based sample (an earlier
+/// version of this used `Utc::now().timestamp_subsec_nanos() % rate`) silently
+/// breaks on any clock source whose resolution isn't fine enough to hit every
+/// residue mod `rate` — e.g. a coarse virtualized/Windows timer ticking in
+/// large, evenly-divisible steps could make the check fire on nearly 100% of
+/// calls (defeating the sampling entirely) or effectively 0% (undoing the
+/// backstop against unbounded growth), depending on the tick size, with no
+/// visible symptom short of profiling. Doesn't need to be cryptographically
+/// random, just cheap and evenly distributed across calls — `DefaultHasher`
+/// over an already-unique string avoids pulling in a `rand` dependency just for
+/// a sampling backstop.
+fn should_sample_cleanup(key: &str, rate: u32) -> bool {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish().is_multiple_of(rate as u64)
+}
+
 impl Tracker {
     /// Create a new tracker instance.
     ///
@@ -247,149 +468,21 @@ impl Tracker {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn new() -> Result<Self> {
-        let db_path = get_db_path()?;
-        if let Some(parent) = db_path.parent() {
-            crate::core::utils::create_private_dir(parent)?;
-        }
-
-        // Create the file ourselves so SQLite derives the -wal/-shm modes from
-        // an already-private DB instead of the umask.
-        crate::core::utils::open_private(
-            std::fs::OpenOptions::new().write(true).create(true),
-            &db_path,
-        )
-        .with_context(|| {
-            format!(
-                "Failed to pre-create private DB file: {}",
-                db_path.display()
-            )
-        })?;
-
-        let conn = Connection::open(&db_path)?;
-        // WAL mode + busy_timeout for concurrent access (multiple Claude Code instances).
-        // Non-fatal: NFS/read-only filesystems may not support WAL.
-        let _ = conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA busy_timeout=5000;",
-        );
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS commands (
-                id INTEGER PRIMARY KEY,
-                timestamp TEXT NOT NULL,
-                original_cmd TEXT NOT NULL,
-                rtk_cmd TEXT NOT NULL,
-                input_tokens INTEGER NOT NULL,
-                output_tokens INTEGER NOT NULL,
-                saved_tokens INTEGER NOT NULL,
-                savings_pct REAL NOT NULL
-            )",
-            [],
-        )?;
-
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_timestamp ON commands(timestamp)",
-            [],
-        )?;
-
-        // Migration: add exec_time_ms column if it doesn't exist
-        let _ = conn.execute(
-            "ALTER TABLE commands ADD COLUMN exec_time_ms INTEGER DEFAULT 0",
-            [],
-        );
-        // Migration: add project_path column with DEFAULT '' for new rows // changed: added DEFAULT
-        let _ = conn.execute(
-            "ALTER TABLE commands ADD COLUMN project_path TEXT DEFAULT ''",
-            [],
-        );
-        // One-time migration: normalize NULLs from pre-default schema // changed: guarded with EXISTS
-        let has_nulls: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM commands WHERE project_path IS NULL)",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
-        if has_nulls {
-            let _ = conn.execute(
-                "UPDATE commands SET project_path = '' WHERE project_path IS NULL",
-                [],
-            );
-        }
-        // Index for fast project-scoped gain queries // added
-        let _ = conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_project_path_timestamp ON commands(project_path, timestamp)",
-            [],
-        );
-
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS parse_failures (
-                id INTEGER PRIMARY KEY,
-                timestamp TEXT NOT NULL,
-                raw_command TEXT NOT NULL,
-                error_message TEXT NOT NULL,
-                fallback_succeeded INTEGER NOT NULL DEFAULT 0
-            )",
-            [],
-        )?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_pf_timestamp ON parse_failures(timestamp)",
-            [],
-        )?;
-
-        restrict_db_files(&db_path);
-
-        Ok(Self { conn })
+        Ok(Self {
+            conn: open_and_prepare(MigrationMode::GatedByVersion)?,
+        })
     }
 
     /// Create an isolated in-memory tracker for tests.
+    ///
+    /// Runs the same `run_schema_migrations` the real on-disk `Tracker::new()`
+    /// path uses, rather than hand-duplicating the DDL — a second copy would
+    /// silently drift from the real schema the next time `SCHEMA_VERSION` bumps.
     #[cfg(test)]
     pub fn new_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("Failed to open in-memory DB")?;
-        let tracker = Self { conn };
-        tracker.init_schema()?;
-        Ok(tracker)
-    }
-
-    #[cfg(test)]
-    fn init_schema(&self) -> Result<()> {
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS commands (
-                id INTEGER PRIMARY KEY,
-                timestamp TEXT NOT NULL,
-                original_cmd TEXT NOT NULL,
-                rtk_cmd TEXT NOT NULL,
-                input_tokens INTEGER NOT NULL,
-                output_tokens INTEGER NOT NULL,
-                saved_tokens INTEGER NOT NULL,
-                savings_pct REAL NOT NULL,
-                exec_time_ms INTEGER DEFAULT 0,
-                project_path TEXT DEFAULT ''
-            )",
-            [],
-        )?;
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_timestamp ON commands(timestamp)",
-            [],
-        )?;
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_project_path_timestamp ON commands(project_path, timestamp)",
-            [],
-        )?;
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS parse_failures (
-                id INTEGER PRIMARY KEY,
-                timestamp TEXT NOT NULL,
-                raw_command TEXT NOT NULL,
-                error_message TEXT NOT NULL,
-                fallback_succeeded INTEGER NOT NULL DEFAULT 0
-            )",
-            [],
-        )?;
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_pf_timestamp ON parse_failures(timestamp)",
-            [],
-        )?;
-        Ok(())
+        run_schema_migrations(&conn)?;
+        Ok(Self { conn })
     }
 
     /// Record a command execution with token counts and timing.
@@ -445,7 +538,8 @@ impl Tracker {
                 pct,
                 exec_time_ms as i64
             ],
-        )?;
+        )
+        .inspect_err(|e| warn_if_missing_table("record", e))?;
 
         self.cleanup_old()?;
         Ok(())
@@ -461,16 +555,21 @@ impl Tracker {
             "DELETE FROM parse_failures WHERE timestamp < ?1",
             params![cutoff.to_rfc3339()],
         )?;
+        self.conn.execute(
+            "DELETE FROM hook_decisions WHERE timestamp < ?1",
+            params![cutoff.to_rfc3339()],
+        )?;
         Ok(())
     }
 
-    /// Delete all tracked data (commands + parse_failures), resetting all stats to zero.
+    /// Delete all tracked data (commands + parse_failures + hook_decisions), resetting all stats to zero.
     pub fn reset_all(&self) -> Result<()> {
         self.conn
             .execute_batch(
                 "BEGIN;
                  DELETE FROM commands;
                  DELETE FROM parse_failures;
+                 DELETE FROM hook_decisions;
                  COMMIT;",
             )
             .context("Failed to reset tracking database")?;
@@ -493,9 +592,145 @@ impl Tracker {
                 error_message,
                 fallback_succeeded as i32,
             ],
-        )?;
+        )
+        .inspect_err(|e| warn_if_missing_table("record_parse_failure", e))?;
         self.cleanup_old()?;
         Ok(())
+    }
+
+    /// Record a PreToolUse hook decision at the moment the hook actually ran.
+    ///
+    /// Deliberately does *not* run the full `cleanup_old()` (which sweeps
+    /// `commands`/`parse_failures` too) unconditionally — this fires on every
+    /// single Bash tool call (the hook's hot path, under the project's <10ms
+    /// latency budget), so a 3-table DELETE sweep here would tax every command,
+    /// not just RTK-covered ones. Retention mostly piggybacks on whatever cadence
+    /// `record()`/`record_parse_failure()` already run cleanup at, but a user whose
+    /// commands are almost entirely `Deny`/`Defer`'d may rarely trigger either of
+    /// those, so `hook_decisions` alone still gets a `maybe_cleanup_hook_decisions`
+    /// sweep — sampled, not every call — as a backstop against unbounded growth.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_hook_decision(
+        &self,
+        session_id: &str,
+        tool_use_id: &str,
+        project_path: &str,
+        raw_cmd: &str,
+        decision: HookOutcome,
+        rewritten_cmd: Option<&str>,
+        rtk_version: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO hook_decisions (timestamp, session_id, tool_use_id, project_path, raw_cmd, decision, rewritten_cmd, rtk_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                Utc::now().to_rfc3339(),
+                session_id,
+                tool_use_id,
+                project_path,
+                raw_cmd,
+                decision.as_str(),
+                rewritten_cmd,
+                rtk_version,
+            ],
+        )
+        .inspect_err(|e| warn_if_missing_table("record_hook_decision", e))?;
+
+        // The INSERT above already committed as its own autocommit statement —
+        // whatever happens to the retention sweep must not be reported as if it
+        // were *this* write failing (a caller like `log_hook_decision` prints
+        // "hook_decisions logging failed" on `Err`, which would be a lie here:
+        // the decision genuinely was recorded and is readable by `rtk discover`).
+        // Best-effort only, same as the rest of this best-effort side channel.
+        if let Err(e) = self.maybe_cleanup_hook_decisions(tool_use_id) {
+            eprintln!("rtk: warning: hook_decisions retention sweep failed: {e}");
+        }
+        Ok(())
+    }
+
+    /// Sampled retention sweep for `hook_decisions` alone (not the full 3-table
+    /// `cleanup_old()`), run on roughly 1-in-`HOOK_DECISIONS_CLEANUP_SAMPLE_RATE`
+    /// calls to `record_hook_decision`. Bounds the table's growth for a user whose
+    /// commands are mostly `Deny`/`Defer`'d — and so rarely trigger `record()`'s or
+    /// `record_parse_failure()`'s own cleanup — without paying a DELETE on every
+    /// single hook invocation.
+    fn maybe_cleanup_hook_decisions(&self, tool_use_id: &str) -> Result<()> {
+        const HOOK_DECISIONS_CLEANUP_SAMPLE_RATE: u32 = 500;
+        if !should_sample_cleanup(tool_use_id, HOOK_DECISIONS_CLEANUP_SAMPLE_RATE) {
+            return Ok(());
+        }
+        self.cleanup_hook_decisions()
+    }
+
+    /// The actual `hook_decisions` DELETE sweep, split out from
+    /// `maybe_cleanup_hook_decisions` so it's directly callable (bypassing the
+    /// sampling gate) from tests without needing to hit the 1-in-N chance for real.
+    fn cleanup_hook_decisions(&self) -> Result<()> {
+        let cutoff = Utc::now() - chrono::Duration::days(DEFAULT_HISTORY_DAYS);
+        self.conn.execute(
+            "DELETE FROM hook_decisions WHERE timestamp < ?1",
+            params![cutoff.to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Bulk-fetch every hook decision at or after `cutoff`, keyed by `tool_use_id`.
+    ///
+    /// Meant to be called once per `rtk discover` run (mirroring the existing
+    /// single `Config::load()`/`hook_status()` snapshot pattern), so per-command
+    /// lookups during the scan loop are in-memory instead of one query each.
+    pub fn hook_decisions_since(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> Result<HashMap<String, HookDecisionRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT tool_use_id, decision
+             FROM hook_decisions
+             WHERE timestamp >= ?1",
+        )?;
+        let rows = stmt.query_map(params![cutoff.to_rfc3339()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        // Single pass: insert directly instead of collecting into an intermediate
+        // Vec first and looping over that separately — this scales with
+        // hook_decisions table size and runs once per `rtk discover` invocation.
+        let mut out = HashMap::new();
+        for row in rows {
+            let (tool_use_id, decision) = row?;
+            // Skip rows with an unrecognized decision string (e.g. written by a
+            // future rtk version with a decision this build doesn't know) rather
+            // than failing the whole query — `discover` just falls back to its
+            // estimate heuristic for that command.
+            if let Ok(decision) = decision.parse::<HookOutcome>() {
+                out.insert(tool_use_id, HookDecisionRecord { decision });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Earliest timestamp among *currently-retained* hook decision rows, if any
+    /// exist. NOT the date logging first began: `hook_decisions` is pruned by the
+    /// same `DEFAULT_HISTORY_DAYS` window as the rest of the tracking DB (see
+    /// `cleanup_hook_decisions`), so this rolls forward over time — on a
+    /// long-running install it settles at roughly "now minus `DEFAULT_HISTORY_DAYS`",
+    /// not the true install date.
+    ///
+    /// Used to tell `rtk discover` where the "measured" window currently starts —
+    /// any scan range before this point falls back to the estimate-based heuristic,
+    /// permanently (not just transitionally), since retention keeps pruning the
+    /// tail as new rows come in.
+    pub fn earliest_hook_decision_timestamp(&self) -> Result<Option<DateTime<Utc>>> {
+        let ts: Option<String> =
+            self.conn
+                .query_row("SELECT MIN(timestamp) FROM hook_decisions", [], |row| {
+                    row.get(0)
+                })?;
+        Ok(ts.and_then(|t| {
+            DateTime::parse_from_rfc3339(&t)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+        }))
     }
 
     /// Get parse failure summary for `rtk gain --failures`.
@@ -1218,13 +1453,14 @@ fn categorize_command(rtk_cmd: &str) -> String {
     match tool {
         "git" | "gh" | "gt" => "git",
         "cargo" => "cargo",
-        "npm" | "npx" | "pnpm" | "vitest" | "tsc" | "lint" | "prettier" | "next" | "playwright"
-        | "prisma" => "js",
+        "npm" | "npx" | "pnpm" | "bun" | "bunx" | "deno" | "vitest" | "tsc" | "lint"
+        | "prettier" | "next" | "playwright" | "prisma" => "js",
         "pytest" | "ruff" | "mypy" | "pip" => "python",
         "go" | "golangci-lint" => "go",
         "docker" | "kubectl" => "cloud",
         "rspec" | "rubocop" | "rake" => "ruby",
         "dotnet" => "dotnet",
+        "ctest" => "cpp",
         "ls" | "tree" | "grep" | "find" | "wc" | "read" | "env" | "json" | "log" | "smart"
         | "diff" | "deps" | "summary" | "format" => "system",
         _ => "other",
@@ -1259,16 +1495,117 @@ pub(crate) fn get_db_path() -> Result<PathBuf> {
         return Ok(PathBuf::from(custom_path));
     }
 
-    // Priority 2: Configuration file
-    if let Ok(config) = crate::core::config::Config::load() {
-        if let Some(db_path) = config.tracking.database_path {
-            return Ok(db_path);
-        }
+    // Priority 2: Configuration file. Reads the process-wide cached config (see
+    // `config::cached_config`), not a fresh `Config::load()`: this runs inside
+    // `Tracker::new()`, which `log_hook_decision` now calls on every single
+    // PreToolUse hook invocation — `hook_rewrite_params()` (called earlier in the
+    // same hook invocation, via `get_rewritten`) already reads config too, so
+    // without caching that's two full disk-read-plus-TOML-parse round trips per
+    // Bash tool call instead of one.
+    if let Some(db_path) = crate::core::config::cached_config()
+        .tracking
+        .database_path
+        .clone()
+    {
+        return Ok(db_path);
     }
 
     // Priority 3: Default platform-specific location
     let data_dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
     Ok(data_dir.join(RTK_DATA_DIR).join(HISTORY_DB))
+}
+
+/// Whether to gate schema migrations behind `user_version` (the hot-path
+/// default) or always re-run them (used by `rtk init`, which isn't a hot path
+/// and wants to self-heal a dropped/corrupted table — see `ensure_schema_fresh`).
+enum MigrationMode {
+    GatedByVersion,
+    Always,
+}
+
+/// Open (creating if needed) the tracking DB, apply pragmas, and run schema
+/// migrations per `mode`. Shared by `Tracker::new()` (hot path, gated) and
+/// `ensure_schema_fresh` (`rtk init`, unconditional).
+fn open_and_prepare(mode: MigrationMode) -> Result<Connection> {
+    let db_path = get_db_path()?;
+
+    // `create_private_dir` is cheap even when the directory already exists (its own
+    // chmod is a no-op past the first call — see `utils::set_owner_only`), so it
+    // stays unconditional.
+    //
+    // For a brand-new DB, pre-create the file ourselves via `open_private` so
+    // SQLite derives the -wal/-shm modes from an already-private DB instead of the
+    // umask. For an already-existing DB, skip that pre-create's own redundant
+    // open()/close() pair (a second file open on top of the `Connection::open`
+    // right after it) — but still re-chmod the file *before* `Connection::open`
+    // via the now-cheap `restrict_file` (a no-op stat once permissions already
+    // match), rather than only healing it via `restrict_db_files` at the very
+    // end. Skipping the pre-open heal entirely would let `Connection::open` and
+    // any migration writes touch a file whose permissions had drifted (external
+    // tampering, restored backup) before anything corrected them — the same
+    // "chmod before SQLite ever opens it" invariant the original pre-create dance
+    // provided, just without paying its extra open. `Tracker::new()` is on the
+    // hot path for every `rtk <cmd>` and, since rtk-ai/rtk#3206's hook_decisions
+    // ground-truth logging, every single PreToolUse hook call (not just
+    // RTK-covered ones), so avoiding that redundant open on the already-set-up
+    // common case matters for the <10ms budget.
+    if let Some(parent) = db_path.parent() {
+        crate::core::utils::create_private_dir(parent)?;
+    }
+    if db_path.exists() {
+        crate::core::utils::restrict_file(&db_path);
+    } else {
+        crate::core::utils::open_private(
+            std::fs::OpenOptions::new().write(true).create(true),
+            &db_path,
+        )
+        .with_context(|| {
+            format!(
+                "Failed to pre-create private DB file: {}",
+                db_path.display()
+            )
+        })?;
+    }
+
+    let conn = Connection::open(&db_path)?;
+    // WAL mode + busy_timeout for concurrent access (multiple Claude Code instances).
+    // Non-fatal: NFS/read-only filesystems may not support WAL. Cheap on every
+    // open (WAL mode persists in the DB file; busy_timeout is a per-connection
+    // in-memory setting), so these stay unconditional.
+    let _ = conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA busy_timeout=5000;",
+    );
+
+    match mode {
+        MigrationMode::Always => run_schema_migrations(&conn)?,
+        MigrationMode::GatedByVersion => {
+            // Schema creation/migration is comparatively expensive (several CREATE
+            // TABLE/INDEX/ALTER statements plus a table scan) and `Tracker::new()` is
+            // called on every `rtk <cmd>` invocation and every PreToolUse hook call, so
+            // gate it behind a single cheap `user_version` read instead of re-running it
+            // every time.
+            let current_version: i64 =
+                conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            if current_version < SCHEMA_VERSION {
+                run_schema_migrations(&conn)?;
+            }
+        }
+    }
+
+    restrict_db_files(&db_path);
+
+    Ok(conn)
+}
+
+/// Unconditionally re-run schema migrations, bypassing the `user_version` gate
+/// `Tracker::new()` uses on its hot path. Meant to be called from `rtk init`
+/// (not a hot path): this both pre-warms the schema during install/upgrade and
+/// self-heals a table dropped/corrupted out-of-band after `user_version` was
+/// already stamped current (see `warn_if_missing_table`) — `CREATE TABLE IF NOT
+/// EXISTS`/`ALTER TABLE` are additive, so existing history is left untouched.
+pub fn ensure_schema_fresh() -> Result<()> {
+    open_and_prepare(MigrationMode::Always).map(|_| ())
 }
 
 /// Individual parse failure record.
@@ -1458,6 +1795,14 @@ pub fn args_display(args: &[OsString]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes tests that mutate the process-global `RTK_DB_PATH` env var.
+    /// Must be a single shared static: a `static` declared inside each test
+    /// function body is a distinct static per function, not a shared lock, so
+    /// tests using separate locals don't actually serialize against each other
+    /// and can race on the same global env var under parallel `cargo test`.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
@@ -1483,13 +1828,15 @@ mod tests {
     // 3. Tracker::record + get_recent — round-trip DB
     #[test]
     fn test_tracker_record_and_recent() {
-        let tracker = Tracker::new().expect("Failed to create tracker");
+        // In-memory: isolated per-test DB, immune to the shared on-disk DB's
+        // cross-test races under parallel `cargo test` (see get_recent(N) racing
+        // against concurrent inserts from other tests hitting the same file).
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
 
-        // Use unique test identifier to avoid conflicts with other tests
-        let test_cmd = format!("rtk git status test_{}", std::process::id());
+        let test_cmd = "rtk git status test";
 
         tracker
-            .record("git status", &test_cmd, 100, 20, 50)
+            .record("git status", test_cmd, 100, 20, 50)
             .expect("Failed to record");
 
         let recent = tracker.get_recent(10).expect("Failed to get recent");
@@ -1507,21 +1854,20 @@ mod tests {
     // 4. track_passthrough doesn't dilute stats (input=0, output=0)
     #[test]
     fn test_track_passthrough_no_dilution() {
-        let tracker = Tracker::new().expect("Failed to create tracker");
+        // In-memory: isolated per-test DB, see test_tracker_record_and_recent.
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
 
-        // Use unique test identifiers
-        let pid = std::process::id();
-        let cmd1 = format!("rtk cmd1_test_{}", pid);
-        let cmd2 = format!("rtk cmd2_passthrough_test_{}", pid);
+        let cmd1 = "rtk cmd1_test";
+        let cmd2 = "rtk cmd2_passthrough_test";
 
         // Record one real command with 80% savings
         tracker
-            .record("cmd1", &cmd1, 1000, 200, 10)
+            .record("cmd1", cmd1, 1000, 200, 10)
             .expect("Failed to record cmd1");
 
         // Record passthrough (0, 0)
         tracker
-            .record("cmd2", &cmd2, 0, 0, 5)
+            .record("cmd2", cmd2, 0, 0, 5)
             .expect("Failed to record passthrough");
 
         // Verify both records exist in recent history
@@ -1549,8 +1895,25 @@ mod tests {
     }
 
     // 5. TimedExecution::track records with exec_time > 0
+    //
+    // TimedExecution::track() hardcodes Tracker::new() internally (real
+    // on-disk DB via get_db_path()), so it can't take an in-memory tracker
+    // like the tests above. Point RTK_DB_PATH at a private temp file instead —
+    // otherwise get_recent(5) races against every other test concurrently
+    // inserting into the same shared default DB and can miss this test's own
+    // record once 5+ other rows land first.
     #[test]
     fn test_timed_execution_records_time() {
+        use std::env;
+        let _guard = ENV_LOCK.lock().unwrap();
+        let db_path = env::temp_dir().join(format!(
+            "rtk_test_timed_exec_records_{}.db",
+            std::process::id()
+        ));
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
+        env::set_var("RTK_DB_PATH", &db_path);
+
         let timer = TimedExecution::start();
         std::thread::sleep(std::time::Duration::from_millis(10));
         timer.track("test cmd", "rtk test", "raw input data", "filtered");
@@ -1559,11 +1922,27 @@ mod tests {
         let tracker = Tracker::new().expect("Failed to create tracker");
         let recent = tracker.get_recent(5).expect("Failed to get recent");
         assert!(recent.iter().any(|r| r.rtk_cmd == "rtk test"));
+
+        drop(tracker);
+        env::remove_var("RTK_DB_PATH");
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
     }
 
     // 6. TimedExecution::track_passthrough records with 0 tokens
+    // Same isolation rationale as test_timed_execution_records_time above.
     #[test]
     fn test_timed_execution_passthrough() {
+        use std::env;
+        let _guard = ENV_LOCK.lock().unwrap();
+        let db_path = env::temp_dir().join(format!(
+            "rtk_test_timed_exec_passthrough_{}.db",
+            std::process::id()
+        ));
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
+        env::set_var("RTK_DB_PATH", &db_path);
+
         let timer = TimedExecution::start();
         timer.track_passthrough("git tag", "rtk git tag (passthrough)");
 
@@ -1578,6 +1957,11 @@ mod tests {
         // savings_pct should be 0 for passthrough
         assert_eq!(pt.savings_pct, 0.0);
         assert_eq!(pt.saved_tokens, 0);
+
+        drop(tracker);
+        env::remove_var("RTK_DB_PATH");
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
     }
 
     // 7. get_db_path respects environment variable RTK_DB_PATH
@@ -1586,8 +1970,6 @@ mod tests {
     #[test]
     fn test_db_path_env_and_default() {
         use std::env;
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap();
 
         let custom_path = env::temp_dir().join("rtk_test_custom.db");
@@ -1602,6 +1984,89 @@ mod tests {
             "expected default path ending with rtk/history.db, got: {}",
             db_path.display()
         );
+    }
+
+    // 8b. Tracker::new() gates schema migration behind PRAGMA user_version, so a
+    // fresh DB gets stamped to SCHEMA_VERSION and a second open on the same file
+    // still works (and doesn't re-run/fail the migration).
+    #[test]
+    fn test_schema_migration_gated_by_user_version() {
+        use std::env;
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let db_path =
+            env::temp_dir().join(format!("rtk_test_schema_version_{}.db", std::process::id()));
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
+        env::set_var("RTK_DB_PATH", &db_path);
+
+        let tracker = Tracker::new().expect("first open should run migrations");
+        let version: i64 = tracker
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("user_version should be readable");
+        assert_eq!(version, SCHEMA_VERSION);
+        drop(tracker);
+
+        // Second open on the same file must skip migrations without erroring, and
+        // the DB must still be fully usable (tables from the first open persist).
+        let tracker2 = Tracker::new().expect("second open should skip migrations cleanly");
+        tracker2
+            .record("git status", "rtk git status", 100, 20, 50)
+            .expect("commands table should already exist and accept writes");
+
+        env::remove_var("RTK_DB_PATH");
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    // 8c. Re-running run_schema_migrations() unconditionally (what
+    // ensure_schema_fresh()/MigrationMode::Always does, vs. Tracker::new()'s
+    // gated hot path) recreates a table dropped out-of-band, even though
+    // user_version is already at SCHEMA_VERSION. This is the self-heal `rtk
+    // init` relies on instead of a dedicated repair flag.
+    //
+    // Exercises the migration function directly on its own throwaway on-disk
+    // connection rather than going through ensure_schema_fresh()/Tracker::new()
+    // (which read the process-global RTK_DB_PATH env var): this test doesn't
+    // need the ENV_LOCK serialization those need, and — critically — never
+    // leaves the *shared default* tracking DB in a dropped-table state where
+    // an unrelated, concurrently-running test that opens Tracker::new()
+    // without its own RTK_DB_PATH override could observe it.
+    #[test]
+    fn test_run_schema_migrations_heals_dropped_table_when_forced() {
+        let db_path = std::env::temp_dir().join(format!(
+            "rtk_test_heal_migrations_{}.db",
+            std::process::id()
+        ));
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
+        let conn = Connection::open(&db_path).expect("open should succeed");
+
+        run_schema_migrations(&conn).expect("first migration run should succeed");
+        conn.execute("DROP TABLE hook_decisions", [])
+            .expect("drop should succeed");
+        assert!(
+            conn.execute(
+                "INSERT INTO hook_decisions (timestamp, session_id, tool_use_id, raw_cmd, decision, rtk_version) VALUES ('t','s','u','c','allow','0')",
+                [],
+            )
+            .is_err(),
+            "table should genuinely be gone after DROP"
+        );
+
+        // Forced re-run (what ensure_schema_fresh does) recreates it, even
+        // though user_version is already stamped to SCHEMA_VERSION.
+        run_schema_migrations(&conn).expect("forced re-run should recreate the dropped table");
+        conn.execute(
+            "INSERT INTO hook_decisions (timestamp, session_id, tool_use_id, raw_cmd, decision, rtk_version) VALUES ('t','s','u','c','allow','0')",
+            [],
+        )
+        .expect("hook_decisions table should exist and accept writes again");
+
+        drop(conn);
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
     }
 
     // 9. project_filter_params uses GLOB pattern with * wildcard // added
@@ -1645,11 +2110,12 @@ mod tests {
     // 12. record_parse_failure + get_parse_failure_summary roundtrip
     #[test]
     fn test_parse_failure_roundtrip() {
-        let tracker = Tracker::new().expect("Failed to create tracker");
-        let test_cmd = format!("git -C /path status test_{}", std::process::id());
+        // In-memory: isolated per-test DB, see test_tracker_record_and_recent.
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        let test_cmd = "git -C /path status test";
 
         tracker
-            .record_parse_failure(&test_cmd, "unrecognized subcommand", true)
+            .record_parse_failure(test_cmd, "unrecognized subcommand", true)
             .expect("Failed to record parse failure");
 
         let summary = tracker
@@ -1663,24 +2129,23 @@ mod tests {
     // 13. recovery_rate calculation
     #[test]
     fn test_parse_failure_recovery_rate() {
-        let tracker = Tracker::new().expect("Failed to create tracker");
-        let pid = std::process::id();
+        // In-memory: isolated per-test DB, see test_tracker_record_and_recent.
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
 
         // 2 successes, 1 failure
         tracker
-            .record_parse_failure(&format!("cmd_ok1_{}", pid), "err", true)
+            .record_parse_failure("cmd_ok1", "err", true)
             .unwrap();
         tracker
-            .record_parse_failure(&format!("cmd_ok2_{}", pid), "err", true)
+            .record_parse_failure("cmd_ok2", "err", true)
             .unwrap();
         tracker
-            .record_parse_failure(&format!("cmd_fail_{}", pid), "err", false)
+            .record_parse_failure("cmd_fail", "err", false)
             .unwrap();
 
         let summary = tracker.get_parse_failure_summary().unwrap();
-        // We can't assert exact rate because other tests may have added records,
-        // but we can verify recovery_rate is between 0 and 100
-        assert!(summary.recovery_rate >= 0.0 && summary.recovery_rate <= 100.0);
+        // Isolated DB, so the rate is now exact: 2/3 successes ≈ 66.7%.
+        assert!((summary.recovery_rate - 66.7).abs() < 0.1);
     }
 
     #[test]
@@ -1755,6 +2220,207 @@ mod tests {
         for p in [&db, &wal, &shm] {
             let mode = std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "expected 0600 on {}", p.display());
+        }
+    }
+
+    // rtk-ai/rtk#3148: ground-truth hook-decision logging, so `discover` can join
+    // real hook outcomes back to transcript entries by `tool_use_id` instead of
+    // re-deriving a guess from today's hook/config state.
+    #[test]
+    fn test_record_and_lookup_hook_decision_by_tool_use_id() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+
+        tracker
+            .record_hook_decision(
+                "session-1",
+                "toolu_abc123",
+                "/home/user/project",
+                "git status",
+                HookOutcome::Allow,
+                Some("rtk git status"),
+                "0.42.4",
+            )
+            .expect("Failed to record hook decision");
+
+        let cutoff = Utc::now() - chrono::Duration::days(1);
+        let log = tracker
+            .hook_decisions_since(cutoff)
+            .expect("Failed to query hook decisions");
+
+        let record = log
+            .get("toolu_abc123")
+            .expect("record not found by tool_use_id");
+        assert_eq!(record.decision, HookOutcome::Allow);
+
+        // The other columns aren't exposed on HookDecisionRecord (nothing in Rust
+        // reads them back yet), but they must still be persisted correctly for
+        // direct DB inspection.
+        let (raw_cmd, rewritten_cmd, rtk_version): (String, Option<String>, String) = tracker
+            .conn
+            .query_row(
+                "SELECT raw_cmd, rewritten_cmd, rtk_version FROM hook_decisions WHERE tool_use_id = ?1",
+                params!["toolu_abc123"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("row not found");
+        assert_eq!(raw_cmd, "git status");
+        assert_eq!(rewritten_cmd.as_deref(), Some("rtk git status"));
+        assert_eq!(rtk_version, "0.42.4");
+    }
+
+    #[test]
+    fn test_hook_decisions_since_excludes_older_rows() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+
+        tracker
+            .record_hook_decision(
+                "session-1",
+                "toolu_old",
+                "",
+                "git status",
+                HookOutcome::Deny,
+                None,
+                "0.42.4",
+            )
+            .expect("Failed to record hook decision");
+
+        // Cutoff in the future — the row above should not appear.
+        let cutoff = Utc::now() + chrono::Duration::days(1);
+        let log = tracker
+            .hook_decisions_since(cutoff)
+            .expect("Failed to query hook decisions");
+
+        assert!(!log.contains_key("toolu_old"));
+    }
+
+    #[test]
+    fn test_earliest_hook_decision_timestamp() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+
+        assert!(tracker
+            .earliest_hook_decision_timestamp()
+            .expect("query failed")
+            .is_none());
+
+        tracker
+            .record_hook_decision(
+                "s",
+                "toolu_1",
+                "",
+                "ls",
+                HookOutcome::Allow,
+                Some("rtk ls"),
+                "0.42.4",
+            )
+            .expect("Failed to record hook decision");
+
+        assert!(tracker
+            .earliest_hook_decision_timestamp()
+            .expect("query failed")
+            .is_some());
+    }
+
+    #[test]
+    fn test_reset_all_clears_hook_decisions() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+
+        tracker
+            .record_hook_decision(
+                "s",
+                "toolu_1",
+                "",
+                "ls",
+                HookOutcome::Allow,
+                Some("rtk ls"),
+                "0.42.4",
+            )
+            .expect("Failed to record hook decision");
+
+        tracker.reset_all().expect("Failed to reset");
+
+        assert!(tracker
+            .earliest_hook_decision_timestamp()
+            .expect("query failed")
+            .is_none());
+    }
+
+    // rtk-ai/rtk#3206 review: hook_decisions grows unbounded for a user whose
+    // commands are mostly Deny/Defer'd, since record_hook_decision deliberately
+    // skips the full cleanup_old() sweep and those decisions rarely trigger
+    // record()/record_parse_failure()'s own cleanup. maybe_cleanup_hook_decisions
+    // is a sampled backstop against that.
+
+    #[test]
+    fn test_should_sample_cleanup_pure() {
+        // Deterministic for a given key (same tool_use_id always samples the same
+        // way), and observably not "always true"/"always false" across a spread of
+        // distinct keys — the actual hit rate isn't asserted (that would pin the
+        // hash implementation), just that it's a real subset.
+        let sampled: Vec<bool> = (0..2000)
+            .map(|i| should_sample_cleanup(&format!("toolu_{i}"), 500))
+            .collect();
+        assert!(sampled.iter().any(|&s| s), "some keys should sample");
+        assert!(sampled.iter().any(|&s| !s), "most keys should not sample");
+
+        // Same key, same rate → same decision every time.
+        let a = should_sample_cleanup("toolu_stable", 500);
+        let b = should_sample_cleanup("toolu_stable", 500);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_cleanup_hook_decisions_deletes_only_stale_rows() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+
+        // Recent row, via the real API.
+        tracker
+            .record_hook_decision(
+                "s",
+                "toolu_recent",
+                "",
+                "ls",
+                HookOutcome::Allow,
+                Some("rtk ls"),
+                "0.42.4",
+            )
+            .expect("Failed to record hook decision");
+
+        // Stale row, inserted directly: record_hook_decision always stamps
+        // Utc::now(), so there's no other way to get an old row into the table.
+        let stale_ts = (Utc::now() - chrono::Duration::days(DEFAULT_HISTORY_DAYS + 1)).to_rfc3339();
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO hook_decisions (timestamp, session_id, tool_use_id, project_path, raw_cmd, decision, rewritten_cmd, rtk_version)
+                 VALUES (?1, 's', 'toolu_stale', '', 'ls', 'allow', 'rtk ls', '0.42.4')",
+                params![stale_ts],
+            )
+            .expect("Failed to insert stale row");
+
+        // Call the sweep directly, bypassing maybe_cleanup_hook_decisions' sampling
+        // gate — this test isn't exercising the sampling decision, just the DELETE.
+        tracker
+            .cleanup_hook_decisions()
+            .expect("cleanup should succeed");
+
+        let far_past = DateTime::<Utc>::MIN_UTC;
+        let all = tracker
+            .hook_decisions_since(far_past)
+            .expect("query failed");
+        assert!(
+            all.contains_key("toolu_recent"),
+            "recent row should survive cleanup"
+        );
+        assert!(
+            !all.contains_key("toolu_stale"),
+            "stale row should be deleted by cleanup"
+        );
+    }
+
+    #[test]
+    fn test_categorize_bun_and_deno_as_js() {
+        for cmd in ["rtk bun install", "rtk bunx cowsay", "rtk deno test"] {
+            assert_eq!(categorize_command(cmd), "js", "{cmd}");
         }
     }
 }

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::borrow::Cow;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -6,8 +7,9 @@ use std::sync::mpsc;
 #[cfg(test)]
 use regex::Regex;
 
-/// Read `reader` line by line, decoding each line lossily (invalid UTF-8
-/// bytes become U+FFFD) instead of erroring.
+/// Read `reader` line by line, decoding each line through the console code
+/// page and falling back to lossy UTF-8 (invalid bytes become U+FFFD) instead
+/// of erroring.
 ///
 /// `BufRead::lines()` returns `Err` for a non-UTF-8 line, and callers
 /// commonly chain `.map_while(Result::ok)` to skip bad lines — but
@@ -16,6 +18,11 @@ use regex::Regex;
 /// every line after it too, not just the bad one. This reads raw bytes and
 /// never fails on the source encoding, so a garbled line still surfaces
 /// instead of vanishing along with everything downstream of it.
+///
+/// The OEM/ANSI lines this guards against are exactly what
+/// [`decode_process_output`](super::utils::decode_process_output) exists to
+/// read, so the streamed path decodes them the same way the captured path
+/// does rather than going straight to U+FFFD.
 fn read_lines_lossy(reader: impl Read) -> impl Iterator<Item = String> {
     BufReader::new(reader).split(b'\n').filter_map(|res| {
         let mut buf = match res {
@@ -28,7 +35,7 @@ fn read_lines_lossy(reader: impl Read) -> impl Iterator<Item = String> {
         if buf.last() == Some(&b'\r') {
             buf.pop();
         }
-        Some(String::from_utf8_lossy(&buf).into_owned())
+        Some(super::utils::decode_process_output(&buf))
     })
 }
 
@@ -41,6 +48,12 @@ pub trait StreamFilter {
 }
 
 pub trait BlockHandler {
+    /// Rewrite a raw line before it is matched or emitted — the place to
+    /// strip ANSI escapes for tools that colour by default. Identity unless
+    /// a handler opts in, so the rest of the pipeline sees raw bytes.
+    fn normalize_line<'a>(&self, line: &'a str) -> Cow<'a, str> {
+        Cow::Borrowed(line)
+    }
     fn should_skip(&mut self, line: &str) -> bool;
     fn is_block_start(&mut self, line: &str) -> bool;
     fn is_block_continuation(&mut self, line: &str, block: &[String]) -> bool;
@@ -77,6 +90,8 @@ impl<H: BlockHandler> BlockStreamFilter<H> {
 
 impl<H: BlockHandler> StreamFilter for BlockStreamFilter<H> {
     fn feed_line(&mut self, line: &str) -> Option<String> {
+        let line = self.handler.normalize_line(line);
+        let line = line.as_ref();
         if self.handler.should_skip(line) {
             return None;
         }
@@ -556,22 +571,30 @@ impl CaptureResult {
 
 pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
     cmd.stdin(Stdio::null());
-    let output = cmd.output().context("Failed to execute command")?;
-    Ok(CaptureResult {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        exit_code: status_to_exit_code(output.status),
-    })
+    capture(cmd)
 }
 
 /// Like [`exec_capture`] but inherits stdin so a wrapped engine can read a piped stdin.
 pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
     cmd.stdin(Stdio::inherit());
+    capture(cmd)
+}
+
+/// Run `cmd` to completion, decode what it wrote, and report the exit code.
+///
+/// A process killed by a signal has no exit code of its own, and returning
+/// only the synthesized `128 + signal` hides why it died. `exit_code_from_output`
+/// announces that on stderr, so callers moving here from a hand-rolled
+/// `.output()` keep the diagnostic instead of losing it. The program name is
+/// used as the label so no call site has to pass one.
+fn capture(cmd: &mut Command) -> Result<CaptureResult> {
+    let program = cmd.get_program().to_string_lossy().into_owned();
     let output = cmd.output().context("Failed to execute command")?;
+    let exit_code = super::utils::exit_code_from_output(&output, &program);
     Ok(CaptureResult {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        exit_code: status_to_exit_code(output.status),
+        stdout: super::utils::decode_process_output(&output.stdout),
+        stderr: super::utils::decode_process_output(&output.stderr),
+        exit_code,
     })
 }
 
@@ -690,6 +713,26 @@ pub(crate) mod tests {
         child.kill().unwrap();
         let status = child.wait().unwrap();
         assert_eq!(status_to_exit_code(status), 137);
+    }
+
+    #[test]
+    fn test_exec_capture_decodes_and_reports_exit_code() {
+        let captured = exec_capture(&mut Command::new("false")).expect("spawn");
+        assert_eq!(captured.exit_code, 1);
+        assert!(!captured.success());
+    }
+
+    /// A signal-killed child keeps the `128 + signal` code that
+    /// `exit_code_from_output` reports, so callers that moved off a hand-rolled
+    /// `.output()` neither lose the code nor the stderr diagnostic with it.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_capture_reports_signal_exit_code() {
+        // `kill -TERM $$` makes the shell terminate itself by signal 15.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("kill -TERM $$");
+        let captured = exec_capture(&mut cmd).expect("spawn");
+        assert_eq!(captured.exit_code, 128 + 15);
     }
 
     #[test]
@@ -958,6 +1001,34 @@ pub(crate) mod tests {
             output.push_str(&post);
         }
         output
+    }
+
+    struct UpperHandler;
+
+    impl BlockHandler for UpperHandler {
+        fn normalize_line<'a>(&self, line: &'a str) -> Cow<'a, str> {
+            Cow::Owned(line.to_uppercase())
+        }
+        fn should_skip(&mut self, _line: &str) -> bool {
+            false
+        }
+        fn is_block_start(&mut self, line: &str) -> bool {
+            line.starts_with("ERR")
+        }
+        fn is_block_continuation(&mut self, line: &str, _block: &[String]) -> bool {
+            line.starts_with("  ")
+        }
+        fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+            None
+        }
+    }
+
+    #[test]
+    fn block_handler_normalize_line_feeds_matching_and_emission() {
+        // Both the match and the emitted block see the normalized line.
+        let mut f = BlockStreamFilter::new(UpperHandler);
+        let out = run_block_filter(&mut f, "err: one\n  detail\nnoise\n", 0);
+        assert_eq!(out, "ERR: ONE\n  DETAIL\n");
     }
 
     struct TestHandler;

@@ -6,6 +6,7 @@
 //! - Command execution with error context
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde_json::Value;
 use std::fs;
@@ -13,6 +14,25 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::LazyLock;
 use std::sync::OnceLock;
+
+/// Compute `days` ago from now, clamped instead of panicking on overflow.
+///
+/// `days` is typically user-supplied (`--since <days>`) and unbounded. Naively
+/// building `chrono::Duration::days(days as i64)` and subtracting it from
+/// `Utc::now()` panics for a large enough value ("DateTime - TimeDelta
+/// overflowed") — this happened identically in `rtk discover --since` and `rtk
+/// hook audit --since` before both were routed through this helper. `days` is
+/// capped to `i64::MAX` before the `as i64` cast (a `u64` past `i64::MAX` would
+/// otherwise reinterpret as negative, turning "look back" into "look forward"),
+/// and any remaining overflow building or applying the `Duration` falls back to
+/// `DateTime::<Utc>::MIN_UTC` — an arbitrarily distant cutoff means "no lower
+/// bound", which is exactly what an absurdly large `--since` should behave like.
+pub fn days_ago_cutoff(days: u64) -> DateTime<Utc> {
+    let days = days.min(i64::MAX as u64) as i64;
+    chrono::Duration::try_days(days)
+        .and_then(|d| Utc::now().checked_sub_signed(d))
+        .unwrap_or(DateTime::<Utc>::MIN_UTC)
+}
 
 /// Truncates a string to `max_len` characters, appending `...` if needed.
 ///
@@ -54,6 +74,25 @@ pub fn strip_ansi(text: &str) -> String {
         LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap());
 
     ANSI_RE.replace_all(text, "").to_string()
+}
+
+/// Strip one or more leading UTF-8 BOMs (`EF BB BF`, sometimes doubled),
+/// which serde_json refuses to parse. Windows editors (Notepad, PowerShell
+/// 5.1 `Out-File -Encoding utf8`) prepend one to hand-edited config files,
+/// and Cursor on Windows ships hook payloads with them. Strip defensively
+/// wherever RTK parses JSON a human or another tool may have written.
+pub fn strip_leading_bom(input: &str) -> &str {
+    let mut s = input;
+    while let Some(rest) = s.strip_prefix('\u{feff}') {
+        s = rest;
+    }
+    s
+}
+
+/// BOM-tolerant `serde_json::from_str`. Prefer this over `serde_json::from_str`
+/// anywhere the JSON may have been written by a human, an editor, or another tool.
+pub fn from_json_str<'a, T: serde::Deserialize<'a>>(s: &'a str) -> serde_json::Result<T> {
+    serde_json::from_str(strip_leading_bom(s))
 }
 
 /// Executes a command and returns cleaned stdout/stderr.
@@ -273,9 +312,41 @@ pub fn open_private(
     Ok(file)
 }
 
+/// Pure core of `set_owner_only`'s "is a chmod even needed" check, taking the raw
+/// `st_mode` reading directly so it's deterministically testable without touching
+/// the filesystem (an unprivileged `chmod` setting setuid/setgid isn't reliably
+/// honored across every environment — e.g. some sandboxed/containerized
+/// filesystems silently drop it — so a test that round-trips through a real file
+/// would be flaky rather than actually exercising this logic).
+///
+/// Masks with `0o7777`, NOT `0o777`: setuid/setgid/sticky live in the `0o7000`
+/// range, above the rwx bits but below the file-type bits `st_mode` also carries.
+/// A `0o777` mask would strip those dangerous bits out of the comparison too, so
+/// a file with e.g. setuid set (`0o4600`) would read as "already correct" against
+/// a `target` of `0o600` and permanently skip the chmod that would clear it —
+/// defeating the self-heal `set_owner_only` exists to provide, for exactly the
+/// files (external tampering, restored backups) it's meant to catch.
+#[cfg(unix)]
+fn mode_already_correct(actual: u32, target: u32) -> bool {
+    actual & 0o7777 == target
+}
+
 #[cfg(unix)]
 fn set_owner_only(path: &std::path::Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
+    // Skip the chmod syscall once permissions already match. This runs on every
+    // `Tracker::new()` call, which is now on the PreToolUse hook's hot path for
+    // *every* Bash tool call (not just RTK-covered ones — see rtk-ai/rtk#3206's
+    // hook_decisions ground-truth logging), under the project's <10ms latency
+    // budget, so a redundant chmod on the already-correct common case adds up.
+    // Falls through to chmod on any metadata-read failure, erring toward
+    // enforcing the permission rather than silently skipping it.
+    //
+    if let Ok(meta) = fs::metadata(path) {
+        if mode_already_correct(meta.permissions().mode(), mode) {
+            return;
+        }
+    }
     let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
 }
 
@@ -302,20 +373,28 @@ pub fn count_tokens(text: &str) -> usize {
 }
 
 /// Detect the package manager used in the current directory.
-/// Returns "pnpm", "yarn", or "npm" based on lockfile presence.
+/// Returns "pnpm", "yarn", "bun", or "npm" based on lockfile presence.
 ///
 /// # Examples
 /// ```no_run
 /// use rtk::utils::detect_package_manager;
 /// let pm = detect_package_manager();
-/// // Returns "pnpm" if pnpm-lock.yaml exists, "yarn" if yarn.lock, else "npm"
+/// // "pnpm" for pnpm-lock.yaml, "yarn" for yarn.lock, "bun" for bun.lock(b), else "npm"
 /// ```
 #[allow(dead_code)]
 pub fn detect_package_manager() -> &'static str {
-    if std::path::Path::new("pnpm-lock.yaml").exists() {
+    detect_package_manager_in(std::path::Path::new("."))
+}
+
+/// Lockfile detection against an explicit directory, so callers (and tests) do
+/// not have to move the process's current directory to ask the question.
+pub fn detect_package_manager_in(dir: &std::path::Path) -> &'static str {
+    if dir.join("pnpm-lock.yaml").exists() {
         "pnpm"
-    } else if std::path::Path::new("yarn.lock").exists() {
+    } else if dir.join("yarn.lock").exists() {
         "yarn"
+    } else if dir.join("bun.lockb").exists() || dir.join("bun.lock").exists() {
+        "bun"
     } else {
         "npm"
     }
@@ -324,11 +403,54 @@ pub fn detect_package_manager() -> &'static str {
 /// Build a Command using the detected package manager's exec mechanism.
 /// Returns a Command ready to have tool-specific args appended.
 pub fn package_manager_exec(tool: &str) -> Command {
-    if tool_exists(tool) {
+    tool_exec(None, tool, MissingTool::Fail)
+}
+
+/// What the npm arm does when `tool` is not installed. `npx` fetches on demand
+/// by default, which is right for a tool the user named themselves and
+/// surprising for one rtk picked on their behalf.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MissingTool {
+    Fetch,
+    Fail,
+}
+
+/// The runner used to resolve a tool that is not on PATH. A runner the user
+/// named wins outright. Otherwise lockfile detection picks one, except that a
+/// detected bun resolves through npx: bunx always fetches a missing tool into
+/// its cache and cannot be told not to, so `MissingTool` could not be honoured
+/// and the presence of a lockfile alone would decide what gets downloaded.
+pub fn exec_runner(runner: Option<&str>, missing: MissingTool) -> &str {
+    match runner {
+        Some(named) => named,
+        // Nothing was named and rtk may fetch: npx is the only runner that can,
+        // and lockfile detection would hand `pnpm exec` a tool the project
+        // does not have.
+        None if missing == MissingTool::Fetch => "npx",
+        None => match detect_package_manager() {
+            // bunx always fetches; npm's runner is npx.
+            "bun" | "npm" => "npx",
+            other => other,
+        },
+    }
+}
+
+/// Build a Command that runs `tool`, preferring the package runner the user
+/// actually named over lockfile detection.
+///
+/// RTK forwards what was typed rather than substituting an engine for it: a
+/// user who types `bunx tsc` must not get `pnpm` because a lockfile is present.
+/// Detection applies only when nothing was named, as with a bare `rtk tsc`.
+///
+/// A tool already on PATH is run directly only when no runner was named.
+pub fn tool_exec(runner: Option<&str>, tool: &str, missing: MissingTool) -> Command {
+    // Only when nothing was named: `bunx tsc` must resolve the project's tsc,
+    // not a global one that happens to be on PATH. Both bunx and npx prefer
+    // node_modules/.bin before fetching, so naming one is a real choice.
+    if runner.is_none() && tool_exists(tool) {
         resolved_command(tool)
     } else {
-        let pm = detect_package_manager();
-        match pm {
+        match exec_runner(runner, missing) {
             "pnpm" => {
                 let mut c = resolved_command("pnpm");
                 c.arg("exec").arg("--").arg(tool);
@@ -339,9 +461,17 @@ pub fn package_manager_exec(tool: &str) -> Command {
                 c.arg("exec").arg("--").arg(tool);
                 c
             }
+            "bun" | "bunx" => {
+                let mut c = resolved_command("bunx");
+                c.arg(tool);
+                c
+            }
             _ => {
                 let mut c = resolved_command("npx");
-                c.arg("--no-install").arg("--").arg(tool);
+                if missing == MissingTool::Fail {
+                    c.arg("--no-install");
+                }
+                c.arg("--").arg(tool);
                 c
             }
         }
@@ -444,7 +574,7 @@ fn composer_bin_dirs_from(env_bin_dir: Option<&str>, composer_json: Option<&str>
 }
 
 fn read_composer_bin_dir(composer_json: &str) -> Option<PathBuf> {
-    let parsed: Value = serde_json::from_str(composer_json).ok()?;
+    let parsed: Value = from_json_str(composer_json).ok()?;
     let bin_dir = parsed.get("config")?.get("bin-dir")?.as_str()?.trim();
     if bin_dir.is_empty() {
         None
@@ -453,11 +583,40 @@ fn read_composer_bin_dir(composer_json: &str) -> Option<PathBuf> {
     }
 }
 
+/// Join lines with newlines, or return "ok" when there is nothing left to show.
+///
+/// Shared by output filters that collapse fully to a success marker.
+pub fn join_or_ok(lines: &[&str]) -> String {
+    if lines.is_empty() {
+        "ok".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
 /// Check if a tool exists on PATH (PATHEXT-aware on Windows).
 ///
 /// Replaces manual `Command::new("which").arg(tool)` checks that fail on Windows.
 pub fn tool_exists(name: &str) -> bool {
     which::which(name).is_ok()
+}
+
+/// Check if a compile-time environment variable was set to a non-empty value.
+///
+/// `option_env!` yields `Some("")` when the build environment exports the
+/// variable with an empty value, which a CI `env:` block fed by an unset
+/// repository variable does. `.is_some()` alone then reports a feature as
+/// configured when it is not, so pair every `option_env!` gate with this.
+///
+/// # Examples
+/// ```
+/// use rtk::utils::env_is_some;
+/// assert!(env_is_some(Some("https://example.com")));
+/// assert!(!env_is_some(Some("")));
+/// assert!(!env_is_some(None));
+/// ```
+pub fn env_is_some(value: Option<&str>) -> bool {
+    value.is_some_and(|v| !v.is_empty())
 }
 
 /// Extract short name from AWS ARN.
@@ -496,13 +655,203 @@ pub fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// Decode child process output bytes, respecting the Windows console code page.
+///
+/// Valid UTF-8 is returned untouched — the overwhelmingly common case, and the
+/// only one on Unix. Otherwise the buffer is decoded a line at a time: lines
+/// that are valid UTF-8 keep their bytes, and only the lines that are not get
+/// re-decoded through the console code page (GBK, Big5, CP850, …). Decoding
+/// the whole buffer as a legacy code page at the first bad byte would mangle
+/// output that was almost entirely valid UTF-8.
+///
+/// Falls back to lossy UTF-8 (`U+FFFD`) when no code page applies, matching the
+/// previous behavior.
+pub fn decode_process_output(bytes: &[u8]) -> String {
+    // Fast path: fully valid UTF-8 needs no scanning and no allocation beyond
+    // the copy. This is every Unix run and every UTF-8 console on Windows.
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_owned(),
+        Err(_) => decode_mixed(bytes, output_codepage()),
+    }
+}
+
+/// Decode `bytes` line by line, keeping valid UTF-8 lines verbatim and passing
+/// the rest through code page `cp` (lossy UTF-8 when `cp` is `None`).
+///
+/// The line is the decoding unit because a byte run is not one: GB18030's
+/// four-byte sequences embed bytes in the ASCII digit range, so any rule that
+/// stops a run at the first byte under `0x80` splits them. `\n` is unambiguous
+/// in every encoding handled here — none of UTF-8, GBK, gb18030, Big5,
+/// Shift_JIS, EUC-KR or the single-byte pages can produce it as a trail byte —
+/// and a process does not switch encoding mid-line, so the whole line can be
+/// handed to one decoder.
+///
+/// Takes the code page as a parameter so the walk and the mapping are
+/// unit-testable on every platform, not only Windows.
+fn decode_mixed(bytes: &[u8], cp: Option<u16>) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    // `split_inclusive` keeps the terminator, so line endings survive intact
+    // and an empty input yields no chunks at all.
+    for line in bytes.split_inclusive(|&b| b == b'\n') {
+        match std::str::from_utf8(line) {
+            Ok(valid) => out.push_str(valid),
+            Err(_) => out.push_str(&decode_line(line, cp)),
+        }
+    }
+    out
+}
+
+/// Decode one line that failed UTF-8 validation using code page `cp`.
+///
+/// A code page result is only accepted when it decodes cleanly. A line that is
+/// really UTF-8 with a corrupt byte usually fails the code page decoder too,
+/// and lossy UTF-8 preserves its valid characters where the code page would
+/// turn all of them into mojibake.
+fn decode_line(line: &[u8], cp: Option<u16>) -> String {
+    if let Some(cp) = cp {
+        // encoding_rs covers the ANSI and DBCS pages (1252, GBK, gb18030,
+        // Shift_JIS, Big5, …); `codepage` maps the Windows page number onto it.
+        if let Some(encoding) = codepage::to_encoding(cp) {
+            let (decoded, _, had_errors) = encoding.decode(line);
+            if !had_errors {
+                return decoded.into_owned();
+            }
+        // encoding_rs implements only WHATWG encodings, which exclude the
+        // legacy OEM/DOS pages (437, 850, 852, …) that plain cmd.exe still
+        // defaults to in many locales. `oem_cp` supplies those tables.
+        } else if let Some(table) = oem_cp::code_table::DECODING_TABLE_CP_MAP.get(&cp) {
+            if let Some(decoded) = table.decode_string_checked(line) {
+                return decoded;
+            }
+        } else {
+            warn_unmapped_codepage(cp);
+        }
+    }
+    String::from_utf8_lossy(line).into_owned()
+}
+
+/// Warn once that output is being decoded lossily because the console code
+/// page has no known table — previously this fell back silently.
+fn warn_unmapped_codepage(cp: u16) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        eprintln!(
+            "[rtk] warning: no decoder for console code page {}; \
+             non-UTF-8 output will be shown with replacement characters",
+            cp
+        );
+    });
+}
+
+/// The code page child output should be decoded with, or `None` when the
+/// platform has no such concept (every Unix) and lossy UTF-8 should be used.
+#[cfg(not(windows))]
+fn output_codepage() -> Option<u16> {
+    None
+}
+
+/// Windows: the console output code page, cached after the first lookup.
+///
+/// `GetConsoleOutputCP` describes the console rtk is attached to, which the
+/// child inherits. It returns 0 when there is no console — rtk running under a
+/// hook with its output piped, the common case flagged in review — and a
+/// console program writing to a pipe uses the ANSI code page instead, so
+/// `GetACP` is the fallback rather than giving up and decoding lossily.
+///
+/// This remains a best guess: a child is free to emit any encoding regardless
+/// of either code page. It is only ever consulted for bytes that already
+/// failed UTF-8 validation, so a wrong guess degrades to the same replacement
+/// characters that the previous lossy conversion produced.
+#[cfg(windows)]
+fn output_codepage() -> Option<u16> {
+    static CODEPAGE: OnceLock<Option<u16>> = OnceLock::new();
+    *CODEPAGE.get_or_init(|| {
+        #[allow(unsafe_code)]
+        // nosemgrep: unsafe-block — read-only Win32 APIs, no memory or thread safety risk
+        let cp = unsafe {
+            let console = windows_sys::Win32::System::Console::GetConsoleOutputCP();
+            if console != 0 {
+                console
+            } else {
+                windows_sys::Win32::Globalization::GetACP()
+            }
+        };
+        u16::try_from(cp).ok().filter(|&cp| cp != 0)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn test_strip_leading_bom_helper() {
+        // Direct unit test on the helper so future refactors can't
+        // regress the loop semantics without a clear failure signal.
+        assert_eq!(strip_leading_bom(""), "");
+        assert_eq!(strip_leading_bom("hello"), "hello");
+        assert_eq!(strip_leading_bom("\u{feff}hello"), "hello");
+        assert_eq!(strip_leading_bom("\u{feff}\u{feff}hello"), "hello");
+        assert_eq!(strip_leading_bom("\u{feff}\u{feff}\u{feff}hello"), "hello");
+        // BOM in the middle is preserved (not "leading").
+        assert_eq!(strip_leading_bom("a\u{feff}b"), "a\u{feff}b");
+    }
+
+    #[test]
+    fn test_from_json_str_strips_bom() {
+        let v: Value = from_json_str("\u{feff}{\"foo\": 1}").unwrap();
+        assert_eq!(v["foo"], 1);
+    }
+
+    #[test]
+    fn test_from_json_str_no_bom() {
+        let v: Value = from_json_str("{\"foo\": 1}").unwrap();
+        assert_eq!(v["foo"], 1);
+    }
+
+    #[test]
+    fn test_from_json_str_borrowed_type() {
+        // Deserialize<'a> (not DeserializeOwned) must keep zero-copy
+        // borrowing working through the wrapper.
+        #[derive(serde::Deserialize)]
+        struct Borrowed<'a> {
+            name: &'a str,
+        }
+        let b: Borrowed = from_json_str("\u{feff}{\"name\": \"rtk\"}").unwrap();
+        assert_eq!(b.name, "rtk");
+    }
+
+    #[test]
+    fn env_is_some_rejects_unset_and_empty() {
+        assert!(env_is_some(Some("https://telemetry.example")));
+        // An unset CI repository variable still exports the env var, so the
+        // empty string reaches `option_env!` as `Some("")`.
+        assert!(!env_is_some(Some("")));
+        assert!(!env_is_some(None));
+    }
+
+    #[test]
     fn test_truncate_short_string() {
         assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_days_ago_cutoff_normal_value_is_in_the_past() {
+        let cutoff = days_ago_cutoff(30);
+        assert!(cutoff < Utc::now());
+    }
+
+    #[test]
+    fn test_days_ago_cutoff_does_not_panic_on_huge_since_days() {
+        // rtk-ai/rtk#3206 review: `rtk discover --since 100000000` and `rtk hook
+        // audit --since 100000000` both panicked with "DateTime - TimeDelta
+        // overflowed". Must clamp instead of crashing.
+        assert_eq!(days_ago_cutoff(100_000_000), DateTime::<Utc>::MIN_UTC);
+    }
+
+    #[test]
+    fn test_days_ago_cutoff_does_not_panic_on_u64_max() {
+        assert_eq!(days_ago_cutoff(u64::MAX), DateTime::<Utc>::MIN_UTC);
     }
 
     #[test]
@@ -651,7 +1000,7 @@ mod tests {
         // In the test environment (rtk repo), there's no JS lockfile
         // so it should default to "npm"
         let pm = detect_package_manager();
-        assert!(["pnpm", "yarn", "npm"].contains(&pm));
+        assert!(["pnpm", "yarn", "bun", "npm"].contains(&pm));
     }
 
     #[test]
@@ -1044,5 +1393,288 @@ mod tests {
     fn test_restrict_file_ignores_missing_path() {
         let tmp = tempfile::tempdir().unwrap();
         restrict_file(&tmp.path().join("absent.db-wal"));
+    }
+
+    #[test]
+    fn test_decode_process_output_valid_utf8() {
+        assert_eq!(decode_process_output(b"hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_decode_process_output_chinese_utf8() {
+        let input = "测试中文".as_bytes();
+        assert_eq!(decode_process_output(input), "测试中文");
+    }
+
+    #[test]
+    fn test_decode_process_output_empty() {
+        assert_eq!(decode_process_output(b""), "");
+    }
+
+    #[test]
+    fn test_decode_process_output_invalid_utf8_no_panic() {
+        let bytes: &[u8] = &[0xFF, 0xFE, 0x41, 0x42];
+        let result = decode_process_output(bytes);
+        assert!(!result.is_empty());
+    }
+
+    // `decode_mixed` takes the code page as a parameter so these run on every
+    // platform, not only Windows — the CI runners that would exercise the
+    // Windows-gated versions do not exist.
+
+    /// The bug this fix targets: GBK output from a Chinese-locale console.
+    #[test]
+    fn test_decode_mixed_gbk_run() {
+        assert_eq!(decode_mixed(&[0xB2, 0xE2, 0xCA, 0xD4], Some(936)), "测试");
+    }
+
+    /// GB18030 (54936) must not be treated as plain GBK: it has to keep its
+    /// own table so 4-byte sequences decode.
+    #[test]
+    fn test_decode_mixed_gb18030_is_not_gbk() {
+        // 0x81 0x35 0xF4 0x37 is a 4-byte GB18030 sequence.
+        let decoded = decode_mixed(&[0x81, 0x35, 0xF4, 0x37], Some(54936));
+        assert_eq!(
+            decoded.chars().count(),
+            1,
+            "expected one char: {:?}",
+            decoded
+        );
+        assert!(
+            !decoded.contains('\u{FFFD}'),
+            "got replacement: {:?}",
+            decoded
+        );
+        assert_eq!(
+            codepage::to_encoding(54936).map(|e| e.name()),
+            Some("gb18030")
+        );
+    }
+
+    /// Legacy OEM/DOS pages are cmd.exe's default in many locales and are not
+    /// WHATWG encodings, so they come from `oem_cp` rather than encoding_rs.
+    #[test]
+    fn test_decode_mixed_oem_codepages() {
+        assert_eq!(decode_mixed(&[0xB0, 0xDB], Some(437)), "░█");
+        // 850 and 852 are likewise absent from encoding_rs.
+        assert!(codepage::to_encoding(437).is_none());
+        assert!(!decode_mixed(&[0xE1], Some(850)).contains('\u{FFFD}'));
+    }
+
+    /// The regression the review flagged: a buffer that is almost entirely
+    /// valid UTF-8 must not be reinterpreted wholesale because of one bad
+    /// line. Only the GBK line is re-decoded; the UTF-8 lines keep their bytes.
+    #[test]
+    fn test_decode_mixed_only_redecodes_invalid_lines() {
+        let mut bytes = "héllo wörld\n".as_bytes().to_vec();
+        bytes.extend_from_slice(&[0xB2, 0xE2, 0xCA, 0xD4, b'\n']); // GBK 测试
+        bytes.extend_from_slice("grüße\n".as_bytes());
+
+        assert_eq!(
+            decode_mixed(&bytes, Some(936)),
+            "héllo wörld\n测试\ngrüße\n"
+        );
+    }
+
+    /// A corrupt byte inside an otherwise-UTF-8 line falls back to lossy UTF-8
+    /// rather than mojibake, because the code page decode does not come out
+    /// clean. The surrounding lines are untouched either way.
+    #[test]
+    fn test_decode_mixed_corrupt_byte_prefers_lossy_utf8() {
+        let mut bytes = "first\n".as_bytes().to_vec();
+        bytes.extend_from_slice("naïve".as_bytes());
+        bytes.push(0xC3); // dangling lead byte: invalid UTF-8 and invalid GBK
+        bytes.extend_from_slice(b"\nlast\n");
+
+        let decoded = decode_mixed(&bytes, Some(936));
+        assert!(decoded.starts_with("first\n"), "{:?}", decoded);
+        assert!(decoded.contains("naïve"), "{:?}", decoded);
+        assert!(decoded.ends_with("\nlast\n"), "{:?}", decoded);
+    }
+
+    /// Line endings and the final line without a terminator must survive.
+    #[test]
+    fn test_decode_mixed_preserves_line_structure() {
+        let mut bytes = b"a\r\n".to_vec();
+        bytes.extend_from_slice(&[0xB2, 0xE2, b'\n']); // GBK 测
+        bytes.extend_from_slice(b"tail"); // no trailing newline
+
+        assert_eq!(decode_mixed(&bytes, Some(936)), "a\r\n测\ntail");
+    }
+
+    /// No code page (every Unix run) keeps the old lossy behavior.
+    #[test]
+    fn test_decode_mixed_without_codepage_is_lossy() {
+        let mut bytes = b"ok ".to_vec();
+        bytes.push(0xFF);
+        assert_eq!(decode_mixed(&bytes, None), "ok \u{FFFD}");
+    }
+
+    /// An unmapped code page must degrade to lossy rather than panic.
+    #[test]
+    fn test_decode_mixed_unknown_codepage_is_lossy() {
+        assert_eq!(decode_mixed(&[0xFF], Some(60000)), "\u{FFFD}");
+    }
+
+    /// Truncated trailing UTF-8 must terminate rather than loop forever.
+    #[test]
+    fn test_decode_mixed_truncated_utf8_terminates() {
+        // First two bytes of a three-byte character, cut short.
+        let decoded = decode_mixed(&[b'a', 0xE6, 0xB5], None);
+        assert!(decoded.starts_with('a'), "{:?}", decoded);
+    }
+
+    /// Every byte value must survive both paths without panicking.
+    #[test]
+    fn test_decode_mixed_all_byte_values_no_panic() {
+        let all: Vec<u8> = (0u8..=255).collect();
+        for cp in [None, Some(936), Some(437), Some(65001), Some(1252)] {
+            let _ = decode_mixed(&all, cp);
+        }
+    }
+
+    /// Without a code page — every Unix run — the result must stay identical to
+    /// the `String::from_utf8_lossy` this replaced. Splitting on `\n` cannot
+    /// change it: a newline is valid ASCII, so no ill-formed sequence spans one.
+    #[test]
+    fn test_decode_process_output_unchanged_without_codepage() {
+        let cases: [&[u8]; 6] = [
+            b"",
+            b"plain ascii\n",
+            "utf8 ünïcödé\nsecond ライン\n".as_bytes(),
+            &[0xFF, 0xFE, b'\n', b'o', b'k'],
+            &[b'a', b'\n', 0xE6, 0xB5, b'\n', b'b'],
+            &[0xB2, 0xE2, 0xCA, 0xD4],
+        ];
+        for bytes in cases {
+            assert_eq!(
+                decode_mixed(bytes, None),
+                String::from_utf8_lossy(bytes),
+                "lossy mismatch for {:?}",
+                bytes
+            );
+        }
+    }
+
+    // rtk-ai/rtk#3206 review: set_owner_only now skips the chmod syscall once
+    // permissions already match, since Tracker::new() (which calls this via
+    // create_private_dir/open_private/restrict_db_files) is on the PreToolUse
+    // hook's hot path for every Bash tool call. These don't observe the skipped
+    // syscall directly, but confirm the already-correct case stays correct
+    // (idempotent) across repeated calls, on both a directory and a file.
+
+    #[test]
+    #[cfg(unix)]
+    fn test_set_owner_only_idempotent_when_already_correct_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("already-private");
+        create_private_dir(&dir).unwrap();
+        assert_eq!(mode_of(&dir), 0o700);
+
+        // Second call hits the already-correct fast path — must stay 0o700.
+        create_private_dir(&dir).unwrap();
+        assert_eq!(mode_of(&dir), 0o700);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_restrict_file_idempotent_when_already_correct() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("history.db");
+        fs::write(&file, b"x").unwrap();
+        restrict_file(&file);
+        assert_eq!(mode_of(&file), 0o600);
+
+        // Second call hits the already-correct fast path — must stay 0o600.
+        restrict_file(&file);
+        assert_eq!(mode_of(&file), 0o600);
+    }
+
+    // Regression: the fast-path comparison must mask with 0o7777 (including
+    // setuid/setgid/sticky), not 0o777 — a 0o777 mask would make a file with e.g.
+    // setuid set (0o4600) read as "already 0o600" and permanently skip the chmod
+    // that clears the dangerous bit. Tested against the pure mask logic directly
+    // (not round-tripped through a real chmod) since an unprivileged chmod setting
+    // setuid isn't reliably honored across every environment — some sandboxed/
+    // containerized filesystems silently drop it, which would make a
+    // filesystem-based version of this test flaky rather than exercise the logic.
+    #[test]
+    #[cfg(unix)]
+    fn test_mode_already_correct_rejects_setuid_bit() {
+        assert!(
+            !mode_already_correct(0o4600, 0o600),
+            "setuid set (0o4600) must not read as already-correct against target 0o600"
+        );
+        assert!(
+            !mode_already_correct(0o2600, 0o600),
+            "setgid set (0o2600) must not read as already-correct against target 0o600"
+        );
+        assert!(
+            !mode_already_correct(0o1600, 0o600),
+            "sticky bit set (0o1600) must not read as already-correct against target 0o600"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_mode_already_correct_accepts_exact_match() {
+        assert!(mode_already_correct(0o600, 0o600));
+        assert!(mode_already_correct(0o700, 0o700));
+        assert!(!mode_already_correct(0o644, 0o600));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_mode_already_correct_ignores_file_type_bits() {
+        // `st_mode` carries file-type bits (e.g. S_IFREG = 0o100000) above the
+        // 0o7777 permission range this function masks to — those must not affect
+        // the comparison either way.
+        assert!(mode_already_correct(0o100600, 0o600));
+    }
+
+    #[test]
+    fn test_detect_package_manager_recognizes_bun() {
+        // Asks about an explicit directory: chdir is process-global and would
+        // race the other tests in this binary that assert on the real cwd.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("bun.lockb"), "").expect("write lockfile");
+        assert_eq!(detect_package_manager_in(dir.path()), "bun");
+    }
+
+    #[test]
+    fn test_missing_tool_policy_controls_npx_no_install() {
+        // Semantics are per caller: a tool the user named may be fetched, one
+        // rtk chose may not. Changing either would change what runs, not what
+        // is printed, which is not rtk's job.
+        let args: Vec<String> =
+            tool_exec(Some("npm"), "definitely-not-installed", MissingTool::Fetch)
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+        assert!(!args.contains(&"--no-install".to_string()), "{args:?}");
+
+        let args: Vec<String> =
+            tool_exec(Some("npm"), "definitely-not-installed", MissingTool::Fail)
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+        assert!(args.contains(&"--no-install".to_string()), "{args:?}");
+    }
+
+    #[test]
+    fn test_exec_runner_prefers_the_named_runner_and_never_detects_bunx() {
+        // A named runner is used as given, whatever the fetch policy.
+        for missing in [MissingTool::Fetch, MissingTool::Fail] {
+            assert_eq!(exec_runner(Some("bunx"), missing), "bunx");
+            assert_eq!(exec_runner(Some("pnpm"), missing), "pnpm");
+        }
+
+        // Detection never resolves through bunx: it always fetches a missing
+        // tool, so MissingTool::Fail could not be honoured.
+        assert_ne!(exec_runner(None, MissingTool::Fail), "bun");
+        assert_ne!(exec_runner(None, MissingTool::Fail), "bunx");
+
+        // Nothing named and rtk may fetch: npx is the only runner that can.
+        assert_eq!(exec_runner(None, MissingTool::Fetch), "npx");
     }
 }
