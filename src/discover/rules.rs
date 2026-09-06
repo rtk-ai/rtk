@@ -782,9 +782,18 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^(?:\./gradlew|gradlew\.bat|gradlew|gradle)(?:\s+(test|build|clean|assemble\w*|install\w*|check|lint\w*|dependencies))?(\s|$)",
+        pattern: r"^(?:\./gradlew|gradlew\.bat|gradlew)\s+(?:(?::[\w.-]+)+:)?(connected\w*|test\w*|build\w*|clean|assemble\w*|bundle\w*|install\w*|check|lint\w*|ktlint\w*|detekt\w*|dependencies)(\s|$)",
         rtk_cmd: "rtk gradlew",
-        rewrite_prefixes: &["./gradlew", "gradlew.bat", "gradlew", "gradle"],
+        rewrite_prefixes: &["./gradlew", "gradlew.bat", "gradlew"],
+        category: "Build",
+        savings_pct: 75.0,
+        subcmd_savings: &[("test", 90.0), ("build", 80.0), ("check", 80.0)],
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^gradle\s+(?:(?::[\w.-]+)+:)?(connected\w*|test\w*|build\w*|clean|assemble\w*|bundle\w*|install\w*|check|lint\w*|ktlint\w*|detekt\w*|dependencies)(\s|$)",
+        rtk_cmd: "rtk gradle",
+        rewrite_prefixes: &["gradle"],
         category: "Build",
         savings_pct: 75.0,
         subcmd_savings: &[("test", 90.0), ("build", 80.0), ("check", 80.0)],

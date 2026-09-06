@@ -4728,7 +4728,7 @@ mod tests {
         assert!(matches!(
             classify_command("gradle build"),
             Classification::Supported {
-                rtk_equivalent: "rtk gradlew",
+                rtk_equivalent: "rtk gradle",
                 ..
             }
         ));
@@ -4762,8 +4762,19 @@ mod tests {
     fn test_rewrite_gradle() {
         assert_eq!(
             rewrite_command_no_prefixes("gradle build", &[]),
-            Some("rtk gradlew build".into())
+            Some("rtk gradle build".into())
         );
+    }
+
+    #[test]
+    fn test_gradle_rewrite_skips_unsupported_tasks() {
+        assert_eq!(rewrite_command_no_prefixes("gradle publish", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("gradle wrapper --gradle-version 8.5", &[]),
+            None
+        );
+        assert_eq!(rewrite_command_no_prefixes("gradle --version", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("gradle", &[]), None);
     }
 
     #[test]
