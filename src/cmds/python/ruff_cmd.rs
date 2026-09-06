@@ -4,6 +4,7 @@ use crate::core::config;
 use crate::core::runner;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, truncate};
+use crate::parser::truncate_output;
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -112,7 +113,7 @@ pub fn filter_ruff_check_json(output: &str) -> String {
             return format!(
                 "Ruff check (JSON parse failed: {})\n{}",
                 e,
-                truncate(output, config::limits().passthrough_max_chars)
+                truncate_output(output, config::limits().passthrough_max_chars)
             );
         }
     };
@@ -396,6 +397,18 @@ mod tests {
         assert!(result.contains("utils.py"));
         assert!(result.contains("Violations:"), "Violations section missing");
         assert!(result.contains("1:8"), "line:col location missing");
+    }
+
+    #[test]
+    fn test_filter_ruff_check_parse_failure_marks_truncated_passthrough() {
+        let long_invalid_json = "{".repeat(crate::core::config::limits().passthrough_max_chars + 20);
+        let result = filter_ruff_check_json(&long_invalid_json);
+
+        assert!(result.contains("Ruff check (JSON parse failed:"));
+        assert!(
+            result.contains("[RTK:PASSTHROUGH] Output truncated"),
+            "parse fallback should make truncation visible, got:\n{result}"
+        );
     }
 
     #[test]
