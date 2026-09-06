@@ -1336,6 +1336,23 @@ strip_ansi = true
         assert_eq!(found.unwrap().name, "terraform-plan");
     }
 
+    /// Pin the load-bearing ordering invariant of the rsync dry-run fix:
+    /// "dry-run-rsync" must sort (and therefore match) before "rsync" so a
+    /// dry run is never collapsed to "ok (synced)". If a rename ever breaks
+    /// the alphabetical precedence, this fails instead of silently
+    /// reintroducing fabricated sync success.
+    #[test]
+    fn test_dry_run_rsync_preempts_rsync_builtin() {
+        let filters = make_filters(BUILTIN_TOML);
+        let dry = find_filter_in("rsync -avn src/ dst/", &filters).expect("dry-run should match");
+        assert_eq!(dry.name, "dry-run-rsync");
+        let abbrev =
+            find_filter_in("rsync --dry -av src/ dst/", &filters).expect("--dry should match");
+        assert_eq!(abbrev.name, "dry-run-rsync");
+        let real = find_filter_in("rsync -av src/ dst/", &filters).expect("real sync should match");
+        assert_eq!(real.name, "rsync");
+    }
+
     #[test]
     fn test_find_filter_no_match_returns_none() {
         let filters = make_filters(
@@ -2048,6 +2065,7 @@ match_command = "^make\\b"
             "composer-install",
             "df",
             "dotnet-build",
+            "dry-run-rsync",
             "du",
             "fail2ban-client",
             "gcloud",
@@ -2102,8 +2120,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            63,
-            "Expected exactly 63 built-in filters, got {}. \
+            64,
+            "Expected exactly 64 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -2209,11 +2227,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 63 existing filters still present + 1 new = 64
+        // All 64 existing filters still present + 1 new = 65
         assert_eq!(
             filters.len(),
-            64,
-            "Expected 64 filters after concat (63 built-in + 1 new)"
+            65,
+            "Expected 65 filters after concat (64 built-in + 1 new)"
         );
 
         // New filter is discoverable

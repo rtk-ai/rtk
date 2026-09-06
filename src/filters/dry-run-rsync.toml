@@ -1,0 +1,48 @@
+[filters.dry-run-rsync]
+# Guards against a false "ok (synced)" on dry runs. rsync prints "total size
+# is" on every non-error run — including --dry-run/-n runs that report real
+# pending changes — so the `rsync` filter's match_output short-circuit would
+# claim a sync happened when nothing was transferred. macOS openrsync makes
+# output-based detection impossible (its dry-run summary carries no
+# "(DRY RUN)" marker), so this filter matches on the command flags instead
+# and passes output through with only light noise stripping.
+# NOTE: the name must sort alphabetically before "rsync" — filters are
+# matched in BTreeMap (name) order, first match wins.
+description = "Pass rsync --dry-run/-n output through — never claim 'synced' for a dry run"
+# --dry[-a-z]* : rsync accepts getopt_long prefix abbreviation (--dry ==
+# --dry-run), so match any unambiguous prefix, not just the full spelling.
+match_command = "^rsync\\b.*(--dry[-a-z]*|\\s-[a-zA-Z]*n[a-zA-Z]*(\\s|$))"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^sending incremental file list",
+]
+max_lines = 60
+on_empty = "(dry run produced no output — add -v to list pending changes)"
+
+[[tests.dry-run-rsync]]
+name = "openrsync-style dry run with pending changes passes through"
+input = """
+Transfer starting: 2 files
+file1.txt
+
+sent 105 bytes  received 20 bytes  113636 bytes/sec
+total size is 4  speedup is 0.03
+"""
+expected = """Transfer starting: 2 files
+file1.txt
+sent 105 bytes  received 20 bytes  113636 bytes/sec
+total size is 4  speedup is 0.03"""
+
+[[tests.dry-run-rsync]]
+name = "GNU-style dry run with DRY RUN marker passes through"
+input = """
+sending incremental file list
+file1.txt
+
+sent 1,234 bytes  received 42 bytes  2,552.00 bytes/sec
+total size is 98,765  speedup is 77.31 (DRY RUN)
+"""
+expected = """file1.txt
+sent 1,234 bytes  received 42 bytes  2,552.00 bytes/sec
+total size is 98,765  speedup is 77.31 (DRY RUN)"""
