@@ -73,7 +73,7 @@ As contagens de tokens que o RTK reporta são estimadas como `bytes / 4`: o RTK 
 brew install rtk
 ```
 
-### Instalação rápida (Linux/macOS)
+### Instalação rápida (Linux/macOS/Git for Windows)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
