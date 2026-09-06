@@ -451,27 +451,11 @@ fn split_token_spans(cmd: &str) -> Vec<(&str, usize)> {
     coalesce_words(cmd, &tokenize(cmd))
 }
 
-/// Normalize absolute binary paths: `/usr/bin/grep -rn foo` → `grep -rn foo` (#485)
-/// Only strips if the first word contains a `/` (Unix path).
+/// Normalize absolute binary paths: `/usr/bin/grep -rn foo` -> `grep -rn foo` (#485)
+/// Also handles Windows paths: `C:\Windows\System32\cmd.exe` -> `cmd.exe`
+/// Uses the cross-platform path_utils module.
 fn strip_absolute_path(cmd: &str) -> String {
-    let first_space = cmd.find(' ');
-    let first_word = match first_space {
-        Some(pos) => &cmd[..pos],
-        None => cmd,
-    };
-    if first_word.contains('/') {
-        // Extract basename
-        let basename = first_word.rsplit('/').next().unwrap_or(first_word);
-        if basename.is_empty() {
-            return cmd.to_string();
-        }
-        match first_space {
-            Some(pos) => format!("{}{}", basename, &cmd[pos..]),
-            None => basename.to_string(),
-        }
-    } else {
-        cmd.to_string()
-    }
+    crate::core::path_utils::strip_absolute_path(cmd)
 }
 
 pub fn prefix_contains_rtk_disabled(prefix_part: &str) -> bool {

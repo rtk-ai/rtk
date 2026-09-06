@@ -830,21 +830,8 @@ fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &
 }
 
 fn compact_path(path: &str) -> String {
-    if path.len() <= 50 {
-        return path.to_string();
-    }
-
-    let parts: Vec<&str> = path.split('/').collect();
-    if parts.len() <= 3 {
-        return path.to_string();
-    }
-
-    format!(
-        "{}/.../{}/{}",
-        parts[0],
-        parts[parts.len() - 2],
-        parts[parts.len() - 1]
-    )
+    // Use the cross-platform path utility that handles both Unix and Windows paths
+    crate::core::path_utils::compact_path(path, 50)
 }
 
 #[cfg(test)]

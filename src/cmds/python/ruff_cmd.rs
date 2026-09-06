@@ -331,19 +331,8 @@ pub fn filter_ruff_format(output: &str) -> String {
 
 /// Compact file path (remove common prefixes)
 fn compact_path(path: &str) -> String {
-    let path = path.replace('\\', "/");
-
-    if let Some(pos) = path.rfind("/src/") {
-        format!("src/{}", &path[pos + 5..])
-    } else if let Some(pos) = path.rfind("/lib/") {
-        format!("lib/{}", &path[pos + 5..])
-    } else if let Some(pos) = path.rfind("/tests/") {
-        format!("tests/{}", &path[pos + 7..])
-    } else if let Some(pos) = path.rfind('/') {
-        path[pos + 1..].to_string()
-    } else {
-        path
-    }
+    // Use the cross-platform path utility
+    crate::core::path_utils::compact_file_path(path)
 }
 
 #[cfg(test)]
