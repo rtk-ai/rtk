@@ -37,7 +37,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     // survive intact. `String::from_utf8_lossy` would otherwise replace
     // every non-UTF-8 byte with U+FFFD (3 bytes), corrupting e.g. gzip
     // magic `1f 8b 08 00` into `1f ef bf bd 08 00` (#1087).
-    let output = cmd.output().context("Failed to run curl")?;
+    let output =
+        crate::core::timings::time_child(|| cmd.output()).context("Failed to run curl")?;
     let exit_code = output.status.code().unwrap_or(1);
 
     // Skip filtering on failure: curl can return HTML error bodies that would
