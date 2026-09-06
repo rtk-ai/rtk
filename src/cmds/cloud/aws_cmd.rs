@@ -356,8 +356,13 @@ fn run_aws_filtered(
         return Ok(exit_code);
     }
 
+    // Falling back to raw output is the normal path for shapes the filter
+    // does not model (e.g. a `--query` that yields a scalar), not a fault the
+    // agent should see: keep the notice for -v only.
     let result = filter_fn(&stdout).unwrap_or_else(|| {
-        eprintln!("rtk: filter warning: aws filter returned None, passing through raw output");
+        if verbose > 0 {
+            eprintln!("rtk: aws filter returned None, passing through raw output");
+        }
         FilterResult::new(stdout.clone())
     });
 
