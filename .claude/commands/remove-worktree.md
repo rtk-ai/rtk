@@ -11,8 +11,8 @@ Remove a specific worktree, cleaning up directory, git references, and optionall
 ## Usage
 
 ```bash
-/tech:remove-worktree feature/new-filter
-/tech:remove-worktree fix/session-bug
+/remove-worktree feature/new-filter
+/remove-worktree fix/session-bug
 ```
 
 ## Implementation
@@ -26,10 +26,10 @@ set -euo pipefail
 BRANCH_NAME="$ARGUMENTS"
 
 if [ -z "$BRANCH_NAME" ]; then
-  echo "❌ Usage: /tech:remove-worktree <branch-name>"
+  echo "❌ Usage: /remove-worktree <branch-name>"
   echo ""
   echo "Example:"
-  echo "  /tech:remove-worktree feature/new-filter"
+  echo "  /remove-worktree feature/new-filter"
   exit 1
 fi
 
