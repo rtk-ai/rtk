@@ -62,7 +62,7 @@ For full details on what is collected, opt-out options, and GDPR rights, see [Te
 | Variable | Description |
 |----------|-------------|
 | `RTK_DISABLED=1` | Disable RTK for a single command (`RTK_DISABLED=1 git status`) |
-| `RTK_RECALL=0` | Disable the recall store for a single command |
+| `RTK_RECALL=0` | Disable recall *writes* for a single command; `rtk recall` still reads an existing store |
 | `RTK_RECALL_DB` | Override the recall database path |
 | `RTK_TEE=0` | Legacy alias of `RTK_RECALL=0` (still honored) |
 | `RTK_TEE_DIR` | Override the tee directory (tee mode) |
@@ -79,7 +79,12 @@ FAILED: 2/15 tests
 [full output: rtk recall 36365b69eda6]
 ```
 
-Your AI assistant runs `rtk recall <hash>` exactly as printed in the hint — that is the whole agent interface. For humans inspecting the store: `rtk recall <hash> --full | --from N | --lines N | --grep PAT` and `rtk recall --list`. Storage is byte-faithful (`BLOB` + lossless lz4); the stored input is the captured command text, as with the previous tee files.
+Your AI assistant runs `rtk recall <hash>` exactly as printed in the hint — that is the whole agent interface. For humans inspecting the store: `rtk recall <hash> --full | --from N | --lines N | --grep PAT` and `rtk recall --list`. Storage is byte-faithful (`BLOB` + lossless lz4) up to `max_entry_bytes`; the stored input is the captured command text, as with the previous tee files.
+
+Two caveats worth knowing before relying on it:
+
+- **Output larger than `max_entry_bytes` is stored truncated**, cut back to a line boundary. `rtk recall` says so on stderr when it returns such an entry. Legacy `tee` mode truncates differently — it appends a `--- truncated at N bytes ---` marker into the file, so a truncated tee payload is annotated rather than raw.
+- **`RTK_RECALL=0` disables *writing*, not reading.** `rtk recall <hash>` and `rtk gain --recalls` still read an existing store with the variable set. The switch is aimed at the hook path that captures output, not at the command you run deliberately.
 
 ### Choosing the recovery mode
 

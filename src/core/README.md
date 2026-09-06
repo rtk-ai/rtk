@@ -124,7 +124,7 @@ Consumers that parse structured output (JSON, NDJSON, state machines) should cal
 
 For truncation recovery on **success** (e.g. a list capped at 20 items), use `tee::force_tee_hint()` (multi-line blocks) or `tee::force_tee_tail_hint(content, slug, offset)` (flat lists). All three persist the full output to the content-addressed recall store ([`retriever.rs`](retriever.rs)) and emit a runnable hint — `[full output: rtk recall <hash>]` or `[+N hidden: rtk recall <hash>]` — instead of burning tokens working around missing data.
 
-The agent runs `rtk recall <hash>` to get back exactly what was elided. For `force_tee_tail_hint`, `offset` is the 1-based first hidden line (`header_lines + MAX_CAP + 1`); it is stored so the default recall returns only the hidden tail. Storage is byte-faithful (`BLOB` + lossless lz4); tune limits via the `[retriever]` config section.
+The agent runs `rtk recall <hash>` to get back exactly what was elided. For `force_tee_tail_hint`, `offset` is the 1-based first hidden line (`header_lines + MAX_CAP + 1`); it is stored so the default recall returns only the hidden tail. Storage is byte-faithful (`BLOB` + lossless lz4) up to `max_entry_bytes`; larger output is stored truncated at a line boundary, and `rtk recall` reports that on stderr. Tune limits via the `[retriever]` config section.
 
 ### Truncation Caps (`truncate`)
 
