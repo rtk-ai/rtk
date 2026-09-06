@@ -1858,6 +1858,10 @@ impl LineHandler for GitPushLineHandler {
         if line.is_empty() {
             return true;
         }
+        if line.contains("Everything up-to-date") {
+            self.up_to_date = true;
+            return true;
+        }
         let trimmed = line.trim_start();
         GIT_PUSH_NOISE_PREFIXES
             .iter()
@@ -4642,11 +4646,10 @@ To https://github.com/foo/bar.git
     }
 
     #[test]
-    fn test_push_filter_up_to_date_summary() {
+    fn test_push_filter_up_to_date_uses_compact_summary() {
         let input = "Everything up-to-date\n";
         let result = run_push_filter(input, 0);
-        assert!(result.contains("Everything up-to-date"));
-        assert!(result.ends_with("ok (up-to-date)\n"), "got: {}", result);
+        assert_eq!(result, "ok (up-to-date)\n");
     }
 
     #[test]
