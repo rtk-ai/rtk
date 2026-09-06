@@ -4,12 +4,15 @@ use crate::core::display_helpers::{format_duration, print_period_table};
 use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
 use crate::core::utils::{format_tokens, truncate};
 use crate::hooks::hook_check;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::Local;
 use colored::Colorize;
 use serde::Serialize;
-use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::fs;
+use std::io::{IsTerminal, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -23,6 +26,11 @@ pub fn run(
     monthly: bool,
     all: bool,
     format: &str,
+    web: bool,
+    serve: bool,
+    open: bool,
+    port: u16,
+    web_output: Option<&Path>,
     failures: bool,
     reset: bool,
     yes: bool,
@@ -30,6 +38,10 @@ pub fn run(
 ) -> Result<()> {
     let tracker = Tracker::new().context("Failed to initialize tracking database")?;
     let project_scope = resolve_project_scope(project)?; // added: resolve project path
+
+    if open && !web && !serve {
+        bail!("--open requires --web or --serve");
+    }
 
     if reset {
         if !yes && !confirm_reset()? {
@@ -45,6 +57,14 @@ pub fn run(
 
     if failures {
         return show_failures(&tracker);
+    }
+
+    if serve {
+        return serve_web_dashboard(project_scope, open, port);
+    }
+
+    if web {
+        return export_web_dashboard(&tracker, project_scope.as_deref(), open, web_output);
     }
 
     // Handle export formats
@@ -523,6 +543,528 @@ struct ExportSummary {
     avg_savings_pct: f64,
     total_time_ms: u64,
     avg_time_ms: u64,
+}
+
+#[derive(Serialize)]
+struct WebDashboardData {
+    generated_at: String,
+    scope: WebScope,
+    summary: ExportSummary,
+    by_command: Vec<WebCommandStats>,
+    daily: Vec<DayStats>,
+    weekly: Vec<WeekStats>,
+    monthly: Vec<MonthStats>,
+}
+
+#[derive(Serialize)]
+struct WebScope {
+    kind: String,
+    path: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WebCommandStats {
+    command: String,
+    count: usize,
+    saved_tokens: usize,
+    avg_savings_pct: f64,
+    avg_time_ms: u64,
+}
+
+fn export_web_dashboard(
+    tracker: &Tracker,
+    project_scope: Option<&str>,
+    open: bool,
+    output: Option<&Path>,
+) -> Result<()> {
+    let data = build_web_dashboard_data(tracker, project_scope)?;
+    let html = render_web_dashboard(&data, false)?;
+    let path = output
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| std::env::temp_dir().join("rtk-gain-dashboard.html"));
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create dashboard output directory {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    fs::write(&path, html)
+        .with_context(|| format!("Failed to write web dashboard to {}", path.display()))?;
+
+    println!("Web dashboard written to {}", path.display());
+
+    if open {
+        open_dashboard(&path)?;
+    }
+
+    Ok(())
+}
+
+fn build_web_dashboard_data(
+    tracker: &Tracker,
+    project_scope: Option<&str>,
+) -> Result<WebDashboardData> {
+    let summary = tracker
+        .get_summary_filtered(project_scope)
+        .context("Failed to load token savings summary from database")?;
+
+    Ok(WebDashboardData {
+        generated_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        scope: WebScope {
+            kind: if project_scope.is_some() {
+                "Project".to_string()
+            } else {
+                "Global".to_string()
+            },
+            path: project_scope.map(|scope| scope.to_string()),
+        },
+        summary: ExportSummary {
+            total_commands: summary.total_commands,
+            total_input: summary.total_input,
+            total_output: summary.total_output,
+            total_saved: summary.total_saved,
+            avg_savings_pct: summary.avg_savings_pct,
+            total_time_ms: summary.total_time_ms,
+            avg_time_ms: summary.avg_time_ms,
+        },
+        by_command: summary
+            .by_command
+            .into_iter()
+            .map(
+                |(command, count, saved_tokens, avg_savings_pct, avg_time_ms)| WebCommandStats {
+                    command,
+                    count,
+                    saved_tokens,
+                    avg_savings_pct,
+                    avg_time_ms,
+                },
+            )
+            .collect(),
+        daily: tracker.get_all_days_filtered(project_scope)?,
+        weekly: tracker.get_by_week_filtered(project_scope)?,
+        monthly: tracker.get_by_month_filtered(project_scope)?,
+    })
+}
+
+fn render_web_dashboard(data: &WebDashboardData, live: bool) -> Result<String> {
+    let json = serde_json::to_string(data)?
+        .replace('&', "\\u0026")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029");
+    let live_endpoint = if live { "\"/api/gain\"" } else { "null" };
+    Ok(format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RTK Gain Dashboard</title>
+<style>
+:root {{
+  color-scheme: light;
+  --bg: #f7f8fb;
+  --panel: #ffffff;
+  --ink: #18202f;
+  --muted: #687386;
+  --line: #dce1ea;
+  --accent: #0f8b8d;
+  --accent-2: #d95f3d;
+  --good: #278452;
+  --shadow: 0 14px 40px rgba(24, 32, 47, 0.08);
+}}
+* {{ box-sizing: border-box; }}
+body {{
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}}
+main {{
+  width: min(1180px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 32px 0 44px;
+}}
+header {{
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: flex-start;
+  margin-bottom: 24px;
+}}
+h1 {{
+  margin: 0 0 8px;
+  font-size: clamp(28px, 4vw, 46px);
+  line-height: 1.02;
+  letter-spacing: 0;
+}}
+h2 {{
+  margin: 0 0 16px;
+  font-size: 18px;
+  letter-spacing: 0;
+}}
+p {{ margin: 0; color: var(--muted); }}
+.meta {{ text-align: right; font-size: 14px; line-height: 1.5; }}
+.grid {{
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}}
+.stat, .panel {{
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}}
+.stat {{ padding: 16px; min-width: 0; }}
+.label {{
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 8px;
+}}
+.value {{
+  font-size: clamp(22px, 3vw, 32px);
+  font-weight: 760;
+  overflow-wrap: anywhere;
+}}
+.panel {{
+  padding: 20px;
+  margin-top: 18px;
+}}
+.chart-wrap {{ width: 100%; overflow-x: auto; }}
+svg {{ display: block; width: 100%; min-width: 620px; height: 340px; }}
+.axis {{ stroke: var(--line); stroke-width: 1; }}
+.bar {{ fill: var(--accent); }}
+.bar:hover {{ fill: var(--accent-2); }}
+.tick {{ fill: var(--muted); font-size: 12px; }}
+.table {{ width: 100%; border-collapse: collapse; }}
+th, td {{
+  padding: 11px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: right;
+  font-size: 14px;
+}}
+th:first-child, td:first-child {{ text-align: left; }}
+th {{ color: var(--muted); font-weight: 650; }}
+.empty {{
+  min-height: 260px;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  color: var(--muted);
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+}}
+@media (max-width: 780px) {{
+  main {{ width: min(100% - 20px, 1180px); padding-top: 20px; }}
+  header {{ display: block; }}
+  .meta {{ text-align: left; margin-top: 12px; }}
+  .grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+  .panel {{ padding: 14px; }}
+}}
+@media (max-width: 480px) {{
+  .grid {{ grid-template-columns: 1fr; }}
+}}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>RTK Gain</h1>
+      <p id="subtitle"></p>
+    </div>
+    <p class="meta" id="meta"></p>
+  </header>
+  <section class="grid" id="stats"></section>
+  <section class="panel">
+    <h2>Daily Token Savings</h2>
+    <div class="chart-wrap" id="dailyChart"></div>
+  </section>
+  <section class="panel">
+    <h2>Top Commands</h2>
+    <div id="commandTable"></div>
+  </section>
+</main>
+<script>
+let data = {json};
+const liveEndpoint = {live_endpoint};
+
+const fmt = new Intl.NumberFormat();
+const short = value => {{
+  if (value >= 1_000_000) return `${{(value / 1_000_000).toFixed(1)}}M`;
+  if (value >= 1_000) return `${{(value / 1_000).toFixed(1)}}K`;
+  return fmt.format(value);
+}};
+const pct = value => `${{Number(value || 0).toFixed(1)}}%`;
+const ms = value => value >= 1000 ? `${{(value / 1000).toFixed(1)}}s` : `${{fmt.format(value || 0)}}ms`;
+const esc = value => String(value).replace(/[&<>"']/g, char => ({{
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;",
+}}[char]));
+
+function renderSummary() {{
+  document.getElementById("subtitle").textContent =
+    data.scope.path ? `${{data.scope.kind}} scope: ${{data.scope.path}}` : "Global token savings analytics";
+  document.getElementById("meta").innerHTML =
+    `Updated ${{data.generated_at}}<br>${{data.daily.length}} daily points`;
+
+  const stats = [
+    ["Commands", fmt.format(data.summary.total_commands)],
+    ["Input Tokens", short(data.summary.total_input)],
+    ["Output Tokens", short(data.summary.total_output)],
+    ["Tokens Saved", `${{short(data.summary.total_saved)}} (${{
+      pct(data.summary.avg_savings_pct)
+    }})`],
+  ];
+  document.getElementById("stats").innerHTML = stats.map(([label, value]) =>
+    `<article class="stat"><span class="label">${{label}}</span><div class="value">${{value}}</div></article>`
+  ).join("");
+}}
+
+function renderDailyChart() {{
+  const host = document.getElementById("dailyChart");
+  const rows = data.daily;
+  if (!rows.length) {{
+    host.innerHTML = '<div class="empty">No tracking data yet. Run RTK commands and refresh this dashboard.</div>';
+    return;
+  }}
+
+  const width = Math.max(620, rows.length * 34 + 90);
+  const height = 340;
+  const left = 54;
+  const right = 20;
+  const top = 20;
+  const bottom = 58;
+  const innerW = width - left - right;
+  const innerH = height - top - bottom;
+  const max = Math.max(...rows.map(row => row.saved_tokens), 1);
+  const gap = 8;
+  const barW = Math.max(8, (innerW - gap * (rows.length - 1)) / rows.length);
+  const bars = rows.map((row, index) => {{
+    const barH = Math.max(2, (row.saved_tokens / max) * innerH);
+    const x = left + index * (barW + gap);
+    const y = top + innerH - barH;
+    const label = row.date.length >= 10 ? row.date.slice(5) : row.date;
+    return `
+      <rect class="bar" x="${{x}}" y="${{y}}" width="${{barW}}" height="${{barH}}" rx="3">
+        <title>${{row.date}}: ${{fmt.format(row.saved_tokens)}} tokens saved</title>
+      </rect>
+      <text class="tick" x="${{x + barW / 2}}" y="${{height - 24}}" text-anchor="middle" transform="rotate(-35 ${{x + barW / 2}} ${{height - 24}})">${{label}}</text>
+    `;
+  }}).join("");
+  const yTicks = [0, 0.5, 1].map(part => {{
+    const y = top + innerH - innerH * part;
+    const value = Math.round(max * part);
+    return `<line class="axis" x1="${{left}}" y1="${{y}}" x2="${{width - right}}" y2="${{y}}"></line>
+      <text class="tick" x="${{left - 8}}" y="${{y + 4}}" text-anchor="end">${{short(value)}}</text>`;
+  }}).join("");
+  host.innerHTML = `<svg viewBox="0 0 ${{width}} ${{height}}" role="img" aria-label="Daily token savings chart">
+    ${{yTicks}}
+    <line class="axis" x1="${{left}}" y1="${{top + innerH}}" x2="${{width - right}}" y2="${{top + innerH}}"></line>
+    ${{bars}}
+  </svg>`;
+}}
+
+function renderCommandTable() {{
+  const host = document.getElementById("commandTable");
+  if (!data.by_command.length) {{
+    host.innerHTML = '<div class="empty">No command breakdown available yet.</div>';
+    return;
+  }}
+  host.innerHTML = `<table class="table">
+    <thead><tr><th>Command</th><th>Count</th><th>Saved</th><th>Avg Save</th><th>Avg Time</th></tr></thead>
+    <tbody>${{data.by_command.map(row => `<tr>
+      <td>${{esc(row.command)}}</td>
+      <td>${{fmt.format(row.count)}}</td>
+      <td>${{short(row.saved_tokens)}}</td>
+      <td>${{pct(row.avg_savings_pct)}}</td>
+      <td>${{ms(row.avg_time_ms)}}</td>
+    </tr>`).join("")}}</tbody>
+  </table>`;
+}}
+
+function renderDashboard() {{
+  renderSummary();
+  renderDailyChart();
+  renderCommandTable();
+}}
+
+async function refreshDashboard() {{
+  if (!liveEndpoint) return;
+  try {{
+    const response = await fetch(liveEndpoint, {{ cache: "no-store" }});
+    if (!response.ok) return;
+    data = await response.json();
+    renderDashboard();
+  }} catch (_error) {{
+  }}
+}}
+
+renderDashboard();
+if (liveEndpoint) {{
+  setInterval(refreshDashboard, 2000);
+}}
+</script>
+</body>
+</html>
+"#,
+        json = json,
+        live_endpoint = live_endpoint
+    ))
+}
+
+fn serve_web_dashboard(project_scope: Option<String>, open: bool, port: u16) -> Result<()> {
+    let addr = format!("127.0.0.1:{port}");
+    let listener = TcpListener::bind(&addr)
+        .with_context(|| format!("Failed to start dashboard server on http://{addr}"))?;
+    let url = format!("http://{addr}/");
+
+    println!("RTK Gain live dashboard serving at {url}");
+    println!("Press Ctrl+C to stop.");
+
+    if open {
+        open_url(&url)?;
+    }
+
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                if let Err(err) = handle_dashboard_request(stream, project_scope.as_deref()) {
+                    eprintln!("dashboard request failed: {err}");
+                }
+            }
+            Err(err) => eprintln!("dashboard connection failed: {err}"),
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_dashboard_request(mut stream: TcpStream, project_scope: Option<&str>) -> Result<()> {
+    let mut buffer = [0_u8; 2048];
+    let read = stream
+        .read(&mut buffer)
+        .context("Failed to read dashboard request")?;
+    let request = String::from_utf8_lossy(&buffer[..read]);
+    let path = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/");
+
+    match path {
+        "/" | "/index.html" => {
+            let tracker = Tracker::new().context("Failed to initialize tracking database")?;
+            let data = build_web_dashboard_data(&tracker, project_scope)?;
+            let html = render_web_dashboard(&data, true)?;
+            write_http_response(&mut stream, "200 OK", "text/html; charset=utf-8", &html)?;
+        }
+        "/api/gain" => {
+            let tracker = Tracker::new().context("Failed to initialize tracking database")?;
+            let data = build_web_dashboard_data(&tracker, project_scope)?;
+            let json = serde_json::to_string(&data)?;
+            write_http_response(&mut stream, "200 OK", "application/json", &json)?;
+        }
+        _ => {
+            write_http_response(
+                &mut stream,
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                "not found",
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn write_http_response(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &str,
+) -> Result<()> {
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
+        body.as_bytes().len()
+    );
+    stream
+        .write_all(response.as_bytes())
+        .context("Failed to write dashboard response")?;
+    Ok(())
+}
+
+fn open_dashboard(path: &Path) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "start", ""]);
+        cmd.arg(path);
+        cmd
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut cmd = Command::new("open");
+        cmd.arg(path);
+        cmd
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut cmd = Command::new("xdg-open");
+        cmd.arg(path);
+        cmd
+    };
+
+    command
+        .spawn()
+        .with_context(|| format!("Failed to open dashboard {}", path.display()))?;
+
+    Ok(())
+}
+
+fn open_url(url: &str) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "start", "", url]);
+        cmd
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut cmd = Command::new("open");
+        cmd.arg(url);
+        cmd
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut cmd = Command::new("xdg-open");
+        cmd.arg(url);
+        cmd
+    };
+
+    command
+        .spawn()
+        .with_context(|| format!("Failed to open dashboard {url}"))?;
+
+    Ok(())
 }
 
 fn export_json(

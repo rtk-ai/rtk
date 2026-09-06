@@ -29,6 +29,12 @@ rtk gain --history        # last 10 commands
 rtk gain --quota          # monthly quota savings estimate (default tier: 20x)
 rtk gain --quota -t pro   # use pro tier token budget for estimate
 
+# Web dashboard
+rtk gain --web            # generate a local HTML dashboard with charts
+rtk gain --web --open     # generate and open it in your browser
+rtk gain --web --web-output reports/gain.html
+rtk gain --serve --open   # live dashboard that refreshes while RTK records commands
+
 # Export
 rtk gain --all --format json > savings.json
 rtk gain --all --format csv  > savings.csv
@@ -76,6 +82,26 @@ Same columns as daily, aggregated by Sunday-Saturday week or calendar month.
 | `text` | default | Terminal display |
 | `json` | `--format json` | Programmatic analysis, dashboards |
 | `csv` | `--format csv` | Excel, Python/R, Google Sheets |
+
+## Web dashboard
+
+```bash
+rtk gain --web
+```
+
+Generates a self-contained HTML dashboard with KPI cards, daily token-savings bars, and the top commands by tokens saved. By default RTK writes it to your system temp directory and prints the file path.
+
+```bash
+rtk gain --web --open
+```
+
+Opens the generated dashboard in your default browser. Use `--web-output <file.html>` if you want a stable location for reports or sharing.
+
+```bash
+rtk gain --serve --open
+```
+
+Starts a local dashboard server at `http://127.0.0.1:7878/`. The page refreshes its data automatically, so commands tracked by RTK show up while the server is running. Use `--port <number>` to choose a different port.
 
 **JSON structure:**
 ```json

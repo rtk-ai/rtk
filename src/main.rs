@@ -468,6 +468,21 @@ enum Commands {
         /// Output format: text, json, csv
         #[arg(short, long, default_value = "text")]
         format: String,
+        /// Generate a local web dashboard with charts
+        #[arg(long)]
+        web: bool,
+        /// Serve a local live dashboard that refreshes as commands are tracked
+        #[arg(long)]
+        serve: bool,
+        /// Open the generated web dashboard in the default browser
+        #[arg(long)]
+        open: bool,
+        /// Port for the --serve live dashboard
+        #[arg(long, default_value = "7878")]
+        port: u16,
+        /// Write the generated web dashboard to this HTML file
+        #[arg(long = "web-output", requires = "web")]
+        web_output: Option<PathBuf>,
         /// Show parse failure log (commands that fell back to raw execution)
         #[arg(short = 'F', long)]
         failures: bool,
@@ -2321,6 +2336,11 @@ fn run_cli() -> Result<i32> {
             monthly,
             all,
             format,
+            web,
+            serve,
+            open,
+            port,
+            web_output,
             failures,
             reset,
             yes,
@@ -2336,6 +2356,11 @@ fn run_cli() -> Result<i32> {
                 monthly,
                 all,
                 &format,
+                web,
+                serve,
+                open,
+                port,
+                web_output.as_deref(),
                 failures,
                 reset,
                 yes,
@@ -3396,6 +3421,56 @@ mod tests {
         if let Ok(cli) = result {
             match cli.command {
                 Commands::Gain { failures, .. } => assert!(failures),
+                _ => panic!("Expected Gain command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_gain_web_flags_parse() {
+        let result = Cli::try_parse_from([
+            "rtk",
+            "gain",
+            "--web",
+            "--open",
+            "--web-output",
+            "dashboard.html",
+        ]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Gain {
+                    web,
+                    serve,
+                    open,
+                    port,
+                    web_output,
+                    ..
+                } => {
+                    assert!(web);
+                    assert!(!serve);
+                    assert!(open);
+                    assert_eq!(port, 7878);
+                    assert_eq!(web_output, Some(PathBuf::from("dashboard.html")));
+                }
+                _ => panic!("Expected Gain command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_gain_serve_flags_parse() {
+        let result = Cli::try_parse_from(["rtk", "gain", "--serve", "--open", "--port", "9001"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Gain {
+                    serve, open, port, ..
+                } => {
+                    assert!(serve);
+                    assert!(open);
+                    assert_eq!(port, 9001);
+                }
                 _ => panic!("Expected Gain command"),
             }
         }
