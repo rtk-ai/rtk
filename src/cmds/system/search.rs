@@ -136,7 +136,8 @@ fn match_block(path: &str, entries: &[(usize, bool, String)]) -> String {
 ///
 /// - `patterns`: positional pattern + all `-e`/`--regexp` values. Empty → error.
 /// - `paths`: subsequent non-flag positionals. Empty → caller defaults to `["."]`.
-/// - `flags`: other flags forwarded to rg (`-r`/`-R`/`--recursive` stripped).
+/// - `flags`: other flags, forwarded verbatim. (For the rg engine the `-r`/`-R`
+///   grep-habit footgun is neutralized earlier by `sanitize_rg_recursive`.)
 ///
 /// Short clusters are scanned left-to-right; the first value-taking letter
 /// terminates the cluster — everything after it is its inline value, not a
@@ -250,6 +251,103 @@ fn extract_pattern_path<T: AsRef<str>>(args: &[T]) -> (Vec<String>, Vec<String>,
     };
 
     (patterns, paths, flags)
+}
+
+/// Neutralizes the `rg -rn` grep-habit footgun.
+///
+/// ripgrep is recursive by default and has no `-r`-for-recursion: `-r` is
+/// `--replace`, which consumes the rest of the cluster as replacement text. So
+/// `rg -rn 'Foo' .` means "replace every match of `Foo` with the literal `n`",
+/// silently corrupting the output — agents type it constantly from `grep -rn`
+/// muscle memory. For the rg engine we drop `-r`/`-R`/`--recursive` (all no-ops
+/// there) before the command reaches ripgrep, so the search runs as intended.
+///
+/// Only boolean short clusters are touched (mirroring `extract_pattern_path`'s
+/// token discipline): `-e`/`--regexp` values, positionals after `--`, value-flag
+/// values, and the deliberate long `--replace` form are all left untouched, so a
+/// literal pattern like `-rn` is never rewritten. Grep is never routed here (its
+/// `-r`/`-R` genuinely mean recursion). Returns the cleaned args and whether
+/// anything changed (the caller warns once on change).
+fn sanitize_rg_recursive(args: &[String]) -> (Vec<String>, bool) {
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    let mut changed = false;
+    let mut past_dashdash = false;
+    let mut i = 0;
+
+    while i < args.len() {
+        let arg = args[i].as_str();
+
+        if past_dashdash {
+            out.push(arg.to_string());
+            i += 1;
+            continue;
+        }
+        if arg == "--" {
+            past_dashdash = true;
+            out.push(arg.to_string());
+            i += 1;
+            continue;
+        }
+        if arg.starts_with("--") {
+            if arg == "--recursive" {
+                changed = true; // no-op for rg; drop it
+                i += 1;
+                continue;
+            }
+            if arg == "--regexp" || VALUE_FLAGS_LONG.contains(&arg) {
+                out.push(arg.to_string());
+                if i + 1 < args.len() {
+                    out.push(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            out.push(arg.to_string());
+            i += 1;
+            continue;
+        }
+
+        match arg.strip_prefix('-') {
+            Some(rest) if !rest.is_empty() => match parse_cluster(rest) {
+                ClusterResult::Boolean(prefix) => {
+                    let letters = prefix.unwrap_or_default();
+                    if letters.contains('r') || letters.contains('R') {
+                        changed = true;
+                        let cleaned: String =
+                            letters.chars().filter(|c| *c != 'r' && *c != 'R').collect();
+                        // A cluster of only r/R collapses to nothing → drop it.
+                        if !cleaned.is_empty() {
+                            out.push(format!("-{cleaned}"));
+                        }
+                    } else {
+                        out.push(arg.to_string());
+                    }
+                    i += 1;
+                }
+                ClusterResult::ValueTaking { inline, .. } => {
+                    // e.g. `-e PAT`, `-A 3`, `-A5`: keep the flag token, and its
+                    // value token when the value is not inline. A value-taking
+                    // flag terminates the cluster, so any `-r` here is a genuine
+                    // (rare) `--replace` and is deliberately left alone.
+                    out.push(arg.to_string());
+                    if inline.is_empty() && i + 1 < args.len() {
+                        out.push(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+            },
+            _ => {
+                out.push(arg.to_string());
+                i += 1;
+            }
+        }
+    }
+
+    (out, changed)
 }
 
 fn unparsed_signal(stdout: &str) -> usize {
@@ -398,8 +496,7 @@ fn show_file(paths: &[String], extra_args: &[String]) -> bool {
 }
 
 fn show_line(extra_args: &[String]) -> bool {
-    (has_short_flag(extra_args, 'n')
-        || extra_args.iter().any(|f| f == "--line-number"))
+    (has_short_flag(extra_args, 'n') || extra_args.iter().any(|f| f == "--line-number"))
         && !has_short_flag(extra_args, 'N')
         && !extra_args.iter().any(|f| f == "--no-line-number")
 }
@@ -521,8 +618,26 @@ pub fn run(
 
     // Re-insert `--` when clap's trailing_var_arg consumed it
     let args = args_utils::restore_double_dash(args);
+    // `real_cmd` labels tracking/tee with what the agent actually typed, so it is
+    // captured before the rg `-r` footgun is neutralized below.
     let real_cmd = format!("{} {}", engine.label(), args.join(" "));
     let rtk_label = format!("rtk {}", engine.label());
+
+    // For ripgrep, `-r` is `--replace`, not recursion (rg recurses by default).
+    // Strip the grep-habit `-r`/`-R` so `rg -rn 'Foo'` searches instead of
+    // replacing every match with `n`. Warn once so the correction is visible.
+    let args = if matches!(engine, Engine::Rg) {
+        let (cleaned, changed) = sanitize_rg_recursive(&args);
+        if changed {
+            eprintln!(
+                "rtk: ripgrep reads -r as --replace (it is recursive by default); \
+                 dropped -r/-R to avoid replacing matches. Use --replace for deliberate substitution."
+            );
+        }
+        cleaned
+    } else {
+        args
+    };
 
     let (patterns, paths, extra_args) = extract_pattern_path(&args);
 
@@ -679,11 +794,15 @@ pub fn run(
         // Tee the file's full matches (real path) so the tail hint recovers them
         // openably, skipping the lines already shown.
         let full_block = match_block(file, entries);
-        match crate::core::tee::force_tee_tail_hint(&full_block, &grep_slug(idx, file), file_shown + 1)
-        {
-            Some(hint) => {
-                body.push_str(&format!("  +{} more in {} {}\n", remaining, file_display, hint))
-            }
+        match crate::core::tee::force_tee_tail_hint(
+            &full_block,
+            &grep_slug(idx, file),
+            file_shown + 1,
+        ) {
+            Some(hint) => body.push_str(&format!(
+                "  +{} more in {} {}\n",
+                remaining, file_display, hint
+            )),
             None => body.push_str(&format!("  +{} more in {}\n", remaining, file_display)),
         }
     }
@@ -850,6 +969,74 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sanitize(args: &[&str]) -> (Vec<String>, bool) {
+        let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        sanitize_rg_recursive(&owned)
+    }
+
+    #[test]
+    fn test_sanitize_rg_rn_footgun() {
+        // The headline case: `rg -rn 'Foo' .` must become `rg -n 'Foo' .`,
+        // not "replace every match with n".
+        let (out, changed) = sanitize(&["-rn", "Foo", "."]);
+        assert!(changed);
+        assert_eq!(out, vec!["-n", "Foo", "."]);
+    }
+
+    #[test]
+    fn test_sanitize_rg_r_variants() {
+        // r anywhere in a boolean cluster is dropped; other flags survive.
+        assert_eq!(sanitize(&["-nr", "Foo"]).0, vec!["-n", "Foo"]);
+        assert_eq!(sanitize(&["-rln", "Foo"]).0, vec!["-ln", "Foo"]);
+        assert_eq!(sanitize(&["-Rn", "Foo"]).0, vec!["-n", "Foo"]);
+        // A cluster of only r/R collapses away entirely.
+        assert_eq!(sanitize(&["-r", "Foo"]).0, vec!["Foo"]);
+    }
+
+    #[test]
+    fn test_sanitize_context_flag_preserved() {
+        // Context flags (value-taking) must be kept intact while -r is fixed.
+        assert_eq!(
+            sanitize(&["-A3", "-rn", "Foo", "src/"]).0,
+            vec!["-A3", "-n", "Foo", "src/"]
+        );
+        assert_eq!(
+            sanitize(&["-A", "3", "-rn", "Foo"]).0,
+            vec!["-A", "3", "-n", "Foo"]
+        );
+    }
+
+    #[test]
+    fn test_sanitize_leaves_deliberate_replace() {
+        // The deliberate long form is untouched.
+        let (out, changed) = sanitize(&["--replace", "n", "Foo", "."]);
+        assert!(!changed);
+        assert_eq!(out, vec!["--replace", "n", "Foo", "."]);
+        // --recursive is a no-op for rg and is dropped, but replace stays.
+        assert_eq!(sanitize(&["--recursive", "Foo"]).0, vec!["Foo"]);
+    }
+
+    #[test]
+    fn test_sanitize_never_touches_patterns() {
+        // A pattern that merely looks like a flag must survive: after `--`,
+        assert_eq!(
+            sanitize(&["--", "-rn", "src/"]),
+            (
+                vec!["--".to_string(), "-rn".to_string(), "src/".to_string()],
+                false
+            )
+        );
+        // and as an -e value.
+        assert_eq!(
+            sanitize(&["-e", "-rn", "src/"]).0,
+            vec!["-e", "-rn", "src/"]
+        );
+        // No -r present: unchanged.
+        let (out, changed) = sanitize(&["-n", "Foo"]);
+        assert!(!changed);
+        assert_eq!(out, vec!["-n", "Foo"]);
+    }
 
     #[test]
     fn test_clean_line() {
@@ -1621,7 +1808,8 @@ mod tests {
     #[test]
     fn test_unparsed_signal_context_lines_parse_ok() {
         // Context lines (dash separator) parse via the updated regex → not counted.
-        let stdout = "file.txt\x003-context_before\nfile.txt\x004:match\nfile.txt\x005-context_after\n";
+        let stdout =
+            "file.txt\x003-context_before\nfile.txt\x004:match\nfile.txt\x005-context_after\n";
         assert_eq!(unparsed_signal(stdout), 0);
     }
 
