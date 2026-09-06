@@ -5124,6 +5124,12 @@ const GEMINI_HOOK_SCRIPT: &str = r#"#!/bin/bash
 exec rtk hook gemini
 "#;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeminiHookPlatform {
+    Windows,
+    Other,
+}
+
 fn resolve_gemini_dir() -> Result<PathBuf> {
     resolve_home_subdir(GEMINI_DIR)
 }
@@ -5224,7 +5230,7 @@ fn patch_gemini_settings(
 ) -> Result<bool> {
     let InitContext { verbose, dry_run } = ctx;
     let settings_path = gemini_dir.join(SETTINGS_JSON);
-    let hook_cmd = hook_path.to_string_lossy().to_string();
+    let hook_cmd = gemini_hook_command(hook_path);
 
     // Read or create settings.json
     let mut settings: serde_json::Value = if settings_path.exists() {
@@ -5348,6 +5354,85 @@ fn patch_gemini_settings(
     }
 
     Ok(false)
+}
+
+fn gemini_hook_command(hook_path: &Path) -> String {
+    let bash_path = find_git_for_windows_bash();
+    let platform = if cfg!(windows) {
+        GeminiHookPlatform::Windows
+    } else {
+        GeminiHookPlatform::Other
+    };
+
+    gemini_hook_command_for_platform(hook_path, platform, bash_path.as_deref())
+}
+
+fn gemini_hook_command_for_platform(
+    hook_path: &Path,
+    platform: GeminiHookPlatform,
+    bash_path: Option<&Path>,
+) -> String {
+    match (platform, bash_path) {
+        (GeminiHookPlatform::Windows, Some(bash_path)) => {
+            format!(
+                "{} {}",
+                quote_command_arg(bash_path),
+                quote_command_arg(hook_path)
+            )
+        }
+        _ => hook_path.to_string_lossy().to_string(),
+    }
+}
+
+fn quote_command_arg(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    if raw.contains([' ', '\t', '"']) {
+        format!("\"{}\"", raw.replace('"', "\\\""))
+    } else {
+        raw.to_string()
+    }
+}
+
+#[cfg(windows)]
+fn find_git_for_windows_bash() -> Option<PathBuf> {
+    for candidate in [
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\usr\bin\bash.exe",
+    ] {
+        let path = PathBuf::from(candidate);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    let output = std::process::Command::new("where.exe")
+        .arg("bash.exe")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .find(|path| is_git_for_windows_bash(path))
+}
+
+#[cfg(windows)]
+fn is_git_for_windows_bash(path: &Path) -> bool {
+    let normalized = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    normalized.ends_with("/usr/bin/bash.exe") && normalized.contains("/git/")
+}
+
+#[cfg(not(windows))]
+fn find_git_for_windows_bash() -> Option<PathBuf> {
+    None
 }
 
 /// Remove Gemini artifacts during uninstall
@@ -6079,6 +6164,36 @@ mod tests {
     use super::*;
     use std::process::Command;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_gemini_hook_command_windows_prefixes_git_bash() {
+        let hook_path = Path::new(r"C:\Users\me\.gemini\hooks\rtk-hook-gemini.sh");
+        let bash_path = Path::new(r"D:\installed_softs\Git\usr\bin\bash.exe");
+
+        assert_eq!(
+            gemini_hook_command_for_platform(
+                hook_path,
+                GeminiHookPlatform::Windows,
+                Some(bash_path)
+            ),
+            r"D:\installed_softs\Git\usr\bin\bash.exe C:\Users\me\.gemini\hooks\rtk-hook-gemini.sh"
+        );
+    }
+
+    #[test]
+    fn test_gemini_hook_command_windows_quotes_paths_with_spaces() {
+        let hook_path = Path::new(r"C:\Users\Jane Doe\.gemini\hooks\rtk-hook-gemini.sh");
+        let bash_path = Path::new(r"C:\Program Files\Git\usr\bin\bash.exe");
+
+        assert_eq!(
+            gemini_hook_command_for_platform(
+                hook_path,
+                GeminiHookPlatform::Windows,
+                Some(bash_path)
+            ),
+            r#""C:\Program Files\Git\usr\bin\bash.exe" "C:\Users\Jane Doe\.gemini\hooks\rtk-hook-gemini.sh""#
+        );
+    }
 
     #[test]
     fn test_init_mentions_all_top_level_commands() {
