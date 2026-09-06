@@ -52,6 +52,21 @@ After installation, **verify you have the correct rtk**:
 rtk gain  # Must show the savings dashboard (not "command not found")
 ```
 
+### Quick Install (Windows)
+
+```powershell
+winget install rtk-ai.rtk   # or: scoop install rtk / choco install rtk
+```
+
+Or run the installer directly — it picks x64 or ARM64, verifies the SHA256
+checksum, installs to `%LOCALAPPDATA%\rtk\bin` and adds that to your User PATH:
+
+```powershell
+irm https://raw.githubusercontent.com/rtk-ai/rtk/master/install.ps1 | iex
+```
+
+Restart your terminal, then verify with `rtk gain`.
+
 ### Alternative: Manual Installation
 
 ```bash

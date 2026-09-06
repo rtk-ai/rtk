@@ -84,6 +84,27 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 > echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc  # or ~/.zshrc
 > ```
 
+### Windows
+
+```powershell
+winget install rtk-ai.rtk
+# or
+scoop install rtk
+# or
+choco install rtk
+```
+
+Or install straight from the repo (x64 and ARM64, SHA256-verified):
+
+```powershell
+irm https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.ps1 | iex
+```
+
+> Installs to `%LOCALAPPDATA%\rtk\bin` and adds it to your User PATH — restart
+> the terminal afterwards. To pass options (`-Force`, `-NoPath`,
+> `-Version <x.y.z>`, `-InstallDir <path>`), download the script and run it
+> directly instead of piping it to `iex`.
+
 ### Cargo
 
 ```bash
