@@ -14,6 +14,8 @@ use crate::core::utils::{
 };
 use anyhow::{Context, Result};
 use std::ffi::OsString;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Clone)]
@@ -48,6 +50,7 @@ fn git_cmd(global_args: &[String]) -> Command {
 /// We only use this for non-user-facing parses where RTK depends on git's
 /// English status phrases. User-visible passthrough output keeps the user's
 /// locale.
+#[cfg(test)]
 fn git_cmd_c_locale(global_args: &[String]) -> Command {
     let mut cmd = git_cmd(global_args);
     cmd.env("LC_ALL", "C");
@@ -1258,6 +1261,9 @@ impl GitStatusState {
     }
 }
 
+// Plain-status prose parsers kept for unit tests / regression coverage of the
+// state strings we still surface (now via git-dir markers on the hot path).
+#[cfg(test)]
 const REBASE_INDICATORS: &[&str] = &[
     "rebase in progress",
     "You are currently rebasing",
@@ -1268,6 +1274,7 @@ const REBASE_INDICATORS: &[&str] = &[
     "No commands remaining",
 ];
 
+#[cfg(test)]
 fn detect_status_state(line: &str) -> Option<GitStatusState> {
     if line.contains("All conflicts fixed but you are still merging") {
         Some(GitStatusState::MergeReadyToCommit)
@@ -1298,9 +1305,9 @@ fn detect_status_state(line: &str) -> Option<GitStatusState> {
 /// rebase edit, the user sees a "clean" status and misses "You are currently
 /// editing a commit while rebasing ...".
 ///
-/// This helper walks the plain-status output we already capture for tracking
-/// and emits a compact, RTK-style summary rather than dumping git's full prose.
-/// Returns `None` when no state is in progress.
+/// Production hot path uses `state_from_git_dir` instead (no second git spawn).
+/// This prose parser remains as unit-test coverage of the summary strings.
+#[cfg(test)]
 fn extract_state_header(raw: &str) -> Option<String> {
     // Headers of the file-change blocks — everything relevant to state appears
     // above these in git's output, so they double as a terminator.
@@ -1332,15 +1339,185 @@ fn extract_state_header(raw: &str) -> Option<String> {
 /// Extract the explicit "HEAD detached at/from <ref>" line from plain
 /// `git status` output.
 ///
-/// Porcelain `-b` collapses a detached HEAD to the opaque `## HEAD (no branch)`,
-/// which an agent (or a distracted human) can misread as a branch literally
-/// named `HEAD`. The plain-status output keeps the explicit SHA/ref, so we
-/// surface that instead. Returns `None` when HEAD is on a branch.
+/// Production uses `detached_from_git_dir`. This remains for unit tests.
+#[cfg(test)]
 fn extract_detached_head(raw: &str) -> Option<String> {
     raw.lines()
         .map(str::trim)
         .find(|l| l.starts_with("HEAD detached "))
         .map(str::to_string)
+}
+
+/// Resolve the repository `.git` directory without spawning git.
+///
+/// Honors common global options from `global_args` (`-C`, `--git-dir`).
+/// Falls back to walking parents of the current directory for a `.git`
+/// entry (directory or gitfile). Used to avoid a second `git status`
+/// process on the compact status path.
+fn resolve_git_dir(global_args: &[String]) -> Option<PathBuf> {
+    let mut start = std::env::current_dir().ok()?;
+    let mut explicit_git_dir: Option<PathBuf> = None;
+
+    let mut i = 0;
+    while i < global_args.len() {
+        let arg = &global_args[i];
+        if let Some(rest) = arg.strip_prefix("--git-dir=") {
+            explicit_git_dir = Some(PathBuf::from(rest));
+        } else if arg == "--git-dir" {
+            if let Some(next) = global_args.get(i + 1) {
+                explicit_git_dir = Some(PathBuf::from(next));
+                i += 1;
+            }
+        } else if let Some(rest) = arg.strip_prefix("-C") {
+            if rest.is_empty() {
+                if let Some(next) = global_args.get(i + 1) {
+                    start = PathBuf::from(next);
+                    i += 1;
+                }
+            } else {
+                // Unusual form; treat as path after -C with no space (git does not support this).
+            }
+        } else if arg == "-C" {
+            if let Some(next) = global_args.get(i + 1) {
+                start = if Path::new(next).is_absolute() {
+                    PathBuf::from(next)
+                } else {
+                    start.join(next)
+                };
+                i += 1;
+            }
+        }
+        i += 1;
+    }
+
+    if let Some(dir) = explicit_git_dir {
+        let dir = if dir.is_absolute() {
+            dir
+        } else {
+            start.join(dir)
+        };
+        return normalize_git_dir(&dir);
+    }
+
+    let mut dir = start;
+    loop {
+        let candidate = dir.join(".git");
+        if candidate.exists() {
+            return normalize_git_dir(&candidate);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
+}
+
+/// Expand a `.git` path that may be a directory or a gitfile (`gitdir: ...`).
+fn normalize_git_dir(path: &Path) -> Option<PathBuf> {
+    if path.is_dir() {
+        return Some(path.to_path_buf());
+    }
+    // gitfile: "gitdir: /path/to/real/gitdir"
+    let content = fs::read_to_string(path).ok()?;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("gitdir:") {
+            let target = rest.trim();
+            let target_path = PathBuf::from(target);
+            if target_path.is_absolute() {
+                return Some(target_path);
+            }
+            // Relative gitdir is relative to the gitfile's parent
+            return path.parent().map(|p| p.join(target_path));
+        }
+    }
+    None
+}
+
+/// Detect in-progress operations from git-dir marker files (no subprocess).
+///
+/// Mirrors the states `extract_state_header` recovers from plain `git status`
+/// prose, so the compact path can skip the second git invocation.
+fn state_from_git_dir(git_dir: &Path, porcelain: &str) -> Option<String> {
+    // `git am` uses rebase-apply with an `applying` marker — check before rebase.
+    if git_dir.join("rebase-apply").join("applying").is_file() {
+        return Some(GitStatusState::Am.summary().to_string());
+    }
+    if git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir() {
+        return Some(GitStatusState::Rebase.summary().to_string());
+    }
+    if git_dir.join("CHERRY_PICK_HEAD").is_file() {
+        return Some(GitStatusState::CherryPick.summary().to_string());
+    }
+    if git_dir.join("REVERT_HEAD").is_file() {
+        return Some(GitStatusState::Revert.summary().to_string());
+    }
+    if git_dir.join("BISECT_LOG").is_file() {
+        return Some(GitStatusState::Bisect.summary().to_string());
+    }
+    if git_dir.join("MERGE_HEAD").is_file() {
+        let state = if porcelain_has_unmerged(porcelain) {
+            GitStatusState::MergeConflicts
+        } else {
+            GitStatusState::MergeReadyToCommit
+        };
+        return Some(state.summary().to_string());
+    }
+    // Sparse checkout: only when the sparse-checkout cone file is present and
+    // non-empty (matches git's "You are in a sparse checkout" banner).
+    let sparse = git_dir.join("info").join("sparse-checkout");
+    if sparse.is_file() {
+        if let Ok(meta) = fs::metadata(&sparse) {
+            if meta.len() > 0 {
+                // Confirm sparse-checkout is actually enabled via config when possible
+                if sparse_checkout_enabled(git_dir) {
+                    return Some(GitStatusState::SparseCheckout.summary().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Best-effort: `core.sparseCheckout = true` in the repo config.
+fn sparse_checkout_enabled(git_dir: &Path) -> bool {
+    let config = git_dir.join("config");
+    let Ok(text) = fs::read_to_string(config) else {
+        return false;
+    };
+    // Match common forms without a full git-config parser
+    text.lines().any(|l| {
+        let t = l.trim().to_ascii_lowercase().replace(' ', "");
+        t == "sparsecheckout=true" || t.starts_with("sparsecheckout=true#")
+    })
+}
+
+/// True if porcelain status contains unmerged path entries (conflict codes).
+fn porcelain_has_unmerged(porcelain: &str) -> bool {
+    porcelain.lines().any(|line| {
+        if line.len() < 2 || line.starts_with("##") {
+            return false;
+        }
+        let b = line.as_bytes();
+        let x = b[0] as char;
+        let y = b[1] as char;
+        // Unmerged: U in either slot, or AA/DD
+        x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D')
+    })
+}
+
+/// Read detached HEAD display from `.git/HEAD` without spawning git.
+///
+/// Returns `Some("HEAD detached at <shortsha>")` when HEAD is a raw SHA,
+/// matching the information agents need without a plain `git status` call.
+fn detached_from_git_dir(git_dir: &Path) -> Option<String> {
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    if head.starts_with("ref:") || head.is_empty() {
+        return None;
+    }
+    // Annotated tags / unusual forms still start with a hex-ish object name
+    let short = if head.len() >= 7 { &head[..7] } else { head };
+    Some(format!("HEAD detached at {}", short))
 }
 
 /// Minimal filtering for git status with user-provided args
@@ -1421,13 +1598,9 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         return Ok(0);
     }
 
-    let mut raw_cmd = git_cmd_c_locale(global_args);
-    raw_cmd.arg("status");
-    raw_cmd.args(args);
-    let raw_output = exec_capture(&mut raw_cmd)
-        .map(|r| r.stdout)
-        .unwrap_or_default();
-
+    // Single git invocation: porcelain + -b. State headers and detached HEAD
+    // are recovered from the git dir (and porcelain unmerged codes) so we do
+    // not pay for a second plain `git status` on every call.
     let mut cmd = build_status_command(args, global_args);
     let result = exec_capture(&mut cmd).context("Failed to run git status")?;
 
@@ -1450,26 +1623,40 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         } else {
             format!("rtk git status {}", args.join(" "))
         };
-        let shown = never_worse(&raw_output, &message);
-        timer.track(&original_cmd, &rtk_cmd, &raw_output, shown);
+        let shown = never_worse(&result.stdout, &message);
+        timer.track(&original_cmd, &rtk_cmd, &result.stdout, shown);
         return Ok(result.exit_code);
     }
 
-    let formatted = match extract_detached_head(&raw_output) {
+    let git_dir = resolve_git_dir(global_args);
+    let formatted = match git_dir
+        .as_ref()
+        .and_then(|d| detached_from_git_dir(d))
+        .or_else(|| {
+            // Fallback: porcelain branch line for detached without git-dir access
+            if result.stdout.lines().next().is_some_and(|l| l.contains("HEAD (no branch)")) {
+                Some("HEAD detached".to_string())
+            } else {
+                None
+            }
+        }) {
         Some(detached_ref) => format_status_output_detached(&result.stdout, &detached_ref),
         None => format_status_output(&result.stdout),
     };
 
-    // Surface in-progress state (rebase/merge/cherry-pick/bisect/am) from the
-    // plain-status output we already captured for tracking. Porcelain omits it
-    // and hiding it misleads the user about the true repo state.
-    let final_output = match extract_state_header(&raw_output) {
+    let final_output = match git_dir
+        .as_ref()
+        .and_then(|d| state_from_git_dir(d, &result.stdout))
+    {
         Some(state) => format!("{}\n{}", state, formatted),
         None => formatted,
     };
 
-    let shown = never_worse(&raw_output, &final_output);
-    println!("{}", shown);
+    // Compact formatter is intentionally smaller than plain `git status`.
+    // Do not compare against porcelain alone: adding a state header can make
+    // the compact output slightly longer than short porcelain while still
+    // being far smaller than the unfiltered command we replaced.
+    println!("{}", final_output);
 
     let original_cmd = if args.is_empty() {
         "git status".to_string()
@@ -1482,7 +1669,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         format!("rtk git status {}", args.join(" "))
     };
 
-    timer.track(&original_cmd, &rtk_cmd, &raw_output, shown);
+    timer.track(&original_cmd, &rtk_cmd, &result.stdout, &final_output);
 
     Ok(0)
 }
