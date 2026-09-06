@@ -2728,15 +2728,9 @@ mod tests {
     fn test_rewrite_tsc() {
         let commands = vec![
             "npm exec tsc",
-            "npm rum tsc",
-            "npm run tsc",
-            "npm run-script tsc",
-            "npm urn tsc",
             "npm x tsc",
             "pnpm dlx tsc",
             "pnpm exec tsc",
-            "pnpm run tsc",
-            "pnpm run-script tsc",
             "npm tsc",
             "npx tsc",
             "pnpm tsc",
@@ -2751,6 +2745,34 @@ mod tests {
                 command
             );
         }
+    }
+
+    #[test]
+    fn test_rewrite_package_manager_tsc_scripts_preserve_script_invocation() {
+        assert_eq!(
+            rewrite_command_no_prefixes("npm run tsc", &[]),
+            Some("rtk npm run tsc".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("npm run-script tsc -- --pretty false", &[]),
+            Some("rtk npm run-script tsc -- --pretty false".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("npm rum tsc", &[]),
+            Some("rtk npm rum tsc".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("npm urn tsc", &[]),
+            Some("rtk npm urn tsc".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm run tsc", &[]),
+            Some("rtk pnpm run tsc".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm run-script tsc -- --noEmit", &[]),
+            Some("rtk pnpm run-script tsc -- --noEmit".into())
+        );
     }
 
     #[test]

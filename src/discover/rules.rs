@@ -144,21 +144,15 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?tsc(\s|$)",
+        pattern: r"^((p?np(m|x)|p?npm\s+exec|npm\s+x|pnpm\s+dlx)\s+)?tsc(\s|$)",
         rtk_cmd: "rtk tsc",
         rewrite_prefixes: &[
             "npm exec tsc",
-            "npm rum tsc",
-            "npm run tsc",
-            "npm run-script tsc",
             "npm tsc",
-            "npm urn tsc",
             "npm x tsc",
             "npx tsc",
             "pnpm dlx tsc",
             "pnpm exec tsc",
-            "pnpm run tsc",
-            "pnpm run-script tsc",
             "pnpm tsc",
             "pnpx tsc",
             "tsc",
