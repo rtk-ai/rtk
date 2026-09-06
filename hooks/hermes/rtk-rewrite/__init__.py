@@ -4,6 +4,7 @@ All rewrite logic lives in RTK's Rust ``rtk rewrite`` command; this module
 only bridges Hermes ``pre_tool_call`` payloads to that command and fails open.
 """
 
+import os
 import shutil
 import subprocess
 import sys
@@ -76,5 +77,10 @@ def _pre_tool_call(tool_name=None, args=None, **_kwargs):
         return
 
 
+def _conductor_twist_enabled():
+    return os.environ.get("RTK_HERMES_CONDUCTOR", "").lower() in {"1", "true", "yes", "on"}
+
+
 def _warn(message):
-    print(f"rtk: hermes plugin warning: {message}", file=sys.stderr)
+    warning_name = "The Conductor" if _conductor_twist_enabled() else "hermes plugin"
+    print(f"rtk: {warning_name} warning: {message}", file=sys.stderr)
