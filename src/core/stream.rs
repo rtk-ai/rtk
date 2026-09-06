@@ -268,6 +268,16 @@ impl StreamResult {
     }
 }
 
+/// Context message for a failed `spawn`/`status` call, naming the program so the
+/// error points at the missing binary rather than a bare "Failed to spawn process".
+fn spawn_failure_context(cmd: &Command) -> String {
+    let program = cmd.get_program().to_string_lossy();
+    format!(
+        "failed to spawn `{program}` (is it installed, or does its \
+         shebang point at a missing interpreter?)"
+    )
+}
+
 pub fn status_to_exit_code(status: std::process::ExitStatus) -> i32 {
     if let Some(code) = status.code() {
         return code;
@@ -301,7 +311,8 @@ pub fn run_streaming(
         };
         cmd.stdout(Stdio::inherit());
         cmd.stderr(Stdio::inherit());
-        let status = cmd.status().context("Failed to spawn process")?;
+        let spawn_ctx = spawn_failure_context(cmd);
+        let status = cmd.status().with_context(|| spawn_ctx)?;
         return Ok(StreamResult {
             exit_code: status_to_exit_code(status),
             raw: String::new(),
@@ -331,7 +342,8 @@ pub fn run_streaming(
 
     let is_streaming = matches!(stdout_mode, FilterMode::Streaming(_));
 
-    let mut child = ChildGuard(cmd.spawn().context("Failed to spawn process")?);
+    let spawn_ctx = spawn_failure_context(cmd);
+    let mut child = ChildGuard(cmd.spawn().with_context(|| spawn_ctx)?);
 
     let stdin_thread: Option<std::thread::JoinHandle<()>> = match stdin_mode {
         StdinMode::Filter(mut filter) => {
@@ -987,6 +999,47 @@ pub(crate) mod tests {
             exit_code: 0,
         };
         assert_eq!(r.combined(), "");
+    }
+
+    // brief 012: a spawn failure must name the program and hint at the two real
+    // causes of `os error 2` (binary absent vs. stale shebang interpreter),
+    // instead of the old opaque "Failed to spawn process".
+    #[test]
+    fn test_spawn_failure_names_missing_program_passthrough() {
+        let missing = "definitely-not-a-real-binary-xyz";
+        let mut cmd = Command::new(missing);
+        // Passthrough path → cmd.status() spawn site.
+        let Err(err) = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough) else {
+            panic!("spawning a missing program must fail");
+        };
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains(missing),
+            "error chain should name the program, got: {chain}"
+        );
+        assert!(
+            chain.contains("is it installed") && chain.contains("interpreter"),
+            "error chain should hint at install/interpreter causes, got: {chain}"
+        );
+    }
+
+    #[test]
+    fn test_spawn_failure_names_missing_program_capture() {
+        let missing = "definitely-not-a-real-binary-xyz";
+        let mut cmd = Command::new(missing);
+        // Capture path → cmd.spawn() spawn site.
+        let Err(err) = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly) else {
+            panic!("spawning a missing program must fail");
+        };
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains(missing),
+            "error chain should name the program, got: {chain}"
+        );
+        assert!(
+            chain.contains("is it installed") && chain.contains("interpreter"),
+            "error chain should hint at install/interpreter causes, got: {chain}"
+        );
     }
 
     pub fn run_block_filter(filter: &mut dyn StreamFilter, input: &str, exit_code: i32) -> String {
