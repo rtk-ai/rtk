@@ -527,14 +527,7 @@ fn evict_by_count(conn: &Connection, max_entries: usize) {
     if max_entries == 0 {
         return;
     }
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM recall", [], |r| r.get(0))
-        .unwrap_or(0);
-    let excess = count - max_entries as i64;
-    if excess <= 0 {
-        return;
-    }
-    let _ = conn.execute(EVICT_BY_COUNT_SQL, params![excess]);
+    let _ = conn.execute(EVICT_BY_COUNT_SQL, params![max_entries as i64]);
 }
 
 /// Oldest `created_at` first — the same clock the retention rule uses.
@@ -544,8 +537,21 @@ fn evict_by_count(conn: &Connection, max_entries: usize) {
 /// entry that had been re-stored most recently, while retention still counted
 /// it as fresh. `rowid` remains only as a tie-break, so entries stored
 /// within the same second still evict deterministically.
+///
+/// The overshoot is computed inside the statement, not by the caller.
+///
+/// It used to be two: `SELECT COUNT(*)`, then a `DELETE ... LIMIT excess` with
+/// the number the caller had just read. Two processes reaching that pair
+/// against the same 203 rows both computed an excess of 3 and both deleted 3,
+/// leaving 197 where the cap says 200. One statement cannot be interleaved with
+/// itself that way — SQLite evaluates the count at execution, under the write
+/// lock it already holds for the delete.
+///
+/// `max(0, ...)` is load-bearing rather than defensive: a negative LIMIT in
+/// SQLite means *no* limit, so a store below its cap would delete every row.
 const EVICT_BY_COUNT_SQL: &str = "DELETE FROM recall WHERE rowid IN (
-        SELECT rowid FROM recall ORDER BY created_at ASC, rowid ASC LIMIT ?1
+        SELECT rowid FROM recall ORDER BY created_at ASC, rowid ASC
+        LIMIT max(0, (SELECT COUNT(*) FROM recall) - ?1)
     )";
 
 /// What is being recorded about one captured command.
@@ -2383,6 +2389,105 @@ mod tests {
         }
     }
 
+    /// Eviction is idempotent: running it twice trims once.
+    ///
+    /// Written first as a B25 regression test and demoted after it passed
+    /// against the defective shape too — sequential calls never interleave the
+    /// count with the other caller's delete, which is the whole of that race.
+    /// The real one is `test_b25_concurrent_eviction_stops_at_the_cap`.
+    #[test]
+    fn test_eviction_runs_twice_without_trimming_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            max_entries: 200,
+            retention_days: 0,
+            ..temp_cfg(dir.path())
+        };
+        let filler = open(&cfg).unwrap();
+        for i in 0..203 {
+            insert_row(&filler, &format!("{i:012x}"), &format!("cmd{i}"));
+        }
+
+        let first = open(&cfg).unwrap();
+        let second = open(&cfg).unwrap();
+        evict_by_count(&first, cfg.max_entries);
+        evict_by_count(&second, cfg.max_entries);
+
+        let count: i64 = filler
+            .query_row("SELECT COUNT(*) FROM recall", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 200,
+            "the second eviction must find nothing to do, not delete another batch"
+        );
+    }
+
+    /// A store under its cap must lose nothing. Guards the `max(0, ...)` in the
+    /// eviction statement: SQLite reads a negative LIMIT as no limit, so
+    /// without it an under-full store deletes every row it has.
+    #[test]
+    fn test_b25_eviction_below_the_cap_deletes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            max_entries: 200,
+            retention_days: 0,
+            ..temp_cfg(dir.path())
+        };
+        let conn = open(&cfg).unwrap();
+        for i in 0..5 {
+            insert_row(&conn, &format!("{i:012x}"), &format!("cmd{i}"));
+        }
+        evict_by_count(&conn, cfg.max_entries);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM recall", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 5, "eviction below the cap must be a no-op");
+    }
+
+    /// B25: evictions that genuinely coincide must still stop at the cap.
+    ///
+    /// The old shape read `SELECT COUNT(*)` in the caller and passed the
+    /// difference to `DELETE ... LIMIT excess`. Eight callers reaching that
+    /// pair together against 203 rows under a cap of 200 each computed an
+    /// excess of 3 and each deleted 3 — measured, 15 runs out of 15, leaving
+    /// 179. The barrier is what makes it reproducible: without it the counts
+    /// and deletes do not overlap and the defect stays invisible, which is why
+    /// the sequential version of this test passed against the broken code.
+    #[test]
+    fn test_b25_concurrent_eviction_stops_at_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            max_entries: 200,
+            retention_days: 0,
+            ..temp_cfg(dir.path())
+        };
+        let filler = open(&cfg).unwrap();
+        for i in 0..203 {
+            insert_row(&filler, &format!("{i:012x}"), &format!("cmd{i}"));
+        }
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let cfg = cfg.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let conn = open(&cfg).unwrap();
+                    barrier.wait();
+                    evict_by_count(&conn, cfg.max_entries);
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("eviction thread must not panic");
+        }
+
+        let count: i64 = filler
+            .query_row("SELECT COUNT(*) FROM recall", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 200, "concurrent eviction cut below the cap");
+    }
+
     #[test]
     fn test_v6_concurrent_eviction_no_panic() {
         let dir = tempfile::tempdir().unwrap();
@@ -2416,9 +2521,14 @@ mod tests {
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM recall", [], |r| r.get(0))
             .unwrap();
-        assert!(
-            count <= 5,
-            "max_entries=5 must be respected even under concurrency, got {count}"
+        // `<= 5` was the original assertion, and it is what let B25 hide: 197
+        // rows under a cap of 200 satisfies it. Every thread's store evicts on
+        // the same connection it inserted on, and all threads have joined, so
+        // the cap is reached exactly — under-eviction and over-eviction both
+        // fail here now.
+        assert_eq!(
+            count, 5,
+            "max_entries=5 must be reached exactly under concurrency, got {count}"
         );
     }
 
