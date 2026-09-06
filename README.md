@@ -112,7 +112,8 @@ rtk gain        # Should show the savings dashboard
 
 ```bash
 # 1. Install for your AI tool
-rtk init -g                     # Claude Code / Copilot (default)
+ rtk init -g                     # Claude Code
+rtk init -g --copilot           # Copilot
 rtk init -g --gemini            # Gemini CLI
 rtk init -g --codex             # Codex (OpenAI)
 rtk init -g --agent cursor      # Cursor
