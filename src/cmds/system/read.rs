@@ -5,6 +5,7 @@ use crate::core::guard::never_worse;
 use crate::core::tracking;
 use anyhow::{Context, Result};
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 pub fn run(
@@ -21,9 +22,22 @@ pub fn run(
         eprintln!("Reading: {} (filter: {})", file.display(), level);
     }
 
-    // Read file content
-    let content = fs::read_to_string(file)
-        .with_context(|| format!("Failed to read file: {}", file.display()))?;
+    let bytes = fs::read(file).with_context(|| format!("Failed to read file: {}", file.display()))?;
+    let content = match decode_read_bytes(file, bytes, level, max_lines, tail_lines, line_numbers)? {
+        ReadBytes::Text(content) => content,
+        ReadBytes::Binary(bytes) => {
+            if verbose > 0 {
+                eprintln!(
+                    "rtk: warning: {} is non-UTF-8, using raw byte passthrough",
+                    file.display()
+                );
+            }
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(&bytes)?;
+            timer.track_passthrough(&format!("cat {}", file.display()), "rtk read");
+            return Ok(());
+        }
+    };
 
     // Detect language from extension
     let lang = file
@@ -185,6 +199,45 @@ fn apply_line_window(
     content.to_string()
 }
 
+fn supports_binary_passthrough(
+    level: FilterLevel,
+    max_lines: Option<usize>,
+    tail_lines: Option<usize>,
+    line_numbers: bool,
+) -> bool {
+    level == FilterLevel::None
+        && max_lines.is_none()
+        && tail_lines.is_none()
+        && !line_numbers
+}
+
+enum ReadBytes {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+fn decode_read_bytes(
+    file: &Path,
+    bytes: Vec<u8>,
+    level: FilterLevel,
+    max_lines: Option<usize>,
+    tail_lines: Option<usize>,
+    line_numbers: bool,
+) -> Result<ReadBytes> {
+    match String::from_utf8(bytes) {
+        Ok(content) => Ok(ReadBytes::Text(content)),
+        Err(err) if supports_binary_passthrough(level, max_lines, tail_lines, line_numbers) => {
+            Ok(ReadBytes::Binary(err.into_bytes()))
+        }
+        Err(_) => {
+            anyhow::bail!(
+                "Failed to read file: {}: stream did not contain valid UTF-8",
+                file.display()
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +287,75 @@ fn main() {{
         let output = apply_line_window(input, Some(2), None, &Language::Unknown);
         assert!(output.starts_with("a\n"));
         assert!(output.contains("more lines"));
+    }
+
+    #[test]
+    fn test_supports_binary_passthrough_only_for_plain_reads() {
+        assert!(supports_binary_passthrough(
+            FilterLevel::None,
+            None,
+            None,
+            false
+        ));
+        assert!(!supports_binary_passthrough(
+            FilterLevel::Minimal,
+            None,
+            None,
+            false
+        ));
+        assert!(!supports_binary_passthrough(
+            FilterLevel::None,
+            Some(10),
+            None,
+            false
+        ));
+        assert!(!supports_binary_passthrough(
+            FilterLevel::None,
+            None,
+            Some(10),
+            false
+        ));
+        assert!(!supports_binary_passthrough(
+            FilterLevel::None,
+            None,
+            None,
+            true
+        ));
+    }
+
+    #[test]
+    fn test_binary_passthrough_accepts_plain_non_utf8_read() -> Result<()> {
+        let file = NamedTempFile::with_suffix(".bin")?;
+
+        let decoded = decode_read_bytes(
+            file.path(),
+            vec![0xff, b'a', b'b'],
+            FilterLevel::None,
+            None,
+            None,
+            false,
+        )?;
+        match decoded {
+            ReadBytes::Binary(bytes) => assert_eq!(bytes, vec![0xff, b'a', b'b']),
+            ReadBytes::Text(_) => panic!("expected raw byte fallback"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_binary_passthrough_rejects_filtered_non_utf8_read() -> Result<()> {
+        let file = NamedTempFile::with_suffix(".bin")?;
+
+        assert!(decode_read_bytes(
+            file.path(),
+            vec![0xff, b'a', b'b'],
+            FilterLevel::Minimal,
+            None,
+            None,
+            false,
+        )
+        .is_err());
+        Ok(())
     }
 
     fn rtk_bin() -> std::path::PathBuf {
