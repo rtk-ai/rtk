@@ -51,6 +51,12 @@ libc = "0.2"
 windows-sys = { version = "0.59", features = [
     "Win32_System_Console",
     "Win32_Globalization",
+    # Owner-only ACLs for the recall store, its directory and the tee files.
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
 ] }
 
 [build-dependencies]
