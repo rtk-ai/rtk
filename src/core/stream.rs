@@ -258,6 +258,7 @@ pub struct StreamResult {
     pub raw: String,
     pub raw_stdout: String,
     pub raw_stderr: String,
+    /// Empty under `FilterMode::CaptureOnly`, which runs no filter.
     pub filtered: String,
 }
 
@@ -510,7 +511,6 @@ pub fn run_streaming(
                             );
                         }
                     }
-                    filtered = raw_stdout.clone();
                 }
             }
         }
@@ -934,11 +934,25 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_run_streaming_capture_only_filtered_equals_raw() {
-        let mut cmd = Command::new("echo");
-        cmd.arg("check_equality");
+    fn test_run_streaming_capture_only_leaves_filtered_empty() {
+        // nosemgrep: interpreter-execution
+        let mut cmd = Command::new("sh");
+        // ~1 MiB of 80-char lines
+        cmd.args([
+            "-c",
+            "dd if=/dev/zero bs=1024 count=1024 2>/dev/null | tr '\\0' 'a' | fold -w 80",
+        ]);
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly).unwrap();
-        assert_eq!(result.filtered.trim(), result.raw_stdout.trim());
+        assert!(
+            result.raw_stdout.len() > 1_000_000,
+            "stdout should still be captured, got {} bytes",
+            result.raw_stdout.len()
+        );
+        assert!(
+            result.filtered.is_empty(),
+            "CaptureOnly runs no filter, so stdout should not be copied into filtered; got {} bytes",
+            result.filtered.len()
+        );
     }
 
     #[test]
