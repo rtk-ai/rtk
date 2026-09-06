@@ -17,7 +17,7 @@
 <p align="center">
   <a href="https://www.rtk-ai.app">Site web</a> &bull;
   <a href="#installation">Installer</a> &bull;
-  <a href="docs/TROUBLESHOOTING.md">Depannage</a> &bull;
+  <a href="https://www.rtk-ai.app/guide/troubleshooting">Depannage</a> &bull;
   <a href="docs/contributing/ARCHITECTURE.md">Architecture</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
@@ -198,7 +198,7 @@ mode = "failures"
 
 ## Documentation
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Resoudre les problemes courants
+- **[Depannage](https://www.rtk-ai.app/guide/troubleshooting)** - Resoudre les problemes courants
 - **[INSTALL.md](INSTALL.md)** - Guide d'installation detaille
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - Architecture technique
 

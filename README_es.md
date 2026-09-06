@@ -17,7 +17,7 @@
 <p align="center">
   <a href="https://www.rtk-ai.app">Sitio web</a> &bull;
   <a href="#instalacion">Instalar</a> &bull;
-  <a href="docs/TROUBLESHOOTING.md">Solucion de problemas</a> &bull;
+  <a href="https://www.rtk-ai.app/guide/troubleshooting">Solucion de problemas</a> &bull;
   <a href="docs/contributing/ARCHITECTURE.md">Arquitectura</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
@@ -166,7 +166,7 @@ rtk discover                    # Descubrir ahorros perdidos
 
 ## Documentacion
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Resolver problemas comunes
+- **[Solucion de problemas](https://www.rtk-ai.app/guide/troubleshooting)** - Resolver problemas comunes
 - **[INSTALL.md](INSTALL.md)** - Guia de instalacion detallada
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - Arquitectura tecnica
 
