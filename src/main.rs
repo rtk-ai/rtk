@@ -1781,7 +1781,18 @@ fn run_cli() -> Result<i32> {
 
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
     // Skip for Gain — it shows its own inline hook warning.
-    if !matches!(cli.command, Commands::Gain { .. }) {
+    //
+    // Also skip for Hook and Rewrite: those *are* the hook, and their stdout and
+    // stderr are a protocol channel the calling agent parses. A stray line there
+    // is exactly the stderr pollution the quiet-stderr guard is about — and on Windows the agent
+    // merges stderr into its context, so one nag costs more tokens than the
+    // command saved. This only ever fired for users who have Claude Code
+    // installed without the rtk hook, which is why CI (no `~/.claude` at all,
+    // so `status()` reports Ok) never caught it.
+    if !matches!(
+        cli.command,
+        Commands::Gain { .. } | Commands::Hook { .. } | Commands::Rewrite { .. }
+    ) {
         hooks::hook_check::maybe_warn();
     }
 
