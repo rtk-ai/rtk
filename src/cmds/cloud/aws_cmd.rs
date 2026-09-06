@@ -1309,6 +1309,22 @@ fn filter_s3_objects(json_str: &str) -> Option<FilterResult> {
     })
 }
 
+// Join a JSON string array, capping at `cap`. Sets `dropped` when items are
+// hidden so the caller can flag the result for raw recovery.
+fn join_str_array(arr: &Value, cap: usize, dropped: &mut bool) -> Option<String> {
+    let items = arr.as_array()?;
+    if items.is_empty() {
+        return None;
+    }
+    let shown: Vec<&str> = items.iter().take(cap).filter_map(|x| x.as_str()).collect();
+    let mut s = shown.join(",");
+    if items.len() > cap {
+        *dropped = true;
+        s.push_str(&format!(" +{}", items.len() - cap));
+    }
+    Some(s)
+}
+
 fn filter_eks_cluster(json_str: &str) -> Option<FilterResult> {
     let v: Value = serde_json::from_str(json_str).ok()?;
     let cluster = &v["cluster"];
@@ -1317,10 +1333,130 @@ fn filter_eks_cluster(json_str: &str) -> Option<FilterResult> {
     let status = cluster["status"].as_str().unwrap_or("?");
     let version = cluster["version"].as_str().unwrap_or("?");
     let endpoint = cluster["endpoint"].as_str().unwrap_or("?");
-    // certificateAuthority intentionally NOT read (base64 cert, 1000+ chars)
 
-    let text = format!("{} {} k8s/{} {}", name, status, version, endpoint);
-    Some(FilterResult::new(text))
+    // describe-cluster is an inspection command: the detail IS the signal. Keep
+    // the one-line summary but also surface the config fields users actually run
+    // it to see, compactly. certificateAuthority holds a 1000+ char base64 blob,
+    // so we only note its presence instead of dumping it.
+    let mut out = vec![format!("{} {} k8s/{} {}", name, status, version, endpoint)];
+    let mut dropped = false;
+
+    if let Some(pv) = cluster["platformVersion"].as_str() {
+        out.push(format!("  platform: {}", pv));
+    }
+
+    let vpc = &cluster["resourcesVpcConfig"];
+    if vpc.is_object() {
+        let mut parts = Vec::new();
+        if let Some(subnets) = join_str_array(&vpc["subnetIds"], 8, &mut dropped) {
+            parts.push(format!("subnets={}", subnets));
+        }
+        if let Some(sgs) = join_str_array(&vpc["securityGroupIds"], 8, &mut dropped) {
+            parts.push(format!("sgs={}", sgs));
+        }
+        if let Some(public) = vpc["endpointPublicAccess"].as_bool() {
+            parts.push(format!("public={}", public));
+        }
+        if let Some(private) = vpc["endpointPrivateAccess"].as_bool() {
+            parts.push(format!("private={}", private));
+        }
+        if !parts.is_empty() {
+            out.push(format!("  vpc: {}", parts.join(" ")));
+        }
+    }
+
+    let net = &cluster["kubernetesNetworkConfig"];
+    if net.is_object() {
+        let mut parts = Vec::new();
+        if let Some(cidr) = net["serviceIpv4Cidr"].as_str() {
+            parts.push(format!("svcCidr={}", cidr));
+        }
+        if let Some(family) = net["ipFamily"].as_str() {
+            parts.push(format!("ipFamily={}", family));
+        }
+        if !parts.is_empty() {
+            out.push(format!("  network: {}", parts.join(" ")));
+        }
+    }
+
+    if let Some(setups) = cluster["logging"]["clusterLogging"].as_array() {
+        let mut enabled: Vec<String> = Vec::new();
+        for setup in setups {
+            if setup["enabled"].as_bool() == Some(true) {
+                if let Some(types) = setup["types"].as_array() {
+                    enabled.extend(types.iter().filter_map(|t| t.as_str().map(String::from)));
+                }
+            }
+        }
+        let value = if enabled.is_empty() {
+            "disabled".to_string()
+        } else {
+            enabled.join(",")
+        };
+        out.push(format!("  logging: {}", value));
+    }
+
+    if let Some(issuer) = cluster["identity"]["oidc"]["issuer"].as_str() {
+        out.push(format!("  oidc: {}", issuer));
+    }
+
+    if let Some(enc) = cluster["encryptionConfig"].as_array().and_then(|a| a.first()) {
+        let key = enc["provider"]["keyArn"].as_str().unwrap_or("?");
+        let resources = join_str_array(&enc["resources"], 4, &mut dropped).unwrap_or_default();
+        out.push(format!("  encryption: {} ({})", key, resources));
+    }
+
+    if let Some(mode) = cluster["accessConfig"]["authenticationMode"].as_str() {
+        out.push(format!("  access: {}", mode));
+    }
+
+    if cluster["certificateAuthority"]["data"].as_str().is_some() {
+        out.push("  ca: present".to_string());
+    }
+
+    if let Some(tags) = cluster["tags"].as_object() {
+        if !tags.is_empty() {
+            let mut pairs: Vec<String> = tags
+                .iter()
+                .take(MAX_ITEMS)
+                .map(|(k, val)| format!("{}={}", k, val.as_str().unwrap_or("?")))
+                .collect();
+            if tags.len() > MAX_ITEMS {
+                dropped = true;
+                pairs.push(format!("+{}", tags.len() - MAX_ITEMS));
+            }
+            out.push(format!("  tags: {}", pairs.join(" ")));
+        }
+    }
+
+    // Health issues are the field users most need when a cluster misbehaves.
+    if let Some(issues) = cluster["health"]["issues"].as_array() {
+        if issues.is_empty() {
+            out.push("  health: ok".to_string());
+        } else {
+            let summarized: Vec<String> = issues
+                .iter()
+                .take(MAX_ITEMS)
+                .map(|i| {
+                    let code = i["code"].as_str().unwrap_or("?");
+                    let msg = i["message"].as_str().unwrap_or("");
+                    format!("{}: {}", code, crate::core::utils::truncate(msg, 120))
+                })
+                .collect();
+            out.push(format!(
+                "  health: {} issue(s): {}",
+                issues.len(),
+                summarized.join("; ")
+            ));
+        }
+    }
+
+    let text = out.join("\n");
+    Some(if dropped {
+        FilterResult::truncated(text)
+    } else {
+        FilterResult::new(text)
+    })
 }
 
 static S3_TRANSFER_RE: LazyLock<Regex> =
@@ -2338,6 +2474,78 @@ mod tests {
         // certificateAuthority should NOT appear
         assert!(!result.text.contains("LS0tLS1CRUdJTi"));
         assert!(!result.text.contains("VERY_LONG"));
+        // but its presence is noted
+        assert!(result.text.contains("ca: present"));
+        assert!(result.text.contains("logging: api,audit"));
+        assert!(result.text.contains("platform: eks.5"));
+    }
+
+    #[test]
+    fn test_filter_eks_cluster_preserves_detail_fields() {
+        let json = r#"{
+            "cluster": {
+                "name": "prod",
+                "status": "ACTIVE",
+                "version": "1.29",
+                "endpoint": "https://EP.eks.amazonaws.com",
+                "resourcesVpcConfig": {
+                    "subnetIds": ["subnet-a", "subnet-b"],
+                    "securityGroupIds": ["sg-1"],
+                    "endpointPublicAccess": true,
+                    "endpointPrivateAccess": false
+                },
+                "kubernetesNetworkConfig": {"serviceIpv4Cidr": "10.100.0.0/16", "ipFamily": "ipv4"},
+                "logging": {"clusterLogging": [{"types": ["audit"], "enabled": false}]},
+                "identity": {"oidc": {"issuer": "https://oidc.eks.amazonaws.com/id/XYZ"}},
+                "encryptionConfig": [{"resources": ["secrets"], "provider": {"keyArn": "arn:aws:kms:us-east-1:1:key/abc"}}],
+                "accessConfig": {"authenticationMode": "API_AND_CONFIG_MAP"},
+                "tags": {"env": "prod"},
+                "health": {"issues": [{"code": "InsufficientNumberOfReplicas", "message": "control plane unhealthy"}]}
+            }
+        }"#;
+        let result = filter_eks_cluster(json).unwrap();
+        let t = &result.text;
+        assert!(t.contains("subnets=subnet-a,subnet-b"));
+        assert!(t.contains("sgs=sg-1"));
+        assert!(t.contains("public=true"));
+        assert!(t.contains("private=false"));
+        assert!(t.contains("svcCidr=10.100.0.0/16"));
+        assert!(t.contains("logging: disabled"));
+        assert!(t.contains("oidc: https://oidc.eks.amazonaws.com/id/XYZ"));
+        assert!(t.contains("encryption: arn:aws:kms:us-east-1:1:key/abc (secrets)"));
+        assert!(t.contains("access: API_AND_CONFIG_MAP"));
+        assert!(t.contains("tags: env=prod"));
+        assert!(t.contains("health: 1 issue(s): InsufficientNumberOfReplicas: control plane unhealthy"));
+    }
+
+    #[test]
+    fn test_filter_eks_cluster_savings_and_signal() {
+        let raw = include_str!("../../../tests/fixtures/aws_eks_describe_cluster.json");
+        let result = filter_eks_cluster(raw).unwrap();
+
+        // Key fields the issue asked for are preserved...
+        for needle in [
+            "production-cluster ACTIVE",
+            "vpc: subnets=",
+            "public=true",
+            "private=true",
+            "network: svcCidr=10.100.0.0/16",
+            "logging: api,audit,authenticator",
+            "oidc: https://oidc.eks",
+            "encryption: arn:aws:kms",
+            "access: API_AND_CONFIG_MAP",
+            "tags: env=production",
+            "health: ok",
+        ] {
+            assert!(result.text.contains(needle), "missing: {needle}");
+        }
+        // ...the base64 CA blob is not dumped...
+        assert!(!result.text.contains("LS0tLS1CRUdJTi"));
+
+        // ...and we still cut most of the tokens.
+        let count = |s: &str| s.split_whitespace().count();
+        let savings = 100.0 - (count(&result.text) as f64 / count(raw) as f64 * 100.0);
+        assert!(savings >= 60.0, "expected >=60% savings, got {savings:.1}%");
     }
 
     #[test]
