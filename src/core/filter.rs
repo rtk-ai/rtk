@@ -323,33 +323,15 @@ pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> Stri
         return content.to_string();
     }
 
-    let mut result = Vec::with_capacity(max_lines + 1);
-    let mut kept_lines = 0;
-
-    for line in &lines {
-        let trimmed = line.trim();
-
-        // Prioritize structurally important lines so the visible window stays useful.
-        // The old approach interleaved "// ... N lines omitted" markers which AI agents
-        // treated as code, causing parsing confusion and extra retry loops.
-        let is_important = FUNC_SIGNATURE.is_match(trimmed)
-            || IMPORT_PATTERN.is_match(trimmed)
-            || trimmed.starts_with("pub ")
-            || trimmed.starts_with("export ")
-            || trimmed == "}"
-            || trimmed == "{";
-
-        if is_important || kept_lines < max_lines / 2 {
-            result.push((*line).to_string());
-            kept_lines += 1;
-        }
-        // Non-important lines beyond max_lines/2 are silently skipped —
-        // no inline markers that could be mistaken for file content.
-
-        if kept_lines >= max_lines - 1 {
-            break;
-        }
-    }
+    // Bounded reads (head -N, rtk read --max-lines) promise the literal first N
+    // lines, unchanged — the same contract `head` itself has. Pulling in
+    // "important-looking" lines from later in the file (rtk-ai/rtk#3046) breaks
+    // that contract silently: a closing `}` from far past the window can land
+    // right after an early line with no marker, reading as an adjacent syntax
+    // error that isn't real. Keep it a plain contiguous slice, like the
+    // tail-lines path already does.
+    let kept_lines = max_lines.saturating_sub(1);
+    let mut result: Vec<String> = lines[..kept_lines].iter().map(|l| l.to_string()).collect();
 
     // Single end-of-output marker: not code syntax, unambiguous to AI agents.
     // Invariant: kept_lines + N == lines.len() (N = lines not shown)
@@ -515,8 +497,7 @@ fn main() {
 
     #[test]
     fn test_smart_truncate_no_annotations() {
-        // 10 plain-text lines, max_lines=3: smart logic keeps first max_lines/2=1 line.
-        // (None of the lines match FUNC_SIGNATURE or IMPORT_PATTERN patterns.)
+        // 10 plain-text lines, max_lines=3: keeps a contiguous first max_lines-1=2 lines.
         let input = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n";
         let output = smart_truncate(input, 3, &Language::Unknown);
         // Must NOT contain old-style "// ... N lines omitted" annotations
@@ -524,10 +505,34 @@ fn main() {
             !output.contains("// ..."),
             "smart_truncate must not insert synthetic comment annotations"
         );
-        // Must contain clean end-of-output marker (1 kept + 9 omitted = 10 total)
-        assert!(output.contains("[9 more lines]"));
-        // Only the first line is kept (plain-text, no important signatures)
-        assert!(output.starts_with("line1\n"));
+        // Must contain clean end-of-output marker (2 kept + 8 omitted = 10 total)
+        assert!(output.contains("[8 more lines]"));
+        // The first two lines are kept, contiguously
+        assert!(output.starts_with("line1\nline2\n["));
+    }
+
+    #[test]
+    fn test_smart_truncate_does_not_pull_in_later_important_lines() {
+        // rtk-ai/rtk#3046: a `head -N` view must be a literal contiguous prefix.
+        // The old "importance" heuristic pulled a bare `}` in from line 63 of a
+        // 154-line file into a 30-line window, producing a false "orphaned }"
+        // that wasn't actually adjacent to anything shown above it.
+        let mut lines: Vec<String> = (0..60).map(|i| format!("export FOO_{}=1", i)).collect();
+        lines.push("}".to_string()); // line 61: a closing brace far past the window
+        lines.push("more content".to_string());
+        let content = lines.join("\n");
+
+        let output = smart_truncate(&content, 30, &Language::Unknown);
+
+        // The bare `}` must NOT appear pulled into the truncated window —
+        // only the first 29 lines (all "export FOO_*") plus the marker.
+        assert!(
+            !output.lines().any(|l| l.trim() == "}"),
+            "closing brace from beyond the window must not be pulled in:\n{}",
+            output
+        );
+        assert!(output.starts_with("export FOO_0=1\n"));
+        assert!(output.ends_with("[33 more lines]"));
     }
 
     #[test]
