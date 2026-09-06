@@ -408,6 +408,15 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^podman\s+(ps|images|logs|run|exec|build|compose\s+(ps|logs|build))",
+        rtk_cmd: "rtk podman",
+        rewrite_prefixes: &["podman"],
+        category: "Infra",
+        savings_pct: 85.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^kubectl\s+(get|logs|describe|apply)",
         rtk_cmd: "rtk kubectl",
         rewrite_prefixes: &["kubectl"],

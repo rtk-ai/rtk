@@ -296,6 +296,12 @@ enum Commands {
         command: DockerCommands,
     },
 
+    /// Podman commands with compact output (same filters as docker)
+    Podman {
+        #[command(subcommand)]
+        command: PodmanCommands,
+    },
+
     /// Kubectl commands with compact output
     Kubectl {
         #[command(subcommand)]
@@ -1104,6 +1110,27 @@ enum ComposeCommands {
         service: Option<String>,
     },
     /// Passthrough: runs any unsupported compose subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Debug, Subcommand)]
+enum PodmanCommands {
+    /// List running containers
+    Ps {
+        #[arg(short = 'a', long)]
+        all: bool,
+    },
+    /// List images
+    Images,
+    /// Show container logs (deduplicated)
+    Logs { container: String },
+    /// Podman Compose commands with compact output
+    Compose {
+        #[command(subcommand)]
+        command: ComposeCommands,
+    },
+    /// Passthrough: runs any unsupported podman subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
 }
@@ -2109,18 +2136,52 @@ fn run_cli() -> Result<i32> {
                 container::run(container::ContainerCmd::DockerLogs, &[c], cli.verbose)?
             }
             DockerCommands::Compose { command: compose } => match compose {
-                ComposeCommands::Ps { all } => container::run_compose_ps(all, cli.verbose)?,
+                ComposeCommands::Ps { all } => {
+                    container::run_compose_ps("docker", all, cli.verbose)?
+                }
                 ComposeCommands::Logs { service, tail } => {
-                    container::run_compose_logs(service.as_deref(), tail, cli.verbose)?
+                    container::run_compose_logs("docker", service.as_deref(), tail, cli.verbose)?
                 }
                 ComposeCommands::Build { service } => {
-                    container::run_compose_build(service.as_deref(), cli.verbose)?
+                    container::run_compose_build("docker", service.as_deref(), cli.verbose)?
                 }
                 ComposeCommands::Other(args) => {
-                    container::run_compose_passthrough(&args, cli.verbose)?
+                    container::run_compose_passthrough("docker", &args, cli.verbose)?
                 }
             },
             DockerCommands::Other(args) => container::run_docker_passthrough(&args, cli.verbose)?,
+        },
+
+        Commands::Podman { command } => match command {
+            PodmanCommands::Ps { all } => {
+                let cmd = if all {
+                    container::ContainerCmd::PodmanPsAll
+                } else {
+                    container::ContainerCmd::PodmanPs
+                };
+                container::run(cmd, &[], cli.verbose)?
+            }
+            PodmanCommands::Images => {
+                container::run(container::ContainerCmd::PodmanImages, &[], cli.verbose)?
+            }
+            PodmanCommands::Logs { container: c } => {
+                container::run(container::ContainerCmd::PodmanLogs, &[c], cli.verbose)?
+            }
+            PodmanCommands::Compose { command: compose } => match compose {
+                ComposeCommands::Ps { all } => {
+                    container::run_compose_ps("podman", all, cli.verbose)?
+                }
+                ComposeCommands::Logs { service, tail } => {
+                    container::run_compose_logs("podman", service.as_deref(), tail, cli.verbose)?
+                }
+                ComposeCommands::Build { service } => {
+                    container::run_compose_build("podman", service.as_deref(), cli.verbose)?
+                }
+                ComposeCommands::Other(args) => {
+                    container::run_compose_passthrough("podman", &args, cli.verbose)?
+                }
+            },
+            PodmanCommands::Other(args) => container::run_podman_passthrough(&args, cli.verbose)?,
         },
 
         Commands::Kubectl { command } => match command {
@@ -2978,6 +3039,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Log { .. }
             | Commands::Dotnet { .. }
             | Commands::Docker { .. }
+            | Commands::Podman { .. }
             | Commands::Kubectl { .. }
             | Commands::Oc { .. }
             | Commands::Summary { .. }
@@ -3444,6 +3506,7 @@ mod tests {
             "log",
             "dotnet",
             "docker",
+            "podman",
             "kubectl",
             "oc",
             "summary",
