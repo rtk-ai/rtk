@@ -14,7 +14,6 @@ use crate::core::utils::{
 };
 use anyhow::{Context, Result};
 use std::ffi::OsString;
-use std::io::IsTerminal;
 use std::process::Command;
 
 #[derive(Debug, Clone)]
@@ -282,14 +281,17 @@ fn run_show(
         if !result.stderr.is_empty() {
             eprint!("{}", crate::core::utils::decode_process_output(&result.stderr));
         }
-        // Emit git's raw bytes verbatim — no decode, no window — when either:
-        //  - stdout is not a terminal: truncating would change the bytes a downstream
-        //    consumer receives (`git show HEAD:big.py | grep foo`, `> file`), not just
-        //    the on-screen presentation, so a pipe must get exactly what git wrote; or
-        //  - the blob already fits the byte budget: it would never be windowed anyway,
-        //    and decoding would needlessly strip a BOM / rewrite bytes.
-        // Either way the passthrough stays byte-identical to a plain `git show`.
-        if !std::io::stdout().is_terminal() || result.stdout.len() <= MAX_BLOB_BYTES.0 {
+        // Emit git's raw bytes verbatim — no decode, no window — when the blob already
+        // fits the byte budget: it would never be windowed anyway, and decoding would
+        // needlessly strip a BOM / rewrite bytes. This passthrough stays byte-identical
+        // to a plain `git show`. Larger blobs fall through to windowing regardless of
+        // whether stdout is a pipe or a TTY: the whole point of the filter is to shrink
+        // what the agent reads, and the agent reads through a pipe. That mirrors the
+        // diff/log filters (which also compact in a pipe); a consumer that needs the
+        // full content follows the `| tail -n +N` recovery hint — the same tradeoff
+        // `git log | grep` already makes. (`is_terminal()` is not a reliable "human is
+        // watching" signal anyway: CI agents hand rtk a pseudo-TTY — see hooks/init.rs.)
+        if result.stdout.len() <= MAX_BLOB_BYTES.0 {
             return emit_raw_bytes_passthrough(
                 &result.stdout,
                 &label,
@@ -452,6 +454,9 @@ fn is_blob_show_arg(arg: &str) -> bool {
         && !arg.starts_with(":!")
         && !arg.starts_with(":^")
         && arg.contains(':')
+        // A colons-only token (`:`, `::`) is never a blob object: route it to git
+        // rather than the blob window, which would only surface git's own error.
+        && arg.chars().any(|c| c != ':')
 }
 
 /// The positional (non-option) arguments of a `git show` — its objects. Options and
@@ -3686,6 +3691,9 @@ mod tests {
         assert!(!is_blob_show_arg(":!b.txt"));
         // `:^` is an exact synonym of `:!` (exclude magic), also a pathspec.
         assert!(!is_blob_show_arg(":^b.txt"));
+        // A colons-only token is not a blob object.
+        assert!(!is_blob_show_arg(":"));
+        assert!(!is_blob_show_arg("::"));
     }
 
     /// Helper: build an args slice from string literals.
@@ -3882,6 +3890,13 @@ mod tests {
         );
         assert!(out.contains(&expected), "hint missing/unquoted: {out:?}");
         assert!(!out.contains("tail -n +0"));
+
+        // A path containing a single quote must be escaped `'\''` so the hint stays
+        // copy-paste safe (the dangerous branch of `shell_single_quote`).
+        let out_q = compact_blob_show(&s, "HEAD:it's/a.lock");
+        let expected_q =
+            format!("[see remaining: git show 'HEAD:it'\\''s/a.lock' | tail -n +{offset}]");
+        assert!(out_q.contains(&expected_q), "single-quote path unescaped: {out_q:?}");
     }
 
     #[test]
