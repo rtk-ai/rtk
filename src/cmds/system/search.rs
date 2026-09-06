@@ -658,9 +658,10 @@ pub fn run(
             }
             prev_line = *line_num;
             let sep = if *is_match { ':' } else { '-' };
-            if show_file {
+            // File-header mode: filename once per file (first match), then bare line:content.
+            if show_file && file_shown == 0 {
                 body.push_str(&file_display);
-                body.push(sep);
+                body.push('\n');
             }
             if show_line {
                 body.push_str(&line_num.to_string());
@@ -709,7 +710,10 @@ pub fn run(
         body
     };
 
-    let output = if capped && rtk_output.len() < plain.len() {
+    // Prefer rtk_output for multi-file or capped searches, but only when it does
+    // not exceed the raw `plain` baseline: heading + clean_line normally shrink
+    // it, and the size guard also self-heals if a future change bloats the body.
+    let output = if (capped || show_file) && rtk_output.len() <= plain.len() {
         rtk_output
     } else {
         plain
