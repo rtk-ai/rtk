@@ -132,6 +132,11 @@ pub fn emit_passthrough_warning(tool: &str, reason: &str) {
     eprintln!("[RTK:PASSTHROUGH] {} parser: {}", tool, reason);
 }
 
+/// A non-zero command exit explains unparseable output without implying a parser defect.
+pub fn passthrough_warning_reason(exit_code: i32) -> Option<&'static str> {
+    (exit_code == 0).then_some("All parsing tiers failed")
+}
+
 /// Extract a complete JSON object from input that may have non-JSON prefix (pnpm banner, dotenv messages, etc.)
 ///
 /// Strategy:
@@ -257,6 +262,16 @@ mod tests {
         let emoji = "🎉".repeat(200);
         let result = truncate_output(&emoji, 100);
         assert!(result.contains("[RTK:PASSTHROUGH]"));
+    }
+
+    #[test]
+    fn test_passthrough_warning_only_for_successful_commands() {
+        assert_eq!(
+            passthrough_warning_reason(0),
+            Some("All parsing tiers failed")
+        );
+        assert_eq!(passthrough_warning_reason(1), None);
+        assert_eq!(passthrough_warning_reason(127), None);
     }
 
     #[test]
