@@ -11,6 +11,7 @@ const MAX_PIPE_DIRS: usize = CAP_LIST;
 
 pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
     match name {
+        "mysql" => Some(crate::cmds::cloud::mysql_cmd::filter_mysql_output),
         "cargo-test" | "cargo" => Some(crate::cmds::rust::cargo_cmd::filter_cargo_test),
         "pytest" => Some(crate::cmds::python::pytest_cmd::filter_pytest_output),
         "go-test" => Some(go_test_wrapper),

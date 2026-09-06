@@ -721,6 +721,14 @@ pub const RULES: &[RtkRule] = &[
     },
     // TOML-filtered commands
     RtkRule {
+        pattern: r"^mysql(\s|$)",
+        rtk_cmd: "rtk mysql",
+        rewrite_prefixes: &["mysql"],
+        category: "Infra",
+        savings_pct: 60.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^ansible-playbook\b",
         rtk_cmd: "rtk ansible-playbook",
         rewrite_prefixes: &["ansible-playbook"],
