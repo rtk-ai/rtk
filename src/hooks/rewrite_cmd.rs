@@ -33,6 +33,24 @@ fn expand_home(token: &str) -> String {
     token.to_string()
 }
 
+/// The part of a tee filename that may be counted.
+///
+/// A filename carries the family and, for a slug that had one, an unbounded
+/// detail after the marker — a file path, in the only case that produces one.
+/// Counting the whole name here would put that path in `recall_stats`, which
+/// is the leak the slug type closes on the elision side: the detail would have
+/// come back in through the filename on the recall side, and the count would
+/// have been bounded on one side only.
+///
+/// Files written before the marker existed have no `__` and are returned
+/// whole, which is what they were counted as when they were written.
+pub(crate) fn bounded_half(slug: &str) -> &str {
+    match slug.split_once(crate::core::tee_file::DETAIL_MARKER) {
+        Some((family, _)) if !family.is_empty() => family,
+        _ => slug,
+    }
+}
+
 fn tee_read_slug(cmd: &str, tee_dir: &std::path::Path) -> Option<(String, String)> {
     let first = cmd.split_whitespace().next()?;
     let reader = first.rsplit('/').next().unwrap_or(first);
@@ -52,7 +70,7 @@ fn tee_read_slug(cmd: &str, tee_dir: &std::path::Path) -> Option<(String, String
         let stem = path.file_stem()?.to_str()?;
         if let Some((epoch, slug)) = stem.split_once('_') {
             if !epoch.is_empty() && epoch.chars().all(|c| c.is_ascii_digit()) && !slug.is_empty() {
-                return Some((slug.to_string(), expanded));
+                return Some((bounded_half(slug).to_string(), expanded));
             }
         }
     }

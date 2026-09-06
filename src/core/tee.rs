@@ -87,6 +87,15 @@ impl Slug<'_> {
         }
     }
 
+    /// The unbounded half, when there is one. Only `Detailed` has it, and it is
+    /// the half a tee filename needs and the stats table must not see.
+    pub(crate) fn detail(&self) -> Option<&str> {
+        match self {
+            Slug::Detailed { detail, .. } => Some(detail),
+            _ => None,
+        }
+    }
+
     /// The name a tee file is written under, and the `command` column of a
     /// recall row. Unlike the stats key this keeps the detail, because two
     /// files written in the same second need to differ and a reader of
@@ -201,7 +210,7 @@ pub fn tee_and_hint<'a>(raw: &str, slug: impl Into<Slug<'a>>, exit_code: i32) ->
     let slug = slug.into();
     match mode {
         RecoveryMode::Disabled => None,
-        RecoveryMode::Tee => super::tee_file::tee_and_hint(&cfg, raw, &slug.full())
+        RecoveryMode::Tee => super::tee_file::tee_and_hint(&cfg, raw, &slug)
             .inspect(|_| retriever::record_tee_elision(&cfg, &slug.stats_key())),
         RecoveryMode::Sqlite => store_hint(&cfg, raw, &slug, Some(exit_code)),
     }
@@ -215,7 +224,7 @@ pub fn force_tee_hint<'a>(content: &str, slug: impl Into<Slug<'a>>) -> Option<St
     let slug = slug.into();
     match mode {
         RecoveryMode::Disabled => None,
-        RecoveryMode::Tee => super::tee_file::force_tee_hint(&cfg, content, &slug.full())
+        RecoveryMode::Tee => super::tee_file::force_tee_hint(&cfg, content, &slug)
             .inspect(|_| retriever::record_tee_elision(&cfg, &slug.stats_key())),
         RecoveryMode::Sqlite => store_hint(&cfg, content, &slug, None),
     }
@@ -234,7 +243,7 @@ pub fn force_tee_tail_hint<'a>(
     match mode {
         RecoveryMode::Disabled => None,
         RecoveryMode::Tee => {
-            super::tee_file::force_tee_tail_hint(&cfg, content, &slug.full(), line_offset)
+            super::tee_file::force_tee_tail_hint(&cfg, content, &slug, line_offset)
                 .inspect(|_| retriever::record_tee_elision(&cfg, &slug.stats_key()))
         }
         RecoveryMode::Sqlite => tail_hint(&cfg, content, &slug, line_offset),
@@ -410,6 +419,45 @@ mod tests {
         let slug = Slug::Configured(&name);
         assert_eq!(slug.stats_key(), "my-custom-filter");
         assert_eq!(slug.full(), "my-custom-filter");
+    }
+
+    /// The recall side counts the family too, not the path the filename
+    /// carries. Both halves of the count are bounded or neither is.
+    #[test]
+    fn test_tee_filename_hides_its_detail_from_the_recall_side() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tee_dir = dir.path().join("tee");
+        let cfg = RetrieverConfig {
+            mode: RecoveryMode::Tee,
+            tee_directory: Some(tee_dir.clone()),
+            ..RetrieverConfig::default()
+        };
+        let slug = Slug::Detailed {
+            family: "grep",
+            detail: "7_src_core_retriever_rs",
+        };
+
+        let path = super::super::tee_file::force_tee_hint(&cfg, "matches\n", &slug)
+            .expect("tee file written");
+
+        // The filename keeps the detail — two overflows in one second must not
+        // collide — but marks where the countable half ends.
+        assert!(path.contains("grep__7_src_core_retriever_rs"), "{path}");
+
+        let stem = std::path::Path::new(
+            path.trim_start_matches("[full output: ")
+                .trim_end_matches("]"),
+        )
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_string)
+        .expect("stem");
+        let after_epoch = stem.split_once('_').expect("epoch").1;
+        assert_eq!(
+            crate::hooks::rewrite_cmd::bounded_half(after_epoch),
+            "grep",
+            "the recall side must count the family, not the path"
+        );
     }
 
     /// The store files the counts under the bounded name while the row keeps

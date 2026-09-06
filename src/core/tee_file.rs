@@ -18,6 +18,7 @@
 use crate::core::config::Config;
 use crate::core::constants::RTK_DATA_DIR;
 use crate::core::retriever::RetrieverConfig;
+use crate::core::tee::Slug;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -203,16 +204,42 @@ struct TeeTarget<'a> {
     max_files: usize,
 }
 
-fn write_tee_file(raw: &str, slug: &str, target: &TeeTarget<'_>) -> Option<PathBuf> {
+/// Separates the bounded half of a tee filename from the unbounded one.
+///
+/// A reader of the file — `rewrite_cmd::tee_read_slug`, which counts recalls —
+/// recovers the slug from the filename, so whatever the filename carries is
+/// what the stats table gets. Without a marker, a `Detailed` slug's path
+/// reached the stats table by that route even though the elision side had
+/// kept it out: the type bounded one side of the count and not the other.
+pub(crate) const DETAIL_MARKER: &str = "__";
+
+/// The name half of a tee file, marker included.
+///
+/// Split out because it is the whole of the filename contract in one place:
+/// each half is sanitized on its own, so the marker survives the 24-character
+/// fold that would otherwise swallow it, and a slug with no detail is written
+/// exactly as it was before the marker existed.
+fn tee_file_name(slug: &Slug<'_>) -> String {
+    match slug.detail() {
+        Some(detail) => format!(
+            "{}{}{}",
+            sanitize_slug(&slug.stats_key()),
+            DETAIL_MARKER,
+            sanitize_slug(detail)
+        ),
+        None => sanitize_slug(&slug.full()),
+    }
+}
+
+fn write_tee_file(raw: &str, slug: &Slug<'_>, target: &TeeTarget<'_>) -> Option<PathBuf> {
     let TeeTarget {
         dir,
         max_file_size,
         max_files,
     } = *target;
     create_tee_dir(dir)?;
-    let slug = sanitize_slug(slug);
     let epoch = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    let filepath = dir.join(format!("{}_{}.log", epoch, slug));
+    let filepath = dir.join(format!("{}_{}.log", epoch, tee_file_name(slug)));
     write_private(&filepath, &tee_body(raw, max_file_size))?;
     cleanup_old_files(dir, max_files);
     Some(filepath)
@@ -313,7 +340,7 @@ fn display_shell_path(path: &Path) -> String {
     format!("\"{}\"", escape_double_quoted_path(&display))
 }
 
-fn write(cfg: &RetrieverConfig, content: &str, slug: &str) -> Option<PathBuf> {
+fn write(cfg: &RetrieverConfig, content: &str, slug: &Slug<'_>) -> Option<PathBuf> {
     let dir = get_tee_dir(cfg)?;
     write_tee_file(
         content,
@@ -326,12 +353,12 @@ fn write(cfg: &RetrieverConfig, content: &str, slug: &str) -> Option<PathBuf> {
     )
 }
 
-pub fn tee_and_hint(cfg: &RetrieverConfig, raw: &str, slug: &str) -> Option<String> {
+pub fn tee_and_hint(cfg: &RetrieverConfig, raw: &str, slug: &Slug<'_>) -> Option<String> {
     let path = write(cfg, raw, slug)?;
     Some(format!("[full output: {}]", display_shell_path(&path)))
 }
 
-pub fn force_tee_hint(cfg: &RetrieverConfig, content: &str, slug: &str) -> Option<String> {
+pub fn force_tee_hint(cfg: &RetrieverConfig, content: &str, slug: &Slug<'_>) -> Option<String> {
     let path = write(cfg, content, slug)?;
     Some(format!("[full output: {}]", display_shell_path(&path)))
 }
@@ -339,7 +366,7 @@ pub fn force_tee_hint(cfg: &RetrieverConfig, content: &str, slug: &str) -> Optio
 pub fn force_tee_tail_hint(
     cfg: &RetrieverConfig,
     content: &str,
-    slug: &str,
+    slug: &Slug<'_>,
     line_offset: usize,
 ) -> Option<String> {
     let path = write(cfg, content, slug)?;
@@ -434,7 +461,7 @@ mod tests {
         let content = "error: test failed\n".repeat(50);
         let result = write_tee_file(
             &content,
-            "cargo_test",
+            &Slug::Static("cargo_test"),
             &TeeTarget {
                 dir: tmpdir.path(),
                 max_file_size: MAX_FILE_SIZE,
@@ -456,7 +483,7 @@ mod tests {
         let tee_dir = tmpdir.path().join("tee");
         let path = write_tee_file(
             "secret output\n",
-            "grep",
+            &Slug::Static("grep"),
             &TeeTarget {
                 dir: &tee_dir,
                 max_file_size: MAX_FILE_SIZE,
@@ -482,7 +509,7 @@ mod tests {
         let tee_dir = tmpdir.path().join("tee");
         let written = write_tee_file(
             "secret\n",
-            "grep",
+            &Slug::Static("grep"),
             &TeeTarget {
                 dir: &tee_dir,
                 max_file_size: MAX_FILE_SIZE,
@@ -503,7 +530,7 @@ mod tests {
         let big_output = "x".repeat(2000);
         let result = write_tee_file(
             &big_output,
-            "test",
+            &Slug::Static("test"),
             &TeeTarget {
                 dir: tmpdir.path(),
                 max_file_size: 1000,
@@ -523,7 +550,7 @@ mod tests {
         assert_eq!(japanese.len(), 999);
         let result = write_tee_file(
             &japanese,
-            "test_utf8",
+            &Slug::Static("test_utf8"),
             &TeeTarget {
                 dir: tmpdir.path(),
                 max_file_size: 998,
