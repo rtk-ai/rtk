@@ -1,9 +1,11 @@
 //! Data types for reporting which commands RTK can and cannot optimize.
 
 use crate::hooks::constants::{
-    COPILOT_HOOK_FILE, CURSOR_DIR, GITHUB_DIR, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
-    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_SUBDIR, REWRITE_HOOK_FILE,
+    CLAUDE_DIR, CLAUDE_HOOK_COMMAND, COPILOT_HOOK_FILE, CURSOR_DIR, GITHUB_DIR, HERMES_DIR,
+    HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_SUBDIR,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
+use crate::hooks::init::resolve_claude_dir;
 use serde::Serialize;
 use std::path::Path;
 
@@ -50,6 +52,7 @@ pub struct UnsupportedEntry {
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AgentIntegrationStatus {
+    pub claude_hook_installed: bool,
     pub cursor_hook_installed: bool,
     pub hermes_plugin_installed: bool,
     pub copilot_hook_installed: bool,
@@ -60,6 +63,9 @@ impl AgentIntegrationStatus {
         let mut status = dirs::home_dir()
             .map(|home| Self::detect_from_home(&home))
             .unwrap_or_default();
+        status.claude_hook_installed = resolve_claude_dir()
+            .map(|claude_dir| Self::claude_hook_installed_in_dir(&claude_dir))
+            .unwrap_or(false);
         // Copilot is project-scoped (.github/hooks/), unlike the home-based agents.
         status.copilot_hook_installed = std::env::current_dir()
             .map(|cwd| Self::copilot_hook_installed_in(&cwd))
@@ -69,6 +75,7 @@ impl AgentIntegrationStatus {
 
     fn detect_from_home(home: &Path) -> Self {
         Self {
+            claude_hook_installed: Self::claude_hook_installed_in_dir(&home.join(CLAUDE_DIR)),
             cursor_hook_installed: home
                 .join(CURSOR_DIR)
                 .join(HOOKS_SUBDIR)
@@ -82,6 +89,32 @@ impl AgentIntegrationStatus {
                 .is_file(),
             copilot_hook_installed: false,
         }
+    }
+
+    fn claude_hook_installed_in_dir(claude_dir: &Path) -> bool {
+        let settings_path = claude_dir.join(SETTINGS_JSON);
+        let content = match std::fs::read_to_string(&settings_path) {
+            Ok(c) if !c.trim().is_empty() => c,
+            _ => return false,
+        };
+        let root: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let pre_tool_use = match root
+            .get("hooks")
+            .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+            .and_then(|p| p.as_array())
+        {
+            Some(arr) => arr,
+            None => return false,
+        };
+        pre_tool_use
+            .iter()
+            .filter_map(|entry| entry.get("hooks")?.as_array())
+            .flatten()
+            .filter_map(|hook| hook.get("command")?.as_str())
+            .any(|cmd| cmd == CLAUDE_HOOK_COMMAND || cmd.contains(REWRITE_HOOK_FILE))
     }
 
     fn copilot_hook_installed_in(dir: &Path) -> bool {
@@ -280,6 +313,12 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
 }
 
 fn append_agent_notes(out: &mut String, status: AgentIntegrationStatus) {
+    if status.claude_hook_installed {
+        out.push_str(
+            "\nNote: Claude Code hook is installed; discover scans pre-hook transcript commands, so reported opportunities may include commands RTK already rewrote\n",
+        );
+    }
+
     if status.cursor_hook_installed {
         out.push_str("\nNote: Cursor sessions are tracked via `rtk gain` (discover scans Claude Code only)\n");
     }
@@ -525,6 +564,7 @@ mod tests {
     fn test_format_json_includes_agent_status() {
         let mut report = make_report(0, 0);
         report.agent_status = AgentIntegrationStatus {
+            claude_hook_installed: false,
             cursor_hook_installed: true,
             hermes_plugin_installed: true,
             copilot_hook_installed: true,
@@ -533,9 +573,57 @@ mod tests {
         let output = format_json(&report);
         let json: serde_json::Value = serde_json::from_str(&output).unwrap();
 
+        assert_eq!(json["agent_status"]["claude_hook_installed"], false);
         assert_eq!(json["agent_status"]["cursor_hook_installed"], true);
         assert_eq!(json["agent_status"]["hermes_plugin_installed"], true);
         assert_eq!(json["agent_status"]["copilot_hook_installed"], true);
+    }
+
+    #[test]
+    fn test_agent_status_detects_claude_hook_in_settings() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let settings = temp_home.path().join(CLAUDE_DIR).join(SETTINGS_JSON);
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(
+            &settings,
+            format!(
+                r#"{{
+                    "hooks": {{
+                        "PreToolUse": [
+                            {{
+                                "matcher": "Bash",
+                                "hooks": [{{"type": "command", "command": "{}"}}]
+                            }}
+                        ]
+                    }}
+                }}"#,
+                CLAUDE_HOOK_COMMAND
+            ),
+        )
+        .unwrap();
+
+        let status = AgentIntegrationStatus::detect_from_home(temp_home.path());
+
+        assert!(status.claude_hook_installed);
+    }
+
+    #[test]
+    fn test_format_text_reports_claude_hook_detected() {
+        let mut report = make_report(1, 1);
+        report.agent_status = AgentIntegrationStatus {
+            claude_hook_installed: true,
+            ..AgentIntegrationStatus::default()
+        };
+
+        let output = format_text(&report, 10, false);
+
+        assert!(
+            output.contains(
+                "discover scans pre-hook transcript commands, so reported opportunities may include commands RTK already rewrote"
+            ),
+            "Expected Claude hook note in output but got:\n{}",
+            output
+        );
     }
 
     #[test]
