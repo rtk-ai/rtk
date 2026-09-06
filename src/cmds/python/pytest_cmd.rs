@@ -73,6 +73,12 @@ const PYTEST_NO_TESTS: &str = "Pytest: No tests collected";
 const PYTEST_EXIT_NO_TESTS: i32 = 5;
 
 pub(crate) fn filter_pytest_output(output: &str) -> String {
+    // pytest colors its output under FORCE_COLOR / PY_COLORS / CI. An
+    // ANSI-wrapped count (`\x1b[32m30 passed`) defeats the numeric parse
+    // below — worst case a colored `1 failed` silently DROPS the failure
+    // count from the summary. Strip escapes before parsing.
+    let output = strip_ansi(output);
+
     let mut state = ParseState::Header;
     let mut test_files: Vec<String> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
@@ -113,6 +119,14 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
             && (trimmed.contains(" passed")
                 || trimmed.contains(" failed")
                 || trimmed.contains(" skipped"))
+            && trimmed.contains(" in ")
+        {
+            summary_line = trimmed.to_string();
+            continue;
+        // "no tests ran in 0.00s" (=== wrapped or bare) is a real summary:
+        // it is the one case "Pytest: No tests collected" is true for.
+        } else if summary_line.is_empty()
+            && trimmed.contains("no tests ran")
             && trimmed.contains(" in ")
         {
             summary_line = trimmed.to_string();
@@ -162,6 +176,15 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
     // Save last failure if any
     if !current_failure.is_empty() {
         failures.push(current_failure.join("\n"));
+    }
+
+    // No summary line at all: a doubly-quiet run (`-q` injected here on top
+    // of `addopts = -q` in the project's pytest.ini gives `-qq`, which prints
+    // no final summary), a collection error, or non-session output like
+    // `--version`. The filter cannot know what happened — fall back to the
+    // raw output (Never Block) instead of claiming "No tests collected".
+    if summary_line.is_empty() {
+        return output.trim_end().to_string();
     }
 
     // Build compact output
@@ -526,6 +549,48 @@ collected 3 items
             !result.contains("No tests collected"),
             "Should not say 'No tests collected' when tests were skipped. Got: {}",
             result
+        );
+    }
+
+    #[test]
+    fn test_filter_pytest_ansi_colored_summary() {
+        // pytest colors its output under FORCE_COLOR/PY_COLORS/CI; the
+        // ANSI-wrapped count (`\x1b[32m30 passed`) must still parse.
+        let output = "\u{1b}[32m.\u{1b}[0m\u{1b}[32m.\u{1b}[0m\u{1b}[32m [100%]\u{1b}[0m\n\
+                      \u{1b}[32m30 passed\u{1b}[0m\u{1b}[33m, 1 warning\u{1b}[0m\u{1b}[32m in 0.11s\u{1b}[0m";
+        let result = filter_pytest_output(output);
+        assert_eq!(result, "Pytest: 30 passed");
+    }
+
+    #[test]
+    fn test_filter_pytest_ansi_colored_failure_count_preserved() {
+        // A colored `1 failed` must not fall out of the counts — that would
+        // report a failing run as all-passed.
+        let output = "\u{1b}[31mF\u{1b}[0m\u{1b}[32m.\u{1b}[0m\n\
+                      \u{1b}[31m1 failed\u{1b}[0m\u{1b}[32m, 1 passed\u{1b}[0m\u{1b}[31m in 0.05s\u{1b}[0m";
+        let result = filter_pytest_output(output);
+        assert!(result.contains("1 failed"), "got: {result}");
+    }
+
+    #[test]
+    fn test_filter_pytest_double_quiet_passthrough() {
+        // rtk injects `-q`; a project with `addopts = -q` in pytest.ini ends
+        // up at `-qq`, where pytest prints NO final summary line at all.
+        // Claiming "No tests collected" would be a false negative (tests ran,
+        // failures may exist) — fall back to the raw output instead.
+        let output = r#"=============================== warnings summary ===============================
+.venv/lib/python3.13/site-packages/fastapi/testclient.py:1
+  StarletteDeprecationWarning: `httpx` with `starlette.testclient` is deprecated
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html"#;
+        let result = filter_pytest_output(output);
+        assert!(
+            !result.contains("No tests collected"),
+            "must not claim nothing was collected without a summary line; got: {result}"
+        );
+        assert!(
+            result.contains("warnings summary"),
+            "raw output should pass through; got: {result}"
         );
     }
 }
