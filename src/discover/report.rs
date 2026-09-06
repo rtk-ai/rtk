@@ -1,8 +1,9 @@
 //! Data types for reporting which commands RTK can and cannot optimize.
 
 use crate::hooks::constants::{
-    COPILOT_HOOK_FILE, CURSOR_DIR, GITHUB_DIR, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
+    CLAUDE_DIR, COPILOT_HOOK_FILE, CURSOR_DIR, GITHUB_DIR, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
     HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_SUBDIR, REWRITE_HOOK_FILE,
+    SETTINGS_JSON, SETTINGS_LOCAL_JSON,
 };
 use serde::Serialize;
 use std::path::Path;
@@ -53,6 +54,7 @@ pub struct AgentIntegrationStatus {
     pub cursor_hook_installed: bool,
     pub hermes_plugin_installed: bool,
     pub copilot_hook_installed: bool,
+    pub claude_hook_installed: bool,
 }
 
 impl AgentIntegrationStatus {
@@ -81,6 +83,7 @@ impl AgentIntegrationStatus {
                 .join(HERMES_PLUGIN_MANIFEST_FILE)
                 .is_file(),
             copilot_hook_installed: false,
+            claude_hook_installed: Self::claude_hook_installed_in(home),
         }
     }
 
@@ -89,6 +92,18 @@ impl AgentIntegrationStatus {
             .join(HOOKS_SUBDIR)
             .join(COPILOT_HOOK_FILE)
             .exists()
+    }
+
+    /// The Claude Code hook is a native binary command (`rtk hook claude`)
+    /// registered inside settings.json, not a standalone script file, so detect
+    /// it by scanning the settings file content (mirrors `rtk verify`).
+    fn claude_hook_installed_in(home: &Path) -> bool {
+        let claude_dir = home.join(CLAUDE_DIR);
+        [SETTINGS_JSON, SETTINGS_LOCAL_JSON].iter().any(|file| {
+            std::fs::read_to_string(claude_dir.join(file))
+                .map(|content| content.contains("rtk hook claude"))
+                .unwrap_or(false)
+        })
     }
 }
 
@@ -280,6 +295,15 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
 }
 
 fn append_agent_notes(out: &mut String, status: AgentIntegrationStatus) {
+    if status.claude_hook_installed {
+        out.push_str(
+            "\nNote: the Claude Code hook rewrites commands to `rtk ...` at execution time, \
+             but session transcripts record the original (pre-rewrite) command. The \"Already \
+             using RTK\" % above is transcript-based and understates real usage, while \"missed \
+             savings\" overstates it. Run `rtk gain` for the actual savings RTK applied.\n",
+        );
+    }
+
     if status.cursor_hook_installed {
         out.push_str("\nNote: Cursor sessions are tracked via `rtk gain` (discover scans Claude Code only)\n");
     }
@@ -522,12 +546,53 @@ mod tests {
     }
 
     #[test]
+    fn test_agent_status_detects_claude_hook_in_settings() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let settings = temp_home.path().join(CLAUDE_DIR).join(SETTINGS_JSON);
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(
+            &settings,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]}}"#,
+        )
+        .unwrap();
+
+        let status = AgentIntegrationStatus::detect_from_home(temp_home.path());
+
+        assert!(status.claude_hook_installed);
+    }
+
+    #[test]
+    fn test_agent_status_no_claude_hook_when_absent() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let status = AgentIntegrationStatus::detect_from_home(temp_home.path());
+        assert!(!status.claude_hook_installed);
+    }
+
+    #[test]
+    fn test_format_text_reports_claude_detected() {
+        let mut report = make_report(1000, 11);
+        report.agent_status = AgentIntegrationStatus {
+            claude_hook_installed: true,
+            ..AgentIntegrationStatus::default()
+        };
+
+        let output = format_text(&report, 10, false);
+
+        assert!(
+            output.contains("rewrites commands to `rtk ...` at execution time"),
+            "Expected Claude hook transcript caveat in output but got:\n{}",
+            output
+        );
+    }
+
+    #[test]
     fn test_format_json_includes_agent_status() {
         let mut report = make_report(0, 0);
         report.agent_status = AgentIntegrationStatus {
             cursor_hook_installed: true,
             hermes_plugin_installed: true,
             copilot_hook_installed: true,
+            claude_hook_installed: true,
         };
 
         let output = format_json(&report);
@@ -536,6 +601,7 @@ mod tests {
         assert_eq!(json["agent_status"]["cursor_hook_installed"], true);
         assert_eq!(json["agent_status"]["hermes_plugin_installed"], true);
         assert_eq!(json["agent_status"]["copilot_hook_installed"], true);
+        assert_eq!(json["agent_status"]["claude_hook_installed"], true);
     }
 
     #[test]
