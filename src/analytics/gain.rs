@@ -1,5 +1,6 @@
 //! Shows users how many tokens RTK has saved them over time.
 
+use crate::analytics::codex;
 use crate::core::display_helpers::{format_duration, print_period_table};
 use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
 use crate::core::utils::{format_tokens, truncate};
@@ -306,6 +307,8 @@ pub fn run(
             println!("      Actual limits use rolling 5-hour windows, not monthly caps.");
         }
 
+        print_codex_summary();
+
         return Ok(());
     }
 
@@ -323,6 +326,70 @@ pub fn run(
     }
 
     Ok(())
+}
+
+// ── Codex Activity ──
+
+/// Print a compact Codex session summary alongside the Claude Code RTK stats.
+///
+/// Scans the last 30 days of `~/.codex/sessions/**/*.jsonl`, aggregates
+/// exec_command call counts and cumulative token usage, and prints a
+/// two-line summary. Skips silently when no Codex sessions are found.
+fn print_codex_summary() {
+    let paths = codex::discover_sessions(Some(30));
+    if paths.is_empty() {
+        return;
+    }
+
+    let mut sessions: usize = 0;
+    let mut total_tokens: u64 = 0;
+    let mut total_input: u64 = 0;
+    let mut total_output: u64 = 0;
+    let mut total_cached: u64 = 0;
+
+    let mut total_cmds: usize = 0;
+    let mut total_rtk: usize = 0;
+
+    for path in &paths {
+        if let Ok(s) = codex::parse_session(path) {
+            sessions += 1;
+            total_cmds += s.total_cmds;
+            total_rtk += s.rtk_cmds;
+            total_tokens += s.total_tokens;
+            total_input += s.input_tokens;
+            total_output += s.output_tokens;
+            total_cached += s.cached_input_tokens;
+        }
+    }
+
+    if sessions == 0 {
+        return;
+    }
+
+    let avg_adoption = if total_cmds > 0 {
+        total_rtk as f64 / total_cmds as f64 * 100.0
+    } else {
+        0.0
+    };
+
+    println!("{}", styled("Codex Activity (last 30d)", true));
+    println!("──────────────────────────────────────────────────────────");
+    print_kpi("Sessions", sessions.to_string());
+    print_kpi(
+        "RTK adoption",
+        format!("{}/{} cmds ({:.0}%)", total_rtk, total_cmds, avg_adoption),
+    );
+    print_kpi(
+        "Total tokens",
+        format!(
+            "{} (in: {}, out: {}, cached: {})",
+            format_tokens(total_tokens as usize),
+            format_tokens(total_input as usize),
+            format_tokens(total_output as usize),
+            format_tokens(total_cached as usize),
+        ),
+    );
+    println!();
 }
 
 // ── Display helpers (TTY-aware) ── // added: entire section
