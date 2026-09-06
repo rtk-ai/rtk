@@ -2222,6 +2222,66 @@ fn filter_branch_output(output: &str) -> String {
     result.join("\n")
 }
 
+// Git fetch progress prefixes (stderr) — dropped from the stream.
+const GIT_FETCH_NOISE_PREFIXES: &[&str] = &[
+    "Enumerating objects:",
+    "Counting objects:",
+    "Compressing objects:",
+    "Receiving objects:",
+    "Resolving deltas:",
+    "Total ",
+    "From ",
+];
+
+#[derive(Default)]
+struct GitFetchLineHandler {
+    new_refs: usize,
+    has_error: bool,
+}
+
+impl LineHandler for GitFetchLineHandler {
+    fn should_skip(&mut self, line: &str) -> bool {
+        if line.is_empty() {
+            return true;
+        }
+        let trimmed = line.trim_start();
+        if GIT_FETCH_NOISE_PREFIXES
+            .iter()
+            .any(|p| trimmed.starts_with(p))
+        {
+            return true;
+        }
+        // Skip progress percentage lines like "(123/456)"
+        if trimmed.starts_with('(') && trimmed.ends_with(')') {
+            return true;
+        }
+        false
+    }
+
+    fn observe_line(&mut self, line: &str) {
+        if line.contains("->") || line.contains("[new") {
+            self.new_refs += 1;
+        }
+        if line.to_lowercase().contains("error")
+            || line.to_lowercase().contains("fatal")
+        {
+            self.has_error = true;
+        }
+    }
+
+    fn format_summary(&self, exit_code: i32, _raw: &str) -> Option<String> {
+        if exit_code != 0 || self.has_error {
+            return None;
+        }
+        let summary = if self.new_refs > 0 {
+            format!("ok fetched ({} new refs)", self.new_refs)
+        } else {
+            "ok fetched".to_string()
+        };
+        Some(format!("{}\n", summary))
+    }
+}
+
 fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -2235,34 +2295,23 @@ fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32
         cmd.arg(arg);
     }
 
-    let result = exec_capture(&mut cmd).context("Failed to run git fetch")?;
-    let raw = result.combined();
+    let cmd_label = format!("git fetch {}", args.join(" "));
+    let filter = LineStreamFilter::new(GitFetchLineHandler::default());
+    let result = stream::run_streaming(
+        &mut cmd,
+        StdinMode::Inherit,
+        FilterMode::Streaming(Box::new(filter)),
+    )
+    .context("Failed to run git fetch")?;
 
-    if !result.success() {
-        eprintln!("FAILED: git fetch");
-        if !result.stderr.trim().is_empty() {
-            eprintln!("{}", result.stderr);
-        }
-        return Ok(result.exit_code);
-    }
+    timer.track(
+        &cmd_label,
+        &format!("rtk {}", cmd_label),
+        &result.raw,
+        &result.filtered,
+    );
 
-    // Count new refs from stderr (git fetch outputs to stderr)
-    let new_refs: usize = result
-        .stderr
-        .lines()
-        .filter(|l| l.contains("->") || l.contains("[new"))
-        .count();
-
-    let msg = if new_refs > 0 {
-        format!("ok fetched ({} new refs)", new_refs)
-    } else {
-        "ok fetched".to_string()
-    };
-
-    println!("{}", msg);
-    timer.track("git fetch", "rtk git fetch", &raw, &msg);
-
-    Ok(0)
+    Ok(result.exit_code)
 }
 
 /// Format status message for stash operations.
