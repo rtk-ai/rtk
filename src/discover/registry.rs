@@ -1205,6 +1205,10 @@ const ROUTABLE_WRAPPER_PREFIXES: &[&str] = &["uv run"];
 /// Shell keywords that wrap a command without changing which one runs. They are
 /// not spawnable, so they must never fall through: `rtk exec foo` cannot run.
 const SHELL_KEYWORD_PREFIXES: &[&str] = &["noglob", "command", "builtin", "exec", "nocorrect"];
+const NOOP_WRAPPER_PREFIXES: &[&str] = &["env", "nice", "nohup"];
+static TIMEOUT_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^timeout\s+(?:[0-9]+(?:\.[0-9]+)?[smhd]?|--[a-z-]+(?:=\S+)?\s+[0-9]+(?:\.[0-9]+)?[smhd]?)\s+").unwrap()
+});
 
 /// Every built-in transparent wrapper, paired with whether it may fall through.
 /// Derived from the two lists above so they cannot drift apart.
@@ -1374,6 +1378,23 @@ fn rewrite_segment_inner(
             }
             break;
         }
+    }
+
+    // Common shell wrappers preserve the inner command's behavior while
+    // changing how it is launched. Keep them intact when rewriting the inner
+    // command so hooks also handle commands such as `timeout 60 git status`.
+    for prefix in NOOP_WRAPPER_PREFIXES {
+        if let Some(rest) = strip_word_prefix(trimmed, prefix) {
+            if rest.is_empty() {
+                return None;
+            }
+            return rewrite_segment_inner(rest, excluded, transparent_prefixes, context, depth + 1)
+                .map(|rewritten| format!("{} {}", prefix, rewritten));
+        }
+    }
+    if let Some(rest) = TIMEOUT_PREFIX.strip_prefix(trimmed) {
+        return rewrite_segment_inner(rest, excluded, transparent_prefixes, context, depth + 1)
+            .map(|rewritten| format!("{}{}", &trimmed[..trimmed.len() - rest.len()], rewritten));
     }
 
     // User-configured wrapper prefixes (e.g. `docker exec mycontainer`). These
@@ -2721,6 +2742,22 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("GIT_SSH_COMMAND=ssh git push", &[]),
             Some("GIT_SSH_COMMAND=ssh rtk git push".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_with_timeout_wrapper() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 60 git status", &[]),
+            Some("timeout 60 rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_with_noop_wrappers() {
+        assert_eq!(
+            rewrite_command_no_prefixes("nohup nice env git status", &[]),
+            Some("nohup nice env rtk git status".into())
         );
     }
 
