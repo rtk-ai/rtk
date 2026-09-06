@@ -1,6 +1,6 @@
 [filters.gradle]
 description = "Compact Gradle build output — strip progress, keep tasks and errors"
-match_command = "^(gradle|gradlew|\\./)gradlew?\\b"
+match_command = "^(\\./)?(gradlew?)\\b"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",
