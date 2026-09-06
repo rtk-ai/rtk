@@ -268,18 +268,28 @@ impl StreamResult {
     }
 }
 
-pub fn status_to_exit_code(status: std::process::ExitStatus) -> i32 {
-    if let Some(code) = status.code() {
-        return code;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        if let Some(sig) = status.signal() {
-            return 128 + sig;
-        }
-    }
-    1
+/// Map an `ExitStatus` to an exit code, reporting a signal termination on
+/// stderr so a killed child is distinguishable from an ordinary failure.
+///
+/// A child killed by a signal has no exit code of its own, so the `128 + signal`
+/// convention is the only thing left in the status — and on its own it is
+/// indistinguishable from a tool that genuinely exited with that code. `label`
+/// names the command in the diagnostic; the reporting itself is shared with
+/// [`crate::core::utils::exit_code_from_status`] so the wording stays identical
+/// across every path that spawns a child.
+pub fn status_to_exit_code(status: std::process::ExitStatus, label: &str) -> i32 {
+    crate::core::utils::exit_code_from_status(&status, label)
+}
+
+/// Name of the spawned program for diagnostics: the basename, so a resolved
+/// absolute path reports as `git` rather than the full path it was found at.
+fn command_label(cmd: &Command) -> String {
+    let program = cmd.get_program();
+    std::path::Path::new(program)
+        .file_name()
+        .unwrap_or(program)
+        .to_string_lossy()
+        .into_owned()
 }
 
 // ISSUE #897: ChildGuard RAII prevents zombie processes that caused kernel panic
@@ -290,6 +300,7 @@ pub fn run_streaming(
     stdin_mode: StdinMode,
     stdout_mode: FilterMode<'_>,
 ) -> Result<StreamResult> {
+    let label = command_label(cmd);
     if matches!(stdout_mode, FilterMode::Passthrough) {
         match &stdin_mode {
             StdinMode::Inherit => {
@@ -303,7 +314,7 @@ pub fn run_streaming(
         cmd.stderr(Stdio::inherit());
         let status = cmd.status().context("Failed to spawn process")?;
         return Ok(StreamResult {
-            exit_code: status_to_exit_code(status),
+            exit_code: status_to_exit_code(status, &label),
             raw: String::new(),
             raw_stdout: String::new(),
             raw_stderr: String::new(),
@@ -525,7 +536,7 @@ pub fn run_streaming(
     }
 
     let status = child.0.wait().context("Failed to wait for child")?;
-    let exit_code = status_to_exit_code(status);
+    let exit_code = status_to_exit_code(status, &label);
     let raw = format!("{}{}", raw_stdout, raw_stderr);
 
     if let Some(mut f) = saved_filter {
@@ -697,13 +708,13 @@ pub(crate) mod tests {
     #[test]
     fn test_exit_code_zero() {
         let status = Command::new("true").status().unwrap();
-        assert_eq!(status_to_exit_code(status), 0);
+        assert_eq!(status_to_exit_code(status, "true"), 0);
     }
 
     #[test]
     fn test_exit_code_nonzero() {
         let status = Command::new("false").status().unwrap();
-        assert_eq!(status_to_exit_code(status), 1);
+        assert_eq!(status_to_exit_code(status, "false"), 1);
     }
 
     #[cfg(unix)]
@@ -712,7 +723,14 @@ pub(crate) mod tests {
         let mut child = Command::new("sleep").arg("60").spawn().unwrap();
         child.kill().unwrap();
         let status = child.wait().unwrap();
-        assert_eq!(status_to_exit_code(status), 137);
+        assert_eq!(status_to_exit_code(status, "sleep"), 137);
+    }
+
+    /// The diagnostic names the tool, not the path it was resolved from.
+    #[test]
+    fn test_command_label_is_program_basename() {
+        assert_eq!(command_label(&Command::new("/usr/bin/env")), "env");
+        assert_eq!(command_label(&Command::new("git")), "git");
     }
 
     #[test]
