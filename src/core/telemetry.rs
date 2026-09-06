@@ -41,6 +41,12 @@ pub fn maybe_ping() {
         return;
     }
 
+    // Check opt-out: standard DO_NOT_TRACK env var
+    let do_not_track = std::env::var("DO_NOT_TRACK").unwrap_or_default();
+    if do_not_track == "1" || do_not_track.to_lowercase() == "true" {
+        return;
+    }
+
     // Load config once (avoid double disk read)
     let cfg = match config::Config::load() {
         Ok(c) => c,
@@ -612,5 +618,18 @@ mod tests {
         // Should not panic even if directories don't exist
         let count = count_custom_toml_filters();
         assert!(count < 10000); // sanity check
+    }
+
+    #[test]
+    fn test_do_not_track_env_values() {
+        // Only "1" or "true" (case-insensitive) triggers opt-out
+        for opt in &["1", "true", "True", "TRUE"] {
+            let should_opt = *opt == "1" || opt.to_lowercase() == "true";
+            assert!(should_opt, "DO_NOT_TRACK={} should opt out", opt);
+        }
+        for no_opt in &["0", "false", "False", "FALSE", ""] {
+            let should_not = *no_opt == "1" || no_opt.to_lowercase() == "true";
+            assert!(!should_not, "DO_NOT_TRACK={} should NOT opt out", no_opt);
+        }
     }
 }
