@@ -89,9 +89,9 @@ When implementing a new filter/cmds, be aware of the [Design Philosophy](#design
 
 - Interactive TUIs (htop, vim, less): not batch-mode compatible
 - Binary output (images, compiled artifacts): no text to filter
-- Trivial commands: not worth the overhead and may loose important informations
+- Trivial commands: not worth the overhead and may lose important information
 - Commands with no text output: nothing to compress
-- Others features not related to a LLM-proxy like RTK
+- Other features not related to a LLM-proxy like RTK
 
 ### TOML vs Rust: Which One?
 
