@@ -1803,14 +1803,21 @@ const CLINE_RULES: &str = include_str!("../../hooks/cline/rules.md");
 
 fn run_cline_mode(ctx: InitContext) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
-    // Cline reads .clinerules from the project root (workspace-scoped)
-    let rules_path = PathBuf::from(".clinerules");
+    // Cline reads .clinerules from the project root (workspace-scoped).
+    // If .clinerules already exists as a directory, write into .clinerules/rtk.md
+    // so we don't crash trying to write a file over a directory.
+    let clinerules_dir = PathBuf::from(".clinerules");
+    let rules_path = if clinerules_dir.is_dir() {
+        clinerules_dir.join("rtk.md")
+    } else {
+        clinerules_dir
+    };
 
     let existing = fs::read_to_string(&rules_path).unwrap_or_default();
     if existing.contains("RTK") || existing.contains("rtk") {
         if !dry_run {
             println!("\nRTK already configured for Cline in this project.\n");
-            println!("  Rules: .clinerules (already present)");
+            println!("  Rules: {} (already present)", rules_path.display());
         }
     } else {
         let new_content = if existing.trim().is_empty() {
@@ -1827,14 +1834,15 @@ fn run_cline_mode(ctx: InitContext) -> Result<()> {
                 println!("[dry-run] content:\n{}", new_content);
             }
         } else {
-            fs::write(&rules_path, &new_content).context("Failed to write .clinerules")?;
+            fs::write(&rules_path, &new_content)
+                .with_context(|| format!("Failed to write {}", rules_path.display()))?;
 
             if verbose > 0 {
-                eprintln!("Wrote .clinerules");
+                eprintln!("Wrote {}", rules_path.display());
             }
 
             println!("\nRTK configured for Cline.\n");
-            println!("  Rules: .clinerules (installed)");
+            println!("  Rules: {} (installed)", rules_path.display());
         }
     }
     if !dry_run {
