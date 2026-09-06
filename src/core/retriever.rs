@@ -893,26 +893,32 @@ fn load_requested_row(conn: &Connection, hash: Option<&str>) -> std::result::Res
 
 /// Which bytes of the stored entry the flags ask for. Defaults to the hidden
 /// tail — the part the agent has not already seen.
-fn select_slice(full: &[u8], args: &RecallArgs, shown_upto: usize) -> Vec<u8> {
+/// Borrows rather than copies. An entry can be `max_entry_bytes` — 10 MiB by
+/// default and user-raisable — and every slice here is a window onto `full`, so
+/// copying bought nothing but a second allocation of that size.
+fn select_slice<'a>(full: &'a [u8], args: &RecallArgs, shown_upto: usize) -> &'a [u8] {
     if args.full {
-        full.to_vec()
+        full
     } else if let Some(n) = args.from {
-        slice_from_line(full, n).to_vec()
+        slice_from_line(full, n)
     } else if let Some(n) = args.lines {
-        slice_first_lines(full, n).to_vec()
+        slice_first_lines(full, n)
     } else {
-        slice_from_line(full, shown_upto).to_vec()
+        slice_from_line(full, shown_upto)
     }
 }
 
-fn apply_grep(sliced: Vec<u8>, pattern: Option<&str>) -> Vec<u8> {
+/// Takes a borrow and returns owned only when it must: with no pattern the
+/// slice is copied once for output, and with one the copy is the filtered
+/// result that has to be built anyway.
+fn apply_grep(sliced: &[u8], pattern: Option<&str>) -> Vec<u8> {
     let Some(pattern) = pattern else {
-        return sliced;
+        return sliced.to_vec();
     };
     if regex::bytes::Regex::new(pattern).is_err() {
         eprintln!("rtk recall: note: --grep pattern is not a valid regex, matching it literally");
     }
-    grep_bytes(&sliced, pattern)
+    grep_bytes(sliced, pattern)
 }
 
 /// Width of the COMMAND column in `rtk recall --list`.
@@ -2186,6 +2192,74 @@ mod tests {
         warn_if_from_past_end(b"one\n", &args, 0);
     }
 
+    /// An ambiguous hash prefix must error rather than pick one. The hint the
+    /// agent receives carries a full hash, so an ambiguous prefix means a
+    /// hand-typed abbreviation — silently choosing a candidate would return the
+    /// wrong output under a plausible-looking hash.
+    ///
+    /// This is asserted by the spec and was previously untested: the `many =>`
+    /// arm could have been changed to take the first match with the whole suite
+    /// still green.
+    #[test]
+    fn test_ambiguous_hash_prefix_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let conn = open(&cfg).unwrap();
+        for hash in ["abc111111111", "abc222222222"] {
+            conn.execute(
+                "INSERT INTO recall (hash, command, created_at, total_lines, shown_upto, byte_size, truncated, codec, blob)
+                 VALUES (?1, 'cmd', ?2, 1, 1, 1, 0, 'raw', x'61')",
+                params![hash, now_secs()],
+            )
+            .unwrap();
+        }
+        let err = load_by_hash(&conn, "abc").expect_err("ambiguous prefix must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ambiguous"),
+            "message names the problem: {msg}"
+        );
+        assert!(msg.contains("abc111111111") && msg.contains("abc222222222"));
+    }
+
+    #[test]
+    fn test_unambiguous_prefix_still_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let stored = store_inner(&cfg, b"payload\n", Capture::full("cmd", Some(0))).unwrap();
+        let conn = open(&cfg).unwrap();
+        let row = load_by_hash(&conn, &stored.hash[..4])
+            .unwrap()
+            .expect("prefix resolves");
+        assert_eq!(row.hash, stored.hash);
+    }
+
+    /// A valid codec over a corrupt blob must degrade, not panic. The
+    /// unknown-codec arm is tested; this is the other half.
+    #[test]
+    fn test_corrupt_lz4_blob_errors_cleanly() {
+        let row = row_with_codec(CODEC_LZ4, vec![0xff; 32]);
+        assert!(decode(&row).is_err(), "garbage under a valid codec errors");
+    }
+
+    /// The truncation guarantee is "cut at a line boundary" — except when the
+    /// first `cap` bytes contain no newline, where it falls back to a hard cut.
+    /// That fallback is exactly where the guarantee does not hold, so it is
+    /// worth pinning.
+    #[test]
+    fn test_truncate_hard_cuts_when_no_newline_in_range() {
+        let (payload, truncated) = truncate_at_line_boundary(b"aaaaaaaaaa", 4);
+        assert!(truncated);
+        assert_eq!(payload, b"aaaa", "no newline to back up to, so a hard cut");
+
+        let (payload, truncated) = truncate_at_line_boundary(b"ab\ncdefgh", 6);
+        assert!(truncated);
+        assert_eq!(
+            payload, b"ab\n",
+            "backs up to the newline when there is one"
+        );
+    }
+
     #[test]
     fn test_b2_upsert_does_not_change_rowid() {
         let dir = tempfile::tempdir().unwrap();
@@ -2576,31 +2650,6 @@ mod tests {
         assert!(!path.exists(), "no DB before any open()");
         let _ = open(&cfg).unwrap();
         assert!(path.exists(), "open() creates it");
-    }
-
-    #[test]
-    #[ignore]
-    fn bench_open_cached_vs_uncached() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = temp_cfg(dir.path());
-        let path = db_path(&cfg).unwrap();
-        reset_conn_cache();
-        let _ = open(&cfg).unwrap();
-
-        let t0 = std::time::Instant::now();
-        for _ in 0..9 {
-            let _ = open(&cfg).unwrap();
-        }
-        let cached = t0.elapsed();
-
-        let t1 = std::time::Instant::now();
-        for _ in 0..9 {
-            let _ = open_uncached(&path).unwrap();
-        }
-        let uncached = t1.elapsed();
-
-        println!("9 cached opens:   {cached:?}");
-        println!("9 uncached opens: {uncached:?}");
     }
 
     // --- corrupted/unavailable DB → silent, no extra token, no exit code change ---
