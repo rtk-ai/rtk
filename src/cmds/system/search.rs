@@ -123,11 +123,14 @@ fn grep_slug(idx: usize, path: &str) -> String {
 
 /// Format a file's matches as `path<sep>line<sep>content`. Tee blocks use the
 /// real (un-compacted) `path` so recovered lines stay openable.
-fn match_block(path: &str, entries: &[(usize, bool, String)]) -> String {
+/// Renders entries for the tee log using each line's *raw* (untruncated)
+/// content — the tee log's whole purpose is full-fidelity recovery, so it
+/// must not carry the same `clean_line`-truncated text shown in `body`.
+fn match_block(path: &str, entries: &[(usize, bool, String, String)]) -> String {
     let mut s = String::new();
-    for (line_num, is_match, content) in entries {
+    for (line_num, is_match, _cleaned, raw) in entries {
         let sep = if *is_match { ':' } else { '-' };
-        s.push_str(&format!("{}{}{}{}{}\n", path, sep, line_num, sep, content));
+        s.push_str(&format!("{}{}{}{}{}\n", path, sep, line_num, sep, raw));
     }
     s
 }
@@ -592,7 +595,7 @@ pub fn run(
         None
     };
 
-    let mut by_file: HashMap<String, Vec<(usize, bool, String)>> = HashMap::new();
+    let mut by_file: HashMap<String, Vec<(usize, bool, String, String)>> = HashMap::new();
     for line in raw_output.lines() {
         let Some((file, line_num, is_match, content)) = parse_match_line(line) else {
             continue;
@@ -601,13 +604,13 @@ pub fn run(
         by_file
             .entry(file)
             .or_default()
-            .push((line_num, is_match, cleaned));
+            .push((line_num, is_match, cleaned, content.to_string()));
     }
 
     let total_matches: usize = by_file
         .values()
         .flat_map(|v| v.iter())
-        .filter(|(_, is_match, _)| *is_match)
+        .filter(|(_, is_match, _, _)| *is_match)
         .count();
 
     // Mirror what the real command prints: the filename only when grep/rg would
@@ -649,7 +652,7 @@ pub fn run(
         let file_display = compact_path(file);
         let mut file_shown = 0;
         let mut prev_line: usize = 0;
-        for (line_num, is_match, content) in entries.iter().take(per_file) {
+        for (line_num, is_match, content, _raw) in entries.iter().take(per_file) {
             if shown >= max_results {
                 break;
             }
@@ -925,6 +928,27 @@ mod tests {
         let line = "🎉🎊🎈🎁🎂🎄 some text 🎃🎆🎇✨";
         let cleaned = clean_line(line, 15, None, "text");
         assert!(!cleaned.is_empty());
+    }
+
+    #[test]
+    fn test_match_block_uses_raw_not_cleaned_content() {
+        // match_block renders the tee log — the log's whole purpose is
+        // full-fidelity recovery, so it must carry the untruncated line, not
+        // the same clean_line-truncated text already shown in the display.
+        let cleaned = "widget line 0: this is a synthetic sentence about widg...".to_string();
+        let raw = "widget line 0: this is a synthetic sentence about widgets that is deliberately padded past eighty characters so truncation logic can be tested, item widget-0.".to_string();
+        let entries = vec![(1, true, cleaned.clone(), raw.clone())];
+
+        let block = match_block("foo/bar.md", &entries);
+
+        assert!(
+            block.contains("item widget-0."),
+            "tee block should contain the full untruncated line, got: {block}"
+        );
+        assert!(
+            !block.contains(&cleaned),
+            "tee block must not contain the truncated display text, got: {block}"
+        );
     }
 
     // --- parse_cluster ---
