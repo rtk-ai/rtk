@@ -37,6 +37,7 @@ pub struct PeriodEconomics {
     // rtk metrics
     pub rtk_commands: Option<usize>,
     pub rtk_saved_tokens: Option<usize>,
+    pub rtk_input_tokens: Option<usize>,
     pub rtk_savings_pct: Option<f64>,
     // Primary metric (weighted input CPT)
     pub weighted_input_cpt: Option<f64>, // Derived input CPT using API ratios
@@ -52,6 +53,7 @@ impl PeriodEconomics {
     fn new(label: &str) -> Self {
         Self {
             label: label.to_string(),
+            rtk_input_tokens: None,
             cc_cost: None,
             cc_total_tokens: None,
             cc_active_tokens: None,
@@ -89,25 +91,25 @@ impl PeriodEconomics {
     fn set_rtk_from_day(&mut self, stats: &DayStats) {
         self.rtk_commands = Some(stats.commands);
         self.rtk_saved_tokens = Some(stats.saved_tokens);
+        self.rtk_input_tokens = Some(stats.input_tokens);
         self.rtk_savings_pct = Some(stats.savings_pct);
     }
 
     fn set_rtk_from_week(&mut self, stats: &WeekStats) {
         self.rtk_commands = Some(stats.commands);
         self.rtk_saved_tokens = Some(stats.saved_tokens);
+        self.rtk_input_tokens = Some(stats.input_tokens);
         self.rtk_savings_pct = Some(stats.savings_pct);
     }
 
     fn set_rtk_from_month(&mut self, stats: &MonthStats) {
         self.rtk_commands = Some(stats.commands);
         self.rtk_saved_tokens = Some(stats.saved_tokens);
-        self.rtk_savings_pct = Some(if stats.input_tokens + stats.output_tokens > 0 {
-            stats.saved_tokens as f64
-                / (stats.saved_tokens + stats.input_tokens + stats.output_tokens) as f64
-                * 100.0
-        } else {
-            0.0
-        });
+        self.rtk_input_tokens = Some(stats.input_tokens);
+        // Use stats.savings_pct (saved/input * 100) — same formula as daily/weekly.
+        // Previously used saved/(saved+input+output): inconsistent denominator that made
+        // monthly rates lower than daily/weekly for the same underlying data.
+        self.rtk_savings_pct = Some(stats.savings_pct);
     }
 
     fn compute_weighted_metrics(&mut self) {
@@ -168,6 +170,12 @@ struct Totals {
     cc_cache_read_tokens: u64,
     rtk_commands: usize,
     rtk_saved_tokens: usize,
+    /// Sum of input_tokens across all periods — used to compute the weighted savings rate.
+    /// Not serialized; it's only needed for the `rtk_avg_savings_pct` calculation.
+    #[serde(skip)]
+    rtk_total_input_tokens: usize,
+    /// Weighted savings rate: `SUM(saved_tokens) * 100 / SUM(input_tokens)` across all periods.
+    /// Using a per-period average would give equal weight to low-volume and high-volume periods.
     rtk_avg_savings_pct: f64,
     weighted_input_cpt: Option<f64>,
     savings_weighted: Option<f64>,
@@ -320,6 +328,7 @@ fn compute_totals(periods: &[PeriodEconomics]) -> Totals {
         cc_cache_read_tokens: 0,
         rtk_commands: 0,
         rtk_saved_tokens: 0,
+        rtk_total_input_tokens: 0,
         rtk_avg_savings_pct: 0.0,
         weighted_input_cpt: None,
         savings_weighted: None,
@@ -328,9 +337,6 @@ fn compute_totals(periods: &[PeriodEconomics]) -> Totals {
         savings_blended: None,
         savings_active: None,
     };
-
-    let mut pct_sum = 0.0;
-    let mut pct_count = 0;
 
     for p in periods {
         if let Some(cost) = p.cc_cost {
@@ -360,14 +366,17 @@ fn compute_totals(periods: &[PeriodEconomics]) -> Totals {
         if let Some(saved) = p.rtk_saved_tokens {
             totals.rtk_saved_tokens += saved;
         }
-        if let Some(pct) = p.rtk_savings_pct {
-            pct_sum += pct;
-            pct_count += 1;
+        if let Some(input) = p.rtk_input_tokens {
+            totals.rtk_total_input_tokens += input;
         }
     }
 
-    if pct_count > 0 {
-        totals.rtk_avg_savings_pct = pct_sum / pct_count as f64;
+    // Weighted savings rate: SUM(saved) * 100 / SUM(input) across all periods.
+    // Gives correct weight to high-volume periods; a simple average of per-period
+    // percentages would treat a 10-command month equally to a 10,000-command month.
+    if totals.rtk_total_input_tokens > 0 {
+        totals.rtk_avg_savings_pct =
+            totals.rtk_saved_tokens as f64 * 100.0 / totals.rtk_total_input_tokens as f64;
     }
 
     // Compute global weighted metrics
@@ -1108,6 +1117,8 @@ mod tests {
                 cc_cache_read_tokens: Some(984_900),
                 rtk_commands: Some(5),
                 rtk_saved_tokens: Some(2000),
+                // rtk_input_tokens: saved=2000 at 50% → input=4000
+                rtk_input_tokens: Some(4000),
                 rtk_savings_pct: Some(50.0),
                 weighted_input_cpt: None,
                 savings_weighted: None,
@@ -1127,6 +1138,8 @@ mod tests {
                 cc_cache_read_tokens: Some(1_979_800),
                 rtk_commands: Some(10),
                 rtk_saved_tokens: Some(3000),
+                // rtk_input_tokens: saved=3000 at 60% → input=5000
+                rtk_input_tokens: Some(5000),
                 rtk_savings_pct: Some(60.0),
                 weighted_input_cpt: None,
                 savings_weighted: None,
@@ -1145,11 +1158,64 @@ mod tests {
         assert_eq!(totals.cc_output_tokens, 15_000);
         assert_eq!(totals.rtk_commands, 15);
         assert_eq!(totals.rtk_saved_tokens, 5000);
-        assert_eq!(totals.rtk_avg_savings_pct, 55.0);
+        // Weighted rate: SUM(saved)*100/SUM(input) = 5000*100/9000 ≈ 55.56%
+        // Old unweighted: (50.0 + 60.0) / 2 = 55.0 — coincidentally close, but wrong.
+        let expected_weighted = 5000.0_f64 * 100.0 / 9000.0;
+        assert!(
+            (totals.rtk_avg_savings_pct - expected_weighted).abs() < 0.01,
+            "Expected weighted rate ≈ {:.2}%, got {:.2}%",
+            expected_weighted,
+            totals.rtk_avg_savings_pct
+        );
 
         assert!(totals.weighted_input_cpt.is_some());
         assert!(totals.savings_weighted.is_some());
         assert!(totals.blended_cpt.is_some());
         assert!(totals.active_cpt.is_some());
+    }
+
+    // Regression test: rtk_avg_savings_pct is weighted by volume, not an average of %
+    //
+    // Two periods with very different volumes:
+    //   Period A: small  — 100 input, 10 saved  (10% savings)
+    //   Period B: large  — 10_000 input, 9_000 saved (90% savings)
+    //
+    //   Unweighted avg: (10 + 90) / 2 = 50%   (wrong — treats months equally)
+    //   Weighted rate:  9_010 * 100 / 10_100 ≈ 89.2%  (correct — large month dominates)
+    //
+    // If rtk_avg_savings_pct were 50%, that would mean the old pct_sum/pct_count bug is back.
+    #[test]
+    fn test_totals_avg_savings_pct_is_weighted_by_volume() {
+        fn make_period(label: &str, saved: usize, input: usize, pct: f64) -> PeriodEconomics {
+            let mut p = PeriodEconomics::new(label);
+            p.rtk_saved_tokens = Some(saved);
+            p.rtk_input_tokens = Some(input);
+            p.rtk_savings_pct = Some(pct);
+            p
+        }
+
+        let periods = vec![
+            make_period("small", 10, 100, 10.0),
+            make_period("large", 9_000, 10_000, 90.0),
+        ];
+
+        let totals = compute_totals(&periods);
+
+        // Weighted: (10 + 9_000) * 100 / (100 + 10_000) = 901_000 / 10_100 ≈ 89.2%
+        let expected = 9_010.0_f64 * 100.0 / 10_100.0;
+        assert!(
+            (totals.rtk_avg_savings_pct - expected).abs() < 0.01,
+            "Expected weighted ≈ {:.2}%, got {:.2}%. Old bug: unweighted would give 50%.",
+            expected,
+            totals.rtk_avg_savings_pct
+        );
+
+        // Explicitly reject the old unweighted value
+        assert!(
+            (totals.rtk_avg_savings_pct - 50.0).abs() > 10.0,
+            "rtk_avg_savings_pct = {:.2}% is suspiciously close to the unweighted 50% — \
+             check that pct_sum/pct_count was not reinstated",
+            totals.rtk_avg_savings_pct
+        );
     }
 }
