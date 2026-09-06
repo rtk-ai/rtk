@@ -5405,6 +5405,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_rewrite_bare_turbo() {
+        for command in ["turbo lint", "turbo run build", "turbo dev"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(format!("rtk {command}")),
+                "Failed for command: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_bare_turbo() {
+        assert_eq!(
+            classify_command("turbo lint"),
+            Classification::Supported {
+                rtk_equivalent: "rtk turbo",
+                category: "Build",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
     // --- #508: RTK_DISABLED detection helpers ---
 
     #[test]
