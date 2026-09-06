@@ -24,15 +24,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     let mut cmd = resolved_command("tree");
 
-    let show_all = args.iter().any(|a| a == "-a" || a == "--all");
-    let has_ignore = args.iter().any(|a| a == "-I" || a.starts_with("--ignore="));
-
-    if !show_all && !has_ignore {
-        let ignore_pattern = NOISE_DIRS.join("|");
-        cmd.arg("-I").arg(&ignore_pattern);
-    }
-
-    for arg in args {
+    let forwarded_args = tree_args_for_platform(args);
+    for arg in &forwarded_args {
         cmd.arg(arg);
     }
 
@@ -62,6 +55,70 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
+fn tree_args_for_platform(args: &[String]) -> Vec<String> {
+    if cfg!(windows) {
+        windows_tree_args(args)
+    } else {
+        unix_tree_args(args)
+    }
+}
+
+fn unix_tree_args(args: &[String]) -> Vec<String> {
+    let mut forwarded = Vec::new();
+    let show_all = args.iter().any(|a| a == "-a" || a == "--all");
+    let has_ignore = args.iter().any(|a| a == "-I" || a.starts_with("--ignore="));
+
+    if !show_all && !has_ignore {
+        forwarded.push("-I".to_string());
+        forwarded.push(NOISE_DIRS.join("|"));
+    }
+
+    forwarded.extend(args.iter().cloned());
+    forwarded
+}
+
+fn windows_tree_args(args: &[String]) -> Vec<String> {
+    let mut forwarded = Vec::new();
+    let mut has_files = false;
+    let mut has_ascii = false;
+    let mut skip_next = false;
+
+    // Windows tree.com only accepts slash flags; Unix -I/--all options break it.
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+
+        let lower = arg.to_ascii_lowercase();
+        match lower.as_str() {
+            "/f" => {
+                has_files = true;
+                forwarded.push(arg.clone());
+            }
+            "/a" => {
+                has_ascii = true;
+                forwarded.push(arg.clone());
+            }
+            "-a" | "--all" => {}
+            "-i" => {
+                skip_next = true;
+            }
+            _ if lower.starts_with("--ignore=") || lower.starts_with("-i") => {}
+            _ => forwarded.push(arg.clone()),
+        }
+    }
+
+    if !has_files {
+        forwarded.push("/F".to_string());
+    }
+    if !has_ascii {
+        forwarded.push("/A".to_string());
+    }
+
+    forwarded
+}
+
 fn filter_tree_output(raw: &str) -> String {
     let lines: Vec<&str> = raw.lines().collect();
 
@@ -72,6 +129,10 @@ fn filter_tree_output(raw: &str) -> String {
     let mut filtered_lines = Vec::new();
 
     for line in lines {
+        if is_windows_tree_header(line) {
+            continue;
+        }
+
         // Skip the final summary line (e.g., "5 directories, 23 files")
         if line.contains("director") && line.contains("file") {
             continue;
@@ -91,6 +152,14 @@ fn filter_tree_output(raw: &str) -> String {
     }
 
     filtered_lines.join("\n") + "\n"
+}
+
+fn is_windows_tree_header(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.eq_ignore_ascii_case("Folder PATH listing")
+        || trimmed
+            .to_ascii_lowercase()
+            .starts_with("volume serial number is ")
 }
 
 #[cfg(test)]
@@ -123,6 +192,37 @@ mod tests {
         let input = "";
         let output = filter_tree_output(input);
         assert_eq!(output, "\n");
+    }
+
+    #[test]
+    fn test_filter_removes_windows_headers() {
+        let input = "Folder PATH listing\nVolume serial number is 0000014E 7957:0E10\nC:\\PROJECT\n+---src\n|       main.rs\n";
+        let output = filter_tree_output(input);
+        assert!(!output.contains("Folder PATH listing"));
+        assert!(!output.contains("Volume serial number"));
+        assert!(output.contains("C:\\PROJECT"));
+        assert!(output.contains("main.rs"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_tree_args_uses_native_flags() {
+        let args = vec![".".to_string()];
+        let output = tree_args_for_platform(&args);
+        assert_eq!(output, vec![".", "/F", "/A"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_tree_args_drops_unix_ignore_flags() {
+        let args = vec![
+            "-I".to_string(),
+            "target|node_modules".to_string(),
+            "--all".to_string(),
+            ".".to_string(),
+        ];
+        let output = tree_args_for_platform(&args);
+        assert_eq!(output, vec![".", "/F", "/A"]);
     }
 
     #[test]
