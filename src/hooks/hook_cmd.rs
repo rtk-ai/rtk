@@ -3,7 +3,7 @@
 //! Uses `writeln!(stdout, ...)` instead of `println!` — accidental stdout/stderr
 //! corrupts the JSON protocol (Claude Code bug #4669 silently disables the hook).
 
-use super::constants::PRE_TOOL_USE_KEY;
+use super::constants::{PERMISSION_REQUEST_KEY, PRE_TOOL_USE_KEY};
 use super::permissions::{self, PermissionVerdict};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -596,6 +596,66 @@ enum PayloadAction {
     Ignore,
 }
 
+/// Claude Code hook events RTK can be registered on.
+///
+/// Both deliver the same `tool_name` + `tool_input.command` payload and accept
+/// `updatedInput`, but they wrap the decision differently (see [`build_hook_output`]).
+enum ClaudeEvent {
+    /// Fires before every tool call. Honors `updatedInput` directly — but the
+    /// field is currently ignored by Claude Code (anthropics/claude-code#15897).
+    PreToolUse,
+    /// Fires only when a permission prompt is about to be shown. Honors
+    /// `updatedInput` (nested under `decision`), used as a fallback for #15897.
+    PermissionRequest,
+}
+
+/// Read which event Claude Code invoked the hook on. Defaults to `PreToolUse`
+/// when `hook_event_name` is absent (older payloads and direct invocations).
+fn claude_event(v: &Value) -> ClaudeEvent {
+    match v.get("hook_event_name").and_then(|e| e.as_str()) {
+        Some(PERMISSION_REQUEST_KEY) => ClaudeEvent::PermissionRequest,
+        _ => ClaudeEvent::PreToolUse,
+    }
+}
+
+/// Build the `hookSpecificOutput` body for the given event.
+fn build_hook_output(event: ClaudeEvent, updated_input: Value, allow: bool) -> Value {
+    match event {
+        ClaudeEvent::PreToolUse => {
+            let mut out = json!({
+                "hookEventName": PRE_TOOL_USE_KEY,
+                "permissionDecisionReason": "RTK auto-rewrite",
+                "updatedInput": updated_input
+            });
+            // AskRewrite omits permissionDecision so Claude Code runs its normal
+            // prompt flow on the rewritten command (never auto-allow on ask).
+            if allow {
+                out.as_object_mut()
+                    .unwrap()
+                    .insert("permissionDecision".into(), json!("allow"));
+            }
+            out
+        }
+        ClaudeEvent::PermissionRequest => {
+            // On PermissionRequest, `updatedInput` is only honored alongside
+            // `decision.behavior: "allow"` — Claude Code drops it otherwise.
+            // Unlike PreToolUse's `permissionDecision: "allow"`, this does NOT
+            // unconditionally run the command: Claude Code re-evaluates the
+            // *rewritten* command against the user's ask/deny rules, so an ask
+            // rule covering `Bash(rtk:*)` still prompts the user. That re-prompt
+            // — not withholding the decision — is what preserves least-privilege
+            // here, so both allow- and ask-verdict rewrites use "allow".
+            json!({
+                "hookEventName": PERMISSION_REQUEST_KEY,
+                "decision": {
+                    "behavior": "allow",
+                    "updatedInput": updated_input
+                }
+            })
+        }
+    }
+}
+
 fn process_claude_payload(v: &Value) -> PayloadAction {
     let cmd = match v
         .pointer("/tool_input/command")
@@ -643,18 +703,7 @@ fn process_claude_payload_from_decision(
         ti
     };
 
-    let mut hook_output = json!({
-        "hookEventName": PRE_TOOL_USE_KEY,
-        "permissionDecisionReason": "RTK auto-rewrite",
-        "updatedInput": updated_input
-    });
-
-    if allow {
-        hook_output
-            .as_object_mut()
-            .unwrap()
-            .insert("permissionDecision".into(), json!("allow"));
-    }
+    let hook_output = build_hook_output(claude_event(v), updated_input, allow);
 
     PayloadAction::Rewrite {
         cmd: cmd.to_string(),
@@ -1762,6 +1811,92 @@ mod tests {
         assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
         assert!(hook["updatedInput"].is_object());
         assert!(hook["updatedInput"]["command"].is_string());
+    }
+
+    // --- Claude PermissionRequest event (anthropics/claude-code#15897 fallback) ---
+
+    fn claude_permissionrequest_input(cmd: &str) -> String {
+        json!({
+            "hook_event_name": PERMISSION_REQUEST_KEY,
+            "tool_name": "Bash",
+            "tool_input": { "command": cmd }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_claude_permissionrequest_rewrite_shape() {
+        // On the PermissionRequest event the rewrite is nested under `decision`
+        // with `behavior: "allow"`, not at the top of `hookSpecificOutput`.
+        let result = run_claude_inner(&claude_permissionrequest_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert_eq!(hook["hookEventName"], PERMISSION_REQUEST_KEY);
+        assert_eq!(hook["decision"]["behavior"], "allow");
+        assert_eq!(
+            hook["decision"]["updatedInput"]["command"],
+            "rtk git status"
+        );
+        // PreToolUse-shaped fields must NOT appear on the PermissionRequest event.
+        assert!(hook["updatedInput"].is_null());
+        assert!(hook["permissionDecision"].is_null());
+    }
+
+    #[test]
+    fn test_claude_permissionrequest_preserves_tool_input_fields() {
+        let input = json!({
+            "hook_event_name": PERMISSION_REQUEST_KEY,
+            "tool_name": "Bash",
+            "tool_input": { "command": "git status", "timeout": 30000, "description": "Status" }
+        })
+        .to_string();
+        let result = run_claude_inner(&input).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let updated = &v["hookSpecificOutput"]["decision"]["updatedInput"];
+        assert_eq!(updated["command"], "rtk git status");
+        assert_eq!(updated["timeout"], 30000);
+        assert_eq!(updated["description"], "Status");
+    }
+
+    #[test]
+    fn test_claude_permissionrequest_passthrough_unsupported() {
+        assert!(run_claude_inner(&claude_permissionrequest_input("htop")).is_none());
+    }
+
+    #[test]
+    fn test_claude_permissionrequest_already_rtk_passthrough() {
+        assert!(run_claude_inner(&claude_permissionrequest_input("rtk git status")).is_none());
+    }
+
+    #[test]
+    fn test_claude_permissionrequest_substitution_not_rewritten() {
+        // Unattestable constructs must never be auto-allowed on PermissionRequest
+        // either — RTK skips so Claude Code evaluates the original natively.
+        assert!(run_claude_inner(&claude_permissionrequest_input(
+            "git status $(rm -rf /tmp/x)"
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn test_claude_explicit_pretooluse_event_keeps_legacy_shape() {
+        // An explicit PreToolUse event (and any unknown/absent event) renders the
+        // original top-level `updatedInput` shape, not the `decision` wrapper.
+        let input = json!({
+            "hook_event_name": PRE_TOOL_USE_KEY,
+            "tool_name": "Bash",
+            "tool_input": { "command": "git status" }
+        })
+        .to_string();
+        let result = run_claude_inner(&input).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(
+            v["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk git status"
+        );
+        assert!(v["hookSpecificOutput"]["decision"].is_null());
     }
 
     #[test]
