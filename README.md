@@ -90,6 +90,11 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 cargo install --git https://github.com/rtk-ai/rtk
 ```
 
+### Windows
+```bash
+winget install --id rtk-ai.rtk
+```
+
 ### Pre-built Binaries
 
 Download from [releases](https://github.com/rtk-ai/rtk/releases):
