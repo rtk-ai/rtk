@@ -1568,19 +1568,21 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                     core::toml_filter::apply_filter_with_info(filter, &combined_raw);
                 let lossy = !matches!(loss, core::toml_filter::Lossiness::None);
 
+                // Slug is the filter family name, never the raw command line: the
+                // raw line would give recall_stats a fresh row per invocation
+                // across all 63 TOML filters, and would persist arguments.
+                let slug = filter.name.as_str();
                 let hint = if !success {
-                    core::tee::tee_and_hint(&combined_raw, &raw_command, exit_code)
+                    core::tee::tee_and_hint(&combined_raw, slug, exit_code)
                 } else {
                     match &loss {
                         core::toml_filter::Lossiness::None => None,
                         core::toml_filter::Lossiness::Tail {
                             tee_payload,
                             tail_offset,
-                        } => {
-                            core::tee::force_tee_tail_hint(tee_payload, &raw_command, *tail_offset)
-                        }
+                        } => core::tee::force_tee_tail_hint(tee_payload, slug, *tail_offset),
                         core::toml_filter::Lossiness::Whole => {
-                            core::tee::force_tee_hint(&combined_raw, &raw_command)
+                            core::tee::force_tee_hint(&combined_raw, slug)
                         }
                     }
                 };

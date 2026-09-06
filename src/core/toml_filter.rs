@@ -2034,6 +2034,27 @@ match_command = "^make\\b"
         );
     }
 
+    /// B8/§X5: the TOML runner passes `filter.name` as the recall slug, so every
+    /// built-in family name must survive slug sanitization unchanged — no
+    /// argument residue, no 24-char hash fold that would make
+    /// `rtk gain --recalls` unreadable.
+    #[test]
+    fn test_builtin_filter_names_are_valid_recall_slugs() {
+        for f in make_filters(BUILTIN_TOML) {
+            let name = f.name.as_str();
+            assert_eq!(
+                crate::core::tee_file::sanitize_slug(name),
+                name,
+                "filter name must be slug-clean: {name}"
+            );
+            assert!(name.len() <= 24, "filter name must stay readable: {name}");
+            assert!(
+                !name.is_empty() && !name.contains(' '),
+                "filter name must carry no arguments: {name}"
+            );
+        }
+    }
+
     /// Verify every expected filter name is present in BUILTIN_TOML.
     /// This is the safeguard against accidentally deleting a filter file.
     #[test]

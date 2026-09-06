@@ -72,11 +72,11 @@ pub(crate) fn track_tee_read(cmd: &str) {
 }
 
 pub fn run(cmd: &str) -> anyhow::Result<()> {
-    track_tee_read(cmd);
     let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
 
     match evaluate(cmd, &excluded, &transparent_prefixes) {
         RewriteOutcome::Allow(rewritten) => {
+            track_tee_read(cmd);
             print!("{}", rewritten);
             let _ = std::io::stdout().flush();
             Ok(())
@@ -406,6 +406,30 @@ mod tests {
             // Sentinel: ensure Default and Allow are distinct enum variants.
             // If this ever fails, the entire permission model is broken.
             assert_ne!(PermissionVerdict::Default, PermissionVerdict::Allow);
+        }
+    }
+
+    mod v17_track_after_verdict {
+        use super::super::{evaluate_with_verdict, RewriteOutcome};
+        use crate::hooks::permissions::PermissionVerdict;
+
+        #[test]
+        fn test_denied_command_never_reaches_allow_branch() {
+            let outcome = evaluate_with_verdict("git status", PermissionVerdict::Deny, &[], &[]);
+            assert_eq!(outcome, RewriteOutcome::Deny);
+        }
+
+        #[test]
+        fn test_passthrough_command_never_reaches_allow_branch() {
+            let outcome =
+                evaluate_with_verdict("git log > /tmp/out.txt", PermissionVerdict::Allow, &[], &[]);
+            assert_eq!(outcome, RewriteOutcome::Passthrough);
+        }
+
+        #[test]
+        fn test_ask_verdict_does_not_reach_allow_branch() {
+            let outcome = evaluate_with_verdict("git status", PermissionVerdict::Default, &[], &[]);
+            assert!(matches!(outcome, RewriteOutcome::Ask(_)));
         }
     }
 }

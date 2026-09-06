@@ -406,6 +406,8 @@ fn recall_slug_is_public(slug: &str) -> bool {
         && slug
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+        && !slug.contains("___")
+        && slug.split(['_', '-']).count() <= 4
         && RECALL_FAMILIES.contains(&slug.split(['_', '-']).next().unwrap_or(""))
 }
 
@@ -772,5 +774,155 @@ mod tests {
         // Should not panic even if directories don't exist
         let count = count_custom_toml_filters();
         assert!(count < 10000); // sanity check
+    }
+
+    // --- V11: telemetry allowlist coverage ---
+
+    #[test]
+    fn test_v11_b7_fixed_argument_bearing_slug_rejected() {
+        assert!(
+            !recall_slug_is_public("go_build___cmd_acmepay"),
+            "B7 FIXED: triple underscore (encoded path) must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_v11_b7_fixed_too_many_segments_rejected() {
+        assert!(
+            !recall_slug_is_public("go_test_-v_-count_1"),
+            "B7 FIXED: >4 segments (argument leak) must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_v11_b7_fixed_family_with_subcommand_accepted() {
+        assert!(recall_slug_is_public("go_test"));
+        assert!(recall_slug_is_public("cargo_test"));
+        assert!(recall_slug_is_public("docker-images"));
+    }
+
+    #[test]
+    fn test_v11_slug_with_path_separators_rejected() {
+        assert!(!recall_slug_is_public("grep_/home/user/secret"));
+        assert!(!recall_slug_is_public("cargo_./src/main.rs"));
+    }
+
+    #[test]
+    fn test_v11_slug_with_uppercase_rejected() {
+        assert!(!recall_slug_is_public("Docker_build"));
+        assert!(!recall_slug_is_public("GIT_status"));
+    }
+
+    #[test]
+    fn test_v11_slug_over_32_chars_rejected() {
+        let long = "cargo_test_very_long_module_name_";
+        assert!(long.len() > 32);
+        assert!(!recall_slug_is_public(long));
+    }
+
+    #[test]
+    fn test_v11_slug_at_length_boundary_accepted() {
+        let slug = "cargo_test_verylongmodname";
+        assert!(slug.len() <= 32);
+        assert!(
+            slug.split(['_', '-']).count() <= 4,
+            "test slug must have <=4 segments"
+        );
+        assert!(recall_slug_is_public(slug));
+    }
+
+    #[test]
+    fn test_v11_every_recall_family_accepted_standalone() {
+        for family in RECALL_FAMILIES {
+            assert!(
+                recall_slug_is_public(family),
+                "family '{}' must pass allowlist standalone",
+                family
+            );
+        }
+    }
+
+    #[test]
+    fn test_v11_every_recall_family_accepted_with_suffix() {
+        for family in RECALL_FAMILIES {
+            let slug = format!("{}_test", family);
+            if slug.len() <= 32 {
+                assert!(
+                    recall_slug_is_public(&slug),
+                    "family '{}' with suffix must pass",
+                    family
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_v11_empty_slug_rejected() {
+        assert!(!recall_slug_is_public(""));
+    }
+
+    #[test]
+    fn test_v11_non_family_head_rejected() {
+        assert!(!recall_slug_is_public("mysecret"));
+        assert!(!recall_slug_is_public("unknown_cmd"));
+        assert!(!recall_slug_is_public("password_grep"));
+    }
+
+    #[test]
+    fn test_v11_slug_with_special_chars_rejected() {
+        assert!(!recall_slug_is_public("grep@host"));
+        assert!(!recall_slug_is_public("cargo+test"));
+        assert!(!recall_slug_is_public("git status"));
+    }
+
+    #[test]
+    fn test_v11_payload_keys_contain_no_content_fields() {
+        let stats = vec![stat("grep", "sqlite", 1, 1)];
+        let v = build_recall_stats(&stats);
+        let arr = v.as_array().unwrap();
+        for entry in arr {
+            let obj = entry.as_object().unwrap();
+            for key in obj.keys() {
+                assert!(
+                    !["blob", "content", "command", "cwd", "hash", "path"].contains(&key.as_str()),
+                    "payload must not contain content field '{}': {:?}",
+                    key,
+                    obj
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_v11_other_bucket_hides_slug_identity() {
+        let stats = vec![stat("mysecret_project", "sqlite", 5, 2)];
+        let v = build_recall_stats(&stats);
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(
+            arr[0]["filter"], "other",
+            "non-public slug must be anonymized"
+        );
+        let serialized = v.to_string();
+        assert!(
+            !serialized.contains("mysecret"),
+            "slug identity must not appear in payload"
+        );
+    }
+
+    #[test]
+    fn test_v11_mixed_public_private_slugs() {
+        let stats = vec![
+            stat("grep", "sqlite", 10, 3),
+            stat("private_tool", "sqlite", 2, 1),
+            stat("cargo_test", "sqlite", 5, 0),
+        ];
+        let v = build_recall_stats(&stats);
+        let arr = v.as_array().unwrap();
+        let names: Vec<&str> = arr.iter().map(|e| e["filter"].as_str().unwrap()).collect();
+        assert!(names.contains(&"grep"));
+        assert!(names.contains(&"cargo_test"));
+        assert!(names.contains(&"other"));
+        assert!(!names.contains(&"private_tool"));
     }
 }
