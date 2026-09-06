@@ -6,7 +6,7 @@
 /// Integration tests run the real binary, which is built without `cfg(test)`
 /// and so reads the developer's ambient config — writing their fixture output
 /// into `~/.local/share/rtk/recall.db` and leaking fixture slugs into the
-/// daily telemetry ping (B13/V19). The unit-test guard in `core::tee` cannot
+/// daily telemetry ping. The unit-test guard in `core::tee` cannot
 /// cover this: it is compiled out of the very binary under test.
 ///
 /// Sets the variable on the test process itself, which every spawned child
