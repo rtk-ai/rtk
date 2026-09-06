@@ -19,6 +19,87 @@ use crate::core::retriever::{
     self, Capture, RecoveryMode, RetrieverConfig, Stored, MIN_FAILURE_BYTES,
 };
 
+/// What a recovery hint is filed under.
+///
+/// Two different things used to share one `&str` parameter: the name of a
+/// *kind* of command, which is what `recall_stats` counts, and the name of one
+/// *invocation*, which is what a tee filename needs to stay unique. Passing a
+/// runtime string satisfied both, so per-invocation data reached the stats
+/// table — `cargo_{subcommand}`, `bun_{subcmd}`, `deno_{subcmd}` and a grep
+/// slug carrying 32 characters of file path, each opening a row that nothing
+/// closed. The table has a cap now, but a cap is a limit on the damage, not a
+/// bound on what enters.
+///
+/// The variants are the admissible ways to name something, and each carries
+/// its own evidence that the set of stats keys it can produce is finite:
+///
+/// - `Static` — one literal. The finite set is the literals in this tree.
+/// - `Composed` — a family plus parts that are themselves `&'static str`, so
+///   the joined name still comes from the literals in this tree. This is what
+///   keeps `cargo_clippy` and `aws_ec2_describe-instances` distinct in the
+///   stats rather than folding them to their family.
+/// - `Detailed` — a runtime value that is *not* bounded, and so never reaches
+///   the stats key at all. It reaches the tee filename, which needs it.
+/// - `Configured` — a name from the user's own config. Bounded by how many
+///   filters they have defined, which is the one case where the bound lives
+///   outside this tree.
+///
+/// There is deliberately no conversion from `String` or `&str`: a caller
+/// holding a runtime string has to say which of the last two it means.
+#[derive(Clone, Copy)]
+pub enum Slug<'a> {
+    Static(&'static str),
+    Composed {
+        family: &'static str,
+        parts: &'a [&'static str],
+    },
+    Detailed {
+        family: &'static str,
+        detail: &'a str,
+    },
+    Configured(&'a str),
+}
+
+impl From<&'static str> for Slug<'static> {
+    fn from(name: &'static str) -> Self {
+        Slug::Static(name)
+    }
+}
+
+/// `family` and its parts as one underscore-joined name, skipping empty parts
+/// so a caller need not special-case a subcommand it does not have.
+fn compose(family: &str, parts: &[&str]) -> String {
+    std::iter::once(family)
+        .chain(parts.iter().copied())
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+impl Slug<'_> {
+    /// The key `recall_stats` counts under. Every variant answers from a
+    /// finite set; this is the whole of the bound.
+    pub(crate) fn stats_key(&self) -> String {
+        match self {
+            Slug::Static(name) | Slug::Configured(name) => (*name).to_string(),
+            Slug::Composed { family, parts } => compose(family, parts),
+            Slug::Detailed { family, .. } => (*family).to_string(),
+        }
+    }
+
+    /// The name a tee file is written under, and the `command` column of a
+    /// recall row. Unlike the stats key this keeps the detail, because two
+    /// files written in the same second need to differ and a reader of
+    /// `recall --list` wants to know which grep it was.
+    pub(crate) fn full(&self) -> String {
+        match self {
+            Slug::Static(name) | Slug::Configured(name) => (*name).to_string(),
+            Slug::Composed { family, parts } => compose(family, parts),
+            Slug::Detailed { family, detail } => format!("{family}_{detail}"),
+        }
+    }
+}
+
 fn active() -> Option<(RecoveryMode, RetrieverConfig)> {
     if matches!(std::env::var("RTK_RECALL").ok().as_deref(), Some("0"))
         || matches!(std::env::var("RTK_TEE").ok().as_deref(), Some("0"))
@@ -101,57 +182,62 @@ pub(crate) fn with_temp_recall<T>(f: impl FnOnce() -> T) -> T {
 fn store_hint(
     cfg: &RetrieverConfig,
     content: &str,
-    slug: &str,
+    slug: &Slug<'_>,
     exit_code: Option<i32>,
 ) -> Option<String> {
-    match retriever::store(cfg, content.as_bytes(), Capture::full(slug, exit_code)) {
+    let (command, key) = (slug.full(), slug.stats_key());
+    let capture = Capture::full(&command, exit_code).keyed(&key);
+    match retriever::store(cfg, content.as_bytes(), capture) {
         Stored::Saved(s) => Some(format!("[full output: rtk recall {}]", s.hash)),
         Stored::Unavailable | Stored::Empty => None,
     }
 }
 
-pub fn tee_and_hint(raw: &str, command_slug: &str, exit_code: i32) -> Option<String> {
+pub fn tee_and_hint<'a>(raw: &str, slug: impl Into<Slug<'a>>, exit_code: i32) -> Option<String> {
     if exit_code == 0 || raw.len() < MIN_FAILURE_BYTES {
         return None;
     }
     let (mode, cfg) = active()?;
+    let slug = slug.into();
     match mode {
         RecoveryMode::Disabled => None,
-        RecoveryMode::Tee => super::tee_file::tee_and_hint(&cfg, raw, command_slug)
-            .inspect(|_| retriever::record_tee_elision(&cfg, command_slug)),
-        RecoveryMode::Sqlite => store_hint(&cfg, raw, command_slug, Some(exit_code)),
+        RecoveryMode::Tee => super::tee_file::tee_and_hint(&cfg, raw, &slug.full())
+            .inspect(|_| retriever::record_tee_elision(&cfg, &slug.stats_key())),
+        RecoveryMode::Sqlite => store_hint(&cfg, raw, &slug, Some(exit_code)),
     }
 }
 
-pub fn force_tee_hint(content: &str, command_slug: &str) -> Option<String> {
+pub fn force_tee_hint<'a>(content: &str, slug: impl Into<Slug<'a>>) -> Option<String> {
     if content.is_empty() {
         return None;
     }
     let (mode, cfg) = active()?;
+    let slug = slug.into();
     match mode {
         RecoveryMode::Disabled => None,
-        RecoveryMode::Tee => super::tee_file::force_tee_hint(&cfg, content, command_slug)
-            .inspect(|_| retriever::record_tee_elision(&cfg, command_slug)),
-        RecoveryMode::Sqlite => store_hint(&cfg, content, command_slug, None),
+        RecoveryMode::Tee => super::tee_file::force_tee_hint(&cfg, content, &slug.full())
+            .inspect(|_| retriever::record_tee_elision(&cfg, &slug.stats_key())),
+        RecoveryMode::Sqlite => store_hint(&cfg, content, &slug, None),
     }
 }
 
-pub fn force_tee_tail_hint(
+pub fn force_tee_tail_hint<'a>(
     content: &str,
-    command_slug: &str,
+    slug: impl Into<Slug<'a>>,
     line_offset: usize,
 ) -> Option<String> {
     if content.is_empty() {
         return None;
     }
     let (mode, cfg) = active()?;
+    let slug = slug.into();
     match mode {
         RecoveryMode::Disabled => None,
         RecoveryMode::Tee => {
-            super::tee_file::force_tee_tail_hint(&cfg, content, command_slug, line_offset)
-                .inspect(|_| retriever::record_tee_elision(&cfg, command_slug))
+            super::tee_file::force_tee_tail_hint(&cfg, content, &slug.full(), line_offset)
+                .inspect(|_| retriever::record_tee_elision(&cfg, &slug.stats_key()))
         }
-        RecoveryMode::Sqlite => tail_hint(&cfg, content, command_slug, line_offset),
+        RecoveryMode::Sqlite => tail_hint(&cfg, content, &slug, line_offset),
     }
 }
 
@@ -160,10 +246,12 @@ pub fn force_tee_tail_hint(
 fn tail_hint(
     cfg: &RetrieverConfig,
     content: &str,
-    slug: &str,
+    slug: &Slug<'_>,
     line_offset: usize,
 ) -> Option<String> {
-    match retriever::store(cfg, content.as_bytes(), Capture::tail(slug, line_offset)) {
+    let (command, key) = (slug.full(), slug.stats_key());
+    let capture = Capture::tail(&command, line_offset).keyed(&key);
+    match retriever::store(cfg, content.as_bytes(), capture) {
         Stored::Saved(s) => Some(format!(
             "[+{} hidden: rtk recall {}]",
             s.hidden_lines, s.hash
@@ -276,5 +364,85 @@ mod tests {
     #[test]
     fn test_force_tee_tail_hint_skips_empty() {
         assert!(force_tee_tail_hint("", "cmd", 5).is_none());
+    }
+
+    /// The whole point of the type: a per-invocation value reaches the tee
+    /// filename and the `command` column, and never the stats key.
+    #[test]
+    fn test_detailed_keeps_detail_out_of_the_stats_key() {
+        let slug = Slug::Detailed {
+            family: "grep",
+            detail: "3_src_core_retriever_rs",
+        };
+        assert_eq!(slug.stats_key(), "grep");
+        assert_eq!(slug.full(), "grep_3_src_core_retriever_rs");
+    }
+
+    /// Composed parts are `&'static str`, so the joined name is still drawn
+    /// from the literals in this tree — which is why it may reach the stats
+    /// key without bounding it to the family.
+    #[test]
+    fn test_composed_keeps_its_parts_in_both_names() {
+        let slug = Slug::Composed {
+            family: "aws",
+            parts: &["ec2", "describe-instances"],
+        };
+        assert_eq!(slug.stats_key(), "aws_ec2_describe-instances");
+        assert_eq!(slug.full(), "aws_ec2_describe-instances");
+    }
+
+    /// A subcommand-less caller composes with an empty part rather than
+    /// special-casing, and must not get a trailing underscore for it.
+    #[test]
+    fn test_composed_skips_empty_parts() {
+        let slug = Slug::Composed {
+            family: "cargo",
+            parts: &[""],
+        };
+        assert_eq!(slug.stats_key(), "cargo");
+    }
+
+    /// A name from the user's own config is bounded by how many filters they
+    /// have, not by this tree, and is carried as itself.
+    #[test]
+    fn test_configured_is_carried_verbatim() {
+        let name = String::from("my-custom-filter");
+        let slug = Slug::Configured(&name);
+        assert_eq!(slug.stats_key(), "my-custom-filter");
+        assert_eq!(slug.full(), "my-custom-filter");
+    }
+
+    /// The store files the counts under the bounded name while the row keeps
+    /// the detailed one. Asserted through `store` rather than on the type, so
+    /// it covers the wiring and not just the rendering.
+    #[test]
+    fn test_store_counts_the_family_and_records_the_detail() {
+        use crate::core::retriever::{stats_snapshot_with, RecoveryMode, RetrieverConfig};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = RetrieverConfig {
+            mode: RecoveryMode::Sqlite,
+            database_path: Some(dir.path().join("recall.db")),
+            ..RetrieverConfig::default()
+        };
+
+        for path in ["src_one_rs", "src_two_rs", "src_three_rs"] {
+            let slug = Slug::Detailed {
+                family: "grep",
+                detail: path,
+            };
+            let content = format!("matches in {path}\n");
+            assert!(store_hint(&cfg, &content, &slug, None).is_some());
+        }
+
+        let stats = stats_snapshot_with(&cfg).expect("stats");
+        let grep: Vec<_> = stats.iter().filter(|s| s.slug == "grep").collect();
+        assert_eq!(grep.len(), 1, "three greps must share one stats row");
+        assert_eq!(grep[0].elisions, 3);
+        assert!(
+            !stats.iter().any(|s| s.slug.contains("src_one_rs")),
+            "no path may appear in a stats key: {:?}",
+            stats.iter().map(|s| &s.slug).collect::<Vec<_>>()
+        );
     }
 }

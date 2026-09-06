@@ -370,7 +370,7 @@ pub struct RecallStat {
     pub recalls: i64,
 }
 
-fn stats_snapshot_with(cfg: &RetrieverConfig) -> Result<Vec<RecallStat>> {
+pub(crate) fn stats_snapshot_with(cfg: &RetrieverConfig) -> Result<Vec<RecallStat>> {
     let conn = open(cfg)?;
     let mut stmt = conn.prepare("SELECT slug, mode, elisions, recalls FROM recall_stats")?;
     let rows = stmt.query_map([], |r| {
@@ -595,6 +595,13 @@ const EVICT_BY_COUNT_SQL: &str = "DELETE FROM recall WHERE rowid IN (
 /// ended, and how much of it the agent already saw.
 pub struct Capture<'a> {
     pub command: &'a str,
+    /// What `recall_stats` counts this under, which is not always what the
+    /// `command` column shows. The command keeps whatever detail the caller
+    /// had — the file a grep overflowed on, the subcommand that ran — because
+    /// a reader of `recall --list` wants it. The stats key has to come from a
+    /// finite set instead, or the table grows a row per invocation. Defaults
+    /// to the command, so a caller with only one name passes it once.
+    pub stats_key: &'a str,
     pub exit_code: Option<i32>,
     /// 1-based first line the agent has *not* seen. 1 means it saw none.
     pub shown_upto: usize,
@@ -608,6 +615,7 @@ impl<'a> Capture<'a> {
     pub fn full(command: &'a str, exit_code: Option<i32>) -> Self {
         Self {
             command,
+            stats_key: command,
             exit_code,
             shown_upto: 1,
         }
@@ -618,9 +626,20 @@ impl<'a> Capture<'a> {
     pub fn tail(command: &'a str, shown_upto: usize) -> Self {
         Self {
             command,
+            stats_key: command,
             exit_code: None,
             shown_upto,
         }
+    }
+
+    /// File the counts under a different name than the command.
+    ///
+    /// The only caller is the hint dispatch, which holds a `Slug` and can tell
+    /// the bounded half from the detailed half. Everything else names the two
+    /// the same and never calls this.
+    pub fn keyed(mut self, stats_key: &'a str) -> Self {
+        self.stats_key = stats_key;
+        self
     }
 }
 
@@ -676,7 +695,7 @@ fn store_inner(cfg: &RetrieverConfig, content: &[u8], capture: Capture<'_>) -> R
     let entry = encode_entry(content, capture.command, cfg.max_entry_bytes);
     let conn = open(cfg)?;
     upsert_entry(&conn, &entry, &capture)?;
-    bump_stat(&conn, capture.command, "sqlite", "elisions");
+    bump_stat(&conn, capture.stats_key, "sqlite", "elisions");
     evict(&conn, cfg);
 
     Ok(StoredRef {
@@ -1226,6 +1245,7 @@ mod tests {
             content,
             Capture {
                 command: "list",
+                stats_key: "list",
                 exit_code: Some(0),
                 shown_upto: 3,
             },
@@ -1500,6 +1520,7 @@ mod tests {
             b"trimmed list\n",
             Capture {
                 command: "docker-images",
+                stats_key: "docker-images",
                 exit_code: None,
                 shown_upto: 2,
             },
@@ -1549,6 +1570,7 @@ mod tests {
             b"a\nb\nc\n",
             Capture {
                 command: "gh-prs",
+                stats_key: "gh-prs",
                 exit_code: Some(0),
                 shown_upto: 2,
             },
@@ -1906,6 +1928,7 @@ mod tests {
             content,
             Capture {
                 command: "slice-test",
+                stats_key: "slice-test",
                 exit_code: Some(0),
                 shown_upto: 2,
             },

@@ -20,7 +20,7 @@ pub fn filter_deno_output(output: &str) -> String {
 
 /// Run a deno subcommand through the shared core runner, which applies the
 /// filter, tee recovery, tracking, and the never_worse output guard.
-fn run_filtered_subcmd(subcmd: &str, args: &[String], verbose: u8) -> Result<i32> {
+fn run_filtered_subcmd(subcmd: &'static str, args: &[String], verbose: u8) -> Result<i32> {
     if crate::core::runner::is_watch_mode(args) {
         return passthrough_subcmd(subcmd, args, verbose);
     }
@@ -34,13 +34,16 @@ fn run_filtered_subcmd(subcmd: &str, args: &[String], verbose: u8) -> Result<i32
     }
 
     let display = format!("{} {}", subcmd, args.join(" "));
-    let tee_label = format!("deno_{}", subcmd);
+
     crate::core::runner::run_filtered(
         cmd,
         "deno",
         display.trim_end(),
         filter_deno_output,
-        crate::core::runner::RunOptions::with_tee(&tee_label),
+        crate::core::runner::RunOptions::with_tee(crate::core::tee::Slug::Composed {
+            family: "deno",
+            parts: &[subcmd],
+        }),
     )
 }
 

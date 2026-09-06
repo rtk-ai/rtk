@@ -1571,7 +1571,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                 // Slug is the filter family name, never the raw command line: the
                 // raw line would give recall_stats a fresh row per invocation
                 // across all 63 TOML filters, and would persist arguments.
-                let slug = filter.name.as_str();
+                let slug = core::tee::Slug::Configured(filter.name.as_str());
                 let hint = if !success {
                     core::tee::tee_and_hint(&combined_raw, slug, exit_code)
                 } else {

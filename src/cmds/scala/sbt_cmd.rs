@@ -78,7 +78,7 @@ fn run_task(
     args: &[String],
     default_task: &str,
     filter: fn(&str) -> String,
-    tee_label: &str,
+    tee_label: &'static str,
     verbose: u8,
 ) -> Result<i32> {
     let mut cmd = resolved_command("sbt");

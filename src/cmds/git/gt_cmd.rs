@@ -26,7 +26,7 @@ fn run_gt_filtered(
     subcmd: &[&str],
     args: &[String],
     verbose: u8,
-    tee_label: &str,
+    tee_label: &'static str,
     filter_fn: fn(&str) -> String,
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();

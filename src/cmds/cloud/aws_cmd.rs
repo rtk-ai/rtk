@@ -107,12 +107,18 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
                 filter_cfn_events,
             )
         }
-        "logs"
-            if !args.is_empty()
-                && (args[0] == "get-log-events" || args[0] == "filter-log-events") =>
-        {
-            run_aws_filtered(&["logs", &args[0]], &args[1..], verbose, filter_logs_events)
-        }
+        "logs" if !args.is_empty() && args[0] == "get-log-events" => run_aws_filtered(
+            &["logs", "get-log-events"],
+            &args[1..],
+            verbose,
+            filter_logs_events,
+        ),
+        "logs" if !args.is_empty() && args[0] == "filter-log-events" => run_aws_filtered(
+            &["logs", "filter-log-events"],
+            &args[1..],
+            verbose,
+            filter_logs_events,
+        ),
         "lambda" if !args.is_empty() && args[0] == "list-functions" => run_aws_filtered(
             &["lambda", "list-functions"],
             &args[1..],
@@ -137,14 +143,18 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
             verbose,
             filter_iam_users,
         ),
-        "dynamodb" if !args.is_empty() && (args[0] == "scan" || args[0] == "query") => {
-            run_aws_filtered(
-                &["dynamodb", &args[0]],
-                &args[1..],
-                verbose,
-                filter_dynamodb_items,
-            )
-        }
+        "dynamodb" if !args.is_empty() && args[0] == "scan" => run_aws_filtered(
+            &["dynamodb", "scan"],
+            &args[1..],
+            verbose,
+            filter_dynamodb_items,
+        ),
+        "dynamodb" if !args.is_empty() && args[0] == "query" => run_aws_filtered(
+            &["dynamodb", "query"],
+            &args[1..],
+            verbose,
+            filter_dynamodb_items,
+        ),
         "ecs" if !args.is_empty() && args[0] == "describe-tasks" => run_aws_filtered(
             &["ecs", "describe-tasks"],
             &args[1..],
@@ -187,8 +197,13 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
             verbose,
             filter_logs_query_results,
         ),
-        "s3" if !args.is_empty() && (args[0] == "sync" || args[0] == "cp") => {
-            run_s3_transfer(&args[0], &args[1..], verbose)
+        // The guard already proves which of the two it is, so pass that literal
+        // rather than the user string it matched: the slug is built from it.
+        "s3" if !args.is_empty() && args[0] == "sync" => {
+            run_s3_transfer("sync", &args[1..], verbose)
+        }
+        "s3" if !args.is_empty() && args[0] == "cp" => {
+            run_s3_transfer("cp", &args[1..], verbose)
         }
         "secretsmanager" if !args.is_empty() && args[0] == "get-secret-value" => run_aws_filtered(
             &["secretsmanager", "get-secret-value"],
@@ -324,21 +339,26 @@ fn run_aws_json(sub_args: &[&str], extra_args: &[String], verbose: u8) -> Result
 /// Shared runner for AWS commands that return JSON.
 /// Follows the six-phase contract: timer → execute → filter (fallback) → tee → track → exit code.
 ///
-/// INVARIANT: `sub_args` must be caller-supplied literals, never user input.
-/// It becomes the recall slug, which lands in `recall_stats` and is read by the
-/// daily telemetry ping. Every current caller passes a fixed array behind an
-/// exact-match guard, so nothing user-controlled reaches it — but that safety
-/// lives in the calling convention rather than in this function, so an arm that
-/// forwarded a resource name would leak it. Bound any such slug at construction.
+/// `sub_args` are `&'static str` because they become the recall slug, which
+/// lands in `recall_stats` and is read by the daily telemetry ping. That used
+/// to be a calling convention written in this comment — every caller passed a
+/// fixed array behind an exact-match guard, so nothing user-controlled reached
+/// it, but an arm that forwarded a resource name would have. The lifetime says
+/// it instead: a runtime string does not typecheck here.
 fn run_aws_filtered(
-    sub_args: &[&str],
+    sub_args: &[&'static str],
     extra_args: &[String],
     verbose: u8,
     filter_fn: fn(&str) -> Option<FilterResult>,
 ) -> Result<i32> {
     let cmd_label = format!("aws {}", sub_args.join(" "));
     let rtk_label = format!("rtk {}", cmd_label);
-    let slug = cmd_label.replace(' ', "_");
+    // Composed rather than a joined String: the parts are literals, so the set
+    // of stats keys this can produce is the set of arms below.
+    let slug = crate::core::tee::Slug::Composed {
+        family: "aws",
+        parts: sub_args,
+    };
     let timer = tracking::TimedExecution::start();
     let CaptureResult {
         stdout,
@@ -354,7 +374,7 @@ fn run_aws_filtered(
     };
 
     if exit_code != 0 {
-        if let Some(hint) = crate::core::tee::tee_and_hint(&raw, &slug, exit_code) {
+        if let Some(hint) = crate::core::tee::tee_and_hint(&raw, slug, exit_code) {
             eprintln!("{}\n{}", stderr.trim(), hint);
         } else {
             eprintln!("{}", stderr.trim());
@@ -369,7 +389,7 @@ fn run_aws_filtered(
     });
 
     let hint = if result.truncated {
-        crate::core::tee::force_tee_hint(&raw, &slug)
+        crate::core::tee::force_tee_hint(&raw, slug)
     } else {
         None
     };
@@ -425,11 +445,15 @@ fn run_s3_ls(extra_args: &[String], verbose: u8) -> Result<i32> {
 }
 
 /// Run s3 sync/cp (text output, not JSON)
-fn run_s3_transfer(operation: &str, extra_args: &[String], verbose: u8) -> Result<i32> {
+fn run_s3_transfer(operation: &'static str, extra_args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
     let cmd_label = format!("aws s3 {}", operation);
     let rtk_label = format!("rtk aws s3 {}", operation);
-    let slug = format!("aws_s3_{}", operation);
+    let slug = crate::core::tee::Slug::Composed {
+        family: "aws",
+        parts: &["s3", operation],
+    };
+
 
     let mut cmd = resolved_command("aws");
     cmd.args(["s3", operation]);
@@ -452,7 +476,7 @@ fn run_s3_transfer(operation: &str, extra_args: &[String], verbose: u8) -> Resul
         format!("{}\n{}", stdout, stderr)
     };
     if exit_code != 0 {
-        if let Some(hint) = crate::core::tee::tee_and_hint(&raw, &slug, exit_code) {
+        if let Some(hint) = crate::core::tee::tee_and_hint(&raw, slug, exit_code) {
             eprintln!("{}\n{}", stderr.trim(), hint);
         } else {
             eprintln!("{}", stderr.trim());
@@ -463,7 +487,7 @@ fn run_s3_transfer(operation: &str, extra_args: &[String], verbose: u8) -> Resul
 
     let result = filter_s3_transfer(&stdout);
     let hint = if result.truncated {
-        force_tee_hint(&raw, &slug)
+        force_tee_hint(&raw, slug)
     } else {
         None
     };

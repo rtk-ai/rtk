@@ -248,9 +248,13 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
         passthrough_requested,
         verbose,
     );
-    let tee_label = format!("{}_run", framework);
+    let slug = crate::core::tee::Slug::Composed {
+        family: framework,
+        parts: &["run"],
+    };
 
-    let rendered = render_test_output(&filtered, &combined, &tee_label, result.exit_code);
+
+    let rendered = render_test_output(&filtered, &combined, slug, result.exit_code);
     let shown = crate::core::runner::emit_guarded(&rendered, None, &combined);
 
     timer.track(
@@ -373,35 +377,35 @@ fn format_passthrough_output_with_limit(raw: &str, max_chars: usize) -> Formatte
 fn render_test_output(
     filtered: &FormattedTestOutput,
     raw: &str,
-    tee_label: &str,
+    slug: crate::core::tee::Slug<'_>,
     exit_code: i32,
 ) -> String {
     render_test_output_with_hints(
         filtered,
         raw,
-        tee_label,
+        slug,
         exit_code,
-        crate::core::tee::force_tee_hint,
-        crate::core::tee::tee_and_hint,
+        |raw, slug| crate::core::tee::force_tee_hint(raw, slug),
+        |raw, slug, code| crate::core::tee::tee_and_hint(raw, slug, code),
     )
 }
 
 fn render_test_output_with_hints<F, T>(
     filtered: &FormattedTestOutput,
     raw: &str,
-    tee_label: &str,
+    slug: crate::core::tee::Slug<'_>,
     exit_code: i32,
     force_hint: F,
     tee_hint: T,
 ) -> String
 where
-    F: FnOnce(&str, &str) -> Option<String>,
-    T: FnOnce(&str, &str, i32) -> Option<String>,
+    F: FnOnce(&str, crate::core::tee::Slug<'_>) -> Option<String>,
+    T: FnOnce(&str, crate::core::tee::Slug<'_>, i32) -> Option<String>,
 {
     let hint = if filtered.truncated {
-        force_hint(raw, tee_label)
+        force_hint(raw, slug)
     } else {
-        tee_hint(raw, tee_label, exit_code)
+        tee_hint(raw, slug, exit_code)
     };
 
     match hint {
@@ -588,11 +592,16 @@ Scope: all 6 workspace projects
         let rendered = render_test_output_with_hints(
             &filtered,
             &output,
-            "vitest_run",
+            crate::core::tee::Slug::Composed {
+                family: "vitest",
+                parts: &["run"],
+            },
             0,
-            |raw, label| {
+            |raw, slug| {
                 assert_eq!(raw, output);
-                assert_eq!(label, "vitest_run");
+                // The production shape, rendered: family plus its static parts.
+                assert_eq!(slug.full(), "vitest_run");
+                assert_eq!(slug.stats_key(), "vitest_run");
                 Some("[full output: /tmp/vitest_run.log]".to_string())
             },
             |_, _, _| Some("[full output: wrong-path.log]".to_string()),

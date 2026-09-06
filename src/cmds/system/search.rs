@@ -110,15 +110,17 @@ fn parse_cluster(rest: &str) -> ClusterResult {
     ClusterResult::Boolean((!raw_prefix.is_empty()).then_some(raw_prefix))
 }
 
-/// Unique, descriptive tee slug for a file's overflow matches. `idx` disambiguates
-/// files within one grep; the tee filename's epoch handles separate runs.
-fn grep_slug(idx: usize, path: &str) -> String {
+/// The part of a grep's tee slug that names *which* overflow this was: the
+/// file, and an index disambiguating files within one grep. The tee filename
+/// needs it, and it is the reason grep's slug is `Detailed` — a path is
+/// unbounded, so this never reaches the stats key.
+fn grep_slug_detail(idx: usize, path: &str) -> String {
     let cleaned: String = path
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
     let tail = &cleaned[cleaned.len().saturating_sub(32)..];
-    format!("grep_{}_{}", idx, tail)
+    format!("{}_{}", idx, tail)
 }
 
 /// Format a file's matches as `path<sep>line<sep>content`. Tee blocks use the
@@ -679,8 +681,11 @@ pub fn run(
         // Tee the file's full matches (real path) so the tail hint recovers them
         // openably, skipping the lines already shown.
         let full_block = match_block(file, entries);
-        match crate::core::tee::force_tee_tail_hint(&full_block, &grep_slug(idx, file), file_shown + 1)
-        {
+        let slug = crate::core::tee::Slug::Detailed {
+            family: "grep",
+            detail: &grep_slug_detail(idx, file),
+        };
+        match crate::core::tee::force_tee_tail_hint(&full_block, slug, file_shown + 1) {
             Some(hint) => {
                 body.push_str(&format!("  +{} more in {} {}\n", remaining, file_display, hint))
             }
