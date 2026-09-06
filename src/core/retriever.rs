@@ -831,8 +831,27 @@ fn emit_selected(
 ) -> Result<i32> {
     let full = decode(row)?;
     let out = apply_grep(select_slice(&full, args, row.shown_upto), args.grep);
+    warn_if_from_past_end(&full, args, out.len());
     emit_recall(conn, row, &out, max_entry_bytes);
     Ok(0)
+}
+
+/// Say so when `--from N` lands past the end of the entry.
+///
+/// Empty output is otherwise indistinguishable from "the entry really has
+/// nothing after line N", which breaks the resume loop the flag exists for: an
+/// agent paging through a long entry gets silence and no way to tell whether it
+/// finished or overshot (§B.B17). Goes to stderr, like the truncation note, so
+/// the recalled bytes on stdout stay exactly what was stored.
+fn warn_if_from_past_end(full: &[u8], args: &RecallArgs, emitted: usize) {
+    let Some(from) = args.from else { return };
+    if emitted > 0 {
+        return;
+    }
+    let total = count_lines(full);
+    if from > total {
+        eprintln!("rtk recall: --from {from} is past the end; this entry has {total} lines");
+    }
 }
 
 /// Deliver the entry and record that it was delivered. The two belong together:
@@ -2120,6 +2139,50 @@ mod tests {
             first_gone,
             "equal created_at must fall back to insertion order, deterministically"
         );
+    }
+
+    // --- B17: --from past the end must not be silent ---
+
+    fn from_args(n: usize) -> RecallArgs<'static> {
+        RecallArgs {
+            hash: None,
+            full: false,
+            from: Some(n),
+            lines: None,
+            grep: None,
+            list: false,
+        }
+    }
+
+    #[test]
+    fn test_b17_from_past_end_is_detected() {
+        let full = b"one\ntwo\nthree\n";
+        assert_eq!(count_lines(full), 3);
+        // Past the end: the slice is empty and the overshoot is real.
+        assert!(slice_from_line(full, 9).is_empty());
+        warn_if_from_past_end(full, &from_args(9), 0);
+    }
+
+    #[test]
+    fn test_b17_from_within_range_yields_output() {
+        let full = b"one\ntwo\nthree\n";
+        let sliced = slice_from_line(full, 3);
+        assert_eq!(sliced, b"three\n");
+        // Non-empty output means nothing to warn about.
+        warn_if_from_past_end(full, &from_args(3), sliced.len());
+    }
+
+    #[test]
+    fn test_b17_no_warning_without_from_flag() {
+        let args = RecallArgs {
+            hash: None,
+            full: true,
+            from: None,
+            lines: None,
+            grep: None,
+            list: false,
+        };
+        warn_if_from_past_end(b"one\n", &args, 0);
     }
 
     #[test]
