@@ -326,23 +326,29 @@ fn stat_family(slug: &str) -> &str {
     }
 }
 
-fn strip_shortened_hash(s: &str) -> &str {
-    let b = s.as_bytes();
-    if b.len() == 15
-        && b[8] == b'_'
-        && s[9..]
-            .chars()
-            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
-    {
-        &s[..8]
-    } else {
-        s
-    }
-}
-
+/// The name a slug is counted under.
+///
+/// `sanitize_slug` folds anything over 24 characters to `prefix8_hash6`, and
+/// this used to throw that hash away again, keeping the first eight characters.
+/// The two functions were fighting: one added a disambiguator, the other
+/// removed it, so any two names sharing eight characters shared a row —
+/// `aws_cloudformation_list-stacks` and
+/// `aws_cloudformation_describe-stack-events` both landed on `aws_clou`, and
+/// `aws_ec2_describe-instances` was stored as `aws_ec2_`, trailing underscore
+/// and all.
+///
+/// Keeping the hash costs nothing now. The strip existed so that a long *raw
+/// command line* and the tee filename derived from it would agree, and so that
+/// two different raw lines sharing a prefix would aggregate rather than opening
+/// a row each. Both concerns were about raw command lines reaching this
+/// function, which the `Slug` type now makes impossible: a caller with a
+/// runtime string must say `Detailed` (the detail never arrives here) or
+/// `Configured` (bounded by the user's own config). The elision and recall
+/// sides still agree, because both now fold through `sanitize_slug` and it is
+/// idempotent on its own output.
 fn stat_key(slug: &str) -> String {
     let sanitized = crate::core::tee_file::sanitize_slug(slug);
-    stat_family(strip_shortened_hash(&sanitized)).to_string()
+    stat_family(&sanitized).to_string()
 }
 
 fn bump_stat(conn: &Connection, slug: &str, mode: &str, column: &str) {
@@ -1658,13 +1664,30 @@ mod tests {
         );
     }
 
+    /// Long names stay bounded and stay distinct.
+    ///
+    /// This used to assert the opposite of the second half — that two different
+    /// raw command lines aggregate to one key. That was true and useful while a
+    /// raw command line could reach `stat_key`; the `Slug` type ended that, and
+    /// the aggregation it described was also what made
+    /// `aws_cloudformation_list-stacks` and
+    /// `aws_cloudformation_describe-stack-events` share a row.
     #[test]
-    fn test_stat_key_bounds_toml_raw_command_slugs() {
+    fn test_stat_key_bounds_long_slugs_without_merging_them() {
         let a = stat_key("helm install myapp ./chart");
         let b = stat_key("helm install other ./elsewhere --wait");
-        assert_eq!(a, b, "same subcommand family must aggregate");
+        assert_ne!(a, b, "distinct names must not share a row");
         assert!(a.len() <= 24, "key stays bounded: {a}");
         assert!(a.starts_with("helm"), "key stays readable: {a}");
+    }
+
+    /// The collision this replaced, pinned: two AWS commands that differ only
+    /// past the eighth character.
+    #[test]
+    fn test_stat_key_does_not_collide_past_eight_characters() {
+        let list = stat_key("aws_cloudformation_list-stacks");
+        let describe = stat_key("aws_cloudformation_describe-stack-events");
+        assert_ne!(list, describe, "both used to be `aws_clou`");
     }
 
     /// Raw command lines short enough to skip the 24-char hash
