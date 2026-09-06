@@ -2845,49 +2845,87 @@ fn run_cli() -> Result<i32> {
 
             const CAP: usize = 1_048_576;
 
-            let stdout_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
-                let mut reader = stdout_pipe;
-                let mut captured = Vec::new();
-                let mut buf = [0u8; 8192];
-
-                loop {
-                    let count = reader.read(&mut buf)?;
-                    if count == 0 {
-                        break;
+            // The reader threads only stop at pipe EOF. EOF never arrives
+            // when a descendant of the child (build daemon, background job)
+            // inherits the pipe write end and outlives it, so a plain join()
+            // blocks rtk forever after the command itself finished (#2320).
+            // Once the child has exited, wait briefly for the readers to
+            // drain, then detach any reader still blocked on an orphaned
+            // pipe — std::process::exit() in main() reaps it. Captures are
+            // shared so tracking still sees what was streamed on detach.
+            fn finish_reader(
+                handle: thread::JoinHandle<std::io::Result<()>>,
+                stream: &str,
+                deadline: std::time::Instant,
+            ) -> Result<()> {
+                while !handle.is_finished() {
+                    if std::time::Instant::now() >= deadline {
+                        return Ok(());
                     }
-                    if captured.len() < CAP {
-                        let take = count.min(CAP - captured.len());
-                        captured.extend_from_slice(&buf[..take]);
-                    }
-                    let mut out = std::io::stdout().lock();
-                    out.write_all(&buf[..count])?;
-                    out.flush()?;
+                    thread::sleep(std::time::Duration::from_millis(10));
                 }
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("{} streaming thread panicked", stream))?
+                    .map_err(anyhow::Error::from)
+            }
 
-                Ok(captured)
-            });
+            let stdout_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
-            let stderr_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
-                let mut reader = stderr_pipe;
-                let mut captured = Vec::new();
-                let mut buf = [0u8; 8192];
+            let stdout_handle = {
+                let captured = std::sync::Arc::clone(&stdout_buf);
+                thread::spawn(move || -> std::io::Result<()> {
+                    let mut reader = stdout_pipe;
+                    let mut buf = [0u8; 8192];
 
-                loop {
-                    let count = reader.read(&mut buf)?;
-                    if count == 0 {
-                        break;
+                    loop {
+                        let count = reader.read(&mut buf)?;
+                        if count == 0 {
+                            break;
+                        }
+                        {
+                            let mut captured = captured.lock().unwrap_or_else(|p| p.into_inner());
+                            if captured.len() < CAP {
+                                let take = count.min(CAP - captured.len());
+                                captured.extend_from_slice(&buf[..take]);
+                            }
+                        }
+                        let mut out = std::io::stdout().lock();
+                        out.write_all(&buf[..count])?;
+                        out.flush()?;
                     }
-                    if captured.len() < CAP {
-                        let take = count.min(CAP - captured.len());
-                        captured.extend_from_slice(&buf[..take]);
-                    }
-                    let mut err = std::io::stderr().lock();
-                    err.write_all(&buf[..count])?;
-                    err.flush()?;
-                }
 
-                Ok(captured)
-            });
+                    Ok(())
+                })
+            };
+
+            let stderr_handle = {
+                let captured = std::sync::Arc::clone(&stderr_buf);
+                thread::spawn(move || -> std::io::Result<()> {
+                    let mut reader = stderr_pipe;
+                    let mut buf = [0u8; 8192];
+
+                    loop {
+                        let count = reader.read(&mut buf)?;
+                        if count == 0 {
+                            break;
+                        }
+                        {
+                            let mut captured = captured.lock().unwrap_or_else(|p| p.into_inner());
+                            if captured.len() < CAP {
+                                let take = count.min(CAP - captured.len());
+                                captured.extend_from_slice(&buf[..take]);
+                            }
+                        }
+                        let mut err = std::io::stderr().lock();
+                        err.write_all(&buf[..count])?;
+                        err.flush()?;
+                    }
+
+                    Ok(())
+                })
+            };
 
             let status = child
                 .0
@@ -2896,12 +2934,14 @@ fn run_cli() -> Result<i32> {
                 .wait()
                 .context(format!("Failed waiting for command: {}", cmd_name))?;
 
-            let stdout_bytes = stdout_handle
-                .join()
-                .map_err(|_| anyhow::anyhow!("stdout streaming thread panicked"))??;
-            let stderr_bytes = stderr_handle
-                .join()
-                .map_err(|_| anyhow::anyhow!("stderr streaming thread panicked"))??;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            finish_reader(stdout_handle, "stdout", deadline)?;
+            finish_reader(stderr_handle, "stderr", deadline)?;
+
+            let stdout_bytes =
+                std::mem::take(&mut *stdout_buf.lock().unwrap_or_else(|p| p.into_inner()));
+            let stderr_bytes =
+                std::mem::take(&mut *stderr_buf.lock().unwrap_or_else(|p| p.into_inner()));
 
             let stdout = core::utils::decode_process_output(&stdout_bytes);
             let stderr = core::utils::decode_process_output(&stderr_bytes);
