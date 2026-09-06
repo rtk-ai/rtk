@@ -204,7 +204,7 @@ pub fn run(
             println!("{}", "─".repeat(table_width));
             println!(
                 "{:>3}  {:<cmd_width$}  {:>count_width$}  {:>saved_width$}  {:>6}  {:>time_width$}  {:<impact_width$}",
-                "#", "Command", "Count", "Saved", "Avg%", "Time", "Impact",
+                "#", "Command", "Count", "Saved", "Total%", "Time", "Impact",
                 cmd_width = cmd_width, count_width = count_width,
                 saved_width = saved_width, time_width = time_width,
                 impact_width = impact_width
