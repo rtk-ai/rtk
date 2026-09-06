@@ -6190,6 +6190,13 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_rtk_md_distinguishes_meta_and_rewritten_commands() {
+        assert!(RTK_SLIM.contains("Meta Commands (type these with `rtk` directly)"));
+        assert!(RTK_SLIM.contains("type the plain command without an `rtk` prefix"));
+        assert!(RTK_SLIM.contains("do not type the rewritten form yourself"));
+    }
+
+    #[test]
     fn test_claude_md_mode_creates_full_injection() {
         // Just verify RTK_INSTRUCTIONS constant has the right content
         assert!(RTK_INSTRUCTIONS.contains(RTK_BLOCK_START));

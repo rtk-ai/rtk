@@ -2,7 +2,7 @@
 
 **Usage**: Token-optimized CLI proxy (cuts up to 90% of bash output)
 
-## Meta Commands (always use rtk directly)
+## Meta Commands (type these with `rtk` directly)
 
 ```bash
 rtk gain              # Show token savings analytics
@@ -21,9 +21,10 @@ which rtk             # Verify correct binary
 
 ⚠️ **Name collision**: If `rtk gain` fails, you may have reachingforthejack/rtk (Rust Type Kit) installed instead.
 
-## Hook-Based Usage
+## Hook-Rewritten Commands
 
-All other commands are automatically rewritten by the Claude Code hook.
-Example: `git status` → `rtk git status` (transparent, 0 tokens overhead)
+For git, gh, cargo, and other hook-covered tools, type the plain command without an `rtk` prefix. The Claude Code hook rewrites it after permission checks.
+
+Example: type `git status`. The hook transparently runs `rtk git status`; do not type the rewritten form yourself.
 
 Refer to CLAUDE.md for full command reference.
