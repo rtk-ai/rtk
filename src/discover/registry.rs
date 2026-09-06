@@ -1038,6 +1038,14 @@ fn rewrite_pipeline_final_stage(
     transparent_prefixes: &[String],
 ) -> Option<String> {
     let final_stage_start = analysis.final_stage_start?;
+    let pipeline = cmd[segment_start..analysis.end_offset].trim();
+    let first_stage = pipeline
+        .split_once('|')
+        .map_or(pipeline, |(stage, _)| stage)
+        .trim();
+    if is_kubectl_exec_segment(first_stage) {
+        return None;
+    }
     let final_stage = cmd[final_stage_start..analysis.end_offset].trim();
 
     rewrite_segment_inner(
@@ -1196,6 +1204,163 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
         }
     }
     None
+}
+
+enum KubectlExecRewrite {
+    Rewrite(String),
+    Passthrough,
+}
+
+const KUBECTL_EXEC_FILE_OUTPUT_COMMANDS: &[&str] = &["cat", "less", "more", "tail"];
+const KUBECTL_EXEC_STRUCTURED_OUTPUT_COMMANDS: &[&str] = &["ps", "env", "printenv", "df"];
+const KUBECTL_EXEC_MANAGEMENT_COMMANDS: &[&str] =
+    &["rm", "kill", "mkdir", "chmod", "chown", "mv", "cp", "touch"];
+
+fn is_kubectl_exec_segment(cmd: &str) -> bool {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let (env_prefix, rest_after_env) = strip_disabled_prefix(trimmed);
+    if !env_prefix.is_empty() {
+        return is_kubectl_exec_segment(rest_after_env);
+    }
+
+    for &prefix in SHELL_KEYWORD_PREFIXES {
+        if let Some(rest) = strip_word_prefix(trimmed, prefix) {
+            return is_kubectl_exec_segment(rest);
+        }
+    }
+
+    is_kubectl_exec_command(trimmed)
+}
+
+fn rewrite_kubectl_exec(cmd_part: &str, redirect_suffix: &str) -> Option<KubectlExecRewrite> {
+    let inner = parse_kubectl_exec_inner_command(cmd_part)?;
+
+    if !redirect_suffix.is_empty() {
+        return Some(KubectlExecRewrite::Passthrough);
+    }
+
+    let inner_command = first_command_word(inner)?;
+    if inner_command == "head" || KUBECTL_EXEC_MANAGEMENT_COMMANDS.contains(&inner_command.as_str())
+    {
+        return Some(KubectlExecRewrite::Passthrough);
+    }
+
+    if KUBECTL_EXEC_FILE_OUTPUT_COMMANDS.contains(&inner_command.as_str()) {
+        return Some(KubectlExecRewrite::Rewrite(format!(
+            "{} | tail -100",
+            cmd_part
+        )));
+    }
+
+    if KUBECTL_EXEC_STRUCTURED_OUTPUT_COMMANDS.contains(&inner_command.as_str()) {
+        return Some(KubectlExecRewrite::Rewrite(format!(
+            "{} | rtk smart",
+            cmd_part
+        )));
+    }
+
+    Some(KubectlExecRewrite::Passthrough)
+}
+
+fn parse_kubectl_exec_inner_command(cmd: &str) -> Option<&str> {
+    let tokens = tokenize(cmd);
+    let args: Vec<&ParsedToken> = tokens
+        .iter()
+        .filter(|token| token.kind == TokenKind::Arg)
+        .collect();
+
+    let first = args.first()?.value.as_str();
+    if first.rsplit('/').next().unwrap_or(first) != "kubectl" {
+        return None;
+    }
+
+    let exec_idx = kubectl_exec_arg_index(&args)?;
+    for token in args.iter().skip(exec_idx + 1) {
+        if token.value == "--" {
+            return Some(cmd[token.offset + token.value.len()..].trim());
+        }
+    }
+
+    None
+}
+
+fn is_kubectl_exec_command(cmd: &str) -> bool {
+    let tokens = tokenize(cmd);
+    let args: Vec<&ParsedToken> = tokens
+        .iter()
+        .filter(|token| token.kind == TokenKind::Arg)
+        .collect();
+
+    let Some(first) = args.first() else {
+        return false;
+    };
+    if first.value.rsplit('/').next().unwrap_or(&first.value) != "kubectl" {
+        return false;
+    }
+
+    kubectl_exec_arg_index(&args).is_some()
+}
+
+fn kubectl_exec_arg_index(args: &[&ParsedToken]) -> Option<usize> {
+    let mut idx = 1;
+    while let Some(token) = args.get(idx) {
+        let value = token.value.as_str();
+        if value == "exec" {
+            return Some(idx);
+        }
+        if value == "--" || !value.starts_with('-') {
+            return None;
+        }
+
+        if kubectl_global_flag_takes_value(value) && !value.contains('=') {
+            idx += 1;
+        }
+        idx += 1;
+    }
+
+    None
+}
+
+fn kubectl_global_flag_takes_value(flag: &str) -> bool {
+    let name = flag.split_once('=').map_or(flag, |(name, _)| name);
+    matches!(
+        name,
+        "-n" | "--namespace"
+            | "--context"
+            | "--kubeconfig"
+            | "--cluster"
+            | "--user"
+            | "--as"
+            | "--as-group"
+            | "--token"
+            | "--server"
+            | "--request-timeout"
+            | "--cache-dir"
+            | "--certificate-authority"
+            | "--client-certificate"
+            | "--client-key"
+            | "--tls-server-name"
+            | "-s"
+    )
+}
+
+fn first_command_word(cmd: &str) -> Option<String> {
+    let (_, rest_after_env) = strip_disabled_prefix(cmd);
+    let first = tokenize(rest_after_env.trim())
+        .into_iter()
+        .find(|token| token.kind == TokenKind::Arg)?;
+    Some(
+        first
+            .value
+            .rsplit('/')
+            .next()
+            .unwrap_or(&first.value)
+            .to_string(),
+    )
 }
 
 /// Transparent wrappers that RULES can also match as a whole string, so an
@@ -1407,6 +1572,16 @@ fn rewrite_segment_inner(
             return None;
         }
         return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
+    }
+
+    if let Some(kubectl_exec) = rewrite_kubectl_exec(cmd_part, redirect_suffix) {
+        return match kubectl_exec {
+            KubectlExecRewrite::Rewrite(rewritten) => Some(rewritten),
+            KubectlExecRewrite::Passthrough => Some(trimmed.to_string()),
+        };
+    }
+    if is_kubectl_exec_command(cmd_part) {
+        return None;
     }
 
     // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
@@ -3542,6 +3717,60 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("kubectl describe pod mypod", &[]),
             Some("rtk kubectl describe pod mypod".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_kubectl_exec() {
+        assert!(matches!(
+            classify_command("kubectl exec -n prod mypod -- cat /var/log/app.log"),
+            Classification::Supported {
+                rtk_equivalent: "rtk kubectl",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_kubectl_exec_file_output() {
+        assert_eq!(
+            rewrite_command_no_prefixes("kubectl exec -n prod mypod -- cat /var/log/app.log", &[]),
+            Some("kubectl exec -n prod mypod -- cat /var/log/app.log | tail -100".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("kubectl -n prod exec mypod -- cat /var/log/app.log", &[]),
+            Some("kubectl -n prod exec mypod -- cat /var/log/app.log | tail -100".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_kubectl_exec_structured_output() {
+        assert_eq!(
+            rewrite_command_no_prefixes("kubectl exec mypod -- ps aux", &[]),
+            Some("kubectl exec mypod -- ps aux | rtk smart".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("kubectl exec mypod -- env", &[]),
+            Some("kubectl exec mypod -- env | rtk smart".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_kubectl_exec_preserves_mutating_or_ambiguous_commands() {
+        assert_eq!(
+            rewrite_command_no_prefixes("kubectl exec mypod -- rm /tmp/file", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("kubectl exec mypod cat /var/log/app.log", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "kubectl exec mypod -- cat /var/log/app.log | tail -100",
+                &[]
+            ),
+            None
         );
     }
 

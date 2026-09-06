@@ -3,12 +3,22 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 
 use crate::core::filter::Language;
+use crate::core::truncate::CAP_INVENTORY;
+use crate::core::utils::{strip_ansi, truncate};
+
+const SMART_STDIN_MAX_LINES: usize = CAP_INVENTORY;
+const SMART_STDIN_MAX_LINE_LEN: usize = 160;
 
 /// Heuristic-based code summarizer - no external model needed
-pub fn run(file: &Path, _model: &str, _force_download: bool, verbose: u8) -> Result<()> {
+pub fn run(file: Option<&Path>, _model: &str, _force_download: bool, verbose: u8) -> Result<()> {
+    let Some(file) = file else {
+        return run_stdin(verbose);
+    };
+
     if verbose > 0 {
         eprintln!("Analyzing: {}", file.display());
     }
@@ -28,6 +38,51 @@ pub fn run(file: &Path, _model: &str, _force_download: bool, verbose: u8) -> Res
     println!("{}", summary.line2);
 
     Ok(())
+}
+
+fn run_stdin(verbose: u8) -> Result<()> {
+    if verbose > 0 {
+        eprintln!("Analyzing stdin");
+    }
+
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .context("Failed to read stdin")?;
+
+    print!("{}", filter_stdin(&input));
+    Ok(())
+}
+
+pub fn filter_stdin(input: &str) -> String {
+    let clean = strip_ansi(input);
+    let lines: Vec<&str> = clean.lines().collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    let needs_line_cap = lines.len() > SMART_STDIN_MAX_LINES;
+    let needs_width_cap = lines
+        .iter()
+        .any(|line| line.chars().count() > SMART_STDIN_MAX_LINE_LEN);
+    if !needs_line_cap && !needs_width_cap {
+        return clean;
+    }
+
+    let mut output: Vec<String> = lines
+        .iter()
+        .take(SMART_STDIN_MAX_LINES)
+        .map(|line| truncate(line, SMART_STDIN_MAX_LINE_LEN))
+        .collect();
+
+    if lines.len() > SMART_STDIN_MAX_LINES {
+        output.push(format!(
+            "[{} more lines]",
+            lines.len() - SMART_STDIN_MAX_LINES
+        ));
+    }
+
+    output.join("\n")
 }
 
 struct CodeSummary {
@@ -314,5 +369,18 @@ def load_config():
 "#;
         let summary = analyze_code(code, &Language::Python);
         assert!(summary.line1.contains("Python"));
+    }
+
+    #[test]
+    fn test_filter_stdin_truncates_structured_output() {
+        let input = (0..55)
+            .map(|idx| format!("root {:>5} {}", idx, "x".repeat(200)))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let output = filter_stdin(&input);
+        assert!(output.lines().count() <= SMART_STDIN_MAX_LINES + 1);
+        assert!(output.contains("[5 more lines]"));
+        assert!(output.lines().next().unwrap().ends_with("..."));
     }
 }
