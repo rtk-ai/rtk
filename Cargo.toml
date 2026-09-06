@@ -12,6 +12,13 @@ readme = "README.md"
 keywords = ["cli", "llm", "token", "filter", "productivity"]
 categories = ["command-line-utilities", "development-tools"]
 
+[features]
+default = ["bundled-sqlite"]
+## Bundle SQLite from source (self-contained binary).
+## Disable with `--no-default-features` on musl-based systems (Alpine Linux)
+## where compiling SQLite from C source is slow — requires sqlite-dev installed.
+bundled-sqlite = ["rusqlite/bundled"]
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 anyhow = "1.0"
@@ -30,7 +37,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 colored = "3"
 dirs = "5"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31" }
 toml = "0.8"
 chrono = "0.4"
 tempfile = "3"
