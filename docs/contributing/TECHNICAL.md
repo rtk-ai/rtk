@@ -320,6 +320,7 @@ Start here, then drill down into each README for file-level details.
 | [`windsurf/`](../hooks/windsurf/README.md) | Windsurf / Cascade | Rules file (workspace-scoped) |
 | [`codex/`](../hooks/codex/README.md) | OpenAI Codex CLI | Awareness document, AGENTS.md integration |
 | [`opencode/`](../hooks/opencode/README.md) | OpenCode | TypeScript plugin, zx library, in-place mutation |
+| [`kilocode/`](../hooks/kilocode/README.md) | Kilo Code | TypeScript plugin, `tool.execute.before`, in-place mutation |
 
 ---
 
@@ -338,6 +339,7 @@ RTK supports the following LLM agents through hook integrations:
 | Windsurf | Rules file | Prompt-level guidance | N/A (prompt) |
 | Codex CLI | Awareness doc | AGENTS.md integration | N/A (prompt) |
 | OpenCode | TS plugin | `tool.execute.before` event | Yes (in-place mutation) |
+| Kilo Code | TS plugin | `tool.execute.before` event | Yes (in-place mutation) |
 
 > **Details**: [`hooks/README.md`](../hooks/README.md) has the full JSON schemas for each agent. [`src/hooks/README.md`](../src/hooks/README.md) covers installation, integrity verification, and the rewrite command.
 
