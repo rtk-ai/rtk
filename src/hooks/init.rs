@@ -146,6 +146,7 @@ schema_version = 1
 const RTK_MD: &str = "RTK.md";
 const CLAUDE_MD: &str = "CLAUDE.md";
 const AGENTS_MD: &str = "AGENTS.md";
+const CODEX_OVERRIDE_MD: &str = "AGENTS.override.md";
 const RTK_MD_REF: &str = "@RTK.md";
 const GEMINI_MD: &str = "GEMINI.md";
 
@@ -1067,6 +1068,7 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
     let InitContext { verbose, dry_run } = ctx;
     let mut removed = Vec::new();
     let absolute_rtk_md_ref = codex_rtk_md_ref(codex_dir);
+    let refs = [RTK_MD_REF, absolute_rtk_md_ref.as_str()];
 
     let rtk_md_path = codex_dir.join(RTK_MD);
     if rtk_md_path.exists() {
@@ -1082,36 +1084,45 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
         removed.push(format!("RTK.md: {}", rtk_md_path.display()));
     }
 
-    let agents_md_path = codex_dir.join(AGENTS_MD);
-    if agents_md_path.exists() {
-        let content = fs::read_to_string(&agents_md_path)
-            .with_context(|| format!("Failed to read AGENTS.md: {}", agents_md_path.display()))?;
+    // Issue #1943: RTK may have written to either AGENTS.md (legacy) or
+    // AGENTS.override.md (current). Scrub both, in that order, so users
+    // upgrading from older RTK get fully cleaned up.
+    for (label, path) in [
+        ("AGENTS.md", codex_dir.join(AGENTS_MD)),
+        ("AGENTS.override.md", codex_dir.join(CODEX_OVERRIDE_MD)),
+    ] {
+        if path.exists() {
+            let content = fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read {}: {}", label, path.display()))?;
+            let mut working_content = content.clone();
+            let mut changed = false;
 
-        let mut working_content = content.clone();
-        let mut agents_changed = false;
+            if working_content.contains(RTK_BLOCK_START) {
+                let (cleaned, did_remove) = remove_rtk_block(&working_content);
+                if did_remove {
+                    working_content = cleaned;
+                    changed = true;
+                    removed.push(format!("{}: removed rtk-instructions block", label));
+                }
+            }
 
-        if working_content.contains(RTK_BLOCK_START) {
-            let (cleaned, did_remove) = remove_rtk_block(&working_content);
-            if did_remove {
-                working_content = cleaned;
-                agents_changed = true;
-                removed.push("AGENTS.md: removed rtk-instructions block".to_string());
+            if changed {
+                if dry_run {
+                    println!(
+                        "[dry-run] would update {} after removing rtk block",
+                        path.display()
+                    );
+                } else {
+                    atomic_write(&path, &working_content).with_context(|| {
+                        format!("Failed to write {}: {}", label, path.display())
+                    })?;
+                }
+            }
+
+            if remove_rtk_reference_from_agents(&path, &refs, ctx)? {
+                removed.push(format!("{}: removed @RTK.md reference", label));
             }
         }
-
-        if agents_changed {
-            atomic_write(&agents_md_path, &working_content).with_context(|| {
-                format!("Failed to write AGENTS.md: {}", agents_md_path.display())
-            })?;
-        }
-    }
-
-    if remove_rtk_reference_from_agents(
-        &agents_md_path,
-        &[RTK_MD_REF, absolute_rtk_md_ref.as_str()],
-        ctx,
-    )? {
-        removed.push("AGENTS.md: removed @RTK.md reference".to_string());
     }
 
     Ok(removed)
@@ -2540,72 +2551,178 @@ fn normalized_yaml_scalar(value: &str) -> Option<String> {
 }
 
 fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
-    let (agents_md_path, rtk_md_path) = if global {
-        let codex_dir = resolve_codex_dir()?;
-        (codex_dir.join(AGENTS_MD), codex_dir.join(RTK_MD))
+    let codex_dir = if global {
+        resolve_codex_dir()?
     } else {
-        (PathBuf::from(AGENTS_MD), PathBuf::from(RTK_MD))
+        PathBuf::from(".")
     };
-
-    run_codex_mode_with_paths(agents_md_path, rtk_md_path, global, ctx)
+    run_codex_mode_at(&codex_dir, global, ctx)
 }
 
-fn run_codex_mode_with_paths(
-    agents_md_path: PathBuf,
-    rtk_md_path: PathBuf,
-    global: bool,
-    ctx: InitContext,
-) -> Result<()> {
+/// Install RTK into a Codex directory.
+///
+/// As of issue #1943, RTK writes its `@RTK.md` reference into
+/// `AGENTS.override.md` (Codex's local-override layer) rather than `AGENTS.md`
+/// (the base layer). This keeps the base file pristine and confines generated
+/// content to the override file. If a prior version wrote into `AGENTS.md`,
+/// the RTK reference is migrated to `AGENTS.override.md` and the base file is
+/// left otherwise unchanged.
+fn run_codex_mode_at(codex_dir: &Path, global: bool, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
     if global && !dry_run {
-        if let Some(parent) = agents_md_path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create Codex config directory: {}",
-                    parent.display()
-                )
-            })?;
-        }
+        fs::create_dir_all(codex_dir).with_context(|| {
+            format!(
+                "Failed to create Codex config directory: {}",
+                codex_dir.display()
+            )
+        })?;
     }
+
+    let agents_md_path = codex_dir.join(AGENTS_MD);
+    let override_md_path = codex_dir.join(CODEX_OVERRIDE_MD);
+    let rtk_md_path = codex_dir.join(RTK_MD);
 
     // ISSUE #892: In global mode, use absolute path so @RTK.md resolves
     // from any CWD (worktrees, nested projects). Codex resolves @ references
-    // relative to CWD, not the AGENTS.md file location.
+    // relative to CWD, not the override file's location.
     let rtk_md_ref = if global {
-        codex_rtk_md_ref(
-            rtk_md_path
-                .parent()
-                .context("RTK.md path missing parent directory")?,
-        )
+        codex_rtk_md_ref(codex_dir)
     } else {
         RTK_MD_REF.to_string()
     };
 
     write_if_changed(&rtk_md_path, RTK_SLIM_CODEX, RTK_MD, ctx)?;
-    let added_ref = patch_agents_md(&agents_md_path, &rtk_md_ref, ctx)?;
+
+    // ISSUE #1943: If a prior version put RTK content into AGENTS.md,
+    // migrate it to AGENTS.override.md before patching.
+    let migrated = migrate_agents_md_to_override(&agents_md_path, &override_md_path, ctx)?;
+
+    let added_ref = patch_agents_md(&override_md_path, &rtk_md_ref, ctx)?;
 
     if !dry_run {
         println!("\nRTK configured for Codex CLI.\n");
-        println!("  RTK.md:    {}", rtk_md_path.display());
+        println!("  RTK.md:               {}", rtk_md_path.display());
+        if migrated {
+            println!("  AGENTS.md:            RTK content migrated to AGENTS.override.md");
+        }
         if added_ref {
-            println!("  AGENTS.md: {} reference added", rtk_md_ref);
+            println!("  AGENTS.override.md:   {} reference added", rtk_md_ref);
         } else {
-            println!("  AGENTS.md: {} reference already present", rtk_md_ref);
+            println!(
+                "  AGENTS.override.md:   {} reference already present",
+                rtk_md_ref
+            );
         }
         if global {
             println!(
-                "\n  Codex global instructions path: {}",
-                agents_md_path.display()
+                "\n  Codex global override path: {}",
+                override_md_path.display()
             );
         } else {
             println!(
-                "\n  Codex project instructions path: {}",
-                agents_md_path.display()
+                "\n  Codex project override path: {}",
+                override_md_path.display()
             );
         }
     }
 
     Ok(())
+}
+
+/// Compatibility shim for tests written against the pre-#1943 path-based API.
+///
+/// Tests pass `agents_md_path` and `rtk_md_path` that live under a shared
+/// `codex_dir`; this shim derives `codex_dir` from `agents_md_path.parent()`
+/// (or the current directory for local-install paths) and forwards to
+/// [`run_codex_mode_at`]. New tests should prefer [`run_codex_mode_at`] directly.
+#[cfg(test)]
+fn run_codex_mode_with_paths(
+    agents_md_path: PathBuf,
+    _rtk_md_path: PathBuf,
+    global: bool,
+    ctx: InitContext,
+) -> Result<()> {
+    let codex_dir = agents_md_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    run_codex_mode_at(&codex_dir, global, ctx)
+}
+
+/// Strip RTK-owned content (`@RTK.md` reference and/or rtk-instructions marker
+/// block) from `AGENTS.md` so the base file is left pristine.
+///
+/// The current `RTK.md` file (written separately) is the source of truth for
+/// RTK content, and `patch_agents_md(&override_md_path, …)` will then add the
+/// `@RTK.md` reference into `AGENTS.override.md`. We intentionally do not copy
+/// the legacy inline block to the override file — it would be stale relative
+/// to the freshly written `RTK.md`, and `patch_agents_md` would treat it as a
+/// migration target and rewrite it anyway.
+///
+/// Returns `Ok(true)` if `AGENTS.md` was modified; `Ok(false)` if it had no
+/// RTK content to remove. User-authored content is preserved verbatim. Honors
+/// `ctx.dry_run`. Unused `override_md_path` parameter is kept in the signature
+/// so future migration paths (e.g. copying user-customized blocks) can opt in
+/// without callsite churn.
+fn migrate_agents_md_to_override(
+    agents_md_path: &Path,
+    _override_md_path: &Path,
+    ctx: InitContext,
+) -> Result<bool> {
+    let InitContext { verbose, dry_run } = ctx;
+
+    if !agents_md_path.exists() {
+        return Ok(false);
+    }
+
+    let agents_content = fs::read_to_string(agents_md_path)
+        .with_context(|| format!("Failed to read {}", agents_md_path.display()))?;
+
+    let has_block = agents_content.contains(RTK_BLOCK_START);
+    let has_reference = agents_content.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed == RTK_MD_REF || (trimmed.starts_with('@') && trimmed.ends_with(RTK_MD))
+    });
+
+    if !has_block && !has_reference {
+        return Ok(false);
+    }
+
+    let mut new_agents = agents_content.clone();
+    if has_block {
+        let (cleaned, _) = remove_rtk_block(&new_agents);
+        new_agents = cleaned;
+    }
+    if has_reference {
+        let kept: Vec<&str> = new_agents
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                !(trimmed == RTK_MD_REF || (trimmed.starts_with('@') && trimmed.ends_with(RTK_MD)))
+            })
+            .collect();
+        new_agents = clean_double_blanks(&kept.join("\n"));
+    }
+
+    if dry_run {
+        println!(
+            "[dry-run] would strip RTK content from {} (will be re-added under AGENTS.override.md)",
+            agents_md_path.display()
+        );
+        return Ok(true);
+    }
+
+    atomic_write(agents_md_path, &new_agents)
+        .with_context(|| format!("Failed to write {}", agents_md_path.display()))?;
+
+    if verbose > 0 {
+        eprintln!(
+            "Stripped RTK content from {} (re-added via AGENTS.override.md)",
+            agents_md_path.display()
+        );
+    }
+
+    Ok(true)
 }
 
 // --- upsert_rtk_block: idempotent RTK block management ---
@@ -6916,24 +7033,132 @@ mod tests {
     }
 
     #[test]
-    fn test_run_codex_mode_global_writes_absolute_reference_to_codex_dir() {
+    fn test_run_codex_mode_global_writes_absolute_reference_to_override_md() {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");
+        let override_md = temp.path().join("AGENTS.override.md");
         let rtk_md = temp.path().join("RTK.md");
 
-        run_codex_mode_with_paths(
-            agents_md.clone(),
-            rtk_md.clone(),
-            true,
-            InitContext::default(),
-        )
-        .unwrap();
+        run_codex_mode_at(temp.path(), true, InitContext::default()).unwrap();
 
         assert!(rtk_md.exists());
         assert_eq!(fs::read_to_string(&rtk_md).unwrap(), RTK_SLIM_CODEX);
+
+        // Issue #1943: RTK now writes into AGENTS.override.md.
+        assert!(
+            !agents_md.exists(),
+            "AGENTS.md (base) must not be touched on fresh codex install"
+        );
+        assert!(override_md.exists(), "AGENTS.override.md must be created");
         assert_eq!(
-            fs::read_to_string(&agents_md).unwrap(),
+            fs::read_to_string(&override_md).unwrap(),
             format!("{}\n", codex_rtk_md_ref(temp.path()))
+        );
+    }
+
+    #[test]
+    fn test_run_codex_mode_preserves_user_agents_md_content() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        let override_md = temp.path().join("AGENTS.override.md");
+        let user_content = "# Base instructions\n\nAnswer in Spanish.\nPrefer concise replies.\n";
+        fs::write(&agents_md, user_content).unwrap();
+
+        run_codex_mode_at(temp.path(), true, InitContext::default()).unwrap();
+
+        // Base AGENTS.md must be byte-for-byte unchanged.
+        assert_eq!(fs::read_to_string(&agents_md).unwrap(), user_content);
+        // Override file holds the RTK reference.
+        assert!(override_md.exists());
+        assert!(fs::read_to_string(&override_md).unwrap().contains(RTK_MD));
+    }
+
+    #[test]
+    fn test_run_codex_mode_migrates_legacy_agents_md_reference() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        let override_md = temp.path().join("AGENTS.override.md");
+        // Legacy state: prior RTK version wrote @<abs>/RTK.md reference into AGENTS.md.
+        let absolute_ref = codex_rtk_md_ref(temp.path());
+        fs::write(
+            &agents_md,
+            format!("# Team rules\n\nUse rg.\n\n{}\n", absolute_ref),
+        )
+        .unwrap();
+
+        run_codex_mode_at(temp.path(), true, InitContext::default()).unwrap();
+
+        // Legacy reference removed from AGENTS.md; user content preserved.
+        let agents_after = fs::read_to_string(&agents_md).unwrap();
+        assert!(!agents_after.contains(&absolute_ref));
+        assert!(agents_after.contains("Use rg."));
+        assert!(agents_after.contains("# Team rules"));
+        // Reference now lives in override.md.
+        assert!(override_md.exists());
+        assert!(fs::read_to_string(&override_md)
+            .unwrap()
+            .contains(&absolute_ref));
+    }
+
+    #[test]
+    fn test_run_codex_mode_migrates_legacy_agents_md_rtk_block() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        let override_md = temp.path().join("AGENTS.override.md");
+        // Older legacy state: inline RTK block directly inside AGENTS.md.
+        let legacy = format!(
+            "# Team rules\n\n{} v2 -->\nRTK INLINE CONTENT\n{}\n\nUse rg.\n",
+            RTK_BLOCK_START, RTK_BLOCK_END
+        );
+        fs::write(&agents_md, &legacy).unwrap();
+
+        run_codex_mode_at(temp.path(), true, InitContext::default()).unwrap();
+
+        // AGENTS.md: legacy inline block removed, user content preserved.
+        let agents_after = fs::read_to_string(&agents_md).unwrap();
+        assert!(!agents_after.contains(RTK_BLOCK_START));
+        assert!(!agents_after.contains("RTK INLINE CONTENT"));
+        assert!(agents_after.contains("# Team rules"));
+        assert!(agents_after.contains("Use rg."));
+
+        // override.md: holds the modern @RTK.md reference (not the legacy
+        // inline block; RTK.md is the canonical source of truth now).
+        let override_after = fs::read_to_string(&override_md).unwrap();
+        assert!(
+            override_after.contains(RTK_MD),
+            "override.md must contain the @RTK.md reference"
+        );
+    }
+
+    #[test]
+    fn test_uninstall_codex_at_cleans_legacy_agents_md_and_override() {
+        let temp = TempDir::new().unwrap();
+        let codex_dir = temp.path();
+        let agents_md = codex_dir.join("AGENTS.md");
+        let override_md = codex_dir.join("AGENTS.override.md");
+        let rtk_md = codex_dir.join("RTK.md");
+        let absolute_ref = codex_rtk_md_ref(codex_dir);
+
+        // Mixed state: legacy reference left in AGENTS.md AND fresh override.md.
+        fs::write(&agents_md, format!("# Team rules\n\n{}\n", absolute_ref)).unwrap();
+        fs::write(&override_md, format!("{}\n", absolute_ref)).unwrap();
+        fs::write(&rtk_md, "codex config").unwrap();
+
+        let removed = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
+
+        // RTK.md removed, both AGENTS files scrubbed of RTK reference.
+        assert!(!rtk_md.exists());
+        let agents_after = fs::read_to_string(&agents_md).unwrap();
+        let override_after = fs::read_to_string(&override_md).unwrap();
+        assert!(!agents_after.contains(&absolute_ref));
+        assert!(agents_after.contains("# Team rules"));
+        assert!(!override_after.contains(&absolute_ref));
+
+        // We expect at least 3 cleanup actions (RTK.md, AGENTS.md ref, override.md ref).
+        assert!(
+            removed.len() >= 3,
+            "Expected ≥3 cleanup actions, got {:?}",
+            removed
         );
     }
 

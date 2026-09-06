@@ -166,6 +166,7 @@ mod tests {
                 .join(HOOKS_SUBDIR)
                 .join(REWRITE_HOOK_FILE),
             home.join(CODEX_DIR).join("AGENTS.md"),
+            home.join(CODEX_DIR).join("AGENTS.override.md"),
             home.join(GEMINI_DIR)
                 .join(HOOKS_SUBDIR)
                 .join(GEMINI_HOOK_FILE),
