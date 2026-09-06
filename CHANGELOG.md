@@ -462,6 +462,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **privacy:** security hardening script for automated privacy configuration ([scripts/rtk-security-hardening.sh](scripts/rtk-security-hardening.sh))
+  - Interactive menu for telemetry/tracking/fingerprinting controls
+  - Automated hardening mode (`--auto` flag)
+  - Security audit mode (`--audit` flag)
+  - Configures command exclusions (curl, aws, kubectl, etc.)
+  - Sets up Claude Code deny rules (blocks `--token`, `--password` flags)
+  - Creates automatic backups before modifications
+  - Tested on macOS 14.6 + RTK 0.34.2
+
 ### Bug Fixes
 
 * **wc:** `wc` filter was never invoked by the hook — removed `"wc "` from `IGNORED_PREFIXES` and added registry entry so `wc` commands are rewritten to `rtk wc`
