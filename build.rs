@@ -2,15 +2,32 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-fn main() {
-    #[cfg(windows)]
-    {
-        // Clap + the full command graph can exceed the default 1 MiB Windows
-        // main-thread stack during process startup. Reserve a larger stack for
-        // the CLI binary so `rtk.exe --version`, `--help`, and hook entry
-        // points start reliably without requiring ad-hoc RUSTFLAGS.
-        println!("cargo:rustc-link-arg=/STACK:8388608");
+/// Reserve a larger main-thread stack for Windows targets.
+///
+/// Clap + the full command graph can exceed the default 1 MiB Windows stack
+/// during process startup, so `rtk.exe --version`, `--help`, and the hook entry
+/// points need the headroom to start reliably without ad-hoc RUSTFLAGS.
+///
+/// Two things here are deliberately keyed off the **target**, not the host:
+/// `CARGO_CFG_TARGET_OS` (a `#[cfg(windows)]` here would describe the machine
+/// running the build, so cross-compiling to Windows from Linux would silently
+/// skip the flag), and the flag syntax itself — `link.exe` takes `/STACK:`
+/// while the MinGW `ld` behind `x86_64-pc-windows-gnu` only understands
+/// `--stack`, and feeding it `/STACK:` makes it look for a file by that name.
+fn set_windows_stack_size() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
     }
+    const STACK_BYTES: usize = 8 * 1024 * 1024;
+    let arg = match std::env::var("CARGO_CFG_TARGET_ENV").as_deref() {
+        Ok("gnu") => format!("-Wl,--stack,{STACK_BYTES}"),
+        _ => format!("/STACK:{STACK_BYTES}"),
+    };
+    println!("cargo:rustc-link-arg={arg}");
+}
+
+fn main() {
+    set_windows_stack_size();
 
     let filters_dir = Path::new("src/filters");
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR must be set by Cargo");
