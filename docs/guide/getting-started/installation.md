@@ -40,11 +40,11 @@ brew install rtk-ai/tap/rtk
 ## Cargo
 
 :::caution[Name collision risk]
-`cargo install rtk` may install **Rust Type Kit** instead of Rust Token Killer — two unrelated projects share the same crate name. Use the explicit Git URL to guarantee the correct package:
+`cargo install rtk` may install **Rust Type Kit** instead of Rust Token Killer — two unrelated projects share the same crate name. Use the explicit Git URL to guarantee the correct package. Pin the moving `latest` tag because the repository's default `develop` branch can carry pre-release package metadata:
 :::
 
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk --branch master rtk
+cargo install --git https://github.com/rtk-ai/rtk --tag latest
 ```
 
 ## Pre-built binaries (Windows, Linux, macOS)
