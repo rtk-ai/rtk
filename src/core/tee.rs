@@ -1,6 +1,5 @@
 //! Recovery-hint dispatch — routes to the sqlite store or legacy tee per `[retriever] mode`.
 
-use crate::core::config::Config;
 pub(crate) use crate::core::retriever::MIN_FAILURE_BYTES as MIN_TEE_SIZE;
 use crate::core::retriever::{self, RecoveryMode, RetrieverConfig, Stored, MIN_FAILURE_BYTES};
 
@@ -10,9 +9,15 @@ fn active() -> Option<(RecoveryMode, RetrieverConfig)> {
     {
         return None;
     }
-    match Config::load().ok().map(|c| (c.retriever.mode, c.retriever)) {
-        Some((RecoveryMode::Disabled, _)) | None => None,
-        some => some,
+    // Cached, not a fresh load: the hint paths in search.rs call this once per
+    // file, and a disk read plus TOML parse per file is the other half of the
+    // per-file overhead that breaches the <10ms target (B11/V18). This is a
+    // read-only caller that never writes config, which is what cached_config
+    // requires.
+    let cfg = &crate::core::config::cached_config().retriever;
+    match cfg.mode {
+        RecoveryMode::Disabled => None,
+        mode => Some((mode, cfg.clone())),
     }
 }
 

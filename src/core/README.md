@@ -76,7 +76,6 @@ mode = "sqlite"             # sqlite (default) | tee (legacy files) | disabled
 max_entry_bytes = 10485760  # sqlite: 10 MiB per entry
 max_entries = 200           # sqlite: FIFO cap
 retention_days = 30         # sqlite: 0 disables age eviction
-compression = true          # sqlite: gzip blobs (lossless)
 # database_path = "/custom/recall.db"
 tee_max_files = 20          # tee mode: rotation
 tee_max_file_size = 1048576 # tee mode: per-file cap
@@ -125,7 +124,7 @@ Consumers that parse structured output (JSON, NDJSON, state machines) should cal
 
 For truncation recovery on **success** (e.g. a list capped at 20 items), use `tee::force_tee_hint()` (multi-line blocks) or `tee::force_tee_tail_hint(content, slug, offset)` (flat lists). All three persist the full output to the content-addressed recall store ([`retriever.rs`](retriever.rs)) and emit a runnable hint — `[full output: rtk recall <hash>]` or `[+N hidden: rtk recall <hash>]` — instead of burning tokens working around missing data.
 
-The agent runs `rtk recall <hash>` to get back exactly what was elided. For `force_tee_tail_hint`, `offset` is the 1-based first hidden line (`header_lines + MAX_CAP + 1`); it is stored so the default recall returns only the hidden tail. Storage is byte-faithful (`BLOB` + lossless gzip); tune limits via the `[retriever]` config section.
+The agent runs `rtk recall <hash>` to get back exactly what was elided. For `force_tee_tail_hint`, `offset` is the 1-based first hidden line (`header_lines + MAX_CAP + 1`); it is stored so the default recall returns only the hidden tail. Storage is byte-faithful (`BLOB` + lossless lz4); tune limits via the `[retriever]` config section.
 
 ### Truncation Caps (`truncate`)
 

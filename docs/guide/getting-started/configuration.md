@@ -43,7 +43,6 @@ mode = "sqlite"             # sqlite (default) | tee (legacy files) | disabled
 max_entry_bytes = 10485760  # sqlite: 10 MiB per entry
 max_entries = 200           # sqlite: FIFO cap
 retention_days = 30         # sqlite: 0 disables age eviction
-compression = true          # sqlite: gzip blobs (lossless)
 # database_path = "/custom/recall.db"
 tee_max_files = 20          # tee mode: rotation
 tee_max_file_size = 1048576 # tee mode: per-file cap
@@ -80,7 +79,7 @@ FAILED: 2/15 tests
 [full output: rtk recall 36365b69eda6]
 ```
 
-Your AI assistant runs `rtk recall <hash>` exactly as printed in the hint — that is the whole agent interface. For humans inspecting the store: `rtk recall <hash> --full | --from N | --lines N | --grep PAT` and `rtk recall --list`. Storage is byte-faithful (`BLOB` + lossless gzip); the stored input is the captured command text, as with the previous tee files.
+Your AI assistant runs `rtk recall <hash>` exactly as printed in the hint — that is the whole agent interface. For humans inspecting the store: `rtk recall <hash> --full | --from N | --lines N | --grep PAT` and `rtk recall --list`. Storage is byte-faithful (`BLOB` + lossless lz4); the stored input is the captured command text, as with the previous tee files.
 
 ### Choosing the recovery mode
 
@@ -103,7 +102,6 @@ To see how often your assistant actually goes back for elided output — and whi
 | `retriever.max_entry_bytes` | `10485760` | Per-entry storage cap (10 MiB) |
 | `retriever.max_entries` | `200` | FIFO cap on retained entries |
 | `retriever.retention_days` | `30` | Age eviction in days (0 = off) |
-| `retriever.compression` | `true` | gzip stored blobs (lossless) |
 | Max file size | 1 MB | Truncated above this |
 
 ## Excluding commands from auto-rewrite

@@ -1372,7 +1372,7 @@ Quand une commande echoue (ou qu'un filtre tronque une liste), RTK sauvegarde la
 
 **Fonctionnement :**
 1. La commande echoue (exit code != 0) ou la sortie est tronquee
-2. RTK stocke la sortie brute (gzip) dans `~/.local/share/rtk/recall.db`
+2. RTK stocke la sortie brute (lz4) dans `~/.local/share/rtk/recall.db`
 3. Un hint avec le hash est affiche : `[full output: rtk recall <hash>]` ou `[+N hidden: rtk recall <hash>]`
 4. `rtk recall <hash>` restitue la partie manquante (delta), `--full` la sortie complete
 
