@@ -9,25 +9,27 @@ use crate::core::runner;
 use crate::core::truncate::{reduced, CAP_WARNINGS};
 use crate::core::utils::{fallback_tail, ruby_exec, truncate};
 use anyhow::Result;
-use lazy_static::lazy_static;
 use regex::Regex;
 use serde::Deserialize;
+use std::sync::LazyLock;
 
 // rspec failures carry full backtraces — show fewer than a generic warning list.
 const MAX_RSPEC_FAILURES: usize = reduced(CAP_WARNINGS, 5);
 
 // ── Noise-stripping regex patterns ──────────────────────────────────────────
 
-lazy_static! {
-    static ref RE_SPRING: Regex = Regex::new(r"(?i)running via spring preloader").unwrap();
-    static ref RE_SIMPLECOV: Regex =
-        Regex::new(r"(?i)(coverage report|simplecov|coverage/|\.simplecov|All Files.*Lines)")
-            .unwrap();
-    static ref RE_DEPRECATION: Regex = Regex::new(r"^DEPRECATION WARNING:").unwrap();
-    static ref RE_FINISHED_IN: Regex = Regex::new(r"^Finished in \d").unwrap();
-    static ref RE_SCREENSHOT: Regex = Regex::new(r"saved screenshot to (.+)").unwrap();
-    static ref RE_RSPEC_SUMMARY: Regex = Regex::new(r"(\d+) examples?, (\d+) failures?").unwrap();
-}
+static RE_SPRING: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)running via spring preloader").unwrap());
+static RE_SIMPLECOV: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(coverage report|simplecov|coverage/|\.simplecov|All Files.*Lines)").unwrap()
+});
+static RE_DEPRECATION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^DEPRECATION WARNING:").unwrap());
+static RE_FINISHED_IN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Finished in \d").unwrap());
+static RE_SCREENSHOT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"saved screenshot to (.+)").unwrap());
+static RE_RSPEC_SUMMARY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(\d+) examples?, (\d+) failures?").unwrap());
 
 // ── JSON structures matching RSpec's --format json output ───────────────────
 
@@ -214,7 +216,6 @@ fn build_rspec_summary(rspec: &RspecOutput) -> String {
         result.push_str(&format!(", {} pending", s.pending_count));
     }
     result.push_str(&format!(" ({:.2}s)\n", s.duration));
-    result.push_str("═══════════════════════════════════════\n");
 
     let failures: Vec<&RspecExample> = rspec
         .examples
@@ -230,7 +231,7 @@ fn build_rspec_summary(rspec: &RspecOutput) -> String {
 
     for (i, example) in failures.iter().take(MAX_RSPEC_FAILURES).enumerate() {
         result.push_str(&format!(
-            "{}. ❌ {}\n   {}:{}\n",
+            "{}. ✗ {}\n   {}:{}\n",
             i + 1,
             example.full_description,
             example.file_path,
@@ -353,9 +354,8 @@ fn filter_rspec_text(output: &str) -> String {
             return format!("RSpec: {}", summary_line);
         }
         let mut result = format!("RSpec: {}\n", summary_line);
-        result.push_str("═══════════════════════════════════════\n\n");
         for (i, failure) in failures.iter().take(MAX_RSPEC_FAILURES).enumerate() {
-            result.push_str(&format!("{}. ❌ {}\n", i + 1, failure));
+            result.push_str(&format!("{}. ✗ {}\n", i + 1, failure));
             if i < failures.len().min(MAX_RSPEC_FAILURES) - 1 {
                 result.push('\n');
             }
@@ -596,7 +596,7 @@ mod tests {
     fn test_filter_rspec_with_failures() {
         let result = filter_rspec_output(with_failures_json());
         assert!(result.contains("1 passed, 1 failed"));
-        assert!(result.contains("❌ User saves to database"));
+        assert!(result.contains("✗ User saves to database"));
         assert!(result.contains("user_spec.rb:10"));
         assert!(result.contains("ExpectationNotMetError"));
         assert!(result.contains("expected true but got false"));
@@ -672,7 +672,7 @@ Failures:
         let result = filter_rspec_output(text);
         assert!(result.contains("RSpec:"));
         assert!(result.contains("4 examples, 1 failure"));
-        assert!(result.contains("❌"), "should show failure marker");
+        assert!(result.contains("✗"), "should show failure marker");
     }
 
     #[test]
@@ -698,7 +698,7 @@ Failures:
 "#;
         let result = filter_rspec_text(text);
         assert!(result.contains("2 failures"));
-        assert!(result.contains("❌"));
+        assert!(result.contains("✗"));
         // Should show spec file path, not gem backtrace
         assert!(result.contains("spec/models/user_spec.rb:15"));
     }
@@ -741,9 +741,9 @@ Failures:
           "summary_line": "6 examples, 6 failures"
         }"#;
         let result = filter_rspec_output(json);
-        assert!(result.contains("1. ❌"), "should show first failure");
-        assert!(result.contains("5. ❌"), "should show fifth failure");
-        assert!(!result.contains("6. ❌"), "should not show sixth inline");
+        assert!(result.contains("1. ✗"), "should show first failure");
+        assert!(result.contains("5. ✗"), "should show fifth failure");
+        assert!(!result.contains("6. ✗"), "should not show sixth inline");
         assert!(
             result.contains("+1 more"),
             "should show overflow count: {}",
@@ -946,9 +946,9 @@ Failures:
 14 examples, 7 failures
 "#;
         let result = filter_rspec_text(text);
-        assert!(result.contains("1. ❌"), "should show first failure");
-        assert!(result.contains("5. ❌"), "should show fifth failure");
-        assert!(!result.contains("6. ❌"), "should not show sixth inline");
+        assert!(result.contains("1. ✗"), "should show first failure");
+        assert!(result.contains("5. ✗"), "should show fifth failure");
+        assert!(!result.contains("6. ✗"), "should not show sixth inline");
         assert!(
             result.contains("+2 more"),
             "should show overflow count: {}",

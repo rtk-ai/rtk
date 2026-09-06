@@ -22,11 +22,11 @@
 ///   6. head/tail_lines      — keep first/last N lines
 ///   7. max_lines            — absolute line cap
 ///   8. on_empty             — message if result is empty
-use super::constants::{FILTERS_TOML, RTK_DATA_DIR};
-use lazy_static::lazy_static;
+use super::constants::RTK_META_COMMANDS;
 use regex::{Regex, RegexSet};
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::sync::LazyLock;
 
 // Built-in filters: concatenated from src/filters/*.toml by build.rs at compile time.
 const BUILTIN_TOML: &str = include_str!(concat!(env!("OUT_DIR"), "/builtin_filters.toml"));
@@ -188,52 +188,38 @@ impl TomlFilterRegistry {
     fn load() -> Self {
         let mut filters = Vec::new();
 
-        // Priority 1: project-local .rtk/filters.toml (trust-gated)
-        let project_filter_path = std::path::Path::new(".rtk/filters.toml");
-        if project_filter_path.exists() {
-            let trust_status = crate::hooks::trust::check_trust(project_filter_path)
-                .unwrap_or(crate::hooks::trust::TrustStatus::Untrusted);
-
-            match trust_status {
-                crate::hooks::trust::TrustStatus::Trusted
-                | crate::hooks::trust::TrustStatus::EnvOverride => {
-                    if let Ok(content) = std::fs::read_to_string(project_filter_path) {
-                        match Self::parse_and_compile(&content, "project") {
-                            Ok(f) => filters.extend(f),
-                            Err(e) => eprintln!("[rtk] warning: .rtk/filters.toml: {}", e),
-                        }
-                    }
-                }
-                crate::hooks::trust::TrustStatus::Untrusted => {
-                    eprintln!("[rtk] WARNING: untrusted project filters (.rtk/filters.toml)");
-                    eprintln!("[rtk] Filters NOT applied. Run `rtk trust` to review and enable.");
-                }
-                crate::hooks::trust::TrustStatus::ContentChanged { .. } => {
-                    eprintln!("[rtk] WARNING: .rtk/filters.toml changed since trusted.");
-                    eprintln!("[rtk] Filters NOT applied. Run `rtk trust` to re-review.");
-                }
-            }
+        for path in crate::hooks::trust::gated_filter_paths() {
+            Self::extend_with_trusted(&mut filters, &path);
         }
 
-        // Priority 2: user-global ~/.config/rtk/filters.toml
-        if let Some(config_dir) = dirs::config_dir() {
-            let global_path = config_dir.join(RTK_DATA_DIR).join(FILTERS_TOML);
-            if let Ok(content) = std::fs::read_to_string(&global_path) {
-                match Self::parse_and_compile(&content, "user-global") {
-                    Ok(f) => filters.extend(f),
-                    Err(e) => eprintln!("[rtk] warning: {}: {}", global_path.display(), e),
-                }
-            }
-        }
-
-        // Priority 3: built-in (embedded at compile time)
-        let builtin = BUILTIN_TOML;
-        match Self::parse_and_compile(builtin, "builtin") {
+        match Self::parse_and_compile(BUILTIN_TOML, "builtin") {
             Ok(f) => filters.extend(f),
             Err(e) => eprintln!("[rtk] warning: builtin filters: {}", e),
         }
 
         TomlFilterRegistry { filters }
+    }
+
+    fn extend_with_trusted(filters: &mut Vec<CompiledFilter>, path: &std::path::Path) {
+        if !path.exists() {
+            return;
+        }
+        let label = path.display().to_string();
+        let (status, content) = crate::hooks::trust::check_trust_with_content(path)
+            .unwrap_or((crate::hooks::trust::TrustStatus::Untrusted, None));
+        match status {
+            crate::hooks::trust::TrustStatus::Trusted
+            | crate::hooks::trust::TrustStatus::EnvOverride => {
+                if let Some(content) = content {
+                    match Self::parse_and_compile(&content, &label) {
+                        Ok(f) => filters.extend(f),
+                        Err(e) => eprintln!("[rtk] warning: {}: {}", label, e),
+                    }
+                }
+            }
+            crate::hooks::trust::TrustStatus::Untrusted
+            | crate::hooks::trust::TrustStatus::ContentChanged { .. } => {}
+        }
     }
 
     fn parse_and_compile(content: &str, source: &str) -> Result<Vec<CompiledFilter>, String> {
@@ -249,6 +235,15 @@ impl TomlFilterRegistry {
 
         let mut compiled = Vec::new();
         for (name, def) in file.filters {
+            if !is_fully_anchored(&def.match_command) {
+                eprintln!(
+                    "[rtk] warning: filter '{}' in {}: match_command '{}' has a top-level branch \
+                     that does not start with '^'; it would match a path component mid-command. \
+                     Filter ignored.",
+                    name, source, def.match_command
+                );
+                continue;
+            }
             match compile_filter(name.clone(), def) {
                 Ok(f) => compiled.push(f),
                 Err(e) => eprintln!("[rtk] warning: filter '{}' in {}: {}", name, source, e),
@@ -288,6 +283,7 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "wc",
     "gain",
     "config",
+    "ctest",
     "vitest",
     "prisma",
     "tsc",
@@ -312,6 +308,10 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "verify",
     "learn",
 ];
+
+pub fn is_rtk_reserved_command(name: &str) -> bool {
+    RUST_HANDLED_COMMANDS.contains(&name) || RTK_META_COMMANDS.contains(&name)
+}
 
 fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, String> {
     // Mutual exclusion: strip and keep cannot both be set
@@ -405,8 +405,135 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
 // Singleton (lazy-loaded, one-time cost)
 // ---------------------------------------------------------------------------
 
-lazy_static! {
-    static ref REGISTRY: TomlFilterRegistry = TomlFilterRegistry::load();
+static REGISTRY: LazyLock<TomlFilterRegistry> = LazyLock::new(TomlFilterRegistry::load);
+
+pub fn toml_disabled() -> bool {
+    std::env::var("RTK_NO_TOML").ok().as_deref() == Some("1")
+}
+
+pub fn active_filter_summaries(content: &str) -> Vec<(String, String)> {
+    toml::from_str::<TomlFilterFile>(content)
+        .map(|f| {
+            f.filters
+                .into_iter()
+                .map(|(name, def)| (name, def.match_command))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn filter_parse_error(content: &str) -> Option<String> {
+    toml::from_str::<TomlFilterFile>(content)
+        .err()
+        .map(|e| e.to_string())
+}
+
+static MATCH_SET: LazyLock<RegexSet> = LazyLock::new(build_match_set);
+
+pub fn command_matches_filter(command: &str) -> bool {
+    MATCH_SET.is_match(command)
+}
+
+fn build_match_set() -> RegexSet {
+    let patterns = collect_match_patterns();
+    RegexSet::new(&patterns).unwrap_or_else(|_| {
+        let valid: Vec<String> = patterns
+            .into_iter()
+            .filter(|p| Regex::new(p).is_ok())
+            .collect();
+        RegexSet::new(&valid).unwrap_or_else(|_| RegexSet::empty())
+    })
+}
+
+fn collect_match_patterns() -> Vec<String> {
+    let mut patterns: Vec<String> = Vec::new();
+    for path in crate::hooks::trust::gated_filter_paths() {
+        if !path.exists() {
+            continue;
+        }
+        let (status, content) = crate::hooks::trust::check_trust_with_content(&path)
+            .unwrap_or((crate::hooks::trust::TrustStatus::Untrusted, None));
+        if matches!(
+            status,
+            crate::hooks::trust::TrustStatus::Trusted
+                | crate::hooks::trust::TrustStatus::EnvOverride
+        ) {
+            if let Some(content) = content {
+                patterns.extend(match_patterns_in(&content));
+            }
+        }
+    }
+    patterns.extend(match_patterns_in(BUILTIN_TOML));
+    patterns
+}
+
+/// Strip a leading inline-flag group such as `(?i)` so the anchor check sees the
+/// pattern body. `(?:` opens a non-capturing group and is left alone.
+fn strip_inline_flags(branch: &str) -> &str {
+    let Some(rest) = branch.strip_prefix("(?") else {
+        return branch;
+    };
+    let Some(end) = rest.find(')') else {
+        return branch;
+    };
+    if rest[..end].chars().all(|c| "imsuxU-".contains(c)) {
+        &rest[end + 1..]
+    } else {
+        branch
+    }
+}
+
+/// Split `pattern` on top-level `|`, ignoring alternations nested inside groups
+/// or character classes.
+fn top_level_branches(pattern: &str) -> Vec<&str> {
+    let mut branches = Vec::new();
+    let mut depth = 0usize;
+    let mut escaped = false;
+    let mut in_class = false;
+    let mut start = 0usize;
+
+    for (idx, character) in pattern.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' => escaped = true,
+            '[' if !in_class => in_class = true,
+            ']' if in_class => in_class = false,
+            '(' if !in_class => depth += 1,
+            ')' if !in_class => depth = depth.saturating_sub(1),
+            '|' if !in_class && depth == 0 => {
+                branches.push(&pattern[start..idx]);
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    branches.push(&pattern[start..]);
+    branches
+}
+
+/// A filter selects on argv[0], but its regex runs against the whole command
+/// line. A top-level branch that does not start with `^` therefore matches a
+/// path component or wrapper argument mid-line, so `timeout 5 /usr/bin/liquibase
+/// update` activates the liquibase filter and rewrites the wrapper instead.
+fn is_fully_anchored(pattern: &str) -> bool {
+    top_level_branches(pattern)
+        .iter()
+        .all(|branch| strip_inline_flags(branch).starts_with('^'))
+}
+
+fn match_patterns_in(content: &str) -> Vec<String> {
+    match toml::from_str::<TomlFilterFile>(content) {
+        Ok(file) if file.schema_version == 1 => file
+            .filters
+            .into_values()
+            .map(|def| def.match_command)
+            .filter(|pattern| is_fully_anchored(pattern))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -434,6 +561,22 @@ pub fn find_filter_in<'a>(
 ///   7. max_lines            — absolute line cap
 ///   8. on_empty             — message if result is empty
 pub fn apply_filter(filter: &CompiledFilter, stdout: &str) -> String {
+    apply_filter_with_info(filter, stdout).0
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Lossiness {
+    None,
+    /// `tail -n +{tail_offset}` over `tee_payload` reproduces the dropped lines,
+    /// up to the tee `max_file_size` cap (larger payloads are truncated in the tee file).
+    Tail {
+        tee_payload: String,
+        tail_offset: usize,
+    },
+    Whole,
+}
+
+pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String, Lossiness) {
     let mut lines: Vec<String> = stdout.lines().map(String::from).collect();
 
     // 1. strip_ansi
@@ -471,7 +614,7 @@ pub fn apply_filter(filter: &CompiledFilter, stdout: &str) -> String {
                         continue; // errors/warnings present — skip this rule
                     }
                 }
-                return rule.message.clone();
+                return (rule.message.clone(), Lossiness::Whole);
             }
         }
     }
@@ -484,41 +627,60 @@ pub fn apply_filter(filter: &CompiledFilter, stdout: &str) -> String {
     }
 
     // 5. truncate_lines_at — uses utils::truncate (unicode-safe)
+    let mut intra_line_loss = false;
     if let Some(max_chars) = filter.truncate_lines_at {
         lines = lines
             .into_iter()
-            .map(|l| crate::core::utils::truncate(&l, max_chars))
+            .map(|line| {
+                let truncated = crate::core::utils::truncate(&line, max_chars);
+                if truncated != line {
+                    intra_line_loss = true;
+                }
+                truncated
+            })
             .collect();
     }
 
+    let snapshot_for_tail = !intra_line_loss
+        && filter.tail_lines.is_none()
+        && (filter.head_lines.is_some() || filter.max_lines.is_some());
+    let pre_cut = snapshot_for_tail.then(|| lines.clone());
+
     // 6. head + tail
     let total = lines.len();
+    let mut noncontiguous_drop = false;
+    let mut head_cut: Option<usize> = None;
     if let (Some(head), Some(tail)) = (filter.head_lines, filter.tail_lines) {
         if total > head + tail {
             let mut result = lines[..head].to_vec();
             result.push(format!("... ({} lines omitted)", total - head - tail));
             result.extend_from_slice(&lines[total - tail..]);
             lines = result;
+            noncontiguous_drop = true;
         }
     } else if let Some(head) = filter.head_lines {
         if total > head {
             lines.truncate(head);
             lines.push(format!("... ({} lines omitted)", total - head));
+            head_cut = Some(head);
         }
     } else if let Some(tail) = filter.tail_lines {
         if total > tail {
             let omitted = total - tail;
             lines = lines[omitted..].to_vec();
             lines.insert(0, format!("... ({} lines omitted)", omitted));
+            noncontiguous_drop = true;
         }
     }
 
     // 7. max_lines — absolute cap applied after head/tail (includes omit messages)
+    let mut max_cut: Option<usize> = None;
     if let Some(max) = filter.max_lines {
         if lines.len() > max {
-            let truncated = lines.len() - max;
+            let dropped = lines.len() - max;
             lines.truncate(max);
-            lines.push(format!("... ({} lines truncated)", truncated));
+            lines.push(format!("... ({} lines truncated)", dropped));
+            max_cut = Some(max);
         }
     }
 
@@ -526,11 +688,30 @@ pub fn apply_filter(filter: &CompiledFilter, stdout: &str) -> String {
     let result = lines.join("\n");
     if result.trim().is_empty() {
         if let Some(ref msg) = filter.on_empty {
-            return msg.clone();
+            return (msg.clone(), Lossiness::None);
         }
     }
 
-    result
+    let loss = if let Some(snapshot) = pre_cut {
+        match (head_cut, max_cut) {
+            (Some(_), Some(_)) => Lossiness::Whole,
+            (Some(head), None) => Lossiness::Tail {
+                tee_payload: snapshot.join("\n"),
+                tail_offset: head + 1,
+            },
+            (None, Some(max)) => Lossiness::Tail {
+                tee_payload: snapshot.join("\n"),
+                tail_offset: max + 1,
+            },
+            (None, None) => Lossiness::None,
+        }
+    } else if noncontiguous_drop || intra_line_loss || head_cut.is_some() || max_cut.is_some() {
+        Lossiness::Whole
+    } else {
+        Lossiness::None
+    };
+
+    (result, loss)
 }
 
 // ---------------------------------------------------------------------------
@@ -559,12 +740,13 @@ pub fn run_filter_tests(filter_name_opt: Option<&str>) -> VerifyResults {
     // Trust-gated: only verify project-local filters if trusted (SA-2025-RTK-002)
     let project_path = std::path::Path::new(".rtk/filters.toml");
     if project_path.exists() {
-        let trust_status = crate::hooks::trust::check_trust(project_path)
-            .unwrap_or(crate::hooks::trust::TrustStatus::Untrusted);
+        let (trust_status, verified_content) =
+            crate::hooks::trust::check_trust_with_content(project_path)
+                .unwrap_or((crate::hooks::trust::TrustStatus::Untrusted, None));
         match trust_status {
             crate::hooks::trust::TrustStatus::Trusted
             | crate::hooks::trust::TrustStatus::EnvOverride => {
-                if let Ok(content) = std::fs::read_to_string(project_path) {
+                if let Some(content) = verified_content {
                     collect_test_outcomes(
                         &content,
                         filter_name_opt,
@@ -692,7 +874,7 @@ mod tests {
     use super::*;
 
     // Helper: build a CompiledFilter from inline TOML for tests.
-    // Never touches the lazy_static registry.
+    // Never touches the lazy registry.
     fn make_filters(toml: &str) -> Vec<CompiledFilter> {
         TomlFilterRegistry::parse_and_compile(toml, "test").expect("test TOML should be valid")
     }
@@ -702,6 +884,170 @@ mod tests {
             .into_iter()
             .next()
             .expect("expected at least one filter")
+    }
+
+    #[test]
+    fn command_matches_filter_agrees_with_find_matching_filter() {
+        for cmd in ["jj log", "jq .", "frobnicate xyz", "cd /tmp"] {
+            assert_eq!(
+                command_matches_filter(cmd),
+                find_matching_filter(cmd).is_some(),
+                "match-set disagreed with registry for {cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_loss_tail_configured_unfired_max_fires_is_whole() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\ntail_lines = 100\nmax_lines = 2\n";
+        let (out, loss) = apply_filter_with_info(&first_filter(toml), "a\nb\nc\nd\ne");
+        assert!(out.contains("lines truncated"));
+        assert_ne!(loss, Lossiness::None);
+    }
+
+    #[test]
+    fn test_match_patterns_in_honors_schema_version() {
+        let v1 = "schema_version = 1\n[filters.a]\nmatch_command = \"^aaa\"\n";
+        assert_eq!(match_patterns_in(v1), vec!["^aaa".to_string()]);
+
+        let v2 = "schema_version = 2\n[filters.a]\nmatch_command = \"^aaa\"\n";
+        assert!(match_patterns_in(v2).is_empty());
+
+        assert!(match_patterns_in("not valid toml {{{").is_empty());
+    }
+
+    #[test]
+    fn test_filter_parse_error() {
+        assert!(
+            filter_parse_error("schema_version = 1\n[filters.a]\nmatch_command = \"^a\"\n")
+                .is_none()
+        );
+        assert!(filter_parse_error("[filters.a]\nmatch_command = \"^a\"\n").is_some());
+        assert!(filter_parse_error("this is { not toml").is_some());
+    }
+
+    #[test]
+    fn test_toml_parse_tolerates_utf8_bom() {
+        // Hand-edited filter files on Windows often carry a BOM. The toml
+        // crate tolerates it natively — this pin is why the TOML file-read
+        // sites (config.rs, toml_filter.rs) deliberately skip
+        // strip_leading_bom; if a crate upgrade regresses this, add it there.
+        let bom = "\u{feff}schema_version = 1\n[filters.a]\nmatch_command = \"^a\"\n";
+        assert!(filter_parse_error(bom).is_none());
+        assert_eq!(match_patterns_in(bom), vec!["^a".to_string()]);
+    }
+
+    #[test]
+    fn test_is_rtk_reserved_command() {
+        assert!(is_rtk_reserved_command("git"));
+        assert!(is_rtk_reserved_command("cargo"));
+        assert!(is_rtk_reserved_command("json"));
+        assert!(is_rtk_reserved_command("rewrite"));
+        assert!(!is_rtk_reserved_command("jj"));
+        assert!(!is_rtk_reserved_command("jq"));
+        assert!(!is_rtk_reserved_command("just"));
+        assert!(!is_rtk_reserved_command("frobnicate"));
+    }
+
+    fn loss_of(toml: &str, input: &str) -> Lossiness {
+        apply_filter_with_info(&first_filter(toml), input).1
+    }
+
+    #[test]
+    fn test_loss_head_lines_is_tail() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nhead_lines = 2\n";
+        let (out, loss) = apply_filter_with_info(&first_filter(toml), "a\nb\nc\nd\ne");
+        assert!(out.starts_with("a\nb\n"));
+        match loss {
+            Lossiness::Tail {
+                tee_payload,
+                tail_offset,
+            } => {
+                assert_eq!(tail_offset, 3);
+                let recovered: Vec<&str> = tee_payload.lines().skip(tail_offset - 1).collect();
+                assert_eq!(recovered, vec!["c", "d", "e"]);
+            }
+            other => panic!("expected Tail, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_loss_max_lines_is_tail() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nmax_lines = 2\n";
+        match loss_of(toml, "a\nb\nc\nd\ne") {
+            Lossiness::Tail {
+                tee_payload,
+                tail_offset,
+            } => {
+                assert_eq!(tail_offset, 3);
+                let recovered: Vec<&str> = tee_payload.lines().skip(tail_offset - 1).collect();
+                assert_eq!(recovered, vec!["c", "d", "e"]);
+            }
+            other => panic!("expected Tail, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_loss_tail_lines_is_whole() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\ntail_lines = 2\n";
+        assert_eq!(loss_of(toml, "a\nb\nc\nd\ne"), Lossiness::Whole);
+    }
+
+    #[test]
+    fn test_loss_head_then_max_is_whole() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nhead_lines = 2\nmax_lines = 2\n";
+        assert_eq!(loss_of(toml, "a\nb\nc\nd\ne"), Lossiness::Whole);
+    }
+
+    #[test]
+    fn test_loss_head_plus_tail_is_whole() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nhead_lines = 1\ntail_lines = 1\n";
+        assert_eq!(loss_of(toml, "a\nb\nc\nd\ne"), Lossiness::Whole);
+    }
+
+    #[test]
+    fn test_loss_truncate_lines_at_is_whole() {
+        let toml =
+            "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\ntruncate_lines_at = 3\n";
+        assert_eq!(loss_of(toml, "abcdefgh\nshort"), Lossiness::Whole);
+    }
+
+    #[test]
+    fn test_loss_match_output_is_whole() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\n[[filters.f.match_output]]\npattern = \"ok\"\nmessage = \"all good\"\n";
+        let (out, loss) = apply_filter_with_info(&first_filter(toml), "everything ok here\nmore");
+        assert_eq!(out, "all good");
+        assert_eq!(loss, Lossiness::Whole);
+    }
+
+    #[test]
+    fn test_loss_strip_only_is_none() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nstrip_lines_matching = [\"^noise\"]\n";
+        let (out, loss) = apply_filter_with_info(&first_filter(toml), "keep\nnoise line\nkeep2");
+        assert_eq!(out, "keep\nkeep2");
+        assert_eq!(loss, Lossiness::None);
+    }
+
+    #[test]
+    fn test_loss_on_empty_is_none() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nstrip_lines_matching = [\".\"]\non_empty = \"nothing\"\n";
+        let (out, loss) = apply_filter_with_info(&first_filter(toml), "a\nb\nc");
+        assert_eq!(out, "nothing");
+        assert_eq!(loss, Lossiness::None);
+    }
+
+    #[test]
+    fn test_loss_no_truncation_is_none() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nhead_lines = 10\n";
+        assert_eq!(loss_of(toml, "a\nb\nc"), Lossiness::None);
+    }
+
+    #[test]
+    fn test_apply_filter_wrapper_matches_with_info() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\nhead_lines = 2\n";
+        let f = first_filter(toml);
+        let input = "a\nb\nc\nd";
+        assert_eq!(apply_filter(&f, input), apply_filter_with_info(&f, input).0);
     }
 
     // --- Pipeline primitives (existing) ---
@@ -1136,6 +1482,137 @@ make[1]: Leaving directory '/home/user/project/docs'
             input_words,
             out_words
         );
+    }
+
+    #[test]
+    fn test_spring_boot_match_command_requires_spring_named_jar() {
+        let filters = make_filters(BUILTIN_TOML);
+        let spring_boot = filters
+            .iter()
+            .find(|f| f.name == "spring-boot")
+            .expect("spring-boot filter must exist");
+
+        assert!(
+            !spring_boot
+                .match_regex
+                .is_match("java -jar build/libs/my-other-tool.jar"),
+            "a non-Spring jar must not activate the spring-boot filter"
+        );
+
+        let spring_jar = find_filter_in("java -jar build/libs/my-spring-app.jar", &filters)
+            .expect("a jar with 'spring' in its filename must still match");
+        assert_eq!(spring_jar.name, "spring-boot");
+
+        let mvn_run = find_filter_in("mvn spring-boot:run", &filters)
+            .expect("mvn spring-boot:run must still match");
+        assert_eq!(mvn_run.name, "spring-boot");
+
+        let capitalized = find_filter_in("java -jar build/libs/MySpringApp.jar", &filters)
+            .expect("a jar with 'Spring' capitalized in its filename must still match");
+        assert_eq!(capitalized.name, "spring-boot");
+
+        assert!(
+            !spring_boot
+                .match_regex
+                .is_match("java -jar /opt/spring-cache/other-tool.jar"),
+            "'spring' appearing only in a directory segment (not the jar filename itself) must not activate the spring-boot filter"
+        );
+
+        // Windows paths: '\' must be treated as a path separator too, not swallowed
+        // into the filename-only match (the exact bug this guard exists to catch).
+        assert!(
+            !spring_boot
+                .match_regex
+                .is_match(r"java -jar C:\spring-cache\other.jar"),
+            "'spring' appearing only in a Windows directory segment must not activate the spring-boot filter"
+        );
+        assert!(
+            !spring_boot
+                .match_regex
+                .is_match(r"java -jar C:\dev\spring-workspace\build\other-tool.jar"),
+            "'spring' appearing only in a nested Windows directory segment must not activate the spring-boot filter"
+        );
+        assert!(
+            spring_boot
+                .match_regex
+                .is_match(r"java -jar C:\dev\my-spring-app.jar"),
+            "a Windows-path jar with 'spring' in its own filename must still match"
+        );
+
+        // argv reaches this regex as one space-joined string, so a path containing spaces
+        // is indistinguishable from a following argument. Widening the prefix across
+        // whitespace would let a later 'spring'-named jar argument re-trigger the filter,
+        // so jars under such a path stay on full passthrough instead.
+        assert!(
+            !spring_boot
+                .match_regex
+                .is_match(r"java -jar C:\Program Files\app\my-spring-app.jar"),
+            "a jar under a path containing spaces is deliberately left to full passthrough"
+        );
+    }
+
+    #[test]
+    fn test_liquibase_match_command_ignores_path_substring() {
+        let filters = make_filters(BUILTIN_TOML);
+        let liquibase = filters
+            .iter()
+            .find(|f| f.name == "liquibase")
+            .expect("liquibase filter must exist");
+
+        assert!(
+            !liquibase.match_regex.is_match("rm -rf /opt/liquibase"),
+            "'liquibase' appearing only as a path argument must not activate the liquibase filter"
+        );
+
+        let bare = find_filter_in("liquibase status", &filters)
+            .expect("bare liquibase invocation must still match");
+        assert_eq!(bare.name, "liquibase");
+
+        // Production callers (run_fallback in src/main.rs, strip_absolute_path in
+        // src/discover/registry.rs) always basename argv[0] before this regex runs,
+        // so a raw path-qualified string must NOT match on its own — the regex has
+        // no path-prefix branch to fall back on.
+        assert!(
+            !liquibase
+                .match_regex
+                .is_match("/usr/local/bin/liquibase update"),
+            "a raw path-qualified invocation must not match — callers basename argv[0] before matching"
+        );
+
+        for wrapped in [
+            "timeout 5 /usr/bin/liquibase update",
+            "nohup /opt/tools/liquibase update",
+        ] {
+            assert!(
+                !liquibase.match_regex.is_match(wrapped),
+                "a wrapper command must not activate the liquibase filter: {wrapped}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ssh_match_command_excludes_ssh_dash_utilities() {
+        let filters = make_filters(BUILTIN_TOML);
+        let ssh = filters
+            .iter()
+            .find(|f| f.name == "ssh")
+            .expect("ssh filter must exist");
+
+        assert!(
+            !ssh.match_regex.is_match("ssh-keygen -t ed25519"),
+            "ssh-keygen must not activate the plain ssh connection filter"
+        );
+        assert!(
+            !ssh.match_regex.is_match("ssh-add id_ed25519"),
+            "ssh-add must not activate the plain ssh connection filter"
+        );
+
+        let plain = find_filter_in("ssh user@host", &filters)
+            .expect("plain ssh invocation must still match");
+        assert_eq!(plain.name, "ssh");
+
+        let bare = find_filter_in("ssh", &filters).expect("bare ssh with no args must still match");
+        assert_eq!(bare.name, "ssh");
     }
 
     // --- Edge cases ---
@@ -1582,12 +2059,16 @@ match_command = "^make\\b"
             "markdownlint",
             "mix-compile",
             "mix-format",
-            "mvn-build",
             "ping",
             "pio-run",
             "poetry-install",
             "pre-commit",
             "ps",
+            "pulumi-destroy",
+            "pulumi-preview",
+            "pulumi-refresh",
+            "pulumi-stack",
+            "pulumi-up",
             "quarto-render",
             "rsync",
             "shellcheck",
@@ -1621,10 +2102,59 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            59,
-            "Expected exactly 59 built-in filters, got {}. \
+            63,
+            "Expected exactly 63 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
+        );
+    }
+
+    /// Every built-in filter must be anchored on every top-level branch: the
+    /// match runs against the whole command line, so an unanchored branch
+    /// activates the filter on a path component or wrapper argument.
+    #[test]
+    fn test_builtin_all_filters_match_command_anchored() {
+        // Read the raw patterns rather than the compiled registry: both loaders
+        // drop unanchored filters, so a compiled view cannot observe one.
+        let file: TomlFilterFile =
+            toml::from_str(BUILTIN_TOML).expect("built-in filters should parse");
+        assert!(!file.filters.is_empty());
+        for (name, def) in &file.filters {
+            assert!(
+                is_fully_anchored(&def.match_command),
+                "Filter '{}' has match_command '{}' with a top-level branch that does not start with '^'",
+                name,
+                def.match_command
+            );
+        }
+
+        assert!(is_fully_anchored(r"^liquibase(?:\s|$)"));
+        assert!(is_fully_anchored(r"^(liquibase\b|/liquibase\b)"));
+        assert!(is_fully_anchored(r"^pnpm\b|^npm\b"));
+        assert!(is_fully_anchored(r"(?i)^liquibase\b"));
+        assert!(!is_fully_anchored(r"^liquibase\b|/liquibase\b"));
+        assert!(!is_fully_anchored(r"(?:^|/)liquibase(?:\s|$)"));
+    }
+
+    /// The invariant above covers `BUILTIN_TOML`; project-local and global
+    /// filters are user-authored, so both loaders drop unanchored patterns
+    /// rather than letting them match mid-command.
+    #[test]
+    fn test_unanchored_user_filter_is_rejected_by_both_loaders() {
+        let unanchored =
+            "schema_version = 1\n[filters.mytool]\nmatch_command = \"(?:^|/)mytool\\\\b\"\n";
+        assert!(match_patterns_in(unanchored).is_empty());
+        assert!(TomlFilterRegistry::parse_and_compile(unanchored, "test")
+            .expect("schema is valid")
+            .is_empty());
+
+        let anchored = "schema_version = 1\n[filters.mytool]\nmatch_command = \"^mytool\\\\b\"\n";
+        assert_eq!(match_patterns_in(anchored), vec!["^mytool\\b".to_string()]);
+        assert_eq!(
+            TomlFilterRegistry::parse_and_compile(anchored, "test")
+                .expect("schema is valid")
+                .len(),
+            1
         );
     }
 
@@ -1679,11 +2209,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 59 existing filters still present + 1 new = 60
+        // All 63 existing filters still present + 1 new = 64
         assert_eq!(
             filters.len(),
-            60,
-            "Expected 60 filters after concat (59 built-in + 1 new)"
+            64,
+            "Expected 64 filters after concat (63 built-in + 1 new)"
         );
 
         // New filter is discoverable

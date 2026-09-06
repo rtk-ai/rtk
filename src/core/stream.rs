@@ -1,10 +1,43 @@
 use anyhow::{Context, Result};
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::borrow::Cow;
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 
 #[cfg(test)]
 use regex::Regex;
+
+/// Read `reader` line by line, decoding each line through the console code
+/// page and falling back to lossy UTF-8 (invalid bytes become U+FFFD) instead
+/// of erroring.
+///
+/// `BufRead::lines()` returns `Err` for a non-UTF-8 line, and callers
+/// commonly chain `.map_while(Result::ok)` to skip bad lines — but
+/// `map_while` stops at the *first* `None`, so one invalid-UTF-8 line (e.g.
+/// OEM/ANSI bytes from a non-English-locale Windows tool) silently discards
+/// every line after it too, not just the bad one. This reads raw bytes and
+/// never fails on the source encoding, so a garbled line still surfaces
+/// instead of vanishing along with everything downstream of it.
+///
+/// The OEM/ANSI lines this guards against are exactly what
+/// [`decode_process_output`](super::utils::decode_process_output) exists to
+/// read, so the streamed path decodes them the same way the captured path
+/// does rather than going straight to U+FFFD.
+fn read_lines_lossy(reader: impl Read) -> impl Iterator<Item = String> {
+    BufReader::new(reader).split(b'\n').filter_map(|res| {
+        let mut buf = match res {
+            Ok(buf) => buf,
+            Err(e) => {
+                eprintln!("rtk: stream read error: {}", e);
+                return None;
+            }
+        };
+        if buf.last() == Some(&b'\r') {
+            buf.pop();
+        }
+        Some(super::utils::decode_process_output(&buf))
+    })
+}
 
 pub trait StreamFilter {
     fn feed_line(&mut self, line: &str) -> Option<String>;
@@ -15,6 +48,12 @@ pub trait StreamFilter {
 }
 
 pub trait BlockHandler {
+    /// Rewrite a raw line before it is matched or emitted — the place to
+    /// strip ANSI escapes for tools that colour by default. Identity unless
+    /// a handler opts in, so the rest of the pipeline sees raw bytes.
+    fn normalize_line<'a>(&self, line: &'a str) -> Cow<'a, str> {
+        Cow::Borrowed(line)
+    }
     fn should_skip(&mut self, line: &str) -> bool;
     fn is_block_start(&mut self, line: &str) -> bool;
     fn is_block_continuation(&mut self, line: &str, block: &[String]) -> bool;
@@ -51,6 +90,8 @@ impl<H: BlockHandler> BlockStreamFilter<H> {
 
 impl<H: BlockHandler> StreamFilter for BlockStreamFilter<H> {
     fn feed_line(&mut self, line: &str) -> Option<String> {
+        let line = self.handler.normalize_line(line);
+        let line = line.as_ref();
         if self.handler.should_skip(line) {
             return None;
         }
@@ -298,10 +339,7 @@ pub fn run_streaming(
             Some(std::thread::spawn(move || {
                 let mut writer = BufWriter::new(child_stdin);
                 let stdin_handle = io::stdin();
-                for line in BufReader::new(stdin_handle.lock())
-                    .lines()
-                    .map_while(Result::ok)
-                {
+                for line in read_lines_lossy(stdin_handle.lock()) {
                     if let Some(out) = filter.feed_line(&line) {
                         if writeln!(writer, "{}", out).is_err() {
                             break;
@@ -340,7 +378,7 @@ pub fn run_streaming(
         let (tx, rx) = mpsc::channel();
         let tx_out = tx.clone();
         let stdout_thread = std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            for line in read_lines_lossy(stdout) {
                 if tx_out.send(StreamLine::Stdout(line)).is_err() {
                     break;
                 }
@@ -348,7 +386,7 @@ pub fn run_streaming(
         });
         let tx_err = tx;
         let stderr_thread = std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            for line in read_lines_lossy(stderr) {
                 if tx_err.send(StreamLine::Stderr(line)).is_err() {
                     break;
                 }
@@ -417,7 +455,7 @@ pub fn run_streaming(
         let stderr_thread = std::thread::spawn(move || -> String {
             let mut raw_err = String::new();
             let mut capped = false;
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            for line in read_lines_lossy(stderr) {
                 if raw_err.len() + line.len() < RAW_CAP {
                     raw_err.push_str(&line);
                     raw_err.push('\n');
@@ -436,7 +474,7 @@ pub fn run_streaming(
                 FilterMode::Passthrough => unreachable!("handled by early-return above"),
                 FilterMode::Streaming(_) => unreachable!("handled by is_streaming branch"),
                 FilterMode::Buffered(filter_fn) => {
-                    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    for line in read_lines_lossy(stdout) {
                         if raw_stdout.len() + line.len() < RAW_CAP {
                             raw_stdout.push_str(&line);
                             raw_stdout.push('\n');
@@ -461,7 +499,7 @@ pub fn run_streaming(
                     }
                 }
                 FilterMode::CaptureOnly => {
-                    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    for line in read_lines_lossy(stdout) {
                         if raw_stdout.len() + line.len() < RAW_CAP {
                             raw_stdout.push_str(&line);
                             raw_stdout.push('\n');
@@ -533,11 +571,30 @@ impl CaptureResult {
 
 pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
     cmd.stdin(Stdio::null());
+    capture(cmd)
+}
+
+/// Like [`exec_capture`] but inherits stdin so a wrapped engine can read a piped stdin.
+pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
+    cmd.stdin(Stdio::inherit());
+    capture(cmd)
+}
+
+/// Run `cmd` to completion, decode what it wrote, and report the exit code.
+///
+/// A process killed by a signal has no exit code of its own, and returning
+/// only the synthesized `128 + signal` hides why it died. `exit_code_from_output`
+/// announces that on stderr, so callers moving here from a hand-rolled
+/// `.output()` keep the diagnostic instead of losing it. The program name is
+/// used as the label so no call site has to pass one.
+fn capture(cmd: &mut Command) -> Result<CaptureResult> {
+    let program = cmd.get_program().to_string_lossy().into_owned();
     let output = cmd.output().context("Failed to execute command")?;
+    let exit_code = super::utils::exit_code_from_output(&output, &program);
     Ok(CaptureResult {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        exit_code: status_to_exit_code(output.status),
+        stdout: super::utils::decode_process_output(&output.stdout),
+        stderr: super::utils::decode_process_output(&output.stderr),
+        exit_code,
     })
 }
 
@@ -545,6 +602,77 @@ pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
 pub(crate) mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn test_read_lines_lossy_preserves_lines_after_invalid_utf8() {
+        // Line 2 contains a lone 0xE3 byte (the cp850 case from the bug report).
+        // `BufRead::lines().map_while(Result::ok)` would stop at that Err and
+        // silently lose line 3 as well — not just the bad byte.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"ERRO A: ascii\n");
+        data.extend_from_slice(&[b'E', b'R', b'R', b'O', b' ', b'B', b':', b' ', 0xE3, b'\n']);
+        data.extend_from_slice(b"ERRO C: ascii again\n");
+
+        let lines: Vec<String> = read_lines_lossy(data.as_slice()).collect();
+        assert_eq!(lines.len(), 3, "got: {:?}", lines);
+        assert_eq!(lines[0], "ERRO A: ascii");
+        assert!(lines[1].starts_with("ERRO B: "), "got: {:?}", lines[1]);
+        assert!(lines[1].contains('\u{FFFD}'), "got: {:?}", lines[1]);
+        assert_eq!(lines[2], "ERRO C: ascii again");
+    }
+
+    #[test]
+    fn test_read_lines_lossy_strips_crlf() {
+        let lines: Vec<String> = read_lines_lossy(&b"a\r\nb\n"[..]).collect();
+        assert_eq!(lines, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn test_read_lines_lossy_no_trailing_newline() {
+        let lines: Vec<String> = read_lines_lossy(&b"only line"[..]).collect();
+        assert_eq!(lines, vec!["only line".to_string()]);
+    }
+
+    #[test]
+    fn test_read_lines_lossy_empty_input() {
+        let lines: Vec<String> = read_lines_lossy(&b""[..]).collect();
+        assert!(lines.is_empty());
+    }
+
+    /// A `Read` that yields some good lines, then a genuine I/O error --
+    /// distinct from clean EOF (`Ok(0)`). Before this fix, `Ok(0) | Err(_)`
+    /// treated both the same way, silently truncating output on a real read
+    /// failure instead of surfacing it.
+    struct FailingReader {
+        data: std::io::Cursor<Vec<u8>>,
+        failed: bool,
+    }
+
+    impl Read for FailingReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.data.position() as usize >= self.data.get_ref().len() {
+                if !self.failed {
+                    self.failed = true;
+                    return Err(io::Error::other("simulated read failure"));
+                }
+                return Ok(0);
+            }
+            std::io::Read::read(&mut self.data, buf)
+        }
+    }
+
+    #[test]
+    fn test_read_lines_lossy_stops_on_io_error_without_panicking() {
+        let reader = FailingReader {
+            data: std::io::Cursor::new(b"line one\nline two\n".to_vec()),
+            failed: false,
+        };
+        // The two good lines are still yielded; the simulated failure after
+        // them must not panic or hang -- it just ends the iterator, same as
+        // clean EOF would, but via the Err(_) arm instead of Ok(0).
+        let lines: Vec<String> = read_lines_lossy(reader).collect();
+        assert_eq!(lines, vec!["line one".to_string(), "line two".to_string()]);
+    }
 
     struct LineFilter<F: FnMut(&str) -> Option<String>> {
         f: F,
@@ -585,6 +713,26 @@ pub(crate) mod tests {
         child.kill().unwrap();
         let status = child.wait().unwrap();
         assert_eq!(status_to_exit_code(status), 137);
+    }
+
+    #[test]
+    fn test_exec_capture_decodes_and_reports_exit_code() {
+        let captured = exec_capture(&mut Command::new("false")).expect("spawn");
+        assert_eq!(captured.exit_code, 1);
+        assert!(!captured.success());
+    }
+
+    /// A signal-killed child keeps the `128 + signal` code that
+    /// `exit_code_from_output` reports, so callers that moved off a hand-rolled
+    /// `.output()` neither lose the code nor the stderr diagnostic with it.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_capture_reports_signal_exit_code() {
+        // `kill -TERM $$` makes the shell terminate itself by signal 15.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("kill -TERM $$");
+        let captured = exec_capture(&mut cmd).expect("spawn");
+        assert_eq!(captured.exit_code, 128 + 15);
     }
 
     #[test]
@@ -853,6 +1001,34 @@ pub(crate) mod tests {
             output.push_str(&post);
         }
         output
+    }
+
+    struct UpperHandler;
+
+    impl BlockHandler for UpperHandler {
+        fn normalize_line<'a>(&self, line: &'a str) -> Cow<'a, str> {
+            Cow::Owned(line.to_uppercase())
+        }
+        fn should_skip(&mut self, _line: &str) -> bool {
+            false
+        }
+        fn is_block_start(&mut self, line: &str) -> bool {
+            line.starts_with("ERR")
+        }
+        fn is_block_continuation(&mut self, line: &str, _block: &[String]) -> bool {
+            line.starts_with("  ")
+        }
+        fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+            None
+        }
+    }
+
+    #[test]
+    fn block_handler_normalize_line_feeds_matching_and_emission() {
+        // Both the match and the emitted block see the normalized line.
+        let mut f = BlockStreamFilter::new(UpperHandler);
+        let out = run_block_filter(&mut f, "err: one\n  detail\nnoise\n", 0);
+        assert_eq!(out, "ERR: ONE\n  DETAIL\n");
     }
 
     struct TestHandler;

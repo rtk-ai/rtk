@@ -1,14 +1,16 @@
 //! Filters cargo output — build errors, test results, clippy warnings.
 
+use crate::core::args_utils;
 use crate::core::runner;
 use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
 use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
-use crate::core::utils::{resolved_command, truncate};
+use crate::core::utils::{join_with_overflow, resolved_command, truncate};
 use anyhow::Result;
+use serde::Deserialize;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone)]
 pub enum CargoCommand {
@@ -31,45 +33,6 @@ pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<i32> {
     }
 }
 
-/// Reconstruct args with `--` separator preserved from the original command line.
-/// Clap strips `--` from parsed args, but cargo subcommands need it to separate
-/// their own flags from test runner flags (e.g. `cargo test -- --nocapture`).
-fn restore_double_dash(args: &[String]) -> Vec<String> {
-    let raw_args: Vec<String> = std::env::args().collect();
-    restore_double_dash_with_raw(args, &raw_args)
-}
-
-/// Testable version that takes raw_args explicitly.
-fn restore_double_dash_with_raw(args: &[String], raw_args: &[String]) -> Vec<String> {
-    if args.is_empty() {
-        return args.to_vec();
-    }
-
-    // If args already contain `--` (Clap preserved it), no restoration needed
-    if args.iter().any(|a| a == "--") {
-        return args.to_vec();
-    }
-
-    // Find `--` in the original command line
-    let sep_pos = match raw_args.iter().position(|a| a == "--") {
-        Some(pos) => pos,
-        None => return args.to_vec(),
-    };
-
-    // Count how many of our parsed args appeared before `--` in the original.
-    // Args before `--` are positional (e.g. test name), args after are flags.
-    let args_before_sep = raw_args[..sep_pos]
-        .iter()
-        .filter(|a| args.contains(a))
-        .count();
-
-    let mut result = Vec::with_capacity(args.len() + 1);
-    result.extend_from_slice(&args[..args_before_sep]);
-    result.push("--".to_string());
-    result.extend_from_slice(&args[args_before_sep..]);
-    result
-}
-
 // --- Stream handlers ---
 
 struct CargoBuildHandler {
@@ -77,15 +40,17 @@ struct CargoBuildHandler {
     warnings: usize,
     error_count: usize,
     finished_line: Option<String>,
+    label: &'static str,
 }
 
 impl CargoBuildHandler {
-    fn new() -> Self {
+    fn with_label(label: &'static str) -> Self {
         Self {
             compiled: 0,
             warnings: 0,
             error_count: 0,
             finished_line: None,
+            label,
         }
     }
 }
@@ -131,19 +96,29 @@ impl BlockHandler for CargoBuildHandler {
         !(line.trim().is_empty() && block.len() > 3)
     }
 
-    fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
-        if self.error_count == 0 && self.warnings == 0 {
-            let mut s = format!("cargo build ({} crates compiled)", self.compiled);
-            if let Some(ref finished) = self.finished_line {
-                s = format!("{}\n{}", s, finished);
-            }
-            Some(format!("{}\n", s))
-        } else {
-            Some(format!(
-                "═══════════════════════════════════════\ncargo build: {} errors, {} warnings ({} crates)\n",
-                self.error_count, self.warnings, self.compiled
-            ))
+    fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String> {
+        if self.error_count == 0 && self.warnings == 0 && exit_code == 0 {
+            let summary = cargo_build_success_line(
+                self.compiled,
+                self.finished_line.as_deref(),
+                self.label,
+            );
+            return Some(crate::core::guard::never_worse(raw, &summary).to_string());
         }
+        // The streamed path only runs for non-json build/check; error blocks are
+        // emitted live, so the summary carries no rendered diagnostics.
+        let empty = JsonDiagnostics {
+            errors: Vec::new(),
+            warnings: Vec::new(),
+        };
+        Some(cargo_build_failure_summary(
+            self.compiled,
+            self.error_count,
+            self.warnings,
+            &empty,
+            self.label,
+            exit_code,
+        ))
     }
 }
 
@@ -162,6 +137,65 @@ impl CargoTestHandler {
             summary_lines: Vec::new(),
             has_compile_errors: false,
         }
+    }
+
+    /// Compacted `cargo test` summary, before the never-worse guard.
+    fn compute_test_summary(&self, raw: &str) -> Option<String> {
+        if self.summary_lines.is_empty() {
+            let json = extract_json_diagnostics(raw);
+            if self.has_compile_errors || !json.errors.is_empty() {
+                // Content-based (exit 0): a real compile error yields "cargo test: N
+                // errors"; a bare "could not compile" leaves the raw tail fallback.
+                let build_filtered = filter_cargo_build_labeled(raw, "test", 0);
+                if build_filtered.contains("cargo test:") {
+                    return Some(format!("{}\n", build_filtered));
+                }
+                // Fallback: last 5 meaningful lines
+                let meaningful: Vec<&str> = raw
+                    .lines()
+                    .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("Compiling"))
+                    .collect();
+                let last5: Vec<&str> = meaningful.iter().rev().take(5).rev().copied().collect();
+                return Some(format!("{}\n", last5.join("\n")));
+            }
+        }
+
+        // No failures emitted — aggregate pass results
+        let mut aggregated: Option<AggregatedTestResult> = None;
+        let mut all_parsed = true;
+
+        for line in &self.summary_lines {
+            if let Some(parsed) = AggregatedTestResult::parse_line(line) {
+                if let Some(ref mut agg) = aggregated {
+                    agg.merge(&parsed);
+                } else {
+                    aggregated = Some(parsed);
+                }
+            } else {
+                all_parsed = false;
+                break;
+            }
+        }
+
+        if all_parsed {
+            if let Some(agg) = aggregated {
+                if agg.suites > 0 {
+                    return Some(format!("{}\n", agg.format_compact()));
+                }
+            }
+        }
+
+        // Fallback: show raw summary lines
+        if !self.summary_lines.is_empty() {
+            let mut s = String::new();
+            for line in &self.summary_lines {
+                s.push_str(line);
+                s.push('\n');
+            }
+            return Some(s);
+        }
+
+        None
     }
 }
 
@@ -221,59 +255,12 @@ impl BlockHandler for CargoTestHandler {
     }
 
     fn format_summary(&self, _exit_code: i32, raw: &str) -> Option<String> {
-        if self.summary_lines.is_empty() && self.has_compile_errors {
-            let build_filtered = filter_cargo_build(raw);
-            if build_filtered.starts_with("cargo build:") {
-                return Some(format!(
-                    "{}\n",
-                    build_filtered.replacen("cargo build:", "cargo test:", 1)
-                ));
-            }
-            // Fallback: last 5 meaningful lines
-            let meaningful: Vec<&str> = raw
-                .lines()
-                .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("Compiling"))
-                .collect();
-            let last5: Vec<&str> = meaningful.iter().rev().take(5).rev().copied().collect();
-            return Some(format!("{}\n", last5.join("\n")));
-        }
-
-        // No failures emitted — aggregate pass results
-        let mut aggregated: Option<AggregatedTestResult> = None;
-        let mut all_parsed = true;
-
-        for line in &self.summary_lines {
-            if let Some(parsed) = AggregatedTestResult::parse_line(line) {
-                if let Some(ref mut agg) = aggregated {
-                    agg.merge(&parsed);
-                } else {
-                    aggregated = Some(parsed);
-                }
-            } else {
-                all_parsed = false;
-                break;
-            }
-        }
-
-        if all_parsed {
-            if let Some(agg) = aggregated {
-                if agg.suites > 0 {
-                    return Some(format!("{}\n", agg.format_compact()));
-                }
-            }
-        }
-
-        // Fallback: show raw summary lines
-        if !self.summary_lines.is_empty() {
-            let mut s = String::new();
-            for line in &self.summary_lines {
-                s.push_str(line);
-                s.push('\n');
-            }
-            return Some(s);
-        }
-
-        None
+        // Same never-worse guard as CargoBuildHandler (#3430 review): if the
+        // compacted summary ends up larger than the raw output (e.g. a tiny
+        // `cargo test` run), keep the raw output instead of "compacting" it
+        // into something bigger.
+        let summary = self.compute_test_summary(raw)?;
+        Some(crate::core::guard::never_worse(raw, &summary).to_string())
     }
 }
 
@@ -291,7 +278,7 @@ where
     let mut cmd = resolved_command("cargo");
     cmd.arg(subcommand);
 
-    let restored_args = restore_double_dash(args);
+    let restored_args = args_utils::restore_double_dash(args);
     for arg in &restored_args {
         cmd.arg(arg);
     }
@@ -309,6 +296,38 @@ where
     )
 }
 
+/// Same as `run_cargo_filtered` but the filter also receives the child exit code,
+/// so it can tell a genuine failure from a clean run when no diagnostics parse.
+fn run_cargo_filtered_with_exit<F>(
+    subcommand: &str,
+    args: &[String],
+    verbose: u8,
+    filter_fn: F,
+) -> Result<i32>
+where
+    F: Fn(&str, i32) -> String,
+{
+    let mut cmd = resolved_command("cargo");
+    cmd.arg(subcommand);
+
+    let restored_args = args_utils::restore_double_dash(args);
+    for arg in &restored_args {
+        cmd.arg(arg);
+    }
+
+    if verbose > 0 {
+        eprintln!("Running: cargo {} {}", subcommand, restored_args.join(" "));
+    }
+
+    runner::run_filtered_with_exit(
+        cmd,
+        &format!("cargo {}", subcommand),
+        &restored_args.join(" "),
+        filter_fn,
+        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
+    )
+}
+
 fn run_cargo_streamed(
     subcommand: &str,
     args: &[String],
@@ -318,7 +337,7 @@ fn run_cargo_streamed(
     let mut cmd = resolved_command("cargo");
     cmd.arg(subcommand);
 
-    let restored_args = restore_double_dash(args);
+    let restored_args = args_utils::restore_double_dash(args);
     for arg in &restored_args {
         cmd.arg(arg);
     }
@@ -336,16 +355,40 @@ fn run_cargo_streamed(
     )
 }
 
+fn has_json_message_format(args: &[String]) -> bool {
+    let mut json = false;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if let Some(val) = arg.strip_prefix("--message-format=") {
+            json = val.contains("json");
+        } else if arg == "--message-format" {
+            if let Some(val) = iter.next() {
+                json = val.contains("json");
+            }
+        }
+    }
+    json
+}
+
 fn run_build(args: &[String], verbose: u8) -> Result<i32> {
+    if has_json_message_format(args) {
+        return run_cargo_filtered_with_exit("build", args, verbose, |o, exit| {
+            filter_cargo_build_labeled(o, "build", exit)
+        });
+    }
     run_cargo_streamed(
         "build",
         args,
         verbose,
-        Box::new(BlockStreamFilter::new(CargoBuildHandler::new())),
+        Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label("build"))),
     )
 }
 
 fn run_test(args: &[String], verbose: u8) -> Result<i32> {
+    // No json branch here on purpose: --message-format=json only reformats the
+    // build phase, the test harness output stays human-readable. CargoTestHandler
+    // reads both — it aggregates the `test result:` lines and, on a compile error,
+    // parses the json diagnostics in format_summary.
     run_cargo_streamed(
         "test",
         args,
@@ -355,15 +398,23 @@ fn run_test(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 fn run_clippy(args: &[String], verbose: u8) -> Result<i32> {
+    if has_json_message_format(args) {
+        return run_cargo_filtered_with_exit("clippy", args, verbose, filter_cargo_clippy_json);
+    }
     run_cargo_filtered("clippy", args, verbose, filter_cargo_clippy)
 }
 
 fn run_check(args: &[String], verbose: u8) -> Result<i32> {
+    if has_json_message_format(args) {
+        return run_cargo_filtered_with_exit("check", args, verbose, |o, exit| {
+            filter_cargo_build_labeled(o, "check", exit)
+        });
+    }
     run_cargo_streamed(
         "check",
         args,
         verbose,
-        Box::new(BlockStreamFilter::new(CargoBuildHandler::new())),
+        Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label("check"))),
     )
 }
 
@@ -526,7 +577,6 @@ fn filter_cargo_install(output: &str) -> String {
                 deps_info
             ));
         }
-        result.push_str("═══════════════════════════════════════\n");
 
         const MAX_INSTALL_ERRORS: usize = CAP_ERRORS;
         for (i, err) in errors.iter().enumerate().take(MAX_INSTALL_ERRORS) {
@@ -581,18 +631,12 @@ fn flush_failure_block(header: &mut String, body: &mut Vec<String>, failures: &m
 
 /// Filter cargo nextest output - show failures + compact summary
 fn filter_cargo_nextest(output: &str) -> String {
-    static SUMMARY_RE: OnceLock<regex::Regex> = OnceLock::new();
-    let summary_re = SUMMARY_RE.get_or_init(|| {
-        regex::Regex::new(
-            r"Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run:\s+(\d+) passed(?:,\s+(\d+) failed)?(?:,\s+(\d+) skipped)?"
-        ).expect("invalid nextest summary regex")
-    });
+    let summary_re = regex::Regex::new(
+        r"Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run:\s+(\d+) passed(?:,\s+(\d+) failed)?(?:,\s+(\d+) skipped)?"
+    ).expect("invalid nextest summary regex");
 
-    static STARTING_RE: OnceLock<regex::Regex> = OnceLock::new();
-    let starting_re = STARTING_RE.get_or_init(|| {
-        regex::Regex::new(r"Starting \d+ tests? across (\d+) binar(?:y|ies)")
-            .expect("invalid nextest starting regex")
-    });
+    let starting_re = regex::Regex::new(r"Starting \d+ tests? across (\d+) binar(?:y|ies)")
+        .expect("invalid nextest starting regex");
 
     let mut failures: Vec<String> = Vec::new();
     let mut in_failure_block = false;
@@ -796,8 +840,134 @@ fn filter_cargo_nextest(output: &str) -> String {
     String::new()
 }
 
+struct JsonDiagnostics {
+    errors: Vec<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct CargoJsonLine {
+    reason: String,
+    message: Option<CargoDiagnostic>,
+}
+
+#[derive(Deserialize)]
+struct CargoDiagnostic {
+    level: String,
+    #[serde(default)]
+    message: String,
+    rendered: Option<String>,
+}
+
+fn extract_json_diagnostics(raw: &str) -> JsonDiagnostics {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim_start();
+        if !line.starts_with('{') {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<CargoJsonLine>(line) else {
+            continue;
+        };
+        if entry.reason != "compiler-message" {
+            continue;
+        }
+        let Some(msg) = entry.message else {
+            continue;
+        };
+        let bucket = match msg.level.as_str() {
+            "error" | "error: internal compiler error" => &mut errors,
+            "warning" => &mut warnings,
+            _ => continue,
+        };
+        if msg.message.starts_with("aborting due to")
+            || msg.message.starts_with("could not compile")
+            || (msg.message.contains("warning") && msg.message.contains("generated"))
+        {
+            continue;
+        }
+        if let Some(rendered) = msg.rendered {
+            bucket.push(crate::core::utils::strip_ansi(&rendered).trim_end().to_string());
+        } else if !msg.message.is_empty() {
+            bucket.push(msg.message);
+        }
+    }
+    JsonDiagnostics { errors, warnings }
+}
+
+fn merge_diag_counts(error_count: usize, warnings: usize, json: &JsonDiagnostics) -> (usize, usize) {
+    (
+        error_count.max(json.errors.len()),
+        warnings.max(json.warnings.len()),
+    )
+}
+
+fn cargo_build_success_line(compiled: usize, finished: Option<&str>, label: &str) -> String {
+    match finished {
+        Some(f) => format!("cargo {} ({} crates compiled)\n{}\n", label, compiled, f),
+        None => format!("cargo {} ({} crates compiled)\n", label, compiled),
+    }
+}
+
+fn cargo_build_failure_summary(
+    compiled: usize,
+    errors: usize,
+    warnings: usize,
+    json: &JsonDiagnostics,
+    label: &str,
+    exit_code: i32,
+) -> String {
+    let mut out = if errors == 0 && warnings == 0 {
+        format!("cargo {}: failed (exit {})\n", label, exit_code)
+    } else {
+        format!(
+            "cargo {}: {} errors, {} warnings ({} crates)\n",
+            label, errors, warnings, compiled
+        )
+    };
+    if !json.errors.is_empty() {
+        let shown: Vec<String> = json.errors.iter().take(CAP_ERRORS).cloned().collect();
+        out.push_str(&join_with_overflow(
+            &shown,
+            json.errors.len(),
+            CAP_ERRORS,
+            "errors",
+        ));
+        out.push('\n');
+    }
+    if !json.warnings.is_empty() {
+        let shown: Vec<String> = json.warnings.iter().take(CAP_WARNINGS).cloned().collect();
+        out.push_str(&join_with_overflow(
+            &shown,
+            json.warnings.len(),
+            CAP_WARNINGS,
+            "warnings",
+        ));
+        out.push('\n');
+    }
+    if json.errors.len() > CAP_ERRORS || json.warnings.len() > CAP_WARNINGS {
+        let full = json
+            .errors
+            .iter()
+            .chain(json.warnings.iter())
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if let Some(hint) = crate::core::tee::force_tee_hint(&full, "cargo-json-issues") {
+            out.push_str(&format!("  {}\n", hint));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
 fn filter_cargo_build(output: &str) -> String {
-    let mut handler = CargoBuildHandler::new();
+    filter_cargo_build_labeled(output, "build", 0)
+}
+
+fn filter_cargo_build_labeled(output: &str, label: &'static str, exit_code: i32) -> String {
+    let mut handler = CargoBuildHandler::with_label(label);
     let mut blocks: Vec<Vec<String>> = Vec::new();
     let mut current_block: Vec<String> = Vec::new();
     let mut in_block = false;
@@ -825,18 +995,16 @@ fn filter_cargo_build(output: &str) -> String {
         blocks.push(current_block);
     }
 
-    if handler.error_count == 0 && handler.warnings == 0 {
-        let mut s = format!("cargo build ({} crates compiled)", handler.compiled);
-        if let Some(ref finished) = handler.finished_line {
-            s = format!("{}\n{}", s, finished);
-        }
-        return s;
+    let json = extract_json_diagnostics(output);
+    let (errors, warnings) = merge_diag_counts(handler.error_count, handler.warnings, &json);
+
+    if errors == 0 && warnings == 0 && exit_code == 0 {
+        let summary = cargo_build_success_line(handler.compiled, handler.finished_line.as_deref(), label);
+        return crate::core::guard::never_worse(output, &summary).to_string();
     }
 
-    let mut result = format!(
-        "cargo build: {} errors, {} warnings ({} crates)\n═══════════════════════════════════════\n",
-        handler.error_count, handler.warnings, handler.compiled
-    );
+    let mut result =
+        cargo_build_failure_summary(handler.compiled, errors, warnings, &json, label, exit_code);
     const MAX_CHECK_BLOCKS: usize = CAP_ERRORS;
     for (i, blk) in blocks.iter().enumerate().take(MAX_CHECK_BLOCKS) {
         result.push_str(&blk.join("\n"));
@@ -879,14 +1047,13 @@ impl AggregatedTestResult {
     /// Parse a test result summary line
     /// Format: "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
     fn parse_line(line: &str) -> Option<Self> {
-        static RE: OnceLock<regex::Regex> = OnceLock::new();
-        let re = RE.get_or_init(|| {
+        static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
             regex::Regex::new(
                 r"test result: (\w+)\.\s+(\d+) passed;\s+(\d+) failed;\s+(\d+) ignored;\s+(\d+) measured;\s+(\d+) filtered out(?:;\s+finished in ([\d.]+)s)?"
             ).unwrap()
         });
 
-        let caps = re.captures(line)?;
+        let caps = RE.captures(line)?;
         let status = caps.get(1)?.as_str();
 
         // Only aggregate if status is "ok" (all tests passed)
@@ -1049,7 +1216,6 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
 
     if !failures.is_empty() {
         result.push_str(&format!("FAILURES ({}):\n", failures.len()));
-        result.push_str("═══════════════════════════════════════\n");
         const MAX_FAILURES: usize = CAP_WARNINGS;
         for (i, failure) in failures.iter().enumerate().take(MAX_FAILURES) {
             result.push_str(&format!("{}. {}\n", i + 1, truncate(failure, 200)));
@@ -1071,15 +1237,17 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
     }
 
     if result.trim().is_empty() {
-        let has_compile_errors = output.lines().any(|line| {
-            let trimmed = line.trim_start();
-            trimmed.starts_with("error[") || trimmed.starts_with("error:")
-        });
+        let json = extract_json_diagnostics(output);
+        let has_compile_errors = !json.errors.is_empty()
+            || output.lines().any(|line| {
+                let trimmed = line.trim_start();
+                trimmed.starts_with("error[") || trimmed.starts_with("error:")
+            });
 
         if has_compile_errors {
-            let build_filtered = filter_cargo_build(output);
-            if build_filtered.starts_with("cargo build:") {
-                return build_filtered.replacen("cargo build:", "cargo test:", 1);
+            let build_filtered = filter_cargo_build_labeled(output, "test", 0);
+            if build_filtered.contains("cargo test:") {
+                return build_filtered;
             }
         }
 
@@ -1206,7 +1374,6 @@ fn filter_cargo_clippy(output: &str) -> String {
         "cargo clippy: {} errors, {} warnings\n",
         error_count, warning_count
     ));
-    result.push_str("═══════════════════════════════════════\n");
 
     // Show full error blocks so developers can see what needs fixing
     if !error_blocks.is_empty() {
@@ -1268,13 +1435,25 @@ fn filter_cargo_clippy(output: &str) -> String {
     result.trim().to_string()
 }
 
+fn filter_cargo_clippy_json(output: &str, exit_code: i32) -> String {
+    let json = extract_json_diagnostics(output);
+    if json.errors.is_empty() && json.warnings.is_empty() && exit_code == 0 {
+        return "cargo clippy: No issues found".to_string();
+    }
+    filter_cargo_build_labeled(output, "clippy", exit_code)
+}
+
 pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
     crate::core::runner::run_passthrough("cargo", args, verbose)
 }
 
 #[cfg(test)]
 mod tests {
+    const TINY_BUILD_SUCCESS_OUTPUT: &str =
+        "    Finished dev [unoptimized + debuginfo] target(s) in 0.01s\n";
+
     use super::*;
+    use crate::core::args_utils::restore_double_dash_with_raw;
 
     #[test]
     fn test_restore_double_dash_with_separator() {
@@ -1391,6 +1570,42 @@ mod tests {
         let result = filter_cargo_build(output);
         assert!(result.contains("cargo build"));
         assert!(result.contains("3 crates compiled"));
+    }
+
+    #[test]
+    fn test_filter_cargo_build_success_uses_raw_when_summary_is_larger() {
+        let output = TINY_BUILD_SUCCESS_OUTPUT;
+        let result = filter_cargo_build(output);
+        assert_eq!(result, output);
+    }
+
+    #[test]
+    fn test_cargo_test_summary_uses_raw_when_summary_is_larger() {
+        // A one-line compile failure is already minimal: prefixing it with the
+        // "cargo test: N errors, ..." header emits more tokens than the raw
+        // output, so the never-worse guard must keep the raw output.
+        const CARGO_COMPILE_FAILURE_EXIT_CODE: i32 = 101;
+        let raw = "error[E0433]: failed to resolve: use of undeclared type `Foo`\n";
+
+        let mut handler = CargoTestHandler::new();
+        for line in raw.lines() {
+            handler.should_skip(line);
+        }
+
+        let unguarded = handler
+            .compute_test_summary(raw)
+            .expect("compile failure yields a summary");
+        assert!(
+            unguarded.len() > raw.len(),
+            "expected the compacted summary to be larger than the raw output, got {:?}",
+            unguarded
+        );
+        assert_eq!(
+            handler
+                .format_summary(CARGO_COMPILE_FAILURE_EXIT_CODE, raw)
+                .as_deref(),
+            Some(raw)
+        );
     }
 
     #[test]
@@ -2143,10 +2358,36 @@ error: test run failed
     #[test]
     fn test_cargo_build_stream_success() {
         let input = "   Compiling libc v0.2.153\n   Compiling cfg-if v1.0.0\n   Compiling rtk v0.5.0\n    Finished dev [unoptimized + debuginfo] target(s) in 15.23s\n";
-        let mut f = BlockStreamFilter::new(CargoBuildHandler::new());
+        let mut f = BlockStreamFilter::new(CargoBuildHandler::with_label("build"));
         let result = run_block_filter(&mut f, input, 0);
         assert!(result.contains("3 crates compiled"), "got: {}", result);
         assert!(result.contains("Finished"), "got: {}", result);
+        assert!(!result.contains("Compiling"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_cargo_build_stream_success_uses_raw_when_summary_is_larger() {
+        let input = TINY_BUILD_SUCCESS_OUTPUT;
+        let mut f = BlockStreamFilter::new(CargoBuildHandler::with_label("build"));
+        let result = run_block_filter(&mut f, input, 0);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_cargo_build_stream_json_success() {
+        let input = concat!(
+            "   Compiling demo v0.1.0 (/tmp/demo)\n",
+            r#"{"reason":"compiler-artifact","package_id":"demo 0.1.0","target":{"name":"demo"},"executable":"/tmp/demo/target/debug/demo"}"#,
+            "\n",
+            "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.39s\n",
+            r#"{"reason":"build-finished","success":true}"#,
+            "\n",
+        );
+        let mut f = BlockStreamFilter::new(CargoBuildHandler::with_label("build"));
+        let result = run_block_filter(&mut f, input, 0);
+        assert!(result.contains("1 crates compiled"), "got: {}", result);
+        assert!(result.contains("Finished"), "got: {}", result);
+        assert!(!result.contains("error"), "got: {}", result);
         assert!(!result.contains("Compiling"), "got: {}", result);
     }
 
@@ -2161,12 +2402,338 @@ error[E0308]: mismatched types
 
 error: aborting due to 1 previous error
 "#;
-        let mut f = BlockStreamFilter::new(CargoBuildHandler::new());
+        let mut f = BlockStreamFilter::new(CargoBuildHandler::with_label("build"));
         let result = run_block_filter(&mut f, input, 1);
         assert!(result.contains("E0308"), "got: {}", result);
         assert!(result.contains("mismatched types"), "got: {}", result);
         assert!(result.contains("1 errors"), "got: {}", result);
         assert!(!result.contains("aborting"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_cargo_build_json_warning_rendered() {
+        let input = concat!(
+            "   Compiling v_cargo v0.1.0 (/tmp/v_cargo)\n",
+            r#"{"reason":"compiler-message","package_id":"v_cargo 0.1.0","message":{"level":"warning","message":"unused variable: `x`","rendered":"warning: unused variable: `x`\n --> src/main.rs:2:9"}}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":true}"#,
+            "\n",
+        );
+        let result = filter_cargo_build_labeled(input, "build", 0);
+        assert!(result.contains("unused variable"), "got: {}", result);
+        assert!(result.contains("1 warnings"), "got: {}", result);
+        assert!(!result.contains("crates compiled"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_cargo_check_stream_success_label() {
+        let input = "   Checking demo v0.1.0 (/tmp/demo)\n    Finished dev [unoptimized + debuginfo] target(s) in 0.42s\n";
+        let mut f = BlockStreamFilter::new(CargoBuildHandler::with_label("check"));
+        let result = run_block_filter(&mut f, input, 0);
+        assert!(result.contains("cargo check"), "got: {}", result);
+        assert!(!result.contains("cargo build"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_cargo_build_labeled_clippy_json_not_clean() {
+        let input = concat!(
+            "    Checking demo v0.1.0 (/tmp/demo)\n",
+            r#"{"reason":"compiler-message","message":{"code":{"code":"E0308"},"level":"error","message":"mismatched types","rendered":"error[E0308]: mismatched types\n --> src/main.rs:2:18"}}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":false}"#,
+            "\n",
+        );
+        let result = filter_cargo_build_labeled(input, "clippy", 1);
+        assert!(result.contains("cargo clippy:"), "got: {}", result);
+        assert!(result.contains("1 errors"), "got: {}", result);
+        assert!(
+            !result.contains("No issues found"),
+            "json clippy errors must not be swallowed: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_clippy_json_clean() {
+        let input = concat!(
+            "    Checking demo v0.1.0 (/tmp/demo)\n",
+            r#"{"reason":"compiler-artifact","package_id":"demo 0.1.0","target":{"name":"demo"}}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":true}"#,
+            "\n",
+        );
+        assert_eq!(
+            filter_cargo_clippy_json(input, 0),
+            "cargo clippy: No issues found"
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_clippy_json_warnings() {
+        let input = concat!(
+            "    Checking demo v0.1.0 (/tmp/demo)\n",
+            r#"{"reason":"compiler-message","message":{"level":"warning","message":"unused variable: `x`","rendered":"warning: unused variable: `x`\n --> src/main.rs:2:9"}}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":true}"#,
+            "\n",
+        );
+        let result = filter_cargo_clippy_json(input, 0);
+        assert!(result.contains("unused variable"), "got: {}", result);
+        assert!(result.contains("cargo clippy: 0 errors, 1 warnings"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_batch_filter_nonzero_exit_without_diagnostics_is_not_compiled() {
+        // build-script failure: exit 101, no compiler-message diagnostics parsed.
+        let input = concat!(
+            "   Compiling demo v0.1.0 (/tmp/demo)\n",
+            r#"{"reason":"build-finished","success":false}"#,
+            "\n",
+        );
+        let result = filter_cargo_build_labeled(input, "build", 101);
+        assert!(
+            !result.contains("crates compiled"),
+            "a failed build must not be reported as compiled: {}",
+            result
+        );
+        assert!(result.contains("cargo build: failed (exit 101)"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_failure_summary_line_is_first() {
+        let json = JsonDiagnostics {
+            errors: vec!["error[E0308]: mismatched types".to_string()],
+            warnings: Vec::new(),
+        };
+        let out = cargo_build_failure_summary(1, 1, 0, &json, "build", 101);
+        assert!(
+            out.starts_with("cargo build: 1 errors"),
+            "summary line must come first: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_build_labeled_check() {
+        let input = concat!(
+            r#"{"reason":"compiler-message","message":{"level":"error","message":"mismatched types","rendered":"error[E0308]: mismatched types\n --> src/main.rs:2:18"}}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":false}"#,
+            "\n",
+        );
+        let result = filter_cargo_build_labeled(input, "check", 1);
+        assert!(result.contains("cargo check:"), "got: {}", result);
+        assert!(!result.contains("cargo build:"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_extract_json_diagnostics_strips_ansi() {
+        let output = concat!(
+            r#"{"reason":"compiler-message","message":{"level":"error","message":"mismatched types","rendered":"\u001b[1m\u001b[31merror[E0308]\u001b[0m: mismatched types"}}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":false}"#,
+            "\n",
+        );
+        let json = extract_json_diagnostics(output);
+        assert_eq!(json.errors.len(), 1);
+        assert!(
+            !json.errors[0].contains('\u{1b}'),
+            "ansi escapes must be stripped: {:?}",
+            json.errors[0]
+        );
+        assert!(
+            json.errors[0].contains("error[E0308]"),
+            "got: {:?}",
+            json.errors[0]
+        );
+    }
+
+
+    #[test]
+    fn test_extract_json_diagnostics_skips_generated_summary() {
+        let output = concat!(
+            r#"{"reason":"compiler-message","message":{"level":"warning","message":"unused variable: `x`","rendered":"warning: unused variable: `x`"}}"#,
+            "\n",
+            r#"{"reason":"compiler-message","message":{"level":"warning","message":"`demo` (bin \"demo\") generated 1 warning","rendered":"warning: `demo` (bin \"demo\") generated 1 warning"}}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":true}"#,
+            "\n",
+        );
+        let json = extract_json_diagnostics(output);
+        assert_eq!(json.warnings.len(), 1, "generated summary must not inflate the count");
+        assert!(
+            !json.warnings.iter().any(|w| w.contains("generated")),
+            "the generated summary line must not appear in the output"
+        );
+    }
+
+    #[test]
+    fn test_extract_json_diagnostics_counts_ice_as_error() {
+        let output = concat!(
+            r#"{"reason":"compiler-message","message":{"level":"error: internal compiler error","message":"unexpected panic","rendered":"error: internal compiler error: unexpected panic"}}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":false}"#,
+            "\n",
+        );
+        let json = extract_json_diagnostics(output);
+        assert_eq!(json.errors.len(), 1, "an ICE must count as an error");
+        assert!(json.errors[0].contains("internal compiler error"), "got: {:?}", json.errors[0]);
+    }
+
+    #[test]
+    fn test_json_format_inline_eq() {
+        assert!(has_json_message_format(&["--message-format=json".into()]));
+    }
+
+    #[test]
+    fn test_json_format_space_separated() {
+        assert!(has_json_message_format(&[
+            "--message-format".into(),
+            "json".into(),
+        ]));
+    }
+
+    #[test]
+    fn test_json_format_rendered_ansi() {
+        assert!(has_json_message_format(&[
+            "--message-format=json-diagnostic-rendered-ansi".into()
+        ]));
+    }
+
+    #[test]
+    fn test_json_format_render_diagnostics() {
+        assert!(has_json_message_format(&[
+            "--message-format=json-render-diagnostics".into()
+        ]));
+    }
+
+    #[test]
+    fn test_json_format_space_rendered() {
+        assert!(has_json_message_format(&[
+            "--message-format".into(),
+            "json-diagnostic-rendered-ansi".into(),
+        ]));
+    }
+
+    #[test]
+    fn test_non_json_format_not_detected() {
+        assert!(!has_json_message_format(&["--message-format=human".into()]));
+    }
+
+    #[test]
+    fn test_no_format_flag() {
+        assert!(!has_json_message_format(&[
+            "--release".into(),
+            "-p".into(),
+            "my-crate".into(),
+        ]));
+    }
+
+    #[test]
+    fn test_json_format_among_other_args() {
+        assert!(has_json_message_format(&[
+            "--release".into(),
+            "-p".into(),
+            "my-crate".into(),
+            "--message-format=json".into(),
+        ]));
+    }
+
+    #[test]
+    fn test_json_format_trailing_message_format_no_value() {
+        assert!(!has_json_message_format(&["--message-format".into()]));
+    }
+
+    #[test]
+    fn test_json_format_last_occurrence_wins() {
+        assert!(!has_json_message_format(&[
+            "--message-format=json".into(),
+            "--message-format=human".into(),
+        ]));
+        assert!(has_json_message_format(&[
+            "--message-format=human".into(),
+            "--message-format=json".into(),
+        ]));
+    }
+
+    #[test]
+    fn test_filter_cargo_build_json_failure_not_compiled() {
+        let output = concat!(
+            r#"{"reason":"compiler-message","message":{"rendered":"error[E0277]: the trait bound is not satisfied","level":"error","message":"trait bound"}}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":false}"#,
+            "\n",
+        );
+        let result = filter_cargo_build(output);
+        assert!(result.contains("E0277"), "got: {}", result);
+        assert!(result.contains("1 errors"), "got: {}", result);
+        assert!(!result.contains("crates compiled"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_cargo_build_json_errors_capped() {
+        let total = CAP_ERRORS + 5;
+        let mut output = String::new();
+        for i in 0..total {
+            output.push_str(&format!(
+                r#"{{"reason":"compiler-message","message":{{"code":{{"code":"E0308"}},"level":"error","message":"mismatched types","rendered":"error[E0308]: mismatched types ({})"}}}}"#,
+                i
+            ));
+            output.push('\n');
+        }
+        output.push_str(r#"{"reason":"build-finished","success":false}"#);
+        output.push('\n');
+
+        let result = filter_cargo_build(&output);
+        let rendered = result.matches("error[E0308]").count();
+        assert_eq!(rendered, CAP_ERRORS, "json errors must be capped: {}", result);
+        assert!(
+            result.contains(&format!("… +{} more errors", total - CAP_ERRORS)),
+            "expected overflow hint: {}",
+            result
+        );
+        assert!(
+            result.contains(&format!("{} errors", total)),
+            "summary must report the real total: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_build_json_savings() {
+        // Real --message-format=json lines carry a verbose envelope (spans,
+        // children, code, message) around the human `rendered` text. The filter
+        // keeps only `rendered` and caps the list, so savings come from both
+        // dropping the envelope and capping a large failing build.
+        let template = r#"{"reason":"compiler-message","package_id":"demo 0.1.0 (path+file:///tmp/demo)","manifest_path":"/tmp/demo/Cargo.toml","target":{"kind":["bin"],"crate_types":["bin"],"name":"demo","src_path":"/tmp/demo/src/main.rs","edition":"2021","doc":true,"doctest":false,"test":true},"message":{"rendered":"error[E0308]: mismatched types\n  --> src/main.rs:IDX:18\n   |\nIDX |     let _xIDX: i32 = \"errIDX\";\n   |               ---   ^^^^^^^ expected `i32`, found `&str`\n   |               |\n   |               expected due to this\n\n","$message_type":"diagnostic","children":[{"children":[],"code":null,"level":"note","message":"expected due to the type annotation here","rendered":null,"spans":[]}],"code":{"code":"E0308","explanation":null},"level":"error","message":"mismatched types","spans":[{"byte_end":40,"byte_start":33,"column_end":25,"column_start":18,"expansion":null,"file_name":"src/main.rs","is_primary":true,"label":"expected `i32`, found `&str`","line_end":IDX,"line_start":IDX,"suggested_replacement":null,"suggestion_applicability":null,"text":[{"highlight_end":25,"highlight_start":18,"text":"    let _xIDX: i32 = \"errIDX\";"}]}]}}"#;
+
+        let total = CAP_ERRORS + 30;
+        let mut input = String::new();
+        for i in 0..total {
+            input.push_str(&template.replace("IDX", &i.to_string()));
+            input.push('\n');
+        }
+        input.push_str(r#"{"reason":"build-finished","success":false}"#);
+        input.push('\n');
+
+        let result = filter_cargo_build(&input);
+
+        // The cap is what bounds the output, so assert it holds here too.
+        let rendered = result.matches("error[E0308]").count();
+        assert_eq!(rendered, CAP_ERRORS, "json errors must be capped: {}", result);
+        assert!(
+            result.contains(&format!("… +{} more errors", total - CAP_ERRORS)),
+            "expected overflow hint: {}",
+            result
+        );
+
+        let raw = input.split_whitespace().count();
+        let out = result.split_whitespace().count();
+        let savings = 100.0 - (out as f64 / raw as f64) * 100.0;
+        assert!(
+            savings >= 60.0,
+            "token savings dropped below 60%: {savings:.1}%"
+        );
     }
 
     #[test]
@@ -2252,5 +2819,41 @@ error: could not compile `rtk` (test "repro_compile_fail") due to 1 previous err
         let result = run_block_filter(&mut f, input, 1);
         assert!(result.contains("cargo test:"), "got: {}", result);
         assert!(result.contains("1 errors"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_cargo_test_stream_json_compile_error() {
+        let input = concat!(
+            "   Compiling v_cargo v0.1.0 (/tmp/v_cargo)\n",
+            r#"{"reason":"compiler-message","package_id":"v_cargo 0.1.0","message":{"code":{"code":"E0425"},"level":"error","message":"cannot find value `missing_symbol` in this scope","rendered":"error[E0425]: cannot find value `missing_symbol` in this scope\n --> tests/repro.rs:3:13"}}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":false}"#,
+            "\n",
+        );
+        let mut f = BlockStreamFilter::new(CargoTestHandler::new());
+        let result = run_block_filter(&mut f, input, 101);
+        assert!(!result.trim().is_empty(), "json compile error must not be silent");
+        assert!(result.contains("cargo test:"), "got: {}", result);
+        assert!(result.contains("1 errors"), "got: {}", result);
+        assert!(result.contains("E0425"), "diagnostic must be surfaced: {}", result);
+    }
+
+    #[test]
+    fn test_cargo_test_stream_no_diagnostic_falls_back_to_raw() {
+        // "could not compile" sets has_compile_errors but is skipped by the build
+        // re-scan, so the reused filter yields a success-shaped line. We must not
+        // trust it — fall back to the raw tail instead of a bogus "compiled".
+        let input = concat!(
+            "   Compiling foo v0.1.0 (/tmp/foo)\n",
+            "error: could not compile `foo` (test \"bar\") due to previous error\n",
+        );
+        let mut f = BlockStreamFilter::new(CargoTestHandler::new());
+        let result = run_block_filter(&mut f, input, 101);
+        assert!(
+            !result.contains("crates compiled"),
+            "must not report a failed test run as compiled: {}",
+            result
+        );
+        assert!(result.contains("could not compile"), "got: {}", result);
     }
 }

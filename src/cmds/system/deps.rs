@@ -1,8 +1,9 @@
 //! Summarizes project dependencies from lock files and manifests.
 
+use crate::core::guard::never_worse;
 use crate::core::tracking;
 use crate::core::truncate::{reduced, CAP_WARNINGS};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use regex::Regex;
 use std::fs;
 use std::path::Path;
@@ -73,13 +74,15 @@ pub fn run(path: &Path, verbose: u8) -> Result<()> {
         rtk.push_str(&format!("No dependency files found in {}", dir.display()));
     }
 
-    print!("{}", rtk);
-    timer.track("cat */deps", "rtk deps", &raw, &rtk);
+    let shown = never_worse(&raw, &rtk);
+    print!("{}", shown);
+    timer.track("cat */deps", "rtk deps", &raw, shown);
     Ok(())
 }
 
 fn summarize_cargo_str(path: &Path) -> Result<String> {
-    let content = fs::read_to_string(path)?;
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
     let dep_re =
         Regex::new(r#"^([a-zA-Z0-9_-]+)\s*=\s*(?:"([^"]+)"|.*version\s*=\s*"([^"]+)")"#).unwrap();
     let section_re = Regex::new(r"^\[([^\]]+)\]").unwrap();
@@ -132,8 +135,10 @@ fn summarize_cargo_str(path: &Path) -> Result<String> {
 }
 
 fn summarize_package_json_str(path: &Path) -> Result<String> {
-    let content = fs::read_to_string(path)?;
-    let json: serde_json::Value = serde_json::from_str(&content)?;
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let json: serde_json::Value = crate::core::utils::from_json_str(&content)
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
     let mut out = String::new();
 
     if let Some(name) = json.get("name").and_then(|v| v.as_str()) {
@@ -168,7 +173,8 @@ fn summarize_package_json_str(path: &Path) -> Result<String> {
 }
 
 fn summarize_requirements_str(path: &Path) -> Result<String> {
-    let content = fs::read_to_string(path)?;
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
     let dep_re = Regex::new(r"^([a-zA-Z0-9_-]+)([=<>!~]+.*)?$").unwrap();
     let mut deps = Vec::new();
     let mut out = String::new();
@@ -196,7 +202,8 @@ fn summarize_requirements_str(path: &Path) -> Result<String> {
 }
 
 fn summarize_pyproject_str(path: &Path) -> Result<String> {
-    let content = fs::read_to_string(path)?;
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
     let mut in_deps = false;
     let mut deps = Vec::new();
     let mut out = String::new();
@@ -232,7 +239,8 @@ fn summarize_pyproject_str(path: &Path) -> Result<String> {
 }
 
 fn summarize_gomod_str(path: &Path) -> Result<String> {
-    let content = fs::read_to_string(path)?;
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
     let mut module_name = String::new();
     let mut go_version = String::new();
     let mut deps = Vec::new();
@@ -272,4 +280,39 @@ fn summarize_gomod_str(path: &Path) -> Result<String> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PACKAGE_JSON: &str =
+        r#"{"name": "demo", "version": "1.0.0", "dependencies": {"left-pad": "^1.3.0"}}"#;
+
+    fn summarize(content: &str) -> Result<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("package.json");
+        fs::write(&path, content).expect("write package.json");
+        summarize_package_json_str(&path)
+    }
+
+    #[test]
+    fn test_package_json_plain_parses() {
+        let out = summarize(PACKAGE_JSON).expect("plain package.json must parse");
+        assert!(out.contains("demo @ 1.0.0"));
+        assert!(out.contains("left-pad"));
+    }
+
+    #[test]
+    fn test_package_json_bom_parses() {
+        let bom = format!("\u{feff}{}", PACKAGE_JSON);
+        let out = summarize(&bom).expect("BOM-prefixed package.json must parse");
+        assert_eq!(out, summarize(PACKAGE_JSON).unwrap());
+    }
+
+    #[test]
+    fn test_package_json_invalid_has_path_context() {
+        let err = summarize("not json").unwrap_err();
+        assert!(err.to_string().contains("package.json"));
+    }
 }

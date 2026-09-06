@@ -1,9 +1,11 @@
 //! Filters Go command output — test results, build errors, vet warnings.
 
+use crate::core::guard::never_worse;
 use crate::core::runner;
+use crate::core::stream::{exec_capture, CaptureResult};
 use crate::core::tracking;
 use crate::core::truncate::CAP_ERRORS;
-use crate::core::utils::{exit_code_from_output, resolved_command, truncate};
+use crate::core::utils::{resolved_command, truncate};
 use crate::golangci_cmd;
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -92,11 +94,11 @@ pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: go build {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_filtered_with_exit(
         cmd,
         "go build",
         &args.join(" "),
-        filter_go_build,
+        filter_go_build_with_exit,
         crate::core::runner::RunOptions::with_tee("go_build"),
     )
 }
@@ -148,16 +150,12 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
         eprintln!("Running: go {} ...", subcommand);
     }
 
-    let output = cmd
-        .output()
+    let captured = exec_capture(&mut cmd)
         .with_context(|| format!("Failed to run go {}", subcommand))?;
+    let raw = format!("{}\n{}", captured.stdout, captured.stderr);
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    print!("{}", stdout);
-    eprint!("{}", stderr);
+    print!("{}", captured.stdout);
+    eprint!("{}", captured.stderr);
 
     timer.track(
         &format!("go {}", subcommand),
@@ -166,26 +164,21 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
         &raw, // No filtering for unsupported commands
     );
 
-    Ok(exit_code_from_output(&output, "go"))
+    Ok(captured.exit_code)
 }
 
 /// Detect golangci-lint major version when invoked via `go tool`.
 /// Returns 1 on any failure (safe fallback — v1 behaviour).
 fn detect_go_tool_golangci_version() -> u32 {
-    let output = resolved_command("go")
-        .arg("tool")
-        .arg("golangci-lint")
-        .arg("--version")
-        .output();
+    let mut cmd = resolved_command("go");
+    cmd.arg("tool").arg("golangci-lint").arg("--version");
 
-    match output {
-        Ok(o) => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            let version_text = if stdout.trim().is_empty() {
-                &*stderr
+    match exec_capture(&mut cmd) {
+        Ok(captured) => {
+            let version_text = if captured.stdout.trim().is_empty() {
+                &captured.stderr
             } else {
-                &*stdout
+                &captured.stdout
             };
             golangci_cmd::parse_major_version(version_text)
         }
@@ -264,12 +257,11 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
         }
     }
 
-    let output = cmd
-        .output()
-        .context("Failed to run go tool golangci-lint")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let CaptureResult {
+        stdout,
+        stderr,
+        exit_code,
+    } = exec_capture(&mut cmd).context("Failed to run go tool golangci-lint")?;
     let raw = format!("{}\n{}", stdout, stderr);
 
     // v2 outputs JSON on first line + trailing text; v1 outputs just JSON
@@ -280,7 +272,8 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
     };
 
     let filtered = golangci_cmd::filter_golangci_json(json_output, version);
-    println!("{}", filtered);
+    let shown = never_worse(&raw, &filtered);
+    println!("{}", shown);
 
     if !stderr.trim().is_empty() && verbose > 0 {
         eprintln!("{}", stderr.trim());
@@ -290,10 +283,9 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
         "go tool golangci-lint",
         "rtk go tool golangci-lint",
         &raw,
-        &filtered,
+        shown,
     );
 
-    let exit_code = exit_code_from_output(&output, "go tool golangci-lint");
     // golangci-lint: exit 0 = clean, exit 1 = lint issues found (not an error),
     // exit 2+ = config/build error, None = killed by signal (OOM, SIGKILL)
     Ok(if exit_code == 1 { 0 } else { exit_code })
@@ -431,7 +423,6 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
         result.push_str(&format!(", {} skipped", total_skip));
     }
     result.push_str(&format!(" in {} packages\n", total_packages));
-    result.push_str("═══════════════════════════════════════\n");
 
     // Show package-level failures first (timeouts, signals, panics).
     // Skip packages that already have individual test-level failures — those are displayed
@@ -571,6 +562,10 @@ fn is_go_test_failure_line(line: &str) -> bool {
 
 /// Filter go build output - show only errors
 pub(crate) fn filter_go_build(output: &str) -> String {
+    filter_go_build_with_exit(output, 0)
+}
+
+fn filter_go_build_with_exit(output: &str, exit_code: i32) -> String {
     let mut errors: Vec<String> = Vec::new();
 
     for line in output.lines() {
@@ -581,12 +576,15 @@ pub(crate) fn filter_go_build(output: &str) -> String {
     }
 
     if errors.is_empty() {
-        return "Go build: Success".to_string();
+        return if exit_code == 0 {
+            "Go build: Success".to_string()
+        } else {
+            format_go_build_failure(output, exit_code)
+        };
     }
 
     let mut result = String::new();
     result.push_str(&format!("Go build: {} errors\n", errors.len()));
-    result.push_str("═══════════════════════════════════════\n");
 
     const MAX_GO_BUILD_ERRORS: usize = CAP_ERRORS;
     for (i, error) in errors.iter().take(MAX_GO_BUILD_ERRORS).enumerate() {
@@ -599,6 +597,37 @@ pub(crate) fn filter_go_build(output: &str) -> String {
         if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_errors, "go-build", MAX_GO_BUILD_ERRORS + 1) {
             result.push_str(&format!("  {}\n", hint));
         }
+    }
+
+    result.trim().to_string()
+}
+
+fn format_go_build_failure(output: &str, exit_code: i32) -> String {
+    let lines: Vec<String> = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    if lines.is_empty() {
+        return format!("Go build: failed (exit {})", exit_code);
+    }
+
+    let mut result = String::new();
+    result.push_str(&format!("Go build: failed (exit {})\n", exit_code));
+    result.push_str("═══════════════════════════════════════\n");
+
+    const MAX_GO_BUILD_ERRORS: usize = CAP_ERRORS;
+    for (i, line) in lines.iter().take(MAX_GO_BUILD_ERRORS).enumerate() {
+        result.push_str(&format!("{}. {}\n", i + 1, truncate(line, 120)));
+    }
+
+    if lines.len() > MAX_GO_BUILD_ERRORS {
+        result.push_str(&format!(
+            "\n… +{} more output lines\n",
+            lines.len() - MAX_GO_BUILD_ERRORS
+        ));
     }
 
     result.trim().to_string()
@@ -646,6 +675,7 @@ fn is_go_build_error_line(line: &str) -> bool {
         "go: build failed",
         "go: error ",
         "error: ",
+        "pattern ",
         "go: updates to go.mod needed",
         "go: inconsistent vendoring",
         "no go files in ",
@@ -678,7 +708,6 @@ fn filter_go_vet(output: &str) -> String {
 
     let mut result = String::new();
     result.push_str(&format!("Go vet: {} issues\n", issues.len()));
-    result.push_str("═══════════════════════════════════════\n");
 
     const MAX_GO_VET_ISSUES: usize = CAP_ERRORS;
     for (i, issue) in issues.iter().take(MAX_GO_VET_ISSUES).enumerate() {
@@ -989,6 +1018,28 @@ go: cannot load module missing listed in go.work file: open missing/go.mod: no s
         );
         assert!(result.contains("no Go files in /tmp/example"));
         assert!(result.contains("go: cannot load module missing listed in go.work file"));
+    }
+
+    #[test]
+    fn test_filter_go_build_preserves_package_pattern_errors() {
+        let output = r#"pattern ./...: directory prefix . does not contain main module or its selected dependencies
+pattern ./...: directory prefix . does not contain modules listed in go.work or their selected dependencies"#;
+
+        let result = filter_go_build(output);
+        assert!(result.contains("2 errors"));
+        assert!(result.contains("does not contain main module"));
+        assert!(result.contains("does not contain modules listed in go.work"));
+        assert!(!result.contains("Success"));
+    }
+
+    #[test]
+    fn test_filter_go_build_nonzero_exit_never_reports_success() {
+        let output = "opaque go build failure from stderr";
+
+        let result = filter_go_build_with_exit(output, 1);
+        assert!(result.contains("Go build: failed (exit 1)"));
+        assert!(result.contains(output));
+        assert!(!result.contains("Success"));
     }
 
     #[test]

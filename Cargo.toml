@@ -1,7 +1,8 @@
 [package]
 name = "rtk"
-version = "0.40.0"
+version = "0.42.4"
 edition = "2021"
+rust-version = "1.91"
 authors = ["Patrick Szymkowiak"]
 description = "Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption"
 license = "Apache 2.0"
@@ -14,13 +15,20 @@ categories = ["command-line-utilities", "development-tools"]
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 anyhow = "1.0"
+# Console code page decoding for child-process output. Kept off the
+# cfg(windows) target so the mapping and the incremental UTF-8 walk stay
+# compiled — and unit-tested — on every platform; only the code page *lookup*
+# is Windows-specific. codepage covers the ANSI/DBCS pages encoding_rs
+# implements, oem_cp the legacy OEM/DOS pages (437, 850, …) it does not.
+encoding_rs = "0.8"
+codepage = "0.1"
+oem_cp = "2"
 ignore = "0.4"
 walkdir = "2"
 regex = "1"
-lazy_static = "1.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-colored = "2"
+colored = "3"
 dirs = "5"
 rusqlite = { version = "0.31", features = ["bundled"] }
 toml = "0.8"
@@ -37,10 +45,14 @@ automod = "1"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_System_Console",
+    "Win32_Globalization",
+] }
+
 [build-dependencies]
 toml = "0.8"
-
-[dev-dependencies]
 
 [profile.release]
 opt-level = 3

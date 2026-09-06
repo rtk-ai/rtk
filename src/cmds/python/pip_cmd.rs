@@ -1,5 +1,6 @@
 //! Filters pip and uv package manager output.
 
+use crate::core::guard::never_worse;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_INVENTORY, CAP_LIST};
@@ -78,7 +79,7 @@ fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, Str
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    let filtered = filter_pip_list(&result.stdout);
+    let filtered = never_worse(&raw, &filter_pip_list(&result.stdout)).to_string();
     println!("{}", filtered);
 
     Ok((raw, filtered, result.exit_code))
@@ -106,7 +107,7 @@ fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String,
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    let filtered = filter_pip_outdated(&result.stdout);
+    let filtered = never_worse(&raw, &filter_pip_outdated(&result.stdout)).to_string();
     println!("{}", filtered);
 
     Ok((raw, filtered, result.exit_code))
@@ -153,7 +154,6 @@ fn filter_pip_list(output: &str) -> String {
 
     let mut result = String::new();
     result.push_str(&format!("pip list: {} packages\n", packages.len()));
-    result.push_str("═══════════════════════════════════════\n");
 
     // Group by first letter for easier scanning
     let mut by_letter: std::collections::HashMap<char, Vec<&Package>> =
@@ -203,7 +203,6 @@ fn filter_pip_outdated(output: &str) -> String {
 
     let mut result = String::new();
     result.push_str(&format!("pip outdated: {} packages\n", packages.len()));
-    result.push_str("═══════════════════════════════════════\n");
 
     const MAX_PIP_PACKAGES: usize = CAP_LIST;
     for (i, pkg) in packages.iter().take(MAX_PIP_PACKAGES).enumerate() {

@@ -5,6 +5,7 @@ use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
 use regex::Regex;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = if tool_exists("mypy") {
@@ -23,14 +24,24 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: mypy {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_filtered_with_exit(
         cmd,
         "mypy",
         &args.join(" "),
-        |raw| filter_mypy_output(&strip_ansi(raw)),
+        |raw, exit_code| {
+            let clean = strip_ansi(raw);
+            let filtered = filter_mypy_output(&clean);
+            // Nothing recognised on a failed run means mypy never type-checked.
+            if exit_code != 0 && filtered == MYPY_CLEAN {
+                return clean.trim().to_string();
+            }
+            filtered
+        },
         runner::RunOptions::default(),
     )
 }
+
+const MYPY_CLEAN: &str = "mypy: No issues found";
 
 struct MypyError {
     file: String,
@@ -41,13 +52,11 @@ struct MypyError {
 }
 
 pub fn filter_mypy_output(output: &str) -> String {
-    lazy_static::lazy_static! {
-        // file.py:12: error: Message [error-code]
-        // file.py:12:5: error: Message [error-code]
-        static ref MYPY_DIAG: Regex = Regex::new(
-            r"^(.+?):(\d+)(?::\d+)?: (error|warning|note): (.+?)(?:\s+\[(.+)\])?$"
-        ).unwrap();
-    }
+    // file.py:12: error: Message [error-code]
+    // file.py:12:5: error: Message [error-code]
+    static MYPY_DIAG: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(.+?):(\d+)(?::\d+)?: (error|warning|note): (.+?)(?:\s+\[(.+)\])?$").unwrap()
+    });
 
     let lines: Vec<&str> = output.lines().collect();
     let mut errors: Vec<MypyError> = Vec::new();
@@ -128,9 +137,9 @@ pub fn filter_mypy_output(output: &str) -> String {
     // No errors at all
     if errors.is_empty() && fileless_lines.is_empty() {
         if output.contains("Success: no issues found") || output.contains("no issues found") {
-            return "mypy: No issues found".to_string();
+            return MYPY_CLEAN.to_string();
         }
-        return "mypy: No issues found".to_string();
+        return MYPY_CLEAN.to_string();
     }
 
     // Group by file
@@ -164,7 +173,6 @@ pub fn filter_mypy_output(output: &str) -> String {
             errors.len(),
             by_file.len()
         ));
-        result.push_str("═══════════════════════════════════════\n");
 
         // Top error codes summary (only when 2+ distinct codes)
         let mut code_counts: Vec<_> = by_code.iter().collect();
