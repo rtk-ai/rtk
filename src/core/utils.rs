@@ -478,6 +478,27 @@ pub fn tool_exec(runner: Option<&str>, tool: &str, missing: MissingTool) -> Comm
     }
 }
 
+/// Build a Command using `pnpm --filter <workspace> exec -- <tool>`, or
+/// fallback to `package_manager_exec()` when no workspace filter is provided.
+///
+/// When `pnpm_filter` is set, this always uses `pnpm` because workspace
+/// scoping is only supported through pnpm's filter flags.
+#[allow(dead_code)]
+pub fn package_manager_filtered_exec(tool: &str, pnpm_filter: Option<&str>) -> Command {
+    match pnpm_filter {
+        Some(workspace) => {
+            let mut c = resolved_command("pnpm");
+            c.arg("--filter")
+                .arg(workspace)
+                .arg("exec")
+                .arg("--")
+                .arg(tool);
+            c
+        }
+        None => package_manager_exec(tool),
+    }
+}
+
 /// Resolve a binary name to its full path, honoring PATHEXT on Windows.
 ///
 /// On Windows, Node.js tools are installed as `.CMD`/`.BAT`/`.PS1` shims.
@@ -1115,6 +1136,56 @@ mod tests {
             !tool_exists("nonexistent_binary_xyz_99999"),
             "tool_exists should return false for nonexistent binary"
         );
+    }
+
+    // ===== package_manager_filtered_exec tests (#515) =====
+
+    #[test]
+    fn test_package_manager_filtered_exec_uses_pnpm_when_filter_is_set() {
+        let cmd = package_manager_filtered_exec("prettier", Some("web"));
+        let program = cmd.get_program().to_string_lossy().to_lowercase();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect();
+
+        assert!(
+            program.contains("pnpm"),
+            "expected pnpm executable, got: {program}"
+        );
+        assert_eq!(args, vec!["--filter", "web", "exec", "--", "prettier"]);
+    }
+
+    #[test]
+    fn test_package_manager_filtered_exec_supports_scoped_workspace() {
+        let cmd = package_manager_filtered_exec("vitest", Some("@scope/pkg"));
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args, vec!["--filter", "@scope/pkg", "exec", "--", "vitest"]);
+    }
+
+    #[test]
+    fn test_package_manager_filtered_exec_none_falls_back_to_package_manager_exec() {
+        let tool = "nonexistent_binary_xyz_99999";
+        let cmd = package_manager_filtered_exec(tool, None);
+
+        let program = cmd.get_program().to_string_lossy().to_lowercase();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect();
+
+        if program.contains("pnpm") || program.contains("yarn") {
+            assert_eq!(args, vec!["exec", "--", tool]);
+        } else {
+            assert!(
+                program.contains("npx"),
+                "expected npx/pnpm/yarn executable, got: {program}"
+            );
+            assert_eq!(args, vec!["--no-install", "--", tool]);
+        }
     }
 
     #[test]
