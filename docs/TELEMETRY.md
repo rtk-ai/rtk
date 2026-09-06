@@ -62,8 +62,8 @@ This data directly drives our roadmap. For example, if telemetry shows that 40% 
 |-------|---------|---------|
 | `passthrough_top` | `["git:15", "npm:8"]` | Top 5 commands with 0% savings — these need filters |
 | `parse_failures_24h` | `3` | Filter fragility — high count means filters are breaking |
-| `low_savings_commands` | `["rtk docker ps:25%"]` | Commands averaging <30% savings — filters to improve |
-| `avg_savings_per_command` | `68.5` | Unweighted average (vs global which is volume-biased) |
+| `low_savings_commands` | `["rtk docker ps:25%"]` | Commands with weighted savings rate <30% — filters to improve. Rate is `SUM(saved)/SUM(input)` per command so high-volume calls are not diluted by passthrough calls. |
+| `avg_savings_per_command` | `68.5` | Unweighted average across distinct command names (each filter counts once regardless of invocation volume). Each command's individual rate is weighted by volume before the outer average. |
 
 ### Ecosystem distribution
 

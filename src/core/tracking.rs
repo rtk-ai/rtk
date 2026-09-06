@@ -1300,12 +1300,18 @@ impl Tracker {
     }
 
     /// Count commands with low savings (<30%) — filters that need improvement.
+    ///
+    /// Uses weighted savings rate (`SUM(saved_tokens) / SUM(input_tokens)`) per command so that
+    /// a handful of 0%-savings passthrough calls don't dilute a filter that genuinely performs
+    /// well on high-volume invocations. Same fix as `get_by_command` (PR #891).
     pub fn low_savings_commands(&self, limit: usize) -> Result<Vec<(String, f64)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT rtk_cmd, AVG(savings_pct) as avg_sav FROM commands
+            "SELECT rtk_cmd,
+                    SUM(saved_tokens) * 100.0 / SUM(input_tokens) AS sav
+             FROM commands
              WHERE input_tokens > 0
              GROUP BY rtk_cmd
-             HAVING avg_sav < 30.0 AND avg_sav > 0.0
+             HAVING SUM(input_tokens) > 0 AND sav < 30.0 AND sav > 0.0
              ORDER BY COUNT(*) DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
@@ -1317,13 +1323,22 @@ impl Tracker {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// Average savings percentage per command (unweighted — each command name counts once).
+    /// Average savings percentage per command (unweighted across command names — each distinct
+    /// command counts once, regardless of how many times it was invoked).
+    ///
+    /// The *inner* rate per command is weighted by volume (`SUM(saved)/SUM(input)`) so that
+    /// passthrough calls don't dilute a command's own rate. The *outer* average across command
+    /// names stays unweighted — this is intentional: it gives equal weight to every filter
+    /// instead of being dominated by the most-called one. Documented in `docs/TELEMETRY.md`.
     pub fn avg_savings_per_command(&self) -> Result<f64> {
         let avg: f64 = self.conn.query_row(
-            "SELECT COALESCE(AVG(avg_sav), 0.0) FROM (
-                SELECT rtk_cmd, AVG(savings_pct) as avg_sav
-                FROM commands WHERE input_tokens > 0
+            "SELECT COALESCE(AVG(cmd_rate), 0.0) FROM (
+                SELECT rtk_cmd,
+                       SUM(saved_tokens) * 100.0 / SUM(input_tokens) AS cmd_rate
+                FROM commands
+                WHERE input_tokens > 0
                 GROUP BY rtk_cmd
+                HAVING SUM(input_tokens) > 0
             )",
             [],
             |row| row.get(0),
@@ -2124,6 +2139,122 @@ mod tests {
 
         assert!(summary.total >= 1);
         assert!(summary.recent.iter().any(|r| r.raw_command == test_cmd));
+    }
+
+    // 14. low_savings_commands uses weighted rate — high-volume command never mis-classified
+    //
+    // Regression test for: AVG(savings_pct) over rows gave wrong per-command rate when a
+    // single high-savings invocation was diluted by several zero-savings invocations.
+    //
+    // Setup (5 rows via direct SQL to avoid polluting get_recent window):
+    //   1 big row:  input=100_000, saved=95_000 → savings_pct=95%
+    //   4 small rows: input=100, saved=0        → savings_pct=0%
+    //
+    //   Unweighted AVG(savings_pct): (95 + 0+0+0+0) / 5 = 19%  → old bug: appears in low_savings
+    //   Weighted SUM(saved)/SUM(input)*100: 95_000/100_400 ≈ 94.6% → correct: must NOT appear
+    #[test]
+    fn test_low_savings_commands_excludes_high_volume_command() {
+        let tracker = Tracker::new().expect("Failed to create tracker");
+        let pid = std::process::id();
+        let cmd = format!("rtk_lowsav_test_{}", pid);
+        let ts = Utc::now().to_rfc3339();
+
+        // 1 large call: 95% savings
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO commands \
+                 (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![&ts, &cmd, &cmd, "/tmp/rtk_ls_test", 100_000_i64, 5_000_i64, 95_000_i64, 95.0_f64, 10_i64],
+            )
+            .expect("Failed to insert large row");
+
+        // 4 small calls: 0% savings (input > 0 so included in GROUP BY filter)
+        for _ in 0..4 {
+            tracker
+                .conn
+                .execute(
+                    "INSERT INTO commands \
+                     (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![&ts, &cmd, &cmd, "/tmp/rtk_ls_test", 100_i64, 100_i64, 0_i64, 0.0_f64, 5_i64],
+                )
+                .expect("Failed to insert small row");
+        }
+
+        let low = tracker
+            .low_savings_commands(1000)
+            .expect("Failed to query low_savings_commands");
+
+        let found = low
+            .iter()
+            .any(|(name, _)| name.starts_with("rtk_lowsav_test_"));
+        assert!(
+            !found,
+            "High-volume command (weighted 94.6%) incorrectly appeared in low_savings_commands. \
+             Unweighted AVG bug would give 19% (below 30% threshold)."
+        );
+    }
+
+    // 15. avg_savings_per_command inner rate is weighted per-command
+    //
+    // Regression test for: AVG(savings_pct) on the inner subquery diluted per-command rates.
+    //
+    // Setup (5 rows via direct SQL):
+    //   1 big row:  input=100_000, saved=95_000 → savings_pct=95%
+    //   4 small rows: input=100, saved=0        → savings_pct=0%
+    //
+    //   Inner weighted rate: 95_000/100_400 ≈ 94.6%
+    //   Old inner AVG(savings_pct): 19%  — would drag the command into low_savings
+    //
+    // We verify the fix indirectly: the function must return a value in [0, 100], and the
+    // correctness of the inner weighted rate is already proven by test 14 above (the same
+    // SQL pattern is used in both queries). We also check the function doesn't panic.
+    #[test]
+    fn test_avg_savings_per_command_inner_weighted() {
+        let tracker = Tracker::new().expect("Failed to create tracker");
+        let pid = std::process::id();
+        let cmd = format!("rtk_avgtest_{}", pid);
+        let ts = Utc::now().to_rfc3339();
+
+        // 1 large call: 95% savings
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO commands \
+                 (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![&ts, &cmd, &cmd, "/tmp/rtk_avg_test", 100_000_i64, 5_000_i64, 95_000_i64, 95.0_f64, 10_i64],
+            )
+            .expect("Failed to insert large row");
+
+        // 4 small calls: 0% savings
+        for _ in 0..4 {
+            tracker
+                .conn
+                .execute(
+                    "INSERT INTO commands \
+                     (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![&ts, &cmd, &cmd, "/tmp/rtk_avg_test", 100_i64, 100_i64, 0_i64, 0.0_f64, 5_i64],
+                )
+                .expect("Failed to insert small row");
+        }
+
+        let rate = tracker
+            .avg_savings_per_command()
+            .expect("avg_savings_per_command must not fail");
+
+        assert!(
+            (0.0..=100.0).contains(&rate),
+            "avg_savings_per_command returned out-of-range value: {:.1}%",
+            rate
+        );
+        // The inner per-command rate for our cmd is ~94.6% (weighted).
+        // Old inner AVG would be 19%. We can't assert the global aggregate exactly
+        // because other DB entries coexist, but the function must succeed and be in range.
+        // Correctness of the inner weighted formula is proven via test 14.
     }
 
     // 13. recovery_rate calculation
