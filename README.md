@@ -152,6 +152,8 @@ Four strategies applied per command type:
 3. **Truncation** - Keeps relevant context, cuts redundancy
 4. **Deduplication** - Collapses repeated log lines with counts
 
+> **Does RTK break Claude's prompt cache?** No. RTK filters output once per command. The result is stored in history and cached normally on subsequent API calls, so the cache keeps working as expected. Smaller outputs also mean cheaper cache writes and reads. See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for details.
+
 ## Commands
 
 > Percentages below are **reductions in bash output**, not reductions in your bill. See [How Savings Work](#how-savings-work).
