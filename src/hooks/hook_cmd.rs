@@ -270,7 +270,21 @@ fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
     }
 }
 
+/// Strip leading shell line-continuation sequences (`\` + newline).
+///
+/// Claude Code sometimes emits multi-line commands with a leading `\\\n`
+/// before the actual command token, which prevents the rewrite registry
+/// from recognising the command. Strip them so the hook sees the real command.
+fn strip_line_continuations(cmd: &str) -> &str {
+    let mut s = cmd;
+    while let Some(rest) = s.strip_prefix("\\\n") {
+        s = rest;
+    }
+    s
+}
+
 fn decide_hook_action(cmd: &str, host: permissions::Host) -> HookDecision {
+    let cmd = strip_line_continuations(cmd);
     decide_from_verdict(cmd, permissions::check_command_for(cmd, host))
 }
 
@@ -1700,6 +1714,50 @@ mod tests {
     #[test]
     fn test_claude_already_rtk_passthrough() {
         assert!(run_claude_inner(&claude_input("rtk git status")).is_none());
+    }
+
+    #[test]
+    fn test_strip_line_continuations_single() {
+        assert_eq!(strip_line_continuations("\\\nkubectl get pods"), "kubectl get pods");
+    }
+
+    #[test]
+    fn test_strip_line_continuations_multiple() {
+        assert_eq!(strip_line_continuations("\\\n\\\nkubectl get pods"), "kubectl get pods");
+    }
+
+    #[test]
+    fn test_strip_line_continuations_no_op() {
+        assert_eq!(strip_line_continuations("kubectl get pods"), "kubectl get pods");
+        assert_eq!(strip_line_continuations(""), "");
+    }
+
+    #[test]
+    fn test_claude_leading_continuation_is_rewritten() {
+        // Claude Code emits \\\n before the real command in some multiline contexts.
+        let result = run_claude_inner(&claude_input("\\\nkubectl get pods -n default"));
+        assert!(
+            result.is_some(),
+            "command with leading \\\\n should be rewritten, not silently dropped"
+        );
+        let v: Value = serde_json::from_str(&result.unwrap()).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk kubectl get pods -n default");
+    }
+
+    #[test]
+    fn test_claude_double_continuation_is_rewritten() {
+        let result = run_claude_inner(&claude_input("\\\n\\\nkubectl get pods -n default"));
+        assert!(result.is_some());
+        let v: Value = serde_json::from_str(&result.unwrap()).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk kubectl get pods -n default");
     }
 
     #[test]
