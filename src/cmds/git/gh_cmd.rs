@@ -468,29 +468,71 @@ fn pr_checks(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32>
     )
 }
 
+/// Extract the status bucket from a `gh pr checks` row.
+///
+/// `gh pr checks` prints tab-separated rows — `<name>\t<bucket>\t<elapsed>\t<url>`
+/// — where bucket is one of pass / fail / pending / skipping / cancel(ed). We
+/// classify on the bucket COLUMN, not a whole-line substring: a check whose
+/// *name* contains "pass"/"fail"/"pending" (e.g. "compass-audit", "fail-fast
+/// smoke") must be counted by its real status, not its name.
+fn pr_check_bucket(line: &str) -> Option<(&str, &str)> {
+    let mut fields = line.split('\t');
+    let name = fields.next()?.trim();
+    let bucket = fields.next()?.trim();
+    if name.is_empty() || bucket.is_empty() {
+        return None;
+    }
+    Some((name, bucket))
+}
+
 fn format_pr_checks(stdout: &str) -> String {
     let mut passed = 0;
     let mut failed = 0;
     let mut pending = 0;
+    let mut skipped = 0;
     let mut failed_checks = Vec::new();
 
     for line in stdout.lines() {
-        if line.contains("[ok]") || line.contains("pass") {
+        let Some((name, bucket)) = pr_check_bucket(line) else {
+            continue;
+        };
+        // Match on the bucket column. `starts_with` absorbs label variants
+        // (skipping/skipped, cancel/canceled/cancelled).
+        if bucket.starts_with("pass") {
             passed += 1;
-        } else if line.contains("[x]") || line.contains("fail") {
+        } else if bucket.starts_with("fail") || bucket.starts_with("cancel") {
+            // A cancelled check is not a pass — gh's own rollup exits non-zero
+            // for it, so surface it alongside failures rather than dropping it.
             failed += 1;
-            failed_checks.push(line.trim().to_string());
-        } else if line.contains('*') || line.contains("pending") {
+            failed_checks.push(name.to_string());
+        } else if bucket.starts_with("pending") {
             pending += 1;
+        } else if bucket.starts_with("skip") {
+            skipped += 1;
         }
     }
 
+    let total = passed + failed + pending + skipped;
+
+    // Nothing parsed as a check row (e.g. "no checks reported on the '...'
+    // branch"). Return empty so the caller falls back to gh's raw output —
+    // never invent a misleading "0 passed" summary. (CONTRIBUTING: never block.)
+    if total == 0 {
+        return String::new();
+    }
+
+    // Lead with passed/total so the counts reconcile — skipped/pending checks are
+    // part of the total, never silently dropped (CONTRIBUTING: transparency).
     let mut out = String::new();
-    out.push_str("CI Checks Summary:\n");
-    out.push_str(&format!("  [ok] Passed: {}\n", passed));
-    out.push_str(&format!("  [FAIL] Failed: {}\n", failed));
+    out.push_str(&format!("CI Checks Summary: {}/{} passed\n", passed, total));
+    if failed > 0 {
+        out.push_str(&format!("  [FAIL] Failed: {}\n", failed));
+    }
     if pending > 0 {
         out.push_str(&format!("  [pending] Pending: {}\n", pending));
+    }
+    if skipped > 0 {
+        out.push_str(&format!("  [skip] Skipped: {}\n", skipped));
     }
     if !failed_checks.is_empty() {
         out.push_str("\n  Failed checks:\n");
@@ -1033,6 +1075,44 @@ mod tests {
         assert_eq!(truncate("", 10), "");
         assert_eq!(truncate("ab", 10), "ab");
         assert_eq!(truncate("abc", 3), "abc"); // exact fit
+    }
+
+    #[test]
+    fn test_format_pr_checks_classifies_by_bucket_not_name() {
+        // Names deliberately contain "pass"/"fail" substrings; classification
+        // must come from the status column, not the name.
+        let stdout = "compass-audit\tskipping\t0\thttps://x/1\n\
+                      fail-fast smoke\tpass\t3s\thttps://x/2\n\
+                      real failure\tfail\t1s\thttps://x/3";
+        let out = format_pr_checks(stdout);
+        assert!(out.contains("1/3 passed"), "got: {out}");
+        assert!(out.contains("Failed: 1"), "got: {out}");
+        assert!(out.contains("Skipped: 1"), "got: {out}");
+        assert!(out.contains("real failure"), "got: {out}");
+        // The skipping check named "compass-audit" must not be counted as passed.
+        assert!(!out.contains("2/3"), "got: {out}");
+    }
+
+    #[test]
+    fn test_format_pr_checks_reconciles_total_with_skips() {
+        // 1 pass + 2 skips: the total must be 3, skips surfaced, not dropped.
+        let stdout = "build\tpass\t1m\thttps://x/1\n\
+                      render smoke\tskipping\t0\thttps://x/2\n\
+                      web smoke\tskipping\t0\thttps://x/3";
+        let out = format_pr_checks(stdout);
+        assert!(out.contains("1/3 passed"), "got: {out}");
+        assert!(out.contains("Skipped: 2"), "got: {out}");
+    }
+
+    #[test]
+    fn test_format_pr_checks_empty_falls_back_to_raw() {
+        // No parseable rows → empty, so the caller passes gh's real message
+        // ("no checks reported…") through instead of a misleading "0 passed".
+        assert_eq!(format_pr_checks(""), "");
+        assert_eq!(
+            format_pr_checks("no checks reported on the 'feature' branch"),
+            ""
+        );
     }
 
     #[test]
