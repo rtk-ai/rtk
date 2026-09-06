@@ -17,7 +17,7 @@
 <p align="center">
   <a href="https://www.rtk-ai.app">官网</a> &bull;
   <a href="#安装">安装</a> &bull;
-  <a href="docs/TROUBLESHOOTING.md">故障排除</a> &bull;
+  <a href="docs/guide/resources/troubleshooting.md">故障排除</a> &bull;
   <a href="docs/contributing/ARCHITECTURE.md">架构</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
@@ -172,7 +172,7 @@ rtk discover                    # 发现遗漏的节省机会
 
 ## 文档
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - 解决常见问题
+- **[TROUBLESHOOTING.md](docs/guide/resources/troubleshooting.md)** - 解决常见问题
 - **[INSTALL.md](INSTALL.md)** - 详细安装指南
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - 技术架构
 
