@@ -143,18 +143,37 @@ fn write_tee_file(
     let filename = format!("{}_{}.log", epoch, slug);
     let filepath = tee_dir.join(filename);
 
-    // Truncate at max_file_size (find a safe UTF-8 char boundary)
+    // Truncate to fit in max_file_size, keeping head + tail and dropping the middle.
+    // Tail-heavy commands (test runners, build summaries) put their useful data at the
+    // end; head-only truncation throws that away. 25/75 split keeps the prologue while
+    // giving the summary three quarters of the budget.
     let content = if raw.len() > max_file_size {
-        let boundary = raw
+        let head_budget = max_file_size / 4;
+        let tail_budget = max_file_size - head_budget;
+
+        // Last UTF-8 char boundary at or before head_budget.
+        let head_end = raw
             .char_indices()
-            .take_while(|(i, _)| *i < max_file_size)
+            .take_while(|(i, _)| *i < head_budget)
             .last()
             .map(|(i, c)| i + c.len_utf8())
             .unwrap_or(0);
+
+        // First UTF-8 char boundary at or after raw.len() - tail_budget.
+        let tail_target = raw.len().saturating_sub(tail_budget);
+        let tail_start = raw
+            .char_indices()
+            .find(|(i, _)| *i >= tail_target)
+            .map(|(i, _)| i)
+            .unwrap_or(raw.len())
+            .max(head_end);
+
+        let omitted = tail_start - head_end;
         format!(
-            "{}\n\n--- truncated at {} bytes ---",
-            &raw[..boundary],
-            max_file_size
+            "{}\n\n--- {} bytes truncated from middle ---\n\n{}",
+            &raw[..head_end],
+            omitted,
+            &raw[tail_start..]
         )
     } else {
         raw.to_string()
@@ -505,49 +524,75 @@ mod tests {
 
         let path = result.unwrap();
         let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("--- truncated at 1000 bytes ---"));
+        assert!(content.contains("bytes truncated from middle"));
         assert!(content.len() < 2000);
+    }
+
+    #[test]
+    fn test_write_tee_file_keeps_tail() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        // Simulate a tail-heavy command: lots of progress lines, then a summary.
+        let mut raw = String::new();
+        for i in 0..3000 {
+            raw.push_str(&format!("TEST {}/3000 [foo_{}.phpt]\n", i, i));
+        }
+        let summary = "FAILED TEST SUMMARY\nfoo_42.phpt\nfoo_777.phpt\nDONE";
+        raw.push_str(summary);
+
+        // Cap below total size so truncation engages.
+        let cap = 4096;
+        assert!(raw.len() > cap);
+
+        let result = write_tee_file(&raw, "make_test", tmpdir.path(), cap, 20).unwrap();
+        let content = fs::read_to_string(&result).unwrap();
+
+        // Head + tail both survive; middle marker present.
+        assert!(content.starts_with("TEST 0/3000"), "head missing");
+        assert!(content.contains("bytes truncated from middle"));
+        assert!(content.ends_with("DONE"), "tail summary missing");
+        assert!(content.contains("FAILED TEST SUMMARY"));
     }
 
     #[test]
     fn test_write_tee_file_truncation_utf8_boundary() {
         let tmpdir = tempfile::tempdir().unwrap();
-        // Create a string where the truncation point falls inside a multi-byte char.
         // Japanese chars are 3 bytes each in UTF-8.
-        // 332 chars * 3 bytes = 996 bytes, then one more = 999 bytes.
-        // With max_file_size=998, the cut falls mid-character.
-        let japanese = "\u{6F22}".repeat(333); // 999 bytes of 3-byte chars
-        assert_eq!(japanese.len(), 999);
+        // 1000 chars * 3 bytes = 3000 bytes total. With max_file_size=998 the
+        // head budget is 998/4 = 249 bytes (83 chars * 3 = 249), and the tail
+        // budget is 749 bytes — both fall on char boundaries that the slicer
+        // must respect or panic.
+        let japanese = "\u{6F22}".repeat(1000);
+        assert_eq!(japanese.len(), 3000);
 
-        // Truncate at 998 — falls in the middle of the 333rd character
         let result = write_tee_file(&japanese, "test_utf8", tmpdir.path(), 998, 20);
         assert!(result.is_some());
 
         let path = result.unwrap();
         let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("--- truncated at 998 bytes ---"));
-        // Should contain 332 full characters (996 bytes), not panic
-        assert!(content.starts_with(&"\u{6F22}".repeat(332)));
+        assert!(content.contains("bytes truncated from middle"));
+        // Head: starts with the first chars (rounded down to a char boundary).
+        assert!(content.starts_with('\u{6F22}'));
+        // Tail: ends with the last char of the input.
+        assert!(content.ends_with('\u{6F22}'));
     }
 
     #[test]
     fn test_write_tee_file_truncation_emoji() {
         let tmpdir = tempfile::tempdir().unwrap();
         // Emoji are 4 bytes each in UTF-8
-        let emojis = "\u{1F600}".repeat(100); // 400 bytes
-        assert_eq!(emojis.len(), 400);
+        let emojis = "\u{1F600}".repeat(200); // 800 bytes
+        assert_eq!(emojis.len(), 800);
 
-        // Truncate at 201 — falls mid-emoji (4-byte boundary is at 200, 204)
-        let result = write_tee_file(&emojis, "test_emoji", tmpdir.path(), 201, 20);
+        // Truncate at 401 — head budget = 100, tail budget = 301; both fall
+        // mid-emoji, so the slicer must round to the nearest char boundary.
+        let result = write_tee_file(&emojis, "test_emoji", tmpdir.path(), 401, 20);
         assert!(result.is_some());
 
         let path = result.unwrap();
         let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("--- truncated at 201 bytes ---"));
-        // The emoji portion should be exactly 200 bytes (50 emojis),
-        // rounded down from 201 to the nearest char boundary
-        let target = "\u{1F600}".repeat(50);
-        assert!(content.starts_with(&target));
+        assert!(content.contains("bytes truncated from middle"));
+        assert!(content.starts_with('\u{1F600}'));
+        assert!(content.ends_with('\u{1F600}'));
     }
 
     #[test]
