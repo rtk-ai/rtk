@@ -509,7 +509,40 @@ fn record_tee_recall_with(cfg: &RetrieverConfig, slug: &str, path: &str, disable
 fn evict(conn: &Connection, cfg: &RetrieverConfig) {
     evict_by_age(conn, cfg.retention_days);
     evict_by_count(conn, cfg.max_entries);
+    evict_stats(conn);
 }
+
+/// The stats table had no cap and no eviction, unlike `recall` (max_entries)
+/// and `tee_reads` (500). Nothing bounded it: a slug carrying variable data —
+/// a path, a subcommand, a raw command line short enough to skip the 24-char
+/// fold — opens a row per distinct value and never closes one.
+///
+/// What kept it small until now was a coincidence rather than a rule.
+/// `stat_family` truncates at the first digit preceded by an underscore, and
+/// the one slug that embeds a path happens to carry an epoch second in front
+/// of it, so `grep_0__tmp_a` folds to `grep`. A slug shaped `foo_<path>` with
+/// no digit segment folds to nothing.
+///
+/// Least-used rows go first, so a row seen once is dropped before one seen a
+/// hundred times — the opposite of `recall`, where recency governs, because a
+/// stats row is worth keeping in proportion to how much it has counted.
+fn evict_stats(conn: &Connection) {
+    let _ = conn.execute(EVICT_STATS_SQL, params![MAX_STAT_ROWS]);
+}
+
+/// Same self-limiting shape as the entry cap, for the same reason: computing
+/// the overshoot outside the statement lets two callers act on one count.
+const EVICT_STATS_SQL: &str = "DELETE FROM recall_stats WHERE rowid IN (
+        SELECT rowid FROM recall_stats ORDER BY (elisions + recalls) ASC, rowid ASC
+        LIMIT max(0, (SELECT COUNT(*) FROM recall_stats) - ?1)
+    )";
+
+/// 500 rows, matching `tee_reads`. Every family name rtk itself emits fits in
+/// a tenth of that — 50 in the telemetry allowlist — so the cap only ever bites
+/// on slugs carrying variable data, which is exactly what it is here to bound.
+/// Not configurable: a knob would be a number a user has to reason about to fix
+/// a problem the user did not cause.
+const MAX_STAT_ROWS: i64 = 500;
 
 /// Drops entries older than `retention_days`, measured on `created_at`.
 fn evict_by_age(conn: &Connection, retention_days: u32) {
@@ -2453,6 +2486,94 @@ mod tests {
     /// 179. The barrier is what makes it reproducible: without it the counts
     /// and deletes do not overlap and the defect stays invisible, which is why
     /// the sequential version of this test passed against the broken code.
+    /// B24: the stats table is bounded, and bounded by usefulness.
+    ///
+    /// Rows carrying variable data used to accumulate without limit — the
+    /// table had no cap and no eviction of any kind. The busiest rows must
+    /// survive the trim; one-shot rows are what the cap is for.
+    #[test]
+    fn test_b24_stats_table_is_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let conn = open(&cfg).unwrap();
+
+        conn.execute(
+            "INSERT INTO recall_stats (slug, mode, elisions, recalls) VALUES ('busy', 'sqlite', 9999, 0)",
+            [],
+        )
+        .unwrap();
+        for i in 0..MAX_STAT_ROWS + 50 {
+            conn.execute(
+                "INSERT INTO recall_stats (slug, mode, elisions, recalls) VALUES (?1, 'sqlite', 1, 0)",
+                params![format!("one_shot_{i}")],
+            )
+            .unwrap();
+        }
+
+        evict_stats(&conn);
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM recall_stats", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, MAX_STAT_ROWS, "stats table must be capped");
+
+        let busy: i64 = conn
+            .query_row(
+                "SELECT elisions FROM recall_stats WHERE slug = 'busy'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(busy, 9999, "the busiest row must outlive the trim");
+    }
+
+    /// The cap has to be reached through the store path, not only by calling
+    /// the trim directly. Dropping `evict_stats` from `evict` leaves both
+    /// direct tests green, which is what this one is here to catch.
+    #[test]
+    fn test_b24_store_path_trims_the_stats_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let conn = open(&cfg).unwrap();
+        for i in 0..MAX_STAT_ROWS + 50 {
+            conn.execute(
+                "INSERT INTO recall_stats (slug, mode, elisions, recalls) VALUES (?1, 'sqlite', 1, 0)",
+                params![format!("one_shot_{i}")],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        store_inner(&cfg, b"output\n", Capture::full("npm", Some(0))).unwrap();
+
+        let conn = open(&cfg).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM recall_stats", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            count <= MAX_STAT_ROWS,
+            "a store must leave the stats table within its cap, got {count}"
+        );
+    }
+
+    /// A stats table under the cap must lose nothing — the same negative-LIMIT
+    /// trap the entry cap has.
+    #[test]
+    fn test_b24_stats_below_the_cap_are_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let conn = open(&cfg).unwrap();
+        bump_stat(&conn, "npm", "sqlite", "elisions");
+        bump_stat(&conn, "cargo", "sqlite", "elisions");
+
+        evict_stats(&conn);
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM recall_stats", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2, "eviction below the cap must be a no-op");
+    }
+
     #[test]
     fn test_b25_concurrent_eviction_stops_at_the_cap() {
         let dir = tempfile::tempdir().unwrap();
