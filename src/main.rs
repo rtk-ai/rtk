@@ -468,6 +468,9 @@ enum Commands {
         /// Output format: text, json, csv
         #[arg(short, long, default_value = "text")]
         format: String,
+        /// Emit machine-readable JSON (shortcut for --format json)
+        #[arg(long, conflicts_with = "format")]
+        json: bool,
         /// Show parse failure log (commands that fell back to raw execution)
         #[arg(short = 'F', long)]
         failures: bool,
@@ -2321,10 +2324,12 @@ fn run_cli() -> Result<i32> {
             monthly,
             all,
             format,
+            json,
             failures,
             reset,
             yes,
         } => {
+            let output_format = if json { "json" } else { &format };
             analytics::gain::run(
                 project, // added: pass project flag
                 graph,
@@ -2335,7 +2340,7 @@ fn run_cli() -> Result<i32> {
                 weekly,
                 monthly,
                 all,
-                &format,
+                output_format,
                 failures,
                 reset,
                 yes,
@@ -3399,6 +3404,24 @@ mod tests {
                 _ => panic!("Expected Gain command"),
             }
         }
+    }
+
+    #[test]
+    fn test_gain_json_flag_parses() {
+        let cli = Cli::try_parse_from(["rtk", "gain", "--json", "--history"])
+            .expect("gain --json should parse");
+        match cli.command {
+            Commands::Gain { json, history, .. } => {
+                assert!(json);
+                assert!(history);
+            }
+            _ => panic!("expected Gain command"),
+        }
+    }
+
+    #[test]
+    fn test_gain_json_conflicts_with_explicit_format() {
+        assert!(Cli::try_parse_from(["rtk", "gain", "--json", "--format", "csv"]).is_err());
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
 use crate::core::utils::{format_tokens, truncate};
 use crate::hooks::hook_check;
 use anyhow::{Context, Result};
-use chrono::Local;
+use chrono::{Local, Utc};
 use colored::Colorize;
 use serde::Serialize;
 use std::io::IsTerminal;
@@ -56,6 +56,7 @@ pub fn run(
                 weekly,
                 monthly,
                 all,
+                history,
                 project_scope.as_deref(), // added: pass project scope
             );
         }
@@ -505,7 +506,15 @@ fn print_monthly(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
 
 #[derive(Serialize)]
 struct ExportData {
+    scope: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<String>,
+    generated_at: String,
+    rtk_version: &'static str,
     summary: ExportSummary,
+    by_command: Vec<ExportCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history: Option<Vec<ExportHistory>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     daily: Option<Vec<DayStats>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -525,19 +534,78 @@ struct ExportSummary {
     avg_time_ms: u64,
 }
 
+#[derive(Serialize)]
+struct ExportCommand {
+    rank: usize,
+    command: String,
+    count: usize,
+    saved_tokens: usize,
+    avg_savings_pct: f64,
+    avg_time_ms: u64,
+}
+
+#[derive(Serialize)]
+struct ExportHistory {
+    timestamp: String,
+    command: String,
+    saved_tokens: usize,
+    savings_pct: f64,
+}
+
 fn export_json(
     tracker: &Tracker,
     daily: bool,
     weekly: bool,
     monthly: bool,
     all: bool,
+    history: bool,
     project_scope: Option<&str>, // added: project scope
 ) -> Result<()> {
     let summary = tracker
         .get_summary_filtered(project_scope) // changed: use filtered variant
         .context("Failed to load token savings summary from database")?;
 
+    let by_command = summary
+        .by_command
+        .iter()
+        .enumerate()
+        .map(
+            |(index, (command, count, saved_tokens, avg_savings_pct, avg_time_ms))| ExportCommand {
+                rank: index + 1,
+                command: command.clone(),
+                count: *count,
+                saved_tokens: *saved_tokens,
+                avg_savings_pct: *avg_savings_pct,
+                avg_time_ms: *avg_time_ms,
+            },
+        )
+        .collect();
+    let history = if history {
+        Some(
+            tracker
+                .get_recent_filtered(10, project_scope)?
+                .into_iter()
+                .map(|record| ExportHistory {
+                    timestamp: record.timestamp.to_rfc3339(),
+                    command: record.rtk_cmd,
+                    saved_tokens: record.saved_tokens,
+                    savings_pct: record.savings_pct,
+                })
+                .collect(),
+        )
+    } else {
+        None
+    };
+
     let export = ExportData {
+        scope: if project_scope.is_some() {
+            "project"
+        } else {
+            "global"
+        },
+        project: project_scope.map(str::to_string),
+        generated_at: Utc::now().to_rfc3339(),
+        rtk_version: env!("CARGO_PKG_VERSION"),
         summary: ExportSummary {
             total_commands: summary.total_commands,
             total_input: summary.total_input,
@@ -547,6 +615,8 @@ fn export_json(
             total_time_ms: summary.total_time_ms,
             avg_time_ms: summary.avg_time_ms,
         },
+        by_command,
+        history,
         daily: if all || daily {
             Some(tracker.get_all_days_filtered(project_scope)?) // changed: use filtered
         } else {
@@ -759,4 +829,53 @@ fn confirm_reset() -> Result<bool> {
         .context("Failed to read confirmation")?;
 
     Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_export_schema_keeps_machine_readable_metadata_and_counts() {
+        let export = ExportData {
+            scope: "global",
+            project: None,
+            generated_at: "2026-07-20T00:00:00+00:00".to_string(),
+            rtk_version: "0.42.4",
+            summary: ExportSummary {
+                total_commands: 12,
+                total_input: 10_000,
+                total_output: 2_500,
+                total_saved: 7_500,
+                avg_savings_pct: 75.0,
+                total_time_ms: 1_200,
+                avg_time_ms: 100,
+            },
+            by_command: vec![ExportCommand {
+                rank: 1,
+                command: "rtk grep".to_string(),
+                count: 5,
+                saved_tokens: 4_000,
+                avg_savings_pct: 80.0,
+                avg_time_ms: 25,
+            }],
+            history: Some(vec![ExportHistory {
+                timestamp: "2026-07-20T00:00:00+00:00".to_string(),
+                command: "rtk grep needle".to_string(),
+                saved_tokens: 800,
+                savings_pct: 80.0,
+            }]),
+            daily: None,
+            weekly: None,
+            monthly: None,
+        };
+
+        let value = serde_json::to_value(export).unwrap();
+        assert_eq!(value["scope"], "global");
+        assert_eq!(value["rtk_version"], "0.42.4");
+        assert_eq!(value["summary"]["total_input"], 10_000);
+        assert_eq!(value["by_command"][0]["command"], "rtk grep");
+        assert_eq!(value["history"][0]["saved_tokens"], 800);
+        assert!(value.get("project").is_none());
+    }
 }
