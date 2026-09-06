@@ -638,6 +638,11 @@ fn rewrite_single(
         || trimmed.contains(';')
         || trimmed.contains('|')
         || trimmed.contains(" & ");
+    if !has_compound {
+        if let Some(stripped) = strip_redundant_rtk_shell_builtin(trimmed) {
+            return Some(stripped.to_string());
+        }
+    }
     if !has_compound && (trimmed.starts_with("rtk ") || trimmed == "rtk") {
         return Some(trimmed.to_string());
     }
@@ -1392,6 +1397,10 @@ fn rewrite_segment_inner(
     // e.g. "git status 2>&1" → match "git status", re-append " 2>&1"
     let (cmd_part, redirect_suffix) = strip_trailing_redirects(trimmed);
 
+    if let Some(stripped) = strip_redundant_rtk_shell_builtin(cmd_part) {
+        return Some(format!("{}{}", stripped, redirect_suffix));
+    }
+
     // Already RTK — pass through unchanged
     if cmd_part.starts_with("rtk ") || cmd_part == "rtk" {
         return Some(trimmed.to_string());
@@ -1593,6 +1602,23 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
     } else {
         None
     }
+}
+
+fn strip_redundant_rtk_shell_builtin(cmd: &str) -> Option<&str> {
+    const SHELL_BUILTINS: &[&str] = &[
+        ".", "alias", "cd", "export", "popd", "pushd", "set", "source", "ulimit", "umask",
+        "unalias", "unset",
+    ];
+
+    let rest = strip_word_prefix(cmd, "rtk")?.trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+
+    SHELL_BUILTINS
+        .iter()
+        .any(|builtin| strip_word_prefix(rest, builtin).is_some())
+        .then_some(rest)
 }
 
 #[cfg(test)]
@@ -2258,6 +2284,26 @@ mod tests {
     #[test]
     fn test_classify_rtk_already() {
         assert_eq!(classify_command("rtk git status"), Classification::Ignored);
+    }
+
+    #[test]
+    fn test_rewrite_strips_redundant_rtk_prefix_from_shell_builtin() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rtk cd /tmp", &[]),
+            Some("cd /tmp".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("rtk export FOO=bar", &[]),
+            Some("export FOO=bar".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_strips_redundant_rtk_prefix_from_builtin_in_compound() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rtk cd /tmp && rtk npm init -y", &[]),
+            Some("cd /tmp && rtk npm init -y".into())
+        );
     }
 
     #[test]
