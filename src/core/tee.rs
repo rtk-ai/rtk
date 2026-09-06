@@ -1,7 +1,20 @@
 //! Recovery-hint dispatch — routes to the sqlite store or legacy tee per `[retriever] mode`.
 
+// Complexity ratchet — see clippy.toml. Ceilings may only fall.
+#![deny(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    clippy::cognitive_complexity,
+    clippy::excessive_nesting,
+    clippy::fn_params_excessive_bools,
+    clippy::struct_excessive_bools,
+    clippy::type_complexity
+)]
+
 pub(crate) use crate::core::retriever::MIN_FAILURE_BYTES as MIN_TEE_SIZE;
-use crate::core::retriever::{self, RecoveryMode, RetrieverConfig, Stored, MIN_FAILURE_BYTES};
+use crate::core::retriever::{
+    self, Capture, RecoveryMode, RetrieverConfig, Stored, MIN_FAILURE_BYTES,
+};
 
 fn active() -> Option<(RecoveryMode, RetrieverConfig)> {
     if matches!(std::env::var("RTK_RECALL").ok().as_deref(), Some("0"))
@@ -88,7 +101,7 @@ fn store_hint(
     slug: &str,
     exit_code: Option<i32>,
 ) -> Option<String> {
-    match retriever::store(cfg, content.as_bytes(), slug, exit_code, 1) {
+    match retriever::store(cfg, content.as_bytes(), Capture::full(slug, exit_code)) {
         Stored::Saved(s) => Some(format!("[full output: rtk recall {}]", s.hash)),
         Stored::Unavailable | Stored::Empty => None,
     }
@@ -135,19 +148,36 @@ pub fn force_tee_tail_hint(
             super::tee_file::force_tee_tail_hint(&cfg, content, command_slug, line_offset)
                 .inspect(|_| retriever::record_tee_elision(&cfg, command_slug))
         }
-        RecoveryMode::Sqlite => {
-            match retriever::store(&cfg, content.as_bytes(), command_slug, None, line_offset) {
-                Stored::Saved(s) => Some(format!(
-                    "[+{} hidden: rtk recall {}]",
-                    s.hidden_lines, s.hash
-                )),
-                Stored::Unavailable | Stored::Empty => None,
-            }
-        }
+        RecoveryMode::Sqlite => tail_hint(&cfg, content, command_slug, line_offset),
+    }
+}
+
+/// The `[+N hidden: …]` counterpart to [`store_hint`]: same store call, but the
+/// hint names how much was withheld rather than offering the whole entry.
+fn tail_hint(
+    cfg: &RetrieverConfig,
+    content: &str,
+    slug: &str,
+    line_offset: usize,
+) -> Option<String> {
+    match retriever::store(cfg, content.as_bytes(), Capture::tail(slug, line_offset)) {
+        Stored::Saved(s) => Some(format!(
+            "[+{} hidden: rtk recall {}]",
+            s.hidden_lines, s.hash
+        )),
+        Stored::Unavailable | Stored::Empty => None,
     }
 }
 
 #[cfg(test)]
+// Test bodies are linear setup-act-assert scripts; splitting them to satisfy
+// the ratchet makes them harder to read. See clippy.toml.
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    clippy::cognitive_complexity,
+    clippy::excessive_nesting
+)]
 mod tests {
     use super::*;
 

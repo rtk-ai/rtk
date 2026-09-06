@@ -1,6 +1,17 @@
 //! Legacy file-based recovery ("tee" mode) — may be deprecated. Prefer the
 //! sqlite recall store (`[retriever] mode = "sqlite"`); see retriever.rs.
 
+// Complexity ratchet — see clippy.toml. Ceilings may only fall.
+#![deny(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    clippy::cognitive_complexity,
+    clippy::excessive_nesting,
+    clippy::fn_params_excessive_bools,
+    clippy::struct_excessive_bools,
+    clippy::type_complexity
+)]
+
 use crate::core::config::Config;
 use crate::core::constants::RTK_DATA_DIR;
 use crate::core::retriever::RetrieverConfig;
@@ -12,9 +23,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Long slugs (usually an embedded file path that duplicates the command the LLM
 /// already issued) collapse to a short readable prefix plus a short disambiguating
 /// hash, keeping recovery filenames unique but compact — fewer tokens per tee hint.
-pub(crate) fn sanitize_slug(slug: &str) -> String {
-    let sanitized: String = slug
-        .chars()
+/// Every character that is not alphanumeric, underscore or hyphen becomes an
+/// underscore. Deliberately a replacement rather than a removal: dropping the
+/// separators in `go/build/cmd` would collapse it to one word, while replacing
+/// them keeps the shape of the original readable in the filename.
+fn filename_safe(slug: &str) -> String {
+    slug.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
                 c
@@ -22,7 +36,11 @@ pub(crate) fn sanitize_slug(slug: &str) -> String {
                 '_'
             }
         })
-        .collect();
+        .collect()
+}
+
+pub(crate) fn sanitize_slug(slug: &str) -> String {
+    let sanitized = filename_safe(slug);
     const MAX_READABLE: usize = 24;
     if sanitized.len() <= MAX_READABLE {
         return sanitized;
@@ -144,44 +162,75 @@ fn create_tee_dir(tee_dir: &Path) -> Option<()> {
     crate::core::utils::create_private_dir(tee_dir).ok()
 }
 
-fn write_tee_file(
-    raw: &str,
-    slug: &str,
-    dir: &Path,
+/// The bytes a tee file actually receives.
+///
+/// Note what this does on the truncating path: it appends a
+/// `--- truncated at N bytes ---` marker *into* the payload. Tee mode is
+/// therefore not byte-faithful, unlike the sqlite store, which truncates at a
+/// line boundary and adds nothing (§B.B15). Keeping that in its own function
+/// is the difference between a caller who knows the payload is annotated and
+/// one who assumes it is the raw output.
+///
+/// The cut lands on a character boundary via `char_indices`, so a multi-byte
+/// codepoint straddling the cap is dropped rather than split.
+fn tee_body(raw: &str, max_file_size: usize) -> String {
+    if raw.len() <= max_file_size {
+        return raw.to_string();
+    }
+    let boundary = raw
+        .char_indices()
+        .take_while(|(i, _)| *i < max_file_size)
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    format!(
+        "{}\n\n--- truncated at {} bytes ---",
+        &raw[..boundary],
+        max_file_size
+    )
+}
+
+/// Where tee files go and the limits that govern them. Grouped because the
+/// three are always derived from one `[retriever]` config together and are
+/// never meaningful apart — a directory without its rotation limits describes
+/// nothing the writer can act on.
+struct TeeTarget<'a> {
+    dir: &'a Path,
     max_file_size: usize,
     max_files: usize,
-) -> Option<PathBuf> {
+}
+
+fn write_tee_file(raw: &str, slug: &str, target: &TeeTarget<'_>) -> Option<PathBuf> {
+    let TeeTarget {
+        dir,
+        max_file_size,
+        max_files,
+    } = *target;
     create_tee_dir(dir)?;
     let slug = sanitize_slug(slug);
     let epoch = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
     let filepath = dir.join(format!("{}_{}.log", epoch, slug));
-    let content = if raw.len() > max_file_size {
-        let boundary = raw
-            .char_indices()
-            .take_while(|(i, _)| *i < max_file_size)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
-        format!(
-            "{}\n\n--- truncated at {} bytes ---",
-            &raw[..boundary],
-            max_file_size
-        )
-    } else {
-        raw.to_string()
-    };
+    write_private(&filepath, &tee_body(raw, max_file_size))?;
+    cleanup_old_files(dir, max_files);
+    Some(filepath)
+}
+
+/// Create-or-truncate `path` with owner-only permissions and write `content`.
+///
+/// `open_private` sets the mode at creation rather than chmod-ing afterwards,
+/// so there is no window in which a tee file — which holds raw command output —
+/// is readable by anyone else.
+fn write_private(path: &Path, content: &str) -> Option<()> {
+    use std::io::Write;
     let mut file = crate::core::utils::open_private(
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true),
-        &filepath,
+        path,
     )
     .ok()?;
-    use std::io::Write;
-    file.write_all(content.as_bytes()).ok()?;
-    cleanup_old_files(dir, max_files);
-    Some(filepath)
+    file.write_all(content.as_bytes()).ok()
 }
 
 fn display_path(path: &Path) -> String {
@@ -193,32 +242,18 @@ fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
 
+/// Characters that make a path unsafe to paste into a shell unquoted. Quoting,
+/// globbing, redirection, command substitution, separators and history
+/// expansion — the hint we print is meant to be run, so anything the shell would
+/// interpret has to be inside quotes.
+const SHELL_METACHARS: &[char] = &[
+    '\'', '"', '\\', '$', '`', '!', '#', '&', '(', ')', ';', '<', '>', '?', '[', ']', '{', '}',
+    '|', '*',
+];
+
 fn needs_shell_quoting(path: &str) -> bool {
-    path.chars().any(|c| {
-        c.is_whitespace()
-            || matches!(
-                c,
-                '\'' | '"'
-                    | '\\'
-                    | '$'
-                    | '`'
-                    | '!'
-                    | '#'
-                    | '&'
-                    | '('
-                    | ')'
-                    | ';'
-                    | '<'
-                    | '>'
-                    | '?'
-                    | '['
-                    | ']'
-                    | '{'
-                    | '}'
-                    | '|'
-                    | '*'
-            )
-    })
+    path.chars()
+        .any(|c| c.is_whitespace() || SHELL_METACHARS.contains(&c))
 }
 
 fn escape_double_quoted_path(path: &str) -> String {
@@ -251,9 +286,11 @@ fn write(cfg: &RetrieverConfig, content: &str, slug: &str) -> Option<PathBuf> {
     write_tee_file(
         content,
         slug,
-        &dir,
-        cfg.tee_max_file_size,
-        cfg.tee_max_files,
+        &TeeTarget {
+            dir: &dir,
+            max_file_size: cfg.tee_max_file_size,
+            max_files: cfg.tee_max_files,
+        },
     )
 }
 
@@ -282,6 +319,14 @@ pub fn force_tee_tail_hint(
 }
 
 #[cfg(test)]
+// Test bodies are linear setup-act-assert scripts; splitting them to satisfy
+// the ratchet makes them harder to read. See clippy.toml.
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    clippy::cognitive_complexity,
+    clippy::excessive_nesting
+)]
 mod tests {
     use super::*;
     use std::fs;
@@ -355,7 +400,15 @@ mod tests {
     fn test_write_tee_file_creates_file() {
         let tmpdir = tempfile::tempdir().unwrap();
         let content = "error: test failed\n".repeat(50);
-        let result = write_tee_file(&content, "cargo_test", tmpdir.path(), MAX_FILE_SIZE, 20);
+        let result = write_tee_file(
+            &content,
+            "cargo_test",
+            &TeeTarget {
+                dir: tmpdir.path(),
+                max_file_size: MAX_FILE_SIZE,
+                max_files: 20,
+            },
+        );
         let path = result.expect("tee file written");
         assert!(path.exists());
         let written = fs::read_to_string(&path).unwrap();
@@ -369,8 +422,16 @@ mod tests {
 
         let tmpdir = tempfile::tempdir().unwrap();
         let tee_dir = tmpdir.path().join("tee");
-        let path = write_tee_file("secret output\n", "grep", &tee_dir, MAX_FILE_SIZE, 20)
-            .expect("tee file written");
+        let path = write_tee_file(
+            "secret output\n",
+            "grep",
+            &TeeTarget {
+                dir: &tee_dir,
+                max_file_size: MAX_FILE_SIZE,
+                max_files: 20,
+            },
+        )
+        .expect("tee file written");
 
         let mode = |p: &std::path::Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&path), 0o600, "tee file must be owner-only");
@@ -387,7 +448,15 @@ mod tests {
         let previous = unsafe { libc::umask(0o000) };
         let tmpdir = tempfile::tempdir().unwrap();
         let tee_dir = tmpdir.path().join("tee");
-        let written = write_tee_file("secret\n", "grep", &tee_dir, MAX_FILE_SIZE, 20);
+        let written = write_tee_file(
+            "secret\n",
+            "grep",
+            &TeeTarget {
+                dir: &tee_dir,
+                max_file_size: MAX_FILE_SIZE,
+                max_files: 20,
+            },
+        );
         // nosemgrep: unsafe-block
         unsafe { libc::umask(previous) };
 
@@ -400,7 +469,15 @@ mod tests {
     fn test_write_tee_file_truncation() {
         let tmpdir = tempfile::tempdir().unwrap();
         let big_output = "x".repeat(2000);
-        let result = write_tee_file(&big_output, "test", tmpdir.path(), 1000, 20);
+        let result = write_tee_file(
+            &big_output,
+            "test",
+            &TeeTarget {
+                dir: tmpdir.path(),
+                max_file_size: 1000,
+                max_files: 20,
+            },
+        );
         let path = result.expect("tee file written");
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("--- truncated at 1000 bytes ---"));
@@ -412,7 +489,15 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let japanese = "\u{6F22}".repeat(333);
         assert_eq!(japanese.len(), 999);
-        let result = write_tee_file(&japanese, "test_utf8", tmpdir.path(), 998, 20);
+        let result = write_tee_file(
+            &japanese,
+            "test_utf8",
+            &TeeTarget {
+                dir: tmpdir.path(),
+                max_file_size: 998,
+                max_files: 20,
+            },
+        );
         let path = result.expect("tee file written");
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("--- truncated at 998 bytes ---"));

@@ -1,5 +1,16 @@
 //! Content-addressed recall store backing `rtk recall`.
 
+// Complexity ratchet — see clippy.toml. Ceilings may only fall.
+#![deny(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    clippy::cognitive_complexity,
+    clippy::excessive_nesting,
+    clippy::fn_params_excessive_bools,
+    clippy::struct_excessive_bools,
+    clippy::type_complexity
+)]
+
 use super::constants::{RECALL_DB, RTK_DATA_DIR};
 use crate::core::config::Config;
 use anyhow::{Context, Result};
@@ -131,26 +142,49 @@ fn slice_first_lines(bytes: &[u8], n: usize) -> &[u8] {
 }
 
 fn grep_bytes(input: &[u8], pattern: &str) -> Vec<u8> {
-    use regex::bytes::Regex;
-    let re = Regex::new(pattern)
-        .or_else(|_| Regex::new(&regex::escape(pattern)))
-        .ok();
-    let Some(re) = re else {
+    let Some(re) = compile_grep_pattern(pattern) else {
         return input.to_vec();
     };
-    let has_trailing_newline = input.last() == Some(&b'\n');
+    let (lines, trailing_newline) = split_keeping_terminator(input);
+    let matched: Vec<&[u8]> = lines.into_iter().filter(|l| re.is_match(l)).collect();
+    join_matched_lines(&matched, trailing_newline)
+}
+
+/// A regex if the pattern is one, otherwise the pattern matched literally.
+/// `rtk recall --grep` takes whatever the agent typed, and a stray `[` should
+/// search for a bracket rather than fail the command.
+fn compile_grep_pattern(pattern: &str) -> Option<regex::bytes::Regex> {
+    use regex::bytes::Regex;
+    Regex::new(pattern)
+        .or_else(|_| Regex::new(&regex::escape(pattern)))
+        .ok()
+}
+
+/// Split on newlines, reporting whether the input ended with one.
+///
+/// The flag is the whole point. `split` yields a trailing empty slice for input
+/// ending in `\n`, and treating that as a line is what made `--grep '^'` return
+/// the stored bytes plus one newline — the §B.B4 byte-fidelity defect. Dropping
+/// it here, and carrying the terminator separately, keeps the rejoin honest.
+fn split_keeping_terminator(input: &[u8]) -> (Vec<&[u8]>, bool) {
+    let trailing_newline = input.last() == Some(&b'\n');
     let mut lines: Vec<&[u8]> = input.split(|&b| b == b'\n').collect();
-    if has_trailing_newline && lines.last() == Some(&&b""[..]) {
+    if trailing_newline && lines.last() == Some(&&b""[..]) {
         lines.pop();
     }
-    let matched: Vec<&[u8]> = lines.into_iter().filter(|l| re.is_match(l)).collect();
+    (lines, trailing_newline)
+}
+
+/// Rejoin matches, restoring the original terminator and no more: input that
+/// ended in a newline gets one back, input that did not does not gain one.
+fn join_matched_lines(matched: &[&[u8]], trailing_newline: bool) -> Vec<u8> {
     if matched.is_empty() {
         return Vec::new();
     }
     let mut out = Vec::new();
     for (i, line) in matched.iter().enumerate() {
         out.extend_from_slice(line);
-        if i + 1 < matched.len() || has_trailing_newline {
+        if i + 1 < matched.len() || trailing_newline {
             out.push(b'\n');
         }
     }
@@ -182,6 +216,13 @@ fn db_path(cfg: &RetrieverConfig) -> Result<PathBuf> {
     Ok(data_dir.join(RTK_DATA_DIR).join(RECALL_DB))
 }
 
+/// A cached connection and the DB path it was opened against.
+type CachedConn = (PathBuf, std::rc::Rc<Connection>);
+
+/// `(mode, canonical slug)` -> `(elisions, recalls)`, the fold used by
+/// `aggregate_stats`.
+type StatTotals = std::collections::BTreeMap<(String, String), (i64, i64)>;
+
 thread_local! {
     /// Last connection opened on this thread, keyed by the DB path it was
     /// opened against. `store()` runs once per elided command, but the hint
@@ -192,7 +233,7 @@ thread_local! {
     ///
     /// Keyed by path, not unconditional: `RTK_RECALL_DB` and `cfg.database_path`
     /// can select a different DB within one process, and tests routinely do.
-    static CACHED_CONN: std::cell::RefCell<Option<(PathBuf, std::rc::Rc<Connection>)>> =
+    static CACHED_CONN: std::cell::RefCell<Option<CachedConn>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -232,9 +273,10 @@ fn reset_conn_cache() {
     CACHED_CONN.with(|c| *c.borrow_mut() = None);
 }
 
-fn init_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS recall (
+/// Schema as it should exist after `open()`. Every statement is
+/// `IF NOT EXISTS`, so this runs on every connection and is the definition of
+/// the store rather than a migration step.
+const SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS recall (
             hash        TEXT PRIMARY KEY,
             command     TEXT NOT NULL,
             cwd         TEXT,
@@ -259,13 +301,18 @@ fn init_schema(conn: &Connection) -> Result<()> {
             elisions INTEGER NOT NULL DEFAULT 0,
             recalls  INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (slug, mode)
-        );",
-    )
-    .context("init recall schema")?;
-    let _ = conn.execute(
-        "ALTER TABLE recall ADD COLUMN recalled INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
+        );";
+
+/// Adds `recalled` to a `recall` table created before that column existed.
+/// Expected to fail with "duplicate column" on every current database, which is
+/// why the result is discarded: SQLite has no `ADD COLUMN IF NOT EXISTS`.
+const BACKFILL_RECALLED_SQL: &str =
+    "ALTER TABLE recall ADD COLUMN recalled INTEGER NOT NULL DEFAULT 0";
+
+fn init_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(SCHEMA_SQL)
+        .context("init recall schema")?;
+    let _ = conn.execute(BACKFILL_RECALLED_SQL, []);
     Ok(())
 }
 
@@ -331,15 +378,17 @@ fn stats_snapshot_with(cfg: &RetrieverConfig) -> Result<Vec<RecallStat>> {
             r.get::<_, i64>(3)?,
         ))
     })?;
-    let mut agg: std::collections::BTreeMap<(String, String), (i64, i64)> =
-        std::collections::BTreeMap::new();
-    for row in rows.filter_map(|r| r.ok()) {
-        let (slug, mode, elisions, recalls) = row;
-        let entry = agg.entry((mode, stat_key(&slug))).or_insert((0, 0));
-        entry.0 += elisions;
-        entry.1 += recalls;
-    }
-    let mut stats: Vec<RecallStat> = agg
+    Ok(aggregate_stats(rows.filter_map(|r| r.ok())))
+}
+
+/// Fold raw `recall_stats` rows onto their canonical slug and order them for
+/// display: by mode, then busiest first, then alphabetically.
+///
+/// Separate from the query because the folding is where the meaning is — two
+/// stored slugs that `stat_key` maps together are one row to the reader, and
+/// that rule deserves to be exercised without standing up a database.
+fn aggregate_stats(rows: impl Iterator<Item = (String, String, i64, i64)>) -> Vec<RecallStat> {
+    let mut stats: Vec<RecallStat> = fold_stat_rows(rows)
         .into_iter()
         .map(|((mode, slug), (elisions, recalls))| RecallStat {
             slug,
@@ -348,13 +397,29 @@ fn stats_snapshot_with(cfg: &RetrieverConfig) -> Result<Vec<RecallStat>> {
             recalls,
         })
         .collect();
-    stats.sort_by(|a, b| {
-        a.mode
-            .cmp(&b.mode)
-            .then(b.elisions.cmp(&a.elisions))
-            .then(a.slug.cmp(&b.slug))
-    });
-    Ok(stats)
+    stats.sort_by(by_mode_then_busiest);
+    stats
+}
+
+/// Display order: grouped by mode, busiest first within a mode, alphabetical to
+/// break ties so the table is stable between runs.
+fn by_mode_then_busiest(a: &RecallStat, b: &RecallStat) -> std::cmp::Ordering {
+    a.mode
+        .cmp(&b.mode)
+        .then(b.elisions.cmp(&a.elisions))
+        .then(a.slug.cmp(&b.slug))
+}
+
+/// Sum rows onto their canonical slug. This is where two stored slugs that
+/// `stat_key` maps together become one row to the reader.
+fn fold_stat_rows(rows: impl Iterator<Item = (String, String, i64, i64)>) -> StatTotals {
+    let mut agg: StatTotals = std::collections::BTreeMap::new();
+    for (slug, mode, elisions, recalls) in rows {
+        let entry = agg.entry((mode, stat_key(&slug))).or_insert((0, 0));
+        entry.0 += elisions;
+        entry.1 += recalls;
+    }
+    agg
 }
 
 pub fn stats_snapshot() -> Result<Vec<RecallStat>> {
@@ -431,107 +496,212 @@ fn record_tee_recall_with(cfg: &RetrieverConfig, slug: &str, path: &str, disable
     }
 }
 
+/// Two independent rules, and they do not agree on what "oldest" means — see
+/// §B.B2/§V.V13. Retention orders by `created_at`, which the upsert refreshes;
+/// the count cap orders by `rowid`, which it does not. An entry re-stored daily
+/// is therefore fresh to one rule and first-to-die to the other. Splitting them
+/// is not a fix; it makes the disagreement visible at the call site.
 fn evict(conn: &Connection, cfg: &RetrieverConfig) {
-    if cfg.retention_days > 0 {
-        let cutoff = now_secs() - (cfg.retention_days as i64) * 86_400;
-        let _ = conn.execute("DELETE FROM recall WHERE created_at < ?1", params![cutoff]);
+    evict_by_age(conn, cfg.retention_days);
+    evict_by_count(conn, cfg.max_entries);
+}
+
+/// Drops entries older than `retention_days`, measured on `created_at`.
+fn evict_by_age(conn: &Connection, retention_days: u32) {
+    if retention_days == 0 {
+        return;
     }
-    if cfg.max_entries > 0 {
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM recall", [], |r| r.get(0))
-            .unwrap_or(0);
-        let excess = count - cfg.max_entries as i64;
-        if excess > 0 {
-            let _ = conn.execute(
-                "DELETE FROM recall WHERE rowid IN (
-                    SELECT rowid FROM recall ORDER BY rowid ASC LIMIT ?1
-                )",
-                params![excess],
-            );
+    let cutoff = now_secs() - (retention_days as i64) * 86_400;
+    let _ = conn.execute("DELETE FROM recall WHERE created_at < ?1", params![cutoff]);
+}
+
+/// Trims the store back to `max_entries`, dropping lowest `rowid` first —
+/// insertion order, which `ON CONFLICT DO UPDATE` never bumps.
+fn evict_by_count(conn: &Connection, max_entries: usize) {
+    if max_entries == 0 {
+        return;
+    }
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM recall", [], |r| r.get(0))
+        .unwrap_or(0);
+    let excess = count - max_entries as i64;
+    if excess <= 0 {
+        return;
+    }
+    let _ = conn.execute(EVICT_BY_COUNT_SQL, params![excess]);
+}
+
+/// Lowest `rowid` first — insertion order. Note this is *not* `created_at`
+/// order: `ON CONFLICT DO UPDATE` refreshes the timestamp but never the rowid,
+/// which is the disagreement between the two eviction rules.
+const EVICT_BY_COUNT_SQL: &str = "DELETE FROM recall WHERE rowid IN (
+        SELECT rowid FROM recall ORDER BY rowid ASC LIMIT ?1
+    )";
+
+/// What is being recorded about one captured command.
+///
+/// These three always travel together and describe the occurrence rather than
+/// the store, which is why they are one value: the config says where to write
+/// and the content says what, while this says whose output it was, how it
+/// ended, and how much of it the agent already saw.
+pub struct Capture<'a> {
+    pub command: &'a str,
+    pub exit_code: Option<i32>,
+    /// 1-based first line the agent has *not* seen. 1 means it saw none.
+    pub shown_upto: usize,
+}
+
+impl<'a> Capture<'a> {
+    /// The agent saw none of this output — the whole entry is hidden.
+    ///
+    /// Replaces a bare `1` at the call site, which read as a magic number next
+    /// to the offsets used by the tail form.
+    pub fn full(command: &'a str, exit_code: Option<i32>) -> Self {
+        Self {
+            command,
+            exit_code,
+            shown_upto: 1,
+        }
+    }
+
+    /// The agent saw up to `shown_upto`; recall returns the tail after it.
+    /// Used by the truncation paths, which know the offset but not an exit code.
+    pub fn tail(command: &'a str, shown_upto: usize) -> Self {
+        Self {
+            command,
+            exit_code: None,
+            shown_upto,
         }
     }
 }
 
-pub fn store(
-    cfg: &RetrieverConfig,
-    content: &[u8],
-    command: &str,
-    exit_code: Option<i32>,
-    shown_upto: usize,
-) -> Stored {
+pub fn store(cfg: &RetrieverConfig, content: &[u8], capture: Capture<'_>) -> Stored {
     if content.is_empty() {
         return Stored::Empty;
     }
-    match store_inner(cfg, content, command, exit_code, shown_upto.max(1)) {
+    let capture = Capture {
+        shown_upto: capture.shown_upto.max(1),
+        ..capture
+    };
+    match store_inner(cfg, content, capture) {
         Ok(r) => Stored::Saved(r),
         Err(_) => Stored::Unavailable,
     }
 }
 
-fn store_inner(
-    cfg: &RetrieverConfig,
-    content: &[u8],
-    command: &str,
-    exit_code: Option<i32>,
-    shown_upto: usize,
-) -> Result<StoredRef> {
-    let total_lines = count_lines(content);
-    let (payload, truncated) = if content.len() > cfg.max_entry_bytes {
-        let cap = cfg.max_entry_bytes;
-        let cut = content[..cap]
-            .iter()
-            .rposition(|&b| b == b'\n')
-            .map(|i| i + 1)
-            .unwrap_or(cap);
-        (&content[..cut], true)
-    } else {
-        (content, false)
-    };
-    let hash = content_hash(command, content);
-    let blob = lz4_compress(payload);
-    let codec = CODEC_LZ4;
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|p| p.to_string_lossy().into_owned());
+/// Cut `content` to at most `cap` bytes, backing up to the last newline so a
+/// truncated entry never ends mid-line. Falls back to a hard cut when the first
+/// `cap` bytes contain no newline at all. Returns the payload and whether it was
+/// shortened.
+fn truncate_at_line_boundary(content: &[u8], cap: usize) -> (&[u8], bool) {
+    if content.len() <= cap {
+        return (content, false);
+    }
+    let cut = content[..cap]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(cap);
+    (&content[..cut], true)
+}
 
+/// Upsert keyed on the content hash: re-storing identical output from a later
+/// run refreshes the metadata rather than adding a row. Every column is
+/// overwritten, so the entry always reflects its most recent occurrence.
+const UPSERT_RECALL_SQL: &str = "INSERT INTO recall
+     (hash, command, cwd, exit_code, created_at, total_lines, shown_upto, byte_size, truncated, codec, blob)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+     ON CONFLICT(hash) DO UPDATE SET
+         command = excluded.command,
+         cwd = excluded.cwd,
+         exit_code = excluded.exit_code,
+         created_at = excluded.created_at,
+         total_lines = excluded.total_lines,
+         shown_upto = excluded.shown_upto,
+         byte_size = excluded.byte_size,
+         truncated = excluded.truncated,
+         codec = excluded.codec,
+         blob = excluded.blob";
+
+fn store_inner(cfg: &RetrieverConfig, content: &[u8], capture: Capture<'_>) -> Result<StoredRef> {
+    let entry = encode_entry(content, capture.command, cfg.max_entry_bytes);
     let conn = open(cfg)?;
-    conn.execute(
-        "INSERT INTO recall
-         (hash, command, cwd, exit_code, created_at, total_lines, shown_upto, byte_size, truncated, codec, blob)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-         ON CONFLICT(hash) DO UPDATE SET
-             command = excluded.command,
-             cwd = excluded.cwd,
-             exit_code = excluded.exit_code,
-             created_at = excluded.created_at,
-             total_lines = excluded.total_lines,
-             shown_upto = excluded.shown_upto,
-             byte_size = excluded.byte_size,
-             truncated = excluded.truncated,
-             codec = excluded.codec,
-             blob = excluded.blob",
-        params![
-            hash,
-            command,
-            cwd,
-            exit_code,
-            now_secs(),
-            total_lines as i64,
-            shown_upto as i64,
-            content.len() as i64,
-            truncated as i64,
-            codec,
-            blob
-        ],
-    )
-    .context("insert recall row")?;
-    bump_stat(&conn, command, "sqlite", "elisions");
+    upsert_entry(&conn, &entry, &capture)?;
+    bump_stat(&conn, capture.command, "sqlite", "elisions");
     evict(&conn, cfg);
 
     Ok(StoredRef {
-        hash,
-        hidden_lines: total_lines.saturating_sub(shown_upto.saturating_sub(1)),
+        hash: entry.hash,
+        hidden_lines: entry
+            .total_lines
+            .saturating_sub(capture.shown_upto.saturating_sub(1)),
     })
+}
+
+/// Write the encoded entry as a row. Takes the entry rather than eleven loose
+/// values so the column order stays next to the statement it feeds, and so the
+/// signature stays inside the argument ceiling.
+// The one exception to the line ceiling, argued rather than raised: this is a
+// positional list of eleven columns feeding one statement. Its length is the
+// width of the `recall` table, not complexity — there is no branching and
+// nothing to name. Splitting it would separate the values from the statement
+// whose parameter order they must match, which is exactly the mistake the
+// column list is here to prevent. The ceiling stays where it is; this site opts
+// out and says why.
+#[allow(clippy::too_many_lines)]
+fn upsert_entry(conn: &Connection, entry: &EncodedEntry, capture: &Capture<'_>) -> Result<()> {
+    conn.execute(
+        UPSERT_RECALL_SQL,
+        params![
+            entry.hash,
+            capture.command,
+            current_cwd(),
+            capture.exit_code,
+            now_secs(),
+            entry.total_lines as i64,
+            capture.shown_upto as i64,
+            entry.byte_size as i64,
+            entry.truncated as i64,
+            entry.codec,
+            entry.blob
+        ],
+    )
+    .context("insert recall row")?;
+    Ok(())
+}
+
+/// What actually gets written to the blob column, and the numbers describing it.
+struct EncodedEntry {
+    hash: String,
+    blob: Vec<u8>,
+    codec: &'static str,
+    total_lines: usize,
+    /// Size of the input, not of `blob` — what arrived, before truncation and
+    /// before compression.
+    byte_size: usize,
+    truncated: bool,
+}
+
+/// Address and compress the content. Split out because this is the whole of the
+/// store's content-addressing contract in one place: the hash covers the *full*
+/// input while the blob holds the possibly-truncated payload (§B.B16), and
+/// `total_lines` likewise counts what arrived, not what was kept.
+fn encode_entry(content: &[u8], command: &str, max_entry_bytes: usize) -> EncodedEntry {
+    let (payload, truncated) = truncate_at_line_boundary(content, max_entry_bytes);
+    EncodedEntry {
+        hash: content_hash(command, content),
+        blob: lz4_compress(payload),
+        codec: CODEC_LZ4,
+        total_lines: count_lines(content),
+        byte_size: content.len(),
+        truncated,
+    }
+}
+
+fn current_cwd() -> Option<String> {
+    std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 #[derive(Debug)]
@@ -558,10 +728,27 @@ fn map_row(r: &rusqlite::Row) -> rusqlite::Result<Row> {
 const SELECT_COLS: &str = "shown_upto, truncated, codec, blob, command, hash";
 
 fn load_by_hash(conn: &Connection, hash: &str) -> Result<Option<Row>> {
-    let exact = format!("SELECT {SELECT_COLS} FROM recall WHERE hash = ?1");
-    if let Some(row) = conn.query_row(&exact, params![hash], map_row).optional()? {
+    if let Some(row) = load_exact(conn, hash)? {
         return Ok(Some(row));
     }
+    match resolve_prefix(conn, hash)? {
+        Some(full) => load_exact(conn, &full),
+        None => Ok(None),
+    }
+}
+
+fn load_exact(conn: &Connection, hash: &str) -> Result<Option<Row>> {
+    let sql = format!("SELECT {SELECT_COLS} FROM recall WHERE hash = ?1");
+    Ok(conn.query_row(&sql, params![hash], map_row).optional()?)
+}
+
+/// Expand a hash prefix to the one entry it names.
+///
+/// Errors rather than guessing when a prefix matches several entries: the hint
+/// the agent was given is a full hash, so an ambiguous prefix means a
+/// hand-typed abbreviation, and picking one silently would return the wrong
+/// output under a plausible-looking hash.
+fn resolve_prefix(conn: &Connection, hash: &str) -> Result<Option<String>> {
     let mut stmt = conn.prepare(
         "SELECT hash FROM recall WHERE substr(hash, 1, length(?1)) = ?1 ORDER BY hash ASC",
     )?;
@@ -571,10 +758,7 @@ fn load_by_hash(conn: &Connection, hash: &str) -> Result<Option<Row>> {
         .collect();
     match candidates.as_slice() {
         [] => Ok(None),
-        [only] => {
-            let sql = format!("SELECT {SELECT_COLS} FROM recall WHERE hash = ?1");
-            Ok(conn.query_row(&sql, params![only], map_row).optional()?)
-        }
+        [only] => Ok(Some(only.clone())),
         many => anyhow::bail!(
             "ambiguous hash prefix '{hash}': matches {}",
             many.join(", ")
@@ -602,122 +786,200 @@ pub struct RecallArgs<'a> {
     pub list: bool,
 }
 
+/// Open the store for a `rtk recall` invocation, reporting unavailability as an
+/// exit code rather than an error. Same convention as [`load_requested_row`]:
+/// `Err` is what the process should exit with, and the message has already been
+/// printed.
+fn open_for_recall(cfg: &RetrieverConfig) -> std::result::Result<std::rc::Rc<Connection>, i32> {
+    open(cfg).map_err(|e| {
+        eprintln!("rtk recall: store unavailable: {e}");
+        1
+    })
+}
+
 pub fn run_recall(args: RecallArgs) -> Result<i32> {
     let cfg = Config::load().unwrap_or_default().retriever;
-    let conn = match open(&cfg) {
+    let conn = match open_for_recall(&cfg) {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("rtk recall: store unavailable: {e}");
-            return Ok(1);
-        }
+        Err(code) => return Ok(code),
     };
 
     if args.list {
         return list_entries(&conn);
     }
 
-    let row = match args.hash {
-        Some(h) => match load_by_hash(&conn, h) {
-            Ok(row) => row,
-            Err(e) => {
-                eprintln!("rtk recall: {e}");
-                return Ok(1);
-            }
-        },
-        None => {
-            eprintln!("rtk recall: provide a <hash> (from a recovery hint) or --list");
-            return Ok(2);
-        }
+    let row = match load_requested_row(&conn, args.hash) {
+        Ok(row) => row,
+        Err(code) => return Ok(code),
     };
 
-    let Some(row) = row else {
-        eprintln!("rtk recall: no matching entry (try `rtk recall --list`)");
-        return Ok(1);
-    };
+    emit_selected(&conn, &row, &args, cfg.max_entry_bytes)
+}
 
-    let full = decode(&row)?;
-    let sliced: Vec<u8> = if args.full {
-        full.clone()
-    } else if let Some(n) = args.from {
-        slice_from_line(&full, n).to_vec()
-    } else if let Some(n) = args.lines {
-        slice_first_lines(&full, n).to_vec()
-    } else {
-        slice_from_line(&full, row.shown_upto).to_vec()
-    };
-    let out = match args.grep {
-        Some(pat) => {
-            if regex::bytes::Regex::new(pat).is_err() {
-                eprintln!(
-                    "rtk recall: note: --grep pattern is not a valid regex, matching it literally"
-                );
-            }
-            grep_bytes(&sliced, pat)
-        }
-        None => sliced,
-    };
-
-    let stdout = std::io::stdout();
-    let _ = stdout.lock().write_all(&out);
-    mark_recalled(&conn, &row.hash, &row.command);
-
-    if row.truncated {
-        eprintln!(
-            "rtk recall: note: output exceeded the {}-byte cap and was stored truncated",
-            cfg.max_entry_bytes
-        );
-    }
+/// Decode the entry, narrow it to what the flags asked for, and deliver it.
+fn emit_selected(
+    conn: &Connection,
+    row: &Row,
+    args: &RecallArgs,
+    max_entry_bytes: usize,
+) -> Result<i32> {
+    let full = decode(row)?;
+    let out = apply_grep(select_slice(&full, args, row.shown_upto), args.grep);
+    emit_recall(conn, row, &out, max_entry_bytes);
     Ok(0)
 }
 
-fn list_entries(conn: &Connection) -> Result<i32> {
-    let mut stmt = conn.prepare(
-        "SELECT hash, command, total_lines, shown_upto, exit_code, truncated \
-         FROM recall ORDER BY created_at DESC LIMIT 50",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, i64>(2)?,
-            r.get::<_, i64>(3)?,
-            r.get::<_, Option<i64>>(4)?,
-            r.get::<_, i64>(5)?,
-        ))
-    })?;
+/// Deliver the entry and record that it was delivered. The two belong together:
+/// `recalls` is meant to count output the agent actually received, so the
+/// bookkeeping must not drift away from the write that earns it.
+fn emit_recall(conn: &Connection, row: &Row, out: &[u8], max_entry_bytes: usize) {
+    let stdout = std::io::stdout();
+    let _ = stdout.lock().write_all(out);
+    mark_recalled(conn, &row.hash, &row.command);
 
+    if row.truncated {
+        eprintln!(
+            "rtk recall: note: output exceeded the {max_entry_bytes}-byte cap and was stored truncated"
+        );
+    }
+}
+
+/// Resolve the requested entry, or the exit code to return instead. `Err` here
+/// is a CLI exit status, not a failure to propagate: 2 for a missing argument,
+/// 1 for a lookup error or an entry that does not exist.
+fn load_requested_row(conn: &Connection, hash: Option<&str>) -> std::result::Result<Row, i32> {
+    let Some(hash) = hash else {
+        eprintln!("rtk recall: provide a <hash> (from a recovery hint) or --list");
+        return Err(2);
+    };
+    match load_by_hash(conn, hash) {
+        Ok(Some(row)) => Ok(row),
+        Ok(None) => {
+            eprintln!("rtk recall: no matching entry (try `rtk recall --list`)");
+            Err(1)
+        }
+        Err(e) => {
+            eprintln!("rtk recall: {e}");
+            Err(1)
+        }
+    }
+}
+
+/// Which bytes of the stored entry the flags ask for. Defaults to the hidden
+/// tail — the part the agent has not already seen.
+fn select_slice(full: &[u8], args: &RecallArgs, shown_upto: usize) -> Vec<u8> {
+    if args.full {
+        full.to_vec()
+    } else if let Some(n) = args.from {
+        slice_from_line(full, n).to_vec()
+    } else if let Some(n) = args.lines {
+        slice_first_lines(full, n).to_vec()
+    } else {
+        slice_from_line(full, shown_upto).to_vec()
+    }
+}
+
+fn apply_grep(sliced: Vec<u8>, pattern: Option<&str>) -> Vec<u8> {
+    let Some(pattern) = pattern else {
+        return sliced;
+    };
+    if regex::bytes::Regex::new(pattern).is_err() {
+        eprintln!("rtk recall: note: --grep pattern is not a valid regex, matching it literally");
+    }
+    grep_bytes(&sliced, pattern)
+}
+
+/// Width of the COMMAND column in `rtk recall --list`.
+const LIST_COMMAND_WIDTH: usize = 26;
+
+/// Lines the agent never saw: total minus what was shown. `shown_upto` is
+/// 1-based, and both sides saturate because a row written by an older build may
+/// carry a `shown_upto` past `total_lines`.
+fn hidden_line_count(total: i64, shown_upto: i64) -> i64 {
+    total.saturating_sub(shown_upto.saturating_sub(1)).max(0)
+}
+
+/// Fit a command into `width` display cells, eliding with a single-char
+/// ellipsis. Counts `chars`, not bytes: slicing a UTF-8 command line by byte
+/// offset would panic mid-codepoint on any non-ASCII path or argument.
+fn elide_command(command: String, width: usize) -> String {
+    if command.chars().count() <= width {
+        return command;
+    }
+    let head: String = command.chars().take(width - 1).collect();
+    format!("{head}…")
+}
+
+/// One line of `rtk recall --list`. Named rather than a positional 6-tuple
+/// because the columns were destructured twenty lines from where they were
+/// read, which is where a swapped `total`/`shown` would have hidden.
+struct ListEntry {
+    hash: String,
+    command: String,
+    total_lines: i64,
+    shown_upto: i64,
+    exit_code: Option<i64>,
+    truncated: bool,
+}
+
+const LIST_ENTRIES_SQL: &str =
+    "SELECT hash, command, total_lines, shown_upto, exit_code, truncated \
+     FROM recall ORDER BY created_at DESC LIMIT 50";
+
+fn load_list_entries(conn: &Connection) -> Result<Vec<ListEntry>> {
+    let mut stmt = conn.prepare(LIST_ENTRIES_SQL)?;
+    let rows = stmt.query_map([], |r| {
+        Ok(ListEntry {
+            hash: r.get(0)?,
+            command: r.get(1)?,
+            total_lines: r.get(2)?,
+            shown_upto: r.get(3)?,
+            exit_code: r.get(4)?,
+            truncated: r.get::<_, i64>(5)? != 0,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// One row of the `--list` table. Separate from the loop so the column
+/// derivations — elision, hidden-line arithmetic, the `-` for a missing exit
+/// code — sit next to each other rather than inside a `println!` argument list.
+fn format_list_row(e: &ListEntry) -> String {
+    format!(
+        "{:<14} {:<26} {:>7} {:>7} {:>5} {}",
+        e.hash,
+        elide_command(e.command.clone(), LIST_COMMAND_WIDTH),
+        e.total_lines,
+        hidden_line_count(e.total_lines, e.shown_upto),
+        e.exit_code.map_or_else(|| "-".into(), |c| c.to_string()),
+        if e.truncated { "yes" } else { "" }
+    )
+}
+
+fn list_entries(conn: &Connection) -> Result<i32> {
+    let entries = load_list_entries(conn)?;
     println!(
         "{:<14} {:<26} {:>7} {:>7} {:>5} TRUNC",
         "HASH", "COMMAND", "LINES", "HIDDEN", "EXIT"
     );
-    let mut n = 0;
-    for row in rows {
-        let (hash, command, total, shown, exit, truncated) = row?;
-        let hidden = total.saturating_sub(shown.saturating_sub(1)).max(0);
-        let cmd = if command.chars().count() > 26 {
-            let head: String = command.chars().take(25).collect();
-            format!("{head}…")
-        } else {
-            command
-        };
-        println!(
-            "{:<14} {:<26} {:>7} {:>7} {:>5} {}",
-            hash,
-            cmd,
-            total,
-            hidden,
-            exit.map(|e| e.to_string()).unwrap_or_else(|| "-".into()),
-            if truncated != 0 { "yes" } else { "" }
-        );
-        n += 1;
+    for e in entries.iter() {
+        println!("{}", format_list_row(e));
     }
-    if n == 0 {
+    if entries.is_empty() {
         println!("(no recall entries)");
     }
     Ok(0)
 }
 
 #[cfg(test)]
+// Test bodies are linear setup-act-assert scripts; splitting them to satisfy
+// the ratchet makes them harder to read. See clippy.toml.
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    clippy::cognitive_complexity,
+    clippy::excessive_nesting
+)]
 mod tests {
     use super::*;
 
@@ -836,7 +1098,7 @@ mod tests {
     fn test_store_writes_lz4_codec() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
-        let stored = store_inner(&cfg, b"payload\n", "cmd", Some(0), 1).unwrap();
+        let stored = store_inner(&cfg, b"payload\n", Capture::full("cmd", Some(0))).unwrap();
         let conn = open(&cfg).unwrap();
         let codec: String = conn
             .query_row(
@@ -858,7 +1120,7 @@ mod tests {
         nasty.extend_from_slice("漢字\n".as_bytes());
         nasty.extend_from_slice(b"no-eol-tail");
 
-        let stored = store_inner(&cfg, &nasty, "nasty-cmd", Some(0), 1).expect("store");
+        let stored = store_inner(&cfg, &nasty, Capture::full("nasty-cmd", Some(0))).expect("store");
         let conn = open(&cfg).unwrap();
         let row = load_by_hash(&conn, &stored.hash).unwrap().expect("row");
         assert_eq!(
@@ -873,7 +1135,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
         let data = vec![0u8, 1, 2, 255, b'\n', b'x'];
-        let stored = store_inner(&cfg, &data, "c", Some(0), 1).unwrap();
+        let stored = store_inner(&cfg, &data, Capture::full("c", Some(0))).unwrap();
         let conn = open(&cfg).unwrap();
         let row = load_by_hash(&conn, &stored.hash).unwrap().unwrap();
         assert_eq!(row.codec, CODEC_LZ4);
@@ -885,7 +1147,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
         let content = b"i1\ni2\ni3\ni4\ni5\n";
-        let stored = store_inner(&cfg, content, "list", Some(0), 3).unwrap();
+        let stored = store_inner(
+            &cfg,
+            content,
+            Capture {
+                command: "list",
+                exit_code: Some(0),
+                shown_upto: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(stored.hidden_lines, 3);
         let conn = open(&cfg).unwrap();
         let row = load_by_hash(&conn, &stored.hash).unwrap().unwrap();
@@ -901,7 +1172,7 @@ mod tests {
             ..temp_cfg(dir.path())
         };
         let big = vec![b'a'; 100];
-        let stored = store_inner(&cfg, &big, "big", Some(0), 1).unwrap();
+        let stored = store_inner(&cfg, &big, Capture::full("big", Some(0))).unwrap();
         let conn = open(&cfg).unwrap();
         let row = load_by_hash(&conn, &stored.hash).unwrap().unwrap();
         assert!(row.truncated);
@@ -915,7 +1186,8 @@ mod tests {
             max_entry_bytes: 12,
             ..temp_cfg(dir.path())
         };
-        let stored = store_inner(&cfg, b"aaaa\nbbbb\ncccc\n", "cmd", Some(0), 1).unwrap();
+        let stored =
+            store_inner(&cfg, b"aaaa\nbbbb\ncccc\n", Capture::full("cmd", Some(0))).unwrap();
         let conn = open(&cfg).unwrap();
         let row = load_by_hash(&conn, &stored.hash).unwrap().unwrap();
         assert!(row.truncated);
@@ -930,7 +1202,7 @@ mod tests {
             ..temp_cfg(dir.path())
         };
         let big = vec![b'a'; 100];
-        let stored = store_inner(&cfg, &big, "big", Some(0), 1).unwrap();
+        let stored = store_inner(&cfg, &big, Capture::full("big", Some(0))).unwrap();
         let conn = open(&cfg).unwrap();
         let row = load_by_hash(&conn, &stored.hash).unwrap().unwrap();
         assert!(row.truncated);
@@ -973,7 +1245,12 @@ mod tests {
         };
         for i in 0..5 {
             let content = format!("output-{i}");
-            store_inner(&cfg, content.as_bytes(), &format!("cmd{i}"), Some(0), 1).unwrap();
+            store_inner(
+                &cfg,
+                content.as_bytes(),
+                Capture::full(&format!("cmd{i}"), Some(0)),
+            )
+            .unwrap();
         }
         let conn = open(&cfg).unwrap();
         let count: i64 = conn
@@ -986,8 +1263,8 @@ mod tests {
     fn test_dedup_same_content_same_hash() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
-        let a = store_inner(&cfg, b"same output\n", "cmd", Some(0), 1).unwrap();
-        let b = store_inner(&cfg, b"same output\n", "cmd", Some(0), 1).unwrap();
+        let a = store_inner(&cfg, b"same output\n", Capture::full("cmd", Some(0))).unwrap();
+        let b = store_inner(&cfg, b"same output\n", Capture::full("cmd", Some(0))).unwrap();
         assert_eq!(a.hash, b.hash);
         let conn = open(&cfg).unwrap();
         let count: i64 = conn
@@ -1000,8 +1277,8 @@ mod tests {
     fn test_stats_elision_counted_on_store() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
-        store_inner(&cfg, b"out1\n", "cargo-test", Some(1), 1).unwrap();
-        store_inner(&cfg, b"out2\n", "cargo-test", Some(1), 1).unwrap();
+        store_inner(&cfg, b"out1\n", Capture::full("cargo-test", Some(1))).unwrap();
+        store_inner(&cfg, b"out2\n", Capture::full("cargo-test", Some(1))).unwrap();
         let stats = stats_snapshot_with(&cfg).unwrap();
         let row = stats
             .iter()
@@ -1036,7 +1313,7 @@ mod tests {
     fn test_stats_recall_deduped_per_entry() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
-        let stored = store_inner(&cfg, b"x\ny\n", "vitest", Some(1), 1).unwrap();
+        let stored = store_inner(&cfg, b"x\ny\n", Capture::full("vitest", Some(1))).unwrap();
         let conn = open(&cfg).unwrap();
         mark_recalled(&conn, &stored.hash, "vitest");
         mark_recalled(&conn, &stored.hash, "vitest");
@@ -1144,7 +1421,16 @@ mod tests {
     fn test_force_path_stores_null_exit_code() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
-        let stored = store_inner(&cfg, b"trimmed list\n", "docker-images", None, 2).unwrap();
+        let stored = store_inner(
+            &cfg,
+            b"trimmed list\n",
+            Capture {
+                command: "docker-images",
+                exit_code: None,
+                shown_upto: 2,
+            },
+        )
+        .unwrap();
         let conn = open(&cfg).unwrap();
         let exit: Option<i64> = conn
             .query_row(
@@ -1163,10 +1449,11 @@ mod tests {
     fn test_identical_restore_preserves_recalled_flag() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
-        let stored = store_inner(&cfg, b"same fail\n", "cargo_test", Some(1), 1).unwrap();
+        let stored =
+            store_inner(&cfg, b"same fail\n", Capture::full("cargo_test", Some(1))).unwrap();
         let conn = open(&cfg).unwrap();
         mark_recalled(&conn, &stored.hash, "cargo_test");
-        store_inner(&cfg, b"same fail\n", "cargo_test", Some(1), 1).unwrap();
+        store_inner(&cfg, b"same fail\n", Capture::full("cargo_test", Some(1))).unwrap();
         mark_recalled(&conn, &stored.hash, "cargo_test");
         let stats = stats_snapshot_with(&cfg).unwrap();
         let s = stats
@@ -1183,7 +1470,16 @@ mod tests {
     fn test_stats_recall_counted_on_read() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
-        let stored = store_inner(&cfg, b"a\nb\nc\n", "gh-prs", Some(0), 2).unwrap();
+        let stored = store_inner(
+            &cfg,
+            b"a\nb\nc\n",
+            Capture {
+                command: "gh-prs",
+                exit_code: Some(0),
+                shown_upto: 2,
+            },
+        )
+        .unwrap();
         let conn = open(&cfg).unwrap();
         let row = load_by_hash(&conn, &stored.hash).unwrap().unwrap();
         bump_stat(&conn, &row.command, "sqlite", "recalls");
@@ -1204,7 +1500,12 @@ mod tests {
             ..temp_cfg(dir.path())
         };
         for i in 0..4 {
-            store_inner(&cfg, format!("o{i}\n").as_bytes(), "find", Some(1), 1).unwrap();
+            store_inner(
+                &cfg,
+                format!("o{i}\n").as_bytes(),
+                Capture::full("find", Some(1)),
+            )
+            .unwrap();
         }
         let conn = open(&cfg).unwrap();
         let entries: i64 = conn
@@ -1238,8 +1539,8 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let stored =
-            store_inner(&cfg, b"x\ny\n", "vitest", Some(1), 1).expect("store on old schema");
+        let stored = store_inner(&cfg, b"x\ny\n", Capture::full("vitest", Some(1)))
+            .expect("store on old schema");
         let conn = open(&cfg).unwrap();
         mark_recalled(&conn, &stored.hash, "vitest");
         let stats = stats_snapshot_with(&cfg).unwrap();
@@ -1321,7 +1622,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
         for i in 0..3 {
-            store_inner(&cfg, format!("output {i}\n").as_bytes(), "jq", None, 1).unwrap();
+            store_inner(
+                &cfg,
+                format!("output {i}\n").as_bytes(),
+                Capture::full("jq", None),
+            )
+            .unwrap();
         }
         let stats = stats_snapshot_with(&cfg).unwrap();
         let rows: Vec<_> = stats.iter().filter(|s| s.mode == "sqlite").collect();
@@ -1415,7 +1721,7 @@ mod tests {
     fn test_load_by_hash_prefix() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
-        let stored = store_inner(&cfg, b"hello world\n", "cmd", Some(0), 1).unwrap();
+        let stored = store_inner(&cfg, b"hello world\n", Capture::full("cmd", Some(0))).unwrap();
         let conn = open(&cfg).unwrap();
         let prefix = &stored.hash[..6];
         assert!(load_by_hash(&conn, prefix).unwrap().is_some());
@@ -1424,7 +1730,7 @@ mod tests {
     // --- V8 byte fidelity: 1-to-1 coverage per byte class ---
 
     fn recall_full_pipeline(cfg: &RetrieverConfig, content: &[u8], cmd: &str) -> Vec<u8> {
-        let stored = store_inner(cfg, content, cmd, Some(0), 1).expect("store");
+        let stored = store_inner(cfg, content, Capture::full(cmd, Some(0))).expect("store");
         let conn = open(cfg).unwrap();
         let row = load_by_hash(&conn, &stored.hash).unwrap().expect("row");
         let full = decode(&row).unwrap();
@@ -1521,7 +1827,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
         let content = b"\x1b[31mline1\x1b[0m\n\x00line2\x00\nline3\r\n";
-        let stored = store_inner(&cfg, content, "slice-test", Some(0), 2).unwrap();
+        let stored = store_inner(
+            &cfg,
+            content,
+            Capture {
+                command: "slice-test",
+                exit_code: Some(0),
+                shown_upto: 2,
+            },
+        )
+        .unwrap();
         let conn = open(&cfg).unwrap();
         let row = load_by_hash(&conn, &stored.hash).unwrap().unwrap();
         let full = decode(&row).unwrap();
@@ -1534,7 +1849,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
         let content = b"\x1b[31mline1\x1b[0m\n\x00line2\x00\nline3\r\n";
-        let stored = store_inner(&cfg, content, "first-lines", Some(0), 1).unwrap();
+        let stored = store_inner(&cfg, content, Capture::full("first-lines", Some(0))).unwrap();
         let conn = open(&cfg).unwrap();
         let row = load_by_hash(&conn, &stored.hash).unwrap().unwrap();
         let full = decode(&row).unwrap();
@@ -1669,16 +1984,16 @@ mod tests {
             ..temp_cfg(dir.path())
         };
         // Insert entry A (gets lowest rowid)
-        store_inner(&cfg, b"hot-entry-a\n", "hot-cmd", Some(0), 1).unwrap();
+        store_inner(&cfg, b"hot-entry-a\n", Capture::full("hot-cmd", Some(0))).unwrap();
         // Insert entries B and C
-        store_inner(&cfg, b"entry-b\n", "cmd-b", Some(0), 1).unwrap();
-        store_inner(&cfg, b"entry-c\n", "cmd-c", Some(0), 1).unwrap();
+        store_inner(&cfg, b"entry-b\n", Capture::full("cmd-b", Some(0))).unwrap();
+        store_inner(&cfg, b"entry-c\n", Capture::full("cmd-c", Some(0))).unwrap();
         // Re-store A with same (command, content) → ON CONFLICT DO UPDATE refreshes
         // created_at but NOT rowid
-        store_inner(&cfg, b"hot-entry-a\n", "hot-cmd", Some(1), 1).unwrap();
+        store_inner(&cfg, b"hot-entry-a\n", Capture::full("hot-cmd", Some(1))).unwrap();
         // Now insert D — triggers eviction. A has lowest rowid even though
         // it was most recently refreshed.
-        store_inner(&cfg, b"entry-d\n", "cmd-d", Some(0), 1).unwrap();
+        store_inner(&cfg, b"entry-d\n", Capture::full("cmd-d", Some(0))).unwrap();
 
         let conn = open(&cfg).unwrap();
         let hot_exists: bool = conn
@@ -1758,7 +2073,7 @@ mod tests {
         let cfg = temp_cfg(dir.path());
         let conn = open(&cfg).unwrap();
         // Store entry
-        store_inner(&cfg, b"original\n", "dedup-cmd", Some(0), 1).unwrap();
+        store_inner(&cfg, b"original\n", Capture::full("dedup-cmd", Some(0))).unwrap();
         let rowid_before: i64 = conn
             .query_row(
                 "SELECT rowid FROM recall WHERE command = 'dedup-cmd'",
@@ -1767,7 +2082,7 @@ mod tests {
             )
             .unwrap();
         // Re-store with same (command, content) → ON CONFLICT DO UPDATE
-        store_inner(&cfg, b"original\n", "dedup-cmd", Some(0), 1).unwrap();
+        store_inner(&cfg, b"original\n", Capture::full("dedup-cmd", Some(0))).unwrap();
         let rowid_after: i64 = conn
             .query_row(
                 "SELECT rowid FROM recall WHERE command = 'dedup-cmd'",
@@ -1797,7 +2112,7 @@ mod tests {
                     for j in 0..10 {
                         let content = format!("thread-{i}-iter-{j}\n");
                         let cmd = format!("cmd-{i}-{j}");
-                        let result = store(&cfg, content.as_bytes(), &cmd, Some(0), 1);
+                        let result = store(&cfg, content.as_bytes(), Capture::full(&cmd, Some(0)));
                         assert!(
                             !matches!(result, Stored::Unavailable),
                             "thread {i} iter {j}: store must not fail under concurrency"
@@ -1833,8 +2148,12 @@ mod tests {
     fn test_v6_concurrent_store_and_recall() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
-        let stored =
-            store_inner(&cfg, b"concurrent read target\n", "read-cmd", Some(0), 1).unwrap();
+        let stored = store_inner(
+            &cfg,
+            b"concurrent read target\n",
+            Capture::full("read-cmd", Some(0)),
+        )
+        .unwrap();
         let hash = stored.hash.clone();
 
         let handles: Vec<_> = (0..5)
@@ -1859,9 +2178,7 @@ mod tests {
             store(
                 &cfg,
                 content.as_bytes(),
-                &format!("write-cmd-{i}"),
-                Some(0),
-                1,
+                Capture::full(&format!("write-cmd-{i}"), Some(0)),
             );
         }
 
@@ -1888,9 +2205,7 @@ mod tests {
                         let _ = store(
                             &cfg,
                             content.as_bytes(),
-                            &format!("evict-{i}-{j}"),
-                            Some(0),
-                            1,
+                            Capture::full(&format!("evict-{i}-{j}"), Some(0)),
                         );
                     }
                 })
@@ -1920,7 +2235,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
         let db = db_path(&cfg).unwrap();
-        store_inner(&cfg, b"trigger wal\n", "wal-test", Some(0), 1).unwrap();
+        store_inner(&cfg, b"trigger wal\n", Capture::full("wal-test", Some(0))).unwrap();
         let conn = open(&cfg).unwrap();
         conn.execute("INSERT INTO recall (hash, command, created_at, total_lines, shown_upto, byte_size, truncated, codec, blob) VALUES ('wal_test_hash_', 'x', 1, 1, 1, 1, 0, 'raw', x'61')", []).unwrap();
         let wal = db.with_extension("db-wal");
@@ -1951,7 +2266,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
         let db = db_path(&cfg).unwrap();
-        store_inner(&cfg, b"perms check\n", "perm-test", Some(0), 1).unwrap();
+        store_inner(&cfg, b"perms check\n", Capture::full("perm-test", Some(0))).unwrap();
         let mode = std::fs::metadata(&db).unwrap().permissions().mode() & 0o777;
         assert_eq!(
             mode, 0o600,
@@ -1967,7 +2282,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
         let db = db_path(&cfg).unwrap();
-        store_inner(&cfg, b"dir check\n", "dir-test", Some(0), 1).unwrap();
+        store_inner(&cfg, b"dir check\n", Capture::full("dir-test", Some(0))).unwrap();
         if let Some(parent) = db.parent() {
             if parent != dir.path() {
                 let mode = std::fs::metadata(parent).unwrap().permissions().mode() & 0o777;
@@ -2042,7 +2357,7 @@ mod tests {
         };
         // store() itself doesn't check mode — caller (tee.rs) does
         // But store_inner still creates DB. This is B5 scope for store path.
-        let result = store(&cfg, b"test\n", "cmd", Some(0), 1);
+        let result = store(&cfg, b"test\n", Capture::full("cmd", Some(0)));
         // store doesn't guard on mode — caller must
         assert!(matches!(result, Stored::Saved(_)));
     }
@@ -2104,7 +2419,12 @@ mod tests {
         let cfg = temp_cfg(dir.path());
         reset_conn_cache();
         for i in 0..5 {
-            store_inner(&cfg, format!("payload {i}\n").as_bytes(), "cmd", Some(0), 1).unwrap();
+            store_inner(
+                &cfg,
+                format!("payload {i}\n").as_bytes(),
+                Capture::full("cmd", Some(0)),
+            )
+            .unwrap();
         }
         let conn = open(&cfg).unwrap();
         let rows: i64 = conn
@@ -2120,7 +2440,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
         reset_conn_cache();
-        let stored = store_inner(&cfg, b"recall me\n", "cmd", Some(0), 1).unwrap();
+        let stored = store_inner(&cfg, b"recall me\n", Capture::full("cmd", Some(0))).unwrap();
         let conn = open(&cfg).unwrap();
         let row = load_by_hash(&conn, &stored.hash).unwrap().expect("row");
         assert_eq!(decode(&row).unwrap(), b"recall me\n");
@@ -2175,7 +2495,7 @@ mod tests {
             database_path: Some(db_path),
             ..RetrieverConfig::default()
         };
-        let result = store(&cfg, b"some output\n", "cmd", Some(1), 1);
+        let result = store(&cfg, b"some output\n", Capture::full("cmd", Some(1)));
         assert!(
             matches!(result, Stored::Unavailable),
             "corrupted DB must return Unavailable, got {:?}",
@@ -2192,14 +2512,14 @@ mod tests {
             database_path: Some(db_path),
             ..RetrieverConfig::default()
         };
-        let _ = store(&cfg, b"output\n", "cmd", Some(0), 1);
+        let _ = store(&cfg, b"output\n", Capture::full("cmd", Some(0)));
     }
 
     #[test]
     fn test_v9_empty_content_returns_empty_not_error() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
-        let result = store(&cfg, b"", "cmd", Some(0), 1);
+        let result = store(&cfg, b"", Capture::full("cmd", Some(0)));
         assert!(matches!(result, Stored::Empty));
     }
 
@@ -2234,7 +2554,7 @@ mod tests {
             database_path: Some(db_path.clone()),
             ..RetrieverConfig::default()
         };
-        store_inner(&cfg_good, b"seed\n", "cmd", Some(0), 1).unwrap();
+        store_inner(&cfg_good, b"seed\n", Capture::full("cmd", Some(0))).unwrap();
         // Drop the cached handle before touching the file: closing the
         // connection checkpoints the WAL into the main DB, so truncating first
         // would just be undone by the checkpoint on close.
@@ -2245,7 +2565,7 @@ mod tests {
             database_path: Some(db_path),
             ..RetrieverConfig::default()
         };
-        let result = store(&cfg, b"after corruption\n", "cmd2", Some(1), 1);
+        let result = store(&cfg, b"after corruption\n", Capture::full("cmd2", Some(1)));
         assert!(
             matches!(result, Stored::Unavailable),
             "half-truncated DB must return Unavailable, got {:?}",
@@ -2263,12 +2583,12 @@ mod tests {
             database_path: Some(db_path.clone()),
             ..RetrieverConfig::default()
         };
-        store_inner(&cfg, b"seed\n", "cmd", Some(0), 1).unwrap();
+        store_inner(&cfg, b"seed\n", Capture::full("cmd", Some(0))).unwrap();
         // Close the seeded handle first — an already-open connection keeps
         // writing regardless of the mode set on the file afterwards.
         reset_conn_cache();
         std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o444)).unwrap();
-        let result = store(&cfg, b"new content\n", "cmd2", Some(1), 1);
+        let result = store(&cfg, b"new content\n", Capture::full("cmd2", Some(1)));
         std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(
             matches!(result, Stored::Unavailable),
@@ -2286,7 +2606,7 @@ mod tests {
             database_path: Some(db_path),
             ..RetrieverConfig::default()
         };
-        let result = store(&cfg, b"output\n", "cmd", Some(1), 1);
+        let result = store(&cfg, b"output\n", Capture::full("cmd", Some(1)));
         assert!(matches!(result, Stored::Unavailable));
     }
 }
