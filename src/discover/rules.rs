@@ -87,7 +87,10 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^npm\s+(exec|run|run-script|rum|urn|x)(\s|$)",
+        // npm_cmd already treats install/ci/test/audit/outdated/ls as known
+        // subcommands (it only injects `run` for bare script names), so these
+        // are filtered correctly -- the rule just never routed them here.
+        pattern: r"^npm\s+(exec|run|run-script|rum|urn|x|test|install|i|ci|audit|outdated|ls|list)(\s|$)",
         rtk_cmd: "rtk npm",
         rewrite_prefixes: &["npm"],
         category: "PackageManager",
