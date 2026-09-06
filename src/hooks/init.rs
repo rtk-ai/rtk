@@ -705,22 +705,32 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
         None => return false,
     };
 
-    let original_len = pre_tool_use_array.len();
-    pre_tool_use_array.retain(|entry| {
-        if let Some(hooks_array) = entry.get("hooks").and_then(|h| h.as_array()) {
-            for hook in hooks_array {
-                if let Some(command) = hook.get("command").and_then(|c| c.as_str()) {
-                    // Match both legacy script path and new binary command
-                    if command.contains(REWRITE_HOOK_FILE) || is_claude_hook_command(command) {
-                        return false;
-                    }
-                }
-            }
+    let mut removed = false;
+    pre_tool_use_array.retain_mut(|entry| {
+        let Some(hooks_array) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+            return true;
+        };
+
+        let original_len = hooks_array.len();
+        hooks_array.retain(|hook| {
+            let is_rtk_hook = hook
+                .get("command")
+                .and_then(|c| c.as_str())
+                .is_some_and(|command| {
+                    command.contains(REWRITE_HOOK_FILE) || is_claude_hook_command(command)
+                });
+            !is_rtk_hook
+        });
+
+        if hooks_array.len() == original_len {
+            return true;
         }
-        true
+
+        removed = true;
+        !hooks_array.is_empty()
     });
 
-    pre_tool_use_array.len() < original_len
+    removed
 }
 
 /// Remove RTK hook from settings.json file
@@ -7800,6 +7810,41 @@ mod tests {
         assert_eq!(
             pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap(),
             "/some/other/hook.sh"
+        );
+    }
+
+    #[test]
+    fn test_remove_hook_from_json_preserves_foreign_hooks_in_shared_group() {
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "description": "shared security hooks",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": CLAUDE_HOOK_COMMAND
+                        },
+                        {
+                            "type": "command",
+                            "command": "/opt/security/audit-command.sh"
+                        }
+                    ]
+                }]
+            }
+        });
+
+        let removed = remove_hook_from_json(&mut json_content);
+        assert!(removed);
+
+        let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool_use.len(), 1);
+        assert_eq!(pre_tool_use[0]["matcher"], "Bash");
+        assert_eq!(pre_tool_use[0]["description"], "shared security hooks");
+        assert_eq!(pre_tool_use[0]["hooks"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            pre_tool_use[0]["hooks"][0]["command"],
+            "/opt/security/audit-command.sh"
         );
     }
 
