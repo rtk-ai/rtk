@@ -588,14 +588,276 @@ pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
 /// `.output()` keep the diagnostic instead of losing it. The program name is
 /// used as the label so no call site has to pass one.
 fn capture(cmd: &mut Command) -> Result<CaptureResult> {
+    let raw = capture_raw(cmd)?;
+    Ok(CaptureResult {
+        stdout: super::utils::decode_process_output(&raw.stdout),
+        stderr: super::utils::decode_process_output(&raw.stderr),
+        exit_code: raw.exit_code,
+    })
+}
+
+/// Run `cmd` to completion and return its raw bytes plus a signal-aware exit code.
+/// The single spot that turns an `ExitStatus` into a code via
+/// [`exit_code_from_output`](super::utils::exit_code_from_output) — so the
+/// `process terminated by signal N` diagnostic is emitted uniformly whether the
+/// caller decodes the bytes ([`capture`]) or keeps them raw ([`exec_capture_bytes`]),
+/// instead of the raw path silently dropping it.
+fn capture_raw(cmd: &mut Command) -> Result<CaptureBytes> {
     let program = cmd.get_program().to_string_lossy().into_owned();
     let output = cmd.output().context("Failed to execute command")?;
     let exit_code = super::utils::exit_code_from_output(&output, &program);
-    Ok(CaptureResult {
-        stdout: super::utils::decode_process_output(&output.stdout),
-        stderr: super::utils::decode_process_output(&output.stderr),
+    Ok(CaptureBytes {
+        stdout: output.stdout,
+        stderr: output.stderr,
         exit_code,
     })
+}
+
+/// Raw-byte capture result, for callers that must control decoding themselves —
+/// e.g. non-UTF-8 output that [`exec_capture`]'s `from_utf8_lossy` would corrupt.
+pub struct CaptureBytes {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub exit_code: i32,
+}
+
+impl CaptureBytes {
+    pub fn success(&self) -> bool {
+        self.exit_code == 0
+    }
+}
+
+/// Like [`exec_capture`] but returns raw bytes so the caller decides how to decode.
+pub fn exec_capture_bytes(cmd: &mut Command) -> Result<CaptureBytes> {
+    cmd.stdin(Stdio::null());
+    capture_raw(cmd)
+}
+
+/// How captured bytes were decoded into text.
+pub enum Decoded {
+    /// Valid UTF-8.
+    Utf8(String),
+    /// Not UTF-8, but safe ISO-8859-1 (Latin-1) text transcoded losslessly.
+    Latin1(String),
+    /// Binary, or bytes whose encoding is ambiguous — the 0x80–0x9F range where
+    /// ISO-8859-1 and Windows-1252 disagree, or a dense 0xA1–0xFE distribution
+    /// that reads as a legacy multi-byte CJK encoding rather than Latin-1.
+    /// Transcoding would guess and could corrupt silently, so the caller should
+    /// pass the raw bytes through unchanged.
+    Binary,
+}
+
+/// Walk `bytes` as UTF-8, counting well-formed multibyte (≥2-byte) sequences and
+/// bytes that fail to decode. Lets [`decode_output`] tell a UTF-8 file with sparse
+/// corruption (many valid sequences, few invalid bytes) from genuine Latin-1,
+/// where every high byte is a lone char that fails as a UTF-8 lead — no valid
+/// multibyte sequence, all counted invalid. ASCII bytes are ignored; only the
+/// non-ASCII bytes are weighed.
+fn utf8_multibyte_scan(bytes: &[u8]) -> (usize, usize) {
+    let mut i = 0;
+    let mut valid_mb = 0usize;
+    let mut invalid = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b < 0x80 {
+            i += 1;
+            continue;
+        }
+        let len = match b {
+            0xC2..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF4 => 4,
+            // 0x80–0xBF stray continuation, 0xC0/0xC1 overlong, 0xF5–0xFF out of range.
+            _ => {
+                invalid += 1;
+                i += 1;
+                continue;
+            }
+        };
+        if bytes
+            .get(i..i + len)
+            .is_some_and(|seq| std::str::from_utf8(seq).is_ok())
+        {
+            valid_mb += 1;
+            i += len;
+        } else {
+            invalid += 1;
+            i += 1;
+        }
+    }
+    (valid_mb, invalid)
+}
+
+/// Decode captured stdout bytes, preferring fidelity over guessing:
+/// - Valid UTF-8 → [`Decoded::Utf8`].
+/// - Invalid UTF-8 that looks binary (NUL / dense control bytes) or uses the
+///   ambiguous 0x80–0x9F range → [`Decoded::Binary`] (pass raw bytes through).
+/// - Otherwise ISO-8859-1 text: each byte 0x00–0xFF maps to U+0000–U+00FF, a
+///   lossless Latin-1 → UTF-8 transcode → [`Decoded::Latin1`].
+///
+/// This fixes the corruption where `from_utf8_lossy` turns Latin-1 accents into
+/// U+FFFD (`É` → `�`), inflating and mangling e.g. ISO-8859 PL/SQL source blobs.
+pub fn decode_output(bytes: &[u8]) -> Decoded {
+    // encoding_rs (WHATWG) has no UTF-32, and the UTF-32LE BOM (FF FE 00 00)
+    // shares its first two bytes with the UTF-16LE BOM: `for_bom` would match
+    // UTF-16LE and decode the UTF-32 body as garbage. Reject UTF-32 BOMs up front
+    // as binary — before this reorder they fell through to `looks_binary` (the
+    // body is NUL-dense) and passed through raw; keep that safe outcome.
+    if bytes.starts_with(b"\xFF\xFE\x00\x00") || bytes.starts_with(b"\x00\x00\xFE\xFF") {
+        return Decoded::Binary;
+    }
+    // An explicit BOM is an unambiguous encoding declaration — honor it before any
+    // heuristic (a UTF-16 blob is full of NUL bytes `looks_binary` would otherwise
+    // reject). `Encoding::for_bom` recognizes UTF-8/UTF-16LE/UTF-16BE BOMs.
+    if let Some((encoding, bom_len)) = encoding_rs::Encoding::for_bom(bytes) {
+        return match encoding.decode_without_bom_handling_and_without_replacement(&bytes[bom_len..])
+        {
+            // A real BOM'd text file decodes cleanly and is worth keeping.
+            // Honoring a UTF-16 BOM is standard-correct (git, editors, iconv all
+            // do it), but a binary blob that merely *starts* with these bytes also
+            // "decodes" without error — its bytes are valid UTF-16 code units.
+            // `text_looks_binary` rejects the common case (a NUL/control-dense
+            // binary decodes to control-char garbage) back to raw passthrough. It
+            // does NOT catch a binary that decodes to clean BMP text (see its
+            // docs); that residue is the irreducible cost of honoring BOMs and is
+            // negligible — a bare FF FE is almost always real UTF-16, and UTF-32's
+            // FF FE 00 00 is guarded above.
+            Some(text) if !text_looks_binary(&text) => Decoded::Utf8(text.into_owned()),
+            _ => Decoded::Binary,
+        };
+    }
+    // Check binary first: NUL is a valid UTF-8 codepoint, so a NUL-laden binary blob
+    // can pass `from_utf8` — treat it as binary regardless of UTF-8 validity.
+    if looks_binary(bytes) {
+        return Decoded::Binary;
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(s) => Decoded::Utf8(s.to_string()),
+        Err(_) => {
+            // A buffer that is predominantly well-formed UTF-8 with only sparse
+            // invalid bytes is a UTF-8 file with local corruption, NOT Latin-1.
+            // Transcoding the whole buffer as Latin-1 would turn every multibyte
+            // char (`é` = C3 A9) into mojibake (`Ã©`) — strictly worse than
+            // develop's `from_utf8_lossy`, which keeps the valid text and replaces
+            // only the bad bytes. Genuine Latin-1 has ~no well-formed UTF-8
+            // multibyte runs (each accent is a lone high byte that fails as a
+            // UTF-8 lead), so `valid_mb` stays ~0 there and this never steals the
+            // Latin-1 path this change adds. Runs before the C1 guard because a
+            // valid UTF-8 continuation byte can fall in 0x80–0x9F (`ć` = C4 87).
+            let (valid_mb, invalid) = utf8_multibyte_scan(bytes);
+            if valid_mb > invalid {
+                return Decoded::Utf8(String::from_utf8_lossy(bytes).into_owned());
+            }
+            // C1 control bytes are where ISO-8859-1 and Windows-1252 disagree.
+            if bytes.iter().any(|&b| (0x80..=0x9F).contains(&b)) {
+                return Decoded::Binary;
+            }
+            // A dense run of 0xA1–0xFE pairs is a legacy multi-byte CJK encoding
+            // (EUC-JP/KR, GBK, Big5), not Latin-1 — and encoding_rs ships no
+            // charset auto-detector, so we can't decode it correctly. Pass it
+            // through raw rather than emit silent Latin-1 mojibake.
+            if looks_multibyte_cjk(bytes) {
+                return Decoded::Binary;
+            }
+            Decoded::Latin1(bytes.iter().map(|&b| b as char).collect())
+        }
+    }
+}
+
+/// Heuristic distinguishing a legacy multi-byte CJK encoding (EUC-JP/KR, GBK,
+/// Big5) from single-byte Latin-1. Those encodings pack nearly all non-ASCII
+/// text into adjacent 0xA1–0xFE byte pairs, whereas Latin-1 Western text has
+/// only sparse, isolated high bytes (an accent between ASCII letters). Returns
+/// true when such pairs cover a large share of the input, so an occasional
+/// Latin-1 accent — even two adjacent ones — never trips it.
+///
+/// The 30% floor targets blobs that are *substantially* CJK — the whole-file
+/// case where every char would mis-decode into mojibake (the gap the reviewer
+/// flagged). It intentionally does not catch a few CJK bytes sprinkled into
+/// mostly-ASCII text (e.g. one Japanese filename in an English log): that stays
+/// below the floor and degrades to the prior Latin-1 handling for those bytes.
+/// Distinguishing that case would need a real charset auto-detector, which
+/// encoding_rs does not ship; density alone cannot tell sparse EUC from a Latin-1
+/// accent, so we do not guess. Adjacency is what keeps the floor safe: real
+/// Latin-1 prose has essentially no adjacent high-byte pairs, so lowering the
+/// threshold trades false positives (extra passthrough) for reach, never
+/// corruption.
+fn looks_multibyte_cjk(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    let in_range = |b: u8| (0xA1..=0xFE).contains(&b);
+    let mut pair_bytes = 0usize;
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if in_range(bytes[i]) && in_range(bytes[i + 1]) {
+            pair_bytes += 2;
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    pair_bytes * 100 / bytes.len() >= 30
+}
+
+/// A decoded string reads as binary when a meaningful share of its characters
+/// are control codes — C0 (excluding tab/newline/CR), DEL, or C1 (U+0080–U+009F),
+/// all of which `char::is_control` covers. Mirrors `looks_binary`'s 2% rule on
+/// decoded chars.
+///
+/// Scope, deliberately partial: this catches a binary that decodes to
+/// control/NUL-dense garbage — the common case, since real binaries are full of
+/// low bytes that become U+00xx control chars. It does NOT catch a binary that
+/// decodes to clean BMP text (CJK and symbols are not control chars), because
+/// distinguishing that from a genuine UTF-16 file would need a full charset
+/// detector — disproportionate given how rarely a real binary starts with a bare
+/// UTF-16 BOM (UTF-32's colliding FF FE 00 00 is already guarded). Erring toward
+/// "text" for a clean decode only mirrors what git/editors/iconv do with a BOM.
+fn text_looks_binary(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let mut total = 0usize;
+    let mut control = 0usize;
+    for c in s.chars() {
+        total += 1;
+        if c.is_control() && !matches!(c, '\t' | '\n' | '\r') {
+            control += 1;
+        }
+    }
+    control * 100 / total > 2
+}
+
+/// Heuristic: a NUL byte anywhere, or more than 2% C0 control bytes (excluding
+/// tab/newline/CR) across a head+tail sample, marks content as binary rather than
+/// single-byte text.
+///
+/// The control scan samples BOTH ends, not just the head: a blob with a clean
+/// ASCII/UTF-8 head but a binary tail past the first window (an appended signature
+/// block, a corrupted trailer, an embedded resource) and no NUL byte would pass a
+/// head-only scan and get silently transcoded to Latin-1 mojibake. Two 8 KiB windows
+/// keep the scan bounded on very large blobs while covering the tail; when the buffer
+/// is at most two windows the whole thing is scanned (no gap, no double-count).
+fn looks_binary(bytes: &[u8]) -> bool {
+    if bytes.contains(&0) {
+        return true;
+    }
+    if bytes.is_empty() {
+        return false;
+    }
+    const WINDOW: usize = 8192;
+    let is_control = |&&b: &&u8| b < 0x09 || (0x0D < b && b < 0x20);
+    let (sample_len, control) = if bytes.len() <= 2 * WINDOW {
+        (bytes.len(), bytes.iter().filter(is_control).count())
+    } else {
+        let head = bytes[..WINDOW].iter().filter(is_control).count();
+        let tail = bytes[bytes.len() - WINDOW..]
+            .iter()
+            .filter(is_control)
+            .count();
+        (2 * WINDOW, head + tail)
+    };
+    control * 100 / sample_len > 2
 }
 
 #[cfg(test)]
@@ -672,6 +934,200 @@ pub(crate) mod tests {
         // clean EOF would, but via the Err(_) arm instead of Ok(0).
         let lines: Vec<String> = read_lines_lossy(reader).collect();
         assert_eq!(lines, vec!["line one".to_string(), "line two".to_string()]);
+    }
+
+    #[test]
+    fn test_decode_output_utf8() {
+        assert!(matches!(decode_output(b"hello world"), Decoded::Utf8(_)));
+        assert!(matches!(
+            decode_output("café ☕".as_bytes()),
+            Decoded::Utf8(_)
+        ));
+    }
+
+    #[test]
+    fn test_decode_output_latin1_lossless() {
+        // 0xC9 = É, 0xF3 = ó in ISO-8859-1; invalid UTF-8, no 0x80-0x9F byte.
+        let bytes = b"M\xC9TODO acci\xF3n";
+        let Decoded::Latin1(s) = decode_output(bytes) else {
+            panic!("expected Latin1");
+        };
+        assert_eq!(s, "MÉTODO acción");
+        assert!(!s.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn test_decode_output_euc_jp_is_binary() {
+        // EUC-JP kanji: each is two bytes in 0xA1–0xFE (invalid UTF-8, none in
+        // 0x80–0x9F). The old Latin-1 arm would transcode them to garbage mojibake
+        // silently; the density guard now passes the raw bytes through instead.
+        let bytes = b"log: \xC6\xFC\xCB\xDC\xB8\xEC ok";
+        assert!(matches!(decode_output(bytes), Decoded::Binary));
+    }
+
+    #[test]
+    fn test_decode_output_euc_kr_is_binary() {
+        // EUC-KR "한국어" — same 0xA1–0xFE two-byte structure as EUC-JP.
+        let bytes = b"\xC7\xD1\xB1\xB9\xBE\xEE";
+        assert!(matches!(decode_output(bytes), Decoded::Binary));
+    }
+
+    #[test]
+    fn test_decode_output_sparse_high_bytes_stay_latin1() {
+        // Two *adjacent* high bytes but a low overall density (mostly ASCII) is
+        // Latin-1, not CJK — the threshold must not flip it to Binary.
+        let bytes = b"caf\xE9\xE9 and plenty of ascii text to keep the density low";
+        assert!(matches!(decode_output(bytes), Decoded::Latin1(_)));
+    }
+
+    #[test]
+    fn test_decode_output_mostly_utf8_with_bad_byte_stays_utf8() {
+        // Predominantly valid UTF-8 (é = C3 A9, à = C3 A0) with ONE stray invalid
+        // byte (0xFF). This must decode as UTF-8 (bad byte -> U+FFFD, develop's
+        // behavior), NOT Latin-1-transcode the whole buffer, which would mangle
+        // every `é` into `Ã©`. Regression guard for the blocking review finding.
+        let bytes = b"caf\xC3\xA9 r\xC3\xA9sum\xC3\xA9 d\xC3\xA9j\xC3\xA0\xFF";
+        let Decoded::Utf8(s) = decode_output(bytes) else {
+            panic!("expected Utf8 (lossy), got Latin1/Binary");
+        };
+        assert!(s.contains("café résumé déjà"), "kept the UTF-8 text: {s:?}");
+        assert!(
+            !s.contains("Ã©"),
+            "must not Latin-1-mangle valid UTF-8: {s:?}"
+        );
+    }
+
+    #[test]
+    fn test_decode_output_utf8_with_c1_continuation_and_bad_byte_stays_utf8() {
+        // `ć` = C4 87, whose continuation byte 0x87 falls in 0x80–0x9F. A mostly
+        // UTF-8 buffer like this with a stray bad byte must not be caught by the
+        // C1 guard and dumped as Binary — the predominance check runs first.
+        let bytes = b"\xC4\x87\xC4\x87\xC4\x87 mostly ascii source line\xFF";
+        assert!(matches!(decode_output(bytes), Decoded::Utf8(_)));
+    }
+
+    #[test]
+    fn test_decode_output_large_dense_euc_jp_blob_is_binary() {
+        // The predominance scan runs BEFORE the CJK density guard, so a *large*,
+        // realistically dense EUC-JP blob (not just 3 kanji) must still route to
+        // Binary: across the whole buffer `valid_mb` stays far below `invalid`, so
+        // it never steals the passthrough. Guards the new arm's ordering at scale.
+        let mut bytes = Vec::new();
+        for _ in 0..1000 {
+            bytes.extend_from_slice(b"\xC6\xFC\xCB\xDC\xB8\xEC"); // 日本語 (EUC-JP)
+        }
+        assert!(bytes.len() > 5_000);
+        assert!(matches!(decode_output(&bytes), Decoded::Binary));
+    }
+
+    #[test]
+    fn test_decode_output_utf16le_bom() {
+        // FF FE BOM + "hi" as UTF-16LE. Full of NUL bytes, so it must be decoded
+        // via the BOM before looks_binary rejects it.
+        let bytes = b"\xFF\xFEh\x00i\x00";
+        let Decoded::Utf8(s) = decode_output(bytes) else {
+            panic!("expected Utf8 from UTF-16LE BOM");
+        };
+        assert_eq!(s, "hi");
+    }
+
+    #[test]
+    fn test_decode_output_utf32le_bom_is_binary() {
+        // FF FE 00 00 (UTF-32LE BOM) shares its first two bytes with UTF-16LE.
+        // Must be rejected as binary, not decoded as UTF-16 garbage.
+        let bytes = b"\xFF\xFE\x00\x00A\x00\x00\x00B\x00\x00\x00";
+        assert!(matches!(decode_output(bytes), Decoded::Binary));
+    }
+
+    #[test]
+    fn test_decode_output_utf16_bom_then_invalid_is_binary() {
+        // A UTF-16LE BOM followed by an unpaired high surrogate (D800) doesn't
+        // cleanly decode → don't guess, pass through raw.
+        let bytes = b"\xFF\xFE\x00\xD8";
+        assert!(matches!(decode_output(bytes), Decoded::Binary));
+    }
+
+    #[test]
+    fn test_decode_output_bom_prefixed_binary_is_binary() {
+        // A binary blob that merely *starts* with the UTF-16LE BOM decodes without
+        // error (its code units are valid UTF-16) but into control-char garbage.
+        // The decoded-text sanity check must send it back to Binary so the raw
+        // bytes pass through unchanged, as they did before BOM sniffing — otherwise
+        // `git show HEAD:blob > file` would write transcoded garbage.
+        let bytes = b"\xFF\xFE\x01\x00\x00\x00\x02\x00\x7F\x00\x03\x00";
+        assert!(matches!(decode_output(bytes), Decoded::Binary));
+    }
+
+    #[test]
+    fn test_decode_output_sparse_cjk_is_latin1_known_limitation() {
+        // A few EUC bytes in mostly-ASCII text sit below the density floor, so
+        // they decode as Latin-1 (the pre-existing behavior). Documents the known
+        // limit: density alone can't tell sparse EUC from a Latin-1 accent without
+        // a charset detector, so we don't guess. Whole-blob CJK IS caught (above).
+        let bytes = b"2024-01-15 ERROR processing \xC6\xFC.txt failed, retrying later";
+        assert!(matches!(decode_output(bytes), Decoded::Latin1(_)));
+    }
+
+    #[test]
+    fn test_decode_output_utf8_bom_stripped() {
+        // EF BB BF BOM + "café" as UTF-8 → decoded, BOM removed.
+        let bytes = b"\xEF\xBB\xBFcaf\xC3\xA9";
+        let Decoded::Utf8(s) = decode_output(bytes) else {
+            panic!("expected Utf8 from UTF-8 BOM");
+        };
+        assert_eq!(s, "café");
+    }
+
+    #[test]
+    fn test_decode_output_cp1252_ambiguous_is_binary() {
+        // 0x93/0x94 = smart quotes in CP1252, control C1 in ISO-8859-1: ambiguous,
+        // so pass through raw rather than guess and corrupt silently.
+        assert!(matches!(
+            decode_output(b"say \x93hi\x94 there"),
+            Decoded::Binary
+        ));
+    }
+
+    #[test]
+    fn test_decode_output_binary_nul() {
+        assert!(matches!(
+            decode_output(b"PK\x03\x04\x00\x00binary"),
+            Decoded::Binary
+        ));
+    }
+
+    #[test]
+    fn test_looks_binary() {
+        assert!(looks_binary(b"\x00\x01\x02")); // NUL
+        assert!(!looks_binary(b"plain ascii text\n"));
+        assert!(!looks_binary("café".as_bytes())); // UTF-8 accents, no control
+        assert!(!looks_binary(b"")); // empty is not binary
+                                     // A single ESC in otherwise-text stays under the 2% threshold.
+        assert!(!looks_binary(
+            b"line one\x1bline two with lots of text here\n"
+        ));
+        // Dense control bytes read as binary.
+        let ctrl: Vec<u8> = (0..100)
+            .map(|i| if i % 2 == 0 { 0x01 } else { b'a' })
+            .collect();
+        assert!(looks_binary(&ctrl));
+    }
+
+    #[test]
+    fn test_looks_binary_scans_tail_past_head_window() {
+        // Clean ASCII head longer than the 8 KiB control-scan window, then a control-
+        // byte tail with NO NUL byte (an appended signature / corrupted trailer). A
+        // head-only scan would miss the tail and pass this off as text; the head+tail
+        // sample must flag it. Total > 2×8 KiB so the two-window branch is exercised.
+        let mut bytes = vec![b'a'; 20_000];
+        bytes.extend(std::iter::repeat_n(0x01u8, 3_000));
+        assert!(
+            !bytes.contains(&0),
+            "fixture must have no NUL to be meaningful"
+        );
+        assert!(looks_binary(&bytes));
+        // And decode_output routes it to Binary (raw passthrough), not lossy Latin-1.
+        assert!(matches!(decode_output(&bytes), Decoded::Binary));
     }
 
     struct LineFilter<F: FnMut(&str) -> Option<String>> {

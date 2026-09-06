@@ -223,20 +223,19 @@ fn run_show(
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    // If user wants --stat or --format only, pass through
-    let wants_stat_only = args
-        .iter()
-        .any(|arg| arg == "--stat" || arg == "--numstat" || arg == "--shortstat");
+    // Re-insert `--` when clap's trailing_var_arg consumed it (issue #1215), same as
+    // run_diff/run_checkout. Without this the pathspec separator never reaches
+    // `show_positionals`, so `git show <rev> -- <path:with:colon>` would misread the
+    // colon'd pathspec as a `<rev>:<path>` blob and dump it instead of a commit-diff.
+    let args = &args_utils::restore_double_dash(args);
 
-    let wants_format = args
-        .iter()
-        .any(|arg| arg.starts_with("--pretty") || arg.starts_with("--format"));
+    // Pick one of three handlers for `git show`. `show_route` decides the blob case
+    // FIRST (see its docs): the two branches below are mutually exclusive on `route`,
+    // so their source order does not affect which one runs.
+    let positionals = show_positionals(args);
+    let route = show_route(args);
 
-    // `git show rev:path` prints a blob, not a commit diff. In this mode we should
-    // pass through directly to avoid duplicated output from compact-show steps.
-    let wants_blob_show = args.iter().any(|arg| is_blob_show_arg(arg));
-
-    if wants_stat_only || wants_format || wants_blob_show || emits_word_diff(args) {
+    if route == ShowRoute::StatOrFormat {
         let mut cmd = git_cmd(global_args);
         cmd.arg("show");
         for arg in args {
@@ -247,11 +246,7 @@ fn run_show(
             eprintln!("{}", result.stderr);
             return Ok(result.exit_code);
         }
-        if wants_blob_show {
-            print!("{}", result.stdout);
-        } else {
-            println!("{}", result.stdout.trim());
-        }
+        println!("{}", result.stdout.trim());
 
         timer.track(
             &format!("git show {}", args.join(" ")),
@@ -259,6 +254,86 @@ fn run_show(
             &result.stdout,
             &result.stdout,
         );
+
+        return Ok(0);
+    }
+
+    if route == ShowRoute::Blob {
+        let mut cmd = git_cmd(global_args);
+        cmd.arg("show");
+        for arg in args {
+            cmd.arg(arg);
+        }
+        // Capture raw bytes: `git show` of an ISO-8859/Latin-1 file (e.g. Oracle
+        // PL/SQL `.pck`) is not UTF-8, and lossy decoding would corrupt accents into
+        // U+FFFD (`É` → `�`) and inflate the output. `decode_output` transcodes safe
+        // Latin-1 losslessly and passes true binary / ambiguous encodings through.
+        let result =
+            crate::core::stream::exec_capture_bytes(&mut cmd).context("Failed to run git show")?;
+        let label = format!("git show {}", args.join(" "));
+        let rtk_label = format!("rtk git show {}", args.join(" "));
+        if !result.success() {
+            eprint!("{}", crate::core::utils::decode_process_output(&result.stderr));
+            return Ok(result.exit_code);
+        }
+        // git can warn on stderr (e.g. CRLF / autocrlf notices) while still exiting 0;
+        // surface it instead of swallowing it just because the command succeeded.
+        if !result.stderr.is_empty() {
+            eprint!("{}", crate::core::utils::decode_process_output(&result.stderr));
+        }
+        // Emit git's raw bytes verbatim — no decode, no window — when the blob already
+        // fits the byte budget: it would never be windowed anyway, and decoding would
+        // needlessly strip a BOM / rewrite bytes. This passthrough stays byte-identical
+        // to a plain `git show`. Larger blobs fall through to windowing regardless of
+        // whether stdout is a pipe or a TTY: the whole point of the filter is to shrink
+        // what the agent reads, and the agent reads through a pipe. That mirrors the
+        // diff/log filters (which also compact in a pipe); a consumer that needs the
+        // full content follows the `| tail -n +N` recovery hint — the same tradeoff
+        // `git log | grep` already makes. (`is_terminal()` is not a reliable "human is
+        // watching" signal anyway: CI agents hand rtk a pseudo-TTY — see hooks/init.rs.)
+        if result.stdout.len() <= MAX_BLOB_BYTES.0 {
+            return emit_raw_bytes_passthrough(
+                &result.stdout,
+                &label,
+                &rtk_label,
+                &timer,
+                result.exit_code,
+            );
+        }
+        let text = match crate::core::stream::decode_output(&result.stdout) {
+            crate::core::stream::Decoded::Utf8(s) | crate::core::stream::Decoded::Latin1(s) => s,
+            // Binary or ambiguous single-byte encoding: never window or transcode —
+            // write the raw bytes through, tracked as a passthrough.
+            crate::core::stream::Decoded::Binary => {
+                return emit_raw_bytes_passthrough(
+                    &result.stdout,
+                    &label,
+                    &rtk_label,
+                    &timer,
+                    result.exit_code,
+                );
+            }
+        };
+        // A blob dump is unfiltered file content: cap large text blobs to a byte
+        // budget with a tail-recovery pointer, mirroring how the commit-diff path
+        // below caps at `max_lines`. `--max-lines` does not apply here — blob output
+        // is bounded by bytes, not lines. (Recovery for a transcoded Latin-1 blob is
+        // UTF-8-normalized text, not byte-identical to the on-disk ISO-8859 file.)
+        let raw = &text;
+        // `route == Blob` guarantees the first positional is the blob object. Window it
+        // only when it is the sole object: git concatenates multiple objects with no
+        // separator, so cutting the first would silently drop the rest.
+        let shown = if positionals.len() == 1 {
+            compact_blob_show(raw, positionals[0])
+        } else {
+            raw.clone()
+        };
+        print!("{}", shown);
+
+        // Track savings against the bytes git actually wrote (`result.stdout`), not the
+        // decoded text: a Latin-1 transcode inflates the byte count and would overstate
+        // the reduction.
+        timer.track_bytes(&label, &rtk_label, result.stdout.len(), &shown);
 
         return Ok(0);
     }
@@ -364,7 +439,196 @@ fn emits_word_diff(args: &[String]) -> bool {
 
 fn is_blob_show_arg(arg: &str) -> bool {
     // Detect `rev:path` style arguments while ignoring flags like `--pretty=format:...`.
-    !arg.starts_with('-') && arg.contains(':')
+    // `:/text` is a commit-message search, not a blob, so it is excluded. `:path` and
+    // `:N:path` (index / merge-stage blobs) start with `:` but ARE blobs, so only the
+    // `:/` prefix is filtered out there.
+    //
+    // Magic pathspecs (`:(exclude)…`, `:(top)…`, `:!…`, and `:^…` — an exact synonym
+    // of `:!…` for exclude magic) also start with `:` but are NOT blobs: they only
+    // ever appear as pathspecs, so exclude them too. An option value with a colon
+    // (`git show -S 'a:b' HEAD`) is handled by `show_positionals`, which skips a
+    // flag's operand via git's argument grammar, so it never reaches here as a blob.
+    !arg.starts_with('-')
+        && !arg.starts_with(":/")
+        && !arg.starts_with(":(")
+        && !arg.starts_with(":!")
+        && !arg.starts_with(":^")
+        && arg.contains(':')
+        // A colons-only token (`:`, `::`) is never a blob object: route it to git
+        // rather than the blob window, which would only surface git's own error.
+        && arg.chars().any(|c| c != ':')
+}
+
+/// The positional (non-option) arguments of a `git show` — its objects. Options and
+/// the value tokens they consume (`-S 'url:1'`, `-L 1,2:file`) are dropped via git's
+/// own flag/value grammar ([`consumes_next_token_as_value`], shared with run_log), so
+/// an option operand that happens to contain a colon is never mistaken for a blob and
+/// truncated. Args after a `--` are pathspecs, never objects, so a colon in a filename
+/// there (`-- weird:name`) is excluded by scanning only the args before the first `--`;
+/// a trailing `-- <path>` beside a real object arg is thus ignored (git still dumps the
+/// blob) rather than emptying the list.
+fn show_positionals(args: &[String]) -> Vec<&String> {
+    let rev_args = match args.iter().position(|a| a == "--") {
+        Some(sep) => &args[..sep],
+        None => args,
+    };
+    let mut positionals = Vec::new();
+    let mut iter = rev_args.iter();
+    while let Some(arg) = iter.next() {
+        if arg.starts_with('-') {
+            if consumes_next_token_as_value(arg) {
+                iter.next(); // skip this flag's value token
+            }
+            continue;
+        }
+        positionals.push(arg);
+    }
+    positionals
+}
+
+/// git show's object argument, when its first positional is a `<rev>:<path>` blob.
+/// Only the first positional is git show's primary object; a later positional is an
+/// extra object git concatenates, not a windowing target.
+fn blob_show_target(args: &[String]) -> Option<&String> {
+    show_positionals(args)
+        .into_iter()
+        .next()
+        .filter(|a| is_blob_show_arg(a))
+}
+
+/// Which `git show` handler an invocation routes to.
+#[derive(Debug, PartialEq, Eq)]
+enum ShowRoute {
+    /// A `<rev>:<path>` blob dump → byte-safe decode/window path.
+    Blob,
+    /// `--stat`/`--numstat`/`--shortstat`/`--pretty`/`--format` with NO blob target
+    /// → summary-only passthrough.
+    StatOrFormat,
+    /// An ordinary commit → compacted commit-diff.
+    CommitDiff,
+}
+
+/// Classify a `git show` invocation. Blob detection wins over --stat/--format
+/// because git accepts and silently ignores those flags when the argument resolves
+/// to a blob (verified against git 2.39 — output byte-identical to a plain blob
+/// dump), still emitting the full file. Routing such a call to the --stat passthrough
+/// would send it through lossy UTF-8 decoding and reintroduce the blob corruption the
+/// byte-safe path fixes, so the blob case is checked first.
+fn show_route(args: &[String]) -> ShowRoute {
+    if blob_show_target(args).is_some() {
+        return ShowRoute::Blob;
+    }
+    let wants_stat = args
+        .iter()
+        .any(|a| a == "--stat" || a == "--numstat" || a == "--shortstat");
+    let wants_format = args
+        .iter()
+        .any(|a| a.starts_with("--pretty") || a.starts_with("--format"));
+    // A word/color-word diff has no unified-diff markers for `compact_diff` to read,
+    // so it passes through untouched like a --stat/--format summary (see
+    // `emits_word_diff`). It only ever applies to a commit-diff, so it is checked
+    // after the blob case above.
+    if wants_stat || wants_format || emits_word_diff(args) {
+        return ShowRoute::StatOrFormat;
+    }
+    ShowRoute::CommitDiff
+}
+
+/// Byte budget for a blob preview before truncation kicks in (~2k tokens).
+const MAX_BLOB_BYTES: Budget = Budget(8192);
+
+/// Byte budget after which a blob preview is truncated. A newtype rather than a bare
+/// `usize` so a call site can't silently pass some other length in its place.
+#[derive(Clone, Copy)]
+struct Budget(usize);
+
+/// Decide how to window a `git show <rev>:<path>` blob. Returns
+/// `Some((head, remaining_lines, tail_offset))` when the blob should be truncated,
+/// or `None` to pass it through unchanged: a small blob, a binary blob, a tree
+/// listing, or a single line too long to cut at a line boundary.
+///
+/// Pure and side-effect free so it can be unit-tested against real blob fixtures.
+fn blob_truncation(raw: &str, budget: Budget) -> Option<(&str, usize, usize)> {
+    let Budget(budget) = budget;
+    // `git show <rev>:<dir>` prints a tree listing (`tree <rev>:<dir>\n\n...`), not
+    // file content. This is a content prefix, not a git-provided type signal, so a
+    // text blob that genuinely begins with "tree " (e.g. a Newick/NEXUS phylogenetic
+    // file) is a false positive — but it only degrades to full passthrough (the blob
+    // is emitted whole, never truncated), never corruption, so a heavier
+    // `git cat-file -t` type probe isn't worth the extra subprocess.
+    if raw.starts_with("tree ") {
+        return None;
+    }
+    // Binary blob, or bytes mangled by lossy UTF-8 decoding: never window.
+    if raw.contains('\0') || raw.contains('\u{FFFD}') {
+        return None;
+    }
+    if raw.len() <= budget {
+        return None;
+    }
+    // Slicing a `&str` at a byte index that is not a UTF-8 char boundary panics, so
+    // walk the budget back to the nearest boundary at or below it before cutting.
+    let mut end = budget;
+    while end > 0 && !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    // Cut at the last line boundary inside the window. No newline means a single line
+    // longer than the budget, which tail-based recovery cannot re-window: pass through.
+    let cut = raw[..end].rfind('\n')? + 1;
+    let head = &raw[..cut];
+    let head_lines = head.lines().count();
+    let total_lines = raw.lines().count();
+    let remaining = total_lines.checked_sub(head_lines).filter(|&r| r > 0)?;
+    // `tail -n +offset` recovers everything from the first un-shown line onward.
+    Some((head, remaining, head_lines + 1))
+}
+
+/// POSIX single-quote a blob arg so a hint with a space or shell metachar in the path
+/// stays copy-paste safe.
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Window a single blob dump: cap a large text blob and point at the rest with a hint
+/// re-derived from the blob arg itself — `git show <rev>:<path> | tail -n +N`.
+///
+/// The hint deliberately does not lean on a tee file. The tee is capped at
+/// `max_file_size` (1 MB by default), so it would refuse to store exactly the giant
+/// lockfiles this filter most wants to trim, leaving the biggest blobs un-windowed;
+/// re-running `git show` reproduces the tail at any size, with no cap and no I/O.
+fn compact_blob_show(raw: &str, blob_arg: &str) -> String {
+    let Some((head, remaining, offset)) = blob_truncation(raw, MAX_BLOB_BYTES) else {
+        return raw.to_string();
+    };
+    let hint = format!(
+        "[see remaining: git show {} | tail -n +{}]",
+        shell_single_quote(blob_arg),
+        offset
+    );
+    let out = format!("{}... (+{} lines) {}\n", head, remaining, hint);
+    never_worse(raw, &out).to_string()
+}
+
+/// Write raw bytes straight to stdout, tracked as a passthrough. Used when the blob
+/// must reach the caller byte-for-byte — binary or ambiguously-encoded content that
+/// decoding would corrupt, or a passthrough where any rewrite (BOM strip, transcode)
+/// would diverge from what plain `git show` emits — so it goes through the locked
+/// stdout handle as bytes rather than a `String`.
+fn emit_raw_bytes_passthrough(
+    bytes: &[u8],
+    label: &str,
+    rtk_label: &str,
+    timer: &tracking::TimedExecution,
+    exit_code: i32,
+) -> Result<i32> {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    handle
+        .write_all(bytes)
+        .context("Failed to write blob to stdout")?;
+    timer.track_passthrough(label, rtk_label);
+    Ok(exit_code)
 }
 
 /// Path named by a diff section header.
@@ -3413,9 +3677,250 @@ mod tests {
     fn test_is_blob_show_arg() {
         assert!(is_blob_show_arg("develop:modules/pairs_backtest.py"));
         assert!(is_blob_show_arg("HEAD:src/main.rs"));
+        // Index / merge-stage blobs start with `:` but are still blobs.
+        assert!(is_blob_show_arg(":Cargo.toml"));
+        assert!(is_blob_show_arg(":2:conflict.rs"));
         assert!(!is_blob_show_arg("--pretty=format:%h"));
         assert!(!is_blob_show_arg("--format=short"));
         assert!(!is_blob_show_arg("HEAD"));
+        // `:/text` is a commit-message search, not a blob.
+        assert!(!is_blob_show_arg(":/fix the bug"));
+        // Magic pathspecs are pathspecs, never blobs.
+        assert!(!is_blob_show_arg(":(exclude)b.txt"));
+        assert!(!is_blob_show_arg(":(top,glob)*.rs"));
+        assert!(!is_blob_show_arg(":!b.txt"));
+        // `:^` is an exact synonym of `:!` (exclude magic), also a pathspec.
+        assert!(!is_blob_show_arg(":^b.txt"));
+        // A colons-only token is not a blob object.
+        assert!(!is_blob_show_arg(":"));
+        assert!(!is_blob_show_arg("::"));
+    }
+
+    /// Helper: build an args slice from string literals.
+    fn show_args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn test_show_route_blob_wins_over_stat_and_format() {
+        // Blocking bug #1: git accepts and silently ignores --stat/--numstat/--pretty/
+        // --format for a blob target and still dumps the file, so these must NOT shadow
+        // the blob path (which would send the blob through lossy UTF-8 decoding).
+        assert_eq!(
+            show_route(&show_args(&["--stat", "HEAD:legacy.pck"])),
+            ShowRoute::Blob
+        );
+        assert_eq!(
+            show_route(&show_args(&["--numstat", "HEAD:legacy.pck"])),
+            ShowRoute::Blob
+        );
+        assert_eq!(
+            show_route(&show_args(&["--format=medium", "HEAD:legacy.pck"])),
+            ShowRoute::Blob
+        );
+        assert_eq!(
+            show_route(&show_args(&["--pretty=oneline", "HEAD:legacy.pck"])),
+            ShowRoute::Blob
+        );
+    }
+
+    #[test]
+    fn test_show_route_trailing_pathspec_stays_a_blob() {
+        // Blocking bug #2: a trailing `-- <path>` beside a blob arg is ignored by git
+        // (still a blob dump), so it must not disable blob handling.
+        let args = show_args(&["HEAD:Cargo.toml", "--", "Cargo.toml"]);
+        assert_eq!(show_route(&args), ShowRoute::Blob);
+        assert_eq!(blob_show_target(&args), Some(&"HEAD:Cargo.toml".to_string()));
+    }
+
+    #[test]
+    fn test_blob_show_target_skips_flag_operand_with_colon() {
+        // Blocking bug #2: `-S 'url:1'`'s operand contains a colon but is the value of
+        // a pickaxe flag, not an object — it must not be read as a blob and truncated.
+        // The commit is the real (colon-free) object, so this is a commit-diff.
+        let args = show_args(&["-S", "url:1", "HEAD"]);
+        assert!(blob_show_target(&args).is_none());
+        assert_eq!(show_route(&args), ShowRoute::CommitDiff);
+        // `-L <start,end>:<file>` operand likewise carries a colon.
+        let args = show_args(&["-L", "1,2:file.rs", "HEAD"]);
+        assert!(blob_show_target(&args).is_none());
+        // A real blob still routes as a blob even with a preceding value flag.
+        let args = show_args(&["-S", "needle", "HEAD:src/main.rs"]);
+        assert_eq!(blob_show_target(&args), Some(&"HEAD:src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn test_show_route_colon_pathspec_after_dashdash_is_not_a_blob() {
+        // A filename containing a colon AFTER `--` is a pathspec, not a blob target.
+        // This `--` is representative of the real CLI path: clap strips the separator,
+        // but `run_show` restores it via `restore_double_dash` before calling
+        // `show_route`/`show_positionals` (verified live: `git show HEAD -- a:b.txt`
+        // renders a commit-diff, not a blob dump).
+        let args = show_args(&["HEAD", "--", "weird:name.txt"]);
+        assert_eq!(show_route(&args), ShowRoute::CommitDiff);
+        assert!(blob_show_target(&args).is_none());
+    }
+
+    #[test]
+    fn test_show_route_plain_cases() {
+        assert_eq!(
+            show_route(&show_args(&["--stat", "HEAD"])),
+            ShowRoute::StatOrFormat
+        );
+        assert_eq!(show_route(&show_args(&["HEAD"])), ShowRoute::CommitDiff);
+        assert_eq!(
+            show_route(&show_args(&["HEAD:src/main.rs"])),
+            ShowRoute::Blob
+        );
+    }
+
+    #[test]
+    fn test_blob_windowing_token_savings() {
+        // Per `.claude/rules/cli-testing.md`, a filter must verify its 60–90% savings
+        // claim with a real fixture. Use a committed, deterministic ~107 KB blob
+        // (numbered filler lines) rather than `src/main.rs`: the fixture is stable and
+        // stays comfortably above the 24 KiB the assert needs, so the test can't break
+        // if a source file happens to shrink. Windowing to the 8 KiB head clears the
+        // 60% floor; the recovery hint is a handful of tokens, so head-vs-raw is the
+        // savings floor.
+        fn count_tokens(text: &str) -> usize {
+            text.split_whitespace().count()
+        }
+        let raw = include_str!("../../../tests/fixtures/git/blob_windowing_large.txt");
+        assert!(raw.len() > 3 * MAX_BLOB_BYTES.0);
+        let (head, _remaining, _offset) =
+            blob_truncation(raw, MAX_BLOB_BYTES).expect("large blob should window");
+        let savings = 100.0 - (count_tokens(head) as f64 / count_tokens(raw) as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "expected ≥60% token savings, got {:.1}%",
+            savings
+        );
+    }
+
+    #[test]
+    fn test_blob_truncation_small_passthrough() {
+        // Real committed file, ~1.7KB < budget: passed through unchanged.
+        let small = include_str!("../../../Cargo.toml");
+        assert!(blob_truncation(small, MAX_BLOB_BYTES).is_none());
+    }
+
+    #[test]
+    fn test_blob_truncation_large_windowed() {
+        // Real blob fixture (`git show HEAD:src/main.rs | head -350`), ~10.7KB.
+        let large = include_str!("../../../tests/fixtures/git/blob_large.txt");
+        let (head, remaining, offset) =
+            blob_truncation(large, MAX_BLOB_BYTES).expect("large blob should window");
+        assert!(head.len() <= MAX_BLOB_BYTES.0);
+        assert!(head.ends_with('\n'), "head must end at a line boundary");
+        let head_lines = head.lines().count();
+        // N formula: remaining == total - head_lines, offset == head_lines + 1.
+        assert_eq!(offset, head_lines + 1);
+        assert_eq!(remaining, large.lines().count() - head_lines);
+        assert!(remaining > 0);
+    }
+
+    #[test]
+    fn test_blob_truncation_tree_passthrough() {
+        // Real tree listing (`git show HEAD:src`): `tree <rev>:<dir>\n\n...`.
+        let tree = include_str!("../../../tests/fixtures/git/tree_listing.txt");
+        assert!(tree.starts_with("tree "));
+        assert!(blob_truncation(tree, MAX_BLOB_BYTES).is_none());
+    }
+
+    #[test]
+    fn test_blob_truncation_binary_passthrough() {
+        let mut binary = "x".repeat(9000);
+        binary.push('\0');
+        assert!(blob_truncation(&binary, MAX_BLOB_BYTES).is_none());
+        // Replacement char from lossy UTF-8 decoding of a binary blob.
+        let lossy = format!("{}\u{FFFD}", "y".repeat(9000));
+        assert!(blob_truncation(&lossy, MAX_BLOB_BYTES).is_none());
+    }
+
+    #[test]
+    fn test_blob_truncation_giant_single_line_passthrough() {
+        // A single line longer than the budget has no line boundary to cut at.
+        let giant = "a".repeat(20_000);
+        assert!(blob_truncation(&giant, MAX_BLOB_BYTES).is_none());
+    }
+
+    #[test]
+    fn test_blob_truncation_utf8_boundary_no_panic() {
+        // Multibyte content so the byte budget can land mid-codepoint: must not panic.
+        let mut s = String::new();
+        while s.len() < 9000 {
+            s.push_str("áéíóú-ñ-日本語");
+            s.push('\n');
+        }
+        // Exercise budgets straddling a multibyte char around the window edge.
+        let _ = blob_truncation(&s, MAX_BLOB_BYTES);
+        let _ = blob_truncation(&s, Budget(8191));
+        let _ = blob_truncation(&s, Budget(8193));
+        // Should still window (multi-line, over budget) without crashing.
+        assert!(blob_truncation(&s, MAX_BLOB_BYTES).is_some());
+    }
+
+    #[test]
+    fn test_blob_truncation_no_trailing_newline() {
+        let mut s = String::new();
+        for i in 0..500 {
+            s.push_str(&format!("line number {i} with a bit of content here\n"));
+        }
+        s.pop(); // drop the final newline
+        let (head, remaining, offset) =
+            blob_truncation(&s, MAX_BLOB_BYTES).expect("should window");
+        assert_eq!(offset, head.lines().count() + 1);
+        assert_eq!(remaining, s.lines().count() - head.lines().count());
+    }
+
+    #[test]
+    fn test_compact_blob_show_hint_is_tee_independent() {
+        // The recovery hint re-derives the tail from the blob arg itself — no tee file,
+        // so it works at any size (N2) and quotes a path with a space for safe paste.
+        let mut s = String::new();
+        for i in 0..2000 {
+            s.push_str(&format!("line {i} with enough content to exceed the byte budget\n"));
+        }
+        let offset = blob_truncation(&s, MAX_BLOB_BYTES).expect("should window").2;
+        let out = compact_blob_show(&s, "HEAD:my dir/big.lock");
+        assert!(out.len() < s.len(), "windowing must shrink the output");
+        let expected = format!(
+            "[see remaining: git show 'HEAD:my dir/big.lock' | tail -n +{offset}]"
+        );
+        assert!(out.contains(&expected), "hint missing/unquoted: {out:?}");
+        assert!(!out.contains("tail -n +0"));
+
+        // A path containing a single quote must be escaped `'\''` so the hint stays
+        // copy-paste safe (the dangerous branch of `shell_single_quote`).
+        let out_q = compact_blob_show(&s, "HEAD:it's/a.lock");
+        let expected_q =
+            format!("[see remaining: git show 'HEAD:it'\\''s/a.lock' | tail -n +{offset}]");
+        assert!(out_q.contains(&expected_q), "single-quote path unescaped: {out_q:?}");
+    }
+
+    #[test]
+    fn test_compact_blob_show_small_passes_through() {
+        // Below the byte budget: returned unchanged, no hint.
+        let small = "a few\nshort\nlines\n";
+        assert_eq!(compact_blob_show(small, "HEAD:x.txt"), small);
+    }
+
+    #[test]
+    fn test_blob_latin1_fixture_decodes_and_windows() {
+        // Real ISO-8859-1 slice of an Oracle PL/SQL `.pck` (14KB, contains "MÉTODO",
+        // not valid UTF-8). The blob path must transcode it losslessly (no U+FFFD) and
+        // then window it for savings — instead of the old lossy-decode passthrough.
+        let bytes = include_bytes!("../../../tests/fixtures/git/latin1_blob.pck");
+        let crate::core::stream::Decoded::Latin1(text) =
+            crate::core::stream::decode_output(bytes)
+        else {
+            panic!("expected Latin1 decode of the .pck fixture");
+        };
+        assert!(!text.contains('\u{FFFD}'), "transcode must not corrupt");
+        assert!(text.contains("MÉTODO"));
+        assert!(text.len() > MAX_BLOB_BYTES.0);
+        assert!(blob_truncation(&text, MAX_BLOB_BYTES).is_some());
     }
 
     #[test]
