@@ -339,14 +339,22 @@ pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> Stri
             || trimmed == "}"
             || trimmed == "{";
 
-        if is_important || kept_lines < max_lines / 2 {
+        // The ordinary-line budget must never be zero. With max_lines = 1,
+        // `max_lines / 2` is 0, so no plain line could ever qualify and
+        // `head -1 file` returned the "[N more lines]" banner and nothing
+        // else -- exit 0, no error, zero content. Floor the budget at 1.
+        if is_important || kept_lines < (max_lines / 2).max(1) {
             result.push((*line).to_string());
             kept_lines += 1;
         }
-        // Non-important lines beyond max_lines/2 are silently skipped —
+        // Non-important lines beyond the budget are silently skipped —
         // no inline markers that could be mistaken for file content.
 
-        if kept_lines >= max_lines - 1 {
+        // The banner is metadata, not one of the requested lines, so it must
+        // not consume a content slot. Previously this was `max_lines - 1`,
+        // which both truncated every request by one line and underflowed to
+        // usize::MAX when max_lines was 0.
+        if kept_lines >= max_lines {
             break;
         }
     }
@@ -528,6 +536,30 @@ fn main() {
         assert!(output.contains("[9 more lines]"));
         // Only the first line is kept (plain-text, no important signatures)
         assert!(output.starts_with("line1\n"));
+    }
+
+    #[test]
+    fn test_smart_truncate_max_lines_one_returns_a_line() {
+        // Regression: `head -1 <file>` is rewritten to `rtk read --max-lines 1`.
+        // With max_lines/2 == 0 as the ordinary-line budget, no plain line could
+        // ever qualify, so this returned ONLY "[N more lines]" -- exit 0, no
+        // error, and zero of the requested content. Silent data loss.
+        let input = "line1\nline2\nline3\nline4\nline5\n";
+        let output = smart_truncate(input, 1, &Language::Unknown);
+        assert!(
+            output.starts_with("line1"),
+            "max_lines=1 must return the first line, got:\n{}",
+            output
+        );
+        assert!(output.contains("[4 more lines]"), "got:\n{}", output);
+    }
+
+    #[test]
+    fn test_smart_truncate_max_lines_zero_does_not_panic() {
+        // `max_lines - 1` underflowed to usize::MAX on a 0 budget.
+        let input = "a\nb\nc\n";
+        let output = smart_truncate(input, 0, &Language::Unknown);
+        assert!(output.contains("more lines"), "got:\n{}", output);
     }
 
     #[test]
