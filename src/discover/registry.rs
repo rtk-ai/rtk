@@ -1600,6 +1600,49 @@ mod tests {
     use super::super::report::RtkStatus;
     use super::*;
 
+    mod dotnet_subcommands {
+        use super::rewrite_command_no_prefixes;
+
+        /// `dotnet test` is the noisiest of the four and has a dedicated trx
+        /// parser, but only `dotnet build` was routed.
+        #[test]
+        fn filtered_subcommands_are_rewritten() {
+            for cmd in [
+                "dotnet build",
+                "dotnet test",
+                "dotnet restore",
+                "dotnet format",
+            ] {
+                assert_eq!(
+                    rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                    Some(format!("rtk {cmd}").as_str()),
+                    "{cmd} should route to rtk dotnet"
+                );
+            }
+        }
+
+        #[test]
+        fn subcommands_with_arguments_are_rewritten() {
+            assert_eq!(
+                rewrite_command_no_prefixes("dotnet test MyProj.csproj -v n", &[]).as_deref(),
+                Some("rtk dotnet test MyProj.csproj -v n")
+            );
+        }
+
+        /// Subcommands with no rtk filter stay on the native binary.
+        #[test]
+        fn unfiltered_subcommands_are_left_alone() {
+            for cmd in [
+                "dotnet run",
+                "dotnet publish",
+                "dotnet new console",
+                "dotnet testhost",
+            ] {
+                assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+            }
+        }
+    }
+
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
     }
