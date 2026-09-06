@@ -108,6 +108,59 @@ rtk gain        # Should show the savings dashboard
 
 > **Name collision warning**: Another project named "rtk" (Rust Type Kit) exists on crates.io. If `rtk gain` fails, you have the wrong package. Use `cargo install --git` above instead.
 
+## Claude Code Setup
+
+RTK's primary integration is [Claude Code](https://claude.com/claude-code). After the binary is installed (see [Installation](#installation) above), three steps wire it up.
+
+### 1. Connect it globally
+
+So Claude automatically intercepts and compresses Bash output across **all** your projects — without you editing config files by hand — run:
+
+```bash
+rtk init -g
+```
+
+This installs a `PreToolUse` hook plus a short `~/.claude/RTK.md` instruction file. When it asks:
+
+```
+Patch existing ~/.claude/settings.json? [y/N]
+```
+
+type `y` and press Enter. That injects the hook into Claude Code's global config (`~/.claude/settings.json`), with a `.bak` backup written alongside it.
+
+> **Non-interactive?** Use `rtk init -g --auto-patch` (CI/CD) to skip the prompt.
+
+### 2. Restart Claude Code
+
+Start a fresh session so it picks up the new hook:
+
+```bash
+claude
+```
+
+### 3. Verify it's active
+
+Inside Claude Code, ask it to run a command, e.g. *"run git status"*. Behind the scenes the shell call is rewritten from `git status` to `rtk git status`, so the output is stripped by 60–90% before it reaches your token context — with zero token overhead and nothing for you to remember.
+
+Check live savings anytime in a separate terminal:
+
+```bash
+rtk gain          # token savings stats
+rtk init --show   # confirm the hook is registered
+```
+
+### Other init variants
+
+```bash
+rtk init                    # Current project only (./CLAUDE.md)
+rtk init -g --hook-only     # Hook only, skip RTK.md
+rtk init -g --uninstall     # Remove hook + RTK.md + settings.json entry
+```
+
+> **Note:** The hook runs on Bash tool calls only. Claude Code built-in tools like `Read`, `Grep`, and `Glob` bypass it, so call `rtk read`, `rtk grep`, or `rtk find` explicitly when you want RTK filtering there.
+
+For other agents (Gemini, Codex, Cursor, Windsurf, …) see [Quick Start](#quick-start) below and the [Supported AI Tools](#supported-ai-tools) table. Detailed setup lives in [INSTALL.md](INSTALL.md).
+
 ## Quick Start
 
 ```bash
