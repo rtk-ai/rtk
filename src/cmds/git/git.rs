@@ -2053,6 +2053,9 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
             || a == "--points-at"
             || a.starts_with("--points-at=")
     });
+    let wants_native_branch_list = args
+        .iter()
+        .any(|a| matches!(a.as_str(), "-a" | "--all" | "-r" | "--remotes"));
 
     // Detect positional arguments (not flags) — indicates branch creation
     let has_positional_arg = args.iter().any(|a| !a.starts_with('-'));
@@ -2115,6 +2118,39 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
             }
             if !result.stdout.trim().is_empty() {
                 eprintln!("{}", result.stdout);
+            }
+            return Ok(result.exit_code);
+        }
+        return Ok(0);
+    }
+
+    // Explicit all/remotes flags are often used to inspect exact ref names, so
+    // preserve git's native listing instead of collapsing remote-tracking refs.
+    if wants_native_branch_list {
+        let mut cmd = git_cmd(global_args);
+        cmd.arg("branch");
+        cmd.arg("--no-color");
+        for arg in args {
+            cmd.arg(arg);
+        }
+        let result = exec_capture(&mut cmd).context("Failed to run git branch")?;
+        let combined = result.combined();
+
+        timer.track(
+            &format!("git branch {}", args.join(" ")),
+            &format!("rtk git branch {} (passthrough)", args.join(" ")),
+            &combined,
+            &result.stdout,
+        );
+
+        if result.success() {
+            print!("{}", result.stdout);
+        } else {
+            if !result.stdout.is_empty() {
+                print!("{}", result.stdout);
+            }
+            if !result.stderr.is_empty() {
+                eprint!("{}", result.stderr);
             }
             return Ok(result.exit_code);
         }
