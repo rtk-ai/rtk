@@ -1513,6 +1513,15 @@ fn rewrite_segment_inner(
         }
     }
 
+    // TOML-only tools invoked via a path or wrapper (e.g. /usr/local/bin/make).
+    // Prepend `rtk` to the original command so run_fallback executes the real binary path.
+    let lookup = crate::core::toml_filter::lookup_command_for_filter(cmd_part);
+    if crate::core::toml_filter::find_matching_filter(&lookup).is_some()
+        || crate::core::toml_filter::find_matching_filter(cmd_part).is_some()
+    {
+        return Some(format!("rtk {}{}", cmd_part, redirect_suffix));
+    }
+
     None
 }
 
@@ -4685,6 +4694,55 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("npx svgo", &[]),
             Some("rtk npx svgo".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_filter_bin_path() {
+        assert_eq!(
+            rewrite_command_no_prefixes("/usr/local/bin/make all", &[]),
+            Some("rtk /usr/local/bin/make all".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_classify_bru_run() {
+        assert!(matches!(
+            classify_command("bru run Identity/Token"),
+            Classification::Supported {
+                rtk_equivalent: "rtk bru",
+                category: "Tests",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_bru_run() {
+        assert_eq!(
+            rewrite_command_no_prefixes("bru run Identity/Token", &[]),
+            Some("rtk bru run Identity/Token".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bru_node_modules_path() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "../../client/node_modules/.bin/bru run Identity/Token",
+                &[]
+            ),
+            Some(
+                "rtk ../../client/node_modules/.bin/bru run Identity/Token".to_string()
+            ),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npx_bru() {
+        assert_eq!(
+            rewrite_command_no_prefixes("npx bru run Identity/Token", &[]),
+            Some("rtk npx bru run Identity/Token".to_string()),
         );
     }
 

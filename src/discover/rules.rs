@@ -737,6 +737,15 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^(?:[^\s]+/)*bru(?:\.cmd)?(\s|$)|^(?:npx|pnpm|yarn)\s+bru\b",
+        rtk_cmd: "rtk bru",
+        rewrite_prefixes: &["bru"],
+        category: "Tests",
+        savings_pct: 65.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^composer\s+(install|update|require)\b",
         rtk_cmd: "rtk composer",
         rewrite_prefixes: &["composer"],
