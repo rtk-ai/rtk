@@ -3,7 +3,10 @@
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
+mod common;
+
 fn run_with_stdin(command: &mut Command, input: &[u8]) -> Output {
+    common::isolate_recall();
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

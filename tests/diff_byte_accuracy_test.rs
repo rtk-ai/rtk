@@ -2,6 +2,8 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+mod common;
+
 const RTK_BIN: &str = env!("CARGO_BIN_EXE_rtk");
 const DIFF_SUBCOMMAND: &str = "diff";
 const LF_FILE: &str = "lf.txt";
@@ -13,6 +15,7 @@ const IDENTICAL_MESSAGE: &str = "[ok] Files are identical";
 const DIFF_EXIT_CODE: i32 = 1;
 
 fn run_rtk_diff(file1: &Path, file2: &Path) -> Output {
+    common::isolate_recall();
     let file1 = file1.display().to_string();
     let file2 = file2.display().to_string();
 

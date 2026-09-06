@@ -9,7 +9,10 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+mod common;
+
 fn rtk_grep(args: &[&str]) -> (String, Option<i32>) {
+    common::isolate_recall();
     let mut a = vec!["grep"];
     a.extend_from_slice(args);
     let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
@@ -165,6 +168,7 @@ fn case_insensitive_and_invert_match_grep() {
 
 #[test]
 fn piped_stdin_matches_grep() {
+    common::isolate_recall();
     let input = "apple\nzebra\napple pie\n";
     let feed = |cmd: &mut Command| {
         let mut c = cmd

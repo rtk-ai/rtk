@@ -9,16 +9,77 @@ fn active() -> Option<(RecoveryMode, RetrieverConfig)> {
     {
         return None;
     }
-    // Cached, not a fresh load: the hint paths in search.rs call this once per
-    // file, and a disk read plus TOML parse per file is the other half of the
-    // per-file overhead that breaches the <10ms target (B11/V18). This is a
-    // read-only caller that never writes config, which is what cached_config
-    // requires.
-    let cfg = &crate::core::config::cached_config().retriever;
+    let cfg = recall_cfg();
     match cfg.mode {
         RecoveryMode::Disabled => None,
-        mode => Some((mode, cfg.clone())),
+        mode => Some((mode, cfg)),
     }
+}
+
+/// Cached, not a fresh load: the hint paths in search.rs call this once per
+/// file, and a disk read plus TOML parse per file is the other half of the
+/// per-file overhead that breaches the <10ms target (B11/V18). This is a
+/// read-only caller that never writes config, which is what cached_config
+/// requires.
+#[cfg(not(test))]
+fn recall_cfg() -> RetrieverConfig {
+    crate::core::config::cached_config().retriever.clone()
+}
+
+/// Under test the ambient user config is never consulted. Filter unit tests
+/// across 20+ modules call `force_tee_*` with whatever config the developer
+/// happens to have, which wrote their fixture output into the real
+/// `recall.db` and leaked fixture slugs into the daily telemetry ping via
+/// `stats_snapshot()` (B13/V19). Recall is therefore off by default in tests;
+/// a test that needs the real path installs its own tempdir config with
+/// [`with_test_recall`].
+#[cfg(test)]
+fn recall_cfg() -> RetrieverConfig {
+    TEST_RECALL_CFG
+        .with(|c| c.borrow().clone())
+        .unwrap_or_else(|| RetrieverConfig {
+            mode: RecoveryMode::Disabled,
+            ..RetrieverConfig::default()
+        })
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_RECALL_CFG: std::cell::RefCell<Option<RetrieverConfig>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Serializes every test that installs a recall config against the one test
+/// that sets `RTK_RECALL`, which is process-wide and would otherwise switch
+/// recall off underneath a concurrently running test (B12/V19).
+#[cfg(test)]
+pub(crate) static RECALL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Point recall at `cfg` for the duration of `f`. The config itself is
+/// thread-local; the lock guards against the process-wide env kill switch.
+#[cfg(test)]
+pub(crate) fn with_test_recall<T>(cfg: RetrieverConfig, f: impl FnOnce() -> T) -> T {
+    let _guard = RECALL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    TEST_RECALL_CFG.with(|c| *c.borrow_mut() = Some(cfg));
+    let out = f();
+    TEST_RECALL_CFG.with(|c| *c.borrow_mut() = None);
+    out
+}
+
+/// Run `f` with recall backed by a throwaway store. For filter tests that
+/// assert on a truncation/recovery hint: without this the hint paths are inert
+/// under test and the filter correctly falls back to passthrough (B13/V19).
+#[cfg(test)]
+pub(crate) fn with_temp_recall<T>(f: impl FnOnce() -> T) -> T {
+    let dir = tempfile::tempdir().expect("tempdir");
+    with_test_recall(
+        RetrieverConfig {
+            mode: RecoveryMode::Sqlite,
+            database_path: Some(dir.path().join("recall_test.db")),
+            ..RetrieverConfig::default()
+        },
+        f,
+    )
 }
 
 fn store_hint(
@@ -90,17 +151,77 @@ pub fn force_tee_tail_hint(
 mod tests {
     use super::*;
 
+    fn temp_recall_cfg(dir: &std::path::Path) -> RetrieverConfig {
+        RetrieverConfig {
+            mode: RecoveryMode::Sqlite,
+            database_path: Some(dir.join("recall_test.db")),
+            ..RetrieverConfig::default()
+        }
+    }
+
+    /// B13/V19: with no test config installed — the state every filter unit
+    /// test runs in — the hint paths must stay inert. This is what stops
+    /// fixture output reaching the developer's real recall.db.
+    #[test]
+    fn test_recall_inert_in_tests_by_default() {
+        let big = "x".repeat(1000);
+        assert!(tee_and_hint(&big, "cmd", 1).is_none());
+        assert!(force_tee_hint(&big, "cmd").is_none());
+        assert!(force_tee_tail_hint(&big, "cmd", 5).is_none());
+    }
+
+    /// The default must be inertness, not a broken store: with a config
+    /// installed the same calls do produce hints.
+    #[test]
+    fn test_with_test_recall_enables_hints() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("recall_test.db");
+        let big = "x".repeat(1000);
+        let hint = with_test_recall(temp_recall_cfg(dir.path()), || force_tee_hint(&big, "cmd"));
+        assert!(hint.is_some_and(|h| h.contains("rtk recall")));
+        assert!(db.exists(), "writes go to the tempdir, not the real store");
+    }
+
+    /// The override is scoped: recall is inert again once `f` returns.
+    #[test]
+    fn test_with_test_recall_restores_inertness() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = "x".repeat(1000);
+        with_test_recall(temp_recall_cfg(dir.path()), || {
+            assert!(force_tee_hint(&big, "cmd").is_some());
+        });
+        assert!(force_tee_hint(&big, "cmd").is_none());
+    }
+
+    /// The env kill switch still wins over an installed config.
     #[test]
     fn test_disabled_env_emits_nothing() {
-        std::env::set_var("RTK_RECALL", "0");
+        let dir = tempfile::tempdir().unwrap();
         let big = "x".repeat(1000);
-        let hint = tee_and_hint(&big, "cmd", 1);
-        let forced = force_tee_hint(&big, "cmd");
-        let tail = force_tee_tail_hint(&big, "cmd", 5);
-        std::env::remove_var("RTK_RECALL");
-        assert!(hint.is_none(), "disabled must never emit tokens");
-        assert!(forced.is_none());
-        assert!(tail.is_none());
+        with_test_recall(temp_recall_cfg(dir.path()), || {
+            let _guard = EnvKill::set();
+            assert!(tee_and_hint(&big, "cmd", 1).is_none());
+            assert!(force_tee_hint(&big, "cmd").is_none());
+            assert!(force_tee_tail_hint(&big, "cmd", 5).is_none());
+        });
+    }
+
+    /// Sets `RTK_RECALL=0` and restores it on drop. Only ever constructed
+    /// inside a `with_test_recall` closure, which already holds
+    /// [`RECALL_TEST_LOCK`], so no other config-installing test observes it.
+    struct EnvKill;
+
+    impl EnvKill {
+        fn set() -> Self {
+            std::env::set_var("RTK_RECALL", "0");
+            EnvKill
+        }
+    }
+
+    impl Drop for EnvKill {
+        fn drop(&mut self) {
+            std::env::remove_var("RTK_RECALL");
+        }
     }
 
     #[test]
