@@ -769,12 +769,12 @@ fn format_run_list(json: &Value, ultra_compact: bool) -> String {
 }
 
 /// Check if run view args should bypass filtering and pass through directly.
-/// Flags like --log-failed, --log, and --json produce output that the filter
-/// would incorrectly strip.
+/// Flags like --job, --log-failed, --log, and --json produce output that the
+/// workflow-run summary filter would incorrectly strip or reshape.
 fn should_passthrough_run_view(extra_args: &[String]) -> bool {
     extra_args
         .iter()
-        .any(|a| a == "--log-failed" || a == "--log" || a == "--json")
+        .any(|a| a == "--job" || a == "--log-failed" || a == "--log" || a == "--json")
 }
 
 fn view_run(args: &[String], _verbose: u8) -> Result<i32> {
@@ -1177,6 +1177,14 @@ mod tests {
     }
 
     #[test]
+    fn test_run_view_passthrough_job() {
+        assert!(should_passthrough_run_view(&[
+            "--job".into(),
+            "67890".into()
+        ]));
+    }
+
+    #[test]
     fn test_run_view_no_passthrough_empty() {
         assert!(!should_passthrough_run_view(&[]));
     }
@@ -1217,6 +1225,16 @@ mod tests {
         let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
         assert_eq!(id, "12345");
         assert_eq!(extra, vec!["--job", "67890"]);
+    }
+
+    #[test]
+    fn test_parse_optional_identifier_with_job_only() {
+        // gh run view --job 67890
+        let args: Vec<String> = vec!["--job".into(), "67890".into()];
+        let (id, extra) = parse_optional_identifier(&args);
+        assert_eq!(id, None);
+        assert_eq!(extra, vec!["--job", "67890"]);
+        assert!(should_passthrough_run_view(&extra));
     }
 
     #[test]
