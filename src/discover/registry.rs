@@ -2219,6 +2219,27 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_dotnet_ef() {
+        assert_eq!(
+            classify_command("dotnet ef migrations add InitialCreate"),
+            Classification::Supported {
+                rtk_equivalent: "rtk dotnet",
+                category: "Build",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_dotnet_ef() {
+        assert_eq!(
+            rewrite_command_no_prefixes("dotnet ef database update --verbose", &[]),
+            Some("rtk dotnet ef database update --verbose".to_string())
+        );
+    }
+
+    #[test]
     fn test_classify_cat_file() {
         assert_eq!(
             classify_command("cat src/main.rs"),

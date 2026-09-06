@@ -21,6 +21,33 @@ const DOTNET_CLI_UI_LANGUAGE: &str = "DOTNET_CLI_UI_LANGUAGE";
 const DOTNET_CLI_UI_LANGUAGE_VALUE: &str = "en-US";
 static TEMP_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EfCommandKind {
+    MigrationsAdd,
+    MigrationsRemove,
+    MigrationsList,
+    MigrationsScript,
+    DatabaseUpdate,
+    DbContextList,
+    DbContextInfo,
+    Other,
+}
+
+impl EfCommandKind {
+    fn label(self) -> &'static str {
+        match self {
+            EfCommandKind::MigrationsAdd => "migrations add",
+            EfCommandKind::MigrationsRemove => "migrations remove",
+            EfCommandKind::MigrationsList => "migrations list",
+            EfCommandKind::MigrationsScript => "migrations script",
+            EfCommandKind::DatabaseUpdate => "database update",
+            EfCommandKind::DbContextList => "dbcontext list",
+            EfCommandKind::DbContextInfo => "dbcontext info",
+            EfCommandKind::Other => "",
+        }
+    }
+}
+
 pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
     run_dotnet_with_binlog("build", args, verbose)
 }
@@ -70,6 +97,40 @@ pub fn run_format(args: &[String], verbose: u8) -> Result<i32> {
             cleanup_temp_file(path);
         }
     }
+
+    Ok(result.exit_code)
+}
+
+pub fn run_ef(args: &[String], verbose: u8) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+    let mut cmd = resolved_command("dotnet");
+    cmd.env(DOTNET_CLI_UI_LANGUAGE, DOTNET_CLI_UI_LANGUAGE_VALUE);
+    cmd.arg("ef");
+
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    if verbose > 0 {
+        eprintln!("Running: dotnet ef {}", args.join(" "));
+    }
+
+    let result = exec_capture(&mut cmd).context("Failed to run dotnet ef")?;
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
+    let raw_command = format_dotnet_ef_command("dotnet ef", args);
+    let rtk_command = format_dotnet_ef_command("rtk dotnet ef", args);
+    let mut filtered = filter_dotnet_ef_output(args, &raw, result.success());
+
+    if !result.success() {
+        if let Some(hint) = crate::core::tee::tee_and_hint(&raw, &raw_command, result.exit_code) {
+            filtered.push('\n');
+            filtered.push_str(&hint);
+        }
+    }
+
+    println!("{}", filtered);
+
+    timer.track(&raw_command, &rtk_command, &raw, &filtered);
 
     Ok(result.exit_code)
 }
@@ -421,6 +482,660 @@ fn format_dotnet_format_output(
         summary.files_unchanged
     ));
     output
+}
+
+fn format_dotnet_ef_command(prefix: &str, args: &[String]) -> String {
+    if args.is_empty() {
+        prefix.to_string()
+    } else {
+        format!("{} {}", prefix, args.join(" "))
+    }
+}
+
+fn filter_dotnet_ef_output(args: &[String], raw: &str, success: bool) -> String {
+    let clean = normalize_dotnet_ef_output(raw);
+    let kind = detect_ef_command_kind(args);
+
+    if success {
+        format_dotnet_ef_success(kind, args, &clean)
+    } else {
+        format_dotnet_ef_failure(kind, &clean)
+    }
+}
+
+fn normalize_dotnet_ef_output(raw: &str) -> String {
+    let normalized = raw.replace("\r\n", "\n");
+    let clean = crate::core::utils::strip_ansi(&normalized);
+    binlog::scrub_sensitive_env_vars(&clean)
+}
+
+fn detect_ef_command_kind(args: &[String]) -> EfCommandKind {
+    let indices = ef_command_indices(args);
+    let Some(first) = indices.first().and_then(|idx| args.get(*idx)) else {
+        return EfCommandKind::Other;
+    };
+    let Some(second) = indices.get(1).and_then(|idx| args.get(*idx)) else {
+        return EfCommandKind::Other;
+    };
+
+    match (first.as_str(), second.as_str()) {
+        (group, action)
+            if group.eq_ignore_ascii_case("migrations")
+                && action.eq_ignore_ascii_case("add") =>
+        {
+            EfCommandKind::MigrationsAdd
+        }
+        (group, action)
+            if group.eq_ignore_ascii_case("migrations")
+                && action.eq_ignore_ascii_case("remove") =>
+        {
+            EfCommandKind::MigrationsRemove
+        }
+        (group, action)
+            if group.eq_ignore_ascii_case("migrations")
+                && action.eq_ignore_ascii_case("list") =>
+        {
+            EfCommandKind::MigrationsList
+        }
+        (group, action)
+            if group.eq_ignore_ascii_case("migrations")
+                && action.eq_ignore_ascii_case("script") =>
+        {
+            EfCommandKind::MigrationsScript
+        }
+        (group, action)
+            if group.eq_ignore_ascii_case("database") && action.eq_ignore_ascii_case("update") =>
+        {
+            EfCommandKind::DatabaseUpdate
+        }
+        (group, action)
+            if group.eq_ignore_ascii_case("dbcontext") && action.eq_ignore_ascii_case("list") =>
+        {
+            EfCommandKind::DbContextList
+        }
+        (group, action)
+            if group.eq_ignore_ascii_case("dbcontext") && action.eq_ignore_ascii_case("info") =>
+        {
+            EfCommandKind::DbContextInfo
+        }
+        _ => EfCommandKind::Other,
+    }
+}
+
+fn ef_command_indices(args: &[String]) -> Vec<usize> {
+    let mut indices = Vec::new();
+    let mut idx = 0;
+
+    while idx < args.len() && indices.len() < 2 {
+        let arg = args[idx].as_str();
+        if arg == "--" {
+            break;
+        }
+
+        if arg.starts_with('-') {
+            idx += if ef_option_takes_value(arg) && !arg.contains('=') {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+
+        indices.push(idx);
+        idx += 1;
+    }
+
+    indices
+}
+
+fn ef_option_takes_value(arg: &str) -> bool {
+    let name = arg
+        .split_once('=')
+        .map(|(name, _)| name)
+        .unwrap_or(arg)
+        .to_ascii_lowercase();
+
+    matches!(
+        name.as_str(),
+        "-p" | "--project"
+            | "-s"
+            | "--startup-project"
+            | "-c"
+            | "--context"
+            | "--configuration"
+            | "--framework"
+            | "--runtime"
+            | "-o"
+            | "--output"
+            | "--output-dir"
+            | "--namespace"
+            | "--connection"
+    )
+}
+
+fn ef_action_index(args: &[String]) -> Option<usize> {
+    ef_command_indices(args).get(1).copied()
+}
+
+fn ef_first_positional_after(args: &[String], start: usize) -> Option<&str> {
+    let mut idx = start;
+
+    while idx < args.len() {
+        let arg = args[idx].as_str();
+        if arg == "--" {
+            break;
+        }
+
+        if arg.starts_with('-') {
+            idx += if ef_option_takes_value(arg) && !arg.contains('=') {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+
+        return Some(arg);
+    }
+
+    None
+}
+
+fn ef_option_value<'a>(args: &'a [String], names: &[&str]) -> Option<&'a str> {
+    for (idx, arg) in args.iter().enumerate() {
+        let lower = arg.to_ascii_lowercase();
+        for name in names {
+            if lower == *name {
+                return args
+                    .get(idx + 1)
+                    .map(String::as_str)
+                    .filter(|value| !value.starts_with('-'));
+            }
+
+            let prefix = format!("{}=", name);
+            if lower.starts_with(&prefix) {
+                return Some(&arg[prefix.len()..]);
+            }
+        }
+    }
+
+    None
+}
+
+fn format_dotnet_ef_success(kind: EfCommandKind, args: &[String], raw: &str) -> String {
+    match kind {
+        EfCommandKind::MigrationsAdd => format_ef_migrations_add(args, raw),
+        EfCommandKind::MigrationsRemove => format_ef_migrations_remove(raw),
+        EfCommandKind::MigrationsList => format_ef_migrations_list(raw),
+        EfCommandKind::MigrationsScript => format_ef_migrations_script(args, raw),
+        EfCommandKind::DatabaseUpdate => format_ef_database_update(raw),
+        EfCommandKind::DbContextList => format_ef_dbcontext_list(raw),
+        EfCommandKind::DbContextInfo => format_ef_dbcontext_info(raw),
+        EfCommandKind::Other => compact_dotnet_ef_generic(raw, true),
+    }
+}
+
+fn format_dotnet_ef_failure(kind: EfCommandKind, raw: &str) -> String {
+    let diagnostics = collect_ef_diagnostic_lines(raw);
+    if diagnostics.is_empty() {
+        return compact_dotnet_ef_generic(raw, false);
+    }
+
+    let header = if kind == EfCommandKind::Other {
+        "fail dotnet ef".to_string()
+    } else {
+        format!("fail dotnet ef {}", kind.label())
+    };
+
+    const MAX_EF_ERRORS: usize = CAP_ERRORS;
+    let mut output = header;
+    output.push_str("\nErrors:");
+    for line in diagnostics.iter().take(MAX_EF_ERRORS) {
+        output.push_str(&format!("\n  {}", truncate(line, 240)));
+    }
+
+    if diagnostics.len() > MAX_EF_ERRORS {
+        output.push_str(&format!(
+            "\n  ... +{} more errors",
+            diagnostics.len() - MAX_EF_ERRORS
+        ));
+        let all_errors = diagnostics.join("\n");
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(
+            &all_errors,
+            "dotnet-ef-errors",
+            MAX_EF_ERRORS + 1,
+        ) {
+            output.push_str(&format!("\n  {}", hint));
+        }
+    }
+
+    output
+}
+
+fn format_ef_migrations_add(args: &[String], raw: &str) -> String {
+    let migration_name = ef_action_index(args)
+        .and_then(|idx| ef_first_positional_after(args, idx + 1))
+        .unwrap_or("migration");
+    let mut output = format!("ok dotnet ef migrations add: {}", migration_name);
+
+    if let Some(context) = extract_ef_context(raw) {
+        output.push_str(&format!("\n  context: {}", context));
+    }
+
+    let generated = count_generated_migration_files(raw);
+    if generated > 0 {
+        output.push_str(&format!("\n  generated: {} files", generated));
+    }
+
+    append_ef_warnings(&mut output, &collect_ef_warning_lines(raw));
+    output
+}
+
+fn format_ef_migrations_remove(raw: &str) -> String {
+    let mut output = "ok dotnet ef migrations remove".to_string();
+    if let Some(context) = extract_ef_context(raw) {
+        output.push_str(&format!("\n  context: {}", context));
+    }
+    append_ef_warnings(&mut output, &collect_ef_warning_lines(raw));
+    output
+}
+
+fn format_ef_migrations_list(raw: &str) -> String {
+    if raw.to_ascii_lowercase().contains("no migrations were found") {
+        let mut output = "ok dotnet ef migrations list: none".to_string();
+        append_ef_warnings(&mut output, &collect_ef_warning_lines(raw));
+        return output;
+    }
+
+    let warnings = collect_ef_warning_lines(raw);
+    let migrations: Vec<String> = collect_ef_signal_lines(raw)
+        .into_iter()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            !lower.starts_with("using context ")
+                && !lower.contains("warning")
+                && !lower.starts_with("warn:")
+                && !lower.starts_with("info:")
+        })
+        .collect();
+
+    if migrations.is_empty() {
+        return compact_dotnet_ef_generic(raw, true);
+    }
+
+    const MAX_EF_MIGRATIONS: usize = CAP_LIST;
+    let mut output = format!("ok dotnet ef migrations list: {} migrations", migrations.len());
+    for migration in migrations.iter().take(MAX_EF_MIGRATIONS) {
+        output.push_str(&format!("\n  {}", truncate(migration, 180)));
+    }
+
+    if migrations.len() > MAX_EF_MIGRATIONS {
+        output.push_str(&format!(
+            "\n  ... +{} more migrations",
+            migrations.len() - MAX_EF_MIGRATIONS
+        ));
+        let all_migrations = migrations.join("\n");
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(
+            &all_migrations,
+            "dotnet-ef-migrations",
+            MAX_EF_MIGRATIONS + 1,
+        ) {
+            output.push_str(&format!("\n  {}", hint));
+        }
+    }
+
+    append_ef_warnings(&mut output, &warnings);
+    output
+}
+
+fn format_ef_migrations_script(args: &[String], raw: &str) -> String {
+    if let Some(path) = ef_option_value(args, &["-o", "--output"]) {
+        let mut output = format!(
+            "ok dotnet ef migrations script: wrote {}",
+            truncate(path, 180)
+        );
+        append_ef_warnings(&mut output, &collect_ef_warning_lines(raw));
+        return output;
+    }
+
+    let lines = collect_ef_signal_lines(raw);
+    if lines.is_empty() {
+        return "ok dotnet ef migrations script: completed".to_string();
+    }
+
+    let statement_count = lines
+        .iter()
+        .filter(|line| is_sql_statement_line(line))
+        .count();
+    let marker_count = lines
+        .iter()
+        .filter(|line| is_sql_migration_marker(line))
+        .count();
+
+    let mut output = if statement_count > 0 {
+        format!(
+            "ok dotnet ef migrations script: {} SQL statements to stdout",
+            statement_count
+        )
+    } else {
+        format!(
+            "ok dotnet ef migrations script: {} output lines",
+            lines.len()
+        )
+    };
+
+    if marker_count > 0 {
+        output.push_str(&format!("\n  migration markers: {}", marker_count));
+    }
+
+    for line in lines.iter().take(5) {
+        output.push_str(&format!("\n  {}", truncate(line, 180)));
+    }
+
+    if lines.len() > 5 {
+        output.push_str(&format!("\n  ... +{} more lines", lines.len() - 5));
+        if let Some(hint) = crate::core::tee::force_tee_hint(raw, "dotnet-ef-migrations-script") {
+            output.push_str(&format!("\n  {}", hint));
+        }
+    }
+
+    append_ef_warnings(&mut output, &collect_ef_warning_lines(raw));
+    output
+}
+
+fn format_ef_database_update(raw: &str) -> String {
+    let applied = collect_applied_migrations(raw);
+    let mut output = if applied.is_empty() {
+        if raw.to_ascii_lowercase().contains("no migrations were applied") {
+            "ok dotnet ef database update: database up to date".to_string()
+        } else {
+            "ok dotnet ef database update: completed".to_string()
+        }
+    } else {
+        let mut text = format!(
+            "ok dotnet ef database update: applied {} migrations",
+            applied.len()
+        );
+        if let Some(last) = applied.last() {
+            text.push_str(&format!("\n  last: {}", truncate(last, 180)));
+        }
+        text
+    };
+
+    if let Some(context) = extract_ef_context(raw) {
+        output.push_str(&format!("\n  context: {}", context));
+    }
+
+    append_ef_warnings(&mut output, &collect_ef_warning_lines(raw));
+    output
+}
+
+fn format_ef_dbcontext_list(raw: &str) -> String {
+    let warnings = collect_ef_warning_lines(raw);
+    let contexts: Vec<String> = collect_ef_signal_lines(raw)
+        .into_iter()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            !lower.starts_with("using context ")
+                && !lower.contains("warning")
+                && !lower.starts_with("warn:")
+        })
+        .collect();
+
+    if contexts.is_empty() {
+        let mut output = "ok dotnet ef dbcontext list: none".to_string();
+        append_ef_warnings(&mut output, &warnings);
+        return output;
+    }
+
+    const MAX_EF_CONTEXTS: usize = CAP_LIST;
+    let mut output = format!("ok dotnet ef dbcontext list: {} contexts", contexts.len());
+    for context in contexts.iter().take(MAX_EF_CONTEXTS) {
+        output.push_str(&format!("\n  {}", truncate(context, 180)));
+    }
+
+    if contexts.len() > MAX_EF_CONTEXTS {
+        output.push_str(&format!(
+            "\n  ... +{} more contexts",
+            contexts.len() - MAX_EF_CONTEXTS
+        ));
+        let all_contexts = contexts.join("\n");
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(
+            &all_contexts,
+            "dotnet-ef-dbcontexts",
+            MAX_EF_CONTEXTS + 1,
+        ) {
+            output.push_str(&format!("\n  {}", hint));
+        }
+    }
+
+    append_ef_warnings(&mut output, &warnings);
+    output
+}
+
+fn format_ef_dbcontext_info(raw: &str) -> String {
+    let lines = collect_ef_signal_lines(raw);
+    if lines.is_empty() {
+        return "ok dotnet ef dbcontext info: completed".to_string();
+    }
+
+    const MAX_EF_INFO_LINES: usize = CAP_LIST;
+    let mut output = "ok dotnet ef dbcontext info".to_string();
+    for line in lines.iter().take(MAX_EF_INFO_LINES) {
+        output.push_str(&format!("\n  {}", truncate(line, 180)));
+    }
+
+    if lines.len() > MAX_EF_INFO_LINES {
+        output.push_str(&format!(
+            "\n  ... +{} more lines",
+            lines.len() - MAX_EF_INFO_LINES
+        ));
+        let all_lines = lines.join("\n");
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(
+            &all_lines,
+            "dotnet-ef-dbcontext-info",
+            MAX_EF_INFO_LINES + 1,
+        ) {
+            output.push_str(&format!("\n  {}", hint));
+        }
+    }
+
+    output
+}
+
+fn compact_dotnet_ef_generic(raw: &str, success: bool) -> String {
+    let lines = collect_ef_signal_lines(raw);
+    let status = if success { "ok" } else { "fail" };
+
+    if lines.is_empty() {
+        return format!("{} dotnet ef: completed", status);
+    }
+
+    const MAX_EF_LINES: usize = CAP_LIST;
+    let mut output = format!("{} dotnet ef: {} output lines", status, lines.len());
+    for line in lines.iter().take(MAX_EF_LINES) {
+        output.push_str(&format!("\n  {}", truncate(line, 180)));
+    }
+
+    if lines.len() > MAX_EF_LINES {
+        output.push_str(&format!("\n  ... +{} more lines", lines.len() - MAX_EF_LINES));
+        let all_lines = lines.join("\n");
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(
+            &all_lines,
+            "dotnet-ef-output",
+            MAX_EF_LINES + 1,
+        ) {
+            output.push_str(&format!("\n  {}", hint));
+        }
+    }
+
+    output
+}
+
+fn collect_ef_signal_lines(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(str::trim)
+        .filter(|line| !is_dotnet_ef_noise_line(line))
+        .map(String::from)
+        .collect()
+}
+
+fn collect_ef_warning_lines(raw: &str) -> Vec<String> {
+    collect_ef_signal_lines(raw)
+        .into_iter()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("warning") || lower.starts_with("warn:")
+        })
+        .collect()
+}
+
+fn collect_ef_diagnostic_lines(raw: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    for line in raw.lines().map(str::trim) {
+        if line.is_empty() || is_dotnet_ef_noise_line(line) {
+            continue;
+        }
+
+        let lower = line.to_ascii_lowercase();
+        let is_diagnostic = lower.contains("error")
+            || lower.contains("warning")
+            || lower.contains("failed")
+            || lower.contains("exception")
+            || lower.contains("unable to")
+            || lower.contains("cannot")
+            || lower.contains("could not")
+            || lower.contains("no dbcontext")
+            || lower.starts_with("system.")
+            || lower.starts_with("at ")
+            || lower.starts_with("--->");
+
+        if is_diagnostic && !lines.iter().any(|existing| existing == line) {
+            lines.push(line.to_string());
+        }
+    }
+
+    lines
+}
+
+fn append_ef_warnings(output: &mut String, warnings: &[String]) {
+    if warnings.is_empty() {
+        return;
+    }
+
+    const MAX_EF_WARNINGS: usize = CAP_WARNINGS;
+    output.push_str("\nWarnings:");
+    for warning in warnings.iter().take(MAX_EF_WARNINGS) {
+        output.push_str(&format!("\n  {}", truncate(warning, 180)));
+    }
+
+    if warnings.len() > MAX_EF_WARNINGS {
+        output.push_str(&format!(
+            "\n  ... +{} more warnings",
+            warnings.len() - MAX_EF_WARNINGS
+        ));
+        let all_warnings = warnings.join("\n");
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(
+            &all_warnings,
+            "dotnet-ef-warnings",
+            MAX_EF_WARNINGS + 1,
+        ) {
+            output.push_str(&format!("\n  {}", hint));
+        }
+    }
+}
+
+fn is_dotnet_ef_noise_line(line: &str) -> bool {
+    if line.is_empty() {
+        return true;
+    }
+
+    let lower = line.to_ascii_lowercase();
+    lower == "build started..."
+        || lower == "build succeeded."
+        || lower == "done."
+        || lower.starts_with("using project ")
+        || lower.starts_with("using startup project ")
+        || lower.starts_with("using assembly ")
+        || lower.starts_with("using startup assembly ")
+        || lower.starts_with("using application base ")
+        || lower.starts_with("using working directory ")
+        || lower.starts_with("using root namespace ")
+        || lower.starts_with("using project directory ")
+        || lower.starts_with("remaining arguments: ")
+        || lower.starts_with("finding ")
+        || lower.starts_with("using application service provider ")
+        || lower.starts_with("using environment ")
+        || lower.starts_with("using design-time services ")
+        || lower.starts_with("no referenced design-time services were found")
+        || lower.starts_with("executed dbcommand")
+        || lower.starts_with("executing dbcommand")
+        || lower.starts_with("info: microsoft.entityframeworkcore.")
+        || lower.starts_with("dbug:")
+        || lower.starts_with("trce:")
+}
+
+fn extract_ef_context(raw: &str) -> Option<String> {
+    raw.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if trimmed.to_ascii_lowercase().starts_with("using context ") {
+            extract_single_quoted_value(trimmed)
+        } else {
+            None
+        }
+    })
+}
+
+fn extract_single_quoted_value(line: &str) -> Option<String> {
+    let start = line.find('\'')?;
+    let rest = &line[start + 1..];
+    let end = rest.find('\'')?;
+    Some(rest[..end].to_string())
+}
+
+fn count_generated_migration_files(raw: &str) -> usize {
+    raw.lines()
+        .map(str::trim)
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.starts_with("writing migration ")
+                || lower.starts_with("writing model snapshot ")
+                || lower.starts_with("writing snapshot ")
+                || lower.starts_with("writing designer ")
+        })
+        .count()
+}
+
+fn collect_applied_migrations(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(str::trim)
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.starts_with("applying migration ") || lower.starts_with("reverting migration ")
+        })
+        .map(|line| extract_single_quoted_value(line).unwrap_or_else(|| line.to_string()))
+        .collect()
+}
+
+fn is_sql_migration_marker(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.starts_with("--")
+        && (lower.contains("migration")
+            || lower.contains("_")
+            || lower.contains("productversion"))
+}
+
+fn is_sql_statement_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.starts_with("create ")
+        || lower.starts_with("alter ")
+        || lower.starts_with("drop ")
+        || lower.starts_with("insert ")
+        || lower.starts_with("update ")
+        || lower.starts_with("delete ")
+        || lower.starts_with("exec")
+        || lower.starts_with("if ")
 }
 
 fn cleanup_temp_file(path: &Path) {
@@ -1397,6 +2112,178 @@ mod tests {
             .join("fixtures")
             .join("dotnet")
             .join(name)
+    }
+
+    fn count_tokens(text: &str) -> usize {
+        text.split_whitespace().count()
+    }
+
+    #[test]
+    fn test_detect_ef_command_with_leading_options_and_app_args() {
+        let args = vec![
+            "--project".to_string(),
+            "src/Data/Ledger.Data.csproj".to_string(),
+            "--startup-project".to_string(),
+            "src/Web/Ledger.Web.csproj".to_string(),
+            "migrations".to_string(),
+            "add".to_string(),
+            "AddLedgerTables".to_string(),
+            "--context".to_string(),
+            "BillingDbContext".to_string(),
+            "--".to_string(),
+            "--environment".to_string(),
+            "Development".to_string(),
+        ];
+
+        assert_eq!(detect_ef_command_kind(&args), EfCommandKind::MigrationsAdd);
+        assert_eq!(
+            ef_action_index(&args).and_then(|idx| ef_first_positional_after(&args, idx + 1)),
+            Some("AddLedgerTables")
+        );
+    }
+
+    #[test]
+    fn test_filter_dotnet_ef_migrations_add_complex_reduces_tokens() {
+        let raw = fs::read_to_string(format_fixture("ef_migrations_add_complex.txt"))
+            .expect("read EF complex migration fixture");
+        let args = vec![
+            "migrations".to_string(),
+            "add".to_string(),
+            "AddLedgerTables".to_string(),
+            "--context".to_string(),
+            "BillingDbContext".to_string(),
+        ];
+
+        let output = filter_dotnet_ef_output(&args, &raw, true);
+
+        assert!(output.contains("ok dotnet ef migrations add: AddLedgerTables"));
+        assert!(output.contains("context: BillingDbContext"));
+        assert!(output.contains("generated: 3 files"));
+        assert!(!output.contains("Build started"));
+        assert!(!output.contains("Finding DbContext"));
+
+        let savings =
+            100.0 - (count_tokens(&output) as f64 / count_tokens(&raw) as f64 * 100.0);
+        assert!(
+            savings >= 80.0,
+            "dotnet ef complex migration: expected >=80% savings, got {:.1}% (in={} out={})\n{}",
+            savings,
+            count_tokens(&raw),
+            count_tokens(&output),
+            output
+        );
+    }
+
+    #[test]
+    fn test_filter_dotnet_ef_database_update_failure_preserves_diagnostics() {
+        let raw = fs::read_to_string(format_fixture("ef_database_update_failed.txt"))
+            .expect("read EF failed database update fixture");
+        let args = vec!["database".to_string(), "update".to_string()];
+
+        let output = filter_dotnet_ef_output(&args, &raw, false);
+
+        assert!(output.contains("fail dotnet ef database update"));
+        assert!(output.contains("Unable to create a 'DbContext'"));
+        assert!(output.contains("System.InvalidOperationException"));
+        assert!(!output.contains("Build started"));
+    }
+
+    #[test]
+    fn test_filter_dotnet_ef_migrations_list_caps_long_output() {
+        let mut raw = String::from("Build started...\nBuild succeeded.\n");
+        raw.push_str("warn: Microsoft.EntityFrameworkCore.Model.Validation[10400] Sensitive data logging is enabled.\n");
+        for idx in 1..=(CAP_LIST + 2) {
+            raw.push_str(&format!("202605{:02}091520_Migration{}\n", idx, idx));
+        }
+        let args = vec!["migrations".to_string(), "list".to_string()];
+
+        let output = filter_dotnet_ef_output(&args, &raw, true);
+
+        assert!(output.contains(&format!(
+            "ok dotnet ef migrations list: {} migrations",
+            CAP_LIST + 2
+        )));
+        assert!(output.contains("20260501091520_Migration1"));
+        assert!(output.contains("... +2 more migrations"));
+        assert!(!output.contains(&format!(
+            "202605{:02}091520_Migration{}",
+            CAP_LIST + 2,
+            CAP_LIST + 2
+        )));
+        assert!(output.contains("Warnings:"));
+        assert!(output.contains("Sensitive data logging is enabled."));
+    }
+
+    #[test]
+    fn test_filter_dotnet_ef_database_update_summary() {
+        let raw = r#"
+Build started...
+Build succeeded.
+Using context 'BillingDbContext'.
+Applying migration '20260530091520_InitialLedger'.
+Applying migration '20260531091520_AddLedgerTables'.
+Done.
+"#;
+        let args = vec!["database".to_string(), "update".to_string()];
+
+        let output = filter_dotnet_ef_output(&args, raw, true);
+
+        assert!(output.contains("ok dotnet ef database update: applied 2 migrations"));
+        assert!(output.contains("last: 20260531091520_AddLedgerTables"));
+        assert!(output.contains("context: BillingDbContext"));
+        assert!(!output.contains("Build succeeded"));
+    }
+
+    #[test]
+    fn test_filter_dotnet_ef_migrations_script_summarizes_stdout() {
+        let raw = r#"
+Build started...
+Build succeeded.
+-- Migration: 20260530091520_InitialLedger
+CREATE TABLE "__EFMigrationsHistory" (
+    "MigrationId" character varying(150) NOT NULL,
+    "ProductVersion" character varying(32) NOT NULL,
+    CONSTRAINT "PK___EFMigrationsHistory" PRIMARY KEY ("MigrationId")
+);
+CREATE TABLE "Accounts" (
+    "Id" uuid NOT NULL,
+    "Name" text NOT NULL,
+    CONSTRAINT "PK_Accounts" PRIMARY KEY ("Id")
+);
+INSERT INTO "__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+VALUES ('20260530091520_InitialLedger', '8.0.4');
+-- Migration: 20260531091520_AddLedgerTables
+ALTER TABLE "Accounts" ADD "Balance" numeric NOT NULL DEFAULT 0.0;
+"#;
+        let args = vec!["migrations".to_string(), "script".to_string()];
+
+        let output = filter_dotnet_ef_output(&args, raw, true);
+
+        assert!(output.contains("ok dotnet ef migrations script: 4 SQL statements to stdout"));
+        assert!(output.contains("migration markers: 2"));
+        assert!(output.contains("... +"));
+        assert!(!output.contains("Build started"));
+    }
+
+    #[test]
+    fn test_filter_dotnet_ef_dbcontext_list_preserves_warnings() {
+        let raw = r#"
+Build started...
+Build succeeded.
+warn: Microsoft.EntityFrameworkCore.Model.Validation[10400] Sensitive data logging is enabled.
+BillingDbContext
+ReportingDbContext
+"#;
+        let args = vec!["dbcontext".to_string(), "list".to_string()];
+
+        let output = filter_dotnet_ef_output(&args, raw, true);
+
+        assert!(output.contains("ok dotnet ef dbcontext list: 2 contexts"));
+        assert!(output.contains("BillingDbContext"));
+        assert!(output.contains("ReportingDbContext"));
+        assert!(output.contains("Warnings:"));
+        assert!(output.contains("Sensitive data logging is enabled."));
+        assert!(!output.contains("Build started"));
     }
 
     #[test]

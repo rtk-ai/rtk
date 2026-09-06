@@ -1289,6 +1289,11 @@ enum DotnetCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Entity Framework Core tools with compact output
+    Ef {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported dotnet subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -2090,6 +2095,7 @@ fn run_cli() -> Result<i32> {
             DotnetCommands::Test { args } => dotnet_cmd::run_test(&args, cli.verbose)?,
             DotnetCommands::Restore { args } => dotnet_cmd::run_restore(&args, cli.verbose)?,
             DotnetCommands::Format { args } => dotnet_cmd::run_format(&args, cli.verbose)?,
+            DotnetCommands::Ef { args } => dotnet_cmd::run_ef(&args, cli.verbose)?,
             DotnetCommands::Other(args) => dotnet_cmd::run_passthrough(&args, cli.verbose)?,
         },
 

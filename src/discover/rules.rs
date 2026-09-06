@@ -760,6 +760,15 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^dotnet\s+ef\b",
+        rtk_cmd: "rtk dotnet",
+        rewrite_prefixes: &["dotnet"],
+        category: "Build",
+        savings_pct: 80.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^du\b",
         rtk_cmd: "rtk du",
         rewrite_prefixes: &["du"],
