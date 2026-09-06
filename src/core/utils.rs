@@ -283,21 +283,30 @@ pub fn fallback_tail(output: &str, label: &str, n: usize) -> String {
     lines[start..].join("\n")
 }
 
-/// Create a directory owner-only (0700 on Unix), tightening one that already exists.
+/// Create a directory owner-only, tightening one that already exists.
+///
+/// `0700` on Unix; on Windows a DACL with one entry for the current user,
+/// inheriting so what is created inside starts protected too.
 pub fn create_private_dir(path: &std::path::Path) -> std::io::Result<()> {
     fs::create_dir_all(path)?;
     set_owner_only(path, 0o700);
     Ok(())
 }
 
-/// Restrict an existing file to owner-only access (0600 on Unix).
+/// Restrict an existing file to owner-only access: `0600` on Unix, a
+/// single-entry DACL detached from inheritance on Windows.
 pub fn restrict_file(path: &std::path::Path) {
     set_owner_only(path, 0o600);
 }
 
-/// Open a file owner-only (0600 on Unix), applied at creation so content is
-/// never briefly readable under a permissive umask. `mode` is ignored for a
-/// file that already exists, so an older one is still tightened afterwards.
+/// Open a file owner-only, applied at creation on Unix so content is never
+/// briefly readable under a permissive umask. `mode` is ignored for a file
+/// that already exists, so an older one is still tightened afterwards.
+///
+/// Windows cannot do the same: `OpenOptions` has no way to pass
+/// `SECURITY_ATTRIBUTES`, so the file is created with the inherited DACL and
+/// tightened immediately after. The window is real and is bounded by the
+/// parent directory's own DACL, which `create_private_dir` protects.
 pub fn open_private(
     opts: &mut fs::OpenOptions,
     path: &std::path::Path,
