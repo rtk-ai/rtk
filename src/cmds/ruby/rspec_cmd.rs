@@ -164,6 +164,13 @@ fn filter_rspec_output(output: &str) -> String {
         return "RSpec: No output".to_string();
     }
 
+    // `rspec --version` emits minimal JSON like `{"version":"3.13.2"}` which
+    // does not match the run-report struct. Detect and surface it cleanly
+    // instead of warning about a missing `examples` field.
+    if let Some(line) = try_version_only_json(output) {
+        return line;
+    }
+
     // Try parsing as JSON first (happy path when --format json is injected)
     if let Ok(rspec) = serde_json::from_str::<RspecOutput>(output) {
         return build_rspec_summary(&rspec);
@@ -182,6 +189,35 @@ fn filter_rspec_output(output: &str) -> String {
     }
 
     filter_rspec_text(&stripped)
+}
+
+/// Detect the minimal JSON shape emitted by `rspec --version`.
+///
+/// Recognizes `{"version":"..."}` with no run-report fields (`examples`,
+/// `summary`, `summary_line`) and returns a clean `rspec <version>` line.
+/// Returns `None` for any other input so the caller can fall through to the
+/// standard report parser.
+fn try_version_only_json(output: &str) -> Option<String> {
+    let trimmed = output.trim();
+    if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+        return None;
+    }
+
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let obj = value.as_object()?;
+
+    let version = obj.get("version")?.as_str()?;
+
+    // Bail if any run-report key is present — that means it's a real report
+    // that happens to include `version`, not a `--version` query.
+    if obj.contains_key("examples")
+        || obj.contains_key("summary")
+        || obj.contains_key("summary_line")
+    {
+        return None;
+    }
+
+    Some(format!("rspec {}", version))
 }
 
 fn build_rspec_summary(rspec: &RspecOutput) -> String {
@@ -981,6 +1017,61 @@ rspec ./spec/models/user_spec.rb:5 # User is valid
             "should have RSpec prefix: {}",
             result
         );
+    }
+
+    // ── --version JSON handling (Issue 1946) ────────────────────────────────
+
+    #[test]
+    fn test_filter_rspec_version_only_json_clean() {
+        // `rspec --version` emits `{"version":"3.13.2"}` — must produce a
+        // clean line containing the version, with no JSON-parse warning text.
+        let input = r#"{"version":"3.13.2"}"#;
+        let result = filter_rspec_output(input);
+        assert!(
+            result.contains("3.13.2"),
+            "should contain version string: {}",
+            result
+        );
+        assert!(
+            !result.contains("JSON parse"),
+            "should not mention JSON parse error: {}",
+            result
+        );
+        assert!(
+            !result.contains("not recognized"),
+            "should not emit fallback warning marker: {}",
+            result
+        );
+        assert_eq!(result, "rspec 3.13.2");
+    }
+
+    #[test]
+    fn test_filter_rspec_version_only_json_with_whitespace() {
+        // Trailing newline / surrounding whitespace still detected as version-only.
+        let input = "\n  {\"version\":\"3.12.0\"}\n";
+        let result = filter_rspec_output(input);
+        assert_eq!(result, "rspec 3.12.0");
+    }
+
+    #[test]
+    fn test_filter_rspec_version_only_does_not_swallow_real_report() {
+        // A full report that also includes `version` must still go through the
+        // run-report parser (regression guard).
+        let result = filter_rspec_output(all_pass_json());
+        assert!(
+            result.starts_with("✓ RSpec:"),
+            "real report must still be parsed: {}",
+            result
+        );
+        assert!(result.contains("2 passed"));
+    }
+
+    #[test]
+    fn test_try_version_only_json_rspec_rejects_non_object() {
+        assert!(try_version_only_json("\"3.13.2\"").is_none());
+        assert!(try_version_only_json("[]").is_none());
+        assert!(try_version_only_json("not json").is_none());
+        assert!(try_version_only_json("").is_none());
     }
 
     // ── Format flag detection tests (from PR #534) ───────────────────────
