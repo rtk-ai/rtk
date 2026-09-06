@@ -237,6 +237,36 @@ fn grep_dash_e_selects_extended_regex() {
     );
 }
 
+#[test]
+fn grep_short_h_suppresses_filenames_instead_of_printing_help() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let first = dir.path().join("a.txt");
+    let second = dir.path().join("b.txt");
+    std::fs::write(&first, "alpha match\nbeta\n").expect("write first");
+    std::fs::write(&second, "alpha match\ngamma\n").expect("write second");
+
+    let out = rtk()
+        .args([
+            "grep",
+            "-h",
+            "alpha",
+            first.to_str().unwrap(),
+            second.to_str().unwrap(),
+        ])
+        .output()
+        .expect("rtk grep -h");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        ["alpha match", "alpha match"]
+    );
+    assert!(!stdout.contains("Compact grep"));
+    assert!(!stdout.contains("a.txt:"));
+    assert!(!stdout.contains("b.txt:"));
+}
+
 // rg's `-g/--glob` filters the file set; it must reach rg with correct ordering,
 // not be mangled by a grep that has no such flag (#1824, #2167).
 #[test]

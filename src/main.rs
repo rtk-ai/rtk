@@ -316,6 +316,7 @@ enum Commands {
     },
 
     /// Compact grep - strips whitespace, truncates, groups by file
+    #[command(disable_help_flag = true)]
     Grep {
         // rtk's own options here are long-only: a short form shadows the native
         // grep/rg flag of the same letter and captures it before it can reach
@@ -3712,6 +3713,19 @@ mod tests {
                 }
                 _ => panic!("expected Rewrite command"),
             }
+        }
+    }
+
+    #[test]
+    fn test_grep_short_h_is_forwarded_as_no_filename() {
+        let cli = Cli::try_parse_from(["rtk", "grep", "-h", "alpha", "a.txt", "b.txt"])
+            .expect("grep -h should parse as a native grep flag");
+
+        match cli.command {
+            Commands::Grep { extra_args, .. } => {
+                assert_eq!(extra_args, ["-h", "alpha", "a.txt", "b.txt"]);
+            }
+            _ => panic!("expected Grep command"),
         }
     }
 
