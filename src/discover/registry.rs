@@ -3786,6 +3786,17 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_sqlfluff_lint() {
+        assert!(matches!(
+            classify_command("sqlfluff lint models/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk sqlfluff",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn test_classify_pytest() {
         assert!(matches!(
             classify_command("pytest tests/"),
@@ -3842,6 +3853,14 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("ruff format src/", &[]),
             Some("rtk ruff format src/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_sqlfluff_lint() {
+        assert_eq!(
+            rewrite_command_no_prefixes("sqlfluff lint models/", &[]),
+            Some("rtk sqlfluff lint models/".into())
         );
     }
 

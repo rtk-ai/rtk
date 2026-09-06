@@ -5,6 +5,7 @@ use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_ERRORS, CAP_WARNINGS};
 use crate::core::utils::{resolved_command, tool_exec, truncate, MissingTool};
+use crate::cmds::python::sqlfluff_cmd;
 use crate::mypy_cmd;
 use crate::ruff_cmd;
 use anyhow::{Context, Result};
@@ -54,7 +55,7 @@ struct PylintDiagnostic {
 
 /// Check if a linter is Python-based (uses pip/pipx, not npm/pnpm)
 fn is_python_linter(linter: &str) -> bool {
-    matches!(linter, "ruff" | "pylint" | "mypy" | "flake8")
+    matches!(linter, "ruff" | "pylint" | "mypy" | "flake8" | "sqlfluff")
 }
 
 /// Strip package manager prefixes (npx, bunx, pnpm, pnpm exec, yarn) from args.
@@ -106,7 +107,29 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
 
     let (linter, explicit) = detect_linter(effective_args);
 
-    // Python linters use resolved_command() directly (they're on PATH via pip/pipx)
+    // SQLFluff routing mirrors `sqlfluff_cmd::run`: only an explicit `lint`
+    // subcommand (or a bare invocation) goes through the structured filter;
+    // any other subcommand or unknown bareword passes through untouched so
+    // sqlfluff handles it. Format-flag detection below never injects a second
+    // --format, and only JSON-parse when the effective format is JSON. Both
+    // `--format=json` / `-f=json` and space-separated `--format json` /
+    // `-f json` forms are recognized.
+    let sqlfluff_is_lint =
+        linter == "sqlfluff" && (effective_args.len() == 1 || effective_args[1] == "lint");
+    let sqlfluff_user_set_format = linter == "sqlfluff"
+        && effective_args
+            .iter()
+            .skip(1)
+            .any(|a| a == "--format" || a == "-f" || a.starts_with("--format=") || a.starts_with("-f="));
+    let sqlfluff_user_json_format = linter == "sqlfluff"
+        && effective_args.iter().enumerate().any(|(i, a)| {
+            a == "--format=json"
+                || a == "-f=json"
+                || ((a == "--format" || a == "-f")
+                    && effective_args.get(i + 1).is_some_and(|n| n == "json"))
+        });
+
+    // Python linter use resolved_command() directly (they're on PATH via pip/pipx)
     // JS linters use package_manager_exec (npx/pnpm exec)
     let mut cmd = if is_python_linter(linter) {
         resolved_command(linter)
@@ -127,6 +150,16 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
         "pylint" if !effective_args.contains(&"--output-format".to_string()) => {
             cmd.arg("--output-format=json2");
         }
+        // Force JSON output for sqlfluff lint unless the user already chose
+        // a format (a second --format would be rejected). Non-lint
+        // subcommands (parse, dialects, rules, ...) pass through untouched.
+        "sqlfluff" if sqlfluff_is_lint && !sqlfluff_user_set_format => {
+            cmd.arg("lint").arg("--format").arg("json");
+        }
+        "sqlfluff" if sqlfluff_is_lint => {
+            cmd.arg("lint");
+        }
+        "sqlfluff" => {}
         "mypy" => {
             // mypy uses default text output (no special flags)
         }
@@ -141,6 +174,14 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
     } else if linter == "ruff" && !effective_args.is_empty() && effective_args[0] == "ruff" {
         // Skip "ruff" and "check" if we already added "check"
         if effective_args.len() > 1 && effective_args[1] == "check" {
+            2
+        } else {
+            1
+        }
+    } else if linter == "sqlfluff" && !effective_args.is_empty() && effective_args[0] == "sqlfluff"
+    {
+        // Skip "sqlfluff" and a user-supplied "lint" if we already added "lint"
+        if effective_args.len() > 1 && effective_args[1] == "lint" {
             2
         } else {
             1
@@ -207,6 +248,27 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
         }
         "pylint" => filter_pylint_json(&result.stdout),
         "mypy" => mypy_cmd::filter_mypy_output(&raw),
+        "sqlfluff" => {
+            // On failure, sqlfluff writes diagnostics to stderr; an empty
+            // stdout does not mean "no issues".
+            if !result.success() {
+                let err = result.stderr.trim();
+                if !err.is_empty() {
+                    err.to_string()
+                } else {
+                    format!("SQLFluff: failed (exit {})", result.exit_code)
+                }
+            } else if sqlfluff_is_lint
+                && !result.stdout.trim().is_empty()
+                && (!sqlfluff_user_set_format || sqlfluff_user_json_format)
+            {
+                sqlfluff_cmd::filter_sqlfluff_lint_json(&result.stdout)
+            } else if !result.stdout.trim().is_empty() {
+                truncate(result.stdout.trim(), config::limits().passthrough_max_chars)
+            } else {
+                "SQLFluff: No issues found".to_string()
+            }
+        }
         _ => filter_generic_lint(&raw),
     };
 
@@ -716,6 +778,7 @@ mod tests {
         assert!(is_python_linter("pylint"));
         assert!(is_python_linter("mypy"));
         assert!(is_python_linter("flake8"));
+        assert!(is_python_linter("sqlfluff"));
         assert!(!is_python_linter("eslint"));
         assert!(!is_python_linter("biome"));
         assert!(!is_python_linter("unknown"));
