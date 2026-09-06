@@ -295,7 +295,12 @@ pub struct MonthStats {
     pub avg_time_ms: u64,
 }
 
-/// Type alias for command statistics tuple: (command, count, saved_tokens, avg_savings_pct, avg_time_ms)
+/// Type alias for command statistics tuple: (command, count, saved_tokens, weighted_savings_rate, avg_time_ms)
+///
+/// # Warning
+/// The 4th field is a **weighted** savings rate: `SUM(saved_tokens) * 100.0 / SUM(input_tokens)`.
+/// Do NOT aggregate this column with `AVG()` — that would produce an unweighted mean that
+/// under-weights high-volume commands. Always use `SUM(saved) / SUM(input)` instead.
 type CommandStats = (String, usize, usize, f64, u64);
 
 /// Current tracking-DB schema version, stored in the SQLite `user_version` pragma.
@@ -886,7 +891,9 @@ impl Tracker {
     ) -> Result<Vec<CommandStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut stmt = self.conn.prepare(
-            "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)
+            "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens),
+                    CASE WHEN SUM(input_tokens) > 0 THEN SUM(saved_tokens) * 100.0 / SUM(input_tokens) ELSE 0.0 END,
+                    AVG(exec_time_ms)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY rtk_cmd
@@ -2422,5 +2429,72 @@ mod tests {
         for cmd in ["rtk bun install", "rtk bunx cowsay", "rtk deno test"] {
             assert_eq!(categorize_command(cmd), "js", "{cmd}");
         }
+    }
+
+    // 14. get_by_command uses weighted savings rate, not unweighted average
+    //
+    // Regression test for: AVG(savings_pct) gave wrong results when small invocations
+    // with 0% savings diluted the average of high-volume commands.
+    //
+    // Setup: one small command (10% savings) + one large command (95% savings).
+    // Unweighted avg would be ~52.5%. Weighted rate must be ~95%.
+    //
+    // Uses a unique fake project path so project-filtered query returns only our rows,
+    // avoiding the LIMIT 10 cap on the shared DB.
+    #[test]
+    fn test_get_by_command_weighted_savings_rate() {
+        let tracker = Tracker::new().expect("Failed to create tracker");
+        let pid = std::process::id();
+        let cmd_name = format!("weighted_test_{}", pid);
+        // Unique project path keeps our rows isolated from the shared DB
+        let fake_project = format!("/tmp/rtk_weighted_test_{}", pid);
+
+        // Override project_path by inserting directly via conn
+        let saved_small = 10_i64; // 100 in - 90 out = 10 saved → 10%
+        let saved_large = 95_000_i64; // 100_000 in - 5_000 out = 95_000 saved → 95%
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    chrono::Utc::now().to_rfc3339(),
+                    &cmd_name, &cmd_name, &fake_project,
+                    100_i64, 90_i64, saved_small, 10.0_f64, 5_i64
+                ],
+            )
+            .expect("Failed to insert small invocation");
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    chrono::Utc::now().to_rfc3339(),
+                    &cmd_name, &cmd_name, &fake_project,
+                    100_000_i64, 5_000_i64, saved_large, 95.0_f64, 10_i64
+                ],
+            )
+            .expect("Failed to insert large invocation");
+
+        let by_cmd = tracker
+            .get_by_command(Some(&fake_project))
+            .expect("Failed to get by_command stats");
+
+        let entry = by_cmd
+            .iter()
+            .find(|(name, _, _, _, _)| name == &cmd_name)
+            .expect("Test command not found in by_command stats");
+
+        let (_name, _count, _saved, rate, _time) = entry;
+
+        // Weighted rate = (10 + 95_000) * 100.0 / (100 + 100_000) ≈ 94.99%
+        // Unweighted avg would be (10.0 + 95.0) / 2 = 52.5%
+        // The gap proves the fix works.
+        assert!(
+            *rate > 90.0,
+            "Expected weighted rate >90%, got {:.1}% — unweighted avg would be ~52.5%",
+            rate
+        );
     }
 }

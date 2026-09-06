@@ -347,6 +347,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+* **gain:** use weighted savings rate in per-command stats — `AVG(savings_pct)` replaced by `SUM(saved_tokens)/SUM(input_tokens)`, fixing commands like `grep` showing 14.8% instead of 98.6%; column renamed `Avg%` → `Rate` ([#891](https://github.com/rtk-ai/rtk/pull/891)) ([b3ab873](https://github.com/rtk-ai/rtk/commit/b3ab873))
 * **git:** remove `-u` short alias from `--ultra-compact` to fix `git push -u` upstream tracking ([#1086](https://github.com/rtk-ai/rtk/issues/1086))
 
 ## [0.35.0](https://github.com/rtk-ai/rtk/compare/v0.34.3...v0.35.0) (2026-04-06)
