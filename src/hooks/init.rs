@@ -6170,6 +6170,16 @@ mod tests {
     }
 
     #[test]
+    fn test_opencode_plugin_dual_compatibility_v1_and_v2() {
+        assert!(OPENCODE_PLUGIN.contains("RtkOpenCodePlugin"));
+        assert!(OPENCODE_PLUGIN.contains("tool.execute.before"));
+        assert!(OPENCODE_PLUGIN.contains("export default rtkPlugin"));
+        assert!(OPENCODE_PLUGIN.contains("id: \"rtk\""));
+        assert!(OPENCODE_PLUGIN.contains("setup: async"));
+        assert!(OPENCODE_PLUGIN.contains("execute.before"));
+    }
+
+    #[test]
     fn test_migration_warns_on_missing_end_marker() {
         let input = format!("{} v2 -->\nOLD STUFF\nNo end marker", RTK_BLOCK_START);
         let (result, migrated) = remove_rtk_block(&input);
