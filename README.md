@@ -186,6 +186,14 @@ rtk gh issue list               # Compact issue listing
 rtk gh run list                 # Workflow run status
 ```
 
+### Gitea CLI
+```bash
+rtk tea pr list                 # Compact PR listing
+rtk tea pr 42                   # PR details
+rtk tea issue list              # Compact issue listing
+rtk tea release list            # Compact release listing
+```
+
 ### Test Runners
 ```bash
 rtk jest                        # Jest compact (failures only)

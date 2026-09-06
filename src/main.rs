@@ -9,7 +9,7 @@ mod parser;
 // Re-export command modules for routing
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
-use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
+use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd, tea_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
     bun_cmd, deno_cmd, lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd,
@@ -190,6 +190,15 @@ enum Commands {
         #[arg(short = 'g', long = "group")]
         group: Option<String>,
         /// Subcommand: mr, issue, ci, pipeline, api
+        subcommand: String,
+        /// Additional arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Gitea CLI (tea) commands with token-optimized output
+    Tea {
+        /// Subcommand: pr, issue, release, api (aliases: pulls/pull, issues/i, releases/r)
         subcommand: String,
         /// Additional arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -1999,6 +2008,10 @@ fn run_cli() -> Result<i32> {
             glab_cmd::run(&subcommand, &args, cli.verbose, cli.ultra_compact)?
         }
 
+        Commands::Tea { subcommand, args } => {
+            tea_cmd::run(&subcommand, &args, cli.verbose, cli.ultra_compact)?
+        }
+
         Commands::Aws { subcommand, args } => aws_cmd::run(&subcommand, &args, cli.verbose)?,
 
         Commands::Psql { args } => psql_cmd::run(&args, cli.verbose)?,
@@ -2967,6 +2980,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Git { .. }
             | Commands::Gh { .. }
             | Commands::Glab { .. }
+            | Commands::Tea { .. }
             | Commands::Pnpm { .. }
             | Commands::Err { .. }
             | Commands::Test { .. }
@@ -3433,6 +3447,7 @@ mod tests {
             "git",
             "gh",
             "glab",
+            "tea",
             "aws",
             "psql",
             "pnpm",

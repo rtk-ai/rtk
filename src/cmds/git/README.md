@@ -17,6 +17,12 @@
 - `release list` falls back to raw output when the glab 1.82+ format doesn't match the legacy tab-delimited parser
 - Pipeline / merge-status indicators use text tags (`[ok]`, `[fail]`, `[cancel]`, `[run]`, `[pend]`, `[skip]`, `[conflict]`) to match `gh_cmd.rs` and avoid multi-byte rendering quirks
 
+- **tea_cmd.rs** normalizes Gitea's entity aliases (`pulls`/`pull`/`pr`, `issues`/`issue`/`i`, `releases`/`release`/`r`) to a canonical name before dispatch
+- `tea` requests JSON via `-o json` (not a `--json <fields>` flag like `gh`); `has_output_flag()` short-circuits to passthrough when the user already passed `-o`/`--output`
+- tea's list-mode JSON renders every field (including `index`) as a string, but single-item view JSON renders `index` as a number — `get_index()` accepts both
+- `labels` is a comma-joined string in list mode but an array of `{name}` objects in view mode — `labels_str()` handles both shapes
+- `release list` has no `-f`/`--fields` flag and some tea builds emit inconsistent JSON keys (e.g. `tag-_name` instead of `tag_name`); `get_first()` tries known key variants defensively rather than pinning to one build's exact keys
+
 ## Cross-command
 
 - `gh_cmd.rs` imports `compact_diff()` from `git.rs` for diff formatting; markdown helpers (`filter_markdown_body`, `filter_markdown_segment`) are defined in `gh_cmd.rs` itself
