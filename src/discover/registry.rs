@@ -32,7 +32,7 @@ pub enum Classification {
 pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
     match category {
         "Git" => match subcmd {
-            "log" | "diff" | "show" => 200,
+            "log" | "diff" | "show" | "ls-files" => 200,
             _ => 40,
         },
         "Cargo" => match subcmd {
@@ -2376,7 +2376,7 @@ mod tests {
         // Verify that every GitCommand subcommand has a matching pattern
         for subcmd in [
             "status", "log", "diff", "show", "add", "commit", "push", "pull", "branch", "fetch",
-            "stash", "worktree",
+            "stash", "worktree", "ls-files",
         ] {
             let cmd = format!("git {subcmd}");
             match classify_command(&cmd) {

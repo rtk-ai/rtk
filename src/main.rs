@@ -1023,6 +1023,12 @@ enum GitCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Tracked files grouped by directory (supports all git ls-files flags)
+    LsFiles {
+        /// Git ls-files arguments (supports all flags like --cached, --others, -m)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported git subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -1967,6 +1973,13 @@ fn run_cli() -> Result<i32> {
                 )?,
                 GitCommands::Worktree { args } => git::run(
                     git::GitCommand::Worktree,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::LsFiles { args } => git::run(
+                    git::GitCommand::LsFiles,
                     &args,
                     None,
                     cli.verbose,
