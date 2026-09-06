@@ -5,16 +5,19 @@
 //! capable of state-machine parsing (block collapse, continuation tracking,
 //! mode toggle) that TOML DSL cannot express.
 
+use crate::cmds::jvm::surefire_recovery;
 use crate::core::runner::{self, RunOptions};
+use crate::core::tracking::estimate_tokens;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, strip_ansi};
 use anyhow::Result;
 use regex::Regex;
 use std::collections::HashSet;
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
+use std::time::SystemTime;
 
 /// Cap on emitted failing test-class blocks and `[ERROR] Failures:` summary
 /// entries — test-failure cap class, same binding as pytest/rspec/rake/runner.
@@ -1816,6 +1819,39 @@ fn new_mvn_command(args: &[String], daemon: bool) -> Command {
 
 // ── Entry point ─────────────────────────────────────────────────────────────
 
+/// Test-producing routes (Test / Package / quiet) get the Surefire XML
+/// recovery pass appended after the stdout filter: failures present in fresh
+/// `target/surefire-reports/` or `target/failsafe-reports/` XML but missing
+/// from the filtered stdout are appended (see `surefire_recovery`). When
+/// stdout already covers every XML failure — the common case — the output is
+/// unchanged. The block is only appended while the result still fits under
+/// the raw size, so the runner's never-worse guard never has to fall back to
+/// the raw log because of it.
+fn run_with_recovery(
+    args: &[String],
+    daemon: bool,
+    filter: fn(&str, bool) -> String,
+    tee_slug: &str,
+) -> Result<i32> {
+    let started_at = SystemTime::now();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    runner::run_filtered(
+        new_mvn_command(args, daemon),
+        mvn_binary(daemon),
+        &args.join(" "),
+        move |raw: &str| {
+            let filtered = filter(raw, daemon);
+            match surefire_recovery::recover_missing_failures(&filtered, &cwd, started_at) {
+                Some(recovered) if estimate_tokens(&recovered) <= estimate_tokens(raw) => {
+                    recovered
+                }
+                _ => filtered,
+            }
+        },
+        RunOptions::with_tee(tee_slug),
+    )
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     run_tool(args, false, verbose)
 }
@@ -1849,25 +1885,13 @@ fn run_tool(args: &[String], daemon: bool, verbose: u8) -> Result<i32> {
             let osargs: Vec<OsString> = args.iter().map(OsString::from).collect();
             return runner::run_passthrough(tool, &osargs, verbose);
         }
-        return runner::run_filtered(
-            new_mvn_command(args, daemon),
-            tool,
-            &args_display,
-            |raw: &str| filter_quiet(raw, daemon),
-            RunOptions::with_tee("mvn_quiet"),
-        );
+        return run_with_recovery(args, daemon, filter_quiet, "mvn_quiet");
     }
 
     let phase = detect_phase(args);
 
     match phase {
-        MvnPhase::Test => runner::run_filtered(
-            new_mvn_command(args, daemon),
-            tool,
-            &args_display,
-            move |raw: &str| filter_surefire(raw, daemon),
-            RunOptions::with_tee("mvn_test"),
-        ),
+        MvnPhase::Test => run_with_recovery(args, daemon, filter_surefire, "mvn_test"),
         MvnPhase::Compile => runner::run_filtered(
             new_mvn_command(args, daemon),
             tool,
@@ -1875,13 +1899,7 @@ fn run_tool(args: &[String], daemon: bool, verbose: u8) -> Result<i32> {
             move |raw: &str| filter_compile(raw, daemon),
             RunOptions::with_tee("mvn_compile"),
         ),
-        MvnPhase::Package => runner::run_filtered(
-            new_mvn_command(args, daemon),
-            tool,
-            &args_display,
-            move |raw: &str| filter_package(raw, daemon),
-            RunOptions::with_tee("mvn_package"),
-        ),
+        MvnPhase::Package => run_with_recovery(args, daemon, filter_package, "mvn_package"),
         MvnPhase::Passthrough => {
             let osargs: Vec<OsString> = args.iter().map(OsString::from).collect();
             runner::run_passthrough(tool, &osargs, verbose)
