@@ -705,22 +705,35 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
         None => return false,
     };
 
-    let original_len = pre_tool_use_array.len();
-    pre_tool_use_array.retain(|entry| {
-        if let Some(hooks_array) = entry.get("hooks").and_then(|h| h.as_array()) {
-            for hook in hooks_array {
-                if let Some(command) = hook.get("command").and_then(|c| c.as_str()) {
-                    // Match both legacy script path and new binary command
-                    if command.contains(REWRITE_HOOK_FILE) || is_claude_hook_command(command) {
-                        return false;
-                    }
-                }
+    let mut removed_any = false;
+
+    // Remove rtk's own hooks first so foreign hooks sharing an entry survive.
+    for entry in pre_tool_use_array.iter_mut() {
+        if let Some(hooks_array) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+            let before = hooks_array.len();
+            hooks_array.retain(|hook| {
+                !hook
+                    .get("command")
+                    .and_then(|c| c.as_str())
+                    .is_some_and(|cmd| {
+                        cmd.contains(REWRITE_HOOK_FILE) || is_claude_hook_command(cmd)
+                    })
+            });
+            if hooks_array.len() < before {
+                removed_any = true;
             }
         }
-        true
+    }
+
+    // Drop only entries that rtk emptied out.
+    pre_tool_use_array.retain(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .map_or(true, |hooks| !hooks.is_empty())
     });
 
-    pre_tool_use_array.len() < original_len
+    removed_any
 }
 
 /// Remove RTK hook from settings.json file
@@ -7799,6 +7812,40 @@ mod tests {
         assert_eq!(pre_tool_use.len(), 1);
         assert_eq!(
             pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap(),
+            "/some/other/hook.sh"
+        );
+    }
+
+    #[test]
+    fn test_remove_hook_from_json_preserves_foreign_hook_in_shared_entry() {
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            { "type": "command", "command": "/some/other/hook.sh" },
+                            { "type": "command", "command": CLAUDE_HOOK_COMMAND }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let removed = remove_hook_from_json(&mut json_content);
+        assert!(removed);
+
+        let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(
+            pre_tool_use.len(),
+            1,
+            "entry must survive: it still holds a foreign hook"
+        );
+
+        let hooks = pre_tool_use[0]["hooks"].as_array().unwrap();
+        assert_eq!(hooks.len(), 1, "only rtk's hook should be removed");
+        assert_eq!(
+            hooks[0]["command"].as_str().unwrap(),
             "/some/other/hook.sh"
         );
     }
