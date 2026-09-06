@@ -17,7 +17,7 @@
 <p align="center">
   <a href="https://www.rtk-ai.app">Website</a> &bull;
   <a href="#installation">Install</a> &bull;
-  <a href="https://www.rtk-ai.app/guide/troubleshooting">Troubleshooting</a> &bull;
+  <a href="https://www.rtk-ai.app/docs/resources/troubleshooting/">Troubleshooting</a> &bull;
   <a href="docs/contributing/ARCHITECTURE.md">Architecture</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
@@ -418,7 +418,7 @@ RTK supports 17 AI coding tools. Each integration rewrites shell commands to `rt
 | **Kimi AI** | `rtk init --agent kimi` | AGENTS.md (project-scoped) |
 | **Factory Droid** | `rtk init -g --agent droid` (or per-project) | PreToolUse hook in `~/.factory/hooks.json` (matcher `Execute`) |
 
-For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents). The Hermes plugin source and tests live in `hooks/hermes/`; installed Hermes runtime files still live under `~/.hermes/plugins/rtk-rewrite/`.
+For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/docs/getting-started/supported-agents/). The Hermes plugin source and tests live in `hooks/hermes/`; installed Hermes runtime files still live under `~/.hermes/plugins/rtk-rewrite/`.
 
 ## Configuration
 
@@ -440,7 +440,7 @@ FAILED: 2/15 tests
 [full output: ~/.local/share/rtk/tee/1707753600_cargo_test.log]
 ```
 
-For the full config reference (all sections, env vars, per-project filters), see the [Configuration guide](https://www.rtk-ai.app/guide/getting-started/configuration).
+For the full config reference (all sections, env vars, per-project filters), see the [Configuration guide](https://www.rtk-ai.app/docs/getting-started/configuration/).
 
 ### Uninstall
 
@@ -452,7 +452,7 @@ brew uninstall rtk           # If installed via Homebrew
 
 ## Documentation
 
-- **[rtk-ai.app/guide](https://www.rtk-ai.app/guide)** — full user guide (installation, supported agents, what gets optimized, analytics, configuration, troubleshooting)
+- **[rtk-ai.app/docs](https://www.rtk-ai.app/docs/)** — full user guide (installation, supported agents, what gets optimized, analytics, configuration, troubleshooting)
 - **[INSTALL.md](INSTALL.md)** — detailed installation reference
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** — system design and technical decisions
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — contribution guide

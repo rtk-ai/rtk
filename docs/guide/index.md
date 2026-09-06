@@ -69,4 +69,4 @@ See [Discover and Session](./analytics/discover.md) for details.
 - [Configuration](./getting-started/configuration.md) — config.toml, global flags, env vars, tee recovery
 - [Troubleshooting](./resources/troubleshooting.md) — common issues and fixes
 - [Telemetry & Privacy](./resources/telemetry.md) — what RTK collects and how to opt out
-- [ARCHITECTURE.md](https://github.com/rtk-ai/rtk/blob/master/ARCHITECTURE.md) — system design for contributors
+- [ARCHITECTURE.md](https://github.com/rtk-ai/rtk/blob/HEAD/docs/contributing/ARCHITECTURE.md) — system design for contributors
