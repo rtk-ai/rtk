@@ -62,7 +62,30 @@ For full details on what is collected, opt-out options, and GDPR rights, see [Te
 | `RTK_TEE_DIR` | Override the tee directory |
 | `RTK_TELEMETRY_DISABLED=1` | Disable telemetry |
 | `RTK_HOOK_AUDIT=1` | Enable hook audit logging |
+| `RTK_QUIET=1` | Suppress non-error diagnostics on stderr (see below) |
 | `SKIP_ENV_VALIDATION=1` | Skip env validation (useful with Next.js) |
+
+### Quiet diagnostics (`RTK_QUIET` / `hooks.quiet`)
+
+When RTK cannot resolve a binary through `PATH` it falls back to a direct exec
+and prints a one-line note to stderr. That note is useful in a terminal and
+harmful inside an agent: on Windows the agent merges stderr into its context,
+so a diagnostic about a command that worked anyway costs more tokens than the
+command saved.
+
+Silence it per-invocation with an environment variable, or permanently in the
+config file:
+
+```powershell
+$env:RTK_QUIET = '1'
+```
+
+```toml
+[hooks]
+quiet = true
+```
+
+Real errors are still reported; only informational output is suppressed.
 
 ## Tee system
 
