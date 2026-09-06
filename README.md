@@ -84,8 +84,15 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 > echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc  # or ~/.zshrc
 > ```
 
-### Cargo
+### Quick Install (Windows PowerShell)
 
+```powershell
+irm https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.ps1 | iex
+```
+
+> **Note**: rtk installs to `%USERPROFILE%\.local\bin` by default. The installer will offer to add it to your PATH automatically. You can override the install directory with `$env:RTK_INSTALL_DIR`.
+
+### Cargo
 ```bash
 cargo install --git https://github.com/rtk-ai/rtk
 ```
