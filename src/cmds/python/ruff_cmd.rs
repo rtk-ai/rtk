@@ -8,6 +8,20 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+const RUFF_SUBCOMMANDS: &[&str] = &[
+    "analyze",
+    "check",
+    "clean",
+    "config",
+    "format",
+    "generate-shell-completion",
+    "help",
+    "linter",
+    "rule",
+    "server",
+    "version",
+];
+
 #[derive(Debug, Deserialize)]
 struct RuffLocation {
     row: usize,
@@ -32,9 +46,7 @@ struct RuffDiagnostic {
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let is_check = args.is_empty()
-        || args[0] == "check"
-        || (!args[0].starts_with('-') && args[0] != "format" && args[0] != "version");
+    let is_check = is_check_invocation(args);
 
     let is_format = args.iter().any(|a| a == "format");
 
@@ -99,6 +111,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         },
         runner::RunOptions::stdout_only(),
     )
+}
+
+fn is_check_invocation(args: &[String]) -> bool {
+    args.first().is_none_or(|arg| {
+        arg == "check" || (!arg.starts_with('-') && !RUFF_SUBCOMMANDS.contains(&arg.as_str()))
+    })
 }
 
 /// Filter ruff check JSON output - group by rule and file
@@ -349,6 +367,32 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn known_ruff_subcommands_do_not_route_through_check() {
+        for subcommand in RUFF_SUBCOMMANDS {
+            let args = vec![subcommand.to_string()];
+            assert_eq!(
+                is_check_invocation(&args),
+                *subcommand == "check",
+                "unexpected routing for ruff {subcommand}"
+            );
+        }
+    }
+
+    #[test]
+    fn paths_and_explicit_check_route_through_check() {
+        assert!(is_check_invocation(&[]));
+        assert!(is_check_invocation(&["check".to_string(), ".".to_string()]));
+        assert!(is_check_invocation(&["src".to_string()]));
+        assert!(is_check_invocation(&["pyproject.toml".to_string()]));
+    }
+
+    #[test]
+    fn top_level_flags_are_not_misclassified_as_paths() {
+        assert!(!is_check_invocation(&["--version".to_string()]));
+        assert!(!is_check_invocation(&["--help".to_string()]));
+    }
 
     #[test]
     fn test_filter_ruff_check_no_issues() {
