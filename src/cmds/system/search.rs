@@ -716,7 +716,7 @@ pub fn run(
     };
 
     print!("{}", output);
-    timer.track(&real_cmd, &rtk_label, &raw_output, &output);
+    timer.track(&real_cmd, &rtk_label, &plain, &output);
 
     Ok(exit_code)
 }
