@@ -308,8 +308,18 @@ fn filter_eslint_json(output: &str) -> String {
         }
         let mut file_rule_counts: Vec<_> = file_rules.iter().collect();
         file_rule_counts.sort_by(|a, b| b.1.cmp(a.1));
-        for (rule, count) in file_rule_counts.iter().take(3) {
-            result.push_str(&format!("    {} ({})\n", rule, count));
+        for (rule, _) in file_rule_counts.iter().take(3) {
+            result.push_str(&format!("    {}\n", rule));
+            for msg in file_result
+                .messages
+                .iter()
+                .filter(|msg| msg.rule_id.as_deref() == Some(rule.as_str()))
+            {
+                result.push_str(&format!(
+                    "      {}:{} {}\n",
+                    msg.line, msg.column, msg.message
+                ));
+            }
         }
     }
 
@@ -565,6 +575,33 @@ mod tests {
         assert!(result.contains("prefer-const"));
         assert!(result.contains("no-unused-vars"));
         assert!(result.contains("src/utils.ts"));
+        assert!(result.contains("10:5"));
+        assert!(result.contains("Use const instead of let"));
+    }
+
+    #[test]
+    fn test_filter_eslint_json_preserves_complexity_message() {
+        let json = r#"[
+            {
+                "filePath": "/project/src/Item.tsx",
+                "messages": [
+                    {
+                        "ruleId": "sonarjs/cognitive-complexity",
+                        "severity": 2,
+                        "message": "Refactor this function to reduce its Cognitive Complexity from 24 to the 15 allowed",
+                        "line": 34,
+                        "column": 25
+                    }
+                ],
+                "errorCount": 1,
+                "warningCount": 0
+            }
+        ]"#;
+
+        let result = filter_eslint_json(json);
+        assert!(result.contains("sonarjs/cognitive-complexity"));
+        assert!(result.contains("34:25"));
+        assert!(result.contains("Cognitive Complexity from 24 to the 15 allowed"));
     }
 
     #[test]
