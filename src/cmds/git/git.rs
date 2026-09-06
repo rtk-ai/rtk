@@ -913,7 +913,11 @@ fn run_log(
     // Post-process: truncate long messages, cap lines only if RTK set the default
     let filtered = filter_log_output(&result.stdout, limit, user_set_limit, has_format_flag);
     let filtered = never_worse(&result.stdout, &filtered).to_string();
-    println!("{}", filtered);
+    // Empty range (e.g. HEAD..HEAD) must produce empty output, not a bare
+    // newline — `println!` on an empty string still breaks `| wc -l` (#3365).
+    if !filtered.is_empty() {
+        println!("{}", filtered);
+    }
 
     timer.track(
         &format!("git log {}", args.join(" ")),
