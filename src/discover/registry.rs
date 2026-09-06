@@ -3,7 +3,7 @@
 use crate::core::utils::composer_bin_dirs;
 use regex::{Regex, RegexSet};
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 use super::lexer::{
     advance_quote_state, coalesce_words, is_crlf_at, shell_split, split_on_operators, tokenize,
@@ -54,12 +54,10 @@ pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
 static REGEX_SET: LazyLock<RegexSet> = LazyLock::new(|| {
     RegexSet::new(RULES.iter().map(|r| r.pattern)).expect("invalid regex patterns")
 });
-static COMPILED: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    RULES
-        .iter()
-        .map(|r| Regex::new(r.pattern).expect("invalid regex"))
-        .collect()
-});
+// Hooks start a fresh process for each command. The RegexSet selects the rule;
+// only that rule needs a capture regex, not the entire registry.
+static COMPILED: LazyLock<Vec<OnceLock<Regex>>> =
+    LazyLock::new(|| RULES.iter().map(|_| OnceLock::new()).collect());
 static ENV_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
     let double_quoted = r#""(?:[^"\\]|\\.)*""#;
     let single_quoted = r#"'(?:[^'\\]|\\.)*'"#;
@@ -171,7 +169,10 @@ pub fn classify_command(cmd: &str) -> Classification {
         let rule = &RULES[idx];
 
         // Extract subcommand for savings override and status detection
-        let (savings, status) = if let Some(caps) = COMPILED[idx].captures(cmd_clean) {
+        let (savings, status) = if let Some(caps) = COMPILED[idx]
+            .get_or_init(|| Regex::new(rule.pattern).expect("invalid regex"))
+            .captures(cmd_clean)
+        {
             if let Some(sub) = caps.get(1) {
                 // Collapse internal whitespace so a two-word capture ("pm  ls")
                 // still matches its single-spaced key in the tables below.
@@ -1599,6 +1600,65 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
 mod tests {
     use super::super::report::RtkStatus;
     use super::*;
+
+    #[test]
+    fn capture_regexes_initialize_only_for_selected_rules() {
+        const CHILD: &str = "RTK_TEST_LAZY_CAPTURE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Other tests classify commands concurrently. A fresh test process
+            // gives this assertion its own uninitialized registry.
+            let output = std::process::Command::new(
+                std::env::current_exe().expect("test executable"),
+            )
+            .args([
+                "--exact",
+                "discover::registry::tests::capture_regexes_initialize_only_for_selected_rules",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("isolated test");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+
+        assert!(matches!(
+            classify_command("unsupported-tool example"),
+            Classification::Unsupported { .. }
+        ));
+        assert!(COMPILED.iter().all(|regex| regex.get().is_none()));
+        let mut selected = std::collections::BTreeSet::new();
+        for command in [
+            "git status",
+            "cargo test",
+            "git status",
+            "npm run build",
+            "cargo test",
+        ] {
+            let idx = REGEX_SET
+                .matches(command)
+                .into_iter()
+                .next_back()
+                .expect("matching rule");
+            selected.insert(idx);
+            let classification = classify_command(command);
+            assert!(matches!(classification, Classification::Supported { .. }));
+            assert_eq!(classification, classify_command(command));
+            for (index, regex) in COMPILED.iter().enumerate() {
+                assert_eq!(
+                    regex.get().is_some(),
+                    selected.contains(&index),
+                    "{command}: rule {index}"
+                );
+            }
+        }
+    }
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
