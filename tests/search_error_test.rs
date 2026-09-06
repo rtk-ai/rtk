@@ -1,4 +1,6 @@
-#![cfg(unix)]
+//! Runs on every platform: each test that shells out to `grep` or `rg`
+//! skips itself when that engine is not installed, so Windows CI exercises
+//! the filters instead of compiling an empty test binary.
 //! Error/exit faithfulness: rtk surfaces the engine's own stderr and propagates
 //! its exit code, adding nothing (no synthetic "search failed" line). An engine
 //! error (exit >=2) must never look like a silent no-match (#2465 / #1436).
@@ -8,6 +10,16 @@ use std::process::Command;
 fn rtk(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_rtk"))
         .env("LC_ALL", "C")
+        // Point the hook check at a directory that does not exist, so it reports
+        // "no Claude Code here" and stays silent. Without this, a developer who
+        // has Claude Code installed but not the rtk hook gets rtk's once-a-day
+        // "No hook installed" nag on stderr, and every assertion below that
+        // requires empty stderr fails. CI passes either way only because a
+        // fresh runner has no `~/.claude` at all.
+        .env(
+            "CLAUDE_CONFIG_DIR",
+            concat!(env!("CARGO_TARGET_TMPDIR"), "/absent-claude-config"),
+        )
         .args(args)
         .output()
         .expect("rtk")
