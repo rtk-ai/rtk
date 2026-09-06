@@ -107,6 +107,74 @@ struct GolangciRunParts<'a> {
     run_segment: &'a str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PythonTestInvocation<'a> {
+    module: &'static str,
+    args: &'a str,
+}
+
+fn parse_python_test_invocation(cmd: &str) -> Option<PythonTestInvocation<'_>> {
+    let tokens = tokenize(cmd);
+    let executable = tokens.first()?;
+    if executable.kind != TokenKind::Arg {
+        return None;
+    }
+
+    let executable = executable.value.trim_matches(['\'', '"']);
+    let basename = executable
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(executable)
+        .to_ascii_lowercase();
+    let is_py_launcher = basename == "py" || basename == "py.exe";
+    let python_stem = basename.strip_suffix(".exe").unwrap_or(&basename);
+    let is_python = python_stem == "python"
+        || python_stem.strip_prefix("python").is_some_and(|version| {
+            !version.is_empty() && version.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+        });
+    if !is_py_launcher && !is_python {
+        return None;
+    }
+
+    let module_flag = tokens
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, token)| token.kind == TokenKind::Arg && token.value == "-m")?
+        .0;
+    let module_token = tokens.get(module_flag + 1)?;
+    if module_token.kind != TokenKind::Arg {
+        return None;
+    }
+    let module = match module_token.value.trim_matches(['\'', '"']) {
+        "pytest" => "pytest",
+        "unittest" => "unittest",
+        _ => return None,
+    };
+
+    let args_start = module_token.offset + module_token.value.len();
+    Some(PythonTestInvocation {
+        module,
+        args: cmd[args_start..].trim_start(),
+    })
+}
+
+fn normalize_python_test_command(cmd: &str) -> String {
+    let Some(invocation) = parse_python_test_invocation(cmd) else {
+        return cmd.to_string();
+    };
+    let module = if invocation.module == "unittest" {
+        "__rtk_python_unittest"
+    } else {
+        invocation.module
+    };
+    if invocation.args.is_empty() {
+        module.to_string()
+    } else {
+        format!("{} {}", module, invocation.args)
+    }
+}
+
 /// Classify a single (already-split) command.
 pub fn classify_command(cmd: &str) -> Classification {
     let trimmed = cmd.trim();
@@ -133,8 +201,11 @@ pub fn classify_command(cmd: &str) -> Classification {
         return Classification::Ignored;
     }
 
+    // Normalize Python test launchers before paths so Windows backslashes and
+    // quoted interpreter locations are handled without changing other tools.
+    let cmd_normalized = normalize_python_test_command(cmd_clean);
     // Normalize absolute binary paths: /usr/bin/grep → grep (#485)
-    let cmd_normalized = strip_absolute_path(cmd_clean);
+    let cmd_normalized = strip_absolute_path(&cmd_normalized);
     // Strip git global options: git -C /tmp status → git status (#163)
     let cmd_normalized = strip_git_global_opts(&cmd_normalized);
     // Normalize PHP tool paths: vendor/bin/phpunit, bin/phpunit, or composer
@@ -1474,6 +1545,18 @@ fn rewrite_segment_inner(
             )
         };
         return Some(rewritten);
+    }
+
+    if let Some(invocation) = parse_python_test_invocation(cmd_part) {
+        let rewritten = match invocation.module {
+            "pytest" if invocation.args.is_empty() => "rtk pytest".to_string(),
+            "pytest" => format!("rtk pytest {}", invocation.args),
+            // Keep the original interpreter and flags because unittest is a
+            // different runner from pytest. `rtk test` only filters its output.
+            "unittest" => format!("rtk test {}", cmd_part),
+            _ => unreachable!(),
+        };
+        return Some(format!("{}{}", rewritten, redirect_suffix));
     }
 
     // #196: gh with --json/--jq/--template produces structured output that
@@ -3808,6 +3891,43 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_windows_python_test_launchers() {
+        for command in [
+            "py -3.12 -m pytest tests/",
+            "py -3.12 -B -X utf8 -m unittest tests",
+            r".venv\Scripts\python.exe -m pytest tests/",
+            r"C:\Python312\python.exe -m unittest",
+            r#""C:\Program Files\Python312\python.exe" -m pytest -q"#,
+        ] {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        category: "Python",
+                        ..
+                    }
+                ),
+                "expected Python test routing for {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_python_launcher_non_test_modules_are_not_routed() {
+        for command in [
+            "py -3.12 script.py",
+            r".venv\Scripts\python.exe app.py",
+            "python.exe -m pip list",
+            "unittest tests",
+        ] {
+            assert!(
+                !matches!(classify_command(command), Classification::Supported { .. }),
+                "unexpected test routing for {command}"
+            );
+        }
+    }
+
+    #[test]
     fn test_classify_pip_list() {
         assert!(matches!(
             classify_command("pip list"),
@@ -3858,6 +3978,26 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("python -m pytest -x tests/", &[]),
             Some("rtk pytest -x tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_windows_python_test_launchers() {
+        assert_eq!(
+            rewrite_command_no_prefixes("py -3.12 -m pytest -x tests/", &[]),
+            Some("rtk pytest -x tests/".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("py -3.12 -B -X utf8 -m unittest tests", &[]),
+            Some("rtk test py -3.12 -B -X utf8 -m unittest tests".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(r".venv\Scripts\python.exe -m pytest tests/", &[]),
+            Some("rtk pytest tests/".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(r"C:\Python312\python.exe -m unittest", &[]),
+            Some(r"rtk test C:\Python312\python.exe -m unittest".into())
         );
     }
 
