@@ -386,15 +386,45 @@ impl StreamFilter for SearchStreamFilter {
     }
 }
 
+/// Whether grep/rg would print the filename. `-H`/`-h` (and their long forms)
+/// are explicit and the last one wins, exactly as in grep; without either the
+/// engine shows a name for multiple files, a directory, or a recursive search.
 fn show_file(paths: &[String], extra_args: &[String]) -> bool {
+    let mut explicit: Option<bool> = None;
+    for f in extra_args {
+        match f.as_str() {
+            "--with-filename" => explicit = Some(true),
+            "--no-filename" => explicit = Some(false),
+            _ if f.starts_with('-') && !f.starts_with("--") => {
+                // Combined short flags (`-hn`, `-nH`) apply left to right.
+                for ch in f[1..].chars() {
+                    match ch {
+                        'H' => explicit = Some(true),
+                        'h' => explicit = Some(false),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(e) = explicit {
+        return e;
+    }
     paths.len() > 1
         || paths.iter().any(|p| std::path::Path::new(p).is_dir())
-        || has_short_flag(extra_args, 'H')
         || has_short_flag(extra_args, 'r')
         || has_short_flag(extra_args, 'R')
-        || extra_args
-            .iter()
-            .any(|f| f == "--with-filename" || f == "--recursive")
+        || extra_args.iter().any(|f| f == "--recursive")
+}
+
+/// True when `-h`/`--no-filename` is the last filename directive: even with
+/// several files grep then prints bare lines.
+fn no_filename_requested(extra_args: &[String]) -> bool {
+    !show_file(&[], extra_args)
+        && extra_args.iter().any(|f| {
+            f == "--no-filename" || (f.starts_with('-') && !f.starts_with("--") && f[1..].contains('h'))
+        })
 }
 
 fn show_line(extra_args: &[String]) -> bool {
@@ -505,10 +535,11 @@ pub fn run(
     // --version / --help: pass through to the engine without filtering.
     // Note: Clap strips `--` before populating trailing_var_arg, so both
     // `rtk grep --version` and `rtk grep -- --version` land here identically.
-    if args
-        .iter()
-        .any(|a| a == "--version" || a == "--help" || a == "-h")
-    {
+    // `-h` is help only for rg; for grep it is --no-filename and stays a
+    // regular flag (see `show_file`).
+    if args.iter().any(|a| {
+        a == "--version" || a == "--help" || (a == "-h" && matches!(engine, Engine::Rg))
+    }) {
         let mut cmd = resolved_command(engine.bin());
         cmd.args(args);
         let result = exec_capture(&mut cmd).context("search failed")?;
@@ -614,7 +645,8 @@ pub fn run(
     // show one (multiple files, a directory, -r or -H), the line number only with
     // -n. We force -nH--null for robust parsing, then drop what the engine itself
     // would not have shown.
-    let show_file = by_file.len() > 1 || show_file(&paths, &extra_args);
+    let show_file = show_file(&paths, &extra_args)
+        || (by_file.len() > 1 && !no_filename_requested(&extra_args));
     let show_line = show_line(&extra_args);
 
     // Faithful baseline: exactly what the real command prints, full content.
@@ -1436,6 +1468,28 @@ mod tests {
         assert!(show_line(&flags(&["--line-number"])));
         assert!(show_line(&flags(&["-rn"])));
         assert!(show_line(&flags(&["-in"])));
+    }
+
+    #[test]
+    fn show_file_honours_no_filename_in_every_spelling() {
+        let two = flags(&["a.txt", "b.txt"]);
+        assert!(show_file(&two, &flags(&[])));
+        assert!(!show_file(&two, &flags(&["-h"])));
+        assert!(!show_file(&two, &flags(&["--no-filename"])));
+        assert!(!show_file(&two, &flags(&["-hn"])));
+        assert!(!show_file(&two, &flags(&["-rh"])));
+        assert!(no_filename_requested(&flags(&["-ho"])));
+        assert!(!no_filename_requested(&flags(&["-o"])));
+    }
+
+    #[test]
+    fn show_file_last_filename_flag_wins_like_grep() {
+        let one = flags(&["a.txt"]);
+        assert!(show_file(&one, &flags(&["-h", "-H"])));
+        assert!(!show_file(&one, &flags(&["-H", "-h"])));
+        assert!(!show_file(&one, &flags(&["-Hh"])));
+        assert!(show_file(&one, &flags(&["--no-filename", "--with-filename"])));
+        assert!(!no_filename_requested(&flags(&["-h", "-H"])));
     }
 
     #[test]

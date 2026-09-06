@@ -316,6 +316,10 @@ enum Commands {
     },
 
     /// Compact grep - strips whitespace, truncates, groups by file
+    // `-h` is grep's --no-filename, not help: clap must not swallow it before
+    // it reaches search.rs (`rtk grep -h foo a b` printed rtk's usage text).
+    // `--help` still passes through to the engine there.
+    #[command(disable_help_flag = true)]
     Grep {
         // rtk's own options here are long-only: a short form shadows the native
         // grep/rg flag of the same letter and captures it before it can reach
