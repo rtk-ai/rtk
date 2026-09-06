@@ -153,7 +153,11 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
             let raw_summary =
                 normalize_build_summary(binlog::parse_build_from_text(&raw), command_success);
             let summary = merge_build_summaries(binlog_summary, raw_summary);
-            (format_build_output(&summary, &binlog_path), true)
+            // The `Errors:` / `Warnings:` sections already carry parsed diagnostics;
+            // skip the raw-stdout prepend when every reported error has detail. Mirrors
+            // `test_needs_raw_fallback` (issue #2501).
+            let needs_raw = build_needs_raw_fallback(&summary, command_success);
+            (format_build_output(&summary, &binlog_path), needs_raw)
         }
         "test" => {
             // First try to parse from binlog/console output
@@ -1083,6 +1087,39 @@ fn format_build_output(summary: &binlog::BuildSummary, _binlog_path: &Path) -> S
         .join("\n")
 }
 
+/// Returns true when a parsed build issue carries enough context to surface in
+/// the structured `Errors:` / `Warnings:` sections without the raw MSBuild stream.
+fn build_issue_has_detail(issue: &binlog::BinlogIssue) -> bool {
+    if issue.message.starts_with("Build error #") || issue.message.starts_with("Build warning #")
+    {
+        return false;
+    }
+
+    if !issue.file.is_empty() && issue.line > 0 {
+        return true;
+    }
+
+    // MSBuild/NuGet global diagnostics (e.g. `MSBUILD : error MSB1009`).
+    !issue.code.is_empty() && !issue.message.is_empty()
+}
+
+/// Decides whether the raw stdout/stderr should be prepended ahead of the
+/// filtered `dotnet build` summary on a failing run.
+///
+/// Keep the raw fallback only when the structured section can't stand on its own:
+/// build failed but no errors were parsed, or a parsed error lacks location/detail.
+fn build_needs_raw_fallback(summary: &binlog::BuildSummary, command_success: bool) -> bool {
+    if command_success {
+        return false;
+    }
+
+    if summary.errors.is_empty() {
+        return true;
+    }
+
+    summary.errors.iter().any(|issue| !build_issue_has_detail(issue))
+}
+
 /// Decides whether the raw stdout/stderr should be prepended ahead of the
 /// filtered `dotnet test` summary on a failing run.
 ///
@@ -1464,6 +1501,125 @@ mod tests {
     // failure block (+65% vs raw). `test_needs_raw_fallback` must suppress the raw
     // prepend when the structured section already carries failure detail, while
     // keeping it when the filter couldn't capture the failures.
+
+    #[test]
+    fn test_build_issue_has_detail_rejects_placeholder_errors() {
+        let placeholder = binlog::BinlogIssue {
+            code: String::new(),
+            file: String::new(),
+            line: 0,
+            column: 0,
+            message: "Build error #1 (details omitted)".to_string(),
+        };
+        assert!(!build_issue_has_detail(&placeholder));
+    }
+
+    #[test]
+    fn test_build_issue_has_detail_accepts_file_location() {
+        let issue = binlog::BinlogIssue {
+            code: "CS0234".to_string(),
+            file: "src/Program.cs".to_string(),
+            line: 6,
+            column: 12,
+            message: "Type not found".to_string(),
+        };
+        assert!(build_issue_has_detail(&issue));
+    }
+
+    #[test]
+    fn test_build_issue_has_detail_accepts_msbuild_global_error() {
+        let issue = binlog::BinlogIssue {
+            code: "MSB1009".to_string(),
+            file: "MSBUILD".to_string(),
+            line: 0,
+            column: 0,
+            message: "Project file does not exist.".to_string(),
+        };
+        assert!(build_issue_has_detail(&issue));
+    }
+
+    #[test]
+    fn test_build_needs_raw_fallback_false_when_errors_have_detail() {
+        let summary = binlog::BuildSummary {
+            succeeded: false,
+            project_count: 2,
+            errors: vec![binlog::BinlogIssue {
+                code: "CS0234".to_string(),
+                file: "Helpers/BenchmarkCacheOptionsFactory.cs".to_string(),
+                line: 6,
+                column: 12,
+                message: "The type or namespace name 'Create' does not exist".to_string(),
+            }],
+            warnings: vec![
+                binlog::BinlogIssue {
+                    code: "CS8600".to_string(),
+                    file: "Services/CachedServiceAsyncWithTTL.cs".to_string(),
+                    line: 51,
+                    column: 55,
+                    message: "Converting null literal or possible null value to non-nullable type"
+                        .to_string(),
+                },
+                binlog::BinlogIssue {
+                    code: "CS8603".to_string(),
+                    file: "Services/CachedServiceAsyncWithTTL.cs".to_string(),
+                    line: 51,
+                    column: 55,
+                    message: "Possible null reference return".to_string(),
+                },
+            ],
+            duration_text: Some("00:00:02.90".to_string()),
+        };
+        assert!(!build_needs_raw_fallback(&summary, false));
+    }
+
+    #[test]
+    fn test_build_needs_raw_fallback_true_when_no_errors_parsed() {
+        let summary = binlog::BuildSummary {
+            succeeded: false,
+            ..Default::default()
+        };
+        assert!(build_needs_raw_fallback(&summary, false));
+    }
+
+    #[test]
+    fn test_build_needs_raw_fallback_true_when_error_lacks_detail() {
+        let summary = binlog::BuildSummary {
+            succeeded: false,
+            errors: vec![binlog::BinlogIssue {
+                code: String::new(),
+                file: String::new(),
+                line: 0,
+                column: 0,
+                message: "Build error #1 (details omitted)".to_string(),
+            }],
+            ..Default::default()
+        };
+        assert!(build_needs_raw_fallback(&summary, false));
+    }
+
+    #[test]
+    fn test_build_needs_raw_fallback_false_on_success() {
+        let summary = binlog::BuildSummary {
+            succeeded: true,
+            project_count: 1,
+            ..Default::default()
+        };
+        assert!(!build_needs_raw_fallback(&summary, true));
+    }
+
+    #[test]
+    fn test_compose_failure_output_drops_raw_for_build_when_errors_parsed() {
+        let raw_stdout = include_str!("../../../tests/fixtures/dotnet/build_failed.txt");
+        let parsed = binlog::parse_build_from_text(raw_stdout);
+        let filtered = format_build_output(&parsed, Path::new("/tmp/build.binlog"));
+        assert!(!build_needs_raw_fallback(&parsed, false));
+
+        let output = compose_failure_output(false, false, raw_stdout, "", &filtered);
+
+        assert_eq!(output, filtered);
+        assert_eq!(output.matches("CS1525").count(), 1);
+        assert!(!output.contains("Determining projects to restore"));
+    }
 
     #[test]
     fn test_needs_raw_fallback_false_when_failures_have_detail() {
