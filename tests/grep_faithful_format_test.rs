@@ -209,3 +209,24 @@ fn dash_m_max_count_is_per_file_like_grep_n() {
     let f2 = write(d.path(), "b.txt", "hit\nhit\nhit\n");
     assert_eq_grep_with_and_without_n(&["-m", "2", "hit", &f1, &f2]); // 2 per file, both files
 }
+
+/// `-h` is grep's --no-filename, not help: clap must not intercept it, and the
+/// output must match grep byte for byte (no names even with several files).
+#[test]
+fn dash_h_is_no_filename_not_help() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = dir.path().join("a.txt");
+    let b = dir.path().join("b.txt");
+    std::fs::write(&a, "needle one\nhay\n").unwrap();
+    std::fs::write(&b, "needle two\n").unwrap();
+    let (a, b) = (a.to_str().unwrap(), b.to_str().unwrap());
+    assert_eq_grep_with_and_without_n(&["-h", "needle", a, b]);
+    assert_eq_grep_with_and_without_n(&["-ho", "needle", a, b]);
+    assert_eq_grep_with_and_without_n(&["-H", "needle", a]);
+    assert_eq_grep_with_and_without_n(&["-h", "-H", "needle", a]);
+    let (out, _) = rtk_grep(&["-h", "needle", a, b]);
+    assert!(
+        !out.contains("Usage:"),
+        "-h must not print rtk help:\n{out}"
+    );
+}
