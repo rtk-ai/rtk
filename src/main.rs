@@ -1,6 +1,8 @@
 mod analytics;
 mod cmds;
 mod core;
+#[cfg(test)]
+mod datatest;
 mod discover;
 mod hooks;
 mod learn;

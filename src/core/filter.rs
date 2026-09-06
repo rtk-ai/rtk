@@ -363,6 +363,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_filter() {
+        use crate::datatest;
+
+        datatest::run_tests("filter/*", |case| {
+            let level: FilterLevel = case
+                .params
+                .as_deref()
+                .expect("filter level required as params (no .after.<level>. in filename)")
+                .parse()
+                .expect("unknown filter level in filename");
+            let lang = Language::from_extension(
+                case.input_path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or(""),
+            );
+            get_filter(level).filter(&case.input, &lang)
+        });
+    }
+
+    #[test]
     fn test_filter_level_parsing() {
         assert_eq!(FilterLevel::from_str("none").unwrap(), FilterLevel::None);
         assert_eq!(
@@ -451,20 +472,6 @@ mod tests {
             result.contains("/* not a comment */"),
             "Aggressive filter must not strip comment-like patterns in JSON"
         );
-    }
-
-    #[test]
-    fn test_minimal_filter_removes_comments() {
-        let code = r#"
-// This is a comment
-fn main() {
-    println!("Hello");
-}
-"#;
-        let filter = MinimalFilter;
-        let result = filter.filter(code, &Language::Rust);
-        assert!(!result.contains("// This is a comment"));
-        assert!(result.contains("fn main()"));
     }
 
     // --- truncation accuracy ---
