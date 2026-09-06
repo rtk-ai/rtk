@@ -8,7 +8,7 @@
 - Returns `updatedInput` JSON for transparent command rewrite (agent doesn't know RTK is involved)
 - Exits silently (exit 0) on any failure: jq missing, rtk missing, rtk too old (< 0.23.0), no match
 - Version guard checks `rtk --version` against minimum 0.23.0
-- `rtk-awareness.md` is a slim 10-line instructions file embedded into CLAUDE.md by `rtk init`
+- `rtk-awareness.md` is written as `RTK.md` and referenced from `CLAUDE.md` by `rtk init`
 
 ## Testing
 
