@@ -88,12 +88,34 @@ fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
 /// Check if the installed hook is missing or outdated, warn once per day.
 pub fn maybe_warn() {
     // Don't block startup — fail silently on any error
-    let _ = check_and_warn();
+    let warn_on_missing = crate::core::config::Config::load()
+        .map(|c| c.hooks.warn_on_missing)
+        .unwrap_or(true);
+    let _ = check_and_warn(warn_on_missing);
+}
+
+/// Pure decision: should we emit the startup banner right now?
+///
+/// Combines the live hook status with the user-configurable opt-out
+/// (`[hooks] warn_on_missing = false` in `config.toml`).
+fn should_emit(hook_status: &HookStatus, warn_on_missing: bool) -> bool {
+    match hook_status {
+        HookStatus::Ok => false,
+        HookStatus::Missing | HookStatus::Outdated => warn_on_missing,
+    }
 }
 
 /// Single source of truth: delegates to `status()` then rate-limits the warning.
-fn check_and_warn() -> Option<()> {
-    let warning = match status() {
+///
+/// `warn_on_missing` is plumbed in (rather than read from config here) so the
+/// decision is testable without touching the real config directory.
+fn check_and_warn(warn_on_missing: bool) -> Option<()> {
+    let hook_status = status();
+    if !should_emit(&hook_status, warn_on_missing) {
+        return Some(());
+    }
+
+    let warning = match hook_status {
         HookStatus::Ok => return Some(()),
         HookStatus::Missing => {
             "[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings"
@@ -338,5 +360,33 @@ mod tests {
             "Expected valid HookStatus variant, got {:?}",
             s
         );
+    }
+
+    #[test]
+    fn test_should_emit_ok_never_warns() {
+        // If the hook is fine, the user opt-out is irrelevant.
+        assert!(!should_emit(&HookStatus::Ok, true));
+        assert!(!should_emit(&HookStatus::Ok, false));
+    }
+
+    #[test]
+    fn test_should_emit_missing_respects_setting() {
+        assert!(
+            should_emit(&HookStatus::Missing, true),
+            "Missing + warn_on_missing=true should emit"
+        );
+        assert!(
+            !should_emit(&HookStatus::Missing, false),
+            "Missing + warn_on_missing=false must stay silent (this is the no-banner opt-out)"
+        );
+    }
+
+    #[test]
+    fn test_should_emit_outdated_respects_setting() {
+        // Outdated shares the same opt-out as Missing — they're both hook
+        // state warnings, and the user either wants the banner family or
+        // doesn't.
+        assert!(should_emit(&HookStatus::Outdated, true));
+        assert!(!should_emit(&HookStatus::Outdated, false));
     }
 }

@@ -23,7 +23,11 @@ pub struct Config {
     pub limits: LimitsConfig,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+fn default_warn_on_missing() -> bool {
+    true
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct HooksConfig {
     /// Commands to exclude from auto-rewrite (e.g. ["curl", "playwright"]).
     /// Survives `rtk init -g` re-runs since config.toml is user-owned.
@@ -51,6 +55,26 @@ pub struct HooksConfig {
     /// not anything else.
     #[serde(default)]
     pub transparent_prefixes: Vec<String>,
+
+    /// When `false`, suppress the per-invocation "[rtk] /!\\ No hook installed"
+    /// warning (and the related "Hook outdated" warning) emitted to stderr
+    /// from `src/hooks/hook_check.rs`. Use this to silence the banner for
+    /// users who run rtk without a Claude Code hook on purpose.
+    ///
+    /// Default: `true` — preserves the pre-config behavior of always warning
+    /// once per day when a hook is missing or outdated.
+    #[serde(default = "default_warn_on_missing")]
+    pub warn_on_missing: bool,
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            exclude_commands: Vec::new(),
+            transparent_prefixes: Vec::new(),
+            warn_on_missing: true,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -329,5 +353,61 @@ consent_date = "2026-04-10T12:00:00Z"
             config.telemetry.consent_date.as_deref(),
             Some("2026-04-10T12:00:00Z")
         );
+    }
+
+    #[test]
+    fn test_warn_on_missing_default_true() {
+        // The struct default and Config::default() must both flip the banner
+        // on. Otherwise the pre-config "always warn" behavior would silently
+        // change for new users without a config.toml.
+        assert!(HooksConfig::default().warn_on_missing);
+        assert!(Config::default().hooks.warn_on_missing);
+    }
+
+    #[test]
+    fn test_warn_on_missing_deserialize_false() {
+        let toml = r#"
+[hooks]
+warn_on_missing = false
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(!config.hooks.warn_on_missing);
+    }
+
+    #[test]
+    fn test_warn_on_missing_deserialize_true() {
+        let toml = r#"
+[hooks]
+warn_on_missing = true
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(config.hooks.warn_on_missing);
+    }
+
+    #[test]
+    fn test_warn_on_missing_missing_field_defaults_true() {
+        // Backwards compat: config.toml files written before this field
+        // existed must still parse and keep the historical "warn by default"
+        // behavior.
+        let toml = r#"
+[hooks]
+exclude_commands = ["curl"]
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.hooks.exclude_commands, vec!["curl"]);
+        assert!(config.hooks.warn_on_missing);
+    }
+
+    #[test]
+    fn test_warn_on_missing_roundtrip() {
+        let mut config = Config::default();
+        config.hooks.warn_on_missing = false;
+        let serialized = toml::to_string_pretty(&config).expect("serialize");
+        assert!(
+            serialized.contains("warn_on_missing = false"),
+            "expected serialized config to include the field, got:\n{serialized}"
+        );
+        let parsed: Config = toml::from_str(&serialized).expect("deserialize");
+        assert!(!parsed.hooks.warn_on_missing);
     }
 }
