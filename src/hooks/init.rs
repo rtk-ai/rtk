@@ -255,13 +255,13 @@ rtk git worktree        # Compact worktree
 
 Note: Git passthrough works for ALL subcommands, even those not explicitly listed.
 
-### GitHub (26-87% savings)
+### GitHub (79-87% savings)
 ```bash
 rtk gh pr view <num>    # Compact PR view (87%)
 rtk gh pr checks        # Compact PR checks (79%)
 rtk gh run list         # Compact workflow runs (82%)
 rtk gh issue list       # Compact issue list (80%)
-rtk gh api              # Compact API responses (26%)
+rtk gh api              # Intentional passthrough (0%); filter at the source with --jq
 ```
 
 ### JavaScript/TypeScript Tooling (70-90% savings)
