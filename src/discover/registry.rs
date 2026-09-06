@@ -2291,6 +2291,67 @@ mod tests {
         );
     }
 
+    // --- #1654: ssh classify + rewrite roundtrip ---
+
+    #[test]
+    fn test_classify_ssh_with_remote_command() {
+        // Hook path must classify ssh-with-args as Supported so `rtk rewrite`
+        // returns the prefixed form instead of bailing with exit 1.
+        match classify_command("ssh user@host uptime") {
+            Classification::Supported {
+                rtk_equivalent,
+                category,
+                ..
+            } => {
+                assert_eq!(rtk_equivalent, "rtk ssh");
+                assert_eq!(category, "Network");
+            }
+            other => panic!("expected Supported, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_rewrite_ssh_shapes() {
+        // Spot-check the four shapes from #1654's reproduction script.
+        let cases = [
+            ("ssh root@host uptime", "rtk ssh root@host uptime"),
+            ("ssh user@example.test ls", "rtk ssh user@example.test ls"),
+            (
+                "ssh -o ConnectTimeout=5 host echo OK",
+                "rtk ssh -o ConnectTimeout=5 host echo OK",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                Some(expected.into()),
+                "rewrite for {:?} should be Some({:?})",
+                input,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_ssh_with_host_only() {
+        // `ssh host` (no remote command, just login) is the fourth shape
+        // from #1654's reproduction script. It still needs to flow through
+        // the filter — even login banners benefit from `strip_lines_matching`
+        // in `src/filters/ssh.toml`.
+        assert_eq!(
+            rewrite_command_no_prefixes("ssh host", &[]),
+            Some("rtk ssh host".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bare_ssh_not_rewritten() {
+        // `ssh` with no arguments at all is left alone (the regex requires
+        // `\s+` after `ssh`); without an argv it would just print usage to
+        // stderr and there's nothing to filter.
+        assert_eq!(rewrite_command_no_prefixes("ssh", &[]), None);
+    }
+
     #[test]
     fn test_classify_sudo_not_stripped() {
         // sudo is intentionally not stripped: sudo commands stay unclassified so

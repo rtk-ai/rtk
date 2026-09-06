@@ -454,6 +454,22 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 65.0,
         ..RtkRule::DEFAULT
     },
+    // #1654: ssh has a TOML filter (`src/filters/ssh.toml`) that passes
+    // `rtk verify --filter ssh` but the hook rewrite path never reached it
+    // because the registry didn't list a matching rule. Adding the rule lets
+    // `ssh user@host cmd` flow through `rtk rewrite` → `rtk ssh user@host cmd`
+    // → main.rs's TOML-filter dispatch. Interactive `ssh host` (no remote
+    // command, banners only) is intentionally not rewritten — `\s+` requires
+    // at least one argument, mirroring wget/curl above.
+    RtkRule {
+        pattern: r"^ssh\s+",
+        rtk_cmd: "rtk ssh",
+        rewrite_prefixes: &["ssh"],
+        category: "Network",
+        savings_pct: 65.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
     RtkRule {
         pattern: r"^(python3?\s+-m\s+)?mypy(\s|$)",
         rtk_cmd: "rtk mypy",
