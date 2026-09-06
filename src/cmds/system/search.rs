@@ -695,8 +695,8 @@ pub fn run(
         body.push_str(&format!("+{} more files{}\n", skipped_files, hint));
     }
 
-    // Switch to the grouped form only when capping actually shrank the output;
-    // otherwise emit the faithful baseline, so RTK never exceeds the real command.
+    // The grouped form carries a header, so it only pays for itself when matches
+    // were actually dropped and the header explains where they went.
     let capped = shown < total_matches || skipped_files > 0;
     let rtk_output = if capped {
         format!(
@@ -709,7 +709,14 @@ pub fn run(
         body
     };
 
-    let output = if capped && rtk_output.len() < plain.len() {
+    // `capped` only knows about matches that were DROPPED. It says nothing about
+    // matches that were SHORTENED, and by this point `clean_line` has already
+    // trimmed every one of them to `--max-len`. Requiring `capped` here threw
+    // that work away whenever the match count happened to fit under the caps -
+    // which is exactly the shape of a grep over a file with very long lines: few
+    // matches, enormous content. The length comparison alone already keeps the
+    // promise that RTK never emits more than the real command.
+    let output = if rtk_output.len() < plain.len() {
         rtk_output
     } else {
         plain
