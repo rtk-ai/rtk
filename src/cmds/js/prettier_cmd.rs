@@ -16,17 +16,24 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: prettier {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    // Prettier >= 1.19 logs its `--check` results ("[warn] <file>") to stderr,
+    // not stdout — the filter must see the combined output, and the exit code,
+    // to avoid reporting a failing check as success.
+    runner::run_filtered_with_exit(
         cmd,
         "prettier",
         &args.join(" "),
-        filter_prettier_output,
-        RunOptions::stdout_only(),
+        filter_prettier_output_with_exit,
+        RunOptions::default(),
     )
 }
 
 /// Filter Prettier output - show only files that need formatting
 pub fn filter_prettier_output(output: &str) -> String {
+    filter_prettier_output_with_exit(output, 0)
+}
+
+fn filter_prettier_output_with_exit(output: &str, exit_code: i32) -> String {
     // #221: empty or whitespace-only output means prettier didn't run
     if output.trim().is_empty() {
         return "Error: prettier produced no output".to_string();
@@ -39,6 +46,13 @@ pub fn filter_prettier_output(output: &str) -> String {
     for line in output.lines() {
         let trimmed = line.trim();
 
+        // Prettier >= 1.19 prefixes each check result with "[warn] " (on
+        // stderr). Strip the prefix so those file lines are recognized.
+        let trimmed = trimmed
+            .strip_prefix("[warn]")
+            .map(str::trim_start)
+            .unwrap_or(trimmed);
+
         // Detect check mode vs write mode
         if trimmed.contains("Checking formatting") {
             is_check_mode = true;
@@ -49,7 +63,6 @@ pub fn filter_prettier_output(output: &str) -> String {
             && !trimmed.starts_with("Checking")
             && !trimmed.starts_with("All matched")
             && !trimmed.starts_with("Code style")
-            && !trimmed.contains("[warn]")
             && !trimmed.contains("[error]")
             && (trimmed.ends_with(".ts")
                 || trimmed.ends_with(".tsx")
@@ -88,6 +101,12 @@ pub fn filter_prettier_output(output: &str) -> String {
     if is_check_mode {
         // Check mode: show files that need formatting
         if files_to_format.is_empty() {
+            if exit_code != 0 {
+                // Prettier failed but no file list could be parsed (unknown
+                // extension, unexpected output shape). Never claim success on
+                // a failing check — pass the real output through.
+                return output.trim().to_string();
+            }
             result.push_str("Prettier: All files formatted correctly\n");
         } else {
             result.push_str(&format!(
@@ -180,5 +199,48 @@ Code style issues found in the above file(s). Forgot to run Prettier?
         let result = filter_prettier_output("   \n\n  ");
         assert!(result.contains("Error"));
         assert!(!result.contains("All files formatted"));
+    }
+
+    // --- failing `--check` writes "[warn] <file>" to stderr (prettier >= 1.19) ---
+
+    #[test]
+    fn test_filter_check_failure_warn_prefixed_files() {
+        // Real prettier 3.x --check output (combined stdout + stderr)
+        let output = "Checking formatting...\n\
+                      [warn] src/app.ts\n\
+                      [warn] src/util.js\n\
+                      [warn] Code style issues found in the above files. Run Prettier with --write to fix.";
+        let result = filter_prettier_output_with_exit(output, 1);
+        assert!(
+            result.contains("2 files need formatting"),
+            "got: {}",
+            result
+        );
+        assert!(result.contains("src/app.ts"));
+        assert!(result.contains("src/util.js"));
+        assert!(!result.contains("All files formatted correctly"));
+    }
+
+    #[test]
+    fn test_filter_check_failure_never_reports_success() {
+        // Unrecognized extension: no file list parsed, but prettier exited 1 —
+        // must not claim success.
+        let output = "Checking formatting...\n\
+                      [warn] src/component.vue\n\
+                      [warn] Code style issues found in the above file. Run Prettier with --write to fix.";
+        let result = filter_prettier_output_with_exit(output, 1);
+        assert!(
+            !result.contains("All files formatted correctly"),
+            "failing check reported as success: {}",
+            result
+        );
+        assert!(result.contains("src/component.vue"));
+    }
+
+    #[test]
+    fn test_filter_check_success_exit_zero_unchanged() {
+        let output = "Checking formatting...\nAll matched files use Prettier code style!";
+        let result = filter_prettier_output_with_exit(output, 0);
+        assert!(result.contains("All files formatted correctly"));
     }
 }
