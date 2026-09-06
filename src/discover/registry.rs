@@ -5095,6 +5095,23 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_npm_lifecycle_commands() {
+        assert_eq!(
+            rewrite_command_no_prefixes("npm test", &[]),
+            Some("rtk npm test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("npm install --ignore-scripts", &[]),
+            Some("rtk npm install --ignore-scripts".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_does_not_match_unknown_subcommands() {
+        assert_eq!(rewrite_command_no_prefixes("npm publish", &[]), None);
+    }
+
+    #[test]
     fn test_all_rules_are_complete() {
         for rule in RULES {
             assert!(
