@@ -247,6 +247,7 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
         &combined,
         passthrough_requested,
         verbose,
+        result.exit_code,
     );
     let tee_label = format!("{}_run", framework);
 
@@ -328,6 +329,7 @@ fn format_test_output(
     combined: &str,
     passthrough_requested: bool,
     verbose: u8,
+    exit_code: i32,
 ) -> FormattedTestOutput {
     if passthrough_requested {
         return format_passthrough_output(combined);
@@ -340,19 +342,29 @@ fn format_test_output(
             if verbose > 0 {
                 eprintln!("{} run (Tier 1: Full JSON parse)", framework);
             }
-            FormattedTestOutput::new(data.format(mode))
+            FormattedTestOutput::new(format_parsed_test_output(&data, mode, exit_code))
         }
         ParseResult::Degraded(data, warnings) => {
             if verbose > 0 {
                 emit_degradation_warning(framework, &warnings.join(", "));
             }
-            FormattedTestOutput::new(data.format(mode))
+            FormattedTestOutput::new(format_parsed_test_output(&data, mode, exit_code))
         }
         ParseResult::Passthrough(_) => {
             emit_passthrough_warning(framework, "All parsing tiers failed");
             format_passthrough_output(stdout)
         }
     }
+}
+
+fn format_parsed_test_output(data: &TestResult, mode: FormatMode, exit_code: i32) -> String {
+    let mut output = data.format(mode);
+    if exit_code != 0 && data.failed == 0 {
+        output.push_str(&format!(
+            "\n[FAIL] Process exited with code {exit_code} despite reporter listing no failed tests"
+        ));
+    }
+    output
 }
 
 fn format_passthrough_output(raw: &str) -> FormattedTestOutput {
@@ -414,6 +426,21 @@ where
 mod tests {
     use super::*;
 
+    const ALL_PASS_JSON: &str = r#"{
+        "numTotalTests": 2,
+        "numPassedTests": 2,
+        "numFailedTests": 0,
+        "numPendingTests": 0,
+        "testResults": []
+    }"#;
+    const FAILED_TEST_JSON: &str = r#"{
+        "numTotalTests": 2,
+        "numPassedTests": 1,
+        "numFailedTests": 1,
+        "numPendingTests": 0,
+        "testResults": []
+    }"#;
+
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
     }
@@ -438,6 +465,32 @@ mod tests {
         assert_eq!(data.passed, 13);
         assert_eq!(data.failed, 0);
         assert_eq!(data.duration_ms, None);
+    }
+
+    #[test]
+    fn test_all_pass_json_with_nonzero_exit_reports_process_failure() {
+        let output = format_test_output("vitest", ALL_PASS_JSON, ALL_PASS_JSON, false, 0, 1);
+
+        assert!(output.text.contains("PASS (2) FAIL (0)"));
+        assert!(output.text.contains(
+            "[FAIL] Process exited with code 1 despite reporter listing no failed tests"
+        ));
+    }
+
+    #[test]
+    fn test_all_pass_json_with_zero_exit_has_no_process_failure() {
+        let output = format_test_output("vitest", ALL_PASS_JSON, ALL_PASS_JSON, false, 0, 0);
+
+        assert!(output.text.contains("PASS (2) FAIL (0)"));
+        assert!(!output.text.contains("despite reporter listing no failed tests"));
+    }
+
+    #[test]
+    fn test_failed_json_with_nonzero_exit_has_no_process_discrepancy() {
+        let output = format_test_output("vitest", FAILED_TEST_JSON, FAILED_TEST_JSON, false, 0, 1);
+
+        assert!(output.text.contains("PASS (1) FAIL (1)"));
+        assert!(!output.text.contains("despite reporter listing no failed tests"));
     }
 
     #[test]
@@ -569,7 +622,7 @@ Scope: all 6 workspace projects
    Duration  450ms
 "#;
 
-        let filtered = format_test_output("vitest", output, output, true, 0);
+        let filtered = format_test_output("vitest", output, output, true, 0, 0);
 
         assert!(filtered.text.contains("keeps docs path"));
         assert!(filtered.text.contains("keeps app path"));
