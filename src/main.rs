@@ -1,16 +1,3 @@
-// Complexity ceilings are opt-in per module, not crate-wide — see clippy.toml.
-// The pre-existing codebase has functions far over these thresholds; the recall
-// modules re-enable the lints with `#![deny]` at their own file heads.
-#![allow(
-    clippy::too_many_lines,
-    clippy::too_many_arguments,
-    clippy::cognitive_complexity,
-    clippy::excessive_nesting,
-    clippy::fn_params_excessive_bools,
-    clippy::struct_excessive_bools,
-    clippy::type_complexity
-)]
-
 mod analytics;
 mod cmds;
 mod core;

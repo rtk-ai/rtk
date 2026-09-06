@@ -1,6 +1,9 @@
 //! Recovery-hint dispatch — routes to the sqlite store or legacy tee per `[retriever] mode`.
 
-// Complexity ratchet — see clippy.toml. Ceilings may only fall.
+// These modules opt into clippy's complexity lints; the rest of the crate
+// predates them and is not held to the same ceilings. The thresholds come
+// from whatever clippy.toml is in scope and resolve at clippy's defaults when
+// there is none, so this costs a tree without one nothing.
 #![deny(
     clippy::too_many_lines,
     clippy::too_many_arguments,
