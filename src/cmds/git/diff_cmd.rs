@@ -2,7 +2,7 @@
 
 use crate::core::guard::never_worse;
 use crate::core::tracking;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 
@@ -19,8 +19,12 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
         eprintln!("Comparing: {} vs {}", file1.display(), file2.display());
     }
 
-    let content1 = fs::read_to_string(file1)?;
-    let content2 = fs::read_to_string(file2)?;
+    // Name the file: a bare "No such file or directory" leaves the agent
+    // guessing which of the two paths was wrong.
+    let content1 = fs::read_to_string(file1)
+        .with_context(|| format!("cannot read {}", file1.display()))?;
+    let content2 = fs::read_to_string(file2)
+        .with_context(|| format!("cannot read {}", file2.display()))?;
     let lines1: Vec<&str> = content1.lines().collect();
     let lines2: Vec<&str> = content2.lines().collect();
     let diff = compute_diff(&lines1, &lines2);

@@ -44,3 +44,22 @@ fn small_crlf_vs_lf_diff_prints_whitespace_message() {
         "byte-different files must not be reported identical:\n{stdout}"
     );
 }
+
+/// A missing operand must be named in the error, like diff itself does.
+#[test]
+fn missing_file_error_names_the_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let present = dir.path().join("present.txt");
+    std::fs::write(&present, "x\n").unwrap();
+    let missing = dir.path().join("missing.yaml");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["diff", present.to_str().unwrap(), missing.to_str().unwrap()])
+        .output()
+        .expect("rtk diff");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(
+        stderr.contains("missing.yaml"),
+        "stderr must name the path:\n{stderr}"
+    );
+}
