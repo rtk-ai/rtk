@@ -349,4 +349,16 @@ Scope: all 6 workspace projects
             extract_json_object(input).expect("Should extract nested JSON with mixed multibyte");
         assert_eq!(extracted, input);
     }
+
+    #[test]
+    fn test_extract_json_object_with_multibyte_string() {
+        let input = r#"prefix
+{"numTotalTests": 1, "message": "测试输出"}
+suffix"#;
+        let expected = r#"{"numTotalTests": 1, "message": "测试输出"}"#;
+
+        let extracted = extract_json_object(input).expect("Should extract JSON");
+
+        assert_eq!(extracted, expected);
+    }
 }
