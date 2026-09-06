@@ -185,7 +185,14 @@ impl FilterStrategy for MinimalFilter {
 
             // Handle Python docstrings (keep them in minimal mode)
             if *lang == Language::Python && trimmed.starts_with("\"\"\"") {
-                in_docstring = !in_docstring;
+                if !in_docstring {
+                    in_docstring = true;
+                    if trimmed.len() > 3 && trimmed[3..].contains("\"\"\"") {
+                        in_docstring = false;
+                    }
+                } else {
+                    in_docstring = false;
+                }
                 result.push_str(line);
                 result.push('\n');
                 continue;
@@ -194,6 +201,9 @@ impl FilterStrategy for MinimalFilter {
             if in_docstring {
                 result.push_str(line);
                 result.push('\n');
+                if trimmed.ends_with("\"\"\"") {
+                    in_docstring = false;
+                }
                 continue;
             }
 
@@ -543,5 +553,59 @@ fn main() {
         let input = "a\nb\nc";
         let output = smart_truncate(input, 3, &Language::Unknown);
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_python_single_line_docstring_does_not_corrupt_state() {
+        let filter = MinimalFilter;
+        let input = r#"def add(a, b):
+    """Return the sum."""
+    # this comment should be stripped
+    return a + b
+"#;
+        let output = filter.filter(input, &Language::Python);
+        assert!(
+            output.contains("Return the sum"),
+            "docstring should be kept"
+        );
+        assert!(
+            !output.contains("this comment should be stripped"),
+            "comment after single-line docstring must be stripped"
+        );
+        assert!(output.contains("return a + b"), "code must be kept");
+    }
+
+    #[test]
+    fn test_python_multiline_docstring_closing_on_content_line() {
+        let filter = MinimalFilter;
+        let input = r#"def subtract(self, a, b):
+    """Subtract b from a
+    and return result."""
+    # subtract comment
+    return a - b
+
+def multiply(self, a, b):
+    # multiply comment, no docstring before
+    return a * b
+"#;
+        let output = filter.filter(input, &Language::Python);
+        assert!(
+            output.contains("Subtract b from a"),
+            "docstring content should be kept"
+        );
+        assert!(
+            output.contains("and return result."),
+            "docstring closing line should be kept"
+        );
+        assert!(
+            !output.contains("subtract comment"),
+            "comment after multi-line docstring must be stripped"
+        );
+        assert!(
+            !output.contains("multiply comment"),
+            "comment in unrelated method must be stripped"
+        );
+        assert!(output.contains("return a - b"), "code must be kept");
+        assert!(output.contains("return a * b"), "code must be kept");
     }
 }
