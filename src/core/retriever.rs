@@ -496,11 +496,13 @@ fn record_tee_recall_with(cfg: &RetrieverConfig, slug: &str, path: &str, disable
     }
 }
 
-/// Two independent rules, and they do not agree on what "oldest" means — see
-/// §B.B2/§V.V13. Retention orders by `created_at`, which the upsert refreshes;
-/// the count cap orders by `rowid`, which it does not. An entry re-stored daily
-/// is therefore fresh to one rule and first-to-die to the other. Splitting them
-/// is not a fix; it makes the disagreement visible at the call site.
+/// Two rules, one definition of "oldest": both order by `created_at`, which the
+/// upsert refreshes. Retention drops what is older than the cutoff; the count
+/// cap drops the oldest surplus. An entry re-stored daily is fresh to both.
+///
+/// They disagreed until §B.B2 was fixed — the count cap ordered by `rowid`,
+/// which the upsert never touches, so the most recently refreshed entry was the
+/// first evicted while retention still considered it new.
 fn evict(conn: &Connection, cfg: &RetrieverConfig) {
     evict_by_age(conn, cfg.retention_days);
     evict_by_count(conn, cfg.max_entries);
@@ -531,11 +533,15 @@ fn evict_by_count(conn: &Connection, max_entries: usize) {
     let _ = conn.execute(EVICT_BY_COUNT_SQL, params![excess]);
 }
 
-/// Lowest `rowid` first — insertion order. Note this is *not* `created_at`
-/// order: `ON CONFLICT DO UPDATE` refreshes the timestamp but never the rowid,
-/// which is the disagreement between the two eviction rules.
+/// Oldest `created_at` first — the same clock the retention rule uses.
+///
+/// `rowid` would be insertion order, and `ON CONFLICT DO UPDATE` refreshes
+/// `created_at` but never the rowid. Ordering by rowid therefore evicted the
+/// entry that had been re-stored most recently, while retention still counted
+/// it as fresh (§B.B2). `rowid` remains only as a tie-break, so entries stored
+/// within the same second still evict deterministically.
 const EVICT_BY_COUNT_SQL: &str = "DELETE FROM recall WHERE rowid IN (
-        SELECT rowid FROM recall ORDER BY rowid ASC LIMIT ?1
+        SELECT rowid FROM recall ORDER BY created_at ASC, rowid ASC LIMIT ?1
     )";
 
 /// What is being recorded about one captured command.
@@ -1975,27 +1981,32 @@ mod tests {
     // --- B2/V13: eviction order bug — rowid vs created_at inconsistency ---
 
     #[test]
-    #[should_panic(expected = "B2: hot entry evicted despite fresh created_at")]
-    fn test_b2_hot_entry_should_survive_eviction() {
+    fn test_b2_hot_entry_survives_eviction() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = RetrieverConfig {
             max_entries: 3,
             retention_days: 0,
             ..temp_cfg(dir.path())
         };
-        // Insert entry A (gets lowest rowid)
+        // A gets the lowest rowid, then B and C follow.
         store_inner(&cfg, b"hot-entry-a\n", Capture::full("hot-cmd", Some(0))).unwrap();
-        // Insert entries B and C
         store_inner(&cfg, b"entry-b\n", Capture::full("cmd-b", Some(0))).unwrap();
         store_inner(&cfg, b"entry-c\n", Capture::full("cmd-c", Some(0))).unwrap();
-        // Re-store A with same (command, content) → ON CONFLICT DO UPDATE refreshes
-        // created_at but NOT rowid
+
+        // Age everything by a day. B2 describes an entry re-stored *daily*, and
+        // `created_at` is whole seconds — storing four entries in one test tick
+        // leaves them all on the same timestamp, where the rowid tie-break
+        // decides and nothing about recency is being tested.
+        let conn = open(&cfg).unwrap();
+        conn.execute("UPDATE recall SET created_at = created_at - 86400", [])
+            .unwrap();
+
+        // Re-store A: ON CONFLICT DO UPDATE refreshes created_at to now, and
+        // leaves its rowid — still the lowest — untouched.
         store_inner(&cfg, b"hot-entry-a\n", Capture::full("hot-cmd", Some(1))).unwrap();
-        // Now insert D — triggers eviction. A has lowest rowid even though
-        // it was most recently refreshed.
+        // D takes the store over max_entries and triggers eviction.
         store_inner(&cfg, b"entry-d\n", Capture::full("cmd-d", Some(0))).unwrap();
 
-        let conn = open(&cfg).unwrap();
         let hot_exists: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM recall WHERE command = 'hot-cmd'",
@@ -2004,17 +2015,16 @@ mod tests {
             )
             .unwrap();
 
-        // CORRECT behavior: hot entry should survive (it was just refreshed).
-        // B2 BUG: it doesn't survive because eviction uses rowid ASC.
+        // The entry was refreshed most recently, so it is the newest by
+        // created_at and must be the last thing the count cap considers.
         assert!(
             hot_exists,
-            "B2: hot entry evicted despite fresh created_at — count rule uses rowid ASC, \
-             ON CONFLICT DO UPDATE does not bump rowid"
+            "B2: hot entry evicted despite being the most recently refreshed"
         );
     }
 
     #[test]
-    fn test_b2_eviction_rules_use_different_ordering() {
+    fn test_b2_eviction_rules_agree_on_created_at() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = RetrieverConfig {
             max_entries: 2,
@@ -2029,21 +2039,21 @@ mod tests {
              VALUES ('aaa_old_rowid_', 'old', ?1, 1, 1, 1, 0, 'raw', x'61')",
             params![old_ts],
         ).unwrap();
-        // Insert new row — higher rowid, fresh created_at
+        // Second row: higher rowid, and deliberately the OLDEST created_at, so
+        // rowid order and created_at order disagree about which should go.
         conn.execute(
             "INSERT INTO recall (hash, command, created_at, total_lines, shown_upto, byte_size, truncated, codec, blob)
              VALUES ('bbb_new_rowid_', 'new', ?1, 1, 1, 1, 0, 'raw', x'62')",
-            params![now_secs()],
+            params![now_secs() - 500],
         ).unwrap();
-        // Update old row's created_at to NOW (simulating upsert refresh)
+        // Refresh the low-rowid row, as ON CONFLICT DO UPDATE would.
         conn.execute(
             "UPDATE recall SET created_at = ?1 WHERE hash = 'aaa_old_rowid_'",
             params![now_secs()],
         )
         .unwrap();
 
-        // Now evict: retention_days=30 won't delete either (both recent).
-        // max_entries=2 means no excess. But if we add a third:
+        // A third row takes the store over max_entries = 2.
         conn.execute(
             "INSERT INTO recall (hash, command, created_at, total_lines, shown_upto, byte_size, truncated, codec, blob)
              VALUES ('ccc_third_row_', 'third', ?1, 1, 1, 1, 0, 'raw', x'63')",
@@ -2051,19 +2061,64 @@ mod tests {
         ).unwrap();
         evict(&conn, &cfg);
 
-        // Count rule evicts by rowid ASC → 'aaa_old_rowid_' deleted even though
-        // its created_at was just refreshed
-        let old_exists: bool = conn
+        // Both rules now order by created_at, so the genuinely oldest row goes
+        // and the refreshed one stays — the opposite of what rowid order did.
+        let survives = |hash: &str| -> bool {
+            conn.query_row(
+                "SELECT COUNT(*) > 0 FROM recall WHERE hash = ?1",
+                params![hash],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert!(
+            survives("aaa_old_rowid_"),
+            "B2: lowest rowid must survive when its created_at is the freshest"
+        );
+        assert!(
+            !survives("bbb_new_rowid_"),
+            "B2: oldest created_at must be evicted regardless of its rowid"
+        );
+    }
+
+    /// The limit of the B2 fix, stated rather than left to be discovered.
+    ///
+    /// `created_at` is whole seconds, so entries stored inside one second are
+    /// indistinguishable by recency and the `rowid` tie-break decides — meaning
+    /// a refresh that lands in the same second as its neighbours does not
+    /// protect the entry. That is acceptable because B2 is about an entry
+    /// re-stored across days, and at second granularity there is genuinely
+    /// nothing to order on. It is a limitation, not a fix in disguise.
+    #[test]
+    fn test_b2_same_second_entries_fall_back_to_insertion_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            max_entries: 2,
+            retention_days: 0,
+            ..temp_cfg(dir.path())
+        };
+        let conn = open(&cfg).unwrap();
+        let ts = now_secs();
+        for (hash, cmd) in [("aaa", "first"), ("bbb", "second"), ("ccc", "third")] {
+            conn.execute(
+                "INSERT INTO recall (hash, command, created_at, total_lines, shown_upto, byte_size, truncated, codec, blob)
+                 VALUES (?1, ?2, ?3, 1, 1, 1, 0, 'raw', x'61')",
+                params![hash, cmd, ts],
+            )
+            .unwrap();
+        }
+        evict(&conn, &cfg);
+
+        let first_gone: bool = conn
             .query_row(
-                "SELECT COUNT(*) > 0 FROM recall WHERE hash = 'aaa_old_rowid_'",
+                "SELECT COUNT(*) = 0 FROM recall WHERE hash = 'aaa'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
         assert!(
-            !old_exists,
-            "B2: row with lowest rowid evicted despite fresh created_at. \
-             Retention says keep, count says delete."
+            first_gone,
+            "equal created_at must fall back to insertion order, deterministically"
         );
     }
 
