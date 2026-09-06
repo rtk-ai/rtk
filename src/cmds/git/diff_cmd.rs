@@ -2,8 +2,8 @@
 
 use crate::core::guard::never_worse;
 use crate::core::tracking;
+use crate::core::utils::read_path_operands;
 use anyhow::Result;
-use std::fs;
 use std::path::Path;
 
 const IDENTICAL_FILES_MESSAGE: &str = "[ok] Files are identical\n";
@@ -19,8 +19,7 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
         eprintln!("Comparing: {} vs {}", file1.display(), file2.display());
     }
 
-    let content1 = fs::read_to_string(file1)?;
-    let content2 = fs::read_to_string(file2)?;
+    let (content1, content2) = read_path_operands(file1, file2)?;
     let lines1: Vec<&str> = content1.lines().collect();
     let lines2: Vec<&str> = content2.lines().collect();
     let diff = compute_diff(&lines1, &lines2);

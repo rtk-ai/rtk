@@ -10,7 +10,8 @@ use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde_json::Value;
 use std::fs;
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
 use std::sync::OnceLock;
@@ -281,6 +282,55 @@ pub fn fallback_tail(output: &str, label: &str, n: usize) -> String {
     let lines: Vec<&str> = output.lines().collect();
     let start = lines.len().saturating_sub(n);
     lines[start..].join("\n")
+}
+
+/// Whether a path operand names stdin rather than a file.
+///
+/// `-` is a convention each program implements, not a shell or OS feature: the
+/// shell hands the literal string through unchanged, so this holds the same
+/// under bash, Git Bash, MSYS and PowerShell.
+pub fn is_stdin_operand(path: &Path) -> bool {
+    path.as_os_str() == "-"
+}
+
+/// Reads a file, naming the path in the error.
+///
+/// Prefer this over a bare `fs::read_to_string`: an unadorned `No such file or
+/// directory (os error 2)` does not say which file was missing.
+pub fn read_file(path: &Path) -> Result<String> {
+    fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))
+}
+
+/// Reads a pair of path operands, resolving `-` to stdin.
+///
+/// Both operands are resolved together because stdin can only be drained once.
+/// `cmd - -` therefore compares the piped input with itself, as the POSIX tools
+/// do, rather than finding an empty second operand.
+pub fn read_path_operands(first: &Path, second: &Path) -> Result<(String, String)> {
+    // The file operand is read first in the mixed arms so an unreadable path
+    // fails immediately, instead of after draining a producer that may be slow
+    // or unbounded. `diff` fails fast the same way and lets the writer see EPIPE.
+    match (is_stdin_operand(first), is_stdin_operand(second)) {
+        (false, false) => Ok((read_file(first)?, read_file(second)?)),
+        (true, false) => {
+            let from_file = read_file(second)?;
+            Ok((read_stdin()?, from_file))
+        }
+        (false, true) => Ok((read_file(first)?, read_stdin()?)),
+        (true, true) => {
+            // Both operands name the one stream, so the copy is unavoidable.
+            let piped = read_stdin()?;
+            Ok((piped.clone(), piped))
+        }
+    }
+}
+
+fn read_stdin() -> Result<String> {
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .context("Failed to read stdin")?;
+    Ok(buf)
 }
 
 /// Create a directory owner-only (0700 on Unix), tightening one that already exists.
@@ -783,6 +833,56 @@ fn output_codepage() -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_stdin_operand_matches_only_a_lone_dash() {
+        assert!(is_stdin_operand(Path::new("-")));
+        assert!(!is_stdin_operand(Path::new("-x")));
+        assert!(!is_stdin_operand(Path::new("./-")));
+        assert!(!is_stdin_operand(Path::new("a.txt")));
+    }
+
+    #[test]
+    fn read_file_names_the_path_in_its_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("nope.txt");
+
+        let err = read_file(&missing).expect_err("missing file must error");
+
+        assert!(
+            format!("{err:#}").contains("nope.txt"),
+            "error should name the file, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn read_path_operands_reads_two_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, "alpha\n").expect("write");
+        fs::write(&b, "beta\n").expect("write");
+
+        let (first, second) = read_path_operands(&a, &b).expect("read");
+
+        assert_eq!(first, "alpha\n");
+        assert_eq!(second, "beta\n");
+    }
+
+    #[test]
+    fn read_path_operands_errors_name_the_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = dir.path().join("a.txt");
+        fs::write(&a, "alpha\n").expect("write");
+        let missing = dir.path().join("nope.txt");
+
+        let err = read_path_operands(&a, &missing).expect_err("missing file must error");
+
+        assert!(
+            format!("{err:#}").contains("nope.txt"),
+            "error should name the operand, got: {err:#}"
+        );
+    }
 
     #[test]
     fn test_strip_leading_bom_helper() {
