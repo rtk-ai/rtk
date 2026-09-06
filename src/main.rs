@@ -1640,6 +1640,49 @@ enum GtCommands {
 
 /// Split a string into shell-like tokens, respecting single and double quotes.
 /// e.g. `git log --format="%H %s"` → ["git", "log", "--format=%H %s"]
+/// POSIX `test` unary file/string operators. No test runner is ever invoked as
+/// `rtk test -f`, so a leading one of these unambiguously means the shell
+/// builtin rather than `cargo test` / `pytest` / friends.
+const POSIX_TEST_UNARY_OPS: &[&str] = &[
+    "-b", "-c", "-d", "-e", "-f", "-g", "-h", "-k", "-L", "-p", "-r", "-s", "-S", "-t", "-u", "-w",
+    "-x", "-z", "-n", "-G", "-O", "-N",
+];
+
+/// True when `rtk test ...` is really the POSIX file-test builtin.
+///
+/// Matches only the unambiguous shapes: a leading unary operator (`test -f x`),
+/// or a binary comparison (`test a = b`, `test 1 -eq 2`). A bare `rtk test`
+/// with no args, or one naming a runner (`rtk test cargo test`), is left alone.
+fn is_posix_test_predicate(command: &[String]) -> bool {
+    match command.first() {
+        None => false,
+        Some(first) if POSIX_TEST_UNARY_OPS.contains(&first.as_str()) => true,
+        Some(_) => command.iter().any(|a| {
+            matches!(
+                a.as_str(),
+                "=" | "!=" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "-ef" | "-nt" | "-ot"
+            )
+        }),
+    }
+}
+
+/// Exec the real `test` binary and return its exit code. Filesystem predicates
+/// communicate purely through the exit status, so there is nothing to filter.
+fn run_posix_test(command: &[String]) -> i32 {
+    match std::process::Command::new("/usr/bin/test")
+        .args(command)
+        .status()
+    {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("rtk: failed to run test: {}", e);
+            // POSIX: 2 means the predicate could not be evaluated, which is
+            // distinct from a well-formed predicate answering "false" (1).
+            2
+        }
+    }
+}
+
 fn shell_split(input: &str) -> Vec<String> {
     discover::lexer::shell_split(input)
 }
@@ -2038,6 +2081,14 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Test { command } => {
+            if is_posix_test_predicate(&command) {
+                // `test -f path` is the POSIX file-test builtin, not a test
+                // runner. Joining and handing it to `sh -c` produces
+                // `sh -c "-f path"`, where dash parses the leading `-f` as its
+                // own option and dies with `sh: 0: Illegal option -`, breaking
+                // file-existence gates. Exec the real binary instead.
+                std::process::exit(run_posix_test(&command))
+            }
             let cmd = command.join(" ");
             runner::run_test(&cmd, cli.verbose)?
         }
@@ -3023,6 +3074,58 @@ fn is_operational_command(cmd: &Commands) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    // --- POSIX `test` builtin vs test-runner classification ---
+
+    #[test]
+    fn test_posix_predicate_detects_unary_file_ops() {
+        for op in ["-f", "-d", "-e", "-x", "-z", "-n", "-s", "-L"] {
+            assert!(
+                is_posix_test_predicate(&[op.to_string(), "/etc/hostname".to_string()]),
+                "`test {} path` is the POSIX builtin, not a runner",
+                op
+            );
+        }
+    }
+
+    #[test]
+    fn test_posix_predicate_detects_binary_comparisons() {
+        assert!(is_posix_test_predicate(&[
+            "1".to_string(),
+            "-eq".to_string(),
+            "2".to_string()
+        ]));
+        assert!(is_posix_test_predicate(&[
+            "a".to_string(),
+            "=".to_string(),
+            "b".to_string()
+        ]));
+    }
+
+    #[test]
+    fn test_posix_predicate_leaves_test_runners_alone() {
+        // These must still reach the runner filter, which is the whole point of
+        // `rtk test`.
+        assert!(!is_posix_test_predicate(&[
+            "cargo".to_string(),
+            "test".to_string()
+        ]));
+        assert!(!is_posix_test_predicate(&[
+            "pytest".to_string(),
+            "-v".to_string()
+        ]));
+        assert!(!is_posix_test_predicate(&[
+            "npm".to_string(),
+            "test".to_string()
+        ]));
+        // A runner flag that looks unary but is not in a leading position.
+        assert!(!is_posix_test_predicate(&[
+            "cargo".to_string(),
+            "test".to_string(),
+            "-f".to_string()
+        ]));
+        assert!(!is_posix_test_predicate(&[]));
+    }
     use super::*;
     use clap::Parser;
     use std::cell::Cell;
