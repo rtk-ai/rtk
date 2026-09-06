@@ -5352,12 +5352,16 @@ fn patch_gemini_settings(
 
 /// Remove Gemini artifacts during uninstall
 fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
-    let InitContext { verbose, dry_run } = ctx;
-    let mut removed = Vec::new();
     let gemini_dir = match resolve_gemini_dir() {
         Ok(d) => d,
-        Err(_) => return Ok(removed),
+        Err(_) => return Ok(Vec::new()),
     };
+    uninstall_gemini_at(&gemini_dir, ctx)
+}
+
+fn uninstall_gemini_at(gemini_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    let InitContext { verbose, dry_run } = ctx;
+    let mut removed = Vec::new();
 
     // Remove hook
     let hook_path = gemini_dir.join(HOOKS_SUBDIR).join(GEMINI_HOOK_FILE);
@@ -5372,6 +5376,20 @@ fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
                 .with_context(|| format!("Failed to remove {}", hook_path.display()))?;
         }
         removed.push(format!("Gemini hook: {}", hook_path.display()));
+    }
+
+    // Remove the integrity sidecar even if the hook was already deleted.
+    let hash_path = integrity::hash_path_for(&hook_path);
+    if hash_path.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove Gemini integrity hash: {}",
+                hash_path.display()
+            );
+        } else {
+            integrity::remove_hash(&hook_path)?;
+        }
+        removed.push(format!("Gemini integrity hash: {}", hash_path.display()));
     }
 
     // Remove GEMINI.md
@@ -7349,6 +7367,67 @@ mod tests {
         let content = fs::read_to_string(&agents_md).unwrap();
         assert!(!content.contains(&absolute_ref));
         assert!(content.contains("# Team rules"));
+    }
+
+    #[test]
+    fn test_uninstall_gemini_at_removes_hash_and_preserves_user_settings() {
+        let temp = TempDir::new().unwrap();
+        let gemini_dir = temp.path();
+        let hook_dir = gemini_dir.join(HOOKS_SUBDIR);
+        fs::create_dir_all(&hook_dir).unwrap();
+
+        let hook_path = hook_dir.join(GEMINI_HOOK_FILE);
+        fs::write(&hook_path, GEMINI_HOOK_SCRIPT).unwrap();
+        integrity::store_hash(&hook_path).unwrap();
+        let hash_path = integrity::hash_path_for(&hook_path);
+        fs::write(gemini_dir.join(GEMINI_MD), RTK_SLIM).unwrap();
+
+        let settings_path = gemini_dir.join(SETTINGS_JSON);
+        let settings = serde_json::json!({
+            "theme": "dark",
+            "hooks": {
+                "BeforeTool": [
+                    {
+                        "matcher": "run_shell_command",
+                        "hooks": [{
+                            "type": "command",
+                            "command": hook_path.to_string_lossy()
+                        }]
+                    },
+                    {
+                        "matcher": "run_shell_command",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/usr/local/bin/user-hook"
+                        }]
+                    }
+                ]
+            }
+        });
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+
+        let removed = uninstall_gemini_at(gemini_dir, InitContext::default()).unwrap();
+        assert_eq!(removed.len(), 4);
+        assert!(!hook_path.exists());
+        assert!(!hash_path.exists());
+        assert!(!gemini_dir.join(GEMINI_MD).exists());
+
+        let preserved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert_eq!(preserved["theme"], "dark");
+        let before_tool = preserved["hooks"][BEFORE_TOOL_KEY].as_array().unwrap();
+        assert_eq!(before_tool.len(), 1);
+        assert_eq!(
+            before_tool[0]["hooks"][0]["command"],
+            "/usr/local/bin/user-hook"
+        );
+
+        let removed_again = uninstall_gemini_at(gemini_dir, InitContext::default()).unwrap();
+        assert!(removed_again.is_empty());
     }
 
     #[test]
