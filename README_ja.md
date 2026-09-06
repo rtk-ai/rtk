@@ -165,7 +165,7 @@ rtk discover                    # 見逃した節約機会を発見
 
 ## ドキュメント
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - よくある問題の解決
+- **[TROUBLESHOOTING.md](docs/guide/resources/troubleshooting.md)** - よくある問題の解決
 - **[INSTALL.md](INSTALL.md)** - 詳細インストールガイド
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - 技術アーキテクチャ
 

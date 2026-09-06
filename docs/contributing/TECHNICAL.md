@@ -2,7 +2,7 @@
 
 > **Start here** for a guided tour of how RTK works end-to-end.
 >
-> - [CONTRIBUTING.md](../CONTRIBUTING.md) — Design philosophy, PR process, branch naming, testing requirements
+> - [CONTRIBUTING.md](../../CONTRIBUTING.md) — Design philosophy, PR process, branch naming, testing requirements
 > - [ARCHITECTURE.md](ARCHITECTURE.md) — Deep reference: filtering taxonomy, performance benchmarks, architecture decisions
 > - Each folder has its own `README.md` with implementation details and file descriptions
 
@@ -79,7 +79,7 @@ The user runs `rtk init` to set up hooks for their LLM agent. This:
 
 RTK supports 7 agents, each with its own installation mode. The hook scripts are embedded in the binary and written at install time.
 
-> **Details**: [`src/hooks/README.md`](../src/hooks/README.md) covers all installation modes, configuration files, and the uninstall flow.
+> **Details**: [`src/hooks/README.md`](../../src/hooks/README.md) covers all installation modes, configuration files, and the uninstall flow.
 
 ### 3.2 Hook Interception (Command Rewriting)
 
@@ -94,7 +94,7 @@ When an LLM agent runs a command (e.g., `git status`):
 
 All rewrite logic lives in Rust (`src/discover/registry.rs`). Hooks are thin delegates that handle agent-specific JSON formats.
 
-> **Details**: [`hooks/README.md`](../hooks/README.md) covers each agent's JSON format, the rewrite registry, compound command handling, and the `RTK_DISABLED` override.
+> **Details**: [`hooks/README.md`](../../hooks/README.md) covers each agent's JSON format, the rewrite registry, compound command handling, and the `RTK_DISABLED` override.
 
 #### Rewrite Pipeline
 
@@ -240,7 +240,7 @@ Each filter module follows the same pattern:
 5. Track token savings to SQLite
 6. Propagate exit code
 
-> **Details**: [`src/cmds/README.md`](../src/cmds/README.md) covers the common pattern, ecosystem organization, cross-command dependencies, and how to add new filters.
+> **Details**: [`src/cmds/README.md`](../../src/cmds/README.md) covers the common pattern, ecosystem organization, cross-command dependencies, and how to add new filters.
 
 ### 3.5 Fallback Path
 
@@ -261,7 +261,7 @@ Command received
                  -> No:  Passthrough (inherit stdio, track 0% reduction)
 ```
 
-> **Details**: [`src/core/README.md`](../src/core/README.md) covers the TOML filter engine, filter pipeline stages, and trust-gated project filters.
+> **Details**: [`src/core/README.md`](../../src/core/README.md) covers the TOML filter engine, filter pipeline stages, and trust-gated project filters.
 
 ### 3.6 Token Tracking
 
@@ -274,7 +274,7 @@ Every command execution records metrics to SQLite (`~/.local/share/rtk/tracking.
 
 Analytics commands (`rtk gain`, `rtk cc-economics`, `rtk session`) query this database to produce dashboards and ROI reports.
 
-> **Details**: [`src/analytics/README.md`](../src/analytics/README.md) covers the analytics modules, and [`src/core/README.md`](../src/core/README.md) covers the tracking database schema.
+> **Details**: [`src/analytics/README.md`](../../src/analytics/README.md) covers the analytics modules, and [`src/core/README.md`](../../src/core/README.md) covers the tracking database schema.
 
 ### 3.7 Tee Recovery
 
@@ -286,7 +286,7 @@ On command failure (non-zero exit code):
 
 Tee is configurable (enabled/disabled, min size, max files, max file size) and never affects command output or exit code on failure.
 
-> **Details**: [`src/core/README.md`](../src/core/README.md) covers tee configuration and the rotation strategy.
+> **Details**: [`src/core/README.md`](../../src/core/README.md) covers tee configuration and the rotation strategy.
 
 ---
 
@@ -299,27 +299,27 @@ Start here, then drill down into each README for file-level details.
 | Directory | What it does | What you'll find in its README |
 |-----------|-------------|-------------------------------|
 | `main.rs` | CLI entry point, `Commands` enum, routing match | _(no README — read the file directly)_ |
-| [`core/`](../src/core/README.md) | Shared infrastructure | Tracking DB schema, config system, tee recovery, TOML filter engine, utility functions |
-| [`hooks/`](../src/hooks/README.md) | Hook system | Installation flow (`rtk init`), integrity verification, rewrite command, trust model |
-| [`analytics/`](../src/analytics/README.md) | Token savings analytics | `rtk gain` dashboard, Claude Code economics, ccusage parsing |
-| [`cmds/`](../src/cmds/README.md) | **Command filters (9 ecosystems)** | Common filter pattern, cross-command routing, token savings table, **links to each ecosystem** |
-| [`discover/`](../src/discover/README.md) | History analysis + rewrite registry | Rewrite patterns, session providers, compound command splitting |
-| [`learn/`](../src/learn/README.md) | CLI correction detection | Error classification, correction pair detection, rule generation |
-| [`parser/`](../src/parser/README.md) | Parser infrastructure | Canonical types (TestResult, LintResult, etc.), 3-tier format modes, migration guide |
-| [`filters/`](../src/filters/README.md) | TOML filter configs | TOML DSL syntax, 8-stage pipeline, inline testing, naming conventions |
+| [`core/`](../../src/core/README.md) | Shared infrastructure | Tracking DB schema, config system, tee recovery, TOML filter engine, utility functions |
+| [`hooks/`](../../src/hooks/README.md) | Hook system | Installation flow (`rtk init`), integrity verification, rewrite command, trust model |
+| [`analytics/`](../../src/analytics/README.md) | Token savings analytics | `rtk gain` dashboard, Claude Code economics, ccusage parsing |
+| [`cmds/`](../../src/cmds/README.md) | **Command filters (9 ecosystems)** | Common filter pattern, cross-command routing, token savings table, **links to each ecosystem** |
+| [`discover/`](../../src/discover/README.md) | History analysis + rewrite registry | Rewrite patterns, session providers, compound command splitting |
+| [`learn/`](../../src/learn/README.md) | CLI correction detection | Error classification, correction pair detection, rule generation |
+| [`parser/`](../../src/parser/README.md) | Parser infrastructure | Canonical types (TestResult, LintResult, etc.), 3-tier format modes, migration guide |
+| [`filters/`](../../src/filters/README.md) | TOML filter configs | TOML DSL syntax, 8-stage pipeline, inline testing, naming conventions |
 
 ### `hooks/` — Deployed hook artifacts (root directory)
 
 | Directory | Agent | What you'll find in its README |
 |-----------|-------|-------------------------------|
-| [`hooks/`](../hooks/README.md) | _(parent)_ | **All JSON formats**, rewrite registry overview, exit code contract, override controls |
-| [`claude/`](../hooks/claude/README.md) | Claude Code | Shell hook mechanism, `PreToolUse` JSON, test script |
-| [`copilot/`](../hooks/copilot/README.md) | GitHub Copilot | Rust binary hook, single `PreToolUse` schema shared by VS Code Chat and Copilot CLI |
-| [`cursor/`](../hooks/cursor/README.md) | Cursor IDE | Shell hook, empty JSON response requirement |
-| [`cline/`](../hooks/cline/README.md) | Cline / Roo Code | Rules file (prompt-level, no programmatic hook) |
-| [`windsurf/`](../hooks/windsurf/README.md) | Windsurf / Cascade | Rules file (workspace-scoped) |
-| [`codex/`](../hooks/codex/README.md) | OpenAI Codex CLI | Awareness document, AGENTS.md integration |
-| [`opencode/`](../hooks/opencode/README.md) | OpenCode | TypeScript plugin, zx library, in-place mutation |
+| [`hooks/`](../../hooks/README.md) | _(parent)_ | **All JSON formats**, rewrite registry overview, exit code contract, override controls |
+| [`claude/`](../../hooks/claude/README.md) | Claude Code | Shell hook mechanism, `PreToolUse` JSON, test script |
+| [`copilot/`](../../hooks/copilot/README.md) | GitHub Copilot | Rust binary hook, single `PreToolUse` schema shared by VS Code Chat and Copilot CLI |
+| [`cursor/`](../../hooks/cursor/README.md) | Cursor IDE | Shell hook, empty JSON response requirement |
+| [`cline/`](../../hooks/cline/README.md) | Cline / Roo Code | Rules file (prompt-level, no programmatic hook) |
+| [`windsurf/`](../../hooks/windsurf/README.md) | Windsurf / Cascade | Rules file (workspace-scoped) |
+| [`codex/`](../../hooks/codex/README.md) | OpenAI Codex CLI | Awareness document, AGENTS.md integration |
+| [`opencode/`](../../hooks/opencode/README.md) | OpenCode | TypeScript plugin, zx library, in-place mutation |
 
 ---
 
@@ -339,7 +339,7 @@ RTK supports the following LLM agents through hook integrations:
 | Codex CLI | Awareness doc | AGENTS.md integration | N/A (prompt) |
 | OpenCode | TS plugin | `tool.execute.before` event | Yes (in-place mutation) |
 
-> **Details**: [`hooks/README.md`](../hooks/README.md) has the full JSON schemas for each agent. [`src/hooks/README.md`](../src/hooks/README.md) covers installation, integrity verification, and the rewrite command.
+> **Details**: [`hooks/README.md`](../../hooks/README.md) has the full JSON schemas for each agent. [`src/hooks/README.md`](../../src/hooks/README.md) covers installation, integrity verification, and the rewrite command.
 
 ---
 
@@ -349,13 +349,13 @@ RTK supports the following LLM agents through hook integrations:
 
 Compiled filter modules for complex transformations, cutting 60-95% of the bash output.
 
-> **Details**: [`src/cmds/README.md`](../src/cmds/README.md) and each ecosystem subdirectory README.
+> **Details**: [`src/cmds/README.md`](../../src/cmds/README.md) and each ecosystem subdirectory README.
 
 ### TOML DSL Filters (src/filters/*.toml)
 
 Declarative filters with an 8-stage pipeline: strip ANSI, regex replace, match output, strip/keep lines, truncate lines, head/tail, max lines, on-empty message. Loaded from three tiers: built-in (compiled), global (`~/.config/rtk/filters/`), project-local (`.rtk/filters/`, trust-gated).
 
-> **Details**: [`src/core/README.md`](../src/core/README.md) covers the TOML filter engine.
+> **Details**: [`src/core/README.md`](../../src/core/README.md) covers the TOML filter engine.
 
 ---
 
@@ -424,7 +424,7 @@ tests/
 - **Fixtures**: real command output in `tests/fixtures/`
 - **Integration tests**: `#[ignore]` attribute, run with `cargo test --ignored`
 
-> For testing requirements, pre-commit gate, and PR checklist, see [CONTRIBUTING.md — Testing](../CONTRIBUTING.md#testing).
+> For testing requirements, pre-commit gate, and PR checklist, see [CONTRIBUTING.md — Testing](../../CONTRIBUTING.md#testing).
 
 ---
 

@@ -584,6 +584,6 @@ Planned improvements (contributions welcome):
 
 ## See Also
 
-- [README.md](../README.md) - Main project documentation
-- [COMMAND_AUDIT.md](../claudedocs/COMMAND_AUDIT.md) - List of all RTK commands
+- [README.md](../../README.md) - Main project documentation
+- [What RTK covers](../guide/resources/what-rtk-covers.md) - The commands RTK filters
 - [Rust docs](https://docs.rs/) - Run `cargo doc --open` for API docs

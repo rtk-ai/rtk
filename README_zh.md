@@ -172,7 +172,7 @@ rtk discover                    # 发现遗漏的节省机会
 
 ## 文档
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - 解决常见问题
+- **[TROUBLESHOOTING.md](docs/guide/resources/troubleshooting.md)** - 解决常见问题
 - **[INSTALL.md](INSTALL.md)** - 详细安装指南
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - 技术架构
 

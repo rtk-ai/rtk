@@ -27,7 +27,7 @@ RTK is a CLI tool that executes shell commands and handles user input. PRs from 
 
 ## Automated Security Checks
 
-Every PR triggers our [`security-check.yml`](.github/workflows/security-check.yml) workflow:
+Every PR triggers the security jobs in [`ci.yml`](.github/workflows/ci.yml):
 
 1. **Dependency audit** (`cargo audit`) - Detects known CVEs
 2. **Critical files alert** - Flags modifications to high-risk files
@@ -73,7 +73,7 @@ The following files are considered **high-risk** and trigger mandatory 2-reviewe
 
 ### For External Contributors
 
-1. **Submit PR** → Automated `security-check.yml` runs
+1. **Submit PR** → The automated security jobs run
 2. **Review automated results** → Fix any flagged issues
 3. **Manual review** → Maintainer performs comprehensive security audit
 4. **Approval** → Merge (or request for changes)

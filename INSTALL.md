@@ -381,11 +381,11 @@ cargo install --path . --force
 
 - **Website**: https://www.rtk-ai.app
 - **Contact**: contact@rtk-ai.app
-- **Troubleshooting**: See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for common issues
+- **Troubleshooting**: See [TROUBLESHOOTING.md](docs/guide/resources/troubleshooting.md) for common issues
 - **GitHub issues**: https://github.com/rtk-ai/rtk/issues
 - **Pull Requests**: https://github.com/rtk-ai/rtk/pulls
 
-⚠️ **If you installed the wrong rtk (Type Kit)**, see [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#problem-rtk-gain-command-not-found)
+⚠️ **If you installed the wrong rtk (Type Kit)**, see [TROUBLESHOOTING.md](docs/guide/resources/troubleshooting.md)
 
 ## AI Assistant Checklist
 

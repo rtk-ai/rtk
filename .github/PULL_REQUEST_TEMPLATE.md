@@ -10,4 +10,4 @@
 - [ ] Manual testing: `rtk <command>` output inspected
 
 > **Important:** All PRs must target the `develop` branch (not `master`).
-> See [CONTRIBUTING.md](../blob/master/CONTRIBUTING.md) for details.
+> See [CONTRIBUTING.md](../CONTRIBUTING.md) for details.

@@ -198,7 +198,7 @@ mode = "failures"
 
 ## Documentation
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Resoudre les problemes courants
+- **[TROUBLESHOOTING.md](docs/guide/resources/troubleshooting.md)** - Resoudre les problemes courants
 - **[INSTALL.md](INSTALL.md)** - Guide d'installation detaille
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - Architecture technique
 

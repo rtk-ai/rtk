@@ -166,7 +166,7 @@ rtk discover                    # Descubrir ahorros perdidos
 
 ## Documentacion
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Resolver problemas comunes
+- **[TROUBLESHOOTING.md](docs/guide/resources/troubleshooting.md)** - Resolver problemas comunes
 - **[INSTALL.md](INSTALL.md)** - Guia de instalacion detallada
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - Arquitectura tecnica
 
