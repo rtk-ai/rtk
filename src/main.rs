@@ -12,8 +12,8 @@ use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
-    lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
-    vitest_cmd,
+    bun_cmd, deno_cmd, lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd,
+    prisma_cmd, tsc_cmd, vitest_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{
@@ -59,6 +59,8 @@ pub enum AgentTarget {
     Droid,
     /// Mistral Vibe CLI
     Vibe,
+    /// Oh My Pi (OMP)
+    Omp,
 }
 
 #[derive(Parser)]
@@ -383,11 +385,11 @@ enum Commands {
         #[arg(long = "hook-only", group = "mode")]
         hook_only: bool,
 
-        /// Auto-patch settings.json without prompting
+        /// Apply supported init changes without prompting
         #[arg(long = "auto-patch", group = "patch")]
         auto_patch: bool,
 
-        /// Skip settings.json patching (print manual instructions)
+        /// Skip optional init prompts and leave protected content unchanged
         #[arg(long = "no-patch", group = "patch")]
         no_patch: bool,
 
@@ -589,6 +591,19 @@ enum Commands {
     /// npx with intelligent routing (tsc, eslint, prisma -> specialized filters)
     Npx {
         /// npx arguments (command + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Bun runtime commands with compact output
+    Bun {
+        #[command(subcommand)]
+        command: BunCommands,
+    },
+
+    /// bunx with passthrough + auto-filter
+    Bunx {
+        /// bunx arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -814,6 +829,12 @@ enum Commands {
         /// uv arguments (e.g., run pytest, run --project backend python script.py)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+
+    /// Deno runtime commands with compact output
+    Deno {
+        #[command(subcommand)]
+        command: DenoCommands,
     },
 
     /// Go commands with compact output
@@ -1323,6 +1344,120 @@ enum SbtCommands {
     Other(Vec<OsString>),
 }
 
+#[derive(Debug, Subcommand)]
+enum BunCommands {
+    /// Install packages (filter progress bars)
+    Install {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Run scripts
+    Run {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Build project (errors only)
+    Build {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Test with compact output (failures only)
+    Test {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Add packages
+    Add {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Remove packages
+    Remove {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Package manager commands (pm ls, etc.)
+    Pm {
+        #[command(subcommand)]
+        command: BunPmCommands,
+    },
+    /// Execute a package binary (space form of bunx)
+    X {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported bun subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Debug, Subcommand)]
+enum BunPmCommands {
+    /// List installed packages (compact output)
+    Ls {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any other bun pm subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Debug, Subcommand)]
+enum DenoCommands {
+    /// Run a script
+    Run {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Type-check without running
+    Check {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Lint source files
+    Lint {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Run tests (failures only)
+    Test {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Run a task from deno.json
+    Task {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compile to standalone executable (errors only)
+    Compile {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Install dependencies
+    Install {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+/// Route `bunx <tool>` and `bun x <tool>` to the matching tool filter,
+/// falling back to the generic bunx runner for unrecognized tools.
+fn run_bunx_tool(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
+    if args.is_empty() {
+        anyhow::bail!("bunx requires a command argument");
+    }
+    match args[0].as_str() {
+        "tsc" | "typescript" => tsc_cmd::run(Some("bunx"), &args[1..], verbose),
+        "eslint" => lint_cmd::run(Some("bunx"), args, verbose),
+        _ => bun_cmd::run_bunx(args, verbose, skip_env),
+    }
+}
+
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -1592,18 +1727,29 @@ fn main() {
     std::process::exit(code);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
     agent: Option<AgentTarget>,
     global: bool,
     gemini: bool,
     codex: bool,
+    patch_mode: hooks::init::PatchMode,
     ctx: hooks::init::InitContext,
     uninstall_hermes: UninstallHermes,
     uninstall_standard: UninstallStandard,
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
-    UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
+    UninstallStandard: FnOnce(
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        hooks::init::PatchMode,
+        hooks::init::InitContext,
+    ) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
@@ -1614,7 +1760,8 @@ where
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
-        uninstall_standard(global, gemini, codex, cursor, pi, ctx)
+        let omp = agent == Some(AgentTarget::Omp);
+        uninstall_standard(global, gemini, codex, cursor, pi, omp, patch_mode, ctx)
     }
 }
 
@@ -1878,7 +2025,7 @@ fn run_cli() -> Result<i32> {
                     &merge_pnpm_args(&filter, &args),
                     cli.verbose,
                 )?,
-                PnpmCommands::Typecheck { args } => tsc_cmd::run(&args, cli.verbose)?,
+                PnpmCommands::Typecheck { args } => tsc_cmd::run(Some("pnpm"), &args, cli.verbose)?,
                 PnpmCommands::Other(args) => {
                     pnpm_cmd::run_passthrough(&merge_pnpm_args_os(&filter, &args), cli.verbose)?
                 }
@@ -1918,10 +2065,7 @@ fn run_cli() -> Result<i32> {
             0
         }
 
-        Commands::Find { args } => {
-            find_cmd::run_from_args(&args, cli.verbose)?;
-            0
-        }
+        Commands::Find { args } => find_cmd::run_from_args(&args, cli.verbose)?,
 
         Commands::Diff { file1, file2 } => {
             if let Some(f2) = file2 {
@@ -2056,8 +2200,15 @@ fn run_cli() -> Result<i32> {
                 verbose: cli.verbose,
                 dry_run,
             };
+            let patch_mode = if auto_patch {
+                hooks::init::PatchMode::Auto
+            } else if no_patch {
+                hooks::init::PatchMode::Skip
+            } else {
+                hooks::init::PatchMode::Ask
+            };
             if show {
-                hooks::init::show_config(codex)?;
+                hooks::init::show_config(codex, agent == Some(AgentTarget::Omp))?;
             } else if uninstall && copilot {
                 if global {
                     hooks::init::uninstall_copilot_global(ctx)?;
@@ -2075,18 +2226,12 @@ fn run_cli() -> Result<i32> {
                     global,
                     gemini,
                     codex,
+                    patch_mode,
                     ctx,
                     hooks::init::uninstall_hermes,
-                    hooks::init::uninstall,
+                    hooks::init::uninstall_with_patch_mode,
                 )?;
             } else if gemini {
-                let patch_mode = if auto_patch {
-                    hooks::init::PatchMode::Auto
-                } else if no_patch {
-                    hooks::init::PatchMode::Skip
-                } else {
-                    hooks::init::PatchMode::Ask
-                };
                 hooks::init::run_gemini(global, hook_only, patch_mode, ctx)?;
             } else if copilot {
                 if global {
@@ -2095,7 +2240,9 @@ fn run_cli() -> Result<i32> {
                     hooks::init::run_copilot(ctx)?;
                 }
             } else if agent == Some(AgentTarget::Pi) {
-                hooks::init::run_pi_mode(global, ctx)?
+                hooks::init::run_pi_mode_with_patch_mode(global, patch_mode, ctx)?
+            } else if agent == Some(AgentTarget::Omp) {
+                hooks::init::run_omp_mode_with_patch_mode(global, patch_mode, ctx)?
             } else if agent == Some(AgentTarget::Kilocode) {
                 if !global {
                     anyhow::bail!(
@@ -2120,13 +2267,6 @@ fn run_cli() -> Result<i32> {
             } else if agent == Some(AgentTarget::Droid) {
                 hooks::init::run_droid_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Vibe) {
-                let patch_mode = if auto_patch {
-                    hooks::init::PatchMode::Auto
-                } else if no_patch {
-                    hooks::init::PatchMode::Skip
-                } else {
-                    hooks::init::PatchMode::Ask
-                };
                 hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
             } else {
                 let install_opencode = opencode;
@@ -2135,13 +2275,6 @@ fn run_cli() -> Result<i32> {
                 let install_windsurf = agent == Some(AgentTarget::Windsurf);
                 let install_cline = agent == Some(AgentTarget::Cline);
 
-                let patch_mode = if auto_patch {
-                    hooks::init::PatchMode::Auto
-                } else if no_patch {
-                    hooks::init::PatchMode::Skip
-                } else {
-                    hooks::init::PatchMode::Ask
-                };
                 hooks::init::run(
                     global,
                     install_claude,
@@ -2277,11 +2410,11 @@ fn run_cli() -> Result<i32> {
             }
         },
 
-        Commands::Tsc { args } => tsc_cmd::run(&args, cli.verbose)?,
+        Commands::Tsc { args } => tsc_cmd::run(None, &args, cli.verbose)?,
 
         Commands::Next { args } => next_cmd::run(&args, cli.verbose)?,
 
-        Commands::Lint { args } => lint_cmd::run(&args, cli.verbose)?,
+        Commands::Lint { args } => lint_cmd::run(None, &args, cli.verbose)?,
 
         Commands::Prettier { args } => prettier_cmd::run(&args, cli.verbose)?,
 
@@ -2309,6 +2442,58 @@ fn run_cli() -> Result<i32> {
                 cargo_cmd::run(cargo_cmd::CargoCommand::Nextest, &args, cli.verbose)?
             }
             CargoCommands::Other(args) => cargo_cmd::run_passthrough(&args, cli.verbose)?,
+        },
+
+        Commands::Bun { command } => match command {
+            BunCommands::Install { args } => bun_cmd::run_pkg("install", &args, cli.verbose)?,
+            BunCommands::Add { args } => bun_cmd::run_pkg("add", &args, cli.verbose)?,
+            BunCommands::Remove { args } => bun_cmd::run_pkg("remove", &args, cli.verbose)?,
+            BunCommands::Run { args } => {
+                let os_args: Vec<OsString> = std::iter::once(OsString::from("run"))
+                    .chain(args.into_iter().map(OsString::from))
+                    .collect();
+                bun_cmd::run_passthrough(&os_args, cli.verbose)?
+            }
+            BunCommands::Build { args } => bun_cmd::run_build(&args, cli.verbose)?,
+            BunCommands::Test { args } => bun_cmd::run_test(&args, cli.verbose)?,
+            BunCommands::Pm { command } => match command {
+                BunPmCommands::Ls { args } => bun_cmd::run_pm_ls(&args, cli.verbose)?,
+                BunPmCommands::Other(args) => {
+                    let os_args: Vec<OsString> =
+                        std::iter::once(OsString::from("pm")).chain(args).collect();
+                    bun_cmd::run_passthrough(&os_args, cli.verbose)?
+                }
+            },
+            BunCommands::X { args } => run_bunx_tool(&args, cli.verbose, cli.skip_env)?,
+            BunCommands::Other(args) => bun_cmd::run_passthrough(&args, cli.verbose)?,
+        },
+
+        Commands::Bunx { args } => run_bunx_tool(&args, cli.verbose, cli.skip_env)?,
+
+        Commands::Deno { command } => match command {
+            DenoCommands::Test { args } => deno_cmd::run_test(&args, cli.verbose)?,
+            DenoCommands::Check { args } => deno_cmd::run_check(&args, cli.verbose)?,
+            DenoCommands::Lint { args } => deno_cmd::run_lint(&args, cli.verbose)?,
+            DenoCommands::Run { args } => {
+                let os_args: Vec<OsString> = std::iter::once(OsString::from("run"))
+                    .chain(args.into_iter().map(OsString::from))
+                    .collect();
+                deno_cmd::run_passthrough(&os_args, cli.verbose)?
+            }
+            DenoCommands::Task { args } => {
+                let os_args: Vec<OsString> = std::iter::once(OsString::from("task"))
+                    .chain(args.into_iter().map(OsString::from))
+                    .collect();
+                deno_cmd::run_passthrough(&os_args, cli.verbose)?
+            }
+            DenoCommands::Compile { args } => deno_cmd::run_compile(&args, cli.verbose)?,
+            DenoCommands::Install { args } => {
+                let os_args: Vec<OsString> = std::iter::once(OsString::from("install"))
+                    .chain(args.into_iter().map(OsString::from))
+                    .collect();
+                deno_cmd::run_passthrough(&os_args, cli.verbose)?
+            }
+            DenoCommands::Other(args) => deno_cmd::run_passthrough(&args, cli.verbose)?,
         },
 
         Commands::Npm { args } => npm_cmd::run(&args, cli.verbose, cli.skip_env)?,
@@ -2364,8 +2549,8 @@ fn run_cli() -> Result<i32> {
 
             // Intelligent routing: delegate to specialized filters
             match args[0].as_str() {
-                "tsc" | "typescript" => tsc_cmd::run(&args[1..], cli.verbose)?,
-                "eslint" => lint_cmd::run(&args[1..], cli.verbose)?,
+                "tsc" | "typescript" => tsc_cmd::run(Some("npx"), &args[1..], cli.verbose)?,
+                "eslint" => lint_cmd::run(Some("npx"), &args, cli.verbose)?,
                 "prisma" => {
                     // Route to prisma_cmd based on subcommand
                     if args.len() > 1 {
@@ -2837,6 +3022,9 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Sbt { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
+            | Commands::Bun { .. }
+            | Commands::Bunx { .. }
+            | Commands::Deno { .. }
     )
 }
 
@@ -3072,6 +3260,7 @@ mod tests {
             true,
             false,
             false,
+            hooks::init::PatchMode::Ask,
             ctx,
             |ctx| {
                 hermes_called.set(true);
@@ -3079,7 +3268,7 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
-            |_, _, _, _, _, _| {
+            |_, _, _, _, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
             },
@@ -3088,6 +3277,67 @@ mod tests {
         assert!(result.is_ok());
         assert!(hermes_called.get());
         assert!(!standard_called.get());
+    }
+
+    #[test]
+    fn test_try_parse_init_agent_omp() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "omp"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Omp));
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_init_agent_omp_uninstall() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--uninstall", "--agent", "omp", "--global"])
+            .unwrap();
+        match cli.command {
+            Commands::Init {
+                uninstall,
+                agent,
+                global,
+                ..
+            } => {
+                assert!(uninstall);
+                assert_eq!(agent, Some(AgentTarget::Omp));
+                assert!(global);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_init_uninstall_dispatch_routes_omp_to_standard_cleanup() {
+        let hermes_called = Cell::new(false);
+        let standard_called = Cell::new(false);
+        let ctx = hooks::init::InitContext::default();
+
+        let result = uninstall_init_dispatch(
+            Some(AgentTarget::Omp),
+            true,
+            false,
+            false,
+            hooks::init::PatchMode::Auto,
+            ctx,
+            |_c| {
+                hermes_called.set(true);
+                Ok(())
+            },
+            |global, _, _, _, _, omp, patch_mode, _| {
+                standard_called.set(true);
+                assert!(global);
+                assert!(omp);
+                assert_eq!(patch_mode, hooks::init::PatchMode::Auto);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(!hermes_called.get());
+        assert!(standard_called.get());
     }
 
     #[test]
@@ -3244,6 +3494,9 @@ mod tests {
             "pint",
             "phpt",
             "uv",
+            "bun",
+            "bunx",
+            "deno",
         ];
 
         let unclassified: Vec<String> = Cli::command()
@@ -3879,5 +4132,66 @@ mod tests {
         // test pins the premise that helper depends on.
         let (_, _, _, extra_args) = parse_grep(&["rtk", "grep", "--", "-v", "file"]).unwrap();
         assert_eq!(extra_args, vec!["-v", "file"], "clap must consume the --");
+    }
+
+    #[test]
+    fn test_bun_build_parses_to_arg_vector() {
+        let cli = Cli::try_parse_from(["rtk", "bun", "build", "--outdir", "dist"]).unwrap();
+        match cli.command {
+            Commands::Bun {
+                command: BunCommands::Build { args },
+            } => assert_eq!(args, vec!["--outdir", "dist"]),
+            _ => panic!("Expected Bun Build command"),
+        }
+    }
+
+    #[test]
+    fn test_bun_x_parses_to_arg_vector() {
+        let cli = Cli::try_parse_from(["rtk", "bun", "x", "tsc", "--noEmit"]).unwrap();
+        match cli.command {
+            Commands::Bun {
+                command: BunCommands::X { args },
+            } => assert_eq!(args, vec!["tsc", "--noEmit"]),
+            _ => panic!("Expected Bun X command"),
+        }
+    }
+
+    #[test]
+    fn test_bun_pm_ls_parses_to_typed_ls() {
+        let cli = Cli::try_parse_from(["rtk", "bun", "pm", "ls"]).unwrap();
+        match cli.command {
+            Commands::Bun {
+                command:
+                    BunCommands::Pm {
+                        command: BunPmCommands::Ls { args },
+                    },
+            } => assert!(args.is_empty()),
+            _ => panic!("Expected Bun Pm Ls command"),
+        }
+    }
+
+    #[test]
+    fn test_bun_pm_other_passes_through() {
+        let cli = Cli::try_parse_from(["rtk", "bun", "pm", "cache", "rm"]).unwrap();
+        match cli.command {
+            Commands::Bun {
+                command:
+                    BunCommands::Pm {
+                        command: BunPmCommands::Other(args),
+                    },
+            } => assert_eq!(args, vec![OsString::from("cache"), OsString::from("rm")]),
+            _ => panic!("Expected Bun Pm Other passthrough"),
+        }
+    }
+
+    #[test]
+    fn test_deno_compile_parses_to_arg_vector() {
+        let cli = Cli::try_parse_from(["rtk", "deno", "compile", "main.ts"]).unwrap();
+        match cli.command {
+            Commands::Deno {
+                command: DenoCommands::Compile { args },
+            } => assert_eq!(args, vec!["main.ts"]),
+            _ => panic!("Expected Deno Compile command"),
+        }
     }
 }

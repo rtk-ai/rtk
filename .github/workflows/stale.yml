@@ -32,7 +32,7 @@ jobs:
           # --- Issues & PRs ---
           days-before-stale: 90
           days-before-close: 7
-          operations-per-run: 500
+          operations-per-run: 5000
 
           # --- Issues ---
           stale-issue-label: "stale"

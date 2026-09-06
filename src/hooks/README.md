@@ -31,6 +31,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Codex | `rtk init --codex` | RTK.md in `$CODEX_HOME` or `~/.codex` | AGENTS.md |
 | Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
 | Pi | `rtk init --agent pi` | `.pi/extensions/rtk.ts` | -- |
+| Oh My Pi (OMP) | `rtk init --agent omp` | `.omp/extensions/rtk.ts` (shared Pi extension) | -- |
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |
 | Kilo Code | `rtk init -g --agent kilocode` | Kilo plugin in `~/.config/kilo/plugin/` | -- |
 
@@ -56,9 +57,9 @@ Controls how `rtk init` modifies agent settings files:
 
 | Mode | Flag | Behavior |
 |------|------|----------|
-| Ask (default) | -- | Prompts user `[y/N]`; defaults to No if stdin not terminal |
-| Auto | `--auto-patch` | Patches without prompting; for CI/scripted installs |
-| Skip | `--no-patch` | Prints manual instructions; user patches manually |
+| Ask (default) | -- | Prompts before settings changes, protected Pi/OMP overwrites, and definitively shared uninstalls; defaults to No if stdin not terminal |
+| Auto | `--auto-patch` | Patches without prompting and approves protected Pi/OMP extension updates; for CI/scripted installs |
+| Skip | `--no-patch` | Protected Pi/OMP actions leave files unchanged and exit nonzero; settings changes print manual instructions and succeed |
 
 ## Atomicity and Safety
 

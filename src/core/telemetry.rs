@@ -17,11 +17,22 @@ const TELEMETRY_URL: Option<&str> = option_env!("RTK_TELEMETRY_URL");
 const TELEMETRY_TOKEN: Option<&str> = option_env!("RTK_TELEMETRY_TOKEN");
 const PING_INTERVAL_SECS: u64 = 23 * 3600; // 23 hours
 
+/// The telemetry endpoint compiled into this build, if any.
+///
+/// Single source of truth for "can this build talk to the collector at all",
+/// shared by the ping path and `rtk telemetry status` so the two cannot
+/// disagree. Empty is treated as unset: release builds pass the URL through a
+/// CI `env:` block, which exports an empty string when the repository variable
+/// is not configured.
+pub fn endpoint_url() -> Option<&'static str> {
+    TELEMETRY_URL.filter(|&u| crate::core::utils::env_is_some(Some(u)))
+}
+
 /// Send a telemetry ping if enabled and not already sent today.
 /// Fire-and-forget: errors are silently ignored.
 pub fn maybe_ping() {
     // No URL compiled in → telemetry disabled
-    if TELEMETRY_URL.is_none() {
+    if endpoint_url().is_none() {
         return;
     }
 
@@ -69,7 +80,7 @@ pub fn maybe_ping() {
 }
 
 fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
-    let url = TELEMETRY_URL.ok_or("no telemetry URL")?;
+    let url = endpoint_url().ok_or("no telemetry URL")?;
     let device_hash = generate_device_hash();
     let version = env!("CARGO_PKG_VERSION").to_string();
     let os = std::env::consts::OS.to_string();

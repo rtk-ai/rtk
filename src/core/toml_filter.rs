@@ -235,6 +235,15 @@ impl TomlFilterRegistry {
 
         let mut compiled = Vec::new();
         for (name, def) in file.filters {
+            if !is_fully_anchored(&def.match_command) {
+                eprintln!(
+                    "[rtk] warning: filter '{}' in {}: match_command '{}' has a top-level branch \
+                     that does not start with '^'; it would match a path component mid-command. \
+                     Filter ignored.",
+                    name, source, def.match_command
+                );
+                continue;
+            }
             match compile_filter(name.clone(), def) {
                 Ok(f) => compiled.push(f),
                 Err(e) => eprintln!("[rtk] warning: filter '{}' in {}: {}", name, source, e),
@@ -458,12 +467,70 @@ fn collect_match_patterns() -> Vec<String> {
     patterns
 }
 
+/// Strip a leading inline-flag group such as `(?i)` so the anchor check sees the
+/// pattern body. `(?:` opens a non-capturing group and is left alone.
+fn strip_inline_flags(branch: &str) -> &str {
+    let Some(rest) = branch.strip_prefix("(?") else {
+        return branch;
+    };
+    let Some(end) = rest.find(')') else {
+        return branch;
+    };
+    if rest[..end].chars().all(|c| "imsuxU-".contains(c)) {
+        &rest[end + 1..]
+    } else {
+        branch
+    }
+}
+
+/// Split `pattern` on top-level `|`, ignoring alternations nested inside groups
+/// or character classes.
+fn top_level_branches(pattern: &str) -> Vec<&str> {
+    let mut branches = Vec::new();
+    let mut depth = 0usize;
+    let mut escaped = false;
+    let mut in_class = false;
+    let mut start = 0usize;
+
+    for (idx, character) in pattern.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' => escaped = true,
+            '[' if !in_class => in_class = true,
+            ']' if in_class => in_class = false,
+            '(' if !in_class => depth += 1,
+            ')' if !in_class => depth = depth.saturating_sub(1),
+            '|' if !in_class && depth == 0 => {
+                branches.push(&pattern[start..idx]);
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    branches.push(&pattern[start..]);
+    branches
+}
+
+/// A filter selects on argv[0], but its regex runs against the whole command
+/// line. A top-level branch that does not start with `^` therefore matches a
+/// path component or wrapper argument mid-line, so `timeout 5 /usr/bin/liquibase
+/// update` activates the liquibase filter and rewrites the wrapper instead.
+fn is_fully_anchored(pattern: &str) -> bool {
+    top_level_branches(pattern)
+        .iter()
+        .all(|branch| strip_inline_flags(branch).starts_with('^'))
+}
+
 fn match_patterns_in(content: &str) -> Vec<String> {
     match toml::from_str::<TomlFilterFile>(content) {
         Ok(file) if file.schema_version == 1 => file
             .filters
             .into_values()
             .map(|def| def.match_command)
+            .filter(|pattern| is_fully_anchored(pattern))
             .collect(),
         _ => Vec::new(),
     }
@@ -1511,6 +1578,16 @@ make[1]: Leaving directory '/home/user/project/docs'
                 .is_match("/usr/local/bin/liquibase update"),
             "a raw path-qualified invocation must not match — callers basename argv[0] before matching"
         );
+
+        for wrapped in [
+            "timeout 5 /usr/bin/liquibase update",
+            "nohup /opt/tools/liquibase update",
+        ] {
+            assert!(
+                !liquibase.match_regex.is_match(wrapped),
+                "a wrapper command must not activate the liquibase filter: {wrapped}"
+            );
+        }
     }
 
     #[test]
@@ -2029,6 +2106,55 @@ match_command = "^make\\b"
             "Expected exactly 63 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
+        );
+    }
+
+    /// Every built-in filter must be anchored on every top-level branch: the
+    /// match runs against the whole command line, so an unanchored branch
+    /// activates the filter on a path component or wrapper argument.
+    #[test]
+    fn test_builtin_all_filters_match_command_anchored() {
+        // Read the raw patterns rather than the compiled registry: both loaders
+        // drop unanchored filters, so a compiled view cannot observe one.
+        let file: TomlFilterFile =
+            toml::from_str(BUILTIN_TOML).expect("built-in filters should parse");
+        assert!(!file.filters.is_empty());
+        for (name, def) in &file.filters {
+            assert!(
+                is_fully_anchored(&def.match_command),
+                "Filter '{}' has match_command '{}' with a top-level branch that does not start with '^'",
+                name,
+                def.match_command
+            );
+        }
+
+        assert!(is_fully_anchored(r"^liquibase(?:\s|$)"));
+        assert!(is_fully_anchored(r"^(liquibase\b|/liquibase\b)"));
+        assert!(is_fully_anchored(r"^pnpm\b|^npm\b"));
+        assert!(is_fully_anchored(r"(?i)^liquibase\b"));
+        assert!(!is_fully_anchored(r"^liquibase\b|/liquibase\b"));
+        assert!(!is_fully_anchored(r"(?:^|/)liquibase(?:\s|$)"));
+    }
+
+    /// The invariant above covers `BUILTIN_TOML`; project-local and global
+    /// filters are user-authored, so both loaders drop unanchored patterns
+    /// rather than letting them match mid-command.
+    #[test]
+    fn test_unanchored_user_filter_is_rejected_by_both_loaders() {
+        let unanchored =
+            "schema_version = 1\n[filters.mytool]\nmatch_command = \"(?:^|/)mytool\\\\b\"\n";
+        assert!(match_patterns_in(unanchored).is_empty());
+        assert!(TomlFilterRegistry::parse_and_compile(unanchored, "test")
+            .expect("schema is valid")
+            .is_empty());
+
+        let anchored = "schema_version = 1\n[filters.mytool]\nmatch_command = \"^mytool\\\\b\"\n";
+        assert_eq!(match_patterns_in(anchored), vec!["^mytool\\b".to_string()]);
+        assert_eq!(
+            TomlFilterRegistry::parse_and_compile(anchored, "test")
+                .expect("schema is valid")
+                .len(),
+            1
         );
     }
 

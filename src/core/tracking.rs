@@ -1453,8 +1453,8 @@ fn categorize_command(rtk_cmd: &str) -> String {
     match tool {
         "git" | "gh" | "gt" => "git",
         "cargo" => "cargo",
-        "npm" | "npx" | "pnpm" | "vitest" | "tsc" | "lint" | "prettier" | "next" | "playwright"
-        | "prisma" => "js",
+        "npm" | "npx" | "pnpm" | "bun" | "bunx" | "deno" | "vitest" | "tsc" | "lint"
+        | "prettier" | "next" | "playwright" | "prisma" => "js",
         "pytest" | "ruff" | "mypy" | "pip" => "python",
         "go" | "golangci-lint" => "go",
         "docker" | "kubectl" => "cloud",
@@ -2415,5 +2415,12 @@ mod tests {
             !all.contains_key("toolu_stale"),
             "stale row should be deleted by cleanup"
         );
+    }
+
+    #[test]
+    fn test_categorize_bun_and_deno_as_js() {
+        for cmd in ["rtk bun install", "rtk bunx cowsay", "rtk deno test"] {
+            assert_eq!(categorize_command(cmd), "js", "{cmd}");
+        }
     }
 }

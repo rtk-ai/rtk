@@ -122,6 +122,7 @@ rtk init -g --agent kilocode    # Kilo Code
 rtk init --agent antigravity    # Google Antigravity
 rtk init --agent kimi           # Kimi AI
 rtk init -g --agent pi          # Pi
+rtk init --agent omp            # Oh My Pi (OMP)
 rtk init --agent hermes         # Hermes
 rtk init -g --agent droid       # Factory Droid
 
@@ -226,6 +227,17 @@ rtk pip list                    # Python packages (auto-detect uv)
 rtk pip outdated                # Outdated packages
 rtk bundle install              # Ruby gems (strip Using lines)
 rtk prisma generate             # Schema generation (no ASCII art)
+```
+
+### Runtimes
+```bash
+rtk bun install                  # Strip progress and version lines
+rtk bun test                     # Failures only (-90%)
+rtk bun build                    # Errors only when writing to disk, else passthrough
+rtk bunx tsc                     # Smart routing to tsc filter
+rtk deno test                    # Failures only (-90%)
+rtk deno lint                    # Strip download lines + tee recovery
+rtk deno check                   # Strip download lines + tee recovery
 ```
 
 ### AWS
@@ -383,7 +395,7 @@ rtk init -g
 
 ## Supported AI Tools
 
-RTK supports 16 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
+RTK supports 17 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -398,6 +410,7 @@ RTK supports 16 AI coding tools. Each integration rewrites shell commands to `rt
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
 | **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |
 | **Pi** | `rtk init -g --agent pi` (global) | TypeScript extension (tool_call) |
+| **Oh My Pi (OMP)** | `rtk init -g --agent omp` (global) / `rtk init --agent omp` (project) | TypeScript extension (tool_call, shared with Pi) |
 | **Hermes** | `rtk init --agent hermes` | Python plugin adapter (terminal command mutation via `rtk rewrite`) |
 | **Mistral Vibe** | `rtk init -g --agent vibe` | `pre_tool` hook (hooks.toml) |
 | **Kilo Code** | `rtk init -g --agent kilocode` | TypeScript plugin (tool.execute.before) |
