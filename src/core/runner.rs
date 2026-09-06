@@ -455,8 +455,14 @@ impl TestEcosystem {
 /// until the child does, so a watched run prints nothing at all and loses the
 /// buffer on Ctrl-C. Callers send these through unfiltered instead.
 pub fn is_watch_mode(args: &[String]) -> bool {
-    args.iter()
-        .any(|a| a == "--watch" || a.starts_with("--watch="))
+    // Values may be paths (for example Deno's --watch=src), not booleans.
+    // Conservatively bypass capture for every valued form as well.
+    args.iter().any(|arg| {
+        arg == "--watch"
+            || arg.starts_with("--watch=")
+            || arg == "--watchAll"
+            || arg.starts_with("--watchAll=")
+    })
 }
 
 /// Run a prebuilt test command (no shell), showing only failures.
@@ -940,6 +946,17 @@ mod err_test_runner_tests {
 
         let valued: Vec<String> = ["--watch=src"].iter().map(|s| s.to_string()).collect();
         assert!(is_watch_mode(&valued));
+
+        for flag in [
+            "--watchAll",
+            "--watchAll=true",
+            "--watchAll=src",
+            "--watch=false",
+            "--watchAll=false",
+        ] {
+            assert!(is_watch_mode(&[flag.into()]), "{flag}");
+        }
+        assert!(!is_watch_mode(&["--watchAllOfThese".into()]));
 
         // A path or flag that merely starts with the same letters is not it.
         let plain: Vec<String> = ["--watchdog", "./watch", "-w"]
