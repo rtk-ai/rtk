@@ -4,12 +4,17 @@
 
 use std::process::Command;
 
+/// grep/rg messages are localized; pin the locale so assertions on engine
+/// text hold in every contributor's shell.
 fn rtk() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rtk"));
+    cmd.env("LC_ALL", "C");
+    cmd
 }
 
 fn rg_available() -> bool {
     Command::new("rg")
+        .env("LC_ALL", "C")
         .arg("--version")
         .output()
         .map(|o| o.status.success())

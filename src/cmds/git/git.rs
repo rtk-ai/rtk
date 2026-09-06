@@ -2656,6 +2656,7 @@ pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::test_support;
 
     #[test]
     fn test_git_cmd_no_global_args() {
@@ -4343,12 +4344,20 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     #[ignore] // Integration test: requires git repo
     fn test_branch_creation_not_swallowed() {
+        let repo = test_support::temp_git_repo();
         let branch = "test-rtk-create-branch-regression";
-        // Create branch via run_branch
-        run_branch(&[branch.to_string()], 0, &[]).expect("run_branch should succeed");
-        // Verify it exists
-        let output = Command::new("git")
+
+        let created = test_support::rtk_command()
+            .args(["git", "branch", branch])
+            .current_dir(repo.path())
+            .output()
+            .expect("rtk git branch should run");
+        assert!(created.status.success(), "rtk git branch failed: {created:?}");
+
+        let mut list = std::process::Command::new("git");
+        let output = test_support::pin_environment(&mut list)
             .args(["branch", "--list", branch])
+            .current_dir(repo.path())
             .output()
             .expect("git branch --list should work");
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -4357,19 +4366,26 @@ no changes added to commit (use "git add" and/or "git commit -a")
             "Branch '{}' was not created. run_branch silently swallowed the creation.",
             branch
         );
-        // Cleanup
-        let _ = Command::new("git").args(["branch", "-d", branch]).output();
     }
 
     /// Regression test: `git branch <name> <commit>` must create from commit.
     #[test]
     #[ignore] // Integration test: requires git repo
     fn test_branch_creation_from_commit() {
+        let repo = test_support::temp_git_repo();
         let branch = "test-rtk-create-from-commit";
-        run_branch(&[branch.to_string(), "HEAD".to_string()], 0, &[])
-            .expect("run_branch with start-point should succeed");
-        let output = Command::new("git")
+
+        let created = test_support::rtk_command()
+            .args(["git", "branch", branch, "HEAD"])
+            .current_dir(repo.path())
+            .output()
+            .expect("rtk git branch with start-point should run");
+        assert!(created.status.success(), "rtk git branch failed: {created:?}");
+
+        let mut list = std::process::Command::new("git");
+        let output = test_support::pin_environment(&mut list)
             .args(["branch", "--list", branch])
+            .current_dir(repo.path())
             .output()
             .expect("git branch --list should work");
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -4378,7 +4394,6 @@ no changes added to commit (use "git add" and/or "git commit -a")
             "Branch '{}' was not created from commit.",
             branch
         );
-        let _ = Command::new("git").args(["branch", "-d", branch]).output();
     }
 
     #[test]
@@ -4447,23 +4462,13 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     #[ignore] // Requires `cargo build` first — run with `cargo test --ignored`
     fn test_git_status_not_a_repo_exits_nonzero() {
-        // Run rtk git status in a directory that is not a git repo
-        let tmp = std::env::temp_dir().join("rtk_test_not_a_repo");
-        let _ = std::fs::create_dir_all(&tmp);
+        // Run rtk git status in a directory that is not a git repo. A fresh temp dir, not a
+        // fixed /tmp path: two contributors (or two parallel runs) would share the latter.
+        let tmp = tempfile::tempdir().expect("tempdir");
 
-        // Build the path to the test binary
-        let bin_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("rtk");
-        assert!(
-            bin_path.exists(),
-            "Debug binary not found at {:?} — run `cargo build` first",
-            bin_path
-        );
-        let output = std::process::Command::new(&bin_path)
+        let output = test_support::rtk_command()
             .args(["git", "status"])
-            .current_dir(&tmp)
+            .current_dir(tmp.path())
             .output()
             .expect("Failed to run rtk");
 
@@ -4474,17 +4479,19 @@ no changes added to commit (use "git add" and/or "git commit -a")
             output.status.code()
         );
 
-        // Message should be on stderr, not stdout
+        // Message should be on stderr, not stdout. Asserting on git's own wording would only
+        // hold in an English locale -- `git status` is a passthrough, so its message stays in
+        // the user's language by design (see git_cmd_c_locale).
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            stderr.to_lowercase().contains("not a git repository"),
-            "Expected 'not a git repository' on stderr, got stderr={:?}, stdout={:?}",
-            stderr,
-            stdout
+            !stderr.trim().is_empty(),
+            "Expected git's error on stderr, got stderr={stderr:?}, stdout={stdout:?}"
         );
-
-        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            stdout.trim().is_empty(),
+            "Expected nothing on stdout, got stdout={stdout:?}"
+        );
     }
 
     // --- truncation accuracy ---
