@@ -7,7 +7,10 @@
 /// than `parsed_args` (nothing was consumed). Otherwise restores all consumed `--` at
 /// their original positions by returning the user-args suffix of `raw_args` verbatim.
 pub fn restore_double_dash(parsed_args: &[String]) -> Vec<String> {
-    let raw_args: Vec<String> = std::env::args().collect();
+    // args_os(): env::args() aborts when argv holds non-UTF-8 bytes (see #3025).
+    let raw_args: Vec<String> = std::env::args_os()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     restore_double_dash_with_raw(parsed_args, &raw_args)
 }
 

@@ -1459,7 +1459,13 @@ fn run_bunx_tool(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
 }
 
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // argv can hold non-UTF-8 bytes (env::args() aborts on those). Keep the raw
+    // OsStrings for execution and derive lossy text only for display/lookup.
+    let raw_args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let args: Vec<String> = raw_args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
 
     // No args → show Clap's error (user ran just "rtk" with bad syntax)
     if args.is_empty() {
@@ -1501,14 +1507,14 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         let result = if filter.filter_stderr {
             // Merge stderr into stdout so the filter can strip banners emitted by tools like liquibase
             core::utils::resolved_command(&args[0])
-                .args(&args[1..])
+                .args(&raw_args[1..])
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped()) // captured for merging
                 .output()
         } else {
             core::utils::resolved_command(&args[0])
-                .args(&args[1..])
+                .args(&raw_args[1..])
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::piped()) // capture
                 .stderr(std::process::Stdio::inherit()) // stderr always direct
@@ -1577,7 +1583,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     } else {
         // No TOML match: original passthrough behaviour (Stdio::inherit, streaming)
         let status = core::utils::resolved_command(&args[0])
-            .args(&args[1..])
+            .args(&raw_args[1..])
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
