@@ -1617,13 +1617,9 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
             Ok(0)
         }
         CommitOutcome::Failed(code) => {
-            if !stderr.trim().is_empty() {
-                eprint!("{}", stderr);
-            }
-            if !stdout.trim().is_empty() {
-                eprint!("{}", stdout);
-            }
-            timer.track(&original_cmd, "rtk git commit", &raw_output, &raw_output);
+            let report = commit_failure_report(&stderr, &stdout);
+            eprintln!("{}", report);
+            timer.track(&original_cmd, "rtk git commit", &raw_output, &report);
             Ok(code)
         }
     }
@@ -1634,6 +1630,24 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 enum CommitOutcome {
     Ok(String),
     Failed(i32),
+}
+
+/// Render the operator-facing report for a failed `git commit`.
+///
+/// Commit was the one git subcommand whose failure path announced nothing of its
+/// own -- it echoed the hook's raw output and stopped. A pre-commit run ends on
+/// whatever its last hook printed, routinely `...Passed`, so an aborted commit
+/// read as a successful one and the missing commit surfaced much later. Every
+/// other filter here leads with `FAILED: git <sub>`; commit does too now.
+fn commit_failure_report(stderr: &str, stdout: &str) -> String {
+    let mut report = String::from("FAILED: git commit");
+    for stream in [stderr, stdout] {
+        if !stream.trim().is_empty() {
+            report.push('\n');
+            report.push_str(stream.trim_end());
+        }
+    }
+    report
 }
 
 /// Classify a `git commit` result.
@@ -4292,6 +4306,36 @@ no changes added to commit (use "git add" and/or "git commit -a")
             CommitOutcome::Failed(code) => assert_eq!(code, 1),
             CommitOutcome::Ok(s) => panic!("nothing-to-commit must not be ok: {}", s),
         }
+    }
+
+    #[test]
+    fn test_commit_failure_report_leads_with_failed_marker() {
+        // The trap this exists for: pre-commit prints a per-hook result line for
+        // every hook that ran, so an aborted commit's last line is routinely
+        // "...Passed". Without a marker the output reads as a success.
+        let hook_output = "trailing-whitespace...Passed\nunicleaner...Passed\n";
+        let report = commit_failure_report("", hook_output);
+        assert!(
+            report.starts_with("FAILED: git commit"),
+            "failure must announce itself before the hook output: {}",
+            report
+        );
+        assert!(report.contains("unicleaner...Passed"));
+    }
+
+    #[test]
+    fn test_commit_failure_report_includes_both_streams() {
+        let report = commit_failure_report("hook refused\n", "nothing to commit\n");
+        assert_eq!(
+            report,
+            "FAILED: git commit\nhook refused\nnothing to commit"
+        );
+    }
+
+    #[test]
+    fn test_commit_failure_report_omits_empty_streams() {
+        assert_eq!(commit_failure_report("", ""), "FAILED: git commit");
+        assert_eq!(commit_failure_report("   \n", "\n"), "FAILED: git commit");
     }
 
     #[test]
