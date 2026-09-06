@@ -375,10 +375,15 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 94.0,
         ..RtkRule::DEFAULT
     },
+    // #1401: Bun is now the primary JS runtime on a growing share of Prisma
+    // projects. `bunx prisma <sub>` is semantically equivalent to
+    // `npx prisma <sub>` (same CLI, same output format), so it routes through
+    // the same `rtk prisma` filter — no new output-handling logic required.
     RtkRule {
-        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?prisma",
+        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx|bunx)\s+)?prisma",
         rtk_cmd: "rtk prisma",
         rewrite_prefixes: &[
+            "bunx prisma",
             "npm exec prisma",
             "npm prisma",
             "npm rum prisma",

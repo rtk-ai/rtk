@@ -4558,6 +4558,7 @@ mod tests {
             "npx prisma",
             "pnpm prisma",
             "pnpx prisma",
+            "bunx prisma",
             "prisma",
         ];
         for command in commands {
@@ -4592,6 +4593,7 @@ mod tests {
             "npx prisma",
             "pnpm prisma",
             "pnpx prisma",
+            "bunx prisma",
             "prisma",
         ];
         for command in commands {
@@ -4600,6 +4602,34 @@ mod tests {
                 Some("rtk prisma migrate dev".into()),
                 "Failed for command: {}",
                 command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_bunx_prisma_subcommands() {
+        // #1401: exercise the full Prisma surface that the reporter said hits
+        // unfiltered with bun. The classify_command/rewrite tests above already
+        // cover `migrate dev` for every runner; this nails down each subcommand
+        // shape verbatim so a future regex tweak doesn't silently drop one.
+        let cases = [
+            ("bunx prisma migrate dev", "rtk prisma migrate dev"),
+            (
+                "bunx prisma migrate dev --name add_col",
+                "rtk prisma migrate dev --name add_col",
+            ),
+            ("bunx prisma migrate deploy", "rtk prisma migrate deploy"),
+            ("bunx prisma migrate status", "rtk prisma migrate status"),
+            ("bunx prisma generate", "rtk prisma generate"),
+            ("bunx prisma db seed", "rtk prisma db seed"),
+            ("bunx prisma studio", "rtk prisma studio"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                Some(expected.into()),
+                "Failed for input: {}",
+                input
             );
         }
     }
