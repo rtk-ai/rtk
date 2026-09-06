@@ -25,6 +25,7 @@ use super::constants::{
 };
 use super::integrity;
 use super::is_claude_hook_command;
+use super::manifest;
 
 // Embedded OpenCode plugin (auto-rewrite)
 const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
@@ -541,7 +542,7 @@ fn resolve_atomic_target(path: &Path) -> PathBuf {
 /// Atomic write using tempfile + rename
 /// Prevents corruption on crash/interrupt
 /// Follows symlinks so the link itself is preserved.
-fn atomic_write(path: &Path, content: &str) -> Result<()> {
+pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<()> {
     let target = resolve_atomic_target(path);
     let parent = target.parent().with_context(|| {
         format!(
@@ -996,6 +997,13 @@ pub fn uninstall_with_patch_mode(
         removed.push("settings.json: removed RTK hook entry".to_string());
     }
 
+    // Restore plugin hook matchers only when the cache still matches the
+    // manifest's patched snapshot. Never overwrite plugin updates.
+    let restored = manifest::restore_plugin_caches(&claude_dir, dry_run, verbose)?;
+    if restored > 0 {
+        removed.push(format!("Plugin caches: restored {restored} hook file(s)"));
+    }
+
     // 5. Remove OpenCode plugin
     let opencode_removed = remove_opencode_plugin(ctx)?;
     for path in opencode_removed {
@@ -1361,6 +1369,10 @@ fn run_default_mode(
     // 5. Patch settings.json with binary command
     let patch_result =
         patch_settings_json_command(CLAUDE_HOOK_COMMAND, patch_mode, install_opencode, ctx)?;
+    let rtk_hook_active = matches!(
+        &patch_result,
+        PatchResult::Patched | PatchResult::AlreadyPresent
+    );
 
     // Report result
     if !dry_run {
@@ -1381,6 +1393,17 @@ fn run_default_mode(
             }
             PatchResult::WouldPatch => {
                 // Cannot happen outside dry_run
+            }
+        }
+    }
+
+    // Keep RTK as the single Claude Bash matcher so another plugin cannot
+    // discard RTK's updatedInput. The manifest preserves each displaced
+    // command for runtime fallthrough.
+    if !dry_run && rtk_hook_active {
+        if let Err(error) = manifest::patch_plugin_caches(&claude_dir, ctx.verbose) {
+            if ctx.verbose > 0 {
+                eprintln!("Warning: plugin hook collision patch skipped: {error}");
             }
         }
     }
@@ -8360,6 +8383,52 @@ mod tests {
             let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
             let count = settings.matches(CLAUDE_HOOK_COMMAND).count();
             assert_eq!(count, 1, "hook command must appear exactly once");
+        });
+    }
+
+    #[test]
+    fn test_global_init_skip_does_not_patch_plugin_caches() {
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let hook_path = claude_dir.join("plugins/cache/vendor/plugin/1.0.0/hooks/h.json");
+            fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+            fs::write(
+                &hook_path,
+                r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"command":"/bin/echo hook"}]}]}}"#,
+            )
+            .unwrap();
+
+            run_default_mode(true, PatchMode::Skip, false, InitContext::default()).unwrap();
+
+            let content = fs::read_to_string(hook_path).unwrap();
+            assert!(content.contains(r#""matcher":"Bash""#));
+            assert!(!claude_dir.join("hooks/rtk-bash-manifest.json").exists());
+        });
+    }
+
+    #[test]
+    fn test_global_init_patches_and_uninstall_restores_plugin_cache() {
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let hook_path = claude_dir.join("plugins/cache/vendor/plugin/1.0.0/hooks/h.json");
+            fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+            fs::write(
+                &hook_path,
+                r#"{"hooks":{"PreToolUse":[{"matcher":"Bash|Edit","hooks":[{"command":"/bin/echo hook"}]}]}}"#,
+            )
+            .unwrap();
+
+            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+            let patched: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&hook_path).unwrap()).unwrap();
+            assert_eq!(patched["hooks"]["PreToolUse"][0]["matcher"], "Edit");
+            assert!(claude_dir.join("hooks/rtk-bash-manifest.json").exists());
+
+            uninstall(true, false, false, false, false, InitContext::default()).unwrap();
+            let restored: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(hook_path).unwrap()).unwrap();
+            assert_eq!(restored["hooks"]["PreToolUse"][0]["matcher"], "Bash|Edit");
+            assert!(!claude_dir.join("hooks/rtk-bash-manifest.json").exists());
         });
     }
 
