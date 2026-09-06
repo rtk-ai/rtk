@@ -1,11 +1,11 @@
 //! Filters ESLint and Biome linter output, grouping violations by rule.
 
-use crate::core::config;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_ERRORS, CAP_WARNINGS};
 use crate::core::utils::{resolved_command, tool_exec, truncate, MissingTool};
 use crate::mypy_cmd;
+use crate::parser::truncate_passthrough;
 use crate::ruff_cmd;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -242,7 +242,7 @@ fn filter_eslint_json(output: &str) -> String {
             return format!(
                 "ESLint output (JSON parse failed: {})\n{}",
                 e,
-                truncate(output, config::limits().passthrough_max_chars)
+                truncate_passthrough(output)
             );
         }
     };
@@ -341,7 +341,7 @@ fn filter_pylint_json(output: &str) -> String {
             return format!(
                 "Pylint output (JSON parse failed: {})\n{}",
                 e,
-                truncate(output, config::limits().passthrough_max_chars)
+                truncate_passthrough(output)
             );
         }
     };
@@ -568,6 +568,18 @@ mod tests {
     }
 
     #[test]
+    fn test_filter_eslint_json_parse_failure_marks_truncation() {
+        let output = format!(
+            "not-json\n{}",
+            "x".repeat(crate::core::config::limits().passthrough_max_chars + 16)
+        );
+        let result = filter_eslint_json(&output);
+
+        assert!(result.contains("JSON parse failed"));
+        assert!(result.contains("[RTK:PASSTHROUGH] Output truncated"));
+    }
+
+    #[test]
     fn test_compact_path() {
         assert_eq!(
             compact_path("/Users/foo/project/src/utils.ts"),
@@ -634,6 +646,18 @@ mod tests {
         assert!(result.contains("undefined-variable (E0602)"));
         assert!(result.contains("main.py"));
         assert!(result.contains("utils.py"));
+    }
+
+    #[test]
+    fn test_filter_pylint_json_parse_failure_marks_truncation() {
+        let output = format!(
+            "not-json\n{}",
+            "x".repeat(crate::core::config::limits().passthrough_max_chars + 16)
+        );
+        let result = filter_pylint_json(&output);
+
+        assert!(result.contains("JSON parse failed"));
+        assert!(result.contains("[RTK:PASSTHROUGH] Output truncated"));
     }
 
     #[test]

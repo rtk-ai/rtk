@@ -1,10 +1,10 @@
 //! Filters golangci-lint output, grouping issues by rule.
 
-use crate::core::config;
 use crate::core::runner;
 use crate::core::stream::exec_capture;
 use crate::core::truncate::CAP_WARNINGS;
-use crate::core::utils::{resolved_command, truncate};
+use crate::core::utils::resolved_command;
+use crate::parser::truncate_passthrough;
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -276,7 +276,7 @@ pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
             return format!(
                 "golangci-lint (JSON parse failed: {})\n{}",
                 e,
-                truncate(output, config::limits().passthrough_max_chars)
+                truncate_passthrough(output)
             );
         }
     };
@@ -435,6 +435,18 @@ mod tests {
         assert!(result.contains("gosimple"));
         assert!(result.contains("main.go"));
         assert!(result.contains("utils.go"));
+    }
+
+    #[test]
+    fn test_filter_golangci_parse_failure_marks_truncation() {
+        let output = format!(
+            "not-json\n{}",
+            "x".repeat(crate::core::config::limits().passthrough_max_chars + 16)
+        );
+        let result = filter_golangci_json(&output, 1);
+
+        assert!(result.contains("JSON parse failed"));
+        assert!(result.contains("[RTK:PASSTHROUGH] Output truncated"));
     }
 
     #[test]

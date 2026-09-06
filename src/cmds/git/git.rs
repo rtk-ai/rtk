@@ -1127,24 +1127,27 @@ pub(crate) fn filter_log_output(
     if user_format {
         let lines: Vec<&str> = output.lines().collect();
         let max_lines = if user_set_limit { lines.len() } else { limit };
-        return lines
+        let mut result = lines
             .iter()
             .take(max_lines)
             .map(|l| truncate_line(l, truncate_width))
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect::<Vec<_>>();
+        if !user_set_limit && lines.len() >= max_lines && !result.is_empty() {
+            result.push(log_limit_marker(max_lines));
+        }
+        return result.join("\n");
     }
 
     // RTK injected format: split output into commit blocks separated by ---END---
-    let commits: Vec<&str> = output.split("---END---").collect();
+    let commits: Vec<&str> = output
+        .split("---END---")
+        .map(str::trim)
+        .filter(|block| !block.is_empty())
+        .collect();
     let max_commits = if user_set_limit { commits.len() } else { limit };
 
     let mut result = Vec::new();
     for block in commits.iter().take(max_commits) {
-        let block = block.trim();
-        if block.is_empty() {
-            continue;
-        }
         let mut lines = block.lines();
         // First line is the header: hash subject (date) <author>
         let header = match lines.next() {
@@ -1177,7 +1180,18 @@ pub(crate) fn filter_log_output(
         }
     }
 
+    if !user_set_limit && commits.len() >= max_commits && !result.is_empty() {
+        result.push(log_limit_marker(max_commits));
+    }
+
     result.join("\n").trim().to_string()
+}
+
+fn log_limit_marker(limit: usize) -> String {
+    format!(
+        "[limited by RTK: showing up to {} commits; use `rtk git log -n <N>` or `rtk proxy git log` for full output]",
+        limit
+    )
 }
 
 /// Truncate a single line to `width` characters, appending "..." if needed
@@ -3805,7 +3819,29 @@ A  added.rs
             .collect::<Vec<_>>()
             .join("\n");
         let result = filter_log_output(&output, 5, false, false);
-        assert_eq!(result.lines().count(), 5);
+        assert_eq!(result.lines().filter(|l| l.starts_with("hash")).count(), 5);
+        assert!(
+            result.contains("[limited by RTK: showing up to 5 commits"),
+            "default git log cap must be visible, got:\n{result}"
+        );
+        assert!(
+            result.contains("rtk git log -n <N>"),
+            "limit marker must include a recovery hint, got:\n{result}"
+        );
+    }
+
+    #[test]
+    fn test_filter_log_output_user_format_cap_marks_limit() {
+        let output = (0..20)
+            .map(|i| format!("hash{} message {}", i, i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = filter_log_output(&output, 5, false, true);
+        assert_eq!(result.lines().filter(|l| l.starts_with("hash")).count(), 5);
+        assert!(
+            result.contains("[limited by RTK: showing up to 5 commits"),
+            "user-format git log cap must be visible, got:\n{result}"
+        );
     }
 
     #[test]
@@ -4334,7 +4370,14 @@ no changes added to commit (use "git add" and/or "git commit -a")
 
         // user_set_limit=false means cap at limit
         let result = filter_log_output(oneline_output, 3, false, true);
-        assert_eq!(result.lines().count(), 3);
+        assert_eq!(
+            result
+                .lines()
+                .filter(|l| l.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()))
+                .count(),
+            3
+        );
+        assert!(result.contains("[limited by RTK: showing up to 3 commits"));
     }
 
     /// Regression test: `git branch <name>` must create, not list.
