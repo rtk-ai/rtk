@@ -110,19 +110,9 @@ fn parse_cluster(rest: &str) -> ClusterResult {
     ClusterResult::Boolean((!raw_prefix.is_empty()).then_some(raw_prefix))
 }
 
-/// Unique, descriptive tee slug for a file's overflow matches. `idx` disambiguates
-/// files within one grep; the tee filename's epoch handles separate runs.
-fn grep_slug(idx: usize, path: &str) -> String {
-    let cleaned: String = path
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    let tail = &cleaned[cleaned.len().saturating_sub(32)..];
-    format!("grep_{}_{}", idx, tail)
-}
-
 /// Format a file's matches as `path<sep>line<sep>content`. Tee blocks use the
 /// real (un-compacted) `path` so recovered lines stay openable.
+#[cfg(test)]
 fn match_block(path: &str, entries: &[(usize, bool, String)]) -> String {
     let mut s = String::new();
     for (line_num, is_match, content) in entries {
@@ -372,8 +362,12 @@ impl StreamFilter for SearchStreamFilter {
             }
             self.cap_reported = true;
             return Some(format!(
-                "[rtk] output capped at {} results\n",
-                self.max_results
+                "[rtk] output capped at {} results\n{}\n",
+                self.max_results,
+                crate::core::tee::incomplete_output_meta_marker(
+                    "grep_stream_result_limit",
+                    Some(self.shown),
+                )
             ));
         }
 
@@ -617,7 +611,9 @@ pub fn run(
     let show_file = by_file.len() > 1 || show_file(&paths, &extra_args);
     let show_line = show_line(&extra_args);
 
-    // Faithful baseline: exactly what the real command prints, full content.
+    // Faithful user-visible baseline: the same text shape as the real command.
+    // Recovery stores this canonical display output, not the engine's internal
+    // NUL-delimited parse stream.
     let mut plain = String::new();
     for line in raw_output.lines() {
         let Some(output) = format_match_line(line, show_file, show_line) else {
@@ -638,11 +634,9 @@ pub fn run(
     let mut body = String::new();
     let mut shown = 0;
     let mut skipped_files = 0;
-    let mut skipped_block = String::new();
-    for (idx, (file, entries)) in files.into_iter().enumerate() {
+    for (file, entries) in files {
         if shown >= max_results {
             skipped_files += 1;
-            skipped_block.push_str(&match_block(file, entries));
             continue;
         }
 
@@ -676,23 +670,11 @@ pub fn run(
         if remaining == 0 {
             continue;
         }
-        // Tee the file's full matches (real path) so the tail hint recovers them
-        // openably, skipping the lines already shown.
-        let full_block = match_block(file, entries);
-        match crate::core::tee::force_tee_tail_hint(&full_block, &grep_slug(idx, file), file_shown + 1)
-        {
-            Some(hint) => {
-                body.push_str(&format!("  +{} more in {} {}\n", remaining, file_display, hint))
-            }
-            None => body.push_str(&format!("  +{} more in {}\n", remaining, file_display)),
-        }
+        body.push_str(&format!("  +{} more in {}\n", remaining, file_display));
     }
 
     if skipped_files > 0 {
-        let hint = crate::core::tee::force_tee_tail_hint(&skipped_block, "grep_skipped", 1)
-            .map(|h| format!(" {}", h))
-            .unwrap_or_default();
-        body.push_str(&format!("+{} more files{}\n", skipped_files, hint));
+        body.push_str(&format!("+{} more files\n", skipped_files));
     }
 
     // Switch to the grouped form only when capping actually shrank the output;
@@ -709,8 +691,27 @@ pub fn run(
         body
     };
 
+    let total_records: usize = by_file.values().map(Vec::len).sum();
+    let omitted_records = total_records.saturating_sub(shown);
     let output = if capped && rtk_output.len() < plain.len() {
-        rtk_output
+        match crate::core::tee::force_tee_artifact(&plain, "grep") {
+            Some(artifact) if artifact.complete => {
+                let recovery = crate::core::tee::full_output_recovery(
+                    &artifact,
+                    "grep_result_limit",
+                    Some(exit_code),
+                    Some(shown),
+                    Some(omitted_records),
+                );
+                let candidate = format!("{rtk_output}{recovery}\n");
+                if candidate.len() < plain.len() {
+                    candidate
+                } else {
+                    plain
+                }
+            }
+            _ => plain,
+        }
     } else {
         plain
     };
@@ -900,10 +901,24 @@ mod tests {
             filter.feed_line(concat!("(standard input)\0", "1:first")),
             Some("1:first\n".to_string())
         );
-        assert_eq!(
-            filter.feed_line(concat!("(standard input)\0", "2:second")),
-            Some("[rtk] output capped at 1 results\n".to_string())
-        );
+        let capped = filter
+            .feed_line(concat!("(standard input)\0", "2:second"))
+            .expect("cap notice");
+        assert!(capped.starts_with("[rtk] output capped at 1 results\n"));
+        let marker = capped
+            .lines()
+            .find(|line| line.starts_with(crate::core::tee::OUTPUT_META_PREFIX))
+            .expect("machine-readable cap metadata");
+        let parsed: serde_json::Value = serde_json::from_str(
+            marker
+                .strip_prefix(crate::core::tee::OUTPUT_META_PREFIX)
+                .expect("metadata prefix"),
+        )
+        .expect("valid cap metadata");
+        assert_eq!(parsed["truncated"], true);
+        assert_eq!(parsed["reason"], "grep_stream_result_limit");
+        assert_eq!(parsed["shown_records"], 1);
+        assert!(parsed["artifact"].is_null());
         assert_eq!(
             filter.feed_line(concat!("(standard input)\0", "3:third")),
             None

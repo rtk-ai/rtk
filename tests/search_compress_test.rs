@@ -88,8 +88,9 @@ fn capped_single_file_shows_header() {
     }
     let filler: String = (0..40).map(|i| format!("w{i} ")).collect();
     let content: String = (0..60).map(|i| format!("foo {i} {filler}\n")).collect();
-    let (_dir, path) = write_temp(&content);
+    let (dir, path) = write_temp(&content);
     let out = rtk()
+        .env("RTK_TEE_DIR", dir.path().join("tee"))
         .args(["grep", "foo", path.to_str().unwrap()])
         .output()
         .expect("rtk grep");
@@ -250,7 +251,7 @@ fn bulky_grep_yields_token_savings() {
     for i in 0..60 {
         content.push_str(&format!("MATCH line {i} {filler}\n"));
     }
-    let (_dir, path) = write_temp(&content);
+    let (dir, path) = write_temp(&content);
 
     let raw = Command::new("rg")
         .args(["-nH", "MATCH", path.to_str().unwrap()])
@@ -259,6 +260,7 @@ fn bulky_grep_yields_token_savings() {
     let raw_tokens = count_tokens(&String::from_utf8_lossy(&raw.stdout));
 
     let out = rtk()
+        .env("RTK_TEE_DIR", dir.path().join("tee"))
         .args(["grep", "MATCH", path.to_str().unwrap()])
         .output()
         .expect("rtk grep");
@@ -269,6 +271,112 @@ fn bulky_grep_yields_token_savings() {
         savings >= 50.0,
         "expected >=50% token savings, got {savings:.1}% (raw={raw_tokens}, rtk={rtk_tokens})"
     );
+}
+
+#[test]
+fn capped_grep_emits_metadata_and_preserves_complete_visible_output() {
+    if !rg_available() {
+        return;
+    }
+    let filler = "long-result-content-".repeat(12);
+    let content: String = (0..32)
+        .map(|i| format!("needle-{i:02} {filler}\n"))
+        .collect();
+    let (dir, path) = write_temp(&content);
+    let tee_dir = dir.path().join("tee");
+    let out = rtk()
+        .env("RTK_TEE_DIR", &tee_dir)
+        .args(["grep", "needle", path.to_str().unwrap()])
+        .output()
+        .expect("rtk grep");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let marker = stdout
+        .lines()
+        .find(|line| line.starts_with("RTK_OUTPUT_META_V1 "))
+        .expect("capped grep must emit machine-readable truncation metadata");
+    let meta: serde_json::Value = serde_json::from_str(
+        marker
+            .strip_prefix("RTK_OUTPUT_META_V1 ")
+            .expect("metadata prefix"),
+    )
+    .expect("valid truncation metadata");
+
+    assert_eq!(meta["truncated"], true);
+    assert_eq!(meta["raw_exit_code"], 0);
+    assert_eq!(meta["shown_records"], 25);
+    assert_eq!(meta["omitted_records"], 7);
+    assert_eq!(meta["artifact"]["complete"], true);
+    assert_eq!(meta["artifact"]["content"], "complete_user_visible_output");
+
+    let artifact = meta["artifact"]["path"].as_str().expect("artifact path");
+    let recovered = std::fs::read_to_string(artifact).expect("read full grep artifact");
+    assert_eq!(
+        recovered, content,
+        "artifact must preserve the complete user-visible grep output"
+    );
+}
+
+#[test]
+fn grep_count_is_exact_and_never_marked_truncated() {
+    if !rg_available() {
+        return;
+    }
+    let content: String = (0..32).map(|i| format!("needle-{i:02}\n")).collect();
+    let (_dir, path) = write_temp(&content);
+    let out = rtk()
+        .args(["grep", "-c", "needle", path.to_str().unwrap()])
+        .output()
+        .expect("rtk grep -c");
+
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "32");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("RTK_OUTPUT_META_V1"));
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("RTK_OUTPUT_META_V1"));
+}
+
+#[test]
+fn capped_grep_falls_back_to_full_output_when_tee_is_disabled() {
+    if !rg_available() {
+        return;
+    }
+    let filler = "long-result-content-".repeat(12);
+    let content: String = (0..32)
+        .map(|i| format!("needle-{i:02} {filler}\n"))
+        .collect();
+    let (_dir, path) = write_temp(&content);
+    let out = rtk()
+        .env("RTK_TEE", "0")
+        .args(["grep", "needle", path.to_str().unwrap()])
+        .output()
+        .expect("rtk grep");
+
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout), content);
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("RTK_OUTPUT_META_V1"));
+}
+
+#[test]
+fn capped_grep_falls_back_to_full_output_when_tee_directory_is_unwritable() {
+    if !rg_available() {
+        return;
+    }
+    let filler = "long-result-content-".repeat(12);
+    let content: String = (0..32)
+        .map(|i| format!("needle-{i:02} {filler}\n"))
+        .collect();
+    let (dir, path) = write_temp(&content);
+    let blocked_tee_dir = dir.path().join("not-a-directory");
+    std::fs::write(&blocked_tee_dir, "blocked").expect("create blocked tee path");
+    let out = rtk()
+        .env("RTK_TEE_DIR", &blocked_tee_dir)
+        .args(["grep", "needle", path.to_str().unwrap()])
+        .output()
+        .expect("rtk grep");
+
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout), content);
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("RTK_OUTPUT_META_V1"));
 }
 
 // --- grep-only syntax falls back to system grep (#2543) ---

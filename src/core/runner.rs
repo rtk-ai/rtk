@@ -28,8 +28,14 @@ pub fn print_with_hint(
     guard_raw: &str,
     tee_label: &str,
     exit_code: i32,
+    source_complete: bool,
 ) -> String {
-    let hint = crate::core::tee::tee_and_hint(tee_raw, tee_label, exit_code);
+    let hint = crate::core::tee::tee_and_hint_with_source_completeness(
+        tee_raw,
+        tee_label,
+        exit_code,
+        source_complete,
+    );
     emit_guarded(filtered, hint.as_deref(), guard_raw)
 }
 
@@ -43,6 +49,7 @@ pub struct RunOptions<'a> {
     /// can read from a pipe (e.g. `cat file | rtk wc`); without it the child
     /// gets an empty stdin and reports zero.
     pub inherit_stdin: bool,
+    pub force_tee_on_unparseable: bool,
 }
 
 impl<'a> RunOptions<'a> {
@@ -79,14 +86,33 @@ impl<'a> RunOptions<'a> {
         self.inherit_stdin = true;
         self
     }
+
+    pub fn force_tee_on_unparseable(mut self) -> Self {
+        self.force_tee_on_unparseable = true;
+        self
+    }
 }
 
 pub type CaptureFilter<'a> = Box<dyn Fn(&str) -> String + 'a>;
 pub type ExitAwareCaptureFilter<'a> = Box<dyn Fn(&str, i32) -> String + 'a>;
+pub type FactAwareCaptureFilter<'a> = Box<dyn Fn(&str, i32, CaptureFacts) -> String + 'a>;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CaptureFacts {
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+}
+
+impl CaptureFacts {
+    pub fn complete(self) -> bool {
+        !self.stdout_truncated && !self.stderr_truncated
+    }
+}
 
 pub enum RunMode<'a> {
     Filtered(CaptureFilter<'a>),
     FilteredWithExit(ExitAwareCaptureFilter<'a>),
+    FilteredWithFacts(FactAwareCaptureFilter<'a>),
     Streamed(Box<dyn StreamFilter + 'a>),
     Passthrough,
 }
@@ -100,7 +126,7 @@ fn run_captured_filter<F>(
     timer: tracking::TimedExecution,
 ) -> Result<i32>
 where
-    F: Fn(&str, i32) -> String,
+    F: Fn(&str, i32, CaptureFacts) -> String,
 {
     let stdin_mode = if opts.inherit_stdin {
         StdinMode::Inherit
@@ -111,6 +137,10 @@ where
         .with_context(|| format!("Failed to run {}", tool_name))?;
 
     let exit_code = result.exit_code;
+    let capture_facts = CaptureFacts {
+        stdout_truncated: result.stdout_truncated,
+        stderr_truncated: result.stderr_truncated,
+    };
     let raw = &result.raw;
     let raw_stdout = &result.raw_stdout;
 
@@ -130,7 +160,7 @@ where
     } else {
         raw
     };
-    let filtered = filter_fn(text_to_filter, exit_code);
+    let filtered = filter_fn(text_to_filter, exit_code, capture_facts);
 
     let raw_for_tracking = if opts.filter_stdout_only {
         raw_stdout
@@ -139,7 +169,29 @@ where
     };
 
     let shown = if let Some(label) = opts.tee_label {
-        print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
+        if opts.force_tee_on_unparseable && filtered.contains("result could not be parsed") {
+            let hint = crate::core::tee::force_tee_hint_with_source_completeness(
+                raw,
+                label,
+                exit_code,
+                capture_facts.complete(),
+            );
+            let truthful = match hint {
+                Some(hint) => format!("{filtered}\n{hint}"),
+                None => filtered.clone(),
+            };
+            println!("{truthful}");
+            truthful
+        } else {
+            print_with_hint(
+                &filtered,
+                raw,
+                raw_for_tracking,
+                label,
+                exit_code,
+                capture_facts.complete(),
+            )
+        }
     } else {
         let guarded = crate::core::guard::never_worse(raw_for_tracking, &filtered).to_string();
         if opts.no_trailing_newline {
@@ -174,7 +226,7 @@ pub fn run(
             cmd,
             tool_name,
             &cmd_label,
-            move |text, _| filter_fn(text),
+            move |text, _, _| filter_fn(text),
             opts,
             timer,
         ),
@@ -182,7 +234,15 @@ pub fn run(
             cmd,
             tool_name,
             &cmd_label,
-            move |text, exit_code| filter_fn(text, exit_code),
+            move |text, exit_code, _| filter_fn(text, exit_code),
+            opts,
+            timer,
+        ),
+        RunMode::FilteredWithFacts(filter_fn) => run_captured_filter(
+            cmd,
+            tool_name,
+            &cmd_label,
+            move |text, exit_code, facts| filter_fn(text, exit_code, facts),
             opts,
             timer,
         ),
@@ -252,6 +312,25 @@ where
         tool_name,
         args_display,
         RunMode::FilteredWithExit(Box::new(filter_fn)),
+        opts,
+    )
+}
+
+pub fn run_filtered_with_facts<F>(
+    cmd: Command,
+    tool_name: &str,
+    args_display: &str,
+    filter_fn: F,
+    opts: RunOptions<'_>,
+) -> Result<i32>
+where
+    F: Fn(&str, i32, CaptureFacts) -> String,
+{
+    run(
+        cmd,
+        tool_name,
+        args_display,
+        RunMode::FilteredWithFacts(Box::new(filter_fn)),
         opts,
     )
 }
