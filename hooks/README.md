@@ -62,6 +62,15 @@ Each agent subdirectory has its own README with hook-specific details:
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
 | Mistral Vibe | Rust binary (`rtk hook vibe`) | Transparent rewrite | Yes (`hook_specific_output.tool_input`) |
 
+## OpenAI-Compatible API Providers
+
+The following providers expose an OpenAI-compatible API and can serve as the model backend for any RTK-supported agent. Install RTK hooks for the agent as normal; RTK reduces token consumption regardless of which backend is used.
+
+| Provider | Region | Base URL | Env Var | Details |
+|----------|--------|----------|---------|--------|
+| [Astraflow (UCloud)](https://astraflow.ucloud-global.com) | Global | `https://api-us-ca.umodelverse.ai/v1` | `ASTRAFLOW_API_KEY` | [`hooks/astraflow/`](astraflow/README.md) |
+| [Astraflow (UCloud)](https://astraflow.ucloud.cn) | China  | `https://api.modelverse.cn/v1`        | `ASTRAFLOW_CN_API_KEY` | [`hooks/astraflow/`](astraflow/README.md) |
+
 ## JSON Formats by Agent
 
 ### Claude Code (Shell Hook)
