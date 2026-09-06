@@ -368,3 +368,28 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+  winget:
+    name: Update winget manifest
+    needs: [release]
+    if: ${{ !inputs.prerelease }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get version
+        id: version
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: rtk-ai.rtk
+          version: ${{ steps.version.outputs.version }}
+          installers-regex: 'rtk-x86_64-pc-windows-msvc\.zip$'
+          token: ${{ secrets.WINGET_TOKEN }}
+          release-tag: ${{ steps.version.outputs.tag }}

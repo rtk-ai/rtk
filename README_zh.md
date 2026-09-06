@@ -72,6 +72,14 @@ RTK 报告的 token 数量按 `字节数 / 4` 估算：RTK 不内置分词器，
 brew install rtk
 ```
 
+### winget（Windows — 最简单）
+
+Windows 上最简单的安装方式 — 一条命令，无需配置 PATH：
+
+```powershell
+winget install rtk-ai.rtk
+```
+
 ### 快速安装（Linux/macOS）
 
 ```bash

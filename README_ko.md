@@ -72,6 +72,14 @@ RTK가 보고하는 토큰 수는 `바이트 / 4`로 추정됩니다. RTK에는 
 brew install rtk
 ```
 
+### winget (Windows — 가장 쉬운 방법)
+
+Windows에서 가장 쉬운 설치 방법 — 명령어 하나로 끝, PATH 설정 불필요:
+
+```powershell
+winget install rtk-ai.rtk
+```
+
 ### 빠른 설치 (Linux/macOS)
 
 ```bash

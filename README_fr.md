@@ -72,6 +72,14 @@ Les nombres de tokens rapportes par RTK sont estimes avec `octets / 4` : RTK n'e
 brew install rtk
 ```
 
+### winget (Windows — le plus simple)
+
+La manière la plus simple d'installer sur Windows — une seule commande, aucune modification de PATH requise :
+
+```powershell
+winget install rtk-ai.rtk
+```
+
 ### Installation rapide (Linux/macOS)
 
 ```bash
