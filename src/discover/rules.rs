@@ -664,6 +664,19 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^sf\s+(?:project\s+(?:deploy|retrieve)\s+start|apex\s+run\s+test)\b",
+        rtk_cmd: "rtk sf",
+        rewrite_prefixes: &["sf"],
+        category: "Salesforce",
+        savings_pct: 85.0,
+        subcmd_savings: &[
+            ("project deploy start", 90.0),
+            ("project retrieve start", 85.0),
+            ("apex run test", 92.0),
+        ],
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^psql(\s|$)",
         rtk_cmd: "rtk psql",
         rewrite_prefixes: &["psql"],

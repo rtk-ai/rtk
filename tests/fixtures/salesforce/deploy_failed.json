@@ -1,0 +1,83 @@
+{
+  "status": 1,
+  "result": {
+    "checkOnly": false,
+    "completedDate": "2026-07-30T20:13:08.000Z",
+    "createdBy": "005XXXXXXXXXXXX",
+    "createdByName": "Test User",
+    "createdDate": "2026-07-30T20:13:07.000Z",
+    "details": {
+      "componentFailures": [
+        {
+          "changed": false,
+          "columnNumber": 37,
+          "componentType": "ApexClass",
+          "created": false,
+          "createdDate": "2026-07-30T20:13:07.000Z",
+          "deleted": false,
+          "fileName": "classes/BadDeploy.cls",
+          "fullName": "BadDeploy",
+          "lineNumber": 1,
+          "problem": "Variable does not exist: y",
+          "problemType": "Error",
+          "success": false
+        }
+      ],
+      "componentSuccesses": [
+        {
+          "changed": true,
+          "componentType": "",
+          "created": false,
+          "createdDate": "2026-07-30T20:13:08.000Z",
+          "deleted": false,
+          "fileName": "package.xml",
+          "fullName": "package.xml",
+          "success": true
+        }
+      ],
+      "runTestResult": {
+        "numFailures": 0,
+        "numTestsRun": 0,
+        "totalTime": 0,
+        "codeCoverage": [],
+        "codeCoverageWarnings": [],
+        "failures": [],
+        "flowCoverage": [],
+        "flowCoverageWarnings": [],
+        "successes": []
+      }
+    },
+    "done": true,
+    "id": "0AfXXXXXXXXXXXXXXX",
+    "ignoreWarnings": false,
+    "lastModifiedDate": "2026-07-30T20:13:08.000Z",
+    "numberComponentErrors": 1,
+    "numberComponentsDeployed": 0,
+    "numberComponentsTotal": 1,
+    "numberFiles": "4",
+    "numberTestErrors": 0,
+    "numberTestsCompleted": 0,
+    "numberTestsTotal": 0,
+    "rollbackOnError": true,
+    "runTestsEnabled": false,
+    "startDate": "2026-07-30T20:13:07.000Z",
+    "status": "Failed",
+    "success": false,
+    "zipSize": 792,
+    "files": [
+      {
+        "fullName": "BadDeploy",
+        "type": "ApexClass",
+        "state": "Failed",
+        "problemType": "Error",
+        "filePath": "/tmp/sf-bad-deploy/classes/BadDeploy.cls",
+        "lineNumber": 1,
+        "columnNumber": 37,
+        "error": "Variable does not exist: y (1:37)"
+      }
+    ],
+    "zipFileCount": 3,
+    "deployUrl": "https://scratch.example.my.salesforce.com/lightning/setup/DeployStatus/page?address=%2Fchangemgmt%2FmonitorDeploymentsDetails.apexp%3FasyncId%3D0AfXXXXXXXXXXXXXXX%26retURL%3D%252Fchangemgmt%252FmonitorDeployment.apexp"
+  },
+  "warnings": []
+}
