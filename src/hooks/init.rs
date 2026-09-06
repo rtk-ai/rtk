@@ -6157,6 +6157,20 @@ mod tests {
     }
 
     #[test]
+    fn test_opencode_plugin_uses_cross_platform_process_api() {
+        assert!(
+            OPENCODE_PLUGIN.contains(r#"import { execFile } from "node:child_process""#),
+            "OpenCode plugin must use Node's cross-platform child process API"
+        );
+        assert!(OPENCODE_PLUGIN.contains("function runRtk(args: string[]): Promise<string>"));
+        assert!(OPENCODE_PLUGIN.contains(r#"execFile("rtk", args, { windowsHide: true }"#));
+        assert!(OPENCODE_PLUGIN.contains(r#"await runRtk(["--version"])"#));
+        assert!(OPENCODE_PLUGIN.contains(r#"await runRtk(["rewrite", command])"#));
+        assert!(!OPENCODE_PLUGIN.contains("({ $ })"));
+        assert!(!OPENCODE_PLUGIN.contains("which rtk"));
+    }
+
+    #[test]
     fn test_opencode_plugin_remove() {
         let temp = TempDir::new().unwrap();
         let opencode_dir = temp.path().join("opencode");

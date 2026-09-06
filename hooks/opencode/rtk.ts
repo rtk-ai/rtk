@@ -1,4 +1,5 @@
 import type { Plugin } from "@opencode-ai/plugin"
+import { execFile } from "node:child_process"
 
 // RTK OpenCode plugin — rewrites commands to use rtk for token savings.
 // Requires: rtk >= 0.23.0 in PATH.
@@ -6,11 +7,24 @@ import type { Plugin } from "@opencode-ai/plugin"
 // This is a thin delegating plugin: all rewrite logic lives in `rtk rewrite`,
 // which is the single source of truth (src/discover/registry.rs).
 // To add or change rewrite rules, edit the Rust registry — not this file.
+//
+// Node's child_process is used instead of the Bun `$` shell because the
+// plugin context does not provide `$` under the Node runtime (e.g. Desktop)
+// and `which` does not exist on Windows.
 
-export const RtkOpenCodePlugin: Plugin = async ({ $ }) => {
-  try {
-    await $`which rtk`.quiet()
-  } catch {
+function runRtk(args: string[]): Promise<string> {
+  return new Promise((resolve) => {
+    execFile("rtk", args, { windowsHide: true }, (_error, stdout) => {
+      // `rtk rewrite` may return a non-zero status while still emitting a
+      // rewrite, so stdout is resolved regardless of the exit code.
+      resolve(String(stdout ?? "").trim())
+    })
+  })
+}
+
+export const RtkOpenCodePlugin: Plugin = async () => {
+  const version = await runRtk(["--version"])
+  if (!version) {
     console.warn("[rtk] rtk binary not found in PATH — plugin disabled")
     return {}
   }
@@ -25,14 +39,9 @@ export const RtkOpenCodePlugin: Plugin = async ({ $ }) => {
       const command = (args as Record<string, unknown>).command
       if (typeof command !== "string" || !command) return
 
-      try {
-        const result = await $`rtk rewrite ${command}`.quiet().nothrow()
-        const rewritten = String(result.stdout).trim()
-        if (rewritten && rewritten !== command) {
-          ;(args as Record<string, unknown>).command = rewritten
-        }
-      } catch {
-        // rtk rewrite failed — pass through unchanged
+      const rewritten = await runRtk(["rewrite", command])
+      if (rewritten && rewritten !== command) {
+        ;(args as Record<string, unknown>).command = rewritten
       }
     },
   }
