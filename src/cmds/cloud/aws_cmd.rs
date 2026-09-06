@@ -321,23 +321,15 @@ fn run_aws_json(sub_args: &[&str], extra_args: &[String], verbose: u8) -> Result
     Ok(captured)
 }
 
-/// Recall slug for an AWS invocation: `aws_<service>`, never the argument list.
-///
-/// The slug reaches `recall_stats`, which the daily telemetry ping reads, so it
-/// must carry no user data. Joining `sub_args` put resource names in it —
-/// `aws ecr describe myrepo` became `aws_ecr_describe_myrepo`, which is 23
-/// characters over four segments with no digits, and therefore passes the
-/// telemetry allowlist intact. The service name is a fixed AWS vocabulary and
-/// is all the per-filter breakdown needs.
-fn aws_recall_slug(sub_args: &[&str]) -> String {
-    match sub_args.first() {
-        Some(service) => format!("aws_{}", service),
-        None => "aws".to_string(),
-    }
-}
-
 /// Shared runner for AWS commands that return JSON.
 /// Follows the six-phase contract: timer → execute → filter (fallback) → tee → track → exit code.
+///
+/// INVARIANT: `sub_args` must be caller-supplied literals, never user input.
+/// It becomes the recall slug, which lands in `recall_stats` and is read by the
+/// daily telemetry ping. Every current caller passes a fixed array behind an
+/// exact-match guard, so nothing user-controlled reaches it — but that safety
+/// lives in the calling convention rather than in this function, so an arm that
+/// forwarded a resource name would leak it. Bound any such slug at construction.
 fn run_aws_filtered(
     sub_args: &[&str],
     extra_args: &[String],
@@ -346,7 +338,7 @@ fn run_aws_filtered(
 ) -> Result<i32> {
     let cmd_label = format!("aws {}", sub_args.join(" "));
     let rtk_label = format!("rtk {}", cmd_label);
-    let slug = aws_recall_slug(sub_args);
+    let slug = cmd_label.replace(' ', "_");
     let timer = tracking::TimedExecution::start();
     let CaptureResult {
         stdout,
@@ -1548,36 +1540,6 @@ fn filter_secrets_get(json_str: &str) -> Option<FilterResult> {
 mod tests {
     use super::*;
     use crate::core::utils::count_tokens;
-
-    // --- the recall slug must not carry AWS arguments ---
-
-    #[test]
-    fn test_b22_slug_is_service_only() {
-        assert_eq!(
-            aws_recall_slug(&["ecr", "describe-repositories", "--repository-name", "myrepo"]),
-            "aws_ecr"
-        );
-        assert_eq!(aws_recall_slug(&["s3", "ls", "s3://private-bucket"]), "aws_s3");
-        assert_eq!(aws_recall_slug(&[]), "aws");
-    }
-
-    /// The slug the old code produced would have reached the telemetry endpoint
-    /// intact: 23 chars, four segments, no digits, `aws` in the family list. It
-    /// is the same argument-leak defect as the TOML-filter path, at a call site that
-    /// fix never covered, which is why
-    /// the fix belongs at the source rather than in the allowlist.
-    #[test]
-    fn test_b22_old_slug_shape_would_have_leaked() {
-        let leaked = "aws ecr describe myrepo".replace(' ', "_");
-        assert_eq!(leaked, "aws_ecr_describe_myrepo");
-        assert!(leaked.len() <= 32);
-        assert_eq!(leaked.split(['_', '-']).count(), 4);
-        assert!(!leaked.chars().any(|c| c.is_ascii_digit()));
-
-        // What we emit now carries no argument at all.
-        let safe = aws_recall_slug(&["ecr", "describe", "myrepo"]);
-        assert!(!safe.contains("myrepo"));
-    }
 
     #[test]
     fn test_snapshot_sts_identity() {

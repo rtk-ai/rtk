@@ -233,6 +233,9 @@ fn write_private(path: &Path, content: &str) -> Option<()> {
     file.write_all(content.as_bytes()).ok()
 }
 
+/// Only the POSIX hint path uses this: on Windows `display_shell_path` emits
+/// the absolute path, since neither cmd nor PowerShell expands `~`.
+#[cfg(not(windows))]
 fn display_path(path: &Path) -> String {
     if let Some(home) = dirs::home_dir() {
         if let Ok(relative) = path.strip_prefix(&home) {
@@ -624,6 +627,7 @@ mod tests {
         assert_eq!(escape_double_quoted_path("a$b`c\"d"), "a\\$b\\`c\\\"d");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn test_display_shell_path_uses_home_var_for_home_paths_with_spaces() {
         let Some(home) = dirs::home_dir() else {
