@@ -207,10 +207,19 @@ jobs:
             [ -f "$f" ] && cp "$f" "rtk.x86_64.rpm"
           done
 
-      - name: Create checksums
+      - name: Generate SHA-256 checksums
         run: |
           cd release
-          sha256sum * > checksums.txt
+          sha256sum * > SHA256SUMS.txt
+          # Keep checksums.txt for backward compatibility (homebrew job)
+          cp SHA256SUMS.txt checksums.txt
+          cat SHA256SUMS.txt
+
+      - name: Generate per-archive checksums
+        run: |
+          for f in release/*.tar.gz release/*.zip; do
+            [ -f "$f" ] && sha256sum "$f" > "${f}.sha256"
+          done
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
