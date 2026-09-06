@@ -1513,6 +1513,15 @@ fn rewrite_segment_inner(
         }
     }
 
+    // TOML-only tools invoked via a path or wrapper (e.g. /usr/local/bin/make).
+    // Prepend `rtk` to the original command so run_fallback executes the real binary path.
+    let lookup = crate::core::toml_filter::lookup_command_for_filter(cmd_part);
+    if crate::core::toml_filter::find_matching_filter(&lookup).is_some()
+        || crate::core::toml_filter::find_matching_filter(cmd_part).is_some()
+    {
+        return Some(format!("rtk {}{}", cmd_part, redirect_suffix));
+    }
+
     None
 }
 
@@ -4685,6 +4694,14 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("npx svgo", &[]),
             Some("rtk npx svgo".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_filter_bin_path() {
+        assert_eq!(
+            rewrite_command_no_prefixes("/usr/local/bin/make all", &[]),
+            Some("rtk /usr/local/bin/make all".to_string()),
         );
     }
 
