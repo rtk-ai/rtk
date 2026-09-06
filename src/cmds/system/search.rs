@@ -578,7 +578,13 @@ pub fn run(
     }
 
     if result.stdout.trim().is_empty() {
-        timer.track(&real_cmd, &rtk_label, &raw_output, "");
+        if exit_code >= 2 && !result.stderr.is_empty() {
+            let msg = format!("{}: error (exit {})\n", engine.label(), exit_code);
+            print!("{}", msg);
+            timer.track(&real_cmd, &rtk_label, &raw_output, &msg);
+        } else {
+            timer.track(&real_cmd, &rtk_label, &raw_output, "");
+        }
         return Ok(exit_code);
     }
 
@@ -609,6 +615,10 @@ pub fn run(
         .flat_map(|v| v.iter())
         .filter(|(_, is_match, _)| *is_match)
         .count();
+
+    if total_matches == 0 && exit_code == 0 && !raw_output.trim().is_empty() {
+        return passthrough(&timer, engine, &args, &real_cmd);
+    }
 
     // Mirror what the real command prints: the filename only when grep/rg would
     // show one (multiple files, a directory, -r or -H), the line number only with
