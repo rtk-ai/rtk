@@ -4633,26 +4633,517 @@ mod tests {
         }
     }
 
+    // --- pnpm: exhaustive command, alias, flag, and edge-case coverage ---
+
     #[test]
-    fn test_rewrite_pnpm_command() {
-        let commands = vec![
-            "exec",
-            "i",
-            "install",
-            "list",
-            "ls",
-            "outdated",
-            "run",
-            "run-script",
-        ];
-        for command in commands {
+    fn test_rewrite_pnpm_manage_dependencies() {
+        // Every "Manage dependencies" subcommand from pnpm docs
+        for sub in [
+            "add", "install", "update", "remove", "link", "unlink",
+            "import", "rebuild", "prune", "clean", "ci", "fetch",
+            "install-test", "dedupe",
+        ] {
             assert_eq!(
-                rewrite_command_no_prefixes(format!("pnpm {command}").as_str(), &[]),
-                Some(format!("rtk pnpm {command}")),
-                "Failed for command: pnpm {}",
-                command
+                rewrite_command_no_prefixes(&format!("pnpm {sub}"), &[]),
+                Some(format!("rtk pnpm {sub}")),
+                "Failed for pnpm {sub}",
             );
         }
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_aliases() {
+        // install aliases
+        for alias in ["i", "install"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("pnpm {alias}"), &[]),
+                Some(format!("rtk pnpm {alias}")),
+                "Failed for pnpm {alias}",
+            );
+        }
+        // remove aliases: rm, uninstall, un
+        for alias in ["remove", "rm", "uninstall", "un"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("pnpm {alias} lodash"), &[]),
+                Some(format!("rtk pnpm {alias} lodash")),
+                "Failed for pnpm {alias}",
+            );
+        }
+        // update aliases: up, upgrade
+        for alias in ["update", "up", "upgrade"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("pnpm {alias}"), &[]),
+                Some(format!("rtk pnpm {alias}")),
+                "Failed for pnpm {alias}",
+            );
+        }
+        // list aliases: ls, la, ll
+        for alias in ["list", "ls", "la", "ll"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("pnpm {alias}"), &[]),
+                Some(format!("rtk pnpm {alias}")),
+                "Failed for pnpm {alias}",
+            );
+        }
+        // run aliases: run-script
+        for alias in ["run", "run-script"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("pnpm {alias} build"), &[]),
+                Some(format!("rtk pnpm {alias} build")),
+                "Failed for pnpm {alias}",
+            );
+        }
+        // test alias: t, tst
+        for alias in ["test", "t", "tst"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("pnpm {alias}"), &[]),
+                Some(format!("rtk pnpm {alias}")),
+                "Failed for pnpm {alias}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_run_scripts() {
+        // "Run scripts" section from pnpm docs
+        for sub in [
+            "run", "test", "exec", "create", "start",
+            "approve-builds", "ignored-builds",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("pnpm {sub}"), &[]),
+                Some(format!("rtk pnpm {sub}")),
+                "Failed for pnpm {sub}",
+            );
+        }
+        // dlx (pnx alias at CLI level, but pnpm dlx is valid)
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm dlx create-react-app my-app", &[]),
+            Some("rtk pnpm dlx create-react-app my-app".into()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_review_and_patch() {
+        for sub in ["audit", "outdated", "why", "licenses", "patch", "patch-commit", "patch-remove"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("pnpm {sub}"), &[]),
+                Some(format!("rtk pnpm {sub}")),
+                "Failed for pnpm {sub}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_publishing() {
+        for sub in [
+            "publish", "pack", "pack-app", "deprecate", "unpublish",
+            "dist-tag", "owner", "star", "login", "logout", "whoami",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("pnpm {sub}"), &[]),
+                Some(format!("rtk pnpm {sub}")),
+                "Failed for pnpm {sub}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_environment_and_store() {
+        for sub in [
+            "runtime", "cat-file", "cache-list", "store",
+            "self-update", "setup", "doctor", "env",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("pnpm {sub}"), &[]),
+                Some(format!("rtk pnpm {sub}")),
+                "Failed for pnpm {sub}",
+            );
+        }
+        // store subcommands
+        for store_sub in ["status", "add", "prune", "path"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("pnpm store {store_sub}"), &[]),
+                Some(format!("rtk pnpm store {store_sub}")),
+                "Failed for pnpm store {store_sub}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_misc_commands() {
+        for sub in [
+            "init", "deploy", "root", "bin", "config", "help",
+            "ping", "pkg", "pm", "repo", "set-script", "version", "with",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("pnpm {sub}"), &[]),
+                Some(format!("rtk pnpm {sub}")),
+                "Failed for pnpm {sub}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_implicit_run_scripts() {
+        // pnpm treats unknown subcommands as implicit `pnpm run <script>`
+        for script in ["build", "dev", "lint", "typecheck", "format", "preinstall", "postinstall"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("pnpm {script}"), &[]),
+                Some(format!("rtk pnpm {script}")),
+                "Failed for implicit script: pnpm {script}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_recursive_flag() {
+        // -r / --recursive before subcommand
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -r install", &[]),
+            Some("rtk pnpm -r install".into()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --recursive install", &[]),
+            Some("rtk pnpm --recursive install".into()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -r run build", &[]),
+            Some("rtk pnpm -r run build".into()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -r update", &[]),
+            Some("rtk pnpm -r update".into()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_filter_flag() {
+        // --filter with space-separated value
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter desktop typecheck", &[]),
+            Some("rtk pnpm --filter desktop typecheck".into()),
+        );
+        // -F shorthand
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -F desktop typecheck", &[]),
+            Some("rtk pnpm -F desktop typecheck".into()),
+        );
+        // --filter=value (equals syntax)
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter=desktop typecheck", &[]),
+            Some("rtk pnpm --filter=desktop typecheck".into()),
+        );
+        // scoped package filter
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter @myorg/core build", &[]),
+            Some("rtk pnpm --filter @myorg/core build".into()),
+        );
+        // multiple --filter flags
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter @app/web --filter @app/api build", &[]),
+            Some("rtk pnpm --filter @app/web --filter @app/api build".into()),
+        );
+        // multiple -F flags
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -F web -F api test", &[]),
+            Some("rtk pnpm -F web -F api test".into()),
+        );
+        // glob pattern filter
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter './packages/**' build", &[]),
+            Some("rtk pnpm --filter './packages/**' build".into()),
+        );
+        // negation filter
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter !./packages/legacy build", &[]),
+            Some("rtk pnpm --filter !./packages/legacy build".into()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_dir_flag() {
+        // -C / --dir flag
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -C /path/to/project install", &[]),
+            Some("rtk pnpm -C /path/to/project install".into()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --dir /path/to/project install", &[]),
+            Some("rtk pnpm --dir /path/to/project install".into()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_workspace_root_flag() {
+        // -w / --workspace-root
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -w add lodash", &[]),
+            Some("rtk pnpm -w add lodash".into()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --workspace-root add lodash", &[]),
+            Some("rtk pnpm --workspace-root add lodash".into()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_subcommand_with_args() {
+        // install with package args
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm add react react-dom --save-dev", &[]),
+            Some("rtk pnpm add react react-dom --save-dev".into()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm add -D typescript @types/node", &[]),
+            Some("rtk pnpm add -D typescript @types/node".into()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm add -g pnpm", &[]),
+            Some("rtk pnpm add -g pnpm".into()),
+        );
+        // install with flags
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm install --frozen-lockfile", &[]),
+            Some("rtk pnpm install --frozen-lockfile".into()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm install --prod", &[]),
+            Some("rtk pnpm install --prod".into()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm install --no-optional", &[]),
+            Some("rtk pnpm install --no-optional".into()),
+        );
+        // list with depth
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm list --depth=0", &[]),
+            Some("rtk pnpm list --depth=0".into()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm list --json", &[]),
+            Some("rtk pnpm list --json".into()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm list --prod --depth=0", &[]),
+            Some("rtk pnpm list --prod --depth=0".into()),
+        );
+        // outdated with flags
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm outdated --format json", &[]),
+            Some("rtk pnpm outdated --format json".into()),
+        );
+        // run with script args
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm run build -- --mode production", &[]),
+            Some("rtk pnpm run build -- --mode production".into()),
+        );
+        // exec with command
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm exec jest --coverage", &[]),
+            Some("rtk pnpm exec jest --coverage".into()),
+        );
+        // audit with flags
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm audit --fix", &[]),
+            Some("rtk pnpm audit --fix".into()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm audit --json", &[]),
+            Some("rtk pnpm audit --json".into()),
+        );
+        // why with package
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm why react", &[]),
+            Some("rtk pnpm why react".into()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_compound_commands() {
+        // && chaining
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm install && pnpm test", &[]),
+            Some("rtk pnpm install && rtk pnpm test".into()),
+        );
+        // ; chaining
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm install ; pnpm build", &[]),
+            Some("rtk pnpm install ; rtk pnpm build".into()),
+        );
+        // || chaining
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm test || pnpm test --bail", &[]),
+            Some("rtk pnpm test || rtk pnpm test --bail".into()),
+        );
+        // mixed with non-pnpm commands
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm install && git status", &[]),
+            Some("rtk pnpm install && rtk git status".into()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_redirects() {
+        // 2>&1 redirect
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter desktop typecheck 2>&1", &[]),
+            Some("rtk pnpm --filter desktop typecheck 2>&1".into()),
+        );
+        // pipe (only left side rewritten)
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm list | grep react", &[]),
+            Some("rtk pnpm list | grep react".into()),
+        );
+        // 2>/dev/null
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm install 2>/dev/null", &[]),
+            Some("rtk pnpm install 2>/dev/null".into()),
+        );
+        // &>/dev/null
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm install &>/dev/null", &[]),
+            Some("rtk pnpm install &>/dev/null".into()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_env_prefix() {
+        // env var prefix should be stripped for matching
+        assert_eq!(
+            rewrite_command_no_prefixes("NODE_ENV=production pnpm build", &[]),
+            Some("rtk pnpm build".into()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("CI=true pnpm install --frozen-lockfile", &[]),
+            Some("rtk pnpm install --frozen-lockfile".into()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("sudo pnpm install -g pnpm", &[]),
+            Some("rtk pnpm install -g pnpm".into()),
+        );
+    }
+
+    #[test]
+    fn test_classify_pnpm_supported() {
+        // Basic subcommand
+        assert_eq!(
+            classify_command("pnpm install"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pnpm",
+                category: "PackageManager",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+        // With filter flags
+        assert_eq!(
+            classify_command("pnpm --filter desktop typecheck"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pnpm",
+                category: "PackageManager",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+        // With additional arguments
+        assert_eq!(
+            classify_command("pnpm add lodash"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pnpm",
+                category: "PackageManager",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+        // Recursive flag
+        assert_eq!(
+            classify_command("pnpm -r install"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pnpm",
+                category: "PackageManager",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_pnpm_not_bare() {
+        // Bare "pnpm" (no subcommand) should not match — it just shows help
+        assert!(matches!(
+            classify_command("pnpm"),
+            Classification::Unsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn test_classify_pnpm_specific_rules_take_precedence() {
+        // pnpm exec tsc should match the tsc rule (more specific, later in RULES)
+        assert_eq!(
+            classify_command("pnpm exec tsc --noEmit"),
+            Classification::Supported {
+                rtk_equivalent: "rtk tsc",
+                category: "Build",
+                estimated_savings_pct: 83.0,
+                status: RtkStatus::Existing,
+            }
+        );
+        // pnpm run lint should match the lint rule
+        assert!(matches!(
+            classify_command("pnpm run lint"),
+            Classification::Supported {
+                rtk_equivalent: "rtk lint",
+                ..
+            }
+        ));
+        // pnpm exec vitest should match the vitest rule
+        assert!(matches!(
+            classify_command("pnpm exec vitest"),
+            Classification::Supported {
+                rtk_equivalent: "rtk vitest",
+                ..
+            }
+        ));
+        // pnpm run jest should match the jest rule
+        assert!(matches!(
+            classify_command("pnpm run jest"),
+            Classification::Supported {
+                rtk_equivalent: "rtk jest",
+                ..
+            }
+        ));
+        // pnpm exec prettier should match the prettier rule
+        assert!(matches!(
+            classify_command("pnpm exec prettier"),
+            Classification::Supported {
+                rtk_equivalent: "rtk prettier",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_combined_flags_and_args() {
+        // Real-world monorepo patterns
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "pnpm --filter desktop run build --mode production",
+                &[],
+            ),
+            Some("rtk pnpm --filter desktop run build --mode production".into()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -r --filter ./packages test", &[]),
+            Some("rtk pnpm -r --filter ./packages test".into()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "pnpm --filter @scope/pkg add lodash --save-exact",
+                &[],
+            ),
+            Some("rtk pnpm --filter @scope/pkg add lodash --save-exact".into()),
+        );
     }
 
     #[test]
