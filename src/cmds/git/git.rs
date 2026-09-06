@@ -74,8 +74,14 @@ fn uses_compact_status_path(args: &[String]) -> bool {
 
 fn build_status_command(args: &[String], global_args: &[String]) -> Command {
     let mut cmd = git_cmd(global_args);
+    let compact_status = uses_compact_status_path(args);
+    if compact_status {
+        // Keep porcelain paths comparable with `rev-parse --show-prefix`
+        // even when the current subdirectory contains non-ASCII components.
+        cmd.args(["-c", "core.quotePath=false"]);
+    }
     cmd.arg("status");
-    if uses_compact_status_path(args) {
+    if compact_status {
         cmd.args(["--porcelain", "-b"]);
     } else {
         cmd.args(args);
@@ -1191,14 +1197,34 @@ fn truncate_line(line: &str, width: usize) -> String {
 }
 
 pub(crate) fn format_status_output(porcelain: &str) -> String {
-    format_status_inner(porcelain, None)
+    format_status_inner(porcelain, None, None)
 }
 
 pub(crate) fn format_status_output_detached(porcelain: &str, detached_ref: &str) -> String {
-    format_status_inner(porcelain, Some(detached_ref))
+    format_status_inner(porcelain, Some(detached_ref), None)
 }
 
-fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
+fn format_status_output_relative(porcelain: &str, cwd_prefix: Option<&str>) -> String {
+    format_status_inner(porcelain, None, cwd_prefix)
+}
+
+fn format_status_output_detached_relative(
+    porcelain: &str,
+    detached_ref: &str,
+    cwd_prefix: Option<&str>,
+) -> String {
+    if cwd_prefix.is_none() {
+        return format_status_output_detached(porcelain, detached_ref);
+    }
+
+    format_status_inner(porcelain, Some(detached_ref), cwd_prefix)
+}
+
+fn format_status_inner(
+    porcelain: &str,
+    detached: Option<&str>,
+    cwd_prefix: Option<&str>,
+) -> String {
     let lines: Vec<&str> = porcelain
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -1221,7 +1247,7 @@ fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
     }
 
     for line in lines.iter().skip(1) {
-        output.push((*line).to_string());
+        output.push(format_status_line_relative(line, cwd_prefix));
     }
 
     if lines.len() == 1 && lines[0].starts_with("##") {
@@ -1229,6 +1255,87 @@ fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
     }
 
     output.join("\n")
+}
+
+fn current_git_prefix(global_args: &[String]) -> Option<String> {
+    let mut cmd = git_cmd(global_args);
+    cmd.args(["rev-parse", "--show-prefix"]);
+    let result = exec_capture(&mut cmd).ok()?;
+    if !result.success() {
+        return None;
+    }
+
+    let prefix = result.stdout.trim();
+    if prefix.is_empty() {
+        None
+    } else {
+        Some(prefix.to_string())
+    }
+}
+
+fn format_status_line_relative(line: &str, cwd_prefix: Option<&str>) -> String {
+    let Some(cwd_prefix) = cwd_prefix.filter(|prefix| !prefix.is_empty()) else {
+        return line.to_string();
+    };
+
+    if line.len() < 4 || line.as_bytes().get(2) != Some(&b' ') {
+        return line.to_string();
+    }
+
+    let (status, payload) = line.split_at(3);
+    format!("{}{}", status, relativize_status_payload(payload, cwd_prefix))
+}
+
+fn relativize_status_payload(payload: &str, cwd_prefix: &str) -> String {
+    if let Some((old_path, new_path)) = payload.split_once(" -> ") {
+        return format!(
+            "{} -> {}",
+            relativize_status_path(old_path, cwd_prefix),
+            relativize_status_path(new_path, cwd_prefix)
+        );
+    }
+
+    relativize_status_path(payload, cwd_prefix)
+}
+
+fn relativize_status_path(path: &str, cwd_prefix: &str) -> String {
+    if path.starts_with('"') && path.ends_with('"') && path.len() >= 2 {
+        let inner = &path[1..path.len() - 1];
+        return format!("\"{}\"", relativize_unquoted_status_path(inner, cwd_prefix));
+    }
+
+    relativize_unquoted_status_path(path, cwd_prefix)
+}
+
+fn relativize_unquoted_status_path(path: &str, cwd_prefix: &str) -> String {
+    if cwd_prefix.is_empty() {
+        return path.to_string();
+    }
+
+    if let Some(stripped) = path.strip_prefix(cwd_prefix) {
+        return if stripped.is_empty() {
+            "./".to_string()
+        } else {
+            stripped.to_string()
+        };
+    }
+
+    let cwd_parts: Vec<&str> = cwd_prefix.split('/').filter(|part| !part.is_empty()).collect();
+    let path_parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    let common = cwd_parts
+        .iter()
+        .zip(path_parts.iter())
+        .take_while(|(left, right)| left == right)
+        .count();
+
+    let mut relative_parts = vec![".."; cwd_parts.len().saturating_sub(common)];
+    relative_parts.extend(path_parts.iter().skip(common).copied());
+
+    if relative_parts.is_empty() {
+        "./".to_string()
+    } else {
+        relative_parts.join("/")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1430,6 +1537,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 
     let mut cmd = build_status_command(args, global_args);
     let result = exec_capture(&mut cmd).context("Failed to run git status")?;
+    let cwd_prefix = current_git_prefix(global_args);
 
     if !result.success() {
         let message = if result.stderr.contains("not a git repository") {
@@ -1456,8 +1564,12 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     }
 
     let formatted = match extract_detached_head(&raw_output) {
-        Some(detached_ref) => format_status_output_detached(&result.stdout, &detached_ref),
-        None => format_status_output(&result.stdout),
+        Some(detached_ref) => format_status_output_detached_relative(
+            &result.stdout,
+            &detached_ref,
+            cwd_prefix.as_deref(),
+        ),
+        None => format_status_output_relative(&result.stdout, cwd_prefix.as_deref()),
     };
 
     // Surface in-progress state (rebase/merge/cherry-pick/bisect/am) from the
@@ -2732,7 +2844,10 @@ mod tests {
     fn test_build_status_command_default_compact() {
         let cmd = build_status_command(&[], &[]);
         let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, vec!["status", "--porcelain", "-b"]);
+        assert_eq!(
+            args,
+            vec!["-c", "core.quotePath=false", "status", "--porcelain", "-b"]
+        );
     }
 
     #[test]
@@ -2759,7 +2874,10 @@ mod tests {
         let args = vec!["--short".to_string(), "--branch".to_string()];
         let cmd = build_status_command(&args, &[]);
         let cmd_args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(cmd_args, vec!["status", "--porcelain", "-b"]);
+        assert_eq!(
+            cmd_args,
+            vec!["-c", "core.quotePath=false", "status", "--porcelain", "-b"]
+        );
     }
 
     #[test]
@@ -3738,6 +3856,47 @@ A  added.rs
     }
 
     #[test]
+    fn test_format_status_output_relative_to_subdir() {
+        let porcelain = "## main\n M apps/api/server.py\n M apps/web/local_subdir/ui_server.py\n";
+        let result = format_status_output_relative(porcelain, Some("apps/web/"));
+        assert!(result.contains("* main"));
+        assert!(result.contains(" M ../api/server.py"));
+        assert!(result.contains(" M local_subdir/ui_server.py"));
+        assert!(!result.contains("apps/web/local_subdir/ui_server.py"));
+    }
+
+    #[test]
+    fn test_format_status_output_relative_preserves_quoted_paths() {
+        let porcelain =
+            "## main\n M \"apps/api/a file.py\"\n M \"apps/web/\\360\\237\\230\\200.py\"\n";
+        let result = format_status_output_relative(porcelain, Some("apps/web/"));
+        assert!(result.contains(" M \"../api/a file.py\""));
+        assert!(result.contains(" M \"\\360\\237\\230\\200.py\""));
+    }
+
+    #[test]
+    fn test_format_status_output_relative_preserves_renames() {
+        let porcelain = "## main\nR  apps/web/a.py -> apps/api/b.py\n";
+        let result = format_status_output_relative(porcelain, Some("apps/web/"));
+        assert!(result.contains("R  a.py -> ../api/b.py"));
+    }
+
+    #[test]
+    fn test_format_status_output_relative_current_dir_untracked() {
+        let porcelain = "## main\n?? apps/web/\n";
+        let result = format_status_output_relative(porcelain, Some("apps/web/"));
+        assert!(result.contains("?? ./"));
+    }
+
+    #[test]
+    fn test_format_status_output_relative_unicode_prefix() {
+        let porcelain = "## main\n M apps/😀/local_subdir/a.py\n";
+        let result = format_status_output_relative(porcelain, Some("apps/😀/"));
+        assert!(result.contains(" M local_subdir/a.py"));
+        assert!(!result.contains("apps/😀/local_subdir/a.py"));
+    }
+
+    #[test]
     fn test_format_status_output_preserves_rename_and_conflict_lines() {
         let porcelain = "## main\nR  old.rs -> new.rs\nUU conflict.rs\nMM mixed.rs\n";
         let result = format_status_output(porcelain);
@@ -4481,6 +4640,67 @@ no changes added to commit (use "git add" and/or "git commit -a")
             stderr.to_lowercase().contains("not a git repository"),
             "Expected 'not a git repository' on stderr, got stderr={:?}, stdout={:?}",
             stderr,
+            stdout
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    #[ignore] // Requires `cargo build` first — run with `cargo test --ignored`
+    fn test_git_status_paths_are_relative_to_current_subdir() {
+        let tmp = std::env::temp_dir().join(format!(
+            "rtk_test_status_relative_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("apps/web/local_subdir"))
+            .expect("create test repo dirs");
+
+        let run_git = |args: &[&str], dir: &std::path::Path| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .expect("git command should run");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+
+        run_git(&["init", "-q"], &tmp);
+        run_git(&["config", "user.email", "rtk@example.com"], &tmp);
+        run_git(&["config", "user.name", "rtk"], &tmp);
+        let file = tmp.join("apps/web/local_subdir/ui_server.py");
+        std::fs::write(&file, "print('before')\n").expect("write initial file");
+        run_git(&["add", "."], &tmp);
+        run_git(&["commit", "-q", "-m", "init"], &tmp);
+        std::fs::write(&file, "print('after')\n").expect("modify tracked file");
+
+        let bin_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("debug")
+            .join("rtk");
+        assert!(
+            bin_path.exists(),
+            "Debug binary not found at {:?} — run `cargo build` first",
+            bin_path
+        );
+
+        let output = std::process::Command::new(&bin_path)
+            .args(["git", "status"])
+            .current_dir(tmp.join("apps/web"))
+            .output()
+            .expect("Failed to run rtk");
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains(" M local_subdir/ui_server.py"));
+        assert!(
+            !stdout.contains("apps/web/local_subdir/ui_server.py"),
+            "status path should be relative to the current subdir:\n{}",
             stdout
         );
 
