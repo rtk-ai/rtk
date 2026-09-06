@@ -56,9 +56,9 @@ The permission gate, discover/analytics classification, and rewrite each segment
 
 ## How History Analysis Works
 
-`rtk discover` reads Claude Code JSONL session files. Each file contains `tool_use`/`tool_result` pairs for every command the LLM ran. The module:
+`rtk discover` reads Claude Code and Pi JSONL session files. Claude uses `tool_use`/`tool_result` blocks, while modern Pi stores `toolCall`/`toolResult` messages; provider-specific parsers normalize both into the same command records. The module:
 
-1. Extracts commands from the JSONL (via `SessionProvider` trait — currently only Claude Code)
+1. Extracts commands from the JSONL via the `SessionProvider` trait
 2. Splits compound commands using the same lexer-based tokenization
 3. Classifies each command against the same rules used for live rewriting
 4. Aggregates results: which commands could have been rewritten, estimated token savings, adoption rate

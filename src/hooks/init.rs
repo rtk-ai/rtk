@@ -3538,7 +3538,7 @@ fn resolve_opencode_dir() -> Result<PathBuf> {
 // ─── Pi coding agent support ──────────────────────────────────────────
 
 /// Resolve Pi config directory, honouring `PI_CODING_AGENT_DIR` override.
-fn resolve_pi_dir() -> Result<PathBuf> {
+pub(crate) fn resolve_pi_dir() -> Result<PathBuf> {
     if let Ok(dir) = std::env::var(PI_CODING_AGENT_DIR_ENV) {
         if !dir.is_empty() {
             return Ok(PathBuf::from(dir));
