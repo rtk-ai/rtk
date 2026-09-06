@@ -1204,7 +1204,7 @@ const ROUTABLE_WRAPPER_PREFIXES: &[&str] = &["uv run"];
 
 /// Shell keywords that wrap a command without changing which one runs. They are
 /// not spawnable, so they must never fall through: `rtk exec foo` cannot run.
-const SHELL_KEYWORD_PREFIXES: &[&str] = &["noglob", "command", "builtin", "exec", "nocorrect"];
+const SHELL_KEYWORD_PREFIXES: &[&str] = &["noglob", "builtin", "exec", "nocorrect"];
 
 /// Every built-in transparent wrapper, paired with whether it may fall through.
 /// Derived from the two lists above so they cannot drift apart.
@@ -5671,11 +5671,14 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_prefix_command() {
-        assert_eq!(
-            rewrite_command_no_prefixes("command git status", &[]),
-            Some("command rtk git status".into())
-        );
+    fn test_shell_prefix_command_bypasses_rewrite() {
+        for command in [
+            "command git status",
+            "command grep -rn X a",
+            "command find . -print0 | xargs -0 tool",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(command, &[]), None);
+        }
     }
 
     #[test]
@@ -5968,7 +5971,7 @@ mod tests {
     fn test_rewrite_pipeline_final_normalizes_prefixes() {
         assert_eq!(
             rewrite_command_no_prefixes("cargo test | FOO=1 command grep FAILED", &[]),
-            Some("cargo test | FOO=1 command rtk grep FAILED".into())
+            None
         );
         assert_eq!(
             super::rewrite_command(
