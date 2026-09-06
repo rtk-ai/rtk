@@ -2376,7 +2376,7 @@ mod tests {
         // Verify that every GitCommand subcommand has a matching pattern
         for subcmd in [
             "status", "log", "diff", "show", "add", "commit", "push", "pull", "branch", "fetch",
-            "stash", "worktree",
+            "stash", "worktree", "ls-tree", "ls-files",
         ] {
             let cmd = format!("git {subcmd}");
             match classify_command(&cmd) {
@@ -2384,6 +2384,41 @@ mod tests {
                 other => panic!("git {subcmd} should be Supported, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn test_classify_git_ls_tree() {
+        match classify_command("git ls-tree -r HEAD") {
+            Classification::Supported { rtk_equivalent, .. } => {
+                assert_eq!(rtk_equivalent, "rtk git");
+            }
+            other => panic!("git ls-tree should be Supported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_git_ls_files() {
+        match classify_command("git ls-files src/") {
+            Classification::Supported { rtk_equivalent, .. } => {
+                assert_eq!(rtk_equivalent, "rtk git");
+            }
+            other => panic!("git ls-files should be Supported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_rewrite_git_ls_tree() {
+        let rewritten = rewrite_command("git ls-tree -r HEAD", &[], &[]);
+        assert_eq!(rewritten, Some("rtk git ls-tree -r HEAD".to_string()));
+    }
+
+    #[test]
+    fn test_rewrite_git_ls_files() {
+        let rewritten = rewrite_command("git ls-files AGENTS.md CLAUDE.md", &[], &[]);
+        assert_eq!(
+            rewritten,
+            Some("rtk git ls-files AGENTS.md CLAUDE.md".to_string())
+        );
     }
 
     #[test]
